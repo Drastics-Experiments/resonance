@@ -32,6 +32,18 @@ let pendingPlaylistTrackID = null;
 let playlistSyncText = "Not synced";
 let playlistSyncInFlight = null;
 let playlistSyncTimer = null;
+let storageScope = "songs";
+let storageQuery = "";
+let storageSort = "title";
+let storageEditing = false;
+let selectedStorageIDs = new Set();
+let serverQuery = "";
+let serverScope = "all";
+let serverSort = "title";
+let serverSelecting = false;
+let serverConnectionText = "Not connected";
+let serverConnectInFlight = false;
+let serverAutoAttempted = false;
 
 const $ = (selector) => document.querySelector(selector);
 const shuffleIcon = `<svg class="shuffle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h2.5a5 5 0 0 1 4 2l5 7a5 5 0 0 0 4 2H21"/><path d="m17 13 4 4-4 4"/><path d="M3 18h2.5a5 5 0 0 0 4-2l5-7a5 5 0 0 1 4-2H21"/><path d="m17 3 4 4-4 4"/></svg>`;
@@ -202,36 +214,133 @@ function renderPlaylists() {
   document.querySelectorAll("[data-open-playlist]").forEach((button) => button.onclick = () => navigate("library", button.dataset.openPlaylist));
 }
 
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${bytes.toFixed(0)} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && size >= 1024; index += 1) {
+    size /= 1024;
+    unit = units[index];
+  }
+  return `${size >= 10 ? size.toFixed(1) : size.toFixed(2)} ${unit}`;
+}
+
+function storageTracks() {
+  let tracks = state.tracks.filter((track) => {
+    if (storageScope === "downloads" && !track.remoteID) return false;
+    if (storageScope === "files" && track.remoteID) return false;
+    const haystack = `${track.title || ""} ${track.artist || ""} ${track.album || ""} ${track.filePath || ""}`.toLocaleLowerCase();
+    return haystack.includes(storageQuery.toLocaleLowerCase());
+  });
+  tracks = [...tracks].sort((left, right) => {
+    if (storageSort === "size") return (right.size || 0) - (left.size || 0);
+    if (storageSort === "recent") return String(right.dateAdded || "").localeCompare(String(left.dateAdded || ""));
+    return String(left.title || "").localeCompare(String(right.title || ""));
+  });
+  return tracks;
+}
+
+async function deleteStoredTracks(trackIDs) {
+  const tracks = state.tracks.filter((track) => trackIDs.includes(track.id));
+  if (!tracks.length) return;
+  for (const track of tracks) await api.deleteAudio(track.filePath);
+  const removed = new Set(tracks.map((track) => track.id));
+  state.tracks = state.tracks.filter((track) => !removed.has(track.id));
+  state.favorites = state.favorites.filter((id) => !removed.has(id));
+  state.playlists.forEach((playlist) => { playlist.trackIDs = playlist.trackIDs.filter((id) => !removed.has(id)); });
+  if (removed.has(currentID)) { audio.pause(); currentID = null; }
+  selectedStorageIDs.clear();
+  await persist();
+  render();
+  updateChrome();
+}
+
 function renderStorage() {
-  const total = state.tracks.reduce((sum, track) => sum + (track.size || 0), 0);
-  content.innerHTML = `<div class="page"><span class="eyebrow">LOCAL FILES</span><h1>Song Storage</h1><p>${state.tracks.length} songs • ${(total / 1048576).toFixed(1)} MB tracked</p><button class="primary" id="storageImport">＋ Import audio</button><div class="storage-list">${state.tracks.map((track) => `<div><div>${artwork(track)}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.filePath)}</small></span></div><button class="danger" data-delete="${track.id}">Delete</button></div>`).join("") || `<div class="empty"><b>No local files</b></div>`}</div></div>`;
+  const tracks = storageTracks();
+  const localTracks = state.tracks.filter((track) => !track.remoteID);
+  const remoteTracks = state.tracks.filter((track) => track.remoteID);
+  const localBytes = localTracks.reduce((sum, track) => sum + (track.size || 0), 0);
+  const remoteBytes = remoteTracks.reduce((sum, track) => sum + (track.size || 0), 0);
+  const total = Math.max(localBytes + remoteBytes, 1);
+  const localDegrees = Math.round(localBytes / total * 360);
+  content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><div><span class="eyebrow">ON THIS DEVICE</span><h1>Song Storage</h1></div><button class="secondary" id="storageEdit">${storageEditing ? "Done" : "Edit"}</button></div>
+    <div class="storage-summary" id="storageSummary"><div class="storage-ring" style="--local:${localDegrees}deg"><span>♪</span></div><div class="storage-stat"><small>Local audio</small><strong>${formatBytes(localBytes)}</strong><span>${localTracks.length} files</span></div><div class="storage-stat"><small>Server downloads</small><strong>${formatBytes(remoteBytes)}</strong><span>${remoteTracks.length} files</span></div><div class="storage-stat"><small>Available</small><strong id="storageAvailable">Calculating…</strong><span id="storageFreePercent">Disk space</span></div></div>
+    <div class="storage-tools"><label class="page-search"><span>⌕</span><input id="storageSearch" value="${escapeHTML(storageQuery)}" placeholder="Search songs, artists, albums, files…"></label><select id="storageSort" title="Sort storage"><option value="title" ${storageSort === "title" ? "selected" : ""}>Title</option><option value="recent" ${storageSort === "recent" ? "selected" : ""}>Recently added</option><option value="size" ${storageSort === "size" ? "selected" : ""}>File size</option></select><button class="primary" id="storageImport">＋ Import</button></div>
+    <div class="segmented storage-tabs"><button class="${storageScope === "songs" ? "active" : ""}" data-storage-scope="songs">Songs</button><button class="${storageScope === "downloads" ? "active" : ""}" data-storage-scope="downloads">Downloads</button><button class="${storageScope === "files" ? "active" : ""}" data-storage-scope="files">Files</button></div>
+    ${storageEditing ? `<div class="selection-bar"><span>${selectedStorageIDs.size} selected</span><button class="danger" id="deleteSelectedStorage" ${selectedStorageIDs.size ? "" : "disabled"}>Delete selected</button></div>` : ""}
+    <div class="storage-section-heading"><strong>${storageScope === "downloads" ? "DOWNLOADED FROM SERVER" : storageScope === "files" ? "IMPORTED ON THIS PC" : "ALL SONGS"}</strong><span>${tracks.length} songs</span></div>
+    <div class="storage-list redesigned">${tracks.map((track) => `<div class="storage-row"><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${track.id}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(track.album || "Unknown Album")}</small></span><span class="storage-size">${formatBytes(track.size)}</span><button class="row-menu" data-delete="${track.id}" title="Remove from this device">•••</button></div>`).join("") || `<div class="empty"><b>No matching songs</b><span>Try another filter or import audio.</span></div>`}</div></div>`;
   $("#storageImport").onclick = importAudio;
+  $("#storageEdit").onclick = () => { storageEditing = !storageEditing; if (!storageEditing) selectedStorageIDs.clear(); renderStorage(); };
+  $("#storageSearch").oninput = (event) => { storageQuery = event.target.value; renderStorage(); requestAnimationFrame(() => { $("#storageSearch")?.focus(); $("#storageSearch")?.setSelectionRange(storageQuery.length, storageQuery.length); }); };
+  $("#storageSort").onchange = (event) => { storageSort = event.target.value; renderStorage(); };
+  document.querySelectorAll("[data-storage-scope]").forEach((button) => button.onclick = () => { storageScope = button.dataset.storageScope; renderStorage(); });
+  document.querySelectorAll("[data-storage-select]").forEach((button) => button.onclick = () => { selectedStorageIDs.has(button.dataset.storageSelect) ? selectedStorageIDs.delete(button.dataset.storageSelect) : selectedStorageIDs.add(button.dataset.storageSelect); renderStorage(); });
+  if ($("#deleteSelectedStorage")) $("#deleteSelectedStorage").onclick = async () => {
+    if (selectedStorageIDs.size && confirm(`Remove ${selectedStorageIDs.size} selected song${selectedStorageIDs.size === 1 ? "" : "s"} from this device?`)) await deleteStoredTracks([...selectedStorageIDs]);
+  };
   document.querySelectorAll("[data-delete]").forEach((button) => button.onclick = async () => {
     const track = state.tracks.find((item) => item.id === button.dataset.delete);
     if (!track || !confirm(`Remove ${track.title} from this device?`)) return;
-    await api.deleteAudio(track.filePath);
-    state.tracks = state.tracks.filter((item) => item.id !== track.id);
-    state.favorites = state.favorites.filter((id) => id !== track.id);
-    state.playlists.forEach((playlist) => playlist.trackIDs = playlist.trackIDs.filter((id) => id !== track.id));
-    if (currentID === track.id) { audio.pause(); currentID = null; }
-    await persist(); render(); updateChrome();
+    await deleteStoredTracks([track.id]);
   });
+  api.storageSummary().then((summary) => {
+    if (section !== "storage") return;
+    const available = $("#storageAvailable");
+    const percent = $("#storageFreePercent");
+    if (available) available.textContent = formatBytes(summary.availableBytes);
+    if (percent) percent.textContent = summary.capacityBytes ? `${Math.round(summary.availableBytes / summary.capacityBytes * 100)}% free` : "Disk space";
+  }).catch(() => {});
 }
 
 function renderServer() {
-  content.innerHTML = `<div class="page server-page"><span class="eyebrow">REMOTE LIBRARY</span><h1>Music Server</h1><p>Select what to download, upload music, and monitor active transfers.</p><div class="server-card"><label><span>◎</span><input id="serverURL" value="${escapeHTML(state.serverURL)}" placeholder="https://music.unblocked.mov"></label><label><span>◆</span><input id="serverToken" type="password" value="${escapeHTML(serverToken)}" placeholder="Server access token"></label><label><span>◇</span><input id="serverAdminToken" type="password" value="${escapeHTML(serverAdminToken)}" placeholder="Server admin key"></label><div><button class="primary" id="refreshServer">Connect</button><button class="secondary" id="syncSelected">Download selected</button><button class="secondary" id="syncAll">Download all</button><button class="secondary" id="uploadServer">Upload songs</button><button class="secondary" id="syncServerPlaylists">Sync playlists</button></div><small id="serverStatus">Not connected</small><small data-playlist-sync-status>${escapeHTML(playlistSyncText)}</small><div class="transfer-grid"><div><b>Downloads</b><progress id="downloadProgress" max="1" value="0"></progress><small id="downloadDetail">Idle</small></div><div><b>Uploads</b><progress id="uploadProgress" max="1" value="0"></progress><small id="uploadDetail">Idle</small></div></div></div><div class="remote-heading"><strong>Server Catalog</strong><span id="remoteCount">${serverCatalog.length} songs</span></div><div id="remoteSongs" class="remote-list">${serverCatalog.length ? remoteRows() : `<div class="empty"><span>Connect to view hosted songs.</span></div>`}</div></div>`;
-  $("#refreshServer").onclick = () => serverAction("catalog");
+  const downloaded = serverCatalog.filter((song) => state.tracks.some((track) => track.remoteID === song.id)).length;
+  const filteredCount = filteredServerCatalog().length;
+  content.innerHTML = `<div class="page server-page"><div class="server-heading"><div><h1>Music Server</h1><p><span class="connection-pill ${serverCatalog.length ? "connected" : ""}">● ${escapeHTML(serverCatalog.length ? "Connected" : serverConnectInFlight ? "Connecting" : "Offline")}</span> ${escapeHTML(state.serverURL || "Add a server connection")}</p></div></div>
+    <button class="connection-card" id="serverSettings"><span class="connection-icon">◎</span><span><strong>Connection</strong><small>${escapeHTML(state.serverURL || "Configure server URL and access keys")}</small></span><span class="masked-key">◆ ${serverToken ? "•••• •••• ••••" : "No token"}</span><b>⚙</b></button>
+    <div class="server-metrics"><div><span class="metric-icon purple">♪</span><strong id="serverSongCount">${serverCatalog.length}</strong><small>songs</small></div><div><span class="metric-icon violet">≡</span><strong>${state.playlists.filter((playlist) => !playlist.isSystem).length}</strong><small>playlists</small></div><div><span class="metric-icon green">✓</span><strong>${serverCatalog.length && downloaded === serverCatalog.length ? "All" : downloaded}</strong><small>${serverCatalog.length && downloaded === serverCatalog.length ? "synced" : "on device"}</small></div></div>
+    <div class="server-actions"><button class="secondary" id="uploadServer">⇧ Upload</button><button class="secondary" id="syncSelected" ${selectedRemoteIDs.size ? "" : "disabled"}>⇩ Download${selectedRemoteIDs.size ? ` (${selectedRemoteIDs.size})` : ""}</button><button class="secondary" id="syncAll">⇩ Download all</button><button class="secondary" id="syncServerPlaylists">≡ Sync playlists</button></div>
+    <div class="server-transfer"><div class="transfer-header"><strong id="serverStatus">${escapeHTML(serverConnectionText)}</strong><small data-playlist-sync-status>${escapeHTML(playlistSyncText)}</small></div><div class="transfer-grid"><div><span class="metric-icon violet">↓</span><span><b>Downloading</b><small id="downloadDetail">Idle</small></span><progress id="downloadProgress" max="1" value="0"></progress></div><div><span class="metric-icon blue">↑</span><span><b>Uploading</b><small id="uploadDetail">Idle</small></span><progress id="uploadProgress" max="1" value="0"></progress></div></div></div>
+    <div class="server-tools"><label class="page-search"><span>⌕</span><input id="serverSearch" value="${escapeHTML(serverQuery)}" placeholder="Search server library"></label><select id="serverSort" title="Filter and sort"><option value="title" ${serverSort === "title" ? "selected" : ""}>Title</option><option value="artist" ${serverSort === "artist" ? "selected" : ""}>Artist</option><option value="size" ${serverSort === "size" ? "selected" : ""}>File size</option></select></div>
+    <div class="segmented server-tabs"><button class="${serverScope === "all" ? "active" : ""}" data-server-scope="all">All</button><button class="${serverScope === "device" ? "active" : ""}" data-server-scope="device">On Device</button><button class="${serverScope === "available" ? "active" : ""}" data-server-scope="available">Not Downloaded</button></div>
+    <div class="remote-heading"><strong>SERVER LIBRARY</strong><span id="remoteCount">${filteredCount} songs</span><button id="toggleServerSelect">${serverSelecting ? "Done" : "Select"}</button></div><div id="remoteSongs" class="remote-list redesigned">${serverCatalog.length ? remoteRows() : `<div class="empty"><span>${serverConnectInFlight ? "Connecting to your server…" : "Open connection settings to connect."}</span></div>`}</div></div>`;
+  $("#serverSettings").onclick = openServerSettings;
+  $("#toggleServerSelect").onclick = () => { serverSelecting = !serverSelecting; if (!serverSelecting) selectedRemoteIDs.clear(); renderServer(); };
+  $("#serverSearch").oninput = (event) => { serverQuery = event.target.value; renderServer(); requestAnimationFrame(() => { $("#serverSearch")?.focus(); $("#serverSearch")?.setSelectionRange(serverQuery.length, serverQuery.length); }); };
+  $("#serverSort").onchange = (event) => { serverSort = event.target.value; renderServer(); };
+  document.querySelectorAll("[data-server-scope]").forEach((button) => button.onclick = () => { serverScope = button.dataset.serverScope; renderServer(); });
   $("#syncSelected").onclick = () => serverAction("selected");
   $("#syncAll").onclick = () => serverAction("all");
   $("#uploadServer").onclick = uploadServerSongs;
   $("#syncServerPlaylists").onclick = () => syncPlaylistsNow();
-  $("#serverToken").onchange = saveServerForm;
-  $("#serverAdminToken").onchange = saveServerForm;
   bindRemoteRows();
+  if (!serverAutoAttempted && !serverConnectInFlight && state.serverURL && serverToken) {
+    serverAutoAttempted = true;
+    queueMicrotask(() => { if (section === "server") serverAction("catalog"); });
+  }
+}
+
+function filteredServerCatalog() {
+  const query = serverQuery.toLocaleLowerCase();
+  return serverCatalog.filter((song) => {
+    const onDevice = state.tracks.some((track) => track.remoteID === song.id);
+    if (serverScope === "device" && !onDevice) return false;
+    if (serverScope === "available" && onDevice) return false;
+    return `${song.title || song.name || ""} ${song.artist || ""} ${song.album || ""}`.toLocaleLowerCase().includes(query);
+  }).sort((left, right) => {
+    if (serverSort === "size") return (right.size || 0) - (left.size || 0);
+    if (serverSort === "artist") return String(left.artist || "").localeCompare(String(right.artist || ""));
+    return String(left.title || left.name || "").localeCompare(String(right.title || right.name || ""));
+  });
 }
 
 function remoteRows() {
-  return serverCatalog.map((song) => `<div><button class="remote-check" data-select-remote="${song.id}">${selectedRemoteIDs.has(song.id) ? "●" : "○"}</button>${artwork(song)}<span><strong>${escapeHTML(song.title || song.name)}</strong><small>${escapeHTML(song.album || "Server Library")} • ${(song.size / 1048576).toFixed(1)} MB</small></span><b class="sync-state">${state.tracks.some((track) => track.remoteID === song.id) ? "✓ Synced" : "Available"}</b><button class="danger" data-delete-remote="${song.id}">Delete</button></div>`).join("");
+  return filteredServerCatalog().map((song) => {
+    const onDevice = state.tracks.some((track) => track.remoteID === song.id);
+    return `<div class="remote-row"><button class="remote-check ${selectedRemoteIDs.has(song.id) ? "selected" : ""}" data-select-remote="${song.id}" ${serverSelecting ? "" : "hidden"}>${selectedRemoteIDs.has(song.id) ? "✓" : "○"}</button>${artwork(song)}<span><strong>${escapeHTML(song.title || song.name)}</strong><small>${escapeHTML(song.artist || "Unknown Artist")} • ${escapeHTML(song.album || "Server Library")}</small></span><span class="storage-size">${formatBytes(song.size)}</span><b class="sync-state">${onDevice ? "✓ On device" : "⇩ Available"}</b><button class="row-menu" data-delete-remote="${song.id}" title="Delete from server">•••</button></div>`;
+  }).join("");
 }
 
 function bindRemoteRows() {
@@ -243,6 +352,13 @@ function bindRemoteRows() {
     await api.deleteServerSong({ baseURL: state.serverURL, adminToken: serverAdminToken, songID: song.id });
     await serverAction("catalog");
   });
+}
+
+function openServerSettings() {
+  $("#serverURL").value = state.serverURL || "";
+  $("#serverToken").value = serverToken;
+  $("#serverAdminToken").value = serverAdminToken;
+  $("#serverSettingsDialog").showModal();
 }
 
 async function saveServerForm() {
@@ -348,12 +464,15 @@ async function importAudio() {
 }
 
 async function serverAction(mode) {
-  const url = $("#serverURL").value.trim();
-  const token = $("#serverToken").value;
+  if (serverConnectInFlight) return;
+  const url = $("#serverURL")?.value.trim() || state.serverURL;
+  const token = $("#serverToken")?.value || serverToken;
   serverToken = token;
   const status = $("#serverStatus");
   await saveServerForm();
-  status.textContent = mode === "catalog" ? "Loading…" : "Syncing…";
+  serverConnectInFlight = true;
+  serverConnectionText = mode === "catalog" ? "Connecting…" : "Syncing downloads…";
+  if (status) status.textContent = serverConnectionText;
   try {
     let catalog;
     if (mode !== "catalog") {
@@ -362,22 +481,23 @@ async function serverAction(mode) {
       const result = await api.syncServer({ baseURL: url, token, existing: state.tracks, songIDs });
       catalog = result.catalog;
       mergeSyncedTracks(state, result);
-      status.textContent = `Synced ${result.downloaded.length} new song${result.downloaded.length === 1 ? "" : "s"}`;
+      serverConnectionText = `Synced ${result.downloaded.length} new song${result.downloaded.length === 1 ? "" : "s"}`;
+      selectedRemoteIDs.clear();
       await persist();
     } else {
       catalog = await api.fetchCatalog({ baseURL: url, token });
-      status.textContent = `Connected • ${catalog.count} song${catalog.count === 1 ? "" : "s"}`;
+      serverConnectionText = `Connected • ${catalog.count} song${catalog.count === 1 ? "" : "s"}`;
     }
     state.serverURL = url;
     serverCatalog = catalog.songs || [];
     await persist();
-    $("#remoteCount").textContent = `${catalog.count} songs`;
-    $("#remoteSongs").innerHTML = remoteRows();
-    bindRemoteRows();
     renderSidebar();
     await syncPlaylistsNow({ automatic: true });
   } catch (error) {
-    status.textContent = error.message || "Connection failed";
+    serverConnectionText = error.message || "Connection failed";
+  } finally {
+    serverConnectInFlight = false;
+    if (section === "server") renderServer();
   }
 }
 
@@ -386,9 +506,10 @@ async function uploadServerSongs() {
   const status = $("#serverStatus");
   try {
     const result = await api.uploadServer({ baseURL: state.serverURL, adminToken: serverAdminToken });
-    status.textContent = `Uploaded ${result.uploaded} song${result.uploaded === 1 ? "" : "s"}`;
+    serverConnectionText = `Uploaded ${result.uploaded} song${result.uploaded === 1 ? "" : "s"}`;
+    if (status) status.textContent = serverConnectionText;
     await serverAction("catalog");
-  } catch (error) { status.textContent = error.message || "Upload failed"; }
+  } catch (error) { serverConnectionText = error.message || "Upload failed"; if (status) status.textContent = serverConnectionText; }
 }
 
 function play(track) {
@@ -462,6 +583,7 @@ function updateChrome() {
 function setActiveNav() { document.querySelectorAll(".nav").forEach((button) => button.classList.toggle("active", button.dataset.section === section)); }
 
 function applyNavigation(location) {
+  if (location.section === "server" && section !== "server") serverAutoAttempted = false;
   section = location.section;
   selectedPlaylistID = location.playlistID;
   $("#search").value = "";
@@ -485,6 +607,14 @@ document.querySelectorAll("[data-action=next]").forEach((button) => button.oncli
 document.querySelectorAll("[data-action=previous]").forEach((button) => button.onclick = () => history.length ? play(state.tracks.find((track) => track.id === history.pop())) : move(-1));
 $("#newPlaylist").onclick = () => newPlaylist();
 $("#cancelPlaylist").onclick = () => { pendingPlaylistTrackID = null; $("#playlistDialog").close(); };
+$("#cancelServerSettings").onclick = () => $("#serverSettingsDialog").close();
+$("#serverSettingsForm").onsubmit = async (event) => {
+  event.preventDefault();
+  serverAutoAttempted = true;
+  await saveServerForm();
+  $("#serverSettingsDialog").close();
+  if (section === "server") await serverAction("catalog");
+};
 $("#playlistForm").onsubmit = async (event) => {
   event.preventDefault();
   const name = $("#playlistName").value.trim();

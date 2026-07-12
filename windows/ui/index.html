@@ -43,6 +43,19 @@
       <div class="dialog-actions"><button id="cancelPlaylist" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Create</button></div>
     </form>
   </dialog>
+  <dialog id="serverSettingsDialog" class="playlist-dialog">
+    <form id="serverSettingsForm">
+      <span class="eyebrow">CONNECTION</span>
+      <h2>Music Server settings</h2>
+      <label for="serverURL">Server URL</label>
+      <input id="serverURL" autocomplete="url" placeholder="https://music.unblocked.mov" required>
+      <label for="serverToken">Server access token</label>
+      <input id="serverToken" type="password" autocomplete="off" required>
+      <label for="serverAdminToken">Server admin key</label>
+      <input id="serverAdminToken" type="password" autocomplete="off" placeholder="Optional for uploads and deletion">
+      <div class="dialog-actions"><button id="cancelServerSettings" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Save & connect</button></div>
+    </form>
+  </dialog>
   <div id="trackContextMenu" class="track-context-menu" role="menu" hidden></div>
   <audio id="audio"></audio>
   <script type="module" src="app.js"></script>

@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("likedSongs", {
   saveLibrary: (state) => ipcRenderer.invoke("library:save", state),
   importAudio: () => ipcRenderer.invoke("library:import"),
   deleteAudio: (filePath) => ipcRenderer.invoke("library:delete", filePath),
+  storageSummary: () => ipcRenderer.invoke("library:storage"),
   fetchCatalog: (settings) => ipcRenderer.invoke("server:catalog", settings),
   fetchPlaylists: (settings) => ipcRenderer.invoke("server:playlists:get", settings),
   putPlaylists: (settings) => ipcRenderer.invoke("server:playlists:put", settings),

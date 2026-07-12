@@ -2,32 +2,12 @@ import SwiftUI
 
 struct SidebarView: View {
     @EnvironmentObject private var model: PlayerModel
-    @EnvironmentObject private var updateManager: UpdateManager
     @State private var showingNewPlaylist = false
     @State private var newPlaylistName = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Spacer().frame(height: 48)
-
-            HStack(spacing: 10) {
-                Text("M")
-                    .font(.system(size: 15, weight: .heavy))
-                    .frame(width: 29, height: 29)
-                    .background {
-                        LinearGradient(
-                            colors: [Color(hex: 0x4D67FF), Color(hex: 0x9452ED)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-                Text("Resonance")
-                    .font(.system(size: 15, weight: .bold))
-            }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 20)
 
             VStack(spacing: 6) {
                 ForEach(AppSection.allCases) { section in
@@ -82,50 +62,6 @@ struct SidebarView: View {
 
             Spacer(minLength: 12)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Button {
-                    if updateManager.canInstall {
-                        updateManager.installAndRestart()
-                    } else if updateManager.hasUpdate {
-                        Task { await updateManager.downloadUpdate() }
-                    } else {
-                        Task { await updateManager.checkForUpdates() }
-                    }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: updateManager.canInstall ? "arrow.down.circle.fill" : "arrow.triangle.2.circlepath")
-                            .font(.system(size: 15, weight: .semibold))
-                            .frame(width: 22)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(updateButtonTitle)
-                                .font(.system(size: 12, weight: .semibold))
-                            Text(updateManager.status)
-                                .font(.system(size: 10))
-                                .foregroundStyle(Color.appMuted)
-                                .lineLimit(2)
-                        }
-                        Spacer(minLength: 0)
-                        if updateManager.isBusy {
-                            ProgressView().controlSize(.small)
-                        }
-                    }
-                    .padding(10)
-                    .background(Color.white.opacity(0.045))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .disabled(updateManager.isBusy)
-
-                if let error = updateManager.errorMessage {
-                    Text(error)
-                        .font(.system(size: 9))
-                        .foregroundStyle(Color.appCoral)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, 4)
-                }
-            }
-            .padding(.bottom, 10)
-
         }
         .padding(.horizontal, 12)
         .background {
@@ -147,17 +83,10 @@ struct SidebarView: View {
             showingNewPlaylist = true
         }
     }
-
-    private var updateButtonTitle: String {
-        if updateManager.canInstall { return "Restart to update" }
-        if updateManager.hasUpdate { return "Download update" }
-        return "Check for updates"
-    }
 }
 
 struct MusicSettingsView: View {
     @EnvironmentObject private var model: PlayerModel
-    @EnvironmentObject private var updateManager: UpdateManager
     @Environment(\.dismiss) private var dismiss
 
     private var shuffleBinding: Binding<Bool> {
@@ -223,31 +152,9 @@ struct MusicSettingsView: View {
                 }
                 .padding(8)
             }
-
-            GroupBox("Updates") {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(updateManager.status)
-                            .font(.system(size: 12, weight: .semibold))
-                        if let error = updateManager.errorMessage {
-                            Text(error)
-                                .font(.system(size: 9))
-                                .foregroundStyle(Color.appCoral)
-                        }
-                    }
-                    Spacer()
-                    Button(updateManager.canInstall ? "Restart to Update" : updateManager.hasUpdate ? "Download" : "Check Now") {
-                        if updateManager.canInstall { updateManager.installAndRestart() }
-                        else if updateManager.hasUpdate { Task { await updateManager.downloadUpdate() } }
-                        else { Task { await updateManager.checkForUpdates() } }
-                    }
-                    .disabled(updateManager.isBusy)
-                }
-                .padding(8)
-            }
         }
         .padding(24)
-        .frame(width: 430, height: 460)
+        .frame(width: 430, height: 360)
         .background(Color(hex: 0x0C1322))
     }
 }
