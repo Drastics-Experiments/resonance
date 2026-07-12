@@ -283,6 +283,8 @@ function updateChrome() {
   $("#bottomMeta").textContent = track ? `${track.artist} / ${playing ? "Now playing" : "Paused"}` : "Local library";
   $(".mini-art").innerHTML = track?.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : "♪";
   document.querySelectorAll("[data-action=toggle]").forEach((button) => button.textContent = playing ? "Ⅱ" : "▶");
+  const collectionButton = $("#playCollection");
+  if (collectionButton) collectionButton.textContent = playing ? "Ⅱ Pause" : "▶ Play";
   $("#favoriteCurrent").textContent = track && state.favorites.includes(track.id) ? "♥" : "♡";
   $("#shuffle").classList.toggle("active", shuffle);
   $("#repeat").classList.toggle("active", repeat);
