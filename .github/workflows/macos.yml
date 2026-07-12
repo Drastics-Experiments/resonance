@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - name: Check out source
@@ -31,6 +31,11 @@ jobs:
           else
             echo "version=1.0.1" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Verify Swift toolchain
+        run: |
+          swift --version
+          swift package --package-path mac dump-package >/dev/null
 
       - name: Run macOS tests
         run: mac/scripts/test.sh
