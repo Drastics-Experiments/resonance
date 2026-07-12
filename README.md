@@ -28,7 +28,8 @@ pnpm run installer:win
 
 The installer is written to `installers/windows/dist/` and preserves Resonance's per-user library and encrypted credentials during upgrades.
 
+`installers/windows/Install-Resonance.ps1` is the bootstrap downloader. It fetches the latest GitHub Release and verifies the NSIS installer against the published update manifest before installing or saving it.
+
 ## Releases and updates
 
 Tags matching `v*` run the Windows release workflow. The workflow builds and publishes the NSIS installer, block map, and `latest.yml` update manifest to GitHub Releases. Installed builds check that release feed and download newer versions in the background.
-
