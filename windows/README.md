@@ -1,6 +1,8 @@
 # Resonance for Windows
 
-The Windows client is an Electron application with local playback, playlists, search and filters, authenticated server sync, encrypted server credentials, and GitHub Release updates.
+The Windows client is an Electron application with local playback, ordered playlists, search and filters, authenticated song and playlist sync, encrypted server credentials, and GitHub Release updates.
+
+Custom playlists use the same revisioned server document as the macOS and iOS clients. They sync at launch, when the window returns to the foreground, every 60 seconds while open, and shortly after local edits. Liked Songs remains device-local, local-only tracks stay in their playlists, and hosted-song memberships hydrate as those songs are downloaded.
 
 ## Commands
 

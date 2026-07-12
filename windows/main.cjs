@@ -100,8 +100,21 @@ function normalizeBaseURL(value) {
 
 async function authenticatedJSON(url, token) {
   const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!response.ok) throw new Error(`Server returned HTTP ${response.status}`);
+  if (!response.ok) throw await serverResponseError(response);
   return response.json();
+}
+
+async function serverResponseError(response) {
+  let message = "";
+  let body = "";
+  try { body = await response.text(); } catch { /* no response body */ }
+  try {
+    const payload = JSON.parse(body);
+    message = typeof payload?.error === "string" ? payload.error : "";
+  } catch {
+    message = body.trim();
+  }
+  return new Error(`Server returned HTTP ${response.status}${message ? `: ${message}` : ""}`);
 }
 
 function createWindow() {
@@ -182,6 +195,11 @@ ipcMain.handle("library:save", async (_event, state) => {
     repeat: Boolean(state.repeat),
     currentTrackID: state.currentTrackID || null,
     position: Number.isFinite(state.position) ? state.position : 0,
+    playlistRevision: Number.isInteger(state.playlistRevision) && state.playlistRevision >= 0 ? state.playlistRevision : 0,
+    knownRemotePlaylistIDs: Array.isArray(state.knownRemotePlaylistIDs) ? state.knownRemotePlaylistIDs : [],
+    dirtyPlaylistIDs: Array.isArray(state.dirtyPlaylistIDs) ? state.dirtyPlaylistIDs : [],
+    deletedPlaylistIDs: Array.isArray(state.deletedPlaylistIDs) ? state.deletedPlaylistIDs : [],
+    playlistSyncServerURL: typeof state.playlistSyncServerURL === "string" ? state.playlistSyncServerURL : null,
   };
   await fs.writeFile(paths.state, JSON.stringify(safeState, null, 2), "utf8");
   return true;
@@ -237,6 +255,28 @@ ipcMain.handle("server:catalog", async (_event, { baseURL, token }) => {
   if (!token) throw new Error("Enter the server access token.");
   const base = normalizeBaseURL(baseURL);
   return authenticatedJSON(new URL("api/v1/songs", base), token);
+});
+
+ipcMain.handle("server:playlists:get", async (_event, { baseURL, token }) => {
+  if (!token) throw new Error("Enter the server access token.");
+  const base = normalizeBaseURL(baseURL);
+  return authenticatedJSON(new URL("api/v1/playlists", base), token);
+});
+
+ipcMain.handle("server:playlists:put", async (_event, { baseURL, token, document }) => {
+  if (!token) throw new Error("Enter the server access token.");
+  const base = normalizeBaseURL(baseURL);
+  const response = await fetch(new URL("api/v1/playlists", base), {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(document),
+  });
+  if (response.status !== 200 && response.status !== 409) throw await serverResponseError(response);
+  return { status: response.status, document: await response.json() };
 });
 
 ipcMain.handle("server:sync", async (event, { baseURL, token, existing = [], songIDs = null }) => {
