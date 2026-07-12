@@ -15,6 +15,22 @@ Generated artifacts are placed in `installers/windows/dist/` and are intentional
 
 The installer is per-user, supports choosing an installation directory, and creates Start Menu and Desktop shortcuts. Application data remains under Electron's per-user application-data directory and is not removed during upgrades.
 
+## Download or install the latest release
+
+`Install-Resonance.ps1` downloads the latest published installer from GitHub Releases and verifies its SHA-512 value against electron-builder's `latest.yml` manifest before running it.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Install-Resonance.ps1
+```
+
+Save a verified installer without running it:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Install-Resonance.ps1 -DownloadOnly
+```
+
+Use `-Silent` for an unattended per-user installation.
+
 ## Publishing an update
 
 1. Increase `windows/package.json`'s version.
