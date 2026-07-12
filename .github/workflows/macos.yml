@@ -53,8 +53,7 @@ jobs:
           path: |
             installers/macos/dist/Resonance-macOS.zip
             installers/macos/dist/Resonance-macOS.zip.sha256
-            installers/macos/dist/Resonance-macOS.pkg
-            installers/macos/dist/Resonance-macOS.pkg.sha256
+            installers/macos/dist/Resonance-Installer.pkg
             installers/macos/dist/latest-mac.json
           if-no-files-found: error
 
@@ -65,6 +64,5 @@ jobs:
           files: |
             installers/macos/dist/Resonance-macOS.zip
             installers/macos/dist/Resonance-macOS.zip.sha256
-            installers/macos/dist/Resonance-macOS.pkg
-            installers/macos/dist/Resonance-macOS.pkg.sha256
+            installers/macos/dist/Resonance-Installer.pkg
             installers/macos/dist/latest-mac.json
