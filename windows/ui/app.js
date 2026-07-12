@@ -21,9 +21,6 @@ let pendingPlaylistTrackID = null;
 
 const $ = (selector) => document.querySelector(selector);
 const shuffleIcon = `<svg class="shuffle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h2.5a5 5 0 0 1 4 2l5 7a5 5 0 0 0 4 2H21"/><path d="m17 13 4 4-4 4"/><path d="M3 18h2.5a5 5 0 0 0 4-2l5-7a5 5 0 0 1 4-2H21"/><path d="m17 3 4 4-4 4"/></svg>`;
-const musicIcon = `<svg class="row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>`;
-const heartIcon = (liked) => `<svg class="row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.8-7.5 1.1-1.1a5.5 5.5 0 0 0-.1-7.8Z" ${liked ? `class="icon-fill"` : ""}/></svg>`;
-const moreIcon = `<svg class="row-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>`;
 const escapeHTML = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
 const currentTrack = () => state.tracks.find((track) => track.id === currentID) || null;
 const playlistTracks = () => selectedPlaylistID ? tracksForPlaylist(state, selectedPlaylistID) : state.tracks;
@@ -34,7 +31,7 @@ async function persist() {
   renderSidebar();
 }
 
-function artwork(symbol = musicIcon) { return `<div class="row-art">${symbol}</div>`; }
+function artwork(symbol = "♪") { return `<div class="row-art">${symbol}</div>`; }
 
 function trackRow(track, index) {
   const liked = state.favorites.includes(track.id);
@@ -42,8 +39,7 @@ function trackRow(track, index) {
     <span class="track-number">${track.id === currentID && !audio.paused ? "▥" : index + 1}</span>${artwork()}
     <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / Audio</small></div>
     <span class="album">${escapeHTML(track.album)}</span><span class="track-time">${formatTime(track.duration)}</span>
-    <button class="heart" data-favorite="${track.id}" title="${liked ? "Remove from Liked Songs" : "Add to Liked Songs"}" aria-label="${liked ? "Remove from Liked Songs" : "Add to Liked Songs"}">${heartIcon(liked)}</button>
-    <button class="track-menu-button" data-track-menu="${track.id}" title="Song options" aria-label="Song options">${moreIcon}</button>
+    <button class="heart" data-favorite="${track.id}">${liked ? "♥" : "♡"}</button>
   </div>`;
 }
 
@@ -52,7 +48,7 @@ function renderLibrary() {
   const title = selectedPlaylistID ? state.playlists.find((item) => item.id === selectedPlaylistID)?.name || "Playlist" : "Library";
   content.innerHTML = `<div class="collection-scroll"><div class="hero"><div class="hero-art">≋</div><div><span class="eyebrow">${selectedPlaylistID ? "PLAYLIST" : "MUSIC LIBRARY"}</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions"><button class="primary" id="playCollection">${audio.paused ? "▶ Play" : "Ⅱ Pause"}</button><button class="round ${shuffle ? "active" : ""}" id="heroShuffle" title="Shuffle" aria-label="Shuffle">${shuffleIcon}</button><button class="secondary" id="importAudio">＋ Import audio</button></div></div></div>
     <div class="filters"><button class="${libraryFilter === "all" ? "active" : ""}" data-library-filter="all">All songs</button><button class="${libraryFilter === "recent" ? "active" : ""}" data-library-filter="recent">Recently added</button><button class="${libraryFilter === "audio" ? "active" : ""}" data-library-filter="audio">Audio</button></div>
-    <div class="track-table"><div class="track-header"><span>#</span><span></span><span>Title</span><span>Album</span><span>Time</span><span></span><span></span></div>
+    <div class="track-table"><div class="track-header"><span>#</span><span></span><span>Title</span><span>Album</span><span>Time</span><span></span></div>
     ${tracks.length ? tracks.map(trackRow).join("") : `<div class="empty"><b>${selectedPlaylistID ? "This playlist is empty" : "No songs yet"}</b><span>${selectedPlaylistID ? "Like songs or add them from your Library." : "Import audio files or connect your music server."}</span></div>`}</div></div>`;
   bindTrackRows();
   $("#importAudio").onclick = importAudio;
@@ -140,11 +136,6 @@ function bindTrackRows() {
     row.oncontextmenu = (event) => openTrackContextMenu(event, row.dataset.track);
   });
   document.querySelectorAll("[data-favorite]").forEach((button) => button.onclick = (event) => { event.stopPropagation(); toggleFavorite(button.dataset.favorite); });
-  document.querySelectorAll("[data-track-menu]").forEach((button) => button.onclick = (event) => {
-    event.stopPropagation();
-    const rect = button.getBoundingClientRect();
-    openTrackContextMenu({ clientX: rect.right, clientY: rect.bottom, preventDefault() {} }, button.dataset.trackMenu);
-  });
 }
 
 function closeTrackContextMenu() {
