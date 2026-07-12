@@ -1,0 +1,14 @@
+# Dependencies and build output
+node_modules/
+windows/dist/
+installers/windows/dist/
+
+# Logs and local environment
+*.log
+.env
+.env.*
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+
