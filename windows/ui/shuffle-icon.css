@@ -1,0 +1,69 @@
+.shuffle-icon {
+  display: block;
+  width: 19px;
+  height: 19px;
+  margin: auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nav-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.update-panel {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid #ffffff13;
+}
+
+.update-panel > button:first-child {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+}
+
+.update-panel > button:first-child:hover {
+  background: #ffffff0a;
+}
+
+.update-panel strong,
+.update-panel small {
+  display: block;
+}
+
+.update-panel strong {
+  font-size: 10px;
+}
+
+.update-panel small {
+  margin-top: 3px;
+  color: #9fa5b6;
+  font-size: 9px;
+}
+
+#installUpdate {
+  width: 100%;
+  margin-top: 7px;
+  padding: 9px;
+  border-radius: 9px;
+  background: #6558ff;
+  font-size: 10px;
+  font-weight: 700;
+}

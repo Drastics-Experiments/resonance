@@ -1,0 +1,65 @@
+{
+  "name": "resonance-windows",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Functional Resonance music player for Windows",
+  "author": "Drastics Experiments",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "package:win": "electron-packager . \"Resonance\" --platform=win32 --arch=x64 --out=dist --overwrite --asar --prune=false --icon=resonance.ico --ignore=^/dist$ --ignore=^/test$ --ignore=^/node_modules$ --ignore=^/pnpm-lock.yaml$ --ignore=^/.npmrc$",
+    "installer:win": "electron-builder --win nsis --x64 --publish never",
+    "release:win": "electron-builder --win nsis --x64 --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2"
+  },
+  "devDependencies": {
+    "@electron/packager": "latest",
+    "@electron-internal/extract-zip": "^1.0.4",
+    "electron": "latest",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "mov.unblocked.resonance",
+    "productName": "Resonance",
+    "asar": true,
+    "directories": {
+      "output": "../installers/windows/dist"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "package.json",
+      "resonance.ico",
+      "ui/**/*"
+    ],
+    "win": {
+      "icon": "resonance.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Resonance",
+      "artifactName": "Resonance-Setup-${version}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Drastics-Experiments",
+        "repo": "resonance"
+      }
+    ]
+  }
+}
