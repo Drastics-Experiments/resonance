@@ -14,6 +14,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         var tracks: [Track]
         var playlists: [Playlist]
         var favorites: Set<UUID>
+        var playlistRevision: Int?
+        var knownRemotePlaylistIDs: Set<UUID>?
+        var dirtyPlaylistIDs: Set<UUID>?
+        var deletedPlaylistIDs: Set<UUID>?
+        var playlistSyncServerURL: String?
     }
 
     private struct StoredServerCredentials: Codable {
@@ -56,6 +61,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         case missingAdminToken
         case invalidResponse
         case server(Int)
+        case serverMessage(Int, String)
 
         var errorDescription: String? {
             switch self {
@@ -64,6 +70,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             case .missingAdminToken: "Enter the server admin key to upload songs."
             case .invalidResponse: "The server returned an invalid response."
             case .server(let status): "The server returned HTTP \(status)."
+            case .serverMessage(let status, let message): "The server returned HTTP \(status): \(message)"
             }
         }
     }
@@ -129,6 +136,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published var downloadStatus = "Idle"
     @Published var uploadStatus = "Idle"
     @Published var selectedRemoteSongIDs: Set<String> = []
+    @Published var isSyncingPlaylists = false
+    @Published var playlistSyncStatus = "Not synced"
 
     private let defaults: UserDefaults
     private let networkSession: URLSession
@@ -143,6 +152,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var navigationIndex = 0
     private var downloadTask: Task<Void, Never>?
     private var uploadTask: Task<Void, Never>?
+    private var playlistSyncTask: Task<Void, Never>?
+    private var playlistRevision = 0
+    private var knownRemotePlaylistIDs: Set<UUID> = []
+    private var dirtyPlaylistIDs: Set<UUID> = []
+    private var deletedPlaylistIDs: Set<UUID> = []
+    private var playlistSyncServerURL: String?
 
     init(
         loadPersistedLibrary: Bool = true,
@@ -201,6 +216,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         serverURLString = persistServerCredentials ? (defaults.string(forKey: Self.serverURLKey) ?? "") : ""
         serverToken = persistServerCredentials ? Self.readServerToken() : ""
         serverAdminToken = persistServerCredentials ? Self.readServerToken(account: Self.adminKeychainAccount) : ""
+        playlistRevision = stored?.playlistRevision ?? 0
+        knownRemotePlaylistIDs = stored?.knownRemotePlaylistIDs ?? []
+        dirtyPlaylistIDs = stored?.dirtyPlaylistIDs ?? []
+        deletedPlaylistIDs = stored?.deletedPlaylistIDs ?? []
+        playlistSyncServerURL = stored?.playlistSyncServerURL
 
         super.init()
 
@@ -216,12 +236,17 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         defaults.set(volume, forKey: Self.volumeKey)
         defaults.set(Double(playbackRate), forKey: Self.playbackRateKey)
         persistPlaybackPosition()
+        hydrateRemotePlaylistTracks()
 
         if loadPersistedLibrary, stored == nil {
             migrateLegacyLibraryIfNeeded()
         } else if loadPersistedLibrary, availableTracks.count != stored?.tracks.count {
             persistLibrary()
         }
+    }
+
+    deinit {
+        playlistSyncTask?.cancel()
     }
 
     var currentTrack: Track? {
@@ -368,23 +393,31 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         let playlist = Playlist(
             name: name,
             artwork: styles[customPlaylists.count % styles.count],
-            trackIDs: []
+            trackIDs: [],
+            remoteSongIDs: []
         )
         playlists.append(playlist)
+        dirtyPlaylistIDs.insert(playlist.id)
         selectedPlaylistID = playlist.id
         section = .playlists
         persistLibrary()
+        schedulePlaylistSync()
         return playlist
     }
 
     func deletePlaylist(_ playlist: Playlist) {
         guard !playlist.isSystem else { return }
         playlists.removeAll { $0.id == playlist.id }
+        dirtyPlaylistIDs.remove(playlist.id)
+        if knownRemotePlaylistIDs.contains(playlist.id) {
+            deletedPlaylistIDs.insert(playlist.id)
+        }
         if selectedPlaylistID == playlist.id {
             selectedPlaylistID = nil
             section = .playlists
         }
         persistLibrary()
+        schedulePlaylistSync()
     }
 
     func addTrack(_ track: Track, to playlist: Playlist) {
@@ -394,7 +427,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             !playlists[index].trackIDs.contains(track.id)
         else { return }
         playlists[index].trackIDs.append(track.id)
+        updateRemoteSongIDs(forPlaylistAt: index)
+        dirtyPlaylistIDs.insert(playlist.id)
         persistLibrary()
+        schedulePlaylistSync()
     }
 
     func removeTrackFromSelectedPlaylist(_ track: Track) {
@@ -404,7 +440,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             let index = playlists.firstIndex(where: { $0.id == selectedPlaylist.id })
         else { return }
         playlists[index].trackIDs.removeAll { $0 == track.id }
+        updateRemoteSongIDs(forPlaylistAt: index)
+        dirtyPlaylistIDs.insert(selectedPlaylist.id)
         persistLibrary()
+        schedulePlaylistSync()
     }
 
     func removeTrackFromLibrary(_ track: Track) {
@@ -471,7 +510,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func refreshServerCatalog() {
-        Task { await refreshServerCatalogNow() }
+        Task {
+            await refreshServerCatalogNow()
+            await syncPlaylistsNow()
+        }
     }
 
     func connectAndSyncServer() {
@@ -645,6 +687,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             }
 
             if currentTrackID == nil { currentTrackID = tracks.first?.id }
+            hydrateRemotePlaylistTracks()
             persistLibrary()
             rebuildShuffleOrderIfNeeded()
             serverMessage = changedCount == 0
@@ -655,6 +698,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 ? "Downloaded \(changedCount); \(failedCount) failed"
                 : (changedCount == 0 ? "Up to date" : "Downloaded \(changedCount) songs")
             selectedRemoteSongIDs.subtract(Set(songs.map(\.id)))
+            await syncPlaylistsNow()
         } catch is CancellationError {
             serverMessage = "Download cancelled"
             downloadStatus = "Cancelled"
@@ -983,7 +1027,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     private func persistLibrary() {
-        let stored = StoredLibrary(tracks: tracks, playlists: playlists, favorites: favorites)
+        let stored = StoredLibrary(
+            tracks: tracks,
+            playlists: playlists,
+            favorites: favorites,
+            playlistRevision: playlistRevision,
+            knownRemotePlaylistIDs: knownRemotePlaylistIDs,
+            dirtyPlaylistIDs: dirtyPlaylistIDs,
+            deletedPlaylistIDs: deletedPlaylistIDs,
+            playlistSyncServerURL: playlistSyncServerURL
+        )
         guard let data = try? JSONEncoder().encode(stored) else { return }
         defaults.set(data, forKey: Self.libraryKey)
     }
@@ -1033,6 +1086,237 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
         if !adminToken.isEmpty {
             Self.saveServerToken(adminToken, account: Self.adminKeychainAccount)
+        }
+    }
+
+    func syncPlaylists() {
+        playlistSyncTask?.cancel()
+        playlistSyncTask = Task { await syncPlaylistsNow() }
+    }
+
+    func syncPlaylistsAutomatically() async {
+        guard !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (try? normalizedServerURL()) != nil else { return }
+        await syncPlaylistsNow()
+    }
+
+    func runAutomaticPlaylistSync() async {
+        await syncPlaylistsAutomatically()
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(for: .seconds(60))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await syncPlaylistsAutomatically()
+        }
+    }
+
+    func syncPlaylistsNow() async {
+        guard !isSyncingPlaylists else { return }
+
+        do {
+            let base = try normalizedServerURL()
+            try saveServerConfiguration(base: base)
+            let serverKey = base.absoluteString
+            if playlistSyncServerURL != serverKey {
+                playlistSyncServerURL = serverKey
+                playlistRevision = 0
+                knownRemotePlaylistIDs.removeAll()
+                deletedPlaylistIDs.removeAll()
+                dirtyPlaylistIDs.formUnion(playlists.filter { !$0.isSystem }.map(\.id))
+            }
+
+            isSyncingPlaylists = true
+            playlistSyncStatus = "Syncing playlists…"
+            defer { isSyncingPlaylists = false }
+
+            var remoteDocument = try await fetchRemotePlaylists(base: base)
+            var attempts = 0
+            while attempts < 2 {
+                let merge = mergedPlaylistDocument(from: remoteDocument)
+                if !merge.needsUpload {
+                    applyRemotePlaylists(remoteDocument)
+                    playlistSyncStatus = "Synced \(remoteDocument.playlists.count) playlist\(remoteDocument.playlists.count == 1 ? "" : "s")"
+                    return
+                }
+
+                switch try await putRemotePlaylists(merge.document, base: base) {
+                case .updated(let updated):
+                    dirtyPlaylistIDs.removeAll()
+                    deletedPlaylistIDs.removeAll()
+                    applyRemotePlaylists(updated)
+                    playlistSyncStatus = "Synced \(updated.playlists.count) playlist\(updated.playlists.count == 1 ? "" : "s")"
+                    return
+                case .conflict(let current):
+                    remoteDocument = current
+                    attempts += 1
+                }
+            }
+
+            playlistSyncStatus = "Playlist sync conflicted; try again"
+        } catch is CancellationError {
+            return
+        } catch let error as URLError where error.code == .cancelled {
+            return
+        } catch {
+            isSyncingPlaylists = false
+            playlistSyncStatus = "Playlist sync failed: \(error.localizedDescription)"
+        }
+    }
+
+    private enum PlaylistPutResult {
+        case updated(RemotePlaylistsDocument)
+        case conflict(RemotePlaylistsDocument)
+    }
+
+    private func fetchRemotePlaylists(base: URL) async throws -> RemotePlaylistsDocument {
+        let url = base.appendingPathComponent("api/v1/playlists")
+        let (data, response) = try await networkSession.data(for: authenticatedRequest(url: url))
+        guard let status = (response as? HTTPURLResponse)?.statusCode else {
+            throw ServerSyncError.invalidResponse
+        }
+        guard status == 200 else { throw Self.playlistServerError(status: status, data: data) }
+        return try JSONDecoder().decode(RemotePlaylistsDocument.self, from: data)
+    }
+
+    private func putRemotePlaylists(
+        _ document: RemotePlaylistsDocument,
+        base: URL
+    ) async throws -> PlaylistPutResult {
+        var request = authenticatedRequest(url: base.appendingPathComponent("api/v1/playlists"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(document)
+        let (data, response) = try await networkSession.data(for: request)
+        guard let status = (response as? HTTPURLResponse)?.statusCode else {
+            throw ServerSyncError.invalidResponse
+        }
+        if status == 200 {
+            return .updated(try JSONDecoder().decode(RemotePlaylistsDocument.self, from: data))
+        }
+        if status == 409 {
+            return .conflict(try JSONDecoder().decode(RemotePlaylistsDocument.self, from: data))
+        }
+        throw Self.playlistServerError(status: status, data: data)
+    }
+
+    private static func playlistServerError(status: Int, data: Data) -> ServerSyncError {
+        struct ErrorPayload: Decodable { let error: String }
+        if let message = try? JSONDecoder().decode(ErrorPayload.self, from: data).error,
+           !message.isEmpty {
+            return .serverMessage(status, message)
+        }
+        return .server(status)
+    }
+
+    private func mergedPlaylistDocument(
+        from remote: RemotePlaylistsDocument
+    ) -> (document: RemotePlaylistsDocument, needsUpload: Bool) {
+        var merged = remote.playlists.filter { !deletedPlaylistIDs.contains($0.id) }
+        let remoteIDs = Set(remote.playlists.map(\.id))
+        var needsUpload = !deletedPlaylistIDs.isEmpty
+
+        for playlist in playlists where !playlist.isSystem {
+            let isUnsyncedLocalPlaylist = !remoteIDs.contains(playlist.id)
+                && !knownRemotePlaylistIDs.contains(playlist.id)
+            guard dirtyPlaylistIDs.contains(playlist.id) || isUnsyncedLocalPlaylist else { continue }
+
+            let payload = remotePlaylist(from: playlist)
+            if let index = merged.firstIndex(where: { $0.id == playlist.id }) {
+                merged[index] = payload
+            } else {
+                merged.append(payload)
+            }
+            needsUpload = true
+        }
+
+        return (
+            RemotePlaylistsDocument(revision: remote.revision, playlists: merged),
+            needsUpload
+        )
+    }
+
+    private func remotePlaylist(from playlist: Playlist) -> RemotePlaylist {
+        var songIDs: [String] = []
+        for trackID in playlist.trackIDs {
+            guard let remoteID = tracks.first(where: { $0.id == trackID })?.remoteID,
+                  !songIDs.contains(remoteID) else { continue }
+            songIDs.append(remoteID)
+        }
+        for remoteID in playlist.remoteSongIDs ?? [] where !songIDs.contains(remoteID) {
+            songIDs.append(remoteID)
+        }
+        return RemotePlaylist(id: playlist.id, name: playlist.name, songIDs: songIDs)
+    }
+
+    private func applyRemotePlaylists(_ document: RemotePlaylistsDocument) {
+        let existing = Dictionary(uniqueKeysWithValues: playlists.filter { !$0.isSystem }.map { ($0.id, $0) })
+        let systemPlaylists = playlists.filter(\.isSystem)
+        let styles: [ArtworkStyle] = [.lateNight, .softFocus, .onRepeat, .electric, .golden, .falling]
+        let syncedPlaylists = document.playlists.enumerated().map { offset, remote -> Playlist in
+            let localOnlyTrackIDs = existing[remote.id]?.trackIDs.filter { trackID in
+                tracks.first(where: { $0.id == trackID })?.remoteID == nil
+            } ?? []
+            var downloadedTrackIDs = remote.songIDs.compactMap { remoteID in
+                tracks.first(where: { $0.remoteID == remoteID })?.id
+            }
+            downloadedTrackIDs.append(contentsOf: localOnlyTrackIDs.filter { !downloadedTrackIDs.contains($0) })
+            return Playlist(
+                id: remote.id,
+                name: remote.name,
+                artwork: existing[remote.id]?.artwork ?? styles[offset % styles.count],
+                trackIDs: downloadedTrackIDs,
+                remoteSongIDs: remote.songIDs
+            )
+        }
+
+        playlists = systemPlaylists + syncedPlaylists
+        playlistRevision = document.revision
+        knownRemotePlaylistIDs = Set(document.playlists.map(\.id))
+        dirtyPlaylistIDs.subtract(knownRemotePlaylistIDs)
+        if let selectedPlaylistID, !playlists.contains(where: { $0.id == selectedPlaylistID }) {
+            self.selectedPlaylistID = nil
+            section = .playlists
+        }
+        persistLibrary()
+        rebuildShuffleOrderIfNeeded()
+    }
+
+    private func hydrateRemotePlaylistTracks() {
+        for index in playlists.indices where !playlists[index].isSystem {
+            guard let remoteSongIDs = playlists[index].remoteSongIDs else { continue }
+            let localOnlyTrackIDs = playlists[index].trackIDs.filter { trackID in
+                tracks.first(where: { $0.id == trackID })?.remoteID == nil
+            }
+            var hydrated = remoteSongIDs.compactMap { remoteID in
+                tracks.first(where: { $0.remoteID == remoteID })?.id
+            }
+            hydrated.append(contentsOf: localOnlyTrackIDs.filter { !hydrated.contains($0) })
+            playlists[index].trackIDs = hydrated
+        }
+    }
+
+    private func updateRemoteSongIDs(forPlaylistAt index: Int) {
+        guard playlists.indices.contains(index), !playlists[index].isSystem else { return }
+        let previouslyUnresolved = (playlists[index].remoteSongIDs ?? []).filter { remoteID in
+            !tracks.contains { $0.remoteID == remoteID }
+        }
+        var ordered = playlists[index].trackIDs.compactMap { trackID in
+            tracks.first(where: { $0.id == trackID })?.remoteID
+        }
+        ordered.append(contentsOf: previouslyUnresolved.filter { !ordered.contains($0) })
+        playlists[index].remoteSongIDs = ordered
+    }
+
+    private func schedulePlaylistSync() {
+        playlistSyncTask?.cancel()
+        guard !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        playlistSyncTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            await self?.syncPlaylistsNow()
         }
     }
 

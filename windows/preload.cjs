@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld("likedSongs", {
   importAudio: () => ipcRenderer.invoke("library:import"),
   deleteAudio: (filePath) => ipcRenderer.invoke("library:delete", filePath),
   fetchCatalog: (settings) => ipcRenderer.invoke("server:catalog", settings),
+  fetchPlaylists: (settings) => ipcRenderer.invoke("server:playlists:get", settings),
+  putPlaylists: (settings) => ipcRenderer.invoke("server:playlists:put", settings),
   syncServer: (settings) => ipcRenderer.invoke("server:sync", settings),
   uploadServer: (settings) => ipcRenderer.invoke("server:upload", settings),
   deleteServerSong: (settings) => ipcRenderer.invoke("server:delete", settings),

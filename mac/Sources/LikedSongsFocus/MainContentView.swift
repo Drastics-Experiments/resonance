@@ -99,6 +99,10 @@ private struct ServerLibraryView: View {
                             .buttonStyle(.bordered)
                             .disabled(model.isSyncingServer || model.isUploadingServer)
 
+                        Button("Sync Playlists", action: model.syncPlaylists)
+                            .buttonStyle(.bordered)
+                            .disabled(model.isSyncingPlaylists)
+
                         Button("Download Selected", action: model.downloadSelectedServerSongs)
                             .buttonStyle(.borderedProminent)
                             .tint(Color.appCoral)
@@ -131,6 +135,21 @@ private struct ServerLibraryView: View {
                         .font(.system(size: 10))
                         .foregroundStyle(Color.appMuted)
                         .frame(maxWidth: .infinity, alignment: .leading)
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "music.note.list")
+                            .foregroundStyle(Color.appViolet)
+                        Text("Playlists")
+                            .font(.system(size: 10, weight: .semibold))
+                        Spacer()
+                        if model.isSyncingPlaylists {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(model.playlistSyncStatus)
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color.appMuted)
+                            .lineLimit(1)
+                    }
 
                     VStack(spacing: 10) {
                         ServerTransferRow(

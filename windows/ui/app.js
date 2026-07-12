@@ -1,4 +1,15 @@
-import { createEmptyState, filterTracks, formatTime, mergeSyncedTracks, nextIndex, normalizeState, tracksForPlaylist } from "./core.js";
+import {
+  applyRemotePlaylistDocument,
+  createEmptyState,
+  filterTracks,
+  formatTime,
+  mergePlaylistDocument,
+  mergeSyncedTracks,
+  nextIndex,
+  normalizeState,
+  tracksForPlaylist,
+  updatePlaylistRemoteSongIDs,
+} from "./core.js";
 
 const api = window.likedSongs;
 const audio = document.querySelector("#audio");
@@ -18,6 +29,9 @@ let history = [];
 let navigationHistory = [{ section: "library", playlistID: null }];
 let navigationIndex = 0;
 let pendingPlaylistTrackID = null;
+let playlistSyncText = "Not synced";
+let playlistSyncInFlight = null;
+let playlistSyncTimer = null;
 
 const $ = (selector) => document.querySelector(selector);
 const shuffleIcon = `<svg class="shuffle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h2.5a5 5 0 0 1 4 2l5 7a5 5 0 0 0 4 2H21"/><path d="m17 13 4 4-4 4"/><path d="M3 18h2.5a5 5 0 0 0 4-2l5-7a5 5 0 0 1 4-2H21"/><path d="m17 3 4 4-4 4"/></svg>`;
@@ -31,31 +45,150 @@ async function persist() {
   renderSidebar();
 }
 
+function updatePlaylistSyncUI() {
+  document.querySelectorAll("[data-playlist-sync-status]").forEach((element) => {
+    element.textContent = playlistSyncText;
+  });
+}
+
+function setPlaylistSyncText(value) {
+  playlistSyncText = value;
+  updatePlaylistSyncUI();
+}
+
+function normalizedServerKey(value) {
+  const url = new URL(String(value || "").trim());
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Enter a complete http:// or https:// server URL.");
+  url.hash = "";
+  url.search = "";
+  url.pathname = url.pathname.replace(/\/+$/, "") + "/";
+  return url.href;
+}
+
+function markPlaylistDirty(playlist) {
+  if (!playlist || playlist.isSystem) return;
+  const id = playlist.id.toLocaleLowerCase();
+  state.dirtyPlaylistIDs = [...new Set([...state.dirtyPlaylistIDs, id])];
+  state.deletedPlaylistIDs = state.deletedPlaylistIDs.filter((item) => item !== id);
+}
+
+function markPlaylistDeleted(playlist) {
+  if (!playlist || playlist.isSystem) return;
+  const id = playlist.id.toLocaleLowerCase();
+  state.dirtyPlaylistIDs = state.dirtyPlaylistIDs.filter((item) => item !== id);
+  if (state.knownRemotePlaylistIDs.includes(id)) {
+    state.deletedPlaylistIDs = [...new Set([...state.deletedPlaylistIDs, id])];
+  }
+}
+
+function schedulePlaylistSync() {
+  clearTimeout(playlistSyncTimer);
+  if (!serverToken.trim()) return;
+  playlistSyncTimer = setTimeout(() => syncPlaylistsNow({ automatic: true }), 500);
+}
+
+async function syncPlaylistsNow({ automatic = false } = {}) {
+  if (playlistSyncInFlight) return playlistSyncInFlight;
+  playlistSyncInFlight = (async () => {
+    if (!serverToken.trim()) {
+      if (!automatic) setPlaylistSyncText("Enter the server access token");
+      return;
+    }
+
+    try {
+      const serverKey = normalizedServerKey(state.serverURL);
+      if (state.playlistSyncServerURL !== serverKey) {
+        state.playlistSyncServerURL = serverKey;
+        state.playlistRevision = 0;
+        state.knownRemotePlaylistIDs = [];
+        state.deletedPlaylistIDs = [];
+        state.dirtyPlaylistIDs = state.playlists.filter((playlist) => !playlist.isSystem).map((playlist) => playlist.id);
+      }
+
+      setPlaylistSyncText("Syncing playlists…");
+      let remoteDocument = await api.fetchPlaylists({ baseURL: state.serverURL, token: serverToken });
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const merge = mergePlaylistDocument(state, remoteDocument);
+        if (!merge.needsUpload) {
+          applyRemotePlaylistDocument(state, remoteDocument);
+          await persist();
+          setPlaylistSyncText(`Synced ${remoteDocument.playlists.length} playlist${remoteDocument.playlists.length === 1 ? "" : "s"}`);
+          render();
+          return;
+        }
+
+        const result = await api.putPlaylists({
+          baseURL: state.serverURL,
+          token: serverToken,
+          document: merge.document,
+        });
+        if (result.status === 200) {
+          state.dirtyPlaylistIDs = [];
+          state.deletedPlaylistIDs = [];
+          applyRemotePlaylistDocument(state, result.document);
+          await persist();
+          setPlaylistSyncText(`Synced ${result.document.playlists.length} playlist${result.document.playlists.length === 1 ? "" : "s"}`);
+          render();
+          return;
+        }
+        remoteDocument = result.document;
+      }
+      throw new Error("Playlist sync conflicted; try again");
+    } catch (error) {
+      setPlaylistSyncText(`Playlist sync failed: ${error.message || "Unknown error"}`);
+    }
+  })();
+
+  try {
+    await playlistSyncInFlight;
+  } finally {
+    playlistSyncInFlight = null;
+  }
+}
+
 function artwork(track) {
   return `<div class="row-art">${track?.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : "♪"}</div>`;
 }
 
 function trackRow(track, index) {
   const liked = state.favorites.includes(track.id);
+  const editablePlaylist = state.playlists.find((playlist) => playlist.id === selectedPlaylistID && !playlist.isSystem);
+  const playlistActions = editablePlaylist
+    ? `<div class="playlist-track-actions"><button data-reorder-track="-1" data-playlist-track="${track.id}" title="Move up">↑</button><button data-reorder-track="1" data-playlist-track="${track.id}" title="Move down">↓</button><button data-remove-playlist-track="${track.id}" title="Remove from playlist">×</button></div>`
+    : `<span></span>`;
   return `<div class="track-row ${track.id === currentID ? "playing" : ""}" data-track="${track.id}">
     <span class="track-number">${track.id === currentID && !audio.paused ? "▥" : index + 1}</span>${artwork(track)}
     <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / Audio</small></div>
     <span class="album">${escapeHTML(track.album)}</span><span class="track-time">${formatTime(track.duration)}</span>
-    <button class="heart" data-favorite="${track.id}">${liked ? "♥" : "♡"}</button>
+    <button class="heart" data-favorite="${track.id}">${liked ? "♥" : "♡"}</button>${playlistActions}
   </div>`;
 }
 
 function renderLibrary() {
   const tracks = filterTracks(playlistTracks(), $("#search").value, libraryFilter);
-  const title = selectedPlaylistID ? state.playlists.find((item) => item.id === selectedPlaylistID)?.name || "Playlist" : "Library";
-  content.innerHTML = `<div class="collection-scroll"><div class="hero"><div class="hero-art">≋</div><div><span class="eyebrow">${selectedPlaylistID ? "PLAYLIST" : "MUSIC LIBRARY"}</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions"><button class="primary" id="playCollection">${audio.paused ? "▶ Play" : "Ⅱ Pause"}</button><button class="round ${shuffle ? "active" : ""}" id="heroShuffle" title="Shuffle" aria-label="Shuffle">${shuffleIcon}</button><button class="secondary" id="importAudio">＋ Import audio</button></div></div></div>
+  const selectedPlaylist = selectedPlaylistID ? state.playlists.find((item) => item.id === selectedPlaylistID) : null;
+  const title = selectedPlaylist?.name || (selectedPlaylistID ? "Playlist" : "Library");
+  const playlistControls = selectedPlaylist && !selectedPlaylist.isSystem
+    ? `<button class="danger" id="deletePlaylist">Delete playlist</button><small data-playlist-sync-status>${escapeHTML(playlistSyncText)}</small>`
+    : "";
+  content.innerHTML = `<div class="collection-scroll"><div class="hero"><div class="hero-art">≋</div><div><span class="eyebrow">${selectedPlaylistID ? "PLAYLIST" : "MUSIC LIBRARY"}</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions"><button class="primary" id="playCollection">${audio.paused ? "▶ Play" : "Ⅱ Pause"}</button><button class="round ${shuffle ? "active" : ""}" id="heroShuffle" title="Shuffle" aria-label="Shuffle">${shuffleIcon}</button><button class="secondary" id="importAudio">＋ Import audio</button>${playlistControls}</div></div></div>
     <div class="filters"><button class="${libraryFilter === "all" ? "active" : ""}" data-library-filter="all">All songs</button><button class="${libraryFilter === "recent" ? "active" : ""}" data-library-filter="recent">Recently added</button><button class="${libraryFilter === "audio" ? "active" : ""}" data-library-filter="audio">Audio</button></div>
-    <div class="track-table"><div class="track-header"><span>#</span><span></span><span>Title</span><span>Album</span><span>Time</span><span></span></div>
+    <div class="track-table"><div class="track-header"><span>#</span><span></span><span>Title</span><span>Album</span><span>Time</span><span></span><span>${selectedPlaylist && !selectedPlaylist.isSystem ? "Order" : ""}</span></div>
     ${tracks.length ? tracks.map(trackRow).join("") : `<div class="empty"><b>${selectedPlaylistID ? "This playlist is empty" : "No songs yet"}</b><span>${selectedPlaylistID ? "Like songs or add them from your Library." : "Import audio files or connect your music server."}</span></div>`}</div></div>`;
   bindTrackRows();
   $("#importAudio").onclick = importAudio;
   $("#playCollection").onclick = () => currentTrack() ? toggle() : tracks[0] && play(tracks[0]);
   $("#heroShuffle").onclick = () => { shuffle = !shuffle; updateChrome(); render(); };
+  if ($("#deletePlaylist")) $("#deletePlaylist").onclick = async () => {
+    if (!selectedPlaylist || !confirm(`Delete ${selectedPlaylist.name}?`)) return;
+    markPlaylistDeleted(selectedPlaylist);
+    state.playlists = state.playlists.filter((playlist) => playlist.id !== selectedPlaylist.id);
+    selectedPlaylistID = null;
+    section = "playlists";
+    await persist();
+    schedulePlaylistSync();
+    render();
+  };
   document.querySelectorAll("[data-library-filter]").forEach((button) => button.onclick = () => {
     libraryFilter = button.dataset.libraryFilter;
     renderLibrary();
@@ -63,8 +196,9 @@ function renderLibrary() {
 }
 
 function renderPlaylists() {
-  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your local music into collections.</p><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><div class="playlist-grid">${state.playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${playlist.id}"><div class="playlist-art">${playlist.isSystem ? "♥" : "♪"}</div><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("")}</div></div>`;
+  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button><small data-playlist-sync-status>${escapeHTML(playlistSyncText)}</small></div><div class="playlist-grid">${state.playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${playlist.id}"><div class="playlist-art">${playlist.isSystem ? "♥" : "♪"}</div><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("")}</div></div>`;
   $("#pageNewPlaylist").onclick = () => newPlaylist();
+  $("#pageSyncPlaylists").onclick = () => syncPlaylistsNow();
   document.querySelectorAll("[data-open-playlist]").forEach((button) => button.onclick = () => navigate("library", button.dataset.openPlaylist));
 }
 
@@ -85,11 +219,12 @@ function renderStorage() {
 }
 
 function renderServer() {
-  content.innerHTML = `<div class="page server-page"><span class="eyebrow">REMOTE LIBRARY</span><h1>Music Server</h1><p>Select what to download, upload music, and monitor active transfers.</p><div class="server-card"><label><span>◎</span><input id="serverURL" value="${escapeHTML(state.serverURL)}" placeholder="https://music.unblocked.mov"></label><label><span>◆</span><input id="serverToken" type="password" value="${escapeHTML(serverToken)}" placeholder="Server access token"></label><label><span>◇</span><input id="serverAdminToken" type="password" value="${escapeHTML(serverAdminToken)}" placeholder="Server admin key"></label><div><button class="primary" id="refreshServer">Connect</button><button class="secondary" id="syncSelected">Download selected</button><button class="secondary" id="syncAll">Download all</button><button class="secondary" id="uploadServer">Upload songs</button></div><small id="serverStatus">Not connected</small><div class="transfer-grid"><div><b>Downloads</b><progress id="downloadProgress" max="1" value="0"></progress><small id="downloadDetail">Idle</small></div><div><b>Uploads</b><progress id="uploadProgress" max="1" value="0"></progress><small id="uploadDetail">Idle</small></div></div></div><div class="remote-heading"><strong>Server Catalog</strong><span id="remoteCount">${serverCatalog.length} songs</span></div><div id="remoteSongs" class="remote-list">${serverCatalog.length ? remoteRows() : `<div class="empty"><span>Connect to view hosted songs.</span></div>`}</div></div>`;
+  content.innerHTML = `<div class="page server-page"><span class="eyebrow">REMOTE LIBRARY</span><h1>Music Server</h1><p>Select what to download, upload music, and monitor active transfers.</p><div class="server-card"><label><span>◎</span><input id="serverURL" value="${escapeHTML(state.serverURL)}" placeholder="https://music.unblocked.mov"></label><label><span>◆</span><input id="serverToken" type="password" value="${escapeHTML(serverToken)}" placeholder="Server access token"></label><label><span>◇</span><input id="serverAdminToken" type="password" value="${escapeHTML(serverAdminToken)}" placeholder="Server admin key"></label><div><button class="primary" id="refreshServer">Connect</button><button class="secondary" id="syncSelected">Download selected</button><button class="secondary" id="syncAll">Download all</button><button class="secondary" id="uploadServer">Upload songs</button><button class="secondary" id="syncServerPlaylists">Sync playlists</button></div><small id="serverStatus">Not connected</small><small data-playlist-sync-status>${escapeHTML(playlistSyncText)}</small><div class="transfer-grid"><div><b>Downloads</b><progress id="downloadProgress" max="1" value="0"></progress><small id="downloadDetail">Idle</small></div><div><b>Uploads</b><progress id="uploadProgress" max="1" value="0"></progress><small id="uploadDetail">Idle</small></div></div></div><div class="remote-heading"><strong>Server Catalog</strong><span id="remoteCount">${serverCatalog.length} songs</span></div><div id="remoteSongs" class="remote-list">${serverCatalog.length ? remoteRows() : `<div class="empty"><span>Connect to view hosted songs.</span></div>`}</div></div>`;
   $("#refreshServer").onclick = () => serverAction("catalog");
   $("#syncSelected").onclick = () => serverAction("selected");
   $("#syncAll").onclick = () => serverAction("all");
   $("#uploadServer").onclick = uploadServerSongs;
+  $("#syncServerPlaylists").onclick = () => syncPlaylistsNow();
   $("#serverToken").onchange = saveServerForm;
   $("#serverAdminToken").onchange = saveServerForm;
   bindRemoteRows();
@@ -116,6 +251,7 @@ async function saveServerForm() {
   serverAdminToken = $("#serverAdminToken")?.value || serverAdminToken;
   await api.saveServerCredentials({ clientToken: serverToken, adminToken: serverAdminToken });
   await persist();
+  schedulePlaylistSync();
 }
 
 function render() {
@@ -127,6 +263,7 @@ function render() {
   renderQueue();
   $("#navBack").disabled = navigationIndex === 0;
   $("#navForward").disabled = navigationIndex + 1 >= navigationHistory.length;
+  updatePlaylistSyncUI();
 }
 
 function bindTrackRows() {
@@ -138,6 +275,32 @@ function bindTrackRows() {
     row.oncontextmenu = (event) => openTrackContextMenu(event, row.dataset.track);
   });
   document.querySelectorAll("[data-favorite]").forEach((button) => button.onclick = (event) => { event.stopPropagation(); toggleFavorite(button.dataset.favorite); });
+  document.querySelectorAll("[data-reorder-track]").forEach((button) => button.onclick = async (event) => {
+    event.stopPropagation();
+    const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
+    if (!playlist) return;
+    const index = playlist.trackIDs.indexOf(button.dataset.playlistTrack);
+    const destination = index + Number(button.dataset.reorderTrack);
+    if (index < 0 || destination < 0 || destination >= playlist.trackIDs.length) return;
+    const [trackID] = playlist.trackIDs.splice(index, 1);
+    playlist.trackIDs.splice(destination, 0, trackID);
+    updatePlaylistRemoteSongIDs(state, playlist);
+    markPlaylistDirty(playlist);
+    await persist();
+    schedulePlaylistSync();
+    renderLibrary();
+  });
+  document.querySelectorAll("[data-remove-playlist-track]").forEach((button) => button.onclick = async (event) => {
+    event.stopPropagation();
+    const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
+    if (!playlist) return;
+    playlist.trackIDs = playlist.trackIDs.filter((id) => id !== button.dataset.removePlaylistTrack);
+    updatePlaylistRemoteSongIDs(state, playlist);
+    markPlaylistDirty(playlist);
+    await persist();
+    schedulePlaylistSync();
+    renderLibrary();
+  });
 }
 
 function closeTrackContextMenu() {
@@ -161,9 +324,14 @@ function openTrackContextMenu(event, trackID) {
   menu.style.top = `${Math.max(8, Math.min(event.clientY, innerHeight - menu.offsetHeight - 8))}px`;
   menu.querySelectorAll("[data-context-playlist]").forEach((button) => button.onclick = async () => {
     const playlist = state.playlists.find((item) => item.id === button.dataset.contextPlaylist);
-    if (playlist && !playlist.trackIDs.includes(trackID)) playlist.trackIDs.push(trackID);
+    if (playlist && !playlist.trackIDs.includes(trackID)) {
+      playlist.trackIDs.push(trackID);
+      updatePlaylistRemoteSongIDs(state, playlist);
+      markPlaylistDirty(playlist);
+    }
     closeTrackContextMenu();
     await persist();
+    schedulePlaylistSync();
   });
   menu.querySelector("[data-context-new]").onclick = () => {
     closeTrackContextMenu();
@@ -207,6 +375,7 @@ async function serverAction(mode) {
     $("#remoteSongs").innerHTML = remoteRows();
     bindRemoteRows();
     renderSidebar();
+    await syncPlaylistsNow({ automatic: true });
   } catch (error) {
     status.textContent = error.message || "Connection failed";
   }
@@ -320,15 +489,29 @@ $("#playlistForm").onsubmit = async (event) => {
   event.preventDefault();
   const name = $("#playlistName").value.trim();
   if (!name) return;
-  state.playlists.push({ id: crypto.randomUUID(), name, trackIDs: pendingPlaylistTrackID ? [pendingPlaylistTrackID] : [], isSystem: false });
+  const playlist = {
+    id: crypto.randomUUID().toLocaleLowerCase(),
+    name,
+    trackIDs: pendingPlaylistTrackID ? [pendingPlaylistTrackID] : [],
+    remoteSongIDs: [],
+    isSystem: false,
+  };
+  updatePlaylistRemoteSongIDs(state, playlist);
+  markPlaylistDirty(playlist);
+  state.playlists.push(playlist);
   pendingPlaylistTrackID = null;
   $("#playlistDialog").close();
   await persist();
+  schedulePlaylistSync();
   render();
 };
 document.addEventListener("click", (event) => { if (!event.target.closest("#trackContextMenu")) closeTrackContextMenu(); });
 document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeTrackContextMenu(); });
 window.addEventListener("blur", closeTrackContextMenu);
+window.addEventListener("focus", () => syncPlaylistsNow({ automatic: true }));
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") syncPlaylistsNow({ automatic: true });
+});
 $("#search").oninput = () => {
   const query = $("#search").value;
   if (section !== "library") {
@@ -383,3 +566,5 @@ $("#checkForUpdates").onclick = async () => {
 };
 $("#installUpdate").onclick = () => api.installUpdate();
 render(); updateChrome();
+syncPlaylistsNow({ automatic: true });
+setInterval(() => syncPlaylistsNow({ automatic: true }), 60000);

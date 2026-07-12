@@ -1,0 +1,37 @@
+name: iOS
+
+on:
+  pull_request:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild \
+            -project ios/LikedSongsMobile.xcodeproj \
+            -scheme LikedSongsMobile \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -derivedDataPath "$RUNNER_TEMP/ResonanceDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Upload simulator app
+        uses: actions/upload-artifact@v7
+        with:
+          name: Resonance-iOS-Simulator-${{ github.sha }}
+          path: ${{ runner.temp }}/ResonanceDerivedData/Build/Products/Debug-iphonesimulator/Resonance.app
+          if-no-files-found: error
