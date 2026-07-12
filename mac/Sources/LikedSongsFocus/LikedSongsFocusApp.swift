@@ -5,6 +5,7 @@ import SwiftUI
 struct LikedSongsFocusApp: App {
     @StateObject private var model = PlayerModel()
     @StateObject private var updateManager = UpdateManager()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup("Resonance") {
@@ -12,6 +13,11 @@ struct LikedSongsFocusApp: App {
                 .environmentObject(model)
                 .environmentObject(updateManager)
                 .background(WindowConfigurator())
+                .task { await model.runAutomaticPlaylistSync() }
+                .onChange(of: scenePhase) { _, phase in
+                    guard phase == .active else { return }
+                    Task { await model.syncPlaylistsAutomatically() }
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1200, height: 750)

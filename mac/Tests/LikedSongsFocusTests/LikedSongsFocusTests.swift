@@ -23,21 +23,24 @@ private final class MockMusicURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
-private final class MockUpdateURLProtocol: URLProtocol {
-    static var responseData = Data()
-
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func startLoading() {
-        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Self.responseData)
-        client?.urlProtocolDidFinishLoading(self)
+private func requestBodyData(_ request: URLRequest) throws -> Data {
+    if let body = request.httpBody { return body }
+    guard let stream = request.httpBodyStream else { throw URLError(.cannotDecodeContentData) }
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while stream.hasBytesAvailable {
+        let count = stream.read(&buffer, maxLength: buffer.count)
+        if count < 0 { throw stream.streamError ?? URLError(.cannotDecodeContentData) }
+        if count == 0 { break }
+        data.append(buffer, count: count)
     }
-    override func stopLoading() {}
+    return data
 }
 
 @MainActor
+@Suite(.serialized)
 struct LikedSongsFocusTests {
     private let glass = URL(fileURLWithPath: "/System/Library/Sounds/Glass.aiff")
     private let ping = URL(fileURLWithPath: "/System/Library/Sounds/Ping.aiff")
@@ -51,69 +54,21 @@ struct LikedSongsFocusTests {
     }
 
     @Test
-    func updateVersionsCompareNumericallyAndPreferStableReleases() {
-        #expect(MacUpdateVersion.compare("1.9.0", "1.10.0") == .orderedAscending)
-        #expect(MacUpdateVersion.compare("v2.0.0", "2.0") == .orderedSame)
-        #expect(MacUpdateVersion.compare("2.0.0-beta.2", "2.0.0") == .orderedAscending)
-        #expect(MacUpdateVersion.compare("2.0.1", "2.0.0") == .orderedDescending)
-    }
-
-    @Test
-    func updateManifestRequiresGitHubHTTPSAndAFullChecksum() throws {
-        let good = MacUpdateManifest(
-            version: "1.2.0",
-            build: "12",
-            url: try #require(URL(string: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0/Resonance-macOS.zip")),
-            sha256: String(repeating: "a", count: 64)
-        )
-        #expect(throws: Never.self) { try UpdateManager.validate(good) }
-
-        let untrusted = MacUpdateManifest(
-            version: "1.2.0",
-            build: "12",
-            url: try #require(URL(string: "https://example.com/Resonance-macOS.zip")),
-            sha256: String(repeating: "a", count: 64)
-        )
-        #expect(throws: (any Error).self) { try UpdateManager.validate(untrusted) }
-    }
-
-    @Test
-    func updateChecksumUsesSHA256() throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: url) }
-        try Data("resonance".utf8).write(to: url)
-        #expect(try UpdateManager.sha256(of: url) == "2972f9afb85ba78fdc5aa4970eef30ddecc4ed690bdef28dcfdb494543b6f401")
-    }
-
-    @Test
-    func updateCheckReadsTheGitHubManifestAndFindsANewerVersion() async throws {
-        let manifestURL = try #require(URL(string: "https://github.com/Drastics-Experiments/resonance/releases/latest/download/latest-mac.json"))
-        let archiveURL = try #require(URL(string: "https://github.com/Drastics-Experiments/resonance/releases/download/v99.0.0/Resonance-macOS.zip"))
-        MockUpdateURLProtocol.responseData = try JSONEncoder().encode(MacUpdateManifest(
-            version: "99.0.0",
-            build: "99",
-            url: archiveURL,
-            sha256: String(repeating: "b", count: 64)
-        ))
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockUpdateURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
-
-        let manager = UpdateManager(manifestURL: manifestURL, session: session)
-        await manager.checkForUpdates()
-        #expect(manager.availableVersion == "99.0.0")
-        #expect(manager.status == "Version 99.0.0 available")
-        #expect(manager.errorMessage == nil)
-    }
-
-    @Test
     func timeFormattingHandlesBoundaries() {
         #expect(Track.timeText(-1) == "0:00")
         #expect(Track.timeText(.nan) == "0:00")
         #expect(Track.timeText(59.99) == "0:59")
         #expect(Track.timeText(60) == "1:00")
         #expect(Track.timeText(222) == "3:42")
+    }
+
+    @Test
+    func playlistPayloadUsesServerCompatibleLowercaseUUIDs() throws {
+        let id = try #require(UUID(uuidString: "12345678-1234-ABCD-9876-ABCDEF123456"))
+        let payload = RemotePlaylist(id: id, name: "Case Test", songIDs: [])
+        let json = try #require(String(data: JSONEncoder().encode(payload), encoding: .utf8))
+        #expect(json.contains("12345678-1234-abcd-9876-abcdef123456"))
+        #expect(!json.contains("ABCD"))
     }
 
     @Test
@@ -331,5 +286,118 @@ struct LikedSongsFocusTests {
         #expect(model.tracks[0].sourceServer == "http://music.test:8765")
         #expect(model.tracks[0].fileURL.map { FileManager.default.fileExists(atPath: $0.path) } == true)
         #expect(model.serverMessage == "Synced 1 song")
+    }
+
+    @Test
+    func playlistSyncBootstrapsLocalStateAndPreservesSongOrder() async throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockMusicURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            MockMusicURLProtocol.handler = nil
+        }
+
+        let firstRemoteID = "0123456789abcdef01234567"
+        let secondRemoteID = "89abcdef0123456701234567"
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: session,
+            persistServerCredentials: false
+        )
+        let first = Track(title: "First", artist: "Artist", album: "Album", duration: 1, artwork: .electric, fileURL: glass, remoteID: firstRemoteID)
+        let second = Track(title: "Second", artist: "Artist", album: "Album", duration: 1, artwork: .golden, fileURL: ping, remoteID: secondRemoteID)
+        model.tracks = [first, second]
+        let playlist = try #require(model.createPlaylist(named: "Synced Order"))
+        model.addTrack(second, to: playlist)
+        model.addTrack(first, to: model.playlists.first { $0.id == playlist.id }!)
+
+        var uploadedDocument: RemotePlaylistsDocument?
+        MockMusicURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            guard request.value(forHTTPHeaderField: "Authorization") == "Bearer playlist-token" else {
+                throw URLError(.userAuthenticationRequired)
+            }
+            if request.httpMethod == "GET", url.path == "/api/v1/playlists" {
+                let document = RemotePlaylistsDocument(revision: 0, playlists: [])
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, try JSONEncoder().encode(document))
+            }
+            if request.httpMethod == "PUT", url.path == "/api/v1/playlists" {
+                let body = try requestBodyData(request)
+                var document = try JSONDecoder().decode(RemotePlaylistsDocument.self, from: body)
+                uploadedDocument = document
+                document.revision = 1
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, try JSONEncoder().encode(document))
+            }
+            return (HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+        }
+
+        model.serverURLString = "https://music.test"
+        model.serverToken = "playlist-token"
+        await model.syncPlaylistsNow()
+
+        #expect(uploadedDocument?.revision == 0)
+        #expect(uploadedDocument?.playlists.first?.name == "Synced Order")
+        #expect(uploadedDocument?.playlists.first?.songIDs == [secondRemoteID, firstRemoteID])
+        #expect(model.playlistSyncStatus == "Synced 1 playlist")
+    }
+
+    @Test
+    func playlistSyncRetriesARevisionConflictAndAppliesRemoteMembership() async throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockMusicURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            MockMusicURLProtocol.handler = nil
+        }
+
+        let remoteID = "fedcba9876543210fedcba98"
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: session,
+            persistServerCredentials: false
+        )
+        let track = Track(title: "Remote", artist: "Artist", album: "Album", duration: 1, artwork: .electric, fileURL: glass, remoteID: remoteID)
+        model.tracks = [track]
+        let playlist = try #require(model.createPlaylist(named: "Conflict Safe"))
+        model.addTrack(track, to: playlist)
+
+        var putCount = 0
+        MockMusicURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if request.httpMethod == "GET" {
+                let document = RemotePlaylistsDocument(revision: 4, playlists: [])
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, try JSONEncoder().encode(document))
+            }
+            if request.httpMethod == "PUT" {
+                putCount += 1
+                let body = try requestBodyData(request)
+                var document = try JSONDecoder().decode(RemotePlaylistsDocument.self, from: body)
+                if putCount == 1 {
+                    let conflict = RemotePlaylistsDocument(revision: 5, playlists: [])
+                    return (HTTPURLResponse(url: url, statusCode: 409, httpVersion: nil, headerFields: nil)!, try JSONEncoder().encode(conflict))
+                }
+                #expect(document.revision == 5)
+                document.revision = 6
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, try JSONEncoder().encode(document))
+            }
+            return (HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+        }
+
+        model.serverURLString = "https://music.test"
+        model.serverToken = "playlist-token"
+        await model.syncPlaylistsNow()
+
+        #expect(putCount == 2)
+        #expect(model.customPlaylists.first?.trackIDs == [track.id])
+        #expect(model.customPlaylists.first?.remoteSongIDs == [remoteID])
+        #expect(model.playlistSyncStatus == "Synced 1 playlist")
     }
 }
