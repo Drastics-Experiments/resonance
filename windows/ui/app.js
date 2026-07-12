@@ -31,12 +31,14 @@ async function persist() {
   renderSidebar();
 }
 
-function artwork(symbol = "♪") { return `<div class="row-art">${symbol}</div>`; }
+function artwork(track) {
+  return `<div class="row-art">${track?.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : "♪"}</div>`;
+}
 
 function trackRow(track, index) {
   const liked = state.favorites.includes(track.id);
   return `<div class="track-row ${track.id === currentID ? "playing" : ""}" data-track="${track.id}">
-    <span class="track-number">${track.id === currentID && !audio.paused ? "▥" : index + 1}</span>${artwork()}
+    <span class="track-number">${track.id === currentID && !audio.paused ? "▥" : index + 1}</span>${artwork(track)}
     <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / Audio</small></div>
     <span class="album">${escapeHTML(track.album)}</span><span class="track-time">${formatTime(track.duration)}</span>
     <button class="heart" data-favorite="${track.id}">${liked ? "♥" : "♡"}</button>
@@ -68,7 +70,7 @@ function renderPlaylists() {
 
 function renderStorage() {
   const total = state.tracks.reduce((sum, track) => sum + (track.size || 0), 0);
-  content.innerHTML = `<div class="page"><span class="eyebrow">LOCAL FILES</span><h1>Song Storage</h1><p>${state.tracks.length} songs • ${(total / 1048576).toFixed(1)} MB tracked</p><button class="primary" id="storageImport">＋ Import audio</button><div class="storage-list">${state.tracks.map((track) => `<div><div>${artwork()}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.filePath)}</small></span></div><button class="danger" data-delete="${track.id}">Delete</button></div>`).join("") || `<div class="empty"><b>No local files</b></div>`}</div></div>`;
+  content.innerHTML = `<div class="page"><span class="eyebrow">LOCAL FILES</span><h1>Song Storage</h1><p>${state.tracks.length} songs • ${(total / 1048576).toFixed(1)} MB tracked</p><button class="primary" id="storageImport">＋ Import audio</button><div class="storage-list">${state.tracks.map((track) => `<div><div>${artwork(track)}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.filePath)}</small></span></div><button class="danger" data-delete="${track.id}">Delete</button></div>`).join("") || `<div class="empty"><b>No local files</b></div>`}</div></div>`;
   $("#storageImport").onclick = importAudio;
   document.querySelectorAll("[data-delete]").forEach((button) => button.onclick = async () => {
     const track = state.tracks.find((item) => item.id === button.dataset.delete);
@@ -94,7 +96,7 @@ function renderServer() {
 }
 
 function remoteRows() {
-  return serverCatalog.map((song) => `<div><button class="remote-check" data-select-remote="${song.id}">${selectedRemoteIDs.has(song.id) ? "●" : "○"}</button>${artwork()}<span><strong>${escapeHTML(song.title || song.name)}</strong><small>${escapeHTML(song.album || "Server Library")} • ${(song.size / 1048576).toFixed(1)} MB</small></span><b class="sync-state">${state.tracks.some((track) => track.remoteID === song.id) ? "✓ Synced" : "Available"}</b><button class="danger" data-delete-remote="${song.id}">Delete</button></div>`).join("");
+  return serverCatalog.map((song) => `<div><button class="remote-check" data-select-remote="${song.id}">${selectedRemoteIDs.has(song.id) ? "●" : "○"}</button>${artwork(song)}<span><strong>${escapeHTML(song.title || song.name)}</strong><small>${escapeHTML(song.album || "Server Library")} • ${(song.size / 1048576).toFixed(1)} MB</small></span><b class="sync-state">${state.tracks.some((track) => track.remoteID === song.id) ? "✓ Synced" : "Available"}</b><button class="danger" data-delete-remote="${song.id}">Delete</button></div>`).join("");
 }
 
 function bindRemoteRows() {
@@ -270,7 +272,7 @@ function renderQueue() {
   const tracks = playlistTracks();
   const index = tracks.findIndex((track) => track.id === currentID);
   const queue = index < 0 ? tracks : [...tracks.slice(index + 1), ...tracks.slice(0, index)];
-  $("#queue").innerHTML = queue.slice(0, 12).map((track) => `<button data-queue="${track.id}">${artwork()}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)}</small></span><time>${formatTime(track.duration)}</time></button>`).join("") || `<div class="empty"><span>Queue is empty</span></div>`;
+  $("#queue").innerHTML = queue.slice(0, 12).map((track) => `<button data-queue="${track.id}">${artwork(track)}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)}</small></span><time>${formatTime(track.duration)}</time></button>`).join("") || `<div class="empty"><span>Queue is empty</span></div>`;
   document.querySelectorAll("[data-queue]").forEach((button) => button.onclick = () => play(state.tracks.find((track) => track.id === button.dataset.queue)));
 }
 
@@ -279,6 +281,7 @@ function updateChrome() {
   const playing = track && !audio.paused;
   $("#bottomTitle").textContent = track?.title || "Nothing playing";
   $("#bottomMeta").textContent = track ? `${track.artist} / ${playing ? "Now playing" : "Paused"}` : "Local library";
+  $(".mini-art").innerHTML = track?.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : "♪";
   document.querySelectorAll("[data-action=toggle]").forEach((button) => button.textContent = playing ? "Ⅱ" : "▶");
   $("#favoriteCurrent").textContent = track && state.favorites.includes(track.id) ? "♥" : "♡";
   $("#shuffle").classList.toggle("active", shuffle);

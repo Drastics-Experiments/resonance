@@ -22,6 +22,14 @@
   stroke-linejoin: round;
 }
 
+.row-art img,
+.mini-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+
 .update-panel {
   margin-top: auto;
   padding-top: 12px;
