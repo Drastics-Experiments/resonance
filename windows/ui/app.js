@@ -224,10 +224,10 @@ function toggleFavorite(id) {
 }
 
 function newPlaylist() {
-  const name = prompt("Playlist name")?.trim();
-  if (!name) return;
-  state.playlists.push({ id: crypto.randomUUID(), name, trackIDs: [], isSystem: false });
-  persist(); render();
+  const dialog = $("#playlistDialog");
+  $("#playlistName").value = "";
+  dialog.showModal();
+  requestAnimationFrame(() => $("#playlistName").focus());
 }
 
 function renderSidebar() {
@@ -281,6 +281,16 @@ document.querySelectorAll("[data-action=toggle]").forEach((button) => button.onc
 document.querySelectorAll("[data-action=next]").forEach((button) => button.onclick = () => move(1));
 document.querySelectorAll("[data-action=previous]").forEach((button) => button.onclick = () => history.length ? play(state.tracks.find((track) => track.id === history.pop())) : move(-1));
 $("#newPlaylist").onclick = newPlaylist;
+$("#cancelPlaylist").onclick = () => $("#playlistDialog").close();
+$("#playlistForm").onsubmit = async (event) => {
+  event.preventDefault();
+  const name = $("#playlistName").value.trim();
+  if (!name) return;
+  state.playlists.push({ id: crypto.randomUUID(), name, trackIDs: [], isSystem: false });
+  $("#playlistDialog").close();
+  await persist();
+  render();
+};
 $("#search").oninput = () => {
   const query = $("#search").value;
   if (section !== "library") {

@@ -34,6 +34,15 @@
       <div class="volume"><select id="speed"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select><span>🔊</span><input id="volume" type="range" min="0" max="1" step="0.01" value="0.78"><span id="volumeText">78%</span></div>
     </footer>
   </div>
+  <dialog id="playlistDialog" class="playlist-dialog">
+    <form id="playlistForm">
+      <span class="eyebrow">NEW COLLECTION</span>
+      <h2>Create playlist</h2>
+      <label for="playlistName">Playlist name</label>
+      <input id="playlistName" maxlength="80" autocomplete="off" placeholder="My playlist" required>
+      <div class="dialog-actions"><button id="cancelPlaylist" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Create</button></div>
+    </form>
+  </dialog>
   <audio id="audio"></audio>
   <script type="module" src="app.js"></script>
 </body>

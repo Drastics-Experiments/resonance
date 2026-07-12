@@ -1,6 +1,6 @@
 {
   "name": "resonance-windows",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Functional Resonance music player for Windows",
@@ -17,8 +17,8 @@
     "electron-updater": "^6.6.2"
   },
   "devDependencies": {
-    "@electron/packager": "latest",
     "@electron-internal/extract-zip": "^1.0.4",
+    "@electron/packager": "latest",
     "electron": "latest",
     "electron-builder": "^26.0.12"
   },
@@ -41,7 +41,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
