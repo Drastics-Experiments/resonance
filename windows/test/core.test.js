@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createEmptyState, filterTracks, formatTime, mergeSyncedTracks, nextIndex, normalizeState, tracksForPlaylist } from "../ui/core.js";
+import metadata from "../metadata.cjs";
+
+test("converts embedded cover art into a renderable data URL", () => {
+  assert.equal(metadata.pictureDataURL({ format: "image/png", data: Buffer.from([1, 2, 3]) }), "data:image/png;base64,AQID");
+  assert.equal(metadata.pictureDataURL(null), null);
+});
 
 test("normalizes Liked Songs from favorites only", () => {
   const state = normalizeState({ tracks: [{ id: "a" }, { id: "b" }], playlists: [], favorites: ["b"] });

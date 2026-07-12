@@ -4,6 +4,7 @@ const { randomUUID } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { readAudioMetadata } = require("./metadata.cjs");
 
 const AUDIO_EXTENSIONS = new Set([".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".wav"]);
 
@@ -67,6 +68,7 @@ function publicTrack(filePath, details = {}) {
     artist: details.artist || "Local file",
     album: details.album || "Imported",
     duration: Number(details.duration) || 0,
+    artwork: details.artwork || null,
     size: Number(details.size) || 0,
     filePath,
     fileUrl: pathToFileURL(filePath).href,
@@ -75,6 +77,18 @@ function publicTrack(filePath, details = {}) {
     remoteModified: details.remoteModified || null,
     dateAdded: details.dateAdded || new Date().toISOString(),
   };
+}
+
+async function enrichedTrack(filePath, details = {}) {
+  const metadata = await readAudioMetadata(filePath);
+  return publicTrack(filePath, {
+    ...details,
+    title: metadata.title || details.title,
+    artist: metadata.artist || details.artist,
+    album: metadata.album || details.album,
+    duration: metadata.duration || details.duration,
+    artwork: metadata.artwork || details.artwork,
+  });
 }
 
 function normalizeBaseURL(value) {
@@ -139,12 +153,16 @@ ipcMain.handle("library:load", async () => {
       try {
         const information = await fs.stat(track.filePath);
         if (!information.isFile()) return null;
-        return { ...track, size: information.size, fileUrl: pathToFileURL(track.filePath).href };
+        return enrichedTrack(track.filePath, { ...track, size: information.size });
       } catch {
         return null;
       }
     }));
     stored.tracks = tracks.filter(Boolean);
+    await fs.writeFile(state, JSON.stringify({
+      ...stored,
+      tracks: stored.tracks.map(({ fileUrl, ...track }) => track),
+    }, null, 2), "utf8");
     return stored;
   } catch {
     return null;
@@ -201,7 +219,7 @@ ipcMain.handle("library:import", async () => {
     const destination = await uniqueDestination(paths.local, path.basename(source));
     await fs.copyFile(source, destination);
     const information = await fs.stat(destination);
-    tracks.push(publicTrack(destination, { size: information.size }));
+    tracks.push(await enrichedTrack(destination, { size: information.size }));
   }
   return tracks;
 });
@@ -271,7 +289,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, existing = [], son
       throw error;
     }
     if (matching?.id) replacedTrackIDs.push(matching.id);
-    downloaded.push(publicTrack(destination, {
+    downloaded.push(await enrichedTrack(destination, {
       id: matching?.id,
       title: song.title || path.basename(remoteName, path.extname(remoteName)),
       artist: song.artist || "Unknown Artist",

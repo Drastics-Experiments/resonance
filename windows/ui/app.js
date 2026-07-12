@@ -17,6 +17,7 @@ let repeat = false;
 let history = [];
 let navigationHistory = [{ section: "library", playlistID: null }];
 let navigationIndex = 0;
+let pendingPlaylistTrackID = null;
 
 const $ = (selector) => document.querySelector(selector);
 const shuffleIcon = `<svg class="shuffle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h2.5a5 5 0 0 1 4 2l5 7a5 5 0 0 0 4 2H21"/><path d="m17 13 4 4-4 4"/><path d="M3 18h2.5a5 5 0 0 0 4-2l5-7a5 5 0 0 1 4-2H21"/><path d="m17 3 4 4-4 4"/></svg>`;
@@ -30,17 +31,17 @@ async function persist() {
   renderSidebar();
 }
 
-function artwork(symbol = "♪") { return `<div class="row-art">${symbol}</div>`; }
+function artwork(track) {
+  return `<div class="row-art">${track?.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : "♪"}</div>`;
+}
 
 function trackRow(track, index) {
   const liked = state.favorites.includes(track.id);
-  const playlistOptions = state.playlists.filter((item) => !item.isSystem).map((item) => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("");
   return `<div class="track-row ${track.id === currentID ? "playing" : ""}" data-track="${track.id}">
-    <span class="track-number">${track.id === currentID && !audio.paused ? "▥" : index + 1}</span>${artwork()}
+    <span class="track-number">${track.id === currentID && !audio.paused ? "▥" : index + 1}</span>${artwork(track)}
     <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / Audio</small></div>
     <span class="album">${escapeHTML(track.album)}</span><span class="track-time">${formatTime(track.duration)}</span>
     <button class="heart" data-favorite="${track.id}">${liked ? "♥" : "♡"}</button>
-    <select class="add-select" data-add="${track.id}"><option value="">＋ Playlist</option>${playlistOptions}</select>
   </div>`;
 }
 
@@ -49,7 +50,7 @@ function renderLibrary() {
   const title = selectedPlaylistID ? state.playlists.find((item) => item.id === selectedPlaylistID)?.name || "Playlist" : "Library";
   content.innerHTML = `<div class="collection-scroll"><div class="hero"><div class="hero-art">≋</div><div><span class="eyebrow">${selectedPlaylistID ? "PLAYLIST" : "MUSIC LIBRARY"}</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions"><button class="primary" id="playCollection">${audio.paused ? "▶ Play" : "Ⅱ Pause"}</button><button class="round ${shuffle ? "active" : ""}" id="heroShuffle" title="Shuffle" aria-label="Shuffle">${shuffleIcon}</button><button class="secondary" id="importAudio">＋ Import audio</button></div></div></div>
     <div class="filters"><button class="${libraryFilter === "all" ? "active" : ""}" data-library-filter="all">All songs</button><button class="${libraryFilter === "recent" ? "active" : ""}" data-library-filter="recent">Recently added</button><button class="${libraryFilter === "audio" ? "active" : ""}" data-library-filter="audio">Audio</button></div>
-    <div class="track-table"><div class="track-header"><span>#</span><span></span><span>Title</span><span>Album</span><span>Time</span><span></span><span></span></div>
+    <div class="track-table"><div class="track-header"><span>#</span><span></span><span>Title</span><span>Album</span><span>Time</span><span></span></div>
     ${tracks.length ? tracks.map(trackRow).join("") : `<div class="empty"><b>${selectedPlaylistID ? "This playlist is empty" : "No songs yet"}</b><span>${selectedPlaylistID ? "Like songs or add them from your Library." : "Import audio files or connect your music server."}</span></div>`}</div></div>`;
   bindTrackRows();
   $("#importAudio").onclick = importAudio;
@@ -63,13 +64,13 @@ function renderLibrary() {
 
 function renderPlaylists() {
   content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your local music into collections.</p><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><div class="playlist-grid">${state.playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${playlist.id}"><div class="playlist-art">${playlist.isSystem ? "♥" : "♪"}</div><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("")}</div></div>`;
-  $("#pageNewPlaylist").onclick = newPlaylist;
+  $("#pageNewPlaylist").onclick = () => newPlaylist();
   document.querySelectorAll("[data-open-playlist]").forEach((button) => button.onclick = () => navigate("library", button.dataset.openPlaylist));
 }
 
 function renderStorage() {
   const total = state.tracks.reduce((sum, track) => sum + (track.size || 0), 0);
-  content.innerHTML = `<div class="page"><span class="eyebrow">LOCAL FILES</span><h1>Song Storage</h1><p>${state.tracks.length} songs • ${(total / 1048576).toFixed(1)} MB tracked</p><button class="primary" id="storageImport">＋ Import audio</button><div class="storage-list">${state.tracks.map((track) => `<div><div>${artwork()}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.filePath)}</small></span></div><button class="danger" data-delete="${track.id}">Delete</button></div>`).join("") || `<div class="empty"><b>No local files</b></div>`}</div></div>`;
+  content.innerHTML = `<div class="page"><span class="eyebrow">LOCAL FILES</span><h1>Song Storage</h1><p>${state.tracks.length} songs • ${(total / 1048576).toFixed(1)} MB tracked</p><button class="primary" id="storageImport">＋ Import audio</button><div class="storage-list">${state.tracks.map((track) => `<div><div>${artwork(track)}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.filePath)}</small></span></div><button class="danger" data-delete="${track.id}">Delete</button></div>`).join("") || `<div class="empty"><b>No local files</b></div>`}</div></div>`;
   $("#storageImport").onclick = importAudio;
   document.querySelectorAll("[data-delete]").forEach((button) => button.onclick = async () => {
     const track = state.tracks.find((item) => item.id === button.dataset.delete);
@@ -95,7 +96,7 @@ function renderServer() {
 }
 
 function remoteRows() {
-  return serverCatalog.map((song) => `<div><button class="remote-check" data-select-remote="${song.id}">${selectedRemoteIDs.has(song.id) ? "●" : "○"}</button>${artwork()}<span><strong>${escapeHTML(song.title || song.name)}</strong><small>${escapeHTML(song.album || "Server Library")} • ${(song.size / 1048576).toFixed(1)} MB</small></span><b class="sync-state">${state.tracks.some((track) => track.remoteID === song.id) ? "✓ Synced" : "Available"}</b><button class="danger" data-delete-remote="${song.id}">Delete</button></div>`).join("");
+  return serverCatalog.map((song) => `<div><button class="remote-check" data-select-remote="${song.id}">${selectedRemoteIDs.has(song.id) ? "●" : "○"}</button>${artwork(song)}<span><strong>${escapeHTML(song.title || song.name)}</strong><small>${escapeHTML(song.album || "Server Library")} • ${(song.size / 1048576).toFixed(1)} MB</small></span><b class="sync-state">${state.tracks.some((track) => track.remoteID === song.id) ? "✓ Synced" : "Available"}</b><button class="danger" data-delete-remote="${song.id}">Delete</button></div>`).join("");
 }
 
 function bindRemoteRows() {
@@ -129,16 +130,45 @@ function render() {
 }
 
 function bindTrackRows() {
-  document.querySelectorAll("[data-track]").forEach((row) => row.onclick = (event) => {
-    if (event.target.closest("button, select, input, a")) return;
-    play(state.tracks.find((track) => track.id === row.dataset.track));
+  document.querySelectorAll("[data-track]").forEach((row) => {
+    row.onclick = (event) => {
+      if (event.target.closest("button, select, input, a")) return;
+      play(state.tracks.find((track) => track.id === row.dataset.track));
+    };
+    row.oncontextmenu = (event) => openTrackContextMenu(event, row.dataset.track);
   });
   document.querySelectorAll("[data-favorite]").forEach((button) => button.onclick = (event) => { event.stopPropagation(); toggleFavorite(button.dataset.favorite); });
-  document.querySelectorAll("[data-add]").forEach((select) => select.onchange = async () => {
-    const playlist = state.playlists.find((item) => item.id === select.value);
-    if (playlist && !playlist.trackIDs.includes(select.dataset.add)) playlist.trackIDs.push(select.dataset.add);
-    select.value = ""; await persist();
+}
+
+function closeTrackContextMenu() {
+  const menu = $("#trackContextMenu");
+  menu.hidden = true;
+  menu.innerHTML = "";
+}
+
+function openTrackContextMenu(event, trackID) {
+  event.preventDefault();
+  const menu = $("#trackContextMenu");
+  const track = state.tracks.find((item) => item.id === trackID);
+  if (!track) return;
+  const playlists = state.playlists.filter((item) => !item.isSystem);
+  menu.innerHTML = `<div class="context-heading"><small>ADD TO PLAYLIST</small><strong>${escapeHTML(track.title)}</strong></div>${playlists.length ? playlists.map((playlist) => {
+    const added = playlist.trackIDs.includes(trackID);
+    return `<button role="menuitem" data-context-playlist="${escapeHTML(playlist.id)}" ${added ? "disabled" : ""}><span>${added ? "✓" : "＋"}</span>${escapeHTML(playlist.name)}</button>`;
+  }).join("") : `<div class="context-empty">No playlists yet</div>`}<button role="menuitem" data-context-new><span>＋</span>Create new playlist…</button>`;
+  menu.hidden = false;
+  menu.style.left = `${Math.max(8, Math.min(event.clientX, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(event.clientY, innerHeight - menu.offsetHeight - 8))}px`;
+  menu.querySelectorAll("[data-context-playlist]").forEach((button) => button.onclick = async () => {
+    const playlist = state.playlists.find((item) => item.id === button.dataset.contextPlaylist);
+    if (playlist && !playlist.trackIDs.includes(trackID)) playlist.trackIDs.push(trackID);
+    closeTrackContextMenu();
+    await persist();
   });
+  menu.querySelector("[data-context-new]").onclick = () => {
+    closeTrackContextMenu();
+    newPlaylist(trackID);
+  };
 }
 
 async function importAudio() {
@@ -223,11 +253,12 @@ function toggleFavorite(id) {
   persist(); render(); updateChrome();
 }
 
-function newPlaylist() {
-  const name = prompt("Playlist name")?.trim();
-  if (!name) return;
-  state.playlists.push({ id: crypto.randomUUID(), name, trackIDs: [], isSystem: false });
-  persist(); render();
+function newPlaylist(trackID = null) {
+  pendingPlaylistTrackID = typeof trackID === "string" ? trackID : null;
+  const dialog = $("#playlistDialog");
+  $("#playlistName").value = "";
+  dialog.showModal();
+  requestAnimationFrame(() => $("#playlistName").focus());
 }
 
 function renderSidebar() {
@@ -241,7 +272,7 @@ function renderQueue() {
   const tracks = playlistTracks();
   const index = tracks.findIndex((track) => track.id === currentID);
   const queue = index < 0 ? tracks : [...tracks.slice(index + 1), ...tracks.slice(0, index)];
-  $("#queue").innerHTML = queue.slice(0, 12).map((track) => `<button data-queue="${track.id}">${artwork()}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)}</small></span><time>${formatTime(track.duration)}</time></button>`).join("") || `<div class="empty"><span>Queue is empty</span></div>`;
+  $("#queue").innerHTML = queue.slice(0, 12).map((track) => `<button data-queue="${track.id}">${artwork(track)}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)}</small></span><time>${formatTime(track.duration)}</time></button>`).join("") || `<div class="empty"><span>Queue is empty</span></div>`;
   document.querySelectorAll("[data-queue]").forEach((button) => button.onclick = () => play(state.tracks.find((track) => track.id === button.dataset.queue)));
 }
 
@@ -250,7 +281,10 @@ function updateChrome() {
   const playing = track && !audio.paused;
   $("#bottomTitle").textContent = track?.title || "Nothing playing";
   $("#bottomMeta").textContent = track ? `${track.artist} / ${playing ? "Now playing" : "Paused"}` : "Local library";
+  $(".mini-art").innerHTML = track?.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : "♪";
   document.querySelectorAll("[data-action=toggle]").forEach((button) => button.textContent = playing ? "Ⅱ" : "▶");
+  const collectionButton = $("#playCollection");
+  if (collectionButton) collectionButton.textContent = playing ? "Ⅱ Pause" : "▶ Play";
   $("#favoriteCurrent").textContent = track && state.favorites.includes(track.id) ? "♥" : "♡";
   $("#shuffle").classList.toggle("active", shuffle);
   $("#repeat").classList.toggle("active", repeat);
@@ -280,7 +314,21 @@ $("#navForward").onclick = () => { if (navigationIndex + 1 < navigationHistory.l
 document.querySelectorAll("[data-action=toggle]").forEach((button) => button.onclick = toggle);
 document.querySelectorAll("[data-action=next]").forEach((button) => button.onclick = () => move(1));
 document.querySelectorAll("[data-action=previous]").forEach((button) => button.onclick = () => history.length ? play(state.tracks.find((track) => track.id === history.pop())) : move(-1));
-$("#newPlaylist").onclick = newPlaylist;
+$("#newPlaylist").onclick = () => newPlaylist();
+$("#cancelPlaylist").onclick = () => { pendingPlaylistTrackID = null; $("#playlistDialog").close(); };
+$("#playlistForm").onsubmit = async (event) => {
+  event.preventDefault();
+  const name = $("#playlistName").value.trim();
+  if (!name) return;
+  state.playlists.push({ id: crypto.randomUUID(), name, trackIDs: pendingPlaylistTrackID ? [pendingPlaylistTrackID] : [], isSystem: false });
+  pendingPlaylistTrackID = null;
+  $("#playlistDialog").close();
+  await persist();
+  render();
+};
+document.addEventListener("click", (event) => { if (!event.target.closest("#trackContextMenu")) closeTrackContextMenu(); });
+document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeTrackContextMenu(); });
+window.addEventListener("blur", closeTrackContextMenu);
 $("#search").oninput = () => {
   const query = $("#search").value;
   if (section !== "library") {
