@@ -58,7 +58,8 @@
       {
         "provider": "github",
         "owner": "Drastics-Experiments",
-        "repo": "resonance"
+        "repo": "resonance",
+        "releaseType": "release"
       }
     ]
   }
