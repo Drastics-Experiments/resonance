@@ -1,0 +1,65 @@
+name: macOS
+
+on:
+  pull_request:
+    paths:
+      - "mac/**"
+      - "installers/macos/**"
+      - ".github/workflows/macos.yml"
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=1.0.1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run macOS tests
+        run: mac/scripts/test.sh
+
+      - name: Build app and installer
+        run: mac/scripts/build-release.sh
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Resonance-macOS-${{ github.sha }}
+          path: |
+            installers/macos/dist/Resonance-macOS.zip
+            installers/macos/dist/Resonance-macOS.zip.sha256
+            installers/macos/dist/Resonance-macOS.pkg
+            installers/macos/dist/Resonance-macOS.pkg.sha256
+            installers/macos/dist/latest-mac.json
+          if-no-files-found: error
+
+      - name: Publish tagged release assets
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installers/macos/dist/Resonance-macOS.zip
+            installers/macos/dist/Resonance-macOS.zip.sha256
+            installers/macos/dist/Resonance-macOS.pkg
+            installers/macos/dist/Resonance-macOS.pkg.sha256
+            installers/macos/dist/latest-mac.json

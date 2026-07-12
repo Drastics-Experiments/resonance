@@ -2,6 +2,8 @@
 node_modules/
 windows/dist/
 installers/windows/dist/
+mac/.build/
+installers/macos/dist/
 
 # Logs and local environment
 *.log
@@ -11,4 +13,3 @@ installers/windows/dist/
 # Operating-system files
 .DS_Store
 Thumbs.db
-

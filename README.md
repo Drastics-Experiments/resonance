@@ -7,9 +7,10 @@ Resonance is a cross-platform music player. Platform implementations and their i
 | Path | Purpose |
 | --- | --- |
 | `windows/` | Electron-based Windows application source |
-| `mac/` | Reserved for the future macOS application |
+| `mac/` | Native SwiftUI macOS application, updater, tests, and release tooling |
 | `ios/` | Reserved for the future iOS application |
 | `installers/windows/` | Windows NSIS installer output and release documentation |
+| `installers/macos/` | macOS package installer, bootstrap installer, and release assets |
 
 ## Windows development
 
@@ -32,4 +33,20 @@ The installer is written to `installers/windows/dist/` and preserves Resonance's
 
 ## Releases and updates
 
-Tags matching `v*` run the Windows release workflow. The workflow builds and publishes the NSIS installer, block map, and `latest.yml` update manifest to GitHub Releases. Installed builds check that release feed and download newer versions in the background.
+Tags matching `v*` run the Windows and macOS release workflows. They publish the NSIS and PKG installers plus platform update manifests to GitHub Releases. Installed builds check those release feeds and can download newer versions.
+
+## macOS development
+
+```bash
+cd mac
+swift test
+swift run LikedSongsFocus
+```
+
+Build the packaged application, `/Applications` installer, checksums, and updater manifest with:
+
+```bash
+mac/scripts/build-release.sh
+```
+
+The packaged app checks `latest-mac.json` on GitHub Releases, verifies the downloaded app archive with SHA-256, validates its bundle identity and code signature, replaces the installed app atomically, and relaunches it. Tagged releases publish both Windows and macOS update assets.
