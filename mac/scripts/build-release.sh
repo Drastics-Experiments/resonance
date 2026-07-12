@@ -20,7 +20,7 @@ APP="$WORK_DIR/$APP_NAME.app"
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT HUP INT TERM
 
-for tool in swift sips iconutil plutil codesign ditto pkgbuild shasum lipo; do
+for tool in swift sips iconutil plutil codesign ditto pkgbuild shasum lipo xattr; do
     command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 69; }
 done
 
@@ -98,28 +98,31 @@ if [[ -n "${NOTARY_PROFILE:-}" ]]; then
 fi
 
 ZIP="$OUTPUT_DIR/Resonance-macOS.zip"
-PKG="$OUTPUT_DIR/Resonance-macOS.pkg"
-rm -f "$ZIP" "$PKG" "$ZIP.sha256" "$PKG.sha256" "$OUTPUT_DIR/latest-mac.json"
+INSTALLER="$OUTPUT_DIR/Resonance-Installer.pkg"
+rm -f "$ZIP" "$INSTALLER" "$ZIP.sha256" "$OUTPUT_DIR/latest-mac.json" \
+    "$OUTPUT_DIR/Resonance-macOS.pkg" "$OUTPUT_DIR/Resonance-macOS.pkg.sha256"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 
-PKG_ARGS=(--component "$APP" --install-location /Applications --identifier "$BUNDLE_ID" --version "$APP_VERSION")
-if [[ -n "$INSTALLER_IDENTITY" ]]; then PKG_ARGS+=(--sign "$INSTALLER_IDENTITY"); fi
-pkgbuild "${PKG_ARGS[@]}" "$PKG"
-
-if [[ -n "${NOTARY_PROFILE:-}" ]]; then
-    xcrun notarytool submit "$PKG" --keychain-profile "$NOTARY_PROFILE" --wait
-    xcrun stapler staple "$PKG"
-fi
-
 ZIP_SHA="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
-PKG_SHA="$(shasum -a 256 "$PKG" | awk '{print $1}')"
 printf '%s  %s\n' "$ZIP_SHA" "$(basename "$ZIP")" > "$ZIP.sha256"
-printf '%s  %s\n' "$PKG_SHA" "$(basename "$PKG")" > "$PKG.sha256"
 
 RELEASE_BASE_URL="${RELEASE_BASE_URL:-https://github.com/Drastics-Experiments/resonance/releases/download/v$APP_VERSION}"
 printf '{\n  "version": "%s",\n  "build": "%s",\n  "url": "%s/Resonance-macOS.zip",\n  "sha256": "%s"\n}\n' \
     "$APP_VERSION" "$BUILD_NUMBER" "$RELEASE_BASE_URL" "$ZIP_SHA" > "$OUTPUT_DIR/latest-mac.json"
 
+INSTALLER_SCRIPTS="$WORK_DIR/installer-scripts"
+mkdir -p "$INSTALLER_SCRIPTS"
+install -m 0755 "$REPO_DIR/installers/macos/postinstall" "$INSTALLER_SCRIPTS/postinstall"
+xattr -c "$INSTALLER_SCRIPTS/postinstall"
+PKG_ARGS=(--nopayload --scripts "$INSTALLER_SCRIPTS" --identifier "$BUNDLE_ID.installer" --version "$APP_VERSION")
+if [[ -n "$INSTALLER_IDENTITY" ]]; then PKG_ARGS+=(--sign "$INSTALLER_IDENTITY"); fi
+COPYFILE_DISABLE=1 pkgbuild "${PKG_ARGS[@]}" "$INSTALLER"
+
+if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+    xcrun notarytool submit "$INSTALLER" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$INSTALLER"
+fi
+
 echo "App archive: $ZIP"
-echo "Installer: $PKG"
+echo "Bootstrap installer: $INSTALLER"
 echo "Update manifest: $OUTPUT_DIR/latest-mac.json"

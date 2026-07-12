@@ -1,0 +1,88 @@
+#!/bin/bash
+
+set -euo pipefail
+
+REPOSITORY="Drastics-Experiments/resonance"
+RELEASE_BASE="https://github.com/$REPOSITORY/releases/latest/download"
+APPLICATIONS_DIR="/Applications"
+DESTINATION="$APPLICATIONS_DIR/Resonance.app"
+WORK_DIR="$(/usr/bin/mktemp -d /private/tmp/resonance-installer.XXXXXX)"
+MANIFEST="$WORK_DIR/latest-mac.json"
+MANIFEST_PLIST="$WORK_DIR/latest-mac.plist"
+ARCHIVE="$WORK_DIR/Resonance-macOS.zip"
+EXTRACTED="$WORK_DIR/extracted"
+STAGED_APP="$APPLICATIONS_DIR/.Resonance.installing.$$"
+BACKUP_APP="$APPLICATIONS_DIR/.Resonance.previous.$$"
+
+cleanup() {
+    /bin/rm -rf "$WORK_DIR" "$STAGED_APP"
+}
+trap cleanup EXIT HUP INT TERM
+
+echo "Downloading the latest Resonance release information…"
+/usr/bin/curl --fail --location --silent --show-error \
+    --proto '=https' --tlsv1.2 \
+    "$RELEASE_BASE/latest-mac.json" \
+    --output "$MANIFEST"
+
+/usr/bin/plutil -convert xml1 -o "$MANIFEST_PLIST" "$MANIFEST"
+VERSION="$(/usr/bin/plutil -extract version raw "$MANIFEST_PLIST")"
+DOWNLOAD_URL="$(/usr/bin/plutil -extract url raw "$MANIFEST_PLIST")"
+EXPECTED_SHA="$(/usr/bin/plutil -extract sha256 raw "$MANIFEST_PLIST")"
+
+case "$DOWNLOAD_URL" in
+    "https://github.com/$REPOSITORY/releases/download/"*) ;;
+    *) echo "The release manifest contains an untrusted download URL." >&2; exit 65 ;;
+esac
+[[ "$EXPECTED_SHA" =~ ^[a-fA-F0-9]{64}$ ]] || {
+    echo "The release manifest contains an invalid checksum." >&2
+    exit 65
+}
+
+echo "Downloading Resonance $VERSION…"
+/usr/bin/curl --fail --location --silent --show-error \
+    --proto '=https' --tlsv1.2 \
+    "$DOWNLOAD_URL" \
+    --output "$ARCHIVE"
+
+ACTUAL_SHA="$(/usr/bin/shasum -a 256 "$ARCHIVE" | /usr/bin/awk '{print $1}')"
+[[ "$ACTUAL_SHA" == "$EXPECTED_SHA" ]] || {
+    echo "The Resonance download failed checksum verification." >&2
+    exit 65
+}
+
+/bin/mkdir -p "$EXTRACTED"
+/usr/bin/ditto -x -k "$ARCHIVE" "$EXTRACTED"
+NEW_APP="$EXTRACTED/Resonance.app"
+INFO_PLIST="$NEW_APP/Contents/Info.plist"
+[[ -d "$NEW_APP" && -f "$INFO_PLIST" ]] || {
+    echo "The downloaded archive does not contain Resonance.app." >&2
+    exit 65
+}
+
+BUNDLE_ID="$(/usr/bin/plutil -extract CFBundleIdentifier raw "$INFO_PLIST")"
+BUNDLE_VERSION="$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$INFO_PLIST")"
+[[ "$BUNDLE_ID" == "com.gavindietrich.LikedSongsFocus" && "$BUNDLE_VERSION" == "$VERSION" ]] || {
+    echo "The downloaded application identity does not match the release manifest." >&2
+    exit 65
+}
+/usr/bin/codesign --verify --deep --strict "$NEW_APP"
+
+echo "Installing Resonance $VERSION in /Applications…"
+/usr/bin/ditto "$NEW_APP" "$STAGED_APP"
+/usr/sbin/chown -R root:wheel "$STAGED_APP"
+
+if [[ -e "$DESTINATION" ]]; then
+    /bin/rm -rf "$BACKUP_APP"
+    /bin/mv "$DESTINATION" "$BACKUP_APP"
+fi
+
+if /bin/mv "$STAGED_APP" "$DESTINATION"; then
+    /bin/rm -rf "$BACKUP_APP"
+else
+    [[ ! -e "$BACKUP_APP" ]] || /bin/mv "$BACKUP_APP" "$DESTINATION"
+    exit 74
+fi
+
+echo "Resonance $VERSION was installed successfully."
+exit 0

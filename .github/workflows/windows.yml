@@ -28,7 +28,9 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 11
+          # Keep CI reproducible and avoid pnpm's major-range self-updater
+          # changing versions while the action is still bootstrapping.
+          version: 11.7.0
 
       - name: Set up Node.js
         uses: actions/setup-node@v6

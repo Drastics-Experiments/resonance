@@ -179,6 +179,24 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         play(first, in: queue, playlistID: playlist.id)
     }
 
+    func isPlaylistPlaying(_ playlist: MobilePlaylist) -> Bool {
+        guard let currentTrackID else { return false }
+        return isPlaying && playbackPlaylistID == playlist.id && playlist.trackIDs.contains(currentTrackID)
+    }
+
+    func isPlaylistPlaybackActive(_ playlist: MobilePlaylist) -> Bool {
+        guard let currentTrackID else { return false }
+        return playbackPlaylistID == playlist.id && playlist.trackIDs.contains(currentTrackID)
+    }
+
+    func togglePlayback(of playlist: MobilePlaylist) {
+        if isPlaylistPlaybackActive(playlist), player != nil {
+            togglePlay()
+        } else {
+            play(playlist)
+        }
+    }
+
     private func startPlayback(
         _ track: MobileTrack,
         recordHistory: Bool = true,
@@ -284,6 +302,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private var activeQueue: [MobileTrack] {
         let queuedTracks = playbackQueue.compactMap { id in tracks.first { $0.id == id } }
+        if playbackPlaylistID != nil { return queuedTracks }
         return queuedTracks.isEmpty ? tracks : queuedTracks
     }
 
@@ -303,6 +322,23 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         schedulePlaylistSync()
     }
 
+    func deletePlaylist(_ playlist: MobilePlaylist) {
+        guard !playlist.isSystem,
+              playlists.contains(where: { $0.id == playlist.id }) else { return }
+
+        playlists.removeAll { $0.id == playlist.id }
+        dirtyPlaylistIDs.remove(playlist.id)
+        deletedPlaylistIDs.insert(playlist.id)
+
+        if playbackPlaylistID == playlist.id {
+            playbackPlaylistID = nil
+            playbackQueue = tracks.map(\.id)
+        }
+
+        save()
+        schedulePlaylistSync()
+    }
+
     func add(_ track: MobileTrack, to playlist: MobilePlaylist) {
         guard let index = playlists.firstIndex(where: { $0.id == playlist.id }), !playlists[index].isSystem else { return }
         if !playlists[index].trackIDs.contains(track.id) {
@@ -312,6 +348,28 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             if playbackPlaylistID == playlist.id {
                 playbackQueue = playlists[index].trackIDs
             }
+        }
+        save()
+        schedulePlaylistSync()
+    }
+
+    func remove(_ track: MobileTrack, from playlistID: UUID) {
+        guard let index = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+        if playlists[index].isSystem {
+            guard favorites.contains(track.id) else { return }
+            toggleFavorite(track)
+            if playbackPlaylistID == playlistID,
+               let refreshed = playlists.first(where: { $0.id == playlistID }) {
+                playbackQueue = refreshed.trackIDs
+            }
+            return
+        }
+        guard playlists[index].trackIDs.contains(track.id) else { return }
+        playlists[index].trackIDs.removeAll { $0 == track.id }
+        updateRemoteSongIDs(forPlaylistAt: index)
+        dirtyPlaylistIDs.insert(playlistID)
+        if playbackPlaylistID == playlistID {
+            playbackQueue = playlists[index].trackIDs
         }
         save()
         schedulePlaylistSync()
@@ -373,6 +431,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     func downloadSelected() async {
         guard !selectedRemoteSongIDs.isEmpty else { downloadDetail = "Select one or more songs first"; return }
         await sync(songIDs: selectedRemoteSongIDs)
+        await syncPlaylistsNow()
+    }
+    func download(_ song: MobileRemoteSong) async {
+        await sync(songIDs: [song.id])
         await syncPlaylistsNow()
     }
     func downloadAll() async {
@@ -978,7 +1040,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private func startTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        let playbackTimer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let player = self.player else { return }
                 self.position = player.currentTime
@@ -987,6 +1049,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 self.updateNowPlaying()
             }
         }
+        timer = playbackTimer
+        RunLoop.main.add(playbackTimer, forMode: .common)
     }
 
     private func updateNowPlaying() {

@@ -251,6 +251,29 @@ ipcMain.handle("library:delete", async (_event, filePath) => {
   return true;
 });
 
+ipcMain.handle("library:storage", async () => {
+  const paths = await ensureDirectories();
+  const sumDirectory = async (directory) => {
+    let total = 0;
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      try { total += (await fs.stat(path.join(directory, entry.name))).size; } catch { /* file changed during scan */ }
+    }
+    return total;
+  };
+  const [localBytes, remoteBytes, disk] = await Promise.all([
+    sumDirectory(paths.local),
+    sumDirectory(paths.remote),
+    fs.statfs(paths.local),
+  ]);
+  return {
+    localBytes,
+    remoteBytes,
+    availableBytes: Number(disk.bavail) * Number(disk.bsize),
+    capacityBytes: Number(disk.blocks) * Number(disk.bsize),
+  };
+});
+
 ipcMain.handle("server:catalog", async (_event, { baseURL, token }) => {
   if (!token) throw new Error("Enter the server access token.");
   const base = normalizeBaseURL(baseURL);
