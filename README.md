@@ -8,7 +8,7 @@ Resonance is a cross-platform music player. Platform implementations and their i
 | --- | --- |
 | `windows/` | Electron-based Windows application source |
 | `mac/` | Native SwiftUI macOS application, updater, tests, and release tooling |
-| `ios/` | Reserved for the future iOS application |
+| `ios/` | Native SwiftUI iPhone/iPad source and Xcode project |
 | `installers/windows/` | Windows NSIS installer output and release documentation |
 | `installers/macos/` | macOS package installer, bootstrap installer, and release assets |
 
@@ -50,3 +50,7 @@ mac/scripts/build-release.sh
 ```
 
 The packaged app checks `latest-mac.json` on GitHub Releases, verifies the downloaded app archive with SHA-256, validates its bundle identity and code signature, replaces the installed app atomically, and relaunches it. Tagged releases publish both Windows and macOS update assets.
+
+## iOS simulator preview
+
+The `iOS Simulator Preview` workflow builds and runs the real iOS app on a hosted iPhone simulator, then publishes a genuine `simctl` screenshot and the simulator app as CI artifacts. Preview sample tracks are isolated behind `RESONANCE_PREVIEW_DATA=1` and are never used by normal installs.

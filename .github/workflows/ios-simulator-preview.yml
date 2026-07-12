@@ -1,0 +1,71 @@
+name: iOS Simulator Preview
+
+on:
+  pull_request:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-simulator-preview.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: macos-15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Select Xcode
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes
+
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild \
+            -project ios/LikedSongsMobile.xcodeproj \
+            -scheme LikedSongsMobile \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -derivedDataPath "$RUNNER_TEMP/ResonanceDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            ASSETCATALOG_COMPILER_APPICON_NAME= \
+            build
+
+      - name: Boot simulator and capture preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEVICE_UDID="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)["devices"]
+          phones = [d for devices in data.values() for d in devices if d.get("isAvailable") and d["name"].startswith("iPhone")]
+          preferred = next((d for d in phones if "Pro" in d["name"]), phones[0] if phones else None)
+          if not preferred: raise SystemExit("No available iPhone simulator")
+          print(preferred["udid"])
+          ')"
+          xcrun simctl boot "$DEVICE_UDID" || true
+          xcrun simctl bootstatus "$DEVICE_UDID" -b
+
+          APP="$RUNNER_TEMP/ResonanceDerivedData/Build/Products/Debug-iphonesimulator/Resonance.app"
+          test -d "$APP"
+          xcrun simctl install "$DEVICE_UDID" "$APP"
+          SIMCTL_CHILD_RESONANCE_PREVIEW_DATA=1 xcrun simctl launch --terminate-running-process "$DEVICE_UDID" com.gavindietrich.LikedSongsMobile
+          sleep 5
+
+          mkdir -p installers/ios-preview
+          xcrun simctl io "$DEVICE_UDID" screenshot --type=png installers/ios-preview/Resonance-iOS-Simulator.png
+          file installers/ios-preview/Resonance-iOS-Simulator.png
+          test -s installers/ios-preview/Resonance-iOS-Simulator.png
+
+      - name: Upload actual simulator preview
+        uses: actions/upload-artifact@v7
+        with:
+          name: Resonance-iOS-Simulator-${{ github.sha }}
+          path: |
+            installers/ios-preview/Resonance-iOS-Simulator.png
+            ${{ runner.temp }}/ResonanceDerivedData/Build/Products/Debug-iphonesimulator/Resonance.app
+          if-no-files-found: error

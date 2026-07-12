@@ -4,6 +4,7 @@ windows/dist/
 installers/windows/dist/
 mac/.build/
 installers/macos/dist/
+installers/ios-preview/
 
 # Logs and local environment
 *.log
