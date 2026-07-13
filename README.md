@@ -1,6 +1,6 @@
 # Resonance
 
-Resonance is a cross-platform music player. Platform implementations and their installers live in separate folders so Windows, macOS, and iOS can evolve independently.
+Resonance is a cross-platform music player. Platform implementations and their installers live in separate folders so Windows, macOS, iOS, and Android can evolve independently.
 
 ## Repository layout
 
@@ -8,7 +8,8 @@ Resonance is a cross-platform music player. Platform implementations and their i
 | --- | --- |
 | `windows/` | Electron-based Windows application source |
 | `mac/` | Native SwiftUI macOS application, updater, tests, and release tooling |
-| `ios/` | Reserved for the future iOS application |
+| `ios/` | Native SwiftUI iOS application |
+| `android/` | Native Kotlin and Jetpack Compose Android application |
 | `installers/windows/` | Windows NSIS installer output and release documentation |
 | `installers/macos/` | macOS package installer, bootstrap installer, and release assets |
 
@@ -50,3 +51,7 @@ mac/scripts/build-release.sh
 ```
 
 The packaged app checks `latest-mac.json` on GitHub Releases, verifies the downloaded app archive with SHA-256, validates its bundle identity and code signature, replaces the installed app atomically, and relaunches it. Tagged releases publish both Windows and macOS update assets.
+
+## Android development
+
+See [`android/README.md`](android/README.md) for Android Studio, Gradle, APK installation, and emulator instructions. Pull requests that change `android/**` run lint, unit tests, and a debug APK build; the APK is uploaded as a workflow artifact.
