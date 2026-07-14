@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("likedSongs", {
   putPlaylists: (settings) => ipcRenderer.invoke("server:playlists:put", settings),
   syncServer: (settings) => ipcRenderer.invoke("server:sync", settings),
   uploadServer: (settings) => ipcRenderer.invoke("server:upload", settings),
+  cancelServerTransfer: () => ipcRenderer.invoke("server:cancel-transfer"),
   deleteServerSong: (settings) => ipcRenderer.invoke("server:delete", settings),
   loadServerCredentials: () => ipcRenderer.invoke("server:credentials:load"),
   saveServerCredentials: (credentials) => ipcRenderer.invoke("server:credentials:save", credentials),

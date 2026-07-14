@@ -10,6 +10,19 @@ const { conciseUpdaterError, resolveWindowsUpdateFeed } = require("./updater-fee
 const AUDIO_EXTENSIONS = new Set([".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".wav"]);
 
 let mainWindow;
+const activeServerTransfers = new Map();
+
+function beginServerTransfer(event) {
+  const senderID = event.sender.id;
+  activeServerTransfers.get(senderID)?.abort();
+  const controller = new AbortController();
+  activeServerTransfers.set(senderID, controller);
+  return controller;
+}
+
+function finishServerTransfer(event, controller) {
+  if (activeServerTransfers.get(event.sender.id) === controller) activeServerTransfers.delete(event.sender.id);
+}
 
 // electron-updater logs to console by default. Packaged GUI launches may inherit
 // a short-lived stdout pipe, so a delayed update check can otherwise crash with
@@ -109,8 +122,8 @@ function normalizeBaseURL(value) {
   return url;
 }
 
-async function authenticatedJSON(url, token) {
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+async function authenticatedJSON(url, token, signal) {
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal });
   if (!response.ok) throw await serverResponseError(response);
   return response.json();
 }
@@ -315,15 +328,20 @@ ipcMain.handle("server:playlists:put", async (_event, { baseURL, token, document
 
 ipcMain.handle("server:sync", async (event, { baseURL, token, existing = [], songIDs = null }) => {
   if (!token) throw new Error("Enter the server access token.");
-  const base = normalizeBaseURL(baseURL);
-  const catalog = await authenticatedJSON(new URL("api/v1/songs", base), token);
-  const paths = await ensureDirectories();
-  const requested = Array.isArray(songIDs) ? new Set(songIDs) : null;
+  const controller = beginServerTransfer(event);
+  const { signal } = controller;
+  let catalog = null;
   const downloaded = [];
   const replacedTrackIDs = [];
+  try {
+  const base = normalizeBaseURL(baseURL);
+  catalog = await authenticatedJSON(new URL("api/v1/songs", base), token, signal);
+  const paths = await ensureDirectories();
+  const requested = Array.isArray(songIDs) ? new Set(songIDs) : null;
   const songs = (catalog.songs || []).filter((song) => !requested || requested.has(song.id));
   let completed = 0;
   for (const song of songs) {
+    signal.throwIfAborted();
     const remoteName = song.filename || song.name || `Track-${song.id}.mp3`;
     const remoteModified = song.modified_at || song.modified_utc || null;
     const matching = existing.find((item) => item.remoteID === song.id && (!item.sourceServer || item.sourceServer === base.origin));
@@ -345,18 +363,20 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, existing = [], son
     }
     event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length });
     const fileURL = new URL(song.download_url, base);
-    const response = await fetch(fileURL, { headers: { Authorization: `Bearer ${token}` } });
+    const response = await fetch(fileURL, { headers: { Authorization: `Bearer ${token}` }, signal });
     if (!response.ok) throw new Error(`Download failed for ${song.title || song.name || song.id} (HTTP ${response.status})`);
     const destination = matching?.filePath && path.dirname(path.resolve(matching.filePath)) === path.resolve(paths.remote)
       ? matching.filePath
       : await uniqueDestination(paths.remote, remoteName);
     const temporary = `${destination}.${randomUUID()}.part`;
     const bytes = Buffer.from(await response.arrayBuffer());
+    signal.throwIfAborted();
     if (Number.isFinite(Number(song.size)) && bytes.length !== Number(song.size)) {
       throw new Error(`Incomplete download for ${song.title || song.name || song.id}`);
     }
     try {
       await fs.writeFile(temporary, bytes);
+      signal.throwIfAborted();
       await fs.rename(temporary, destination);
     } catch (error) {
       await fs.rm(temporary, { force: true });
@@ -377,6 +397,12 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, existing = [], son
     event.sender.send("server:transfer-progress", { direction: "download", currentFile: song.filename || song.name, completed, total: songs.length });
   }
   return { catalog, downloaded, replacedTrackIDs };
+  } catch (error) {
+    if (error?.name === "AbortError") return { catalog, downloaded, replacedTrackIDs, cancelled: true };
+    throw error;
+  } finally {
+    finishServerTransfer(event, controller);
+  }
 });
 
 ipcMain.handle("server:upload", async (event, { baseURL, adminToken }) => {
@@ -387,20 +413,38 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken }) => {
     filters: [{ name: "Audio", extensions: [...AUDIO_EXTENSIONS].map((item) => item.slice(1)) }],
   });
   if (selection.canceled) return { uploaded: 0 };
-  const base = normalizeBaseURL(baseURL);
+  const controller = beginServerTransfer(event);
+  const { signal } = controller;
   let uploaded = 0;
+  try {
+  const base = normalizeBaseURL(baseURL);
   for (const filePath of selection.filePaths) {
+    signal.throwIfAborted();
     const filename = path.basename(filePath);
     event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed: uploaded, total: selection.filePaths.length });
     const body = await fs.readFile(filePath);
+    signal.throwIfAborted();
     const url = new URL("api/v1/admin/songs", base);
     url.searchParams.set("filename", filename);
-    const response = await fetch(url, { method: "PUT", headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/octet-stream" }, body });
+    const response = await fetch(url, { method: "PUT", headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/octet-stream" }, body, signal });
     if (!response.ok) throw new Error(`Upload failed for ${filename} (HTTP ${response.status})`);
     uploaded += 1;
     event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed: uploaded, total: selection.filePaths.length });
   }
   return { uploaded };
+  } catch (error) {
+    if (error?.name === "AbortError") return { uploaded, cancelled: true };
+    throw error;
+  } finally {
+    finishServerTransfer(event, controller);
+  }
+});
+
+ipcMain.handle("server:cancel-transfer", (event) => {
+  const controller = activeServerTransfers.get(event.sender.id);
+  if (!controller) return false;
+  controller.abort();
+  return true;
 });
 
 ipcMain.handle("server:delete", async (_event, { baseURL, adminToken, songID }) => {

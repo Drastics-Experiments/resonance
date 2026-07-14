@@ -23,9 +23,19 @@
     </aside>
 
     <main>
-      <header class="topbar"><div class="history-buttons"><button id="navBack" disabled>‹</button><button id="navForward" disabled>›</button></div><div class="top-search-group"><label class="search"><span>⌕</span><input id="search" autocomplete="off" spellcheck="false" placeholder="Search your library…"></label><select id="searchSort" class="search-filter" aria-label="Sort search results" hidden></select></div></header>
+      <header class="topbar"><div class="history-buttons"><button id="navBack" disabled>‹</button><button id="navForward" disabled>›</button></div><div class="top-search-group"><label class="search"><span>⌕</span><input id="search" autocomplete="off" spellcheck="false" placeholder="Search your library…"></label><div id="searchSort" class="search-filter" hidden><button id="searchSortButton" type="button" aria-haspopup="listbox" aria-expanded="false"><span id="searchSortLabel">Title</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div id="searchSortMenu" class="search-sort-menu" role="listbox" aria-label="Sort results"></div></div></div></header>
       <section id="content"></section>
     </main>
+
+    <div id="serverTransferToast" class="server-transfer-toast" hidden>
+      <span id="serverTransferIcon" class="transfer-toast-icon" aria-hidden="true"></span>
+      <div>
+        <strong id="serverTransferTitle">Downloading</strong>
+        <small id="serverTransferDetail">Preparing transfer…</small>
+        <div class="transfer-toast-progress"><progress id="serverTransferProgress" max="1" value="0"></progress><span id="serverTransferPercent">0%</span></div>
+      </div>
+      <button id="dismissServerTransfer" title="Dismiss" aria-label="Dismiss transfer status">×</button>
+    </div>
 
     <footer class="playerbar">
       <div class="player-track"><div class="mini-art">♪</div><div><strong id="bottomTitle">Nothing playing</strong><small id="bottomMeta">Local library</small></div><button id="favoriteCurrent">♡</button></div>
