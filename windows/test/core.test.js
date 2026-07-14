@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   applyRemotePlaylistDocument,
   createEmptyState,
+  filterPlaylists,
   filterTracks,
   formatTime,
   mergePlaylistDocument,
@@ -13,6 +15,59 @@ import {
   updatePlaylistRemoteSongIDs,
 } from "../ui/core.js";
 import metadata from "../metadata.cjs";
+import updaterFeed from "../updater-feed.cjs";
+
+const { conciseUpdaterError, resolveWindowsUpdateFeed } = updaterFeed;
+
+test("keeps contextual search and sorting in the persistent top bar", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  assert.match(htmlSource, /id="searchSort"/);
+  assert.doesNotMatch(appSource, /id="(?:storageSearch|serverSearch)"/);
+  assert.match(appSource, /section === "storage"[\s\S]+sort\.value = storageSort/);
+  assert.match(appSource, /section === "server"[\s\S]+sort\.value = serverSort/);
+  assert.match(appSource, /class="now-playing-icon"/);
+  assert.doesNotMatch(appSource, /[Ⅱ▥]/);
+  assert.match(mainSource, /autoUpdater\.logger\s*=\s*null/);
+});
+
+test("selects the newest stable release that actually has a Windows update feed", async () => {
+  const fetchImpl = async () => ({
+    ok: true,
+    json: async () => [
+      {
+        tag_name: "android-v1.0.4",
+        draft: false,
+        prerelease: false,
+        assets: [{ name: "Resonance-Android.apk", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/android-v1.0.4/Resonance-Android.apk" }],
+      },
+      {
+        tag_name: "v1.0.3",
+        draft: false,
+        prerelease: false,
+        assets: [{ name: "latest.yml", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.0.3/latest.yml" }],
+      },
+    ],
+  });
+
+  assert.deepEqual(await resolveWindowsUpdateFeed(fetchImpl), {
+    tag: "v1.0.3",
+    feedURL: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.0.3/",
+  });
+});
+
+test("rejects release lists without a Windows manifest and shortens updater errors", async () => {
+  const fetchImpl = async () => ({
+    ok: true,
+    json: async () => [{ tag_name: "android-v1.0.4", assets: [] }],
+  });
+  await assert.rejects(resolveWindowsUpdateFeed(fetchImpl), /No published Windows release/);
+  assert.equal(
+    conciseUpdaterError(new Error("Cannot find latest.yml: 404 Not Found\nvery long response headers and stack")),
+    "The Windows update feed is temporarily unavailable.",
+  );
+});
 
 test("converts embedded cover art into a renderable data URL", () => {
   assert.equal(metadata.pictureDataURL({ format: "image/png", data: Buffer.from([1, 2, 3]) }), "data:image/png;base64,AQID");
@@ -31,6 +86,7 @@ test("search, queue movement, playlists, and time formatting work", () => {
     { id: "b", title: "Ping", artist: "Server", album: "Remote", filePath: "C:\\Music\\ping.mp4", dateAdded: "2026-02-01T00:00:00Z" },
   ];
   assert.deepEqual(filterTracks(tracks, "remote").map((track) => track.id), ["b"]);
+  assert.deepEqual(filterTracks(tracks, "glass.mp3").map((track) => track.id), ["a"]);
   assert.deepEqual(filterTracks(tracks, "", "audio").map((track) => track.id), ["a"]);
   assert.deepEqual(filterTracks(tracks, "", "recent").map((track) => track.id), ["b", "a"]);
   assert.equal(nextIndex(tracks, "a", 1), 1);
@@ -41,6 +97,7 @@ test("search, queue movement, playlists, and time formatting work", () => {
   state.tracks = tracks;
   state.playlists.push({ id: "p", name: "Test", trackIDs: ["b"], isSystem: false });
   assert.deepEqual(tracksForPlaylist(state, "p").map((track) => track.id), ["b"]);
+  assert.deepEqual(filterPlaylists(state.playlists, tracks, "ping").map((playlist) => playlist.id), ["p"]);
 });
 
 test("replaces stale synced tracks instead of discarding the fresh download", () => {

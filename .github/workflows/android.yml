@@ -5,10 +5,13 @@ on:
     paths:
       - "android/**"
       - ".github/workflows/android.yml"
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -39,3 +42,21 @@ jobs:
           name: Resonance-Android-Debug-${{ github.sha }}
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      - name: Package tagged Android release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p ../installers/android/dist
+          cp app/build/outputs/apk/debug/app-debug.apk "../installers/android/dist/Resonance-Android-${VERSION}.apk"
+          cd ../installers/android/dist
+          sha256sum "Resonance-Android-${VERSION}.apk" > "Resonance-Android-${VERSION}.apk.sha256"
+
+      - name: Publish tagged Android release assets
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installers/android/dist/Resonance-Android-*.apk
+            installers/android/dist/Resonance-Android-*.apk.sha256

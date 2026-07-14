@@ -5,10 +5,13 @@ on:
     paths:
       - "ios/**"
       - ".github/workflows/ios.yml"
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -35,3 +38,23 @@ jobs:
           name: Resonance-iOS-Simulator-${{ github.sha }}
           path: ${{ runner.temp }}/ResonanceDerivedData/Build/Products/Debug-iphonesimulator/Resonance.app
           if-no-files-found: error
+
+      - name: Package tagged iOS Simulator release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p installers/ios/dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/ResonanceDerivedData/Build/Products/Debug-iphonesimulator/Resonance.app" \
+            "installers/ios/dist/Resonance-iOS-Simulator-${VERSION}.zip"
+          cd installers/ios/dist
+          shasum -a 256 "Resonance-iOS-Simulator-${VERSION}.zip" > "Resonance-iOS-Simulator-${VERSION}.zip.sha256"
+
+      - name: Publish tagged iOS Simulator release assets
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installers/ios/dist/Resonance-iOS-Simulator-*.zip
+            installers/ios/dist/Resonance-iOS-Simulator-*.zip.sha256
