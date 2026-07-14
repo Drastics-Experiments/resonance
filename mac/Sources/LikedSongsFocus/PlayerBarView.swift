@@ -246,6 +246,7 @@ private struct StableVolumeSlider: View {
 
     @ViewBuilder
     private var volumeThumb: some View {
+#if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             Capsule()
                 .fill(isDragging ? Color.clear : Color(hex: 0xD8D0FF))
@@ -255,15 +256,22 @@ private struct StableVolumeSlider: View {
                     in: .capsule
                 )
         } else {
-            ZStack {
-                Capsule()
-                    .fill(Color(hex: 0xD8D0FF).opacity(isDragging ? 0 : 1))
-
-                if isDragging {
-                    Capsule().fill(.ultraThinMaterial).opacity(0.55)
-                }
-            }
-            .frame(width: thumbWidth, height: thumbHeight)
+            fallbackVolumeThumb
         }
+#else
+        fallbackVolumeThumb
+#endif
+    }
+
+    private var fallbackVolumeThumb: some View {
+        ZStack {
+            Capsule()
+                .fill(Color(hex: 0xD8D0FF).opacity(isDragging ? 0 : 1))
+
+            if isDragging {
+                Capsule().fill(.ultraThinMaterial).opacity(0.55)
+            }
+        }
+        .frame(width: thumbWidth, height: thumbHeight)
     }
 }
