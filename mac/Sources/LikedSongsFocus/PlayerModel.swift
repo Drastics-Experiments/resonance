@@ -128,6 +128,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published var serverMessage = "Not connected"
     @Published var remoteSongs: [RemoteSong] = []
     @Published var isSyncingServer = false
+    @Published var isRefreshingServerCatalog = false
     @Published var isUploadingServer = false
     @Published var downloadProgress = 0.0
     @Published var uploadProgress = 0.0
@@ -434,14 +435,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func removeTrackFromSelectedPlaylist(_ track: Track) {
-        guard
-            let selectedPlaylist,
-            !selectedPlaylist.isSystem,
-            let index = playlists.firstIndex(where: { $0.id == selectedPlaylist.id })
-        else { return }
+        guard let selectedPlaylist else { return }
+        removeTrack(track, from: selectedPlaylist.id)
+    }
+
+    func removeTrack(_ track: Track, from playlistID: UUID) {
+        guard let index = playlists.firstIndex(where: { $0.id == playlistID }),
+              !playlists[index].isSystem else { return }
         playlists[index].trackIDs.removeAll { $0 == track.id }
         updateRemoteSongIDs(forPlaylistAt: index)
-        dirtyPlaylistIDs.insert(selectedPlaylist.id)
+        dirtyPlaylistIDs.insert(playlistID)
         persistLibrary()
         schedulePlaylistSync()
     }
@@ -581,7 +584,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     func refreshServerCatalogNow() async {
         guard !isSyncingServer else { return }
         isSyncingServer = true
-        defer { isSyncingServer = false }
+        isRefreshingServerCatalog = true
+        defer {
+            isRefreshingServerCatalog = false
+            isSyncingServer = false
+        }
         do {
             let base = try normalizedServerURL()
             try saveServerConfiguration(base: base)

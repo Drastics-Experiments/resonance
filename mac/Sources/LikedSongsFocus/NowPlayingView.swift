@@ -30,6 +30,7 @@ struct NowPlayingView: View {
                             .foregroundStyle(Color(hex: 0xAEB4C2))
                     }
                     .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
                     .frame(width: 20)
                 }
             }
@@ -64,7 +65,7 @@ struct NowPlayingView: View {
                     } label: {
                         Image(systemName: model.favorites.contains(track.id) ? "heart.fill" : "heart")
                             .font(.system(size: 17))
-                            .foregroundStyle(Color.appCoral)
+                            .foregroundStyle(Color.appAccent)
                     }
                     .buttonStyle(.plain)
                 }
@@ -94,9 +95,10 @@ struct NowPlayingView: View {
                             .font(.system(size: 17, weight: .bold))
                             .offset(x: model.isPlaying ? 0 : 1)
                             .frame(width: 50, height: 50)
-                            .background(Color.white.opacity(0.075))
-                            .overlay { Circle().stroke(Color.white.opacity(0.25), lineWidth: 1) }
+                            .background(Color.appSurfaceRaised)
+                            .overlay { Circle().stroke(Color.appAccent.opacity(0.68), lineWidth: 1.5) }
                             .clipShape(Circle())
+                            .shadow(color: Color.appAccent.opacity(0.22), radius: 12)
                     }
                     .buttonStyle(PressableScaleStyle())
                     Spacer()
@@ -128,7 +130,7 @@ struct NowPlayingView: View {
                         .foregroundStyle(Color.appMuted)
                     Button("Add Music", action: model.importLocalFiles)
                         .buttonStyle(.borderless)
-                        .foregroundStyle(Color.appCoral)
+                        .foregroundStyle(Color.appAccent)
                 }
                 .padding(.vertical, 16)
             }
@@ -145,7 +147,7 @@ struct NowPlayingView: View {
                             .frame(height: 44)
                             .overlay(alignment: .bottom) {
                                 if model.queueTab == tab {
-                                    Rectangle().fill(Color.appCoral).frame(height: 2)
+                                    Rectangle().fill(Color.appAccent).frame(height: 2)
                                 }
                             }
                     }
@@ -188,7 +190,7 @@ struct NowPlayingView: View {
         .padding(.bottom, 12)
         .background {
             LinearGradient(
-                colors: [Color(hex: 0x0F1727).opacity(0.98), Color(hex: 0x070E19).opacity(0.99)],
+                colors: [Color(hex: 0x08090E).opacity(0.99), Color.appBackground],
                 startPoint: .top,
                 endPoint: .bottom
             )

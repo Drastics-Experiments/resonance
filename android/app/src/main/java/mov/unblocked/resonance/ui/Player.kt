@@ -1,6 +1,7 @@
 package mov.unblocked.resonance.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -76,7 +77,7 @@ fun MiniPlayer(
     val track = state.currentTrack ?: return
     val fraction = (state.positionMs.toFloat() / track.durationMs.coerceAtLeast(1)).coerceIn(0f, 1f)
     Column(
-        modifier = modifier.fillMaxWidth().background(Color(0xEE20222B)).clickable(onClick = onOpen).padding(top = 8.dp),
+        modifier = modifier.fillMaxWidth().background(Color(0xFA050609)).clickable(onClick = onOpen).padding(top = 8.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         Row(
@@ -89,12 +90,15 @@ fun MiniPlayer(
                 Text(track.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(track.artist, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f), maxLines = 1)
             }
-            IconButton(onClick = { actions.playPrevious() }) { Icon(Icons.Default.SkipPrevious, "Previous", tint = Coral) }
+            IconButton(onClick = { actions.playPrevious() }) { Icon(Icons.Default.SkipPrevious, "Previous", tint = Accent) }
             IconButton(
                 onClick = { actions.togglePlayPause() },
-                modifier = Modifier.size(44.dp).background(Color.White, CircleShape),
-            ) { Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "Pause" else "Play", tint = Color.Black) }
-            IconButton(onClick = { actions.playNext() }) { Icon(Icons.Default.SkipNext, "Next", tint = Coral) }
+                modifier = Modifier
+                    .size(44.dp)
+                    .background(RaisedSurface, CircleShape)
+                    .border(1.dp, Accent.copy(alpha = .72f), CircleShape),
+            ) { Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "Pause" else "Play", tint = Color.White) }
+            IconButton(onClick = { actions.playNext() }) { Icon(Icons.Default.SkipNext, "Next", tint = Accent) }
         }
         Box(
             Modifier
@@ -112,7 +116,7 @@ fun MiniPlayer(
                 .background(Color.White.copy(alpha = .13f)),
             contentAlignment = Alignment.CenterStart,
         ) {
-            Box(Modifier.fillMaxWidth(fraction).height(3.dp).background(Coral))
+            Box(Modifier.fillMaxWidth(fraction).height(3.dp).background(Accent))
         }
     }
 }
@@ -200,7 +204,7 @@ fun NowPlayingScreen(
                         Icon(
                             if (track.id in state.favoriteTrackIds) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                             "Favorite",
-                            tint = if (track.id in state.favoriteTrackIds) Coral else Color.White,
+                            tint = if (track.id in state.favoriteTrackIds) Accent else Color.White,
                             modifier = Modifier.size(28.dp),
                         )
                     }
@@ -227,8 +231,11 @@ fun NowPlayingScreen(
                     }
                     IconButton(
                         onClick = actions::togglePlayPause,
-                        modifier = Modifier.size(76.dp).background(Color.White, CircleShape),
-                    ) { Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "Pause" else "Play", tint = Color.Black, modifier = Modifier.size(38.dp)) }
+                        modifier = Modifier
+                            .size(76.dp)
+                            .background(RaisedSurface, CircleShape)
+                            .border(2.dp, Accent.copy(alpha = .72f), CircleShape),
+                    ) { Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "Pause" else "Play", tint = Color.White, modifier = Modifier.size(38.dp)) }
                     IconButton(onClick = actions::playNext, modifier = Modifier.size(60.dp)) {
                         Icon(Icons.Default.SkipNext, "Next", Modifier.size(35.dp))
                     }
@@ -241,11 +248,11 @@ fun NowPlayingScreen(
                     horizontalArrangement = Arrangement.SpaceAround,
                 ) {
                     IconButton(onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) }) {
-                        Icon(Icons.Default.Shuffle, "Shuffle", tint = if (state.shuffleEnabled) Coral else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                        Icon(Icons.Default.Shuffle, "Shuffle", tint = if (state.shuffleEnabled) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                     }
                     Box {
                         IconButton(onClick = { speedMenu = true }) {
-                            Icon(Icons.Default.Speed, "Playback speed", tint = if (state.playbackSpeed != 1f) Coral else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                            Icon(Icons.Default.Speed, "Playback speed", tint = if (state.playbackSpeed != 1f) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                         }
                         DropdownMenu(expanded = speedMenu, onDismissRequest = { speedMenu = false }) {
                             listOf(.75f, 1f, 1.25f, 1.5f, 2f).forEach { speed ->
@@ -257,7 +264,7 @@ fun NowPlayingScreen(
                         }
                     }
                     IconButton(onClick = { actions.setRepeatEnabled(!state.repeatEnabled) }) {
-                        Icon(Icons.Default.Repeat, "Repeat", tint = if (state.repeatEnabled) Coral else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                        Icon(Icons.Default.Repeat, "Repeat", tint = if (state.repeatEnabled) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                     }
                 }
             }
@@ -314,7 +321,7 @@ private fun PlayerSeekBar(
                 .fillMaxWidth(clampedFraction)
                 .height(4.dp)
                 .clip(CircleShape)
-                .background(Coral),
+                .background(Accent),
         )
         Box(
             Modifier
@@ -325,7 +332,7 @@ private fun PlayerSeekBar(
                     )
                 }
                 .size(20.dp)
-                .background(Color.White, CircleShape),
+                .background(Color(0xFFD8D0FF), CircleShape),
         )
     }
 }

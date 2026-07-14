@@ -36,7 +36,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published var selectedRemoteSongIDs: Set<String> = []
     @Published var serverMessage = "Not connected"
     @Published var isSyncing = false
+    @Published var isDownloading = false
     @Published var isUploading = false
+    @Published var isRefreshingCatalog = false
     @Published var downloadProgress = 0.0
     @Published var uploadProgress = 0.0
     @Published var downloadDetail = "Idle"
@@ -55,6 +57,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var playbackQueue: [UUID] = []
     private var playbackPlaylistID: UUID?
     private var artworkCache: [String: UIImage] = [:]
+    private var nowPlayingArtworkCacheKey: String?
+    private var nowPlayingArtworkCache: MPMediaItemArtwork?
     private var audioSessionObservers: [NSObjectProtocol] = []
     private var wasPlayingBeforeInterruption = false
     private var playlistRevision = 0
@@ -425,6 +429,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func refreshCatalog() async {
+        guard !isRefreshingCatalog else { return }
+        isRefreshingCatalog = true
+        defer { isRefreshingCatalog = false }
         await sync(songIDs: [])
         await syncPlaylistsNow()
     }
@@ -465,11 +472,21 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             remoteSongs = catalog.songs
             selectedRemoteSongIDs.formIntersection(Set(catalog.songs.map(\.id)))
             if songIDs == nil || !(songIDs?.isEmpty ?? true) {
-                let songs = songIDs.map { ids in catalog.songs.filter { ids.contains($0.id) } } ?? catalog.songs
+                let requestedSongs = songIDs.map { ids in catalog.songs.filter { ids.contains($0.id) } } ?? catalog.songs
+                let songs = requestedSongs.filter { !isSynced($0) }
+                guard !songs.isEmpty else {
+                    downloadProgress = 1
+                    downloadDetail = "All requested songs are already on this device"
+                    serverMessage = "All requested songs are already downloaded"
+                    selectedRemoteSongIDs.subtract(Set(requestedSongs.map(\.id)))
+                    return
+                }
+                isDownloading = true
+                downloadProgress = 0
+                defer { isDownloading = false }
                 var completed = 0
                 for song in songs {
                     downloadDetail = "Downloading \(completed + 1) of \(songs.count) • \(song.filename)"
-                    if isSynced(song) { completed += 1; downloadProgress = Double(completed) / Double(max(songs.count, 1)); continue }
                     guard let remoteURL = URL(string: song.downloadURL, relativeTo: baseURL)?.absoluteURL else { continue }
                     var request = URLRequest(url: remoteURL)
                     request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
@@ -1055,7 +1072,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private func updateNowPlaying() {
         guard let track = currentTrack else { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil; return }
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+        var info: [String: Any] = [
             MPMediaItemPropertyTitle: track.title,
             MPMediaItemPropertyArtist: track.artist,
             MPMediaItemPropertyAlbumTitle: track.album,
@@ -1063,6 +1080,62 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             MPNowPlayingInfoPropertyElapsedPlaybackTime: position,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? playbackRate : 0,
         ]
+        info[MPMediaItemPropertyArtwork] = nowPlayingArtwork(for: track)
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private func nowPlayingArtwork(for track: MobileTrack) -> MPMediaItemArtwork {
+        let cacheKey = "\(track.id.uuidString)|\(track.artworkFilename ?? "fallback")"
+        if cacheKey == nowPlayingArtworkCacheKey, let nowPlayingArtworkCache {
+            return nowPlayingArtworkCache
+        }
+
+        // MPMediaItemArtwork is rendered outside the app process. Redrawing the
+        // source into an opaque sRGB bitmap avoids CI-backed or oriented images
+        // becoming a black tile on the Lock Screen and Dynamic Island.
+        let image = renderedNowPlayingArtwork(from: artwork(for: track))
+        let mediaArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+        nowPlayingArtworkCacheKey = cacheKey
+        nowPlayingArtworkCache = mediaArtwork
+        return mediaArtwork
+    }
+
+    private func renderedNowPlayingArtwork(from source: UIImage?) -> UIImage {
+        let size = CGSize(width: 600, height: 600)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            let bounds = CGRect(origin: .zero, size: size)
+
+            if let source, source.size.width > 0, source.size.height > 0 {
+                UIColor.black.setFill()
+                UIRectFill(bounds)
+                let scale = max(size.width / source.size.width, size.height / source.size.height)
+                let drawnSize = CGSize(width: source.size.width * scale, height: source.size.height * scale)
+                let drawnRect = CGRect(
+                    x: (size.width - drawnSize.width) / 2,
+                    y: (size.height - drawnSize.height) / 2,
+                    width: drawnSize.width,
+                    height: drawnSize.height
+                )
+                source.draw(in: drawnRect)
+            } else {
+                UIColor(red: 0.25, green: 0.12, blue: 0.62, alpha: 1).setFill()
+                UIRectFill(bounds)
+                let configuration = UIImage.SymbolConfiguration(pointSize: 190, weight: .semibold)
+                let symbol = UIImage(systemName: "waveform", withConfiguration: configuration)?
+                    .withTintColor(.white, renderingMode: .alwaysOriginal)
+                if let symbol {
+                    let origin = CGPoint(
+                        x: (size.width - symbol.size.width) / 2,
+                        y: (size.height - symbol.size.height) / 2
+                    )
+                    symbol.draw(at: origin)
+                }
+            }
+        }
     }
 
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {

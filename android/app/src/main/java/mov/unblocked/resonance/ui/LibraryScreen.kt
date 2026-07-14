@@ -1,6 +1,8 @@
 package mov.unblocked.resonance.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,12 +37,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 @Composable
 fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: Modifier = Modifier) {
+    val focusManager = LocalFocusManager.current
     val query = state.librarySearch.trim()
     val tracks = if (query.isEmpty()) state.tracks else state.tracks.filter {
         it.title.contains(query, true) || it.artist.contains(query, true) ||
@@ -69,7 +74,7 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
                     onClick = actions::togglePlayPause,
-                    colors = ButtonDefaults.buttonColors(containerColor = Coral),
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent),
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
                 ) {
                     Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null)
@@ -101,6 +106,8 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                 placeholder = { Text("Search your music") },
                 leadingIcon = { Icon(Icons.Default.Search, null) },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
                 shape = RoundedCornerShape(13.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedContainerColor = Color.White.copy(alpha = .055f),

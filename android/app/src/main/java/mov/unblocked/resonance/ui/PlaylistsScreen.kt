@@ -1,6 +1,8 @@
 package mov.unblocked.resonance.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,7 +48,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -76,6 +80,7 @@ private fun PlaylistCollectionScreen(
     onOpen: (String) -> Unit,
     modifier: Modifier,
 ) {
+    val focusManager = LocalFocusManager.current
     var creating by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var deletion by remember { mutableStateOf<Playlist?>(null) }
@@ -92,7 +97,7 @@ private fun PlaylistCollectionScreen(
                 }
                 IconButton(
                     onClick = { creating = true },
-                    modifier = Modifier.size(46.dp).background(Coral, CircleShape),
+                    modifier = Modifier.size(46.dp).background(Accent, CircleShape),
                 ) { Icon(Icons.Default.Add, "New playlist") }
             }
         }
@@ -131,7 +136,16 @@ private fun PlaylistCollectionScreen(
         AlertDialog(
             onDismissRequest = { creating = false },
             title = { Text("New Playlist") },
-            text = { OutlinedTextField(name, { name = it }, placeholder = { Text("Name") }, singleLine = true) },
+            text = {
+                OutlinedTextField(
+                    name,
+                    { name = it },
+                    placeholder = { Text("Name") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
+                )
+            },
             confirmButton = {
                 TextButton(
                     enabled = name.isNotBlank(),
@@ -193,7 +207,7 @@ private fun PlaylistDetailScreen(
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 Button(
                     onClick = { if (isActivePlaylist) actions.togglePlayPause() else actions.playPlaylist(playlist.id) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Coral),
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent),
                 ) {
                     Icon(if (state.isPlaying && isActivePlaylist) Icons.Default.Pause else Icons.Default.PlayArrow, null)
                     Spacer(Modifier.size(6.dp))
@@ -239,7 +253,10 @@ private fun PlaylistDetailScreen(
                     items(state.tracks, key = { it.id }) { track ->
                         val added = track.id in playlist.trackIDs
                         Row(
-                            Modifier.fillMaxWidth().clickable(enabled = !added) { actions.addTrackToPlaylist(playlist.id, track.id) }.padding(vertical = 8.dp),
+                            Modifier.fillMaxWidth().clickable {
+                                if (added) actions.removeTrackFromPlaylist(playlist.id, track.id)
+                                else actions.addTrackToPlaylist(playlist.id, track.id)
+                            }.padding(vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
@@ -248,7 +265,7 @@ private fun PlaylistDetailScreen(
                                 Text(track.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(track.artist, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                             }
-                            Icon(if (added) Icons.Default.Check else Icons.Default.Add, null, tint = if (added) Coral else Color.White)
+                            Icon(if (added) Icons.Default.Check else Icons.Default.Add, null, tint = if (added) Accent else Color.White)
                         }
                     }
                 }

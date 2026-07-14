@@ -110,7 +110,7 @@ private struct WindowConfigurator: NSViewRepresentable {
         guard let window else { return }
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.isMovableByWindowBackground = true
+        window.isMovableByWindowBackground = false
         window.backgroundColor = NSColor(red: 0.027, green: 0.063, blue: 0.110, alpha: 1)
         window.minSize = NSSize(width: 860, height: 620)
         window.standardWindowButton(.closeButton)?.isHidden = false

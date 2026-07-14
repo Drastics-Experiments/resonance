@@ -2,6 +2,8 @@ package mov.unblocked.resonance.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,13 +45,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import mov.unblocked.resonance.data.Track
 
 @Composable
 fun StorageScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: Modifier = Modifier) {
+    val focusManager = LocalFocusManager.current
     var search by remember { mutableStateOf("") }
     var scope by remember { mutableStateOf(StorageScope.Songs) }
     var sort by remember { mutableStateOf(StorageSort.Title) }
@@ -117,6 +122,8 @@ fun StorageScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                     leadingIcon = { Icon(Icons.Default.Search, null) },
                     placeholder = { Text("Search songs, artists, albums, files…", maxLines = 1) },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
                     shape = RoundedCornerShape(13.dp),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedContainerColor = Color.White.copy(alpha = .055f),
@@ -221,7 +228,7 @@ private fun StorageSummary(
             Canvas(Modifier.fillMaxSize()) {
                 drawArc(Color.White.copy(alpha = .08f), -90f, 360f, false, style = Stroke(14.dp.toPx()))
                 if (importedSweep > 0) drawArc(Violet, -90f, importedSweep, false, style = Stroke(14.dp.toPx(), cap = StrokeCap.Butt))
-                if (downloadedSweep > 0) drawArc(Coral, -90f + importedSweep, downloadedSweep, false, style = Stroke(14.dp.toPx(), cap = StrokeCap.Butt))
+                if (downloadedSweep > 0) drawArc(Accent, -90f + importedSweep, downloadedSweep, false, style = Stroke(14.dp.toPx(), cap = StrokeCap.Butt))
             }
             Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
         }
@@ -229,7 +236,7 @@ private fun StorageSummary(
             Text("Local audio", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 StorageMetric(Violet, "Local", importedBytes, "$importedCount files", Modifier.weight(1f))
-                StorageMetric(Coral, "Server", downloadedBytes, "$downloadedCount files", Modifier.weight(1f))
+                StorageMetric(Accent, "Server", downloadedBytes, "$downloadedCount files", Modifier.weight(1f))
                 StorageMetric(ElectricBlue, "Available", availableBytes, "on device", Modifier.weight(1f))
             }
         }
