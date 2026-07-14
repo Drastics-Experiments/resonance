@@ -5,11 +5,16 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { readAudioMetadata } = require("./metadata.cjs");
+const { conciseUpdaterError, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
 
 const AUDIO_EXTENSIONS = new Set([".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".wav"]);
 
 let mainWindow;
 
+// electron-updater logs to console by default. Packaged GUI launches may inherit
+// a short-lived stdout pipe, so a delayed update check can otherwise crash with
+// EPIPE after that parent process exits. Status is surfaced through IPC instead.
+autoUpdater.logger = null;
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 
@@ -22,7 +27,13 @@ autoUpdater.on("update-available", (information) => publishUpdateStatus("availab
 autoUpdater.on("update-not-available", () => publishUpdateStatus("current"));
 autoUpdater.on("download-progress", (progress) => publishUpdateStatus("downloading", { percent: Math.round(progress.percent || 0) }));
 autoUpdater.on("update-downloaded", (information) => publishUpdateStatus("ready", { version: information.version }));
-autoUpdater.on("error", (error) => publishUpdateStatus("error", { message: error.message || "Update check failed" }));
+autoUpdater.on("error", (error) => publishUpdateStatus("error", { message: conciseUpdaterError(error) }));
+
+async function checkForWindowsUpdates() {
+  const { feedURL } = await resolveWindowsUpdateFeed();
+  autoUpdater.setFeedURL({ provider: "generic", url: feedURL });
+  return autoUpdater.checkForUpdates();
+}
 
 function applicationPaths() {
   const root = app.getPath("userData");
@@ -140,7 +151,7 @@ function createWindow() {
 app.whenReady().then(async () => {
   await ensureDirectories();
   createWindow();
-  if (app.isPackaged) setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 10000);
+  if (app.isPackaged) setTimeout(() => checkForWindowsUpdates().catch(() => {}), 10000);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
@@ -148,7 +159,7 @@ app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(
 
 ipcMain.handle("update:check", async () => {
   if (!app.isPackaged) return { supported: false };
-  await autoUpdater.checkForUpdates();
+  await checkForWindowsUpdates();
   return { supported: true };
 });
 

@@ -65,7 +65,7 @@ export function formatTime(seconds) {
 export function filterTracks(tracks, query, mode = "all") {
   const value = String(query || "").trim().toLocaleLowerCase();
   let filtered = value
-    ? tracks.filter((track) => [track.title, track.artist, track.album].some((field) => String(field || "").toLocaleLowerCase().includes(value)))
+    ? tracks.filter((track) => [track.title, track.artist, track.album, track.filePath].some((field) => String(field || "").toLocaleLowerCase().includes(value)))
     : [...tracks];
   if (mode === "audio") {
     filtered = filtered.filter((track) => /\.(aac|aif|aiff|alac|flac|m4a|m4b|mp3|ogg|opus|wav)$/i.test(String(track.filePath || "")));
@@ -73,6 +73,18 @@ export function filterTracks(tracks, query, mode = "all") {
     filtered.sort((left, right) => Date.parse(right.dateAdded || 0) - Date.parse(left.dateAdded || 0));
   }
   return filtered;
+}
+
+export function filterPlaylists(playlists, tracks, query) {
+  const value = String(query || "").trim().toLocaleLowerCase();
+  if (!value) return [...playlists];
+  return playlists.filter((playlist) => {
+    if (String(playlist.name || "").toLocaleLowerCase().includes(value)) return true;
+    return (playlist.trackIDs || []).some((trackID) => {
+      const track = tracks.find((item) => item.id === trackID);
+      return [track?.title, track?.artist, track?.album].some((field) => String(field || "").toLocaleLowerCase().includes(value));
+    });
+  });
 }
 
 export function nextIndex(tracks, currentID, direction = 1, shuffle = false, random = Math.random) {
