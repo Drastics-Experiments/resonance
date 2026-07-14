@@ -1,17 +1,29 @@
+import AppKit
 import SwiftUI
 
 struct MainContentView: View {
     @EnvironmentObject private var model: PlayerModel
+    @State private var serverSearchText = ""
+    @State private var serverScope: MacServerScope = .all
+    @State private var serverSort: MacServerSort = .title
 
     var body: some View {
         VStack(spacing: 0) {
-            TopBarView()
+            TopBarView(
+                serverSearchText: $serverSearchText,
+                serverScope: $serverScope,
+                serverSort: $serverSort
+            )
                 .frame(height: 82)
 
             if model.section == .storage {
                 StorageView()
             } else if model.section == .server {
-                ServerLibraryView()
+                ServerLibraryView(
+                    searchText: $serverSearchText,
+                    scope: $serverScope,
+                    sort: $serverSort
+                )
             } else if model.section == .playlists && model.selectedPlaylistID == nil {
                 PlaylistsOverviewView()
             } else {
@@ -20,7 +32,7 @@ struct MainContentView: View {
         }
         .background {
             LinearGradient(
-                colors: [Color(hex: 0x121730).opacity(0.40), Color(hex: 0x060D17).opacity(0.92)],
+                colors: [Color(hex: 0x080910).opacity(0.68), Color.appBackground],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -31,17 +43,19 @@ struct MainContentView: View {
 
 private struct ServerLibraryView: View {
     @EnvironmentObject private var model: PlayerModel
+    @Binding var searchText: String
+    @Binding var scope: MacServerScope
+    @Binding var sort: MacServerSort
     @State private var deletionCandidate: RemoteSong?
     @State private var presentedSheet: MacServerSheet?
-    @State private var searchText = ""
-    @State private var scope: MacServerScope = .all
-    @State private var sort: MacServerSort = .title
     @State private var isSelecting = false
+    @State private var scopeBeforeSelection: MacServerScope?
 
     private var isConnected: Bool {
-        !model.remoteSongs.isEmpty
-            || model.serverMessage.localizedCaseInsensitiveContains("connected")
-            || model.serverMessage.localizedCaseInsensitiveContains("synced")
+        let status = model.serverMessage.lowercased()
+        return !model.remoteSongs.isEmpty
+            || status.hasPrefix("connected")
+            || status.hasPrefix("synced")
     }
 
     private var syncedCount: Int {
@@ -52,8 +66,9 @@ private struct ServerLibraryView: View {
         !model.remoteSongs.isEmpty && syncedCount == model.remoteSongs.count
     }
 
-    private var serverHost: String {
-        URL(string: model.serverURLString)?.host ?? model.serverURLString
+    private var serverAddress: String {
+        let address = model.serverURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        return address.isEmpty ? "Add a server connection" : address
     }
 
     private var visibleSongs: [RemoteSong] {
@@ -93,225 +108,96 @@ private struct ServerLibraryView: View {
     }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("Music Server")
-                            .font(.system(size: 42, weight: .bold, design: .rounded))
-                            .tracking(-1.2)
-                        HStack(spacing: 10) {
-                            Label(isConnected ? "Connected" : "Not Connected", systemImage: "circle.fill")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(isConnected ? Color(hex: 0x55D98B) : Color.appMuted)
-                                .padding(.horizontal, 10)
-                                .frame(height: 26)
-                                .background((isConnected ? Color(hex: 0x55D98B) : Color.appMuted).opacity(0.12), in: Capsule())
-                            Text(serverHost.isEmpty ? "No server configured" : serverHost)
-                                .font(.system(size: 12))
-                                .foregroundStyle(Color.appMuted)
-                        }
-                    }
-                    Spacer()
-                    Button(action: model.refreshServerCatalog) {
-                        Image(systemName: "arrow.clockwise")
-                            .frame(width: 34, height: 34)
-                            .background(Color.white.opacity(0.06), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(model.isSyncingServer || model.isUploadingServer)
-                    .help("Refresh server catalog")
-                }
+        GeometryReader { proxy in
+            let showAlbum = proxy.size.width >= 690
 
-                Button { presentedSheet = .connection } label: {
-                    HStack(spacing: 14) {
-                        Image(systemName: "globe")
-                            .font(.system(size: 22))
-                            .foregroundStyle(Color.appViolet)
-                            .frame(width: 34)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Connection").font(.system(size: 13, weight: .semibold))
-                            HStack(spacing: 8) {
-                                Text(model.serverURLString.isEmpty ? "No server URL" : model.serverURLString).lineLimit(1)
-                                Text("•")
-                                Image(systemName: "key.fill")
-                                Text(model.serverToken.isEmpty ? "Not configured" : "•••• •••• ••••")
-                            }
-                            .font(.system(size: 10))
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    Text("Music Server")
+                        .font(.system(size: 48, weight: .bold, design: .rounded))
+                        .tracking(-1.7)
+                        .padding(.bottom, 8)
+
+                    serverStatusLine
+                        .padding(.bottom, 32)
+
+                    HStack(alignment: .center, spacing: 12) {
+                        Text("SERVER LIBRARY")
+                            .font(.system(size: 12, weight: .semibold))
+                            .tracking(1.1)
+                            .foregroundStyle(Color(hex: 0xD4D7E0))
+                        Text("\(visibleSongs.count) \(visibleSongs.count == 1 ? "song" : "songs")")
+                            .font(.system(size: 11))
                             .foregroundStyle(Color.appMuted)
+
+                        if scope != .all {
+                            Text(scope.rawValue)
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Color.appViolet)
+                                .padding(.horizontal, 8)
+                                .frame(height: 22)
+                                .background(Color.appViolet.opacity(0.12), in: Capsule())
                         }
-                        Spacer()
-                        Image(systemName: "gearshape")
-                            .frame(width: 34, height: 34)
-                            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
-                    }
-                    .padding(14)
-                    .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 13))
-                    .overlay { RoundedRectangle(cornerRadius: 13).stroke(Color.appLine) }
-                }
-                .buttonStyle(.plain)
 
-                HStack(spacing: 12) {
-                    MacServerMetric(symbol: "music.note", color: Color.appCoral, value: "\(model.remoteSongs.count)", label: "songs")
-                    MacServerMetric(symbol: "list.bullet", color: Color.appViolet, value: "\(model.customPlaylists.count)", label: "playlists")
-                    MacServerMetric(
-                        symbol: allSynced ? "checkmark.circle" : "icloud.and.arrow.down",
-                        color: allSynced ? Color(hex: 0x55D98B) : Color.appCoral,
-                        value: allSynced ? "All" : "\(syncedCount)/\(model.remoteSongs.count)",
-                        label: "synced"
-                    )
-                    Spacer(minLength: 12)
-                    Button(action: model.chooseSongsToUpload) {
-                        Label(model.isUploadingServer ? "Uploading…" : "Upload", systemImage: "icloud.and.arrow.up")
-                            .macServerActionButton()
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(model.isUploadingServer || model.isSyncingServer)
-                    Button {
-                        if model.selectedRemoteSongIDs.isEmpty {
-                            withAnimation { isSelecting = true; scope = .notDownloaded }
-                        } else {
-                            model.downloadSelectedServerSongs()
-                            isSelecting = false
-                        }
-                    } label: {
-                        Label(model.selectedRemoteSongIDs.isEmpty ? "Download" : "Get \(model.selectedRemoteSongIDs.count)", systemImage: "icloud.and.arrow.down")
-                            .macServerActionButton()
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(model.isUploadingServer || model.isSyncingServer)
-                }
+                        Spacer(minLength: 8)
 
-                HStack(spacing: 10) {
-                    ServerTransferRow(
-                        title: "Downloads",
-                        icon: "arrow.down.circle.fill",
-                        color: Color.appCoral,
-                        isActive: model.isSyncingServer,
-                        progress: model.downloadProgress,
-                        currentFile: model.downloadCurrentFile,
-                        status: model.downloadStatus
-                    )
-                    ServerTransferRow(
-                        title: "Uploads",
-                        icon: "arrow.up.circle.fill",
-                        color: Color.appViolet,
-                        isActive: model.isUploadingServer,
-                        progress: model.uploadProgress,
-                        currentFile: model.uploadCurrentFile,
-                        status: model.uploadStatus
-                    )
-                }
-
-                HStack(spacing: 10) {
-                    HStack(spacing: 9) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(Color.appMuted)
-                        TextField("Search server library", text: $searchText)
-                            .textFieldStyle(.plain)
+                        serverActions
                     }
-                    .padding(.horizontal, 13)
-                    .frame(height: 40)
-                    .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
-                    .overlay { RoundedRectangle(cornerRadius: 10).stroke(Color.appLine) }
+                    .padding(.bottom, 10)
+                    .overlay(alignment: .bottom) {
+                        Rectangle().fill(Color.appLine).frame(height: 1)
+                    }
 
-                    Menu {
-                        Section("Filter") {
-                            ForEach(MacServerScope.allCases) { option in
-                                Button {
-                                    scope = option
-                                } label: {
-                                    Label(option.rawValue, systemImage: scope == option ? "checkmark.circle.fill" : option.symbol)
-                                }
+                    MacServerCatalogHeader(showAlbum: showAlbum)
+
+                    if visibleSongs.isEmpty {
+                        ContentUnavailableView(
+                            model.remoteSongs.isEmpty ? "No Server Songs" : "No Results",
+                            systemImage: model.remoteSongs.isEmpty ? "network.slash" : "magnifyingglass",
+                            description: Text(model.remoteSongs.isEmpty ? "Open the connection settings to load the server library." : "Try another search, filter, or sort option.")
+                        )
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 60)
+                    } else {
+                        LazyVStack(spacing: 0) {
+                            let localTracks = localTracksByRemoteID
+                            ForEach(Array(visibleSongs.enumerated()), id: \.element.id) { index, song in
+                                MacServerSongRow(
+                                    song: song,
+                                    number: index + 1,
+                                    localTrack: localTracks[song.id],
+                                    isSynced: model.isRemoteSongSynced(song),
+                                    isSelecting: isSelecting,
+                                    isSelected: model.selectedRemoteSongIDs.contains(song.id),
+                                    showAlbum: showAlbum,
+                                    onToggleSelection: { model.toggleRemoteSelection(song) },
+                                    onDelete: { deletionCandidate = song }
+                                )
                             }
                         }
-                        Section("Sort By") {
-                            ForEach(MacServerSort.allCases) { option in
-                                Button { sort = option } label: {
-                                    Label(option.title, systemImage: sort == option ? "checkmark.circle.fill" : option.symbol)
-                                }
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "line.3.horizontal.decrease")
-                            .frame(width: 38, height: 38)
-                            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
                     }
-                    .menuStyle(.borderlessButton)
-                    .frame(width: 40)
-                    .help("Filter and sort server library")
                 }
-
-                MacServerScopePicker(scope: $scope)
-
-                HStack(alignment: .firstTextBaseline) {
-                    Text("SERVER LIBRARY")
-                        .font(.system(size: 10, weight: .semibold))
-                        .tracking(1.7)
-                        .foregroundStyle(Color(hex: 0xA9AFBD))
-                    Text("\(visibleSongs.count) \(visibleSongs.count == 1 ? "song" : "songs")")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.appMuted)
-                    Spacer()
-                    Text(model.playlistSyncStatus)
-                        .font(.system(size: 9))
-                        .foregroundStyle(Color.appMuted)
-                        .lineLimit(1)
-                    if model.isSyncingPlaylists { ProgressView().controlSize(.small) }
-                    if isSelecting, !model.selectedRemoteSongIDs.isEmpty {
-                        Button("Download \(model.selectedRemoteSongIDs.count)") {
-                            model.downloadSelectedServerSongs()
-                            isSelecting = false
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Color.appCoral)
-                        .controlSize(.small)
-                    }
-                    Button(isSelecting ? "Done" : "Select") {
-                        withAnimation {
-                            isSelecting.toggle()
-                            if !isSelecting { model.selectedRemoteSongIDs.removeAll() }
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-
-                if visibleSongs.isEmpty {
-                    ContentUnavailableView(
-                        model.remoteSongs.isEmpty ? "No Server Songs" : "No Results",
-                        systemImage: model.remoteSongs.isEmpty ? "network.slash" : "magnifyingglass",
-                        description: Text(model.remoteSongs.isEmpty ? "Configure the connection to load the server library." : "Try another search or filter.")
+                .padding(.horizontal, 34)
+                .padding(.top, 18)
+                .padding(.bottom, 44)
+            }
+            .scrollIndicators(.hidden)
+            .background {
+                ZStack {
+                    RadialGradient(
+                        colors: [Color.appViolet.opacity(0.10), .clear],
+                        center: UnitPoint(x: 0.83, y: 0.04),
+                        startRadius: 10,
+                        endRadius: 520
                     )
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 36)
-                } else {
-                    LazyVStack(spacing: 0) {
-                        let localTracks = localTracksByRemoteID
-                        ForEach(visibleSongs) { song in
-                            MacServerSongRow(
-                                song: song,
-                                localTrack: localTracks[song.id],
-                                isSynced: model.isRemoteSongSynced(song),
-                                isSelecting: isSelecting,
-                                isSelected: model.selectedRemoteSongIDs.contains(song.id),
-                                onToggleSelection: { model.toggleRemoteSelection(song) },
-                                onDelete: { deletionCandidate = song }
-                            )
-                        }
-                    }
-                    .background(Color.white.opacity(0.022), in: RoundedRectangle(cornerRadius: 12))
-                    .overlay { RoundedRectangle(cornerRadius: 12).stroke(Color.appLine) }
+                    RadialGradient(
+                        colors: [Color.appViolet.opacity(0.055), .clear],
+                        center: UnitPoint(x: 0.48, y: 0.88),
+                        startRadius: 10,
+                        endRadius: 520
+                    )
                 }
             }
-            .padding(34)
-        }
-        .background {
-            RadialGradient(
-                colors: [Color(hex: 0x245E7D).opacity(0.24), .clear],
-                center: UnitPoint(x: 0.78, y: 0.06),
-                startRadius: 10,
-                endRadius: 440
-            )
         }
         .alert(item: $deletionCandidate) { song in
             Alert(
@@ -336,6 +222,120 @@ private struct ServerLibraryView: View {
                   !model.isSyncingPlaylists else { return }
             await model.refreshServerCatalogNow()
             await model.syncPlaylistsNow()
+        }
+    }
+
+    private var serverStatusLine: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                connectionSummary
+                serverMetrics
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                connectionSummary
+                serverMetrics
+            }
+        }
+    }
+
+    private var connectionSummary: some View {
+        HStack(spacing: 10) {
+            Label(isConnected ? "Connected" : "Offline", systemImage: "circle.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(isConnected ? Color(hex: 0x55D98B) : Color.appMuted)
+                .padding(.horizontal, 10)
+                .frame(height: 27)
+                .background((isConnected ? Color(hex: 0x55D98B) : Color.appMuted).opacity(0.12), in: Capsule())
+
+            Button { presentedSheet = .connection } label: {
+                HStack(spacing: 8) {
+                    Text(serverAddress)
+                        .lineLimit(1)
+                    Image(systemName: "pencil")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(Color.appMuted)
+            }
+            .buttonStyle(.plain)
+            .help("Edit server connection")
+        }
+    }
+
+    private var serverMetrics: some View {
+        HStack(spacing: 12) {
+            Text("•").foregroundStyle(Color.appMuted)
+            MacServerInlineMetric(symbol: "music.note", color: Color.appViolet, value: "\(model.remoteSongs.count)", label: "songs")
+            Text("•").foregroundStyle(Color.appMuted)
+            MacServerInlineMetric(symbol: "list.bullet", color: Color.appViolet, value: "\(model.customPlaylists.count)", label: "playlists")
+            Text("•").foregroundStyle(Color.appMuted)
+            MacServerInlineMetric(
+                symbol: allSynced ? "checkmark" : "icloud.and.arrow.down",
+                color: allSynced ? Color(hex: 0x55D98B) : Color.appAccent,
+                value: "\(syncedCount)",
+                label: "on device"
+            )
+        }
+    }
+
+    private var serverActions: some View {
+        HStack(spacing: 10) {
+            MacServerCircleActionButton(
+                symbol: "square.and.arrow.up",
+                label: "Upload songs",
+                isDisabled: model.isUploadingServer || model.isSyncingServer,
+                action: model.chooseSongsToUpload
+            )
+
+            MacServerCircleActionButton(
+                symbol: "square.and.arrow.down",
+                label: isSelecting ? "Download selected songs" : "Download all missing songs",
+                isDisabled: model.isUploadingServer || model.isSyncingServer || (isSelecting && model.selectedRemoteSongIDs.isEmpty)
+            ) {
+                if isSelecting {
+                    model.downloadSelectedServerSongs()
+                    endSelectionMode()
+                } else {
+                    model.downloadAllServerSongs()
+                }
+            }
+
+            MacServerCircleActionButton(
+                symbol: "checklist",
+                label: isSelecting ? "Cancel song selection" : "Select songs to download",
+                valueText: isSelecting ? "\(model.selectedRemoteSongIDs.count)" : nil,
+                isDisabled: model.isUploadingServer || model.isSyncingServer
+            ) {
+                if isSelecting {
+                    endSelectionMode()
+                } else {
+                    withAnimation {
+                        scopeBeforeSelection = scope
+                        isSelecting = true
+                        scope = .notDownloaded
+                    }
+                }
+            }
+
+            MacServerCircleActionButton(
+                symbol: "arrow.clockwise",
+                label: "Refresh catalog and sync playlists",
+                isRotating: model.isRefreshingServerCatalog || model.isSyncingPlaylists,
+                isDisabled: model.isUploadingServer || model.isSyncingServer || model.isSyncingPlaylists,
+                action: model.refreshServerCatalog
+            )
+        }
+    }
+
+    private func endSelectionMode() {
+        withAnimation {
+            isSelecting = false
+            model.selectedRemoteSongIDs.removeAll()
+            if let scopeBeforeSelection {
+                scope = scopeBeforeSelection
+            }
+            scopeBeforeSelection = nil
         }
     }
 }
@@ -380,115 +380,261 @@ private enum MacServerSort: String, CaseIterable, Identifiable {
     }
 }
 
-private struct MacServerMetric: View {
+private struct MacServerInlineMetric: View {
     let symbol: String
     let color: Color
     let value: String
     let label: String
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Image(systemName: symbol)
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(color)
-                .frame(width: 30, height: 30)
+                .frame(width: 28, height: 28)
                 .background(color.opacity(0.12), in: Circle())
-            VStack(alignment: .leading, spacing: 1) {
-                Text(value).font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                Text(label).font(.system(size: 9)).foregroundStyle(Color.appMuted)
-            }
+            Text(value)
+                .font(.system(size: 12, weight: .semibold))
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.appMuted)
         }
-        .padding(.horizontal, 12)
-        .frame(height: 54)
-        .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
-        .overlay { RoundedRectangle(cornerRadius: 11).stroke(Color.appLine) }
     }
 }
 
-private struct MacServerScopePicker: View {
-    @Binding var scope: MacServerScope
+private struct MacServerCircleActionButton: View {
+    let symbol: String
+    let label: String
+    var valueText: String? = nil
+    var isRotating = false
+    var isDisabled = false
+    let action: () -> Void
+    @State private var rotationDegrees = 0.0
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(MacServerScope.allCases) { option in
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) { scope = option }
-                } label: {
-                    Text(option.rawValue)
-                        .font(.system(size: 10, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 32)
-                        .foregroundStyle(scope == option ? Color.white : Color.appMuted)
-                        .background(scope == option ? Color.appCoral : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+        Button(action: action) {
+            Group {
+                if let valueText {
+                    Text(valueText)
+                        .font(.system(size: 13, weight: .bold))
+                        .monospacedDigit()
+                } else {
+                    Image(systemName: symbol)
+                        .font(.system(size: 15, weight: .semibold))
+                        .rotationEffect(.degrees(rotationDegrees))
                 }
-                .buttonStyle(.plain)
+            }
+            .foregroundStyle(Color.appAccent)
+            .frame(width: 42, height: 42)
+            .background(Color.white.opacity(0.045), in: Circle())
+            .overlay { Circle().stroke(Color.white.opacity(0.035)) }
+        }
+        .buttonStyle(PressableScaleStyle())
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.45 : 1)
+        .help(label)
+        .accessibilityLabel(label)
+        .onChange(of: isRotating) { _, isRotating in
+            guard isRotating else { return }
+            withAnimation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.8)) {
+                rotationDegrees += 360
             }
         }
-        .padding(4)
-        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
-        .overlay { RoundedRectangle(cornerRadius: 10).stroke(Color.appLine) }
+    }
+}
+
+private struct MacServerCatalogHeader: View {
+    let showAlbum: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("#")
+                .frame(width: 32, alignment: .leading)
+            Text("Title")
+                .frame(minWidth: 250, maxWidth: .infinity, alignment: .leading)
+            if showAlbum {
+                Text("Album")
+                    .frame(width: 185, alignment: .leading)
+            }
+            Text("Time")
+                .frame(width: 52, alignment: .leading)
+            Color.clear.frame(width: 44)
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(Color(hex: 0x9299AA))
+        .padding(.horizontal, 10)
+        .frame(height: 42)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.appLine).frame(height: 1)
+        }
     }
 }
 
 private struct MacServerSongRow: View {
     @EnvironmentObject private var model: PlayerModel
     let song: RemoteSong
+    let number: Int
     let localTrack: Track?
     let isSynced: Bool
     let isSelecting: Bool
     let isSelected: Bool
+    let showAlbum: Bool
     let onToggleSelection: () -> Void
     let onDelete: () -> Void
+    @State private var isHovering = false
+
+    private var displayTitle: String {
+        guard let localTrack, !localTrack.title.isEmpty else { return song.title }
+        return localTrack.title
+    }
+
+    private var displayArtist: String {
+        guard let localTrack, !localTrack.artist.isEmpty, localTrack.artist != "Unknown Artist" else { return song.artist }
+        return localTrack.artist
+    }
+
+    private var displayAlbum: String {
+        guard let localTrack, !localTrack.album.isEmpty, localTrack.album != "Server Library" else { return song.album }
+        return localTrack.album
+    }
+
+    private var durationText: String {
+        localTrack?.durationText ?? "—"
+    }
+
+    private var mediaKind: String {
+        let type = song.contentType.lowercased()
+        let fileExtension = URL(fileURLWithPath: song.filename).pathExtension.lowercased()
+        return type.contains("video") || ["mp4", "mov", "m4v", "webm"].contains(fileExtension) ? "Video" : "Audio"
+    }
+
+    private var isCurrent: Bool {
+        localTrack?.id == model.currentTrackID
+    }
+
+    private var isFavorite: Bool {
+        guard let localTrack else { return false }
+        return model.favorites.contains(localTrack.id)
+    }
 
     var body: some View {
-        HStack(spacing: 12) {
-            if isSelecting {
-                Button(action: onToggleSelection) {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(isSelected ? Color.appCoral : Color.appMuted)
-                }
-                .buttonStyle(.plain)
-            }
-
+        HStack(spacing: 10) {
             Button(action: isSelecting ? onToggleSelection : primaryAction) {
-                HStack(spacing: 12) {
+                HStack(spacing: 10) {
                     Group {
-                        if let localTrack {
-                            TrackArtworkView(track: localTrack, symbolSize: 15, cornerRadius: 7)
+                        if isSelecting {
+                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(isSelected ? Color.appAccent : Color.appMuted)
+                        } else if isCurrent && model.isPlaying {
+                            EqualizerGlyph(isAnimating: true)
                         } else {
-                            MiniArtwork(style: .electric, symbol: "music.note", size: 42, cornerRadius: 7)
+                            Text("\(number)")
                         }
                     }
-                    .frame(width: 42, height: 42)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(song.title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                        Text(song.artist).font(.system(size: 10)).foregroundStyle(Color.appMuted).lineLimit(1)
-                        Text(song.album).font(.system(size: 9)).foregroundStyle(Color.appMuted).lineLimit(1)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(hex: 0xAEB4C2))
+                    .frame(width: 32, alignment: .leading)
+
+                    HStack(spacing: 13) {
+                        Group {
+                            if let localTrack {
+                                TrackArtworkView(track: localTrack, symbolSize: 16, cornerRadius: 7)
+                            } else {
+                                MiniArtwork(
+                                    style: .electric,
+                                    symbol: mediaKind == "Video" ? "play.fill" : "music.note",
+                                    size: 50,
+                                    cornerRadius: 7
+                                )
+                            }
+                        }
+                        .frame(width: 50, height: 50)
+
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 7) {
+                                Text(displayTitle)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(Color(hex: 0xF5F6FB))
+                                    .lineLimit(1)
+
+                                if isSynced {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(Color(hex: 0x55D98B))
+                                        .help("On this Mac")
+                                }
+                            }
+
+                            Text("\(displayArtist) / \(mediaKind)")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color(hex: 0x8F96A7))
+                                .lineLimit(1)
+                        }
+
+                        Spacer(minLength: 8)
                     }
-                    Spacer(minLength: 12)
-                    Text(ByteCountFormatter.string(fromByteCount: song.size, countStyle: .file))
-                        .font(.system(size: 9))
-                        .foregroundStyle(Color.appMuted)
-                    Label(isSynced ? "Synced" : "Download", systemImage: isSynced ? "checkmark.icloud" : "icloud.and.arrow.down")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(isSynced ? Color(hex: 0x55D98B) : Color.appCoral)
-                        .frame(width: 76, alignment: .leading)
+                    .frame(minWidth: 250, maxWidth: .infinity, alignment: .leading)
+
+                    if showAlbum {
+                        Text(displayAlbum)
+                            .lineLimit(1)
+                            .frame(width: 185, alignment: .leading)
+                    }
+
+                    Text(durationText)
+                        .monospacedDigit()
+                        .frame(width: 52, alignment: .leading)
                 }
+                .font(.system(size: 11))
+                .foregroundStyle(Color(hex: 0xAEB4C2))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
-            Menu {
-                if !isSynced { Button("Download", action: { model.downloadServerSong(song) }) }
-                Button("Delete from Server", role: .destructive, action: onDelete)
-            } label: {
-                Image(systemName: "ellipsis").frame(width: 24)
+            HStack(spacing: 11) {
+                if let localTrack {
+                    Button {
+                        model.toggleFavorite(localTrack)
+                    } label: {
+                        Image(systemName: isFavorite ? "heart.fill" : "heart")
+                            .font(.system(size: 11))
+                            .foregroundStyle(isFavorite ? Color.appAccent : Color(hex: 0xAEB4C2))
+                    }
+                    .buttonStyle(.plain)
+                    .help(isFavorite ? "Remove from Liked Songs" : "Add to Liked Songs")
+                } else {
+                    Button {
+                        model.downloadServerSong(song)
+                    } label: {
+                        Image(systemName: "icloud.and.arrow.down")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color(hex: 0xAEB4C2))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Download")
+                }
             }
-            .menuStyle(.borderlessButton)
-            .frame(width: 28)
+            .frame(width: 44, alignment: .trailing)
+            .opacity(isSelecting ? 0 : (isHovering || isCurrent || isFavorite || !isSynced ? 1 : 0))
+            .allowsHitTesting(!isSelecting)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .frame(height: 76)
+        .background(isHovering || isSelected || isCurrent ? Color.white.opacity(0.055) : .clear)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay(alignment: .bottom) { Rectangle().fill(Color.appLine).frame(height: 1) }
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+        .contextMenu {
+            if let localTrack {
+                Button("Play", action: { model.selectAndPlay(localTrack) })
+                Button("Show in Finder", action: { model.revealInFinder(localTrack) })
+            } else {
+                Button("Download", action: { model.downloadServerSong(song) })
+            }
+            Divider()
+            Button("Delete from Server", role: .destructive, action: onDelete)
+        }
     }
 
     private func primaryAction() {
@@ -544,62 +690,13 @@ private struct MacServerConnectionSheet: View {
                     else { Text("Connect") }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Color.appCoral)
+                .tint(Color.appAccent)
                 .disabled(model.isSyncingServer)
             }
         }
         .padding(24)
         .frame(width: 480)
-        .background(Color(hex: 0x0C1322))
-    }
-}
-
-private extension View {
-    func macServerActionButton() -> some View {
-        font(.system(size: 11, weight: .semibold))
-            .padding(.horizontal, 16)
-            .frame(height: 38)
-            .background(Color.white.opacity(0.065), in: Capsule())
-            .overlay { Capsule().stroke(Color.appLine) }
-    }
-}
-
-private struct ServerTransferRow: View {
-    let title: String
-    let icon: String
-    let color: Color
-    let isActive: Bool
-    let progress: Double
-    let currentFile: String
-    let status: String
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 20))
-                .foregroundStyle(color)
-                .symbolEffect(.pulse, isActive: isActive)
-            VStack(alignment: .leading, spacing: 5) {
-                HStack {
-                    Text(title).font(.system(size: 11, weight: .semibold))
-                    Spacer()
-                    Text(status).font(.system(size: 9)).foregroundStyle(Color.appMuted)
-                }
-                if isActive {
-                    ProgressView(value: progress)
-                        .tint(color)
-                } else {
-                    Rectangle().fill(Color.appLine).frame(height: 1)
-                }
-                Text(currentFile.isEmpty ? (isActive ? "Starting…" : "No active transfer") : currentFile)
-                    .font(.system(size: 9))
-                    .foregroundStyle(Color.appMuted)
-                    .lineLimit(1)
-            }
-        }
-        .padding(12)
-        .background(Color.white.opacity(isActive ? 0.065 : 0.025))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .background(Color.appPanel)
     }
 }
 
@@ -630,7 +727,7 @@ private struct PlaylistsOverviewView: View {
                         .font(.system(size: 12, weight: .bold))
                         .padding(.horizontal, 18)
                         .frame(height: 40)
-                        .background(Color.appCoral)
+                        .background(Color.appAccent)
                         .clipShape(Capsule())
                 }
                 .buttonStyle(PressableScaleStyle())
@@ -687,6 +784,9 @@ private struct PlaylistsOverviewView: View {
 
 private struct TopBarView: View {
     @EnvironmentObject private var model: PlayerModel
+    @Binding var serverSearchText: String
+    @Binding var serverScope: MacServerScope
+    @Binding var serverSort: MacServerSort
     @FocusState private var searchIsFocused: Bool
 
     var body: some View {
@@ -712,36 +812,21 @@ private struct TopBarView: View {
                 .disabled(!model.canNavigateForward)
             }
 
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color(hex: 0x8E96A8))
-
-                TextField("Search your music…", text: $model.searchText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color.white)
-                    .focused($searchIsFocused)
-
-                Text("⌘ K")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(Color(hex: 0x8C93A2))
+            if model.section == .server {
+                serverSearchField
+                serverSortMenu
+                Spacer(minLength: 0)
+            } else {
+                librarySearchField
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 13)
-            .frame(maxWidth: 460)
-            .frame(height: 39)
-            .background(Color.white.opacity(0.075))
-            .overlay {
-                Capsule().stroke(Color.white.opacity(0.07), lineWidth: 1)
-            }
-            .clipShape(Capsule())
-
-            Spacer(minLength: 0)
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 10)
-        .background(Color(hex: 0x070C18).opacity(0.82))
-        .background(.ultraThinMaterial.opacity(0.22))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(WindowDragArea())
+        .background(Color(hex: 0x050609).opacity(0.94))
+        .background(.ultraThinMaterial.opacity(0.10))
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.appLine).frame(height: 1)
         }
@@ -749,58 +834,189 @@ private struct TopBarView: View {
             searchIsFocused = true
         }
     }
+
+    private var librarySearchField: some View {
+        searchField(
+            placeholder: model.section == .playlists && model.selectedPlaylist != nil
+                ? "Search \(model.selectedPlaylist?.name ?? "playlist")…"
+                : "Search your music…",
+            text: $model.searchText,
+            showsShortcut: true
+        )
+        .frame(maxWidth: 460)
+    }
+
+    private var serverSearchField: some View {
+        searchField(
+            placeholder: "Search server library…",
+            text: $serverSearchText,
+            showsShortcut: false
+        )
+        .frame(maxWidth: 460)
+    }
+
+    private var serverSortMenu: some View {
+        Menu {
+            Section("Sort By") {
+                ForEach(MacServerSort.allCases) { option in
+                    Button {
+                        serverSort = option
+                    } label: {
+                        Label(option.title, systemImage: serverSort == option ? "checkmark" : option.symbol)
+                    }
+                }
+            }
+
+            Section("Show") {
+                ForEach(MacServerScope.allCases) { option in
+                    Button {
+                        serverScope = option
+                    } label: {
+                        Label(option.rawValue, systemImage: serverScope == option ? "checkmark" : option.symbol)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "line.3.horizontal.decrease")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color(hex: 0xC7CBD6))
+                .frame(width: 39, height: 39)
+                .background(Color.white.opacity(0.055), in: Circle())
+                .overlay { Circle().stroke(Color.white.opacity(0.07)) }
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 39, height: 39)
+        .help("Sort and filter server library")
+    }
+
+    private func searchField(
+        placeholder: String,
+        text: Binding<String>,
+        showsShortcut: Bool
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(Color(hex: 0x8E96A8))
+
+            TextField(placeholder, text: text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.white)
+                .focused($searchIsFocused)
+
+            if showsShortcut {
+                Text("⌘ K")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color(hex: 0x8C93A2))
+            }
+        }
+        .padding(.horizontal, 13)
+        .frame(height: 39)
+        .background(Color.white.opacity(0.075), in: Capsule())
+        .overlay { Capsule().stroke(Color.white.opacity(0.07), lineWidth: 1) }
+    }
+}
+
+private struct WindowDragArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        WindowDragNSView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private final class WindowDragNSView: NSView {
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
 }
 
 private struct CollectionView: View {
+    @EnvironmentObject private var model: PlayerModel
+    @State private var playlistForSongPicker: Playlist?
+
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    CollectionHeroView()
+                    CollectionHeroView(onAddSongs: presentSongPicker)
                         .frame(height: 310)
 
                     TrackAreaView(
                         showAlbum: proxy.size.width >= 535,
-                        showHelperText: proxy.size.width > 560
+                        showHelperText: proxy.size.width > 560,
+                        onAddSongs: presentSongPicker
                     )
                     .frame(minHeight: max(proxy.size.height - 310, 360), alignment: .top)
                 }
             }
             .scrollIndicators(.hidden)
         }
+        .sheet(item: $playlistForSongPicker) { playlist in
+            MacPlaylistSongPicker(playlistID: playlist.id)
+        }
+    }
+
+    private func presentSongPicker() {
+        guard let playlist = model.selectedPlaylist, !playlist.isSystem else { return }
+        playlistForSongPicker = playlist
     }
 }
 
 private struct CollectionHeroView: View {
     @EnvironmentObject private var model: PlayerModel
+    let onAddSongs: () -> Void
 
     private var isLikedCollection: Bool { model.collectionTitle == "Liked Songs" }
+    private var canAddSongs: Bool {
+        model.section == .playlists && model.selectedPlaylist?.isSystem == false
+    }
 
     private var symbol: String {
         isLikedCollection ? "heart.fill" : "music.note"
+    }
+
+    private func addSongs() {
+        if canAddSongs {
+            onAddSongs()
+        } else {
+            model.importLocalFiles()
+        }
+    }
+
+    private func showMoreMenu() {
+        guard let window = NSApp.keyWindow, let contentView = window.contentView else { return }
+        let menu = NSMenu()
+        menu.addItem(ClosureMenuItem(title: "Import Songs…", action: model.importLocalFiles))
+        menu.addItem(ClosureMenuItem(title: "Next Track", action: model.next))
+        let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+        let viewPoint = contentView.convert(windowPoint, from: nil)
+        menu.popUp(positioning: nil, at: viewPoint, in: contentView)
     }
 
     var body: some View {
         GeometryReader { proxy in
             ZStack {
                 LinearGradient(
-                    colors: [Color(hex: 0x101D3A), Color(hex: 0x17142A), Color(hex: 0x2A1532)],
+                    colors: [Color(hex: 0x08090E), Color(hex: 0x09080F), Color(hex: 0x07070B)],
                     startPoint: .leading,
                     endPoint: .trailing
                 )
 
                 RadialGradient(
-                    colors: [Color(hex: 0x425BFF).opacity(0.28), .clear],
+                    colors: [Color.appViolet.opacity(0.20), .clear],
                     center: UnitPoint(x: 0.12, y: 0.20),
                     startRadius: 10,
-                    endRadius: 240
+                    endRadius: 270
                 )
 
                 RadialGradient(
-                    colors: [Color(hex: 0xFF5674).opacity(0.24), .clear],
+                    colors: [Color.appAccent.opacity(0.10), .clear],
                     center: UnitPoint(x: 0.72, y: 0.70),
                     startRadius: 8,
-                    endRadius: 210
+                    endRadius: 260
                 )
 
                 HStack(spacing: proxy.size.width < 620 ? 24 : 32) {
@@ -835,7 +1051,7 @@ private struct CollectionHeroView: View {
                             .font(.system(size: 13))
                             .foregroundStyle(Color(hex: 0xADB2C1))
 
-                        HStack(spacing: 10) {
+                        HStack(spacing: 16) {
                             Button(action: model.toggleCollectionPlayback) {
                                 HStack(spacing: 10) {
                                     Image(systemName: model.isCollectionPlaying ? "pause.fill" : "play.fill")
@@ -843,39 +1059,54 @@ private struct CollectionHeroView: View {
                                     Text(model.isCollectionPlaying ? "Pause" : "Play")
                                         .font(.system(size: 15, weight: .bold))
                                 }
-                                .padding(.horizontal, 24)
-                                .frame(height: 48)
-                                .background(Color.appCoral)
+                                .frame(width: 128, height: 48)
+                                .background(Color.appAccent)
                                 .clipShape(Capsule())
-                                .shadow(color: Color.appCoral.opacity(0.18), radius: 18, y: 9)
+                                .shadow(color: Color.appAccent.opacity(0.18), radius: 18, y: 9)
                             }
                             .buttonStyle(PressableScaleStyle())
                             .disabled(model.collectionTrackCount == 0)
                             .opacity(model.collectionTrackCount == 0 ? 0.55 : 1)
 
-                            CircleIconButton(
-                                systemImage: "shuffle",
-                                label: "Shuffle",
-                                size: 42,
-                                symbolSize: 14,
-                                background: Color.white.opacity(0.10),
-                                isActive: model.shuffleEnabled,
-                                action: model.toggleShuffle
-                            )
+                            HStack(spacing: 8) {
+                                CircleIconButton(
+                                    systemImage: "shuffle",
+                                    label: "Shuffle",
+                                    size: 34,
+                                    symbolSize: 14,
+                                    background: .clear,
+                                    hoverBackground: Color.white.opacity(0.12),
+                                    isActive: model.shuffleEnabled,
+                                    showsActiveBackground: false,
+                                    action: model.toggleShuffle
+                                )
 
-                            Menu {
-                                Button("Import Songs…", action: model.importLocalFiles)
-                                Button("Next Track", action: model.next)
-                            } label: {
-                                Image(systemName: "ellipsis")
-                                    .font(.system(size: 15, weight: .semibold))
-                                    .foregroundStyle(Color(hex: 0xAEB5C4))
-                                    .frame(width: 42, height: 42)
-                                    .background(Color.white.opacity(0.10))
-                                    .clipShape(Circle())
+                                CircleIconButton(
+                                    systemImage: "plus",
+                                    label: "Add Songs",
+                                    size: 34,
+                                    symbolSize: 15,
+                                    background: .clear,
+                                    hoverBackground: Color.white.opacity(0.12),
+                                    action: addSongs
+                                )
+
+                                CircleIconButton(
+                                    systemImage: "ellipsis",
+                                    label: "More",
+                                    size: 34,
+                                    symbolSize: 14,
+                                    background: .clear,
+                                    hoverBackground: Color.white.opacity(0.12),
+                                    action: showMoreMenu
+                                )
                             }
-                            .menuStyle(.borderlessButton)
-                            .frame(width: 42)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 7)
+                            .background(Color(hex: 0x1D1D29).opacity(0.98), in: Capsule())
+                            .overlay {
+                                Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1)
+                            }
                         }
                         .padding(.top, 32)
                     }
@@ -891,10 +1122,30 @@ private struct CollectionHeroView: View {
     }
 }
 
+private final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, action: @escaping () -> Void) {
+        handler = action
+        super.init(title: title, action: nil, keyEquivalent: "")
+        target = self
+        self.action = #selector(performAction)
+    }
+
+    required init(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func performAction() {
+        handler()
+    }
+}
+
 private struct TrackAreaView: View {
     @EnvironmentObject private var model: PlayerModel
     let showAlbum: Bool
     let showHelperText: Bool
+    let onAddSongs: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -944,7 +1195,7 @@ private struct TrackAreaView: View {
 
                 if model.unfilteredCollectionTracks.isEmpty {
                     VStack(spacing: 14) {
-                        Image(systemName: model.section == .playlists ? "heart" : "music.note.house")
+                        Image(systemName: model.selectedPlaylist?.isSystem == false ? "music.note.list" : (model.section == .playlists ? "heart" : "music.note.house"))
                             .font(.system(size: 34, weight: .light))
                             .foregroundStyle(Color.appViolet)
                         Text(model.section == .playlists ? "This playlist is empty" : "Build your music library")
@@ -952,17 +1203,27 @@ private struct TrackAreaView: View {
                         Text(model.selectedPlaylist?.isSystem == true
                             ? "Heart songs in your Library to add them to Liked Songs."
                             : (model.section == .playlists
-                                ? "Add songs from your Library using each song's More menu."
+                                ? "Add songs from your library to this playlist."
                                 : "Add audio files or an entire folder. Music stays on this Mac."))
                             .font(.system(size: 11))
                             .foregroundStyle(Color.appMuted)
-                        if model.section != .playlists {
+                        if model.selectedPlaylist?.isSystem == false {
+                            Button(action: onAddSongs) {
+                                Label("Add Songs", systemImage: "plus")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .padding(.horizontal, 18)
+                                    .frame(height: 38)
+                                    .background(Color.appAccent)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(PressableScaleStyle())
+                        } else if model.section != .playlists {
                             Button(action: model.importLocalFiles) {
                                 Label("Add Music", systemImage: "plus")
                                     .font(.system(size: 12, weight: .bold))
                                     .padding(.horizontal, 18)
                                     .frame(height: 38)
-                                    .background(Color.appCoral)
+                                    .background(Color.appAccent)
                                     .clipShape(Capsule())
                             }
                             .buttonStyle(PressableScaleStyle())
@@ -996,6 +1257,142 @@ private struct TrackAreaView: View {
     }
 }
 
+private struct MacPlaylistSongPicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var model: PlayerModel
+    let playlistID: UUID
+    @State private var searchText = ""
+
+    private var playlist: Playlist? {
+        model.playlists.first { $0.id == playlistID }
+    }
+
+    private var visibleTracks: [Track] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return model.tracks }
+        return model.tracks.filter { track in
+            track.title.localizedCaseInsensitiveContains(query)
+                || track.artist.localizedCaseInsensitiveContains(query)
+                || track.album.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Add Songs")
+                        .font(.system(size: 22, weight: .bold))
+                    Text(playlist?.name ?? "Playlist")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.appMuted)
+                }
+
+                Spacer()
+
+                Button("Done") { dismiss() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.appAccent)
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 18)
+
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.appMuted)
+                TextField("Search songs, artists, or albums…", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                if !searchText.isEmpty {
+                    Button { searchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(Color.appMuted)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear Search")
+                }
+            }
+            .padding(.horizontal, 13)
+            .frame(height: 40)
+            .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.appLine)
+            }
+            .padding(.horizontal, 22)
+            .padding(.bottom, 16)
+
+            Rectangle().fill(Color.appLine).frame(height: 1)
+
+            if model.tracks.isEmpty {
+                ContentUnavailableView(
+                    "No Songs in Your Library",
+                    systemImage: "music.note",
+                    description: Text("Import or download songs before adding them to a playlist.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if visibleTracks.isEmpty {
+                ContentUnavailableView.search(text: searchText)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(visibleTracks) { track in
+                            let isAdded = playlist?.trackIDs.contains(track.id) == true
+                            Button {
+                                guard let playlist else { return }
+                                if isAdded {
+                                    model.removeTrack(track, from: playlist.id)
+                                } else {
+                                    model.addTrack(track, to: playlist)
+                                }
+                            } label: {
+                                HStack(spacing: 12) {
+                                    TrackArtworkView(
+                                        track: track,
+                                        symbol: track.kind == .video ? "play.fill" : "music.note",
+                                        cornerRadius: 6
+                                    )
+                                    .frame(width: 42, height: 42)
+
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(track.title)
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(Color.appInk)
+                                            .lineLimit(1)
+                                        Text(track.artist)
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(Color.appMuted)
+                                            .lineLimit(1)
+                                    }
+
+                                    Spacer(minLength: 12)
+
+                                    Image(systemName: isAdded ? "checkmark.circle.fill" : "plus.circle")
+                                        .font(.system(size: 17, weight: .medium))
+                                        .foregroundStyle(isAdded ? Color.appAccent : Color.appMuted)
+                                }
+                                .padding(.horizontal, 14)
+                                .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
+                                .contentShape(Rectangle())
+                                .overlay(alignment: .bottom) {
+                                    Rectangle().fill(Color.appLine).frame(height: 1)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                }
+            }
+        }
+        .frame(width: 600, height: 600)
+        .background(Color.appBackground)
+    }
+}
+
 private struct TrackHeaderRow: View {
     let showAlbum: Bool
 
@@ -1007,7 +1404,6 @@ private struct TrackHeaderRow: View {
                 Text("Album").frame(width: 135, alignment: .leading)
             }
             Text("Time").frame(width: 45, alignment: .leading)
-            Color.clear.frame(width: 44)
         }
         .font(.system(size: 11))
         .foregroundStyle(Color(hex: 0x8E94A4))
@@ -1060,7 +1456,7 @@ private struct TrackRowView: View {
                         if isFavorite {
                             Image(systemName: "heart.fill")
                                 .font(.system(size: 7))
-                                .foregroundStyle(Color.appCoral)
+                                .foregroundStyle(Color.appAccent)
                         }
                     }
 
@@ -1086,49 +1482,14 @@ private struct TrackRowView: View {
                 .foregroundStyle(Color(hex: 0xAEB4C2))
                 .frame(width: 45, alignment: .leading)
 
-            HStack(spacing: 10) {
-                Button {
-                    model.toggleFavorite(track)
-                } label: {
-                    Image(systemName: isFavorite ? "heart.fill" : "heart")
-                        .font(.system(size: 10))
-                        .foregroundStyle(isFavorite ? Color.appCoral : Color(hex: 0xAEB4C2))
-                }
-                .buttonStyle(.plain)
-
-                Menu {
-                    if model.customPlaylists.isEmpty {
-                        Button("Create a playlist first") {
-                            NotificationCenter.default.post(name: .newMusicPlaylist, object: nil)
-                        }
-                    } else {
-                        Menu("Add to Playlist") {
-                            ForEach(model.customPlaylists) { playlist in
-                                Button(playlist.name) { model.addTrack(track, to: playlist) }
-                            }
-                        }
-                    }
-
-                    if let selected = model.selectedPlaylist, model.section == .playlists, !selected.isSystem {
-                        Button("Remove from \(selected.name)") {
-                            model.removeTrackFromSelectedPlaylist(track)
-                        }
-                    }
-
-                    Button("Show in Finder") { model.revealInFinder(track) }
-                    Divider()
-                    Button("Remove from Library", role: .destructive) {
-                        confirmingLibraryRemoval = true
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color(hex: 0xAEB4C2))
-                        .frame(width: 18, height: 22)
-                }
-                .menuStyle(.borderlessButton)
-                .frame(width: 18)
+            Button {
+                model.toggleFavorite(track)
+            } label: {
+                Image(systemName: isFavorite ? "heart.fill" : "heart")
+                    .font(.system(size: 10))
+                    .foregroundStyle(isFavorite ? Color.appAccent : Color(hex: 0xAEB4C2))
             }
+            .buttonStyle(.plain)
             .frame(width: 44, alignment: .trailing)
             .opacity(hovering || isCurrent ? 1 : 0)
         }
@@ -1142,6 +1503,38 @@ private struct TrackRowView: View {
         .contentShape(Rectangle())
         .onTapGesture { model.selectAndPlay(track) }
         .onHover { hovering = $0 }
+        .contextMenu {
+            if model.customPlaylists.isEmpty {
+                Button("Create a playlist first") {
+                    NotificationCenter.default.post(name: .newMusicPlaylist, object: nil)
+                }
+            } else {
+                Menu("Add to Playlist") {
+                    ForEach(model.customPlaylists) { playlist in
+                        Button(playlist.name) { model.addTrack(track, to: playlist) }
+                    }
+                }
+            }
+
+            Button("Show in Finder") { model.revealInFinder(track) }
+            Divider()
+
+            if let selected = model.selectedPlaylist, model.section == .playlists {
+                if selected.isSystem {
+                    Button("Remove from Liked Songs", role: .destructive) {
+                        model.toggleFavorite(track)
+                    }
+                } else {
+                    Button("Remove from \(selected.name)", role: .destructive) {
+                        model.removeTrackFromSelectedPlaylist(track)
+                    }
+                }
+            } else {
+                Button("Remove from Library", role: .destructive) {
+                    confirmingLibraryRemoval = true
+                }
+            }
+        }
         .alert("Remove “\(track.title)”?", isPresented: $confirmingLibraryRemoval) {
             Button("Cancel", role: .cancel) {}
             Button("Remove", role: .destructive) { model.removeTrackFromLibrary(track) }
@@ -1202,8 +1595,9 @@ private struct StorageView: View {
     }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 16) {
+        GeometryReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Song Storage")
                         .font(.system(size: 42, weight: .bold, design: .rounded))
@@ -1222,7 +1616,7 @@ private struct StorageView: View {
                             .font(.system(size: 11, weight: .bold))
                             .padding(.horizontal, 16)
                             .frame(height: 36)
-                            .background(Color.appCoral, in: Capsule())
+                            .background(Color.appAccent, in: Capsule())
                     }
                     .buttonStyle(.plain)
                 }
@@ -1293,6 +1687,7 @@ private struct StorageView: View {
                             symbol: "icloud.and.arrow.down",
                             tracks: downloadedTracks,
                             fileSizes: fileSizes,
+                            showAlbum: proxy.size.width >= 690,
                             isEditing: isEditing,
                             selectedTrackIDs: $selectedTrackIDs,
                             deletionCandidate: $deletionCandidate
@@ -1305,22 +1700,24 @@ private struct StorageView: View {
                             symbol: "desktopcomputer",
                             tracks: importedTracks,
                             fileSizes: fileSizes,
+                            showAlbum: proxy.size.width >= 690,
                             isEditing: isEditing,
                             selectedTrackIDs: $selectedTrackIDs,
                             deletionCandidate: $deletionCandidate
                         )
                     }
                 }
+                }
+                .padding(34)
             }
-            .padding(34)
-        }
-        .background {
-            RadialGradient(
-                colors: [Color.appViolet.opacity(0.18), .clear],
-                center: UnitPoint(x: 0.72, y: 0.06),
-                startRadius: 10,
-                endRadius: 360
-            )
+            .background {
+                RadialGradient(
+                    colors: [Color.appViolet.opacity(0.18), .clear],
+                    center: UnitPoint(x: 0.72, y: 0.06),
+                    startRadius: 10,
+                    endRadius: 360
+                )
+            }
         }
         .task(id: model.tracks.map(\.id)) {
             refreshStorageMetrics()
@@ -1423,10 +1820,12 @@ private struct MacStorageScopePicker: View {
                         .font(.system(size: 10, weight: .semibold))
                         .frame(maxWidth: .infinity)
                         .frame(height: 32)
+                        .contentShape(Rectangle())
                         .foregroundStyle(scope == option ? Color.white : Color.appMuted)
-                        .background(scope == option ? Color.appCoral : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                        .background(scope == option ? Color.appAccent : Color.clear, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
             }
         }
         .padding(4)
@@ -1459,7 +1858,7 @@ private struct MacStorageSummaryCard: View {
                 if downloadedBytes > 0 {
                     Circle()
                         .trim(from: importedEnd, to: 1)
-                        .stroke(Color.appCoral, style: StrokeStyle(lineWidth: 14, lineCap: .butt))
+                        .stroke(Color.appAccent, style: StrokeStyle(lineWidth: 14, lineCap: .butt))
                         .rotationEffect(.degrees(-90))
                 }
                 Image(systemName: "internaldrive").foregroundStyle(Color.appMuted)
@@ -1468,7 +1867,7 @@ private struct MacStorageSummaryCard: View {
 
             MacStorageMetric(color: Color.appViolet, title: "Local audio", bytes: importedBytes, detail: "\(importedCount) files")
             Divider().frame(height: 70)
-            MacStorageMetric(color: Color.appCoral, title: "Server downloads", bytes: downloadedBytes, detail: "\(downloadedCount) files")
+            MacStorageMetric(color: Color.appAccent, title: "Server downloads", bytes: downloadedBytes, detail: "\(downloadedCount) files")
             Divider().frame(height: 70)
             MacStorageMetric(color: Color(hex: 0x7BA7E8), title: "Available", bytes: availableBytes, detail: "on this Mac")
             Spacer()
@@ -1506,26 +1905,38 @@ private struct MacStorageSection: View {
     let symbol: String
     let tracks: [Track]
     let fileSizes: [UUID: Int64]
+    let showAlbum: Bool
     let isEditing: Bool
     @Binding var selectedTrackIDs: Set<UUID>
     @Binding var deletionCandidate: Track?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 7) {
-                Image(systemName: symbol).foregroundStyle(Color.appViolet)
-                Text(title).font(.system(size: 10, weight: .semibold)).tracking(1.4).foregroundStyle(Color.appMuted)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.appViolet)
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .tracking(1.1)
+                    .foregroundStyle(Color(hex: 0xD4D7E0))
                 Spacer()
-                Text("\(tracks.count) \(tracks.count == 1 ? "SONG" : "SONGS")")
-                    .font(.system(size: 9)).foregroundStyle(Color.appMuted)
+                Text("\(tracks.count) \(tracks.count == 1 ? "song" : "songs")")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.appMuted)
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 10)
+            .frame(height: 42)
+
+            MacStorageCatalogHeader(showAlbum: showAlbum)
 
             LazyVStack(spacing: 0) {
-                ForEach(tracks) { track in
+                ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
                     MacStorageTrackRow(
                         track: track,
+                        number: index + 1,
                         fileSize: fileSizes[track.id, default: 0],
+                        showAlbum: showAlbum,
                         isEditing: isEditing,
                         isSelected: selectedTrackIDs.contains(track.id),
                         onToggleSelection: {
@@ -1536,8 +1947,33 @@ private struct MacStorageSection: View {
                     )
                 }
             }
-            .background(Color.white.opacity(0.022), in: RoundedRectangle(cornerRadius: 12))
-            .overlay { RoundedRectangle(cornerRadius: 12).stroke(Color.appLine) }
+        }
+    }
+}
+
+private struct MacStorageCatalogHeader: View {
+    let showAlbum: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("#")
+                .frame(width: 28, alignment: .leading)
+            Text("Title")
+                .frame(minWidth: 210, maxWidth: .infinity, alignment: .leading)
+            if showAlbum {
+                Text("Album")
+                    .frame(width: 135, alignment: .leading)
+            }
+            Text("Size")
+                .frame(width: 64, alignment: .trailing)
+            Color.clear.frame(width: 44)
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(Color(hex: 0x8E94A4))
+        .padding(.horizontal, 10)
+        .frame(height: 38)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.appLine).frame(height: 1)
         }
     }
 }
@@ -1545,57 +1981,97 @@ private struct MacStorageSection: View {
 private struct MacStorageTrackRow: View {
     @EnvironmentObject private var model: PlayerModel
     let track: Track
+    let number: Int
     let fileSize: Int64
+    let showAlbum: Bool
     let isEditing: Bool
     let isSelected: Bool
     let onToggleSelection: () -> Void
     let onDelete: () -> Void
+    @State private var isHovering = false
+
+    private var isCurrent: Bool { model.currentTrackID == track.id }
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 10) {
             Button(action: isEditing ? onToggleSelection : { model.selectAndPlay(track) }) {
-                HStack(spacing: 12) {
-                    if isEditing {
-                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(isSelected ? Color.appCoral : Color.appMuted)
+                HStack(spacing: 10) {
+                    Group {
+                        if isEditing {
+                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(isSelected ? Color.appAccent : Color.appMuted)
+                        } else if isCurrent && model.isPlaying {
+                            EqualizerGlyph(isAnimating: true)
+                        } else {
+                            Text("\(number)")
+                        }
                     }
-                    TrackArtworkView(track: track, symbol: "music.note", symbolSize: 15, cornerRadius: 7)
-                        .frame(width: 44, height: 44)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(track.title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                        Text("\(track.artist) • \(track.album)")
-                            .font(.system(size: 10)).foregroundStyle(Color.appMuted).lineLimit(1)
-                        Text(track.fileURL?.lastPathComponent ?? "File unavailable")
-                            .font(.system(size: 9)).foregroundStyle(Color.appMuted).lineLimit(1)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(hex: 0xAEB4C2))
+                    .frame(width: 28, alignment: .leading)
+
+                    HStack(spacing: 12) {
+                        TrackArtworkView(
+                            track: track,
+                            symbol: track.kind == .video ? "play.fill" : "music.note",
+                            cornerRadius: 5
+                        )
+                        .frame(width: 38, height: 38)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                Text(track.title)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(Color(hex: 0xF5F6FB))
+                                    .lineLimit(1)
+
+                                Image(systemName: track.remoteID == nil ? "desktopcomputer" : "checkmark.circle.fill")
+                                    .font(.system(size: 7))
+                                    .foregroundStyle(track.remoteID == nil ? Color(hex: 0x7BA7E8) : Color(hex: 0x55D98B))
+                                    .help(track.remoteID == nil ? "Imported on this Mac" : "Downloaded from server")
+                            }
+
+                            Text("\(track.artist) / \(track.kind == .video ? "Video" : "Audio")")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Color(hex: 0x8F96A7))
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
                     }
-                    Spacer(minLength: 12)
-                    Image(systemName: track.remoteID == nil ? "desktopcomputer" : "checkmark.icloud")
-                        .foregroundStyle(Color.appViolet)
+                    .frame(minWidth: 210, maxWidth: .infinity, alignment: .leading)
+
+                    if showAlbum {
+                        Text(track.album)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color(hex: 0xAEB4C2))
+                            .lineLimit(1)
+                            .frame(width: 135, alignment: .leading)
+                    }
+
                     Text(storageByteText(fileSize))
-                        .font(.system(size: 9)).foregroundStyle(Color.appMuted)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color(hex: 0xAEB4C2))
+                        .monospacedDigit()
+                        .frame(width: 64, alignment: .trailing)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
-            if !isEditing {
-                Menu {
-                    Button("Play", action: { model.selectAndPlay(track) })
-                    Button("Show in Finder", action: { model.revealInFinder(track) })
-                    Divider()
-                    Button(track.remoteID == nil ? "Delete Original File" : "Delete Downloaded Copy", role: .destructive, action: onDelete)
-                } label: {
-                    Image(systemName: "ellipsis").frame(width: 28)
-                }
-                .menuStyle(.borderlessButton)
-                .frame(width: 32)
-            }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.appLine).frame(height: 1) }
+        .padding(.horizontal, 10)
+        .frame(height: 61)
+        .background((isHovering || isCurrent || isSelected) ? Color.white.opacity(0.055) : .clear)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.appLine).frame(height: 1)
+        }
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
         .contextMenu {
+            Button("Play", action: { model.selectAndPlay(track) })
             Button("Show in Finder", action: { model.revealInFinder(track) })
+            Divider()
             Button(track.remoteID == nil ? "Delete Original File" : "Delete Downloaded Copy", role: .destructive, action: onDelete)
         }
     }

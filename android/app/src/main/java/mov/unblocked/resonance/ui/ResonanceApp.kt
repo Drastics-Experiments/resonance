@@ -1,6 +1,11 @@
 package mov.unblocked.resonance.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,8 +28,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.unit.dp
 
 @Composable
 fun ResonanceApp(state: ResonanceUiState, actions: ResonanceActions) {
@@ -32,6 +40,7 @@ fun ResonanceApp(state: ResonanceUiState, actions: ResonanceActions) {
         var selectedTab by rememberSaveable { mutableStateOf(ResonanceTab.Library) }
         var openPlaylistId by rememberSaveable { mutableStateOf<String?>(null) }
         var showNowPlaying by rememberSaveable { mutableStateOf(false) }
+        val focusManager = LocalFocusManager.current
 
         BackHandler(enabled = showNowPlaying) { showNowPlaying = false }
         BackHandler(enabled = !showNowPlaying && openPlaylistId != null) { openPlaylistId = null }
@@ -46,7 +55,7 @@ fun ResonanceApp(state: ResonanceUiState, actions: ResonanceActions) {
                             if (state.currentTrack != null) {
                                 MiniPlayer(state, actions, onOpen = { showNowPlaying = true })
                             }
-                            NavigationBar(containerColor = Color(0xF01A1C25)) {
+                            NavigationBar(containerColor = Color(0xF5050609)) {
                                 ResonanceTab.entries.forEach { tab ->
                                     val icon = when (tab) {
                                         ResonanceTab.Library -> Icons.Default.LibraryMusic
@@ -57,6 +66,7 @@ fun ResonanceApp(state: ResonanceUiState, actions: ResonanceActions) {
                                     NavigationBarItem(
                                         selected = selectedTab == tab,
                                         onClick = {
+                                            focusManager.clearFocus()
                                             selectedTab = tab
                                             if (tab != ResonanceTab.Playlists) openPlaylistId = null
                                         },
@@ -82,6 +92,17 @@ fun ResonanceApp(state: ResonanceUiState, actions: ResonanceActions) {
                         ResonanceTab.Server -> ServerScreen(state, actions, Modifier.padding(insets))
                     }
                 }
+            }
+            AnimatedVisibility(
+                visible = state.isDownloading || state.isUploading || state.isSyncingPlaylists,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 18.dp)
+                    .padding(bottom = if (state.currentTrack != null) 158.dp else 86.dp),
+                enter = fadeIn() + slideInVertically { it / 2 },
+                exit = fadeOut() + slideOutVertically { it / 2 },
+            ) {
+                TransferPopup(state)
             }
             if (showNowPlaying && state.currentTrack != null) {
                 NowPlayingScreen(state, actions, onDismiss = { showNowPlaying = false })

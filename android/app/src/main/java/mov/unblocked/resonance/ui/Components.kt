@@ -63,7 +63,7 @@ fun ResonanceBackground(modifier: Modifier = Modifier, content: @Composable () -
             .fillMaxSize()
             .background(
                 Brush.linearGradient(
-                    colors = listOf(Color(0xFF151631), DeepNavy),
+                    colors = listOf(Navy, DeepNavy),
                 ),
             ),
     ) {
@@ -85,7 +85,7 @@ fun Artwork(
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(12.dp))
-            .background(Brush.linearGradient(listOf(Violet, Color(0xFFC82EF4), Coral))),
+            .background(Brush.linearGradient(listOf(Violet, Color(0xFF874BFF), Color(0xFFB079FF)))),
         contentAlignment = Alignment.Center,
     ) {
         if (bitmap != null) {
@@ -139,7 +139,7 @@ fun SegmentedControl(
                     .weight(1f)
                     .height(40.dp)
                     .clip(RoundedCornerShape(11.dp))
-                    .background(if (index == selectedIndex) Coral else Color.Transparent)
+                    .background(if (index == selectedIndex) Accent else Color.Transparent)
                     .clickable { onSelected(index) },
                 contentAlignment = Alignment.Center,
             ) {
@@ -188,7 +188,7 @@ fun TrackRow(
                 modifier = Modifier
                     .size(22.dp)
                     .clip(CircleShape)
-                    .background(if (selected) Coral else Color.Transparent)
+                    .background(if (selected) Accent else Color.Transparent)
                     .then(if (selected) Modifier else Modifier.background(Color.White.copy(alpha = .08f))),
                 contentAlignment = Alignment.Center,
             ) {
@@ -217,7 +217,7 @@ fun TrackRow(
                     Icon(
                         if (track.id in state.favoriteTrackIds) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                         contentDescription = "Favorite",
-                        tint = if (track.id in state.favoriteTrackIds) Coral else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                        tint = if (track.id in state.favoriteTrackIds) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
                     )
                 }
             }

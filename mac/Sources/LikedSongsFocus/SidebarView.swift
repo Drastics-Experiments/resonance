@@ -66,7 +66,7 @@ struct SidebarView: View {
         .padding(.horizontal, 12)
         .background {
             LinearGradient(
-                colors: [Color(hex: 0x0F1727).opacity(0.98), Color(hex: 0x070E19).opacity(0.99)],
+                colors: [Color(hex: 0x08090E).opacity(0.99), Color.appBackground],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -127,7 +127,7 @@ struct MusicSettingsView: View {
                     HStack {
                         Image(systemName: "speaker.wave.2.fill")
                         Slider(value: $model.volume, in: 0...1)
-                            .tint(Color.appCoral)
+                            .tint(Color.appAccent)
                         Text("\(Int(model.volume * 100))%")
                             .monospacedDigit()
                             .frame(width: 38, alignment: .trailing)
@@ -155,7 +155,7 @@ struct MusicSettingsView: View {
         }
         .padding(24)
         .frame(width: 430, height: 360)
-        .background(Color(hex: 0x0C1322))
+        .background(Color.appPanel)
     }
 }
 
@@ -178,12 +178,22 @@ private struct SidebarNavigationRow: View {
             .foregroundStyle(isSelected ? Color.white : Color(hex: 0xAEB4C3))
             .padding(.horizontal, 16)
             .frame(height: 48)
-            .background((isSelected || isHovering) ? Color.white.opacity(0.075) : .clear)
+            .background {
+                if isSelected {
+                    LinearGradient(
+                        colors: [Color.appViolet.opacity(0.26), Color.appViolet.opacity(0.10)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                } else if isHovering {
+                    Color.white.opacity(0.055)
+                }
+            }
             .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
             .overlay(alignment: .leading) {
                 if isSelected {
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.appCoral)
+                        .fill(Color.appAccent)
                         .frame(width: 3, height: 28)
                         .offset(x: -12)
                 }
@@ -227,7 +237,13 @@ private struct PlaylistSidebarRow: View {
             }
             .padding(.horizontal, 10)
             .frame(height: 55)
-            .background((isSelected || isHovering) ? Color.white.opacity(0.055) : .clear)
+            .background {
+                if isSelected {
+                    Color.appViolet.opacity(0.11)
+                } else if isHovering {
+                    Color.white.opacity(0.045)
+                }
+            }
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .contentShape(Rectangle())
         }

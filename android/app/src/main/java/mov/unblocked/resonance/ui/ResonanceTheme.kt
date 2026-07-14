@@ -9,24 +9,25 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-val Navy = Color(0xFF101229)
-val DeepNavy = Color(0xFF07101C)
-val NavySurface = Color(0xFF1B1F38)
-val Coral = Color(0xFFFF6F68)
-val Violet = Color(0xFF6558FF)
-val ElectricBlue = Color(0xFF6C9CD8)
+val Navy = Color(0xFF090A0F)
+val DeepNavy = Color(0xFF020305)
+val NavySurface = Color(0xFF0B0C11)
+val RaisedSurface = Color(0xFF12131A)
+val Accent = Color(0xFF7547FF)
+val Violet = Color(0xFF6540F5)
+val ElectricBlue = Color(0xFF9B82FF)
 val SuccessGreen = Color(0xFF35D477)
 
 private val ResonanceColors = darkColorScheme(
-    primary = Coral,
+    primary = Accent,
     secondary = Violet,
     tertiary = ElectricBlue,
     background = DeepNavy,
     surface = NavySurface,
     onPrimary = Color.White,
     onSecondary = Color.White,
-    onBackground = Color(0xFFF5F4FA),
-    onSurface = Color(0xFFF5F4FA),
+    onBackground = Color(0xFFF5F5F7),
+    onSurface = Color(0xFFF5F5F7),
     error = Color(0xFFFF555F),
 )
 

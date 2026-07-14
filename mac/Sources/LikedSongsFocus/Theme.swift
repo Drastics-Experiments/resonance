@@ -11,13 +11,15 @@ extension Color {
         )
     }
 
-    static let appInk = Color(hex: 0xF7F7FB)
-    static let appMuted = Color(hex: 0x9FA5B6)
-    static let appPanel = Color(hex: 0x0C1322)
-    static let appLine = Color.white.opacity(0.075)
-    static let appCoral = Color(hex: 0xFF6F68)
-    static let appViolet = Color(hex: 0x6558FF)
-    static let appBackground = Color(hex: 0x07101C)
+    static let appInk = Color(hex: 0xF5F5F7)
+    static let appMuted = Color(hex: 0xA1A1AC)
+    static let appBackground = Color(hex: 0x020305)
+    static let appPanel = Color(hex: 0x07080C)
+    static let appSurface = Color(hex: 0x0B0C11)
+    static let appSurfaceRaised = Color(hex: 0x12131A)
+    static let appLine = Color.white.opacity(0.09)
+    static let appAccent = Color(hex: 0x7547FF)
+    static let appViolet = Color(hex: 0x6540F5)
 }
 
 enum AppGradient {
