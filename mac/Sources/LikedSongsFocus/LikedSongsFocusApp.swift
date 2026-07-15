@@ -51,11 +51,11 @@ struct LikedSongsFocusApp: App {
                 .disabled(updateManager.isBusy)
 
                 if updateManager.hasUpdate {
-                    Button(updateManager.canInstall ? "Restart to Install Update" : "Download Update") {
+                    Button(updateManager.canInstall ? "Restart to Install Update" : "Update and Restart") {
                         if updateManager.canInstall {
                             updateManager.installAndRestart()
                         } else {
-                            Task { await updateManager.downloadUpdate() }
+                            Task { await updateManager.downloadAndInstall() }
                         }
                     }
                     .disabled(updateManager.isBusy)

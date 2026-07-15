@@ -63,6 +63,51 @@ struct LikedSongsFocusTests {
     }
 
     @Test
+    func updaterRestoresAValidatedDownloadedArchiveAfterRelaunch() async throws {
+        let updateDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: updateDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: updateDirectory) }
+
+        let version = "99.0.0"
+        let archive = updateDirectory.appendingPathComponent("Resonance-macOS-\(version).zip")
+        try Data("complete update archive".utf8).write(to: archive)
+        let manifest = MacUpdateManifest(
+            version: version,
+            build: "1",
+            url: URL(string: "https://github.com/Drastics-Experiments/resonance/releases/download/v\(version)/Resonance-macOS.zip")!,
+            sha256: try UpdateManager.sha256(of: archive)
+        )
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockMusicURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            MockMusicURLProtocol.handler = nil
+        }
+        MockMusicURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            #expect(request.value(forHTTPHeaderField: "Cache-Control") == "no-cache")
+            return (
+                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                try JSONEncoder().encode(manifest)
+            )
+        }
+
+        let firstLaunch = UpdateManager(session: session, updateDirectory: updateDirectory)
+        await firstLaunch.checkForUpdates(silent: true)
+        #expect(firstLaunch.canInstall)
+        #expect(firstLaunch.downloadedArchive == archive)
+
+        let relaunched = UpdateManager(session: session, updateDirectory: updateDirectory)
+        await relaunched.checkForUpdates(silent: true)
+        #expect(relaunched.canInstall)
+        #expect(relaunched.downloadedArchive == archive)
+        #expect(relaunched.status == "Version \(version) ready")
+    }
+
+    @Test
     func playlistPayloadUsesServerCompatibleLowercaseUUIDs() throws {
         let id = try #require(UUID(uuidString: "12345678-1234-ABCD-9876-ABCDEF123456"))
         let payload = RemotePlaylist(id: id, name: "Case Test", songIDs: [])
