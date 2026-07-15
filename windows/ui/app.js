@@ -30,6 +30,7 @@ let history = [];
 let navigationHistory = [{ section: "library", playlistID: null }];
 let navigationIndex = 0;
 let pendingPlaylistTrackID = null;
+let addSongsPlaylistID = null;
 let libraryQuery = "";
 let playlistQuery = "";
 let playlistSyncText = "Not synced";
@@ -49,22 +50,45 @@ let serverConnectInFlight = false;
 let serverAutoAttempted = false;
 let serverTransferActive = false;
 let serverTransferCancelRequested = false;
+let draggingPlaylistTrackID = null;
+let draggingPlaylistTargetID = null;
+let draggingPlaylistInsertAfter = false;
+let playlistDragPreviewKey = "";
+let playlistDragFloatingRow = null;
 
 const $ = (selector) => document.querySelector(selector);
 const shuffleIcon = `<svg class="shuffle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h2.5a5 5 0 0 1 4 2l5 7a5 5 0 0 0 4 2H21"/><path d="m17 13 4 4-4 4"/><path d="M3 18h2.5a5 5 0 0 0 4-2l5-7a5 5 0 0 1 4-2H21"/><path d="m17 3 4 4-4 4"/></svg>`;
+const playlistNoteIcon = `<svg class="playlist-note-icon" viewBox="0 0 120 140" aria-hidden="true"><path d="M79 22v72.5c0 13.5-11.6 24.5-26 24.5S27 108 27 94.5 38.6 70 53 70c4.1 0 8 .9 11.5 2.5V30.8c0-5.3 3.7-9.9 8.9-11l31-6.6c4.4-.9 8.6 2.4 8.6 6.9v25.3c0 3.3-2.3 6.2-5.6 6.9L79 58.4"/></svg>`;
+const likedSongsIcon = `<svg class="liked-songs-icon" viewBox="0 0 120 120" aria-hidden="true"><path d="M60 104C51 96 23 76 17 52 11 28 39 15 60 38c21-23 49-10 43 14-6 24-34 44-43 52Z"/></svg>`;
+const plusIcon = `<svg class="plus-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>`;
+const checkIcon = `<svg class="check-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.3 4.3L19 7"/></svg>`;
 const playbackPlayIcon = `<svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="M8 5v14l11-7z"/></svg>`;
 const playbackPauseIcon = `<svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><rect class="icon-fill" x="6" y="5" width="4.5" height="14" rx="1.5"/><rect class="icon-fill" x="13.5" y="5" width="4.5" height="14" rx="1.5"/></svg>`;
 const nowPlayingIcon = `<svg class="now-playing-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 9.5h4l5-4v13l-5-4h-4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>`;
 const serverUploadIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14v5h14v-5"/></svg>`;
 const serverDownloadIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0 4.5-4.5M12 16l-4.5-4.5"/><path d="M5 19h14"/></svg>`;
 const serverSelectIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v9H7z"/><path d="M4 16v3h16v-3"/><path d="M12 7v7m0 0 2.5-2.5M12 14l-2.5-2.5"/></svg>`;
-const serverPlaylistIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h11M4 11h11M4 16h8"/><path d="M19 13v7m-3.5-3.5h7"/></svg>`;
+const serverRefreshIcon = `<svg class="server-refresh-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M19 12a7 7 0 1 0-2.05 4.95"/></svg>`;
 const serverSongIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="18" r="3"/><path d="M12 18V5l8-2v13"/><circle cx="17" cy="16" r="3"/></svg>`;
 const serverPlaylistMetricIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M4 11h10M4 16h7"/><circle cx="17" cy="17" r="3"/><path d="M20 17V7l-6 1.5"/></svg>`;
 const serverDeviceIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>`;
 const escapeHTML = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
 const currentTrack = () => state.tracks.find((track) => track.id === currentID) || null;
 const playlistTracks = () => selectedPlaylistID ? tracksForPlaylist(state, selectedPlaylistID) : state.tracks;
+
+function clearPlaylistDragPreview() {
+  document.querySelectorAll(".drag-preview-up, .drag-preview-down").forEach((row) => {
+    row.classList.remove("drag-preview-up", "drag-preview-down");
+    row.style.removeProperty("--playlist-drag-offset");
+  });
+  playlistDragPreviewKey = "";
+}
+
+function clearPlaylistDragFloatingRow() {
+  playlistDragFloatingRow?.remove();
+  playlistDragFloatingRow = null;
+  document.querySelectorAll(".track-row.dragging").forEach((row) => row.classList.remove("dragging"));
+}
 
 function currentSearchQuery() {
   if (section === "library") return libraryQuery;
@@ -247,14 +271,11 @@ function artwork(track) {
 function trackRow(track, index) {
   const liked = state.favorites.includes(track.id);
   const editablePlaylist = state.playlists.find((playlist) => playlist.id === selectedPlaylistID && !playlist.isSystem);
-  const playlistActions = editablePlaylist
-    ? `<div class="playlist-track-actions"><button data-reorder-track="-1" data-playlist-track="${track.id}" title="Move up">↑</button><button data-reorder-track="1" data-playlist-track="${track.id}" title="Move down">↓</button><button data-remove-playlist-track="${track.id}" title="Remove from playlist">×</button></div>`
-    : `<span></span>`;
-  return `<div class="track-row ${track.id === currentID ? "playing" : ""}" data-track="${track.id}">
+  return `<div class="track-row ${track.id === currentID ? "playing" : ""} ${editablePlaylist ? "playlist-draggable" : ""}" data-track="${track.id}" ${editablePlaylist ? `draggable="true" data-playlist-draggable="true" aria-label="Drag ${escapeHTML(track.title)} to reorder"` : ""}>
     <span class="track-number" title="${track.id === currentID && !audio.paused ? "Now playing" : `Track ${index + 1}`}">${track.id === currentID && !audio.paused ? nowPlayingIcon : index + 1}</span>${artwork(track)}
     <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / Audio</small></div>
     <span class="album">${escapeHTML(track.album)}</span><span class="track-time">${formatTime(track.duration)}</span>
-    <button class="heart" data-favorite="${track.id}">${liked ? "♥" : "♡"}</button>${playlistActions}
+    <button class="heart" data-favorite="${track.id}">${liked ? "♥" : "♡"}</button>
   </div>`;
 }
 
@@ -263,18 +284,30 @@ function renderLibrary() {
   const tracks = filterTracks(playlistTracks(), libraryQuery, libraryFilter);
   const selectedPlaylist = selectedPlaylistID ? state.playlists.find((item) => item.id === selectedPlaylistID) : null;
   const title = selectedPlaylist?.name || (selectedPlaylistID ? "Playlist" : "Library");
-  const playlistControls = selectedPlaylist && !selectedPlaylist.isSystem
-    ? `<button class="danger" id="deletePlaylist">Delete playlist</button><small data-playlist-sync-status>${escapeHTML(playlistSyncText)}</small>`
-    : "";
-  content.innerHTML = `<div class="collection-scroll"><div class="hero"><div class="hero-art">≋</div><div><span class="eyebrow">${selectedPlaylistID ? "PLAYLIST" : "MUSIC LIBRARY"}</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions"><button class="primary" id="playCollection"><span class="button-icon">${audio.paused ? playbackPlayIcon : playbackPauseIcon}</span><span>${audio.paused ? "Play" : "Pause"}</span></button><button class="round ${shuffle ? "active" : ""}" id="heroShuffle" title="Shuffle" aria-label="Shuffle">${shuffleIcon}</button><button class="secondary" id="importAudio">＋ Import audio</button>${playlistControls}</div></div></div>
+  const isLikedSongs = Boolean(selectedPlaylist?.isSystem);
+  const editablePlaylist = Boolean(selectedPlaylist && !selectedPlaylist.isSystem);
+  const menuItems = [
+    `<button type="button" role="menuitem" data-hero-import>Import Songs…</button>`,
+    `<button type="button" role="menuitem" data-hero-next>Next Track</button>`,
+    selectedPlaylist ? `<button type="button" role="menuitem" data-hero-sync>Sync Playlists</button>` : "",
+    editablePlaylist ? `<button class="danger-item" type="button" role="menuitem" data-hero-delete>Delete Playlist</button>` : "",
+  ].filter(Boolean).join("");
+  const moreMenu = `<details class="playlist-more"><summary title="More options" aria-label="More options"><span aria-hidden="true">•••</span></summary><div class="playlist-menu" role="menu">${menuItems}</div></details>`;
+  const heroActions = `<button class="primary playlist-play" id="playCollection"><span class="button-icon">${audio.paused ? playbackPlayIcon : playbackPauseIcon}</span><span>${audio.paused ? "Play" : "Pause"}</span></button><div class="playlist-action-cluster"><button class="${shuffle ? "active" : ""}" id="heroShuffle" title="Shuffle" aria-label="Shuffle">${shuffleIcon}</button><button id="heroAdd" title="${selectedPlaylist ? "Add songs" : "Import songs"}" aria-label="${selectedPlaylist ? "Add songs" : "Import songs"}">${plusIcon}</button>${moreMenu}</div>`;
+  content.innerHTML = `<div class="collection-scroll"><div class="hero playlist-hero ${selectedPlaylist ? "" : "library-hero"} ${isLikedSongs ? "liked-songs-hero" : ""}"><div class="hero-art">${isLikedSongs ? likedSongsIcon : playlistNoteIcon}</div><div class="hero-body"><span class="eyebrow">${isLikedSongs ? "YOUR COLLECTION" : selectedPlaylistID ? "PLAYLIST" : "MUSIC LIBRARY"}</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions">${heroActions}</div>${selectedPlaylist ? `<small class="playlist-hero-sync" data-playlist-sync-status>${escapeHTML(playlistSyncText)}</small>` : ""}</div></div>
     <div class="filters"><button class="${libraryFilter === "all" ? "active" : ""}" data-library-filter="all">All songs</button><button class="${libraryFilter === "recent" ? "active" : ""}" data-library-filter="recent">Recently added</button><button class="${libraryFilter === "audio" ? "active" : ""}" data-library-filter="audio">Audio</button></div>
-    <div class="track-table"><div class="track-header"><span>#</span><span></span><span>Title</span><span>Album</span><span>Time</span><span></span><span>${selectedPlaylist && !selectedPlaylist.isSystem ? "Order" : ""}</span></div>
+    <div class="track-table"><div class="track-header"><span>#</span><span></span><span>Title</span><span>Album</span><span>Time</span><span></span></div>
     ${tracks.length ? tracks.map(trackRow).join("") : `<div class="empty"><b>${selectedPlaylistID ? "This playlist is empty" : "No songs yet"}</b><span>${selectedPlaylistID ? "Like songs or add them from your Library." : "Import audio files or connect your music server."}</span></div>`}</div></div>`;
   bindTrackRows();
-  $("#importAudio").onclick = importAudio;
   $("#playCollection").onclick = () => currentTrack() ? toggle() : tracks[0] && play(tracks[0]);
   $("#heroShuffle").onclick = () => { shuffle = !shuffle; updateChrome(); render(); };
-  if ($("#deletePlaylist")) $("#deletePlaylist").onclick = async () => {
+  $("#heroAdd").onclick = () => selectedPlaylist ? openAddSongsDialog(selectedPlaylist) : importAudio();
+  document.querySelector("[data-hero-import]").onclick = importAudio;
+  document.querySelector("[data-hero-next]").onclick = () => move(1);
+  const syncButton = document.querySelector("[data-hero-sync]");
+  if (syncButton) syncButton.onclick = () => syncPlaylistsNow();
+  const deleteButton = document.querySelector("[data-hero-delete]");
+  if (deleteButton) deleteButton.onclick = async () => {
     if (!selectedPlaylist || !confirm(`Delete ${selectedPlaylist.name}?`)) return;
     markPlaylistDeleted(selectedPlaylist);
     state.playlists = state.playlists.filter((playlist) => playlist.id !== selectedPlaylist.id);
@@ -402,7 +435,7 @@ function renderServer() {
       <button id="uploadServer" title="Upload songs" aria-label="Upload songs">${serverUploadIcon}</button>
       <button id="syncAll" title="Download all songs" aria-label="Download all songs">${serverDownloadIcon}</button>
       <button id="syncSelected" class="${serverSelecting ? "active" : ""}" title="${selectLabel}" aria-label="${selectLabel}">${serverSelectIcon}${selectedRemoteIDs.size ? `<b>${selectedRemoteIDs.size}</b>` : ""}</button>
-      <button id="syncServerPlaylists" title="Sync playlists" aria-label="Sync playlists">${serverPlaylistIcon}</button>
+      <button id="syncServerPlaylists" title="Sync playlists" aria-label="Sync playlists">${serverRefreshIcon}</button>
     </div></div>
     <div class="server-table-head ${serverSelecting ? "selecting" : ""}">${serverSelecting ? "<span></span>" : ""}<span></span><button data-server-sort="title">TITLE ${serverSort === "title" ? "⌃" : ""}</button><button data-server-sort="artist">ARTIST ${serverSort === "artist" ? "⌃" : ""}</button><span>ALBUM</span><span>DURATION</span><span></span></div>
     <div id="remoteSongs" class="remote-list redesigned server-library">${serverCatalog.length ? remoteRows() : `<div class="empty"><span>${serverConnectInFlight ? "Connecting to your server…" : "Open connection settings to connect."}</span></div>`}</div>
@@ -423,7 +456,14 @@ function renderServer() {
   };
   $("#syncAll").onclick = () => serverAction("all");
   $("#uploadServer").onclick = uploadServerSongs;
-  $("#syncServerPlaylists").onclick = () => syncPlaylistsNow();
+  $("#syncServerPlaylists").onclick = (event) => {
+    const button = event.currentTarget;
+    button.classList.remove("refresh-spinning");
+    void button.offsetWidth;
+    button.classList.add("refresh-spinning");
+    button.addEventListener("animationend", () => button.classList.remove("refresh-spinning"), { once: true });
+    syncPlaylistsNow();
+  };
   bindRemoteRows();
   if (!serverAutoAttempted && !serverConnectInFlight && state.serverURL && serverToken) {
     serverAutoAttempted = true;
@@ -508,40 +548,116 @@ function render() {
 }
 
 function bindTrackRows() {
+  const trackTable = document.querySelector(".track-table");
+  if (trackTable) {
+    trackTable.ondragover = (event) => {
+      if (!draggingPlaylistTrackID) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    };
+    trackTable.ondrop = async (event) => {
+      if (!draggingPlaylistTrackID || !draggingPlaylistTargetID) return;
+      event.preventDefault();
+      const sourceID = draggingPlaylistTrackID;
+      const targetID = draggingPlaylistTargetID;
+      const insertAfter = draggingPlaylistInsertAfter;
+      clearPlaylistDragFloatingRow();
+      draggingPlaylistTrackID = null;
+      draggingPlaylistTargetID = null;
+      draggingPlaylistInsertAfter = false;
+      clearPlaylistDragPreview();
+      const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
+      if (!playlist || sourceID === targetID) return;
+      const sourceIndex = playlist.trackIDs.indexOf(sourceID);
+      if (sourceIndex < 0) return;
+      playlist.trackIDs.splice(sourceIndex, 1);
+      const destinationIndex = playlist.trackIDs.indexOf(targetID);
+      if (destinationIndex < 0) {
+        playlist.trackIDs.splice(sourceIndex, 0, sourceID);
+        return;
+      }
+      playlist.trackIDs.splice(destinationIndex + (insertAfter ? 1 : 0), 0, sourceID);
+      updatePlaylistRemoteSongIDs(state, playlist);
+      markPlaylistDirty(playlist);
+      await persist();
+      schedulePlaylistSync();
+      renderLibrary();
+    };
+  }
   document.querySelectorAll("[data-track]").forEach((row) => {
     row.onclick = (event) => {
       if (event.target.closest("button, select, input, a")) return;
       play(state.tracks.find((track) => track.id === row.dataset.track));
     };
     row.oncontextmenu = (event) => openTrackContextMenu(event, row.dataset.track);
+    if (row.dataset.playlistDraggable === "true") {
+      row.ondragstart = (event) => {
+        draggingPlaylistTrackID = row.dataset.track;
+        draggingPlaylistTargetID = null;
+        draggingPlaylistInsertAfter = false;
+        clearPlaylistDragPreview();
+        clearPlaylistDragFloatingRow();
+        row.classList.add("dragging");
+        const floatingRow = row.cloneNode(true);
+        floatingRow.classList.remove("playlist-draggable", "dragging", "drag-preview-up", "drag-preview-down");
+        floatingRow.classList.add("playlist-drag-floating");
+        floatingRow.removeAttribute("draggable");
+        floatingRow.removeAttribute("data-track");
+        floatingRow.removeAttribute("data-playlist-draggable");
+        floatingRow.removeAttribute("aria-label");
+        floatingRow.setAttribute("aria-hidden", "true");
+        floatingRow.style.top = `${row.offsetTop}px`;
+        floatingRow.style.left = `${row.offsetLeft}px`;
+        floatingRow.style.width = `${row.offsetWidth}px`;
+        floatingRow.style.height = `${row.offsetHeight}px`;
+        floatingRow.style.setProperty("--playlist-drag-source-offset", "0px");
+        trackTable?.append(floatingRow);
+        playlistDragFloatingRow = floatingRow;
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", row.dataset.track);
+        }
+      };
+      row.ondragover = (event) => {
+        if (!draggingPlaylistTrackID || draggingPlaylistTrackID === row.dataset.track) return;
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+        const insertBefore = event.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2;
+        const previewKey = `${row.dataset.track}:${insertBefore ? "before" : "after"}`;
+        draggingPlaylistTargetID = row.dataset.track;
+        draggingPlaylistInsertAfter = !insertBefore;
+        if (previewKey === playlistDragPreviewKey) return;
+        clearPlaylistDragPreview();
+        playlistDragPreviewKey = previewKey;
+        const rows = [...document.querySelectorAll("[data-playlist-draggable]")];
+        const sourceIndex = rows.findIndex((item) => item.dataset.track === draggingPlaylistTrackID);
+        const targetIndex = rows.indexOf(row);
+        if (sourceIndex < 0 || targetIndex < 0) return;
+        const destinationIndex = targetIndex + (draggingPlaylistInsertAfter ? 1 : 0) - (sourceIndex < targetIndex ? 1 : 0);
+        const endIndex = sourceIndex < targetIndex ? targetIndex - (draggingPlaylistInsertAfter ? 0 : 1) : sourceIndex - 1;
+        const startIndex = sourceIndex < targetIndex ? sourceIndex + 1 : targetIndex + (draggingPlaylistInsertAfter ? 1 : 0);
+        const previewClass = sourceIndex < targetIndex ? "drag-preview-up" : "drag-preview-down";
+        const sourceRow = rows[sourceIndex];
+        const adjacentRow = rows[sourceIndex + 1] || rows[sourceIndex - 1];
+        const rowPitch = adjacentRow ? Math.abs(adjacentRow.offsetTop - sourceRow.offsetTop) : sourceRow.offsetHeight;
+        const offset = `${rowPitch}px`;
+        const destinationTop = rows[destinationIndex]?.offsetTop ?? sourceRow.offsetTop;
+        playlistDragFloatingRow?.style.setProperty("--playlist-drag-source-offset", `${destinationTop - sourceRow.offsetTop}px`);
+        for (let index = startIndex; index <= endIndex; index += 1) {
+          rows[index].classList.add(previewClass);
+          rows[index].style.setProperty("--playlist-drag-offset", offset);
+        }
+      };
+      row.ondragend = () => {
+        draggingPlaylistTrackID = null;
+        draggingPlaylistTargetID = null;
+        draggingPlaylistInsertAfter = false;
+        clearPlaylistDragFloatingRow();
+        clearPlaylistDragPreview();
+      };
+    }
   });
   document.querySelectorAll("[data-favorite]").forEach((button) => button.onclick = (event) => { event.stopPropagation(); toggleFavorite(button.dataset.favorite); });
-  document.querySelectorAll("[data-reorder-track]").forEach((button) => button.onclick = async (event) => {
-    event.stopPropagation();
-    const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
-    if (!playlist) return;
-    const index = playlist.trackIDs.indexOf(button.dataset.playlistTrack);
-    const destination = index + Number(button.dataset.reorderTrack);
-    if (index < 0 || destination < 0 || destination >= playlist.trackIDs.length) return;
-    const [trackID] = playlist.trackIDs.splice(index, 1);
-    playlist.trackIDs.splice(destination, 0, trackID);
-    updatePlaylistRemoteSongIDs(state, playlist);
-    markPlaylistDirty(playlist);
-    await persist();
-    schedulePlaylistSync();
-    renderLibrary();
-  });
-  document.querySelectorAll("[data-remove-playlist-track]").forEach((button) => button.onclick = async (event) => {
-    event.stopPropagation();
-    const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
-    if (!playlist) return;
-    playlist.trackIDs = playlist.trackIDs.filter((id) => id !== button.dataset.removePlaylistTrack);
-    updatePlaylistRemoteSongIDs(state, playlist);
-    markPlaylistDirty(playlist);
-    await persist();
-    schedulePlaylistSync();
-    renderLibrary();
-  });
 }
 
 function closeTrackContextMenu() {
@@ -555,14 +671,28 @@ function openTrackContextMenu(event, trackID) {
   const menu = $("#trackContextMenu");
   const track = state.tracks.find((item) => item.id === trackID);
   if (!track) return;
-  const playlists = state.playlists.filter((item) => !item.isSystem);
-  menu.innerHTML = `<div class="context-heading"><small>ADD TO PLAYLIST</small><strong>${escapeHTML(track.title)}</strong></div>${playlists.length ? playlists.map((playlist) => {
+  const activePlaylist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
+  const playlists = state.playlists.filter((item) => !item.isSystem && item.id !== activePlaylist?.id);
+  const removeAction = activePlaylist
+    ? `<button class="context-danger" role="menuitem" data-context-remove-playlist-track><span>−</span>Remove from ${escapeHTML(activePlaylist.name)}</button><div class="context-divider"></div><div class="context-section-label">ADD TO ANOTHER PLAYLIST</div>`
+    : "";
+  menu.innerHTML = `<div class="context-heading"><small>${activePlaylist ? "PLAYLIST TRACK" : "ADD TO PLAYLIST"}</small><strong>${escapeHTML(track.title)}</strong><em>${escapeHTML(track.artist || "Unknown artist")}</em></div>${removeAction}${playlists.length ? playlists.map((playlist) => {
     const added = playlist.trackIDs.includes(trackID);
     return `<button role="menuitem" data-context-playlist="${escapeHTML(playlist.id)}" ${added ? "disabled" : ""}><span>${added ? "✓" : "＋"}</span>${escapeHTML(playlist.name)}</button>`;
-  }).join("") : `<div class="context-empty">No playlists yet</div>`}<button role="menuitem" data-context-new><span>＋</span>Create new playlist…</button>`;
+  }).join("") : `<div class="context-empty">${activePlaylist ? "No other playlists yet" : "No playlists yet"}</div>`}<div class="context-divider"></div><button class="context-create" role="menuitem" data-context-new><span>＋</span>Create new playlist…</button>`;
   menu.hidden = false;
   menu.style.left = `${Math.max(8, Math.min(event.clientX, innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(event.clientY, innerHeight - menu.offsetHeight - 8))}px`;
+  const removeButton = menu.querySelector("[data-context-remove-playlist-track]");
+  if (removeButton) removeButton.onclick = async () => {
+    activePlaylist.trackIDs = activePlaylist.trackIDs.filter((id) => id !== trackID);
+    updatePlaylistRemoteSongIDs(state, activePlaylist);
+    markPlaylistDirty(activePlaylist);
+    closeTrackContextMenu();
+    await persist();
+    schedulePlaylistSync();
+    renderLibrary();
+  };
   menu.querySelectorAll("[data-context-playlist]").forEach((button) => button.onclick = async () => {
     const playlist = state.playlists.find((item) => item.id === button.dataset.contextPlaylist);
     if (playlist && !playlist.trackIDs.includes(trackID)) {
@@ -586,6 +716,29 @@ async function importAudio() {
   await persist();
   if (!currentID && tracks[0]) currentID = tracks[0].id;
   render(); updateChrome();
+}
+
+function renderAddSongsDialog() {
+  const playlist = state.playlists.find((item) => item.id === addSongsPlaylistID);
+  if (!playlist) {
+    $("#addSongsDialog").close();
+    return;
+  }
+  $("#addSongsPlaylistName").textContent = playlist.name;
+  const query = $("#addSongsSearch").value.trim().toLocaleLowerCase();
+  const tracks = state.tracks.filter((track) => `${track.title} ${track.artist} ${track.album}`.toLocaleLowerCase().includes(query));
+  $("#addSongsList").innerHTML = tracks.length ? tracks.map((track) => {
+    const added = playlist.isSystem ? state.favorites.includes(track.id) : playlist.trackIDs.includes(track.id);
+    return `<div class="add-song-row">${artwork(track)}<div><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist || "Local file")}</small></div><button class="${added ? "added" : ""}" data-add-song="${escapeHTML(track.id)}" aria-label="${added ? `Remove ${escapeHTML(track.title)}` : `Add ${escapeHTML(track.title)}`}">${added ? checkIcon : plusIcon}</button></div>`;
+  }).join("") : `<div class="add-songs-empty"><b>No matching songs</b><span>Try a different title, artist, or album.</span></div>`;
+}
+
+function openAddSongsDialog(playlist) {
+  addSongsPlaylistID = playlist.id;
+  $("#addSongsSearch").value = "";
+  renderAddSongsDialog();
+  $("#addSongsDialog").showModal();
+  requestAnimationFrame(() => $("#addSongsSearch").focus());
 }
 
 function updateServerTransfer({ direction, currentFile, completed = 0, total = 1 }) {
@@ -805,6 +958,34 @@ document.querySelectorAll("[data-action=previous]").forEach((button) => button.o
 $("#newPlaylist").onclick = () => newPlaylist();
 $("#dismissServerTransfer").onclick = cancelServerTransfer;
 $("#cancelPlaylist").onclick = () => { pendingPlaylistTrackID = null; $("#playlistDialog").close(); };
+$("#closeAddSongs").onclick = () => $("#addSongsDialog").close();
+$("#addSongsSearch").oninput = renderAddSongsDialog;
+$("#addSongsList").onclick = async (event) => {
+  const button = event.target.closest("[data-add-song]");
+  if (!button) return;
+  const playlist = state.playlists.find((item) => item.id === addSongsPlaylistID);
+  if (!playlist) return;
+  button.disabled = true;
+  const added = playlist.isSystem ? state.favorites.includes(button.dataset.addSong) : playlist.trackIDs.includes(button.dataset.addSong);
+  if (playlist.isSystem) {
+    state.favorites = added
+      ? state.favorites.filter((id) => id !== button.dataset.addSong)
+      : [...new Set([...state.favorites, button.dataset.addSong])];
+  } else {
+    playlist.trackIDs = added
+      ? playlist.trackIDs.filter((id) => id !== button.dataset.addSong)
+      : [...playlist.trackIDs, button.dataset.addSong];
+    updatePlaylistRemoteSongIDs(state, playlist);
+    markPlaylistDirty(playlist);
+  }
+  await persist();
+  if (!playlist.isSystem) schedulePlaylistSync();
+  renderAddSongsDialog();
+};
+$("#addSongsDialog").addEventListener("close", () => {
+  addSongsPlaylistID = null;
+  if (section === "library") renderLibrary();
+});
 $("#cancelServerSettings").onclick = () => $("#serverSettingsDialog").close();
 $("#serverSettingsForm").onsubmit = async (event) => {
   event.preventDefault();
