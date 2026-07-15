@@ -7,7 +7,7 @@ DESTINATION="${2:?application destination is required}"
 APP_PID="${3:?application pid is required}"
 VERSION="${4:?update version is required}"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/resonance-update.XXXXXX")"
-BACKUP="${DESTINATION}.previous"
+BACKUP="$(dirname "$DESTINATION")/.Resonance.previous.$$"
 
 cleanup() {
     rm -rf "$WORK_DIR"
@@ -34,7 +34,6 @@ BUNDLE_VERSION="$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$INFO
 [[ "$BUNDLE_VERSION" == "$VERSION" ]] || exit 65
 /usr/bin/codesign --verify --deep --strict "$NEW_APP"
 
-rm -rf "$BACKUP"
 mv "$DESTINATION" "$BACKUP"
 if mv "$NEW_APP" "$DESTINATION"; then
     rm -rf "$BACKUP"

@@ -82,7 +82,7 @@ struct ContentView: View {
                             if updateManager.canInstall {
                                 updateManager.installAndRestart()
                             } else {
-                                Task { await updateManager.downloadUpdate() }
+                                Task { await updateManager.downloadAndInstall() }
                             }
                         },
                         onDismiss: { dismissedUpdateAlert = version }
@@ -151,7 +151,7 @@ private struct UpdateAvailableAlert: View {
                     .font(.system(size: 10))
                     .foregroundStyle(Color.appMuted)
 
-                Button(canInstall ? "Restart to Install" : "Download Update", action: onPrimaryAction)
+                Button(canInstall ? "Restart to Install" : "Update and Restart", action: onPrimaryAction)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .tint(Color.appAccent)

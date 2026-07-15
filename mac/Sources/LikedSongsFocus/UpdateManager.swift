@@ -50,12 +50,18 @@ final class UpdateManager: ObservableObject {
 
     private let manifestURL: URL
     private let session: URLSession
+    private let updateDirectoryOverride: URL?
     private var manifest: MacUpdateManifest?
     private var isRunningAutomaticChecks = false
 
-    init(manifestURL: URL = UpdateManager.defaultManifestURL, session: URLSession = .shared) {
+    init(
+        manifestURL: URL = UpdateManager.defaultManifestURL,
+        session: URLSession = .shared,
+        updateDirectory: URL? = nil
+    ) {
         self.manifestURL = manifestURL
         self.session = session
+        updateDirectoryOverride = updateDirectory
     }
 
     var canInstall: Bool { downloadedArchive != nil && manifest != nil && !isBusy }
@@ -87,7 +93,13 @@ final class UpdateManager: ObservableObject {
         defer { isBusy = false }
 
         do {
-            let (data, response) = try await session.data(from: manifestURL)
+            var request = URLRequest(
+                url: manifestURL,
+                cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
+                timeoutInterval: 30
+            )
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+            let (data, response) = try await session.data(for: request)
             try Self.validate(response: response)
             let candidate = try JSONDecoder().decode(MacUpdateManifest.self, from: data)
             try Self.validate(candidate)
@@ -95,7 +107,10 @@ final class UpdateManager: ObservableObject {
             if MacUpdateVersion.compare(current, candidate.version) == .orderedAscending {
                 manifest = candidate
                 availableVersion = candidate.version
-                status = "Version \(candidate.version) available"
+                downloadedArchive = validatedDownloadedArchive(for: candidate)
+                status = downloadedArchive == nil
+                    ? "Version \(candidate.version) available"
+                    : "Version \(candidate.version) ready"
             } else {
                 manifest = nil
                 availableVersion = nil
@@ -123,14 +138,7 @@ final class UpdateManager: ObservableObject {
                 throw UpdateError.checksumMismatch
             }
 
-            let updateDirectory = try FileManager.default.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )
-            .appendingPathComponent("Resonance", isDirectory: true)
-            .appendingPathComponent("Updates", isDirectory: true)
+            let updateDirectory = try updateDirectory()
             try FileManager.default.createDirectory(at: updateDirectory, withIntermediateDirectories: true)
             let destination = updateDirectory.appendingPathComponent("Resonance-macOS-\(manifest.version).zip")
             try? FileManager.default.removeItem(at: destination)
@@ -141,6 +149,14 @@ final class UpdateManager: ObservableObject {
             errorMessage = error.localizedDescription
             status = "Update download failed"
         }
+    }
+
+    func downloadAndInstall() async {
+        if !canInstall {
+            await downloadUpdate()
+        }
+        guard canInstall else { return }
+        installAndRestart()
     }
 
     func installAndRestart() {
@@ -174,6 +190,32 @@ final class UpdateManager: ObservableObject {
     static func sha256(of url: URL) throws -> String {
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func updateDirectory() throws -> URL {
+        if let updateDirectoryOverride { return updateDirectoryOverride }
+        return try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        .appendingPathComponent("Resonance", isDirectory: true)
+        .appendingPathComponent("Updates", isDirectory: true)
+    }
+
+    private func validatedDownloadedArchive(for manifest: MacUpdateManifest) -> URL? {
+        guard let archive = try? updateDirectory()
+            .appendingPathComponent("Resonance-macOS-\(manifest.version).zip") else {
+            return nil
+        }
+        guard FileManager.default.fileExists(atPath: archive.path) else { return nil }
+        guard let digest = try? Self.sha256(of: archive),
+              digest.caseInsensitiveCompare(manifest.sha256) == .orderedSame else {
+            try? FileManager.default.removeItem(at: archive)
+            return nil
+        }
+        return archive
     }
 
     static func validate(_ manifest: MacUpdateManifest) throws {
