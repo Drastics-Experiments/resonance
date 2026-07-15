@@ -15,11 +15,19 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
 
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+
+      - name: Verify Xcode toolchain
+        shell: bash
+        run: |
+          xcodebuild -version
+          swift --version
+          XCODE_MAJOR="$(xcodebuild -version | awk 'NR == 1 { split($2, version, "."); print version[1] }')"
+          (( XCODE_MAJOR >= 26 ))
 
       - name: Build for iOS Simulator
         run: |

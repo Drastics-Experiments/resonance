@@ -5,7 +5,7 @@ set -euo pipefail
 PRODUCT="LikedSongsFocus"
 APP_NAME="Resonance"
 BUNDLE_ID="com.gavindietrich.LikedSongsFocus"
-APP_VERSION="${APP_VERSION:-1.0.7}"
+APP_VERSION="${APP_VERSION:-1.0.8}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 APP_SIGN_IDENTITY="${MACOS_APP_IDENTITY:--}"
 INSTALLER_IDENTITY="${MACOS_INSTALLER_IDENTITY:-}"
@@ -20,7 +20,7 @@ APP="$WORK_DIR/$APP_NAME.app"
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT HUP INT TERM
 
-for tool in swift sips iconutil plutil codesign ditto pkgbuild shasum lipo xattr; do
+for tool in swift sips iconutil plutil codesign ditto pkgbuild pkgutil shasum lipo; do
     command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 69; }
 done
 
@@ -110,13 +110,17 @@ RELEASE_BASE_URL="${RELEASE_BASE_URL:-https://github.com/Drastics-Experiments/re
 printf '{\n  "version": "%s",\n  "build": "%s",\n  "url": "%s/Resonance-macOS.zip",\n  "sha256": "%s"\n}\n' \
     "$APP_VERSION" "$BUILD_NUMBER" "$RELEASE_BASE_URL" "$ZIP_SHA" > "$OUTPUT_DIR/latest-mac.json"
 
-INSTALLER_SCRIPTS="$WORK_DIR/installer-scripts"
-mkdir -p "$INSTALLER_SCRIPTS"
-install -m 0755 "$REPO_DIR/installers/macos/postinstall" "$INSTALLER_SCRIPTS/postinstall"
-xattr -c "$INSTALLER_SCRIPTS/postinstall"
-PKG_ARGS=(--nopayload --scripts "$INSTALLER_SCRIPTS" --identifier "$BUNDLE_ID.installer" --version "$APP_VERSION")
+PKG_ROOT="$WORK_DIR/pkg-root"
+mkdir -p "$PKG_ROOT/Applications"
+ditto "$APP" "$PKG_ROOT/Applications/$APP_NAME.app"
+PKG_ARGS=(--root "$PKG_ROOT" --install-location / --identifier "$BUNDLE_ID.installer" --version "$APP_VERSION")
 if [[ -n "$INSTALLER_IDENTITY" ]]; then PKG_ARGS+=(--sign "$INSTALLER_IDENTITY"); fi
 COPYFILE_DISABLE=1 pkgbuild "${PKG_ARGS[@]}" "$INSTALLER"
+
+if ! pkgutil --payload-files "$INSTALLER" | grep -Eq '(^|/)Applications/Resonance\.app/Contents/MacOS/LikedSongsFocus$'; then
+    echo "The macOS installer does not contain the Resonance application payload." >&2
+    exit 70
+fi
 
 if [[ -n "${NOTARY_PROFILE:-}" ]]; then
     xcrun notarytool submit "$INSTALLER" --keychain-profile "$NOTARY_PROFILE" --wait
@@ -124,5 +128,5 @@ if [[ -n "${NOTARY_PROFILE:-}" ]]; then
 fi
 
 echo "App archive: $ZIP"
-echo "Bootstrap installer: $INSTALLER"
+echo "Installer: $INSTALLER"
 echo "Update manifest: $OUTPUT_DIR/latest-mac.json"
