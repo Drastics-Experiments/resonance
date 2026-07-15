@@ -1,6 +1,6 @@
 {
   "name": "resonance-windows",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "private": true,
   "type": "module",
   "description": "Functional Resonance music player for Windows",
