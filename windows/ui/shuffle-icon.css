@@ -130,29 +130,7 @@
 
 .track-header,
 .track-row {
-  grid-template-columns: 28px 46px minmax(190px, 1fr) minmax(110px, .55fr) 50px 34px 92px;
-}
-
-.playlist-track-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 3px;
-}
-
-.playlist-track-actions button {
-  display: grid;
-  place-items: center;
-  width: 25px;
-  height: 25px;
-  padding: 0;
-  border-radius: 7px;
-  background: #ffffff0b;
-  color: #c7cbd6;
-}
-
-.playlist-track-actions button:hover {
-  background: #ffffff17;
-  color: #fff;
+  grid-template-columns: 28px 46px minmax(190px, 1fr) minmax(110px, .55fr) 50px 34px;
 }
 
 .playlist-page-actions {
@@ -209,6 +187,16 @@
   margin-top: 4px;
   font-size: 11px;
 }
+.context-heading em {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: #9fa5b6;
+  font-size: 9px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .track-context-menu button {
   display: flex;
@@ -235,6 +223,30 @@
   width: 15px;
   color: #ff6f68;
   text-align: center;
+}
+.context-divider {
+  height: 1px;
+  margin: 5px 3px;
+  background: #ffffff12;
+}
+.context-section-label {
+  padding: 5px 9px 3px;
+  color: #7f899d;
+  font-size: 8px;
+  letter-spacing: 1px;
+}
+.track-context-menu .context-danger {
+  color: #ff9ba3;
+}
+.track-context-menu .context-danger:hover {
+  background: #ff5e6d1f;
+}
+.track-context-menu .context-danger span {
+  color: #ff7b84;
+  font-size: 17px;
+}
+.track-context-menu .context-create span {
+  color: #a98cff;
 }
 
 .context-empty {

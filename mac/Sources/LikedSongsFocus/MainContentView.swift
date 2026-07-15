@@ -393,11 +393,13 @@ private struct MacServerInlineMetric: View {
                 .foregroundStyle(color)
                 .frame(width: 28, height: 28)
                 .background(color.opacity(0.12), in: Circle())
-            Text(value)
-                .font(.system(size: 12, weight: .semibold))
-            Text(label)
-                .font(.system(size: 11))
-                .foregroundStyle(Color.appMuted)
+            HStack(spacing: 4) {
+                Text(value)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.appMuted)
+            }
         }
     }
 }
@@ -449,21 +451,21 @@ private struct MacServerCatalogHeader: View {
     var body: some View {
         HStack(spacing: 10) {
             Text("#")
-                .frame(width: 32, alignment: .leading)
+                .frame(width: 28, alignment: .leading)
             Text("Title")
-                .frame(minWidth: 250, maxWidth: .infinity, alignment: .leading)
+                .frame(minWidth: 210, maxWidth: .infinity, alignment: .leading)
             if showAlbum {
                 Text("Album")
-                    .frame(width: 185, alignment: .leading)
+                    .frame(width: 135, alignment: .leading)
             }
             Text("Time")
-                .frame(width: 52, alignment: .leading)
+                .frame(width: 45, alignment: .leading)
             Color.clear.frame(width: 44)
         }
         .font(.system(size: 11))
         .foregroundStyle(Color(hex: 0x9299AA))
         .padding(.horizontal, 10)
-        .frame(height: 42)
+        .frame(height: 38)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.appLine).frame(height: 1)
         }
@@ -533,22 +535,22 @@ private struct MacServerSongRow: View {
                     }
                     .font(.system(size: 12))
                     .foregroundStyle(Color(hex: 0xAEB4C2))
-                    .frame(width: 32, alignment: .leading)
+                    .frame(width: 28, alignment: .leading)
 
-                    HStack(spacing: 13) {
+                    HStack(spacing: 12) {
                         Group {
                             if let localTrack {
-                                TrackArtworkView(track: localTrack, symbolSize: 16, cornerRadius: 7)
+                                TrackArtworkView(track: localTrack, symbolSize: 14, cornerRadius: 5)
                             } else {
                                 MiniArtwork(
                                     style: .electric,
                                     symbol: mediaKind == "Video" ? "play.fill" : "music.note",
-                                    size: 50,
-                                    cornerRadius: 7
+                                    size: 38,
+                                    cornerRadius: 5
                                 )
                             }
                         }
-                        .frame(width: 50, height: 50)
+                        .frame(width: 38, height: 38)
 
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 7) {
@@ -566,24 +568,24 @@ private struct MacServerSongRow: View {
                             }
 
                             Text("\(displayArtist) / \(mediaKind)")
-                                .font(.system(size: 10))
+                                .font(.system(size: 9))
                                 .foregroundStyle(Color(hex: 0x8F96A7))
                                 .lineLimit(1)
                         }
 
                         Spacer(minLength: 8)
                     }
-                    .frame(minWidth: 250, maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: 210, maxWidth: .infinity, alignment: .leading)
 
                     if showAlbum {
                         Text(displayAlbum)
                             .lineLimit(1)
-                            .frame(width: 185, alignment: .leading)
+                            .frame(width: 135, alignment: .leading)
                     }
 
                     Text(durationText)
                         .monospacedDigit()
-                        .frame(width: 52, alignment: .leading)
+                        .frame(width: 45, alignment: .leading)
                 }
                 .font(.system(size: 11))
                 .foregroundStyle(Color(hex: 0xAEB4C2))
@@ -619,9 +621,9 @@ private struct MacServerSongRow: View {
             .allowsHitTesting(!isSelecting)
         }
         .padding(.horizontal, 10)
-        .frame(height: 76)
+        .frame(height: 61)
         .background(isHovering || isSelected || isCurrent ? Color.white.opacity(0.055) : .clear)
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(alignment: .bottom) { Rectangle().fill(Color.appLine).frame(height: 1) }
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
@@ -1038,11 +1040,10 @@ private struct CollectionHeroView: View {
                             .foregroundStyle(Color(hex: 0xB7BBCC))
                             .padding(.bottom, 10)
 
-                        Text(isLikedCollection ? "Liked\nSongs" : model.collectionTitle)
+                        Text(model.collectionTitle)
                             .font(.system(size: model.collectionTitle.count > 13 ? 48 : 58, weight: .regular))
                             .tracking(-2.2)
-                            .lineSpacing(-6)
-                            .lineLimit(2)
+                            .lineLimit(1)
                             .minimumScaleFactor(0.68)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.bottom, 8)
@@ -1146,6 +1147,15 @@ private struct TrackAreaView: View {
     let showAlbum: Bool
     let showHelperText: Bool
     let onAddSongs: () -> Void
+    @State private var draggedTrackID: UUID?
+    @State private var dragOffset: CGFloat = 0
+    @State private var dropPreviewIndex: Int?
+
+    private var reorderablePlaylistID: UUID? {
+        guard model.section == .playlists,
+              let playlist = model.selectedPlaylist else { return nil }
+        return playlist.id
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1242,19 +1252,152 @@ private struct TrackAreaView: View {
                 } else {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(model.displayedTracks.enumerated()), id: \.element.id) { index, track in
-                            TrackRowView(
+                            let row = TrackRowView(
                                 track: track,
                                 number: index + 1,
                                 showAlbum: showAlbum
                             )
+                            let previewEdge = playlistDropPreviewEdge(for: track.id)
+
+                            if let playlistID = reorderablePlaylistID {
+                                row
+                                    .frame(height: draggedTrackID == track.id ? 0 : 61)
+                                    .padding(
+                                        .top,
+                                        previewEdge == .top ? 61 : 0
+                                    )
+                                    .padding(
+                                        .bottom,
+                                        previewEdge == .bottom ? 61 : 0
+                                    )
+                                    .overlay(alignment: .top) {
+                                        if previewEdge == .top {
+                                            playlistDropPreview(number: dropPreviewNumber)
+                                                .transition(.move(edge: .top).combined(with: .opacity))
+                                        }
+                                    }
+                                    .overlay(alignment: .bottom) {
+                                        if previewEdge == .bottom {
+                                            playlistDropPreview(number: dropPreviewNumber)
+                                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                                        }
+                                    }
+                                    .animation(.spring(response: 0.24, dampingFraction: 0.84), value: dropPreviewIndex)
+                                    .offset(y: draggedTrackID == track.id ? draggedRowOffset : 0)
+                                    .scaleEffect(draggedTrackID == track.id ? 1.015 : 1)
+                                    .shadow(
+                                        color: draggedTrackID == track.id ? Color.black.opacity(0.38) : .clear,
+                                        radius: draggedTrackID == track.id ? 12 : 0,
+                                        y: draggedTrackID == track.id ? 6 : 0
+                                    )
+                                    .zIndex(draggedTrackID == track.id ? 2 : 0)
+                                    .animation(.easeOut(duration: 0.12), value: draggedTrackID)
+                                    .highPriorityGesture(
+                                        DragGesture(minimumDistance: 5)
+                                            .onChanged { value in
+                                                updatePlaylistDrag(
+                                                    trackID: track.id,
+                                                    translation: value.translation.height
+                                                )
+                                            }
+                                            .onEnded { _ in
+                                                finishPlaylistDrag(trackID: track.id, playlistID: playlistID)
+                                            }
+                                    )
+                            } else {
+                                row
+                            }
                         }
                     }
+                    .animation(
+                        .spring(response: 0.26, dampingFraction: 0.86),
+                        value: model.displayedTracks.map(\.id)
+                    )
                 }
         }
         .padding(.horizontal, 24)
         .padding(.top, 18)
         .padding(.bottom, 32)
     }
+
+    @ViewBuilder
+    private func playlistDropPreview(number: Int) -> some View {
+        if let draggedTrackID,
+           let draggedTrack = model.displayedTracks.first(where: { $0.id == draggedTrackID }) {
+            TrackRowView(
+                track: draggedTrack,
+                number: number,
+                showAlbum: showAlbum
+            )
+            .opacity(0.32)
+            .scaleEffect(0.985)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private var dropPreviewNumber: Int {
+        (dropPreviewIndex ?? 0) + 1
+    }
+
+    private var draggedRowOffset: CGFloat {
+        guard let draggedTrackID,
+              let sourceIndex = model.displayedTracks.firstIndex(where: { $0.id == draggedTrackID })
+        else { return dragOffset + 30.5 }
+        let layoutCompensation: CGFloat = (dropPreviewIndex ?? sourceIndex) < sourceIndex ? -61 : 0
+        return dragOffset + 30.5 + layoutCompensation
+    }
+
+    private func playlistDropPreviewEdge(for trackID: UUID) -> PlaylistTrackDropEdge? {
+        guard let draggedTrackID,
+              let dropPreviewIndex
+        else { return nil }
+
+        let remainingTracks = model.displayedTracks.filter { $0.id != draggedTrackID }
+        if remainingTracks.isEmpty {
+            return trackID == draggedTrackID ? .top : nil
+        }
+        if dropPreviewIndex < remainingTracks.count {
+            return remainingTracks[dropPreviewIndex].id == trackID ? .top : nil
+        }
+        return remainingTracks.last?.id == trackID ? .bottom : nil
+    }
+
+    private func updatePlaylistDrag(trackID: UUID, translation: CGFloat) {
+        if draggedTrackID == nil {
+            draggedTrackID = trackID
+        }
+        guard draggedTrackID == trackID else { return }
+
+        dragOffset = translation
+        let visibleTrackIDs = model.displayedTracks.map(\.id)
+        guard let sourceIndex = visibleTrackIDs.firstIndex(of: trackID), !visibleTrackIDs.isEmpty else { return }
+        let destinationIndex = min(
+            max(Int((CGFloat(sourceIndex) + (translation / 61)).rounded()), visibleTrackIDs.startIndex),
+            visibleTrackIDs.index(before: visibleTrackIDs.endIndex)
+        )
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.84)) {
+            dropPreviewIndex = destinationIndex
+        }
+    }
+
+    private func finishPlaylistDrag(trackID: UUID, playlistID: UUID) {
+        guard draggedTrackID == trackID else { return }
+        let destinationIndex = dropPreviewIndex
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+            if let destinationIndex {
+                model.moveTrack(trackID, to: destinationIndex, in: playlistID)
+            }
+            draggedTrackID = nil
+            dragOffset = 0
+            dropPreviewIndex = nil
+        }
+    }
+}
+
+private enum PlaylistTrackDropEdge: Equatable {
+    case top
+    case bottom
 }
 
 private struct MacPlaylistSongPicker: View {

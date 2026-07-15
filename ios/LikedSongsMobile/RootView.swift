@@ -133,12 +133,18 @@ private struct LibraryView: View {
                         ContentUnavailableView("No songs yet", systemImage: "music.note", description: Text("Import audio or sync your music server."))
                             .frame(maxWidth: .infinity).padding(.top, 40)
                     } else {
-                        LazyVStack(spacing: 0) {
-                            ForEach(library.filteredTracks) { track in
-                                TrackRow(track: track, playbackQueue: library.filteredTracks)
+                        VStack(spacing: 0) {
+                            MobileSongListHeader()
+                            LazyVStack(spacing: 0) {
+                                ForEach(Array(library.filteredTracks.enumerated()), id: \.element.id) { index, track in
+                                    TrackRow(
+                                        track: track,
+                                        number: index + 1,
+                                        playbackQueue: library.filteredTracks
+                                    )
+                                }
                             }
                         }
-                        .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 16))
                     }
                 }
                 .padding(20)
@@ -158,6 +164,7 @@ private struct LibraryView: View {
 private struct TrackRow: View {
     @EnvironmentObject private var library: MusicLibrary
     let track: MobileTrack
+    let number: Int
     var playbackQueue: [MobileTrack]? = nil
     var playbackPlaylistID: UUID? = nil
 
@@ -167,7 +174,7 @@ private struct TrackRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 7) {
             Button {
                 if let playbackQueue {
                     library.play(track, in: playbackQueue, playlistID: playbackPlaylistID)
@@ -175,80 +182,65 @@ private struct TrackRow: View {
                     library.play(track)
                 }
             } label: {
-                HStack(spacing: 12) {
-                    TrackArtwork(track: track, fallbackSymbol: library.currentTrackID == track.id && library.isPlaying ? "waveform" : "music.note")
-                        .frame(width: 46, height: 46)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(track.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                        Text("\(track.artist) • \(track.album)").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    Spacer()
-                    Text(track.durationText).font(.caption2).foregroundStyle(.secondary)
-                }
-                .contentShape(Rectangle())
+                LocalSongRowContent(
+                    track: track,
+                    number: number,
+                    trailingDetail: track.durationText,
+                    isPlaying: library.currentTrackID == track.id && library.isPlaying
+                )
             }
             .buttonStyle(.plain)
-            Button { library.toggleFavorite(track) } label: {
-                Image(systemName: library.favorites.contains(track.id) ? "heart.fill" : "heart")
-                    .foregroundStyle(library.favorites.contains(track.id) ? Color.accent : .secondary)
+        }
+        .mobileCatalogRow()
+        .contentShape(Rectangle())
+        .contextMenu {
+            trackActions
+        }
+    }
+
+    @ViewBuilder
+    private var trackActions: some View {
+        Button {
+            library.toggleFavorite(track)
+        } label: {
+            Label(
+                library.favorites.contains(track.id) ? "Remove from Liked Songs" : "Add to Liked Songs",
+                systemImage: library.favorites.contains(track.id) ? "heart.slash" : "heart"
+            )
+        }
+        if let playlist = playbackPlaylist, playlist.trackIDs.contains(track.id) {
+            Button(role: .destructive) {
+                library.remove(track, from: playlist.id)
+            } label: {
+                Label(
+                    playlist.isSystem ? "Remove from Liked Songs" : "Remove from Playlist",
+                    systemImage: "text.badge.minus"
+                )
             }
-            .buttonStyle(.plain)
-            Menu {
-                if let playlist = playbackPlaylist, playlist.trackIDs.contains(track.id) {
-                    Button(role: .destructive) {
-                        library.remove(track, from: playlist.id)
+            Divider()
+        }
+        let customPlaylists = library.playlists.filter { !$0.isSystem }
+        if customPlaylists.isEmpty {
+            Text("Create a playlist first")
+        } else {
+            Menu("Add to Playlist", systemImage: "text.badge.plus") {
+                ForEach(customPlaylists) { playlist in
+                    Button {
+                        library.add(track, to: playlist)
                     } label: {
                         Label(
-                            playlist.isSystem ? "Remove from Liked Songs" : "Remove from Playlist",
-                            systemImage: "text.badge.minus"
+                            playlist.name,
+                            systemImage: playlist.trackIDs.contains(track.id) ? "checkmark" : "music.note.list"
                         )
                     }
-                    Divider()
+                    .disabled(playlist.trackIDs.contains(track.id))
                 }
-                let customPlaylists = library.playlists.filter { !$0.isSystem }
-                if customPlaylists.isEmpty {
-                    Text("Create a playlist first")
-                } else {
-                    Menu("Add to Playlist", systemImage: "text.badge.plus") {
-                        ForEach(customPlaylists) { playlist in
-                            Button {
-                                library.add(track, to: playlist)
-                            } label: {
-                                Label(
-                                    playlist.name,
-                                    systemImage: playlist.trackIDs.contains(track.id) ? "checkmark" : "music.note.list"
-                                )
-                            }
-                            .disabled(playlist.trackIDs.contains(track.id))
-                        }
-                    }
-                }
-                Button(role: .destructive) { library.remove(track) } label: {
-                    Label("Remove from Library", systemImage: "trash")
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .frame(width: 30, height: 36)
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("More options for \(track.title)")
         }
-        .padding(.horizontal, 12).padding(.vertical, 9)
-        .contextMenu {
-            if let playlist = playbackPlaylist, playlist.trackIDs.contains(track.id) {
-                Button(
-                    playlist.isSystem ? "Remove from Liked Songs" : "Remove from Playlist",
-                    role: .destructive
-                ) {
-                    library.remove(track, from: playlist.id)
-                }
-                Divider()
-            }
-            ForEach(library.playlists.filter { !$0.isSystem }) { playlist in
-                Button("Add to \(playlist.name)") { library.add(track, to: playlist) }
-            }
-            Button("Remove from library", role: .destructive) { library.remove(track) }
+        Button(role: .destructive) {
+            library.remove(track)
+        } label: {
+            Label("Remove from Library", systemImage: "trash")
         }
     }
 }
@@ -388,15 +380,20 @@ private struct PlaylistDetailView: View {
                         .contentShape(Circle())
                         Spacer()
                     }
-                    .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
 
-                    ForEach(playlistTracks) {
+                    MobileSongListHeader()
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+
+                    ForEach(Array(playlistTracks.enumerated()), id: \.element.id) { index, track in
                         TrackRow(
-                            track: $0,
+                            track: track,
+                            number: index + 1,
                             playbackQueue: playlistTracks,
                             playbackPlaylistID: playlistID
                         )
@@ -410,6 +407,7 @@ private struct PlaylistDetailView: View {
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
+                .contentMargins(.horizontal, 20, for: .scrollContent)
                 .environment(\.defaultMinListRowHeight, 1)
             }
         }
@@ -464,31 +462,45 @@ private struct PlaylistSongPicker: View {
 
     var body: some View {
         NavigationStack {
-            List(library.tracks) { track in
-                Button {
-                    guard let playlist else { return }
-                    if playlist.trackIDs.contains(track.id) {
-                        library.remove(track, from: playlist.id)
-                    } else {
-                        library.add(track, to: playlist)
-                    }
-                } label: {
-                    HStack(spacing: 12) {
-                        TrackArtwork(track: track).frame(width: 42, height: 42)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(track.title).foregroundStyle(.primary).lineLimit(1)
-                            Text(track.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            ZStack {
+                AppBackground()
+                List {
+                    MobileSongListHeader()
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+
+                    ForEach(Array(library.tracks.enumerated()), id: \.element.id) { index, track in
+                        Button {
+                            guard let playlist else { return }
+                            if playlist.trackIDs.contains(track.id) {
+                                library.remove(track, from: playlist.id)
+                            } else {
+                                library.add(track, to: playlist)
+                            }
+                        } label: {
+                            HStack(spacing: 7) {
+                                LocalSongRowContent(
+                                    track: track,
+                                    number: index + 1,
+                                    trailingDetail: track.durationText
+                                )
+                                Image(systemName: playlist?.trackIDs.contains(track.id) == true ? "checkmark.circle.fill" : "plus.circle")
+                                    .foregroundStyle(playlist?.trackIDs.contains(track.id) == true ? Color.accent : .secondary)
+                                    .frame(width: 28, height: 44)
+                            }
+                            .mobileCatalogRow(isSelected: playlist?.trackIDs.contains(track.id) == true)
                         }
-                        Spacer()
-                        if playlist?.trackIDs.contains(track.id) == true {
-                            Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.accent)
-                        } else {
-                            Image(systemName: "plus.circle").foregroundStyle(.secondary)
-                        }
+                        .buttonStyle(.plain)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                     }
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .contentMargins(.horizontal, 20, for: .scrollContent)
+                .environment(\.defaultMinListRowHeight, 1)
             }
             .navigationTitle("Add Songs")
             .navigationBarTitleDisplayMode(.inline)
@@ -918,31 +930,28 @@ private struct StorageSection: View {
             }
             .padding(.horizontal, 5)
 
-            LazyVStack(spacing: 0) {
-                ForEach(tracks) { track in
-                    StorageTrackRow(
-                        track: track,
-                        fileSize: fileSizes[track.id, default: 0],
-                        isEditing: isEditing,
-                        isSelected: selectedTrackIDs.contains(track.id),
-                        onSelect: {
-                            if selectedTrackIDs.contains(track.id) {
-                                selectedTrackIDs.remove(track.id)
-                            } else {
-                                selectedTrackIDs.insert(track.id)
-                            }
-                        },
-                        onDelete: { deletionCandidate = track }
-                    )
-                    if track.id != tracks.last?.id {
-                        Divider().padding(.leading, isEditing ? 112 : 70)
+            VStack(spacing: 0) {
+                MobileSongListHeader(trailingTitle: "Size")
+
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                        StorageTrackRow(
+                            track: track,
+                            number: index + 1,
+                            fileSize: fileSizes[track.id, default: 0],
+                            isEditing: isEditing,
+                            isSelected: selectedTrackIDs.contains(track.id),
+                            onSelect: {
+                                if selectedTrackIDs.contains(track.id) {
+                                    selectedTrackIDs.remove(track.id)
+                                } else {
+                                    selectedTrackIDs.insert(track.id)
+                                }
+                            },
+                            onDelete: { deletionCandidate = track }
+                        )
                     }
                 }
-            }
-            .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(.white.opacity(0.07), lineWidth: 1)
             }
         }
     }
@@ -951,6 +960,7 @@ private struct StorageSection: View {
 private struct StorageTrackRow: View {
     @EnvironmentObject private var library: MusicLibrary
     let track: MobileTrack
+    let number: Int
     let fileSize: Int64
     let isEditing: Bool
     let isSelected: Bool
@@ -958,62 +968,33 @@ private struct StorageTrackRow: View {
     let onDelete: () -> Void
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 7) {
             Button(action: isEditing ? onSelect : { library.play(track) }) {
-                HStack(spacing: 12) {
-                    if isEditing {
-                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                            .font(.title3)
-                            .foregroundStyle(isSelected ? Color.accent : .secondary)
-                            .transition(.scale.combined(with: .opacity))
-                    }
-                    TrackArtwork(track: track)
-                        .frame(width: 50, height: 50)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(track.title)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        Text("\(track.artist) • \(track.album)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 8)
-                    Image(systemName: track.sourceServer == nil ? "iphone" : "checkmark.circle")
-                        .foregroundStyle(Color.violet)
-                        .accessibilityHidden(true)
-                    Text(formatBytes(fileSize))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .contentShape(Rectangle())
+                LocalSongRowContent(
+                    track: track,
+                    number: number,
+                    trailingDetail: formatBytes(fileSize),
+                    selectionState: isEditing ? isSelected : nil
+                )
             }
             .buttonStyle(.plain)
             .accessibilityLabel(isEditing ? "Select \(track.title)" : "Play \(track.title) by \(track.artist)")
 
+        }
+        .mobileCatalogRow(isSelected: isSelected)
+        .contentShape(Rectangle())
+        .contextMenu {
             if !isEditing {
-                Menu {
+                Group {
                     Button { library.play(track) } label: {
                         Label("Play", systemImage: "play.fill")
                     }
                     Button(role: .destructive, action: onDelete) {
                         Label("Delete from iPhone", systemImage: "trash")
                     }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.headline)
-                        .frame(width: 42, height: 50)
-                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("More options for \(track.title)")
             }
         }
-        .padding(.leading, 12)
-        .padding(.trailing, isEditing ? 12 : 2)
-        .padding(.vertical, 9)
         .animation(.easeInOut(duration: 0.18), value: isEditing)
     }
 }
@@ -1151,7 +1132,7 @@ private struct ServerView: View {
                     .padding(.top, 14)
                     .padding(.bottom, 10)
 
-                    ServerCatalogHeader()
+                    MobileSongListHeader()
 
                     if visibleSongs.isEmpty {
                         ContentUnavailableView(
@@ -1546,22 +1527,114 @@ private struct ServerTransferPopup: View {
     }
 }
 
-private struct ServerCatalogHeader: View {
+private struct MobileSongListHeader: View {
+    var trailingTitle = "Time"
+
     var body: some View {
         HStack(spacing: 10) {
             Text("#")
                 .frame(width: 24, alignment: .leading)
             Text("Title")
             Spacer()
-            Text("Time")
+            Text(trailingTitle)
                 .frame(width: 44, alignment: .trailing)
-            Color.clear.frame(width: 28)
         }
         .font(.caption2)
         .foregroundStyle(.secondary)
         .padding(.horizontal, 8)
         .frame(height: 38)
-        .overlay(alignment: .bottom) { Divider() }
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(.white.opacity(0.10))
+                .frame(height: 1)
+        }
+    }
+}
+
+private struct LocalSongRowContent: View {
+    let track: MobileTrack
+    let number: Int
+    let trailingDetail: String
+    var isPlaying = false
+    var selectionState: Bool? = nil
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Group {
+                if let selectionState {
+                    Image(systemName: selectionState ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(selectionState ? Color.accent : .secondary)
+                } else {
+                    Text("\(number)")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption)
+            .frame(width: 24, alignment: .leading)
+
+            TrackArtwork(track: track, fallbackSymbol: isPlaying ? "waveform" : "music.note")
+                .frame(width: 52, height: 52)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(track.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(Color.green)
+                        .fixedSize()
+                }
+                Text("\(track.artist) / \(track.mediaKindLabel)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(track.album.isEmpty ? "Unknown Album" : track.album)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Text(trailingDetail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .frame(width: 44, alignment: .trailing)
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+private extension MobileTrack {
+    var mediaKindLabel: String {
+        let fileExtension = URL(fileURLWithPath: relativePath).pathExtension.lowercased()
+        return ["mp4", "mov", "m4v", "webm"].contains(fileExtension) ? "Video" : "Audio"
+    }
+}
+
+private struct MobileCatalogRowStyle: ViewModifier {
+    let isSelected: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 8)
+            .frame(minHeight: 76)
+            .background(isSelected ? Color.white.opacity(0.05) : .clear)
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(.white.opacity(0.10))
+                    .frame(height: 1)
+            }
+    }
+}
+
+private extension View {
+    func mobileCatalogRow(isSelected: Bool = false) -> some View {
+        modifier(MobileCatalogRowStyle(isSelected: isSelected))
     }
 }
 
@@ -1661,26 +1734,19 @@ private struct ServerSongRow: View {
             .buttonStyle(.plain)
             .accessibilityLabel(isSelecting ? (isSelected ? "Deselect \(song.title)" : "Select \(song.title)") : (isSynced ? "Play \(song.title)" : "Download \(song.title)"))
 
+        }
+        .mobileCatalogRow(isSelected: isSelected)
+        .contentShape(Rectangle())
+        .contextMenu {
             if !isSelecting {
-                Menu {
+                Group {
                     if !isSynced {
                         Button("Download", systemImage: "icloud.and.arrow.down") { Task { await library.download(song) } }
                     }
                     Button("Delete from Server", systemImage: "trash", role: .destructive, action: onDelete)
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(width: 28, height: 44)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("More options for \(song.title)")
             }
         }
-        .padding(.horizontal, 8)
-        .frame(minHeight: 76)
-        .background(isSelected ? Color.white.opacity(0.05) : .clear)
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(alignment: .bottom) { Divider() }
         .animation(.easeInOut(duration: 0.18), value: isSelecting)
     }
 

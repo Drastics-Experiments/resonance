@@ -65,6 +65,13 @@
       <div class="dialog-actions"><button id="cancelServerSettings" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Save & connect</button></div>
     </form>
   </dialog>
+  <dialog id="addSongsDialog" class="add-songs-dialog">
+    <div class="add-songs-shell">
+      <header><div><h2>Add Songs</h2><p id="addSongsPlaylistName"></p></div><button id="closeAddSongs" class="primary" type="button">Done</button></header>
+      <label class="add-songs-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg><input id="addSongsSearch" autocomplete="off" spellcheck="false" placeholder="Search songs, artists, or albums…" aria-label="Search songs to add"></label>
+      <div id="addSongsList" class="add-songs-list"></div>
+    </div>
+  </dialog>
   <div id="trackContextMenu" class="track-context-menu" role="menu" hidden></div>
   <audio id="audio"></audio>
   <script type="module" src="app.js"></script>

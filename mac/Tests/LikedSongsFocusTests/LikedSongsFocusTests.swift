@@ -157,6 +157,59 @@ struct LikedSongsFocusTests {
     }
 
     @Test
+    func customPlaylistSongOrderCanBeRearrangedAndPersists() async throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        await model.importLocalFiles(at: [glass, ping, hero])
+
+        let playlist = try #require(model.createPlaylist(named: "Reorder Me"))
+        for track in model.tracks {
+            model.addTrack(track, to: playlist)
+        }
+        let originalOrder = model.tracks.map(\.id)
+
+        model.moveTrack(originalOrder[0], over: originalOrder[2], in: playlist.id)
+        #expect(model.customPlaylists.first?.trackIDs == [originalOrder[1], originalOrder[2], originalOrder[0]])
+        model.moveTrack(originalOrder[0], to: 0, in: playlist.id)
+        #expect(model.customPlaylists.first?.trackIDs == originalOrder)
+        model.moveTrack(originalOrder[0], to: 2, in: playlist.id)
+        #expect(model.customPlaylists.first?.trackIDs == [originalOrder[1], originalOrder[2], originalOrder[0]])
+
+        let likedSongs = model.playlists[0]
+        model.tracks.forEach(model.toggleFavorite)
+        model.moveTrack(originalOrder[0], over: originalOrder[2], in: likedSongs.id)
+        #expect(model.playlists[0].trackIDs == [originalOrder[1], originalOrder[2], originalOrder[0]])
+
+        let reloaded = PlayerModel(loadPersistedLibrary: true, defaults: defaults, persistServerCredentials: false)
+        #expect(reloaded.customPlaylists.first?.trackIDs == [originalOrder[1], originalOrder[2], originalOrder[0]])
+        #expect(reloaded.playlists[0].trackIDs == [originalOrder[1], originalOrder[2], originalOrder[0]])
+    }
+
+    @Test
+    func playbackControlsKeepTheirQueueAfterNavigationAndFiltering() async throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        await model.importLocalFiles(at: [glass, ping, hero])
+
+        let first = model.tracks[0]
+        let second = model.tracks[1]
+        model.selectAndPlay(first)
+
+        model.selectSection(.server)
+        model.searchText = "no matching songs"
+        model.filter = .video
+        #expect(model.displayedTracks.isEmpty)
+
+        model.next()
+        #expect(model.currentTrackID == second.id)
+        model.previous()
+        #expect(model.currentTrackID == first.id)
+        model.togglePlay()
+    }
+
+    @Test
     func shuffleConsumesQueueAndHistoryReflectsPlayback() async throws {
         let (defaults, suite) = try defaults()
         defer { defaults.removePersistentDomain(forName: suite) }

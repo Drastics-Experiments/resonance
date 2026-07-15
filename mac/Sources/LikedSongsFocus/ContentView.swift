@@ -3,6 +3,12 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var model: PlayerModel
     @EnvironmentObject private var updateManager: UpdateManager
+    @State private var dismissedUpdateAlert: String?
+
+    private var updateAlertVersion: String? {
+        guard let availableVersion = updateManager.availableVersion else { return nil }
+        return availableVersion == dismissedUpdateAlert ? nil : availableVersion
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -66,6 +72,27 @@ struct ContentView: View {
                 .animation(.easeInOut(duration: 0.2), value: model.isRefreshingServerCatalog)
                 .animation(.easeInOut(duration: 0.2), value: model.isUploadingServer)
             }
+            .overlay(alignment: .topTrailing) {
+                if let version = updateAlertVersion {
+                    UpdateAvailableAlert(
+                        version: version,
+                        isBusy: updateManager.isBusy,
+                        canInstall: updateManager.canInstall,
+                        onPrimaryAction: {
+                            if updateManager.canInstall {
+                                updateManager.installAndRestart()
+                            } else {
+                                Task { await updateManager.downloadUpdate() }
+                            }
+                        },
+                        onDismiss: { dismissedUpdateAlert = version }
+                    )
+                    .padding(.top, 94)
+                    .padding(.trailing, 18)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+            }
+            .animation(.easeOut(duration: 0.22), value: updateAlertVersion)
         }
         .background {
             ZStack {
@@ -83,6 +110,79 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .ignoresSafeArea(.container, edges: .top)
         .task { await updateManager.automaticCheck() }
+    }
+}
+
+private struct UpdateAvailableAlert: View {
+    let version: String
+    let isBusy: Bool
+    let canInstall: Bool
+    let onPrimaryAction: () -> Void
+    let onDismiss: () -> Void
+
+    @ViewBuilder
+    var body: some View {
+#if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            alertContent
+                .glassEffect(.regular, in: .rect(cornerRadius: 16))
+                .shadow(color: Color.black.opacity(0.32), radius: 18, y: 8)
+        } else {
+            fallbackAlert
+        }
+#else
+        fallbackAlert
+#endif
+    }
+
+    private var alertContent: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(Color.appAccent)
+                .frame(width: 38, height: 38)
+                .background(Color.appAccent.opacity(0.14), in: Circle())
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Update Available")
+                    .font(.system(size: 13, weight: .semibold))
+
+                Text("Resonance \(version) is ready.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.appMuted)
+
+                Button(canInstall ? "Restart to Install" : "Download Update", action: onPrimaryAction)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .tint(Color.appAccent)
+                    .disabled(isBusy)
+            }
+
+            Spacer(minLength: 6)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.appMuted)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss update alert")
+        }
+        .padding(14)
+        .frame(width: 300)
+    }
+
+    private var fallbackAlert: some View {
+        alertContent
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(Color.appPanel.opacity(0.88), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.10))
+        }
+        .shadow(color: Color.black.opacity(0.32), radius: 18, y: 8)
     }
 }
 
