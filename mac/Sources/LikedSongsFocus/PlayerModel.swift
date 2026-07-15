@@ -147,6 +147,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var audioPlayer: AVAudioPlayer?
     private var loadedAudioTrackID: UUID?
     private var playbackTimer: Timer?
+    private var playbackContextTrackIDs: [UUID] = []
     private var shuffledTrackIDs: [UUID] = []
     private var historyTrackIDs: [UUID] = []
     private var navigationHistory: [NavigationLocation] = []
@@ -186,7 +187,15 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         }
         let validIDs = Set(availableTracks.map(\.id))
         let availableFavorites = (stored?.favorites ?? []).intersection(validIDs)
-        let likedTrackIDs = availableTracks.map(\.id).filter(availableFavorites.contains)
+        var likedTrackIDs: [UUID] = []
+        for trackID in stored?.playlists.first(where: \.isSystem)?.trackIDs ?? []
+        where availableFavorites.contains(trackID) && !likedTrackIDs.contains(trackID) {
+            likedTrackIDs.append(trackID)
+        }
+        for trackID in availableTracks.map(\.id)
+        where availableFavorites.contains(trackID) && !likedTrackIDs.contains(trackID) {
+            likedTrackIDs.append(trackID)
+        }
 
         var availablePlaylists = (stored?.playlists ?? [])
             .map { playlist in
@@ -316,7 +325,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             return historyTrackIDs.reversed().compactMap { tracksByID[$0] }
         }
 
-        let context = playbackTracks
+        let context = activePlaybackTracks
         guard !context.isEmpty else { return [] }
         if shuffleEnabled {
             return shuffledTrackIDs.compactMap { tracksByID[$0] }
@@ -447,6 +456,46 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         dirtyPlaylistIDs.insert(playlistID)
         persistLibrary()
         schedulePlaylistSync()
+    }
+
+    func moveTrack(_ trackID: UUID, over targetTrackID: UUID, in playlistID: UUID) {
+        guard trackID != targetTrackID,
+              let playlistIndex = playlists.firstIndex(where: { $0.id == playlistID }),
+              let sourceIndex = playlists[playlistIndex].trackIDs.firstIndex(of: trackID),
+              let targetIndex = playlists[playlistIndex].trackIDs.firstIndex(of: targetTrackID)
+        else { return }
+
+        let movedTrackID = playlists[playlistIndex].trackIDs.remove(at: sourceIndex)
+        playlists[playlistIndex].trackIDs.insert(
+            movedTrackID,
+            at: min(targetIndex, playlists[playlistIndex].trackIDs.endIndex)
+        )
+        if !playlists[playlistIndex].isSystem {
+            updateRemoteSongIDs(forPlaylistAt: playlistIndex)
+            dirtyPlaylistIDs.insert(playlistID)
+        }
+        persistLibrary()
+        if !playlists[playlistIndex].isSystem {
+            schedulePlaylistSync()
+        }
+    }
+
+    func moveTrack(_ trackID: UUID, to destinationIndex: Int, in playlistID: UUID) {
+        guard let playlistIndex = playlists.firstIndex(where: { $0.id == playlistID }),
+              let sourceIndex = playlists[playlistIndex].trackIDs.firstIndex(of: trackID)
+        else { return }
+
+        let movedTrackID = playlists[playlistIndex].trackIDs.remove(at: sourceIndex)
+        let clampedDestination = min(max(destinationIndex, 0), playlists[playlistIndex].trackIDs.endIndex)
+        playlists[playlistIndex].trackIDs.insert(movedTrackID, at: clampedDestination)
+        if !playlists[playlistIndex].isSystem {
+            updateRemoteSongIDs(forPlaylistAt: playlistIndex)
+            dirtyPlaylistIDs.insert(playlistID)
+        }
+        persistLibrary()
+        if !playlists[playlistIndex].isSystem {
+            schedulePlaylistSync()
+        }
     }
 
     func removeTrackFromLibrary(_ track: Track) {
@@ -771,6 +820,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func selectAndPlay(_ track: Track) {
+        setPlaybackContext(playbackTracks, ensuring: track.id)
         startTrack(track.id, preservingShuffleQueue: false)
     }
 
@@ -780,6 +830,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             return
         }
         guard let track = currentTrack ?? tracks.first else { return }
+        ensurePlaybackContext(containing: track.id)
         if currentTrackID != track.id {
             startTrack(track.id, preservingShuffleQueue: false)
         } else {
@@ -797,15 +848,18 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         if isPlaying, currentInContext != nil {
             pausePlayback()
         } else if let currentInContext, !isPlaying {
+            setPlaybackContext(context, ensuring: currentInContext.id)
             beginPlayback(of: currentInContext, resuming: true)
         } else if let first = context.first {
+            setPlaybackContext(context, ensuring: first.id)
             startTrack(first.id, preservingShuffleQueue: false)
         }
     }
 
     func next() {
-        let context = playbackTracks
+        let context = activePlaybackTracks
         guard !context.isEmpty else { return }
+        captureFallbackPlaybackContextIfNeeded(context)
 
         if shuffleEnabled {
             if shuffledTrackIDs.isEmpty { rebuildShuffleOrder() }
@@ -828,8 +882,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func previous() {
-        let context = playbackTracks
+        let context = activePlaybackTracks
         guard !context.isEmpty else { return }
+        captureFallbackPlaybackContextIfNeeded(context)
         if position > 3, let currentTrack {
             seek(to: 0)
             beginPlayback(of: currentTrack, resuming: true)
@@ -949,6 +1004,28 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         section == .storage ? tracks : displayedTracks
     }
 
+    private var activePlaybackTracks: [Track] {
+        guard !playbackContextTrackIDs.isEmpty else { return playbackTracks }
+        let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        let context = playbackContextTrackIDs.compactMap { tracksByID[$0] }
+        return context.isEmpty ? playbackTracks : context
+    }
+
+    private func setPlaybackContext(_ context: [Track], ensuring trackID: UUID) {
+        let preferredContext = context.contains(where: { $0.id == trackID }) ? context : tracks
+        playbackContextTrackIDs = preferredContext.map(\.id)
+    }
+
+    private func ensurePlaybackContext(containing trackID: UUID) {
+        guard !activePlaybackTracks.contains(where: { $0.id == trackID }) || playbackContextTrackIDs.isEmpty else { return }
+        setPlaybackContext(playbackTracks, ensuring: trackID)
+    }
+
+    private func captureFallbackPlaybackContextIfNeeded(_ context: [Track]) {
+        guard playbackContextTrackIDs.isEmpty else { return }
+        playbackContextTrackIDs = context.map(\.id)
+    }
+
     private func startTrack(_ trackID: UUID, preservingShuffleQueue: Bool) {
         guard let track = tracks.first(where: { $0.id == trackID }) else { return }
         recordCurrentTrackInHistory(whenSwitchingTo: track.id)
@@ -1023,7 +1100,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     private func rebuildShuffleOrder() {
-        shuffledTrackIDs = playbackTracks.map(\.id).filter { $0 != currentTrackID }.shuffled()
+        shuffledTrackIDs = activePlaybackTracks.map(\.id).filter { $0 != currentTrackID }.shuffled()
     }
 
     private func recordCurrentTrackInHistory(whenSwitchingTo newTrackID: UUID) {

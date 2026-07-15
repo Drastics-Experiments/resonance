@@ -51,7 +51,7 @@ final class UpdateManager: ObservableObject {
     private let manifestURL: URL
     private let session: URLSession
     private var manifest: MacUpdateManifest?
-    private var hasAutomaticallyChecked = false
+    private var isRunningAutomaticChecks = false
 
     init(manifestURL: URL = UpdateManager.defaultManifestURL, session: URLSession = .shared) {
         self.manifestURL = manifestURL
@@ -62,10 +62,21 @@ final class UpdateManager: ObservableObject {
     var hasUpdate: Bool { availableVersion != nil }
 
     func automaticCheck() async {
-        guard !hasAutomaticallyChecked else { return }
-        hasAutomaticallyChecked = true
-        try? await Task.sleep(for: .seconds(2))
-        await checkForUpdates(silent: true)
+        guard !isRunningAutomaticChecks else { return }
+        isRunningAutomaticChecks = true
+        defer { isRunningAutomaticChecks = false }
+
+        do {
+            try await Task.sleep(for: .seconds(2))
+            while !Task.isCancelled {
+                await checkForUpdates(silent: true)
+                try await Task.sleep(for: .seconds(5 * 60))
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            return
+        }
     }
 
     func checkForUpdates(silent: Bool = false) async {
