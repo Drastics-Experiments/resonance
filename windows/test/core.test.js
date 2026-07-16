@@ -10,6 +10,7 @@ import {
   mergePlaylistDocument,
   mergeSyncedTracks,
   nextIndex,
+  normalizedVolume,
   normalizeState,
   tracksForPlaylist,
   updatePlaylistRemoteSongIDs,
@@ -35,6 +36,11 @@ test("keeps contextual search and sorting in the persistent top bar", () => {
   assert.match(appSource, /class="server-table-head/);
   assert.match(htmlSource, /id="serverTransferToast"/);
   assert.match(htmlSource, /id="dismissServerTransfer"/);
+  assert.match(htmlSource, /id="dismissServerTransfer"[^>]+aria-label="Cancel transfer"/);
+  assert.match(htmlSource, /id="appNotice"[^>]+aria-live="polite"/);
+  assert.match(htmlSource, /id="seek"[^>]+aria-label="Playback position"/);
+  assert.match(htmlSource, /id="volume"[^>]+aria-label="Volume"/);
+  assert.match(htmlSource, /id="shuffle"[^>]+aria-pressed="false"/);
   assert.doesNotMatch(appSource, /<div id="serverTransferToast"/);
   assert.match(appSource, /function hideServerTransfer\(\)/);
   assert.match(appSource, /#dismissServerTransfer"\)\.onclick = cancelServerTransfer/);
@@ -42,6 +48,12 @@ test("keeps contextual search and sorting in the persistent top bar", () => {
   assert.match(mainSource, /new AbortController\(\)/);
   assert.match(mainSource, /server:cancel-transfer/);
   assert.match(mainSource, /signal\.throwIfAborted\(\)/);
+  assert.match(mainSource, /library\.json\.corrupt-|\.corrupt-\$\{Date\.now\(\)\}/);
+  assert.match(appSource, /function activePlaybackTracks\(\)/);
+  assert.match(appSource, /function previous\(\)[\s\S]+recordHistory: false/);
+  assert.match(appSource, /bindTrackRows\(tracks\)/);
+  assert.match(appSource, /Alt\+ArrowUp Alt\+ArrowDown/);
+  assert.doesNotMatch(appSource, /audio\.play\(\)\.catch\(\(error\) => console\.error/);
   assert.doesNotMatch(appSource, /class="connection-card"/);
   assert.match(appSource, /class="now-playing-icon"/);
   assert.doesNotMatch(appSource, /[Ⅱ▥]/);
@@ -109,11 +121,26 @@ test("search, queue movement, playlists, and time formatting work", () => {
   assert.equal(nextIndex(tracks, "a", -1), 1);
   assert.equal(nextIndex(tracks, "a", 1, true, () => 0), 1);
   assert.equal(formatTime(222), "3:42");
+  assert.equal(normalizedVolume(0), 0);
+  assert.equal(normalizedVolume(2), 1);
+  assert.equal(normalizedVolume("invalid"), 0.78);
   const state = createEmptyState();
   state.tracks = tracks;
   state.playlists.push({ id: "p", name: "Test", trackIDs: ["b"], isSystem: false });
   assert.deepEqual(tracksForPlaylist(state, "p").map((track) => track.id), ["b"]);
   assert.deepEqual(filterPlaylists(state.playlists, tracks, "ping").map((playlist) => playlist.id), ["p"]);
+});
+
+test("normalizes persisted playback context against the current library", () => {
+  const state = normalizeState({
+    tracks: [{ id: "a" }, { id: "b" }],
+    playlists: [],
+    favorites: [],
+    playbackQueueIDs: ["b", "missing", "a", "b"],
+    playbackPlaylistID: "playlist-1",
+  });
+  assert.deepEqual(state.playbackQueueIDs, ["b", "a"]);
+  assert.equal(state.playbackPlaylistID, "playlist-1");
 });
 
 test("replaces stale synced tracks instead of discarding the fresh download", () => {

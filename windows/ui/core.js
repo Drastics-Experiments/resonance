@@ -10,6 +10,8 @@ export function createEmptyState() {
     repeat: false,
     currentTrackID: null,
     position: 0,
+    playbackQueueIDs: [],
+    playbackPlaylistID: null,
     playlistRevision: 0,
     knownRemotePlaylistIDs: [],
     dirtyPlaylistIDs: [],
@@ -39,6 +41,10 @@ export function normalizeState(value) {
   state.playlistSyncServerURL = typeof state.playlistSyncServerURL === "string" ? state.playlistSyncServerURL : null;
   const seenRemote = new Set();
   state.tracks = state.tracks.filter((track) => !track.remoteID || (seenRemote.has(track.remoteID) ? false : (seenRemote.add(track.remoteID), true)));
+  const trackIDs = new Set(state.tracks.map((track) => track.id));
+  state.playbackQueueIDs = unique(Array.isArray(state.playbackQueueIDs) ? state.playbackQueueIDs : [])
+    .filter((id) => trackIDs.has(id));
+  state.playbackPlaylistID = typeof state.playbackPlaylistID === "string" ? state.playbackPlaylistID : null;
   let system = state.playlists.find((playlist) => playlist.isSystem);
   if (!system) {
     system = { id: "liked", name: "Liked Songs", trackIDs: [], isSystem: true };
@@ -60,6 +66,11 @@ export function formatTime(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
   const value = Math.floor(seconds);
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
+}
+
+export function normalizedVolume(value, fallback = 0.78) {
+  const volume = Number(value);
+  return Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : fallback;
 }
 
 export function filterTracks(tracks, query, mode = "all") {
