@@ -200,9 +200,16 @@ ipcMain.handle("library:load", async () => {
       ...stored,
       tracks: stored.tracks.map(({ fileUrl, ...track }) => track),
     }, null, 2), "utf8");
-    return stored;
-  } catch {
-    return null;
+    return { state: stored, warning: null };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { state: null, warning: null };
+    const backup = `${state}.corrupt-${Date.now()}`;
+    let warning = "Resonance could not read your saved library. A new empty library was opened.";
+    try {
+      await fs.copyFile(state, backup);
+      warning += ` The unreadable file was preserved as ${path.basename(backup)}.`;
+    } catch { /* the original read error remains the useful failure */ }
+    return { state: null, warning };
   }
 });
 
@@ -219,6 +226,8 @@ ipcMain.handle("library:save", async (_event, state) => {
     repeat: Boolean(state.repeat),
     currentTrackID: state.currentTrackID || null,
     position: Number.isFinite(state.position) ? state.position : 0,
+    playbackQueueIDs: Array.isArray(state.playbackQueueIDs) ? state.playbackQueueIDs : [],
+    playbackPlaylistID: typeof state.playbackPlaylistID === "string" ? state.playbackPlaylistID : null,
     playlistRevision: Number.isInteger(state.playlistRevision) && state.playlistRevision >= 0 ? state.playlistRevision : 0,
     knownRemotePlaylistIDs: Array.isArray(state.knownRemotePlaylistIDs) ? state.knownRemotePlaylistIDs : [],
     dirtyPlaylistIDs: Array.isArray(state.dirtyPlaylistIDs) ? state.dirtyPlaylistIDs : [],
