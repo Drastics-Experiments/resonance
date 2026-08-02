@@ -60,6 +60,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published var playlistSyncDetail = "Not synced"
     @Published var syncProfileID = "default"
     @Published var syncProfileName = "Default"
+    @Published private(set) var listeningHistoryEntries: [MobileListeningHistoryEntry] = []
 
     private let fileManager = FileManager.default
     private let root: URL
@@ -82,6 +83,13 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var deletedPlaylistIDs: Set<UUID> = []
     private var playlistSyncServerURL: String?
     private var playlistSyncTask: Task<Void, Never>?
+    private var listeningHistorySyncTask: Task<Void, Never>?
+    private var listeningHistorySyncDebounceTask: Task<Void, Never>?
+    private var isSyncingListeningHistory = false
+    private var listeningHistorySyncPending = false
+    private var activeListeningEntryID: UUID?
+    private var lastListeningPosition: TimeInterval = 0
+    private var lastPersistedListeningSeconds: TimeInterval = 0
     private var remoteLikedSongIDs: Set<String> = []
     private var dirtyRemoteLikeSongIDs: Set<String> = []
     private var likesMutationGeneration: UInt64 = 0
@@ -122,6 +130,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     deinit {
         timer?.invalidate()
         playlistSyncTask?.cancel()
+        listeningHistorySyncTask?.cancel()
+        listeningHistorySyncDebounceTask?.cancel()
         for observer in audioSessionObservers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -130,6 +140,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     var currentTrack: MobileTrack? {
         guard let currentTrackID else { return nil }
         return tracks.first { $0.id == currentTrackID }
+    }
+
+    var activeProfileListeningHistoryEntries: [MobileListeningHistoryEntry] {
+        listeningHistoryEntries.filter { ($0.syncProfileID ?? "default") == syncProfileID }
     }
 
     private var tracksForActiveProfile: [MobileTrack] {
@@ -231,6 +245,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         recordHistory: Bool = true,
         startingAt requestedPosition: TimeInterval = 0
     ) {
+        if let activeListeningEntryID,
+           listeningHistoryEntries.first(where: { $0.id == activeListeningEntryID })?.trackID != track.id {
+            endListeningSession()
+        }
         stopTimer()
         if recordHistory, currentTrackID != track.id, let currentTrackID {
             history.append(currentTrackID)
@@ -256,6 +274,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             isPlaying = true
             position = resumePosition
             UserDefaults.standard.set(position, forKey: "Resonance.position")
+            beginListeningSession(for: track)
             startTimer()
             updateNowPlaying()
         } catch {
@@ -291,7 +310,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             }
             player.rate = playbackRate
             isPlaying = player.play()
-            if isPlaying { startTimer() }
+            if isPlaying {
+                if let currentTrack { beginListeningSession(for: currentTrack) }
+                startTimer()
+            }
         } catch {
             isPlaying = false
         }
@@ -299,6 +321,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func pausePlayback() {
+        updateListeningSession()
         if let player {
             player.pause()
             position = player.currentTime
@@ -306,13 +329,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
         stopTimer()
         isPlaying = false
+        save()
+        scheduleListeningHistorySync()
         updateNowPlaying()
     }
 
     func seek(to fraction: Double) {
         guard let player else { return }
+        updateListeningSession()
         player.currentTime = player.duration * min(max(fraction, 0), 1)
         position = player.currentTime
+        lastListeningPosition = position
         UserDefaults.standard.set(position, forKey: "Resonance.position")
         updateNowPlaying()
     }
@@ -384,6 +411,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func completePlaybackAtQueueEnd() {
+        endListeningSession()
         stopTimer()
         player?.currentTime = 0
         position = 0
@@ -513,10 +541,18 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     func remove(_ track: MobileTrack) {
         let removedCurrentTrack = currentTrackID == track.id
         if removedCurrentTrack {
+            endListeningSession()
             stopTimer()
             player?.stop()
             player = nil
             isPlaying = false
+        }
+        for index in listeningHistoryEntries.indices where listeningHistoryEntries[index].trackID == track.id {
+            listeningHistoryEntries[index].remoteSongID = listeningHistoryEntries[index].remoteSongID ?? track.remoteID
+            listeningHistoryEntries[index].title = listeningHistoryEntries[index].title ?? track.title
+            listeningHistoryEntries[index].artist = listeningHistoryEntries[index].artist ?? track.artist
+            listeningHistoryEntries[index].album = listeningHistoryEntries[index].album ?? track.album
+            listeningHistoryEntries[index].duration = listeningHistoryEntries[index].duration ?? track.duration
         }
         try? fileManager.removeItem(at: fileURL(for: track))
         if let artworkFilename = track.artworkFilename {
@@ -549,19 +585,23 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         defer { isRefreshingCatalog = false }
         await sync(songIDs: [])
         await syncPlaylistsNow()
+        await syncListeningHistoryNow()
     }
     func downloadSelected() async {
         guard !selectedRemoteSongIDs.isEmpty else { downloadDetail = "Select one or more songs first"; return }
         await sync(songIDs: selectedRemoteSongIDs)
         await syncPlaylistsNow()
+        await syncListeningHistoryNow()
     }
     func download(_ song: MobileRemoteSong) async {
         await sync(songIDs: [song.id])
         await syncPlaylistsNow()
+        await syncListeningHistoryNow()
     }
     func downloadAll() async {
         await sync(songIDs: nil)
         await syncPlaylistsNow()
+        await syncListeningHistoryNow()
     }
 
     func toggleRemoteSelection(_ song: MobileRemoteSong) {
@@ -911,6 +951,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     func runAutomaticPlaylistSync() async {
         await syncPlaylistsAutomatically()
+        await syncListeningHistoryNow()
         while !Task.isCancelled {
             do {
                 try await Task.sleep(for: .seconds(60))
@@ -919,6 +960,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             }
             guard !Task.isCancelled else { return }
             await syncPlaylistsAutomatically()
+            await syncListeningHistoryNow()
         }
     }
 
@@ -1111,6 +1153,256 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
     }
 
+    private func beginListeningSession(for track: MobileTrack) {
+        if let activeListeningEntryID,
+           let active = listeningHistoryEntries.first(where: { $0.id == activeListeningEntryID }),
+           active.trackID == track.id,
+           (active.syncProfileID ?? "default") == syncProfileID {
+            lastListeningPosition = player?.currentTime ?? position
+            return
+        }
+
+        let entry = MobileListeningHistoryEntry(
+            trackID: track.id,
+            syncProfileID: syncProfileID,
+            remoteSongID: track.remoteID,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            duration: track.duration
+        )
+        listeningHistoryEntries.append(entry)
+        listeningHistoryEntries = Self.cappedListeningHistory(listeningHistoryEntries)
+        activeListeningEntryID = entry.id
+        lastListeningPosition = player?.currentTime ?? position
+        lastPersistedListeningSeconds = 0
+        save()
+    }
+
+    private func updateListeningSession() {
+        let currentPosition = player?.currentTime ?? position
+        guard let activeListeningEntryID,
+              let index = listeningHistoryEntries.firstIndex(where: { $0.id == activeListeningEntryID }) else {
+            lastListeningPosition = currentPosition
+            return
+        }
+        let delta = currentPosition - lastListeningPosition
+        if isPlaying, delta > 0, delta < 5 {
+            listeningHistoryEntries[index].listenedSeconds += delta
+        }
+        lastListeningPosition = currentPosition
+        let listenedSeconds = listeningHistoryEntries[index].listenedSeconds
+        if listenedSeconds - lastPersistedListeningSeconds >= 15 {
+            lastPersistedListeningSeconds = listenedSeconds
+            save()
+            scheduleListeningHistorySync()
+        }
+    }
+
+    private func endListeningSession() {
+        updateListeningSession()
+        if activeListeningEntryID != nil {
+            save()
+            scheduleListeningHistorySync()
+        }
+        activeListeningEntryID = nil
+        lastListeningPosition = 0
+        lastPersistedListeningSeconds = 0
+    }
+
+    private static func cappedListeningHistory(
+        _ entries: [MobileListeningHistoryEntry]
+    ) -> [MobileListeningHistoryEntry] {
+        Dictionary(grouping: entries) { $0.syncProfileID ?? "default" }
+            .values
+            .flatMap { profileEntries in
+                profileEntries.sorted { $0.startedAt < $1.startedAt }.suffix(2_000)
+            }
+            .sorted { $0.startedAt < $1.startedAt }
+    }
+
+    private func scheduleListeningHistorySync() {
+        guard normalizedServer() != nil,
+              !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if isSyncingListeningHistory {
+            listeningHistorySyncPending = true
+            return
+        }
+        listeningHistorySyncDebounceTask?.cancel()
+        listeningHistorySyncDebounceTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            await self?.syncListeningHistoryNow()
+        }
+    }
+
+    func syncListeningHistoryNow() async {
+        guard !isSyncingListeningHistory else {
+            listeningHistorySyncPending = true
+            return
+        }
+        guard let baseURL = normalizedServer(),
+              !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        isSyncingListeningHistory = true
+        let profileID = syncProfileID
+        defer {
+            isSyncingListeningHistory = false
+            if listeningHistorySyncPending {
+                listeningHistorySyncPending = false
+                listeningHistorySyncTask = Task { [weak self] in
+                    await self?.syncListeningHistoryNow()
+                }
+            }
+        }
+
+        do {
+            try await uploadListeningHistory(profileID: profileID, baseURL: baseURL)
+
+            var components = URLComponents(
+                url: baseURL.appendingPathComponent("api/v1/listening-history"),
+                resolvingAgainstBaseURL: false
+            )
+            components?.queryItems = [URLQueryItem(name: "limit", value: "2000")]
+            guard let url = components?.url else { return }
+            let (data, response) = try await URLSession.shared.data(
+                for: listeningHistoryRequest(url: url, profileID: profileID)
+            )
+            guard let status = (response as? HTTPURLResponse)?.statusCode else {
+                throw URLError(.badServerResponse)
+            }
+            // Keep the client compatible with the currently deployed POST-only endpoint.
+            guard status != 404, status != 405 else { return }
+            guard status == 200 else { throw PlaylistServerError(status: status, message: nil) }
+            let document = try JSONDecoder().decode(MobileRemoteListeningHistoryDocument.self, from: data)
+            guard document.profileID == nil || document.profileID == profileID else {
+                throw URLError(.badServerResponse)
+            }
+            mergeRemoteListeningHistory(document.entries, profileID: profileID)
+        } catch is CancellationError {
+            return
+        } catch let error as URLError where error.code == .cancelled {
+            return
+        } catch {
+            // History synchronization must not interrupt playback or other server work.
+        }
+    }
+
+    private func uploadListeningHistory(profileID: String, baseURL: URL) async throws {
+        let entries = listeningHistoryEntries
+            .filter { ($0.syncProfileID ?? "default") == profileID }
+            .sorted { $0.startedAt < $1.startedAt }
+        for offset in stride(from: 0, to: entries.count, by: 500) {
+            let batch = Array(entries[offset..<min(offset + 500, entries.count)])
+            let uploadEntries = batch.map { entry in
+                let track = tracks.first { $0.id == entry.trackID }
+                return MobileListeningHistoryUploadEntry(
+                    id: entry.networkEventID,
+                    trackID: entry.trackID.uuidString,
+                    songID: entry.remoteSongID ?? track?.remoteID,
+                    startedAt: Self.listeningHistoryTimestamp(entry.startedAt),
+                    listenedSeconds: entry.listenedSeconds.isFinite
+                        ? max(0, entry.listenedSeconds)
+                        : 0,
+                    title: entry.title ?? track?.title,
+                    artist: entry.artist ?? track?.artist,
+                    album: entry.album ?? track?.album,
+                    durationSeconds: (entry.duration ?? track?.duration).flatMap {
+                        $0.isFinite && $0 >= 0 ? $0 : nil
+                    }
+                )
+            }
+            var request = listeningHistoryRequest(
+                url: baseURL.appendingPathComponent("api/v1/listening-history"),
+                profileID: profileID
+            )
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(
+                MobileListeningHistoryUploadDocument(entries: uploadEntries)
+            )
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let status = (response as? HTTPURLResponse)?.statusCode,
+                  (200..<300).contains(status) else {
+                throw URLError(.badServerResponse)
+            }
+        }
+    }
+
+    private func listeningHistoryRequest(url: URL, profileID: String) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(profileID, forHTTPHeaderField: "X-Resonance-Profile")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        return request
+    }
+
+    private func mergeRemoteListeningHistory(
+        _ remoteEntries: [MobileRemoteListeningHistoryEntry],
+        profileID: String
+    ) {
+        var merged = listeningHistoryEntries
+        var indexesByEventID = Dictionary(uniqueKeysWithValues: merged.enumerated().map {
+            ("\($0.element.syncProfileID ?? "default")#\($0.element.networkEventID)", $0.offset)
+        })
+        for remote in remoteEntries {
+            guard !remote.id.isEmpty,
+                  let startedAt = Self.listeningHistoryDate(remote.startedAt) else { continue }
+            let seconds = remote.listenedSeconds.isFinite ? max(0, remote.listenedSeconds) : 0
+            let localTrack = remote.songID.flatMap { songID in
+                tracks.first {
+                    $0.remoteID == songID && ($0.syncProfileID ?? "default") == profileID
+                }
+            }
+            let eventKey = "\(profileID)#\(remote.id)"
+            if let index = indexesByEventID[eventKey],
+               (merged[index].syncProfileID ?? "default") == profileID {
+                merged[index].listenedSeconds = max(merged[index].listenedSeconds, seconds)
+                merged[index].trackID = localTrack?.id ?? merged[index].trackID
+                merged[index].syncEventID = remote.id
+                merged[index].remoteSongID = remote.songID ?? merged[index].remoteSongID
+                merged[index].title = Self.nonEmptyHistoryText(remote.title) ?? merged[index].title
+                merged[index].artist = Self.nonEmptyHistoryText(remote.artist) ?? merged[index].artist
+                merged[index].album = Self.nonEmptyHistoryText(remote.album) ?? merged[index].album
+                merged[index].duration = remote.durationSeconds ?? merged[index].duration
+            } else {
+                let entry = MobileListeningHistoryEntry(
+                    trackID: localTrack?.id ?? UUID(uuidString: remote.trackID) ?? UUID(),
+                    startedAt: startedAt,
+                    listenedSeconds: seconds,
+                    syncProfileID: profileID,
+                    syncEventID: remote.id,
+                    remoteSongID: remote.songID,
+                    title: Self.nonEmptyHistoryText(remote.title) ?? localTrack?.title,
+                    artist: Self.nonEmptyHistoryText(remote.artist) ?? localTrack?.artist,
+                    album: Self.nonEmptyHistoryText(remote.album) ?? localTrack?.album,
+                    duration: remote.durationSeconds ?? localTrack?.duration
+                )
+                indexesByEventID[eventKey] = merged.count
+                merged.append(entry)
+            }
+        }
+        listeningHistoryEntries = Self.cappedListeningHistory(merged)
+        save()
+    }
+
+    private static func listeningHistoryTimestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    private static func listeningHistoryDate(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+        return ISO8601DateFormatter().date(from: value)
+    }
+
+    private static func nonEmptyHistoryText(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     func activateSyncProfile(named rawName: String) async -> Bool {
         let name = rawName
             .split(whereSeparator: \.isWhitespace)
@@ -1171,8 +1463,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         if id == syncProfileID {
             syncProfileName = name
             save()
+            scheduleListeningHistorySync()
             return
         }
+        let previousProfileID = syncProfileID
+        endListeningSession()
         let currentTrackBelongsToPreviousProfile = currentTrack.map {
             $0.remoteID != nil && ($0.syncProfileID ?? "default") != id
         } ?? false
@@ -1210,6 +1505,14 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         normalizeSystemPlaylist()
         save()
         updateNowPlaying()
+        listeningHistorySyncDebounceTask?.cancel()
+        listeningHistorySyncDebounceTask = nil
+        listeningHistorySyncTask?.cancel()
+        listeningHistorySyncTask = Task { [weak self] in
+            guard let self, let baseURL = self.normalizedServer() else { return }
+            try? await self.uploadListeningHistory(profileID: previousProfileID, baseURL: baseURL)
+            await self.syncListeningHistoryNow()
+        }
     }
 
     private func setProfileHeader(on request: inout URLRequest) {
@@ -1279,7 +1582,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             syncProfileName: syncProfileName,
             remoteLikedSongIDs: remoteLikedSongIDs,
             dirtyRemoteLikeSongIDs: dirtyRemoteLikeSongIDs,
-            likesDirty: likesDirty
+            likesDirty: likesDirty,
+            listeningHistory: listeningHistoryEntries
         )
         if let data = try? JSONEncoder().encode(stored) { try? data.write(to: stateURL, options: .atomic) }
     }
@@ -1299,6 +1603,20 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         playlistSyncServerURL = stored.playlistSyncServerURL
         syncProfileID = stored.syncProfileID ?? "default"
         syncProfileName = stored.syncProfileName ?? (syncProfileID == "default" ? "Default" : syncProfileID)
+        listeningHistoryEntries = Self.cappedListeningHistory(
+            (stored.listeningHistory ?? []).map { entry in
+                var scoped = entry
+                if scoped.syncProfileID == nil { scoped.syncProfileID = syncProfileID }
+                if let track = tracks.first(where: { $0.id == scoped.trackID }) {
+                    scoped.remoteSongID = scoped.remoteSongID ?? track.remoteID
+                    scoped.title = scoped.title ?? track.title
+                    scoped.artist = scoped.artist ?? track.artist
+                    scoped.album = scoped.album ?? track.album
+                    scoped.duration = scoped.duration ?? track.duration
+                }
+                return scoped
+            }
+        )
         let migratedLikedSongIDs = Set(favorites.compactMap { trackID in
             tracks.first(where: {
                 $0.id == trackID && ($0.syncProfileID ?? "default") == syncProfileID
@@ -1442,6 +1760,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                     return
                 }
                 self.position = player.currentTime
+                self.updateListeningSession()
                 UserDefaults.standard.set(self.position, forKey: "Resonance.position")
                 self.isPlaying = true
                 self.updateNowPlaying()
@@ -1534,6 +1853,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: (any Error)?) {
         Task { @MainActor [weak self] in
             guard let self, self.player === player else { return }
+            self.endListeningSession()
             self.stopTimer()
             self.isPlaying = false
             if self.activeQueue.count > 1 {

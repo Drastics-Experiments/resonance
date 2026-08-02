@@ -132,23 +132,69 @@ struct Track: Identifiable, Hashable, Codable {
 
 struct ListeningHistoryEntry: Identifiable, Codable, Hashable {
     let id: UUID
-    let trackID: UUID
+    var trackID: UUID
     let startedAt: Date
     var listenedSeconds: TimeInterval
     var syncProfileID: String?
+    var syncEventID: String?
+    var remoteSongID: String?
+    var title: String?
+    var artist: String?
+    var album: String?
+    var duration: TimeInterval?
 
     init(
         id: UUID = UUID(),
         trackID: UUID,
         startedAt: Date = .now,
         listenedSeconds: TimeInterval = 0,
-        syncProfileID: String? = nil
+        syncProfileID: String? = nil,
+        syncEventID: String? = nil,
+        remoteSongID: String? = nil,
+        title: String? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        duration: TimeInterval? = nil
     ) {
         self.id = id
         self.trackID = trackID
         self.startedAt = startedAt
         self.listenedSeconds = listenedSeconds
         self.syncProfileID = syncProfileID
+        self.syncEventID = syncEventID
+        self.remoteSongID = remoteSongID
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.duration = duration
+    }
+
+    var songIdentity: String {
+        Self.nonEmpty(remoteSongID)
+            ?? trackID.uuidString.lowercased()
+    }
+
+    var networkEventID: String {
+        Self.nonEmpty(syncEventID) ?? id.uuidString
+    }
+
+    func displayTrack(from tracksByID: [UUID: Track]) -> Track {
+        if let track = tracksByID[trackID] { return track }
+        return Track(
+            id: trackID,
+            title: Self.nonEmpty(title) ?? "Removed song",
+            artist: Self.nonEmpty(artist) ?? "Unknown artist",
+            album: Self.nonEmpty(album) ?? "Unknown album",
+            duration: duration.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil } ?? 0,
+            artwork: .midnight,
+            remoteID: remoteSongID,
+            syncProfileID: syncProfileID
+        )
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -234,9 +280,9 @@ struct ListeningHistoryCalendarSummary: Hashable {
         let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
         var todayListeningSeconds: TimeInterval = 0
         var todayListeningPlays = 0
-        var activeTrackIDs = Set<UUID>()
+        var activeTrackIDs = Set<String>()
         var seriesByTrackID: [
-            UUID: (
+            String: (
                 track: Track,
                 seconds: TimeInterval,
                 plays: Int,
@@ -265,10 +311,10 @@ struct ListeningHistoryCalendarSummary: Hashable {
             guard let dayIndex = dayIndexByDate[entryDate] else { continue }
             dailyHistory[dayIndex].seconds += seconds
             dailyHistory[dayIndex].plays += 1
-            activeTrackIDs.insert(entry.trackID)
+            activeTrackIDs.insert(entry.songIdentity)
 
-            guard let track = tracksByID[entry.trackID] else { continue }
-            var series = seriesByTrackID[track.id] ?? (
+            let track = entry.displayTrack(from: tracksByID)
+            var series = seriesByTrackID[entry.songIdentity] ?? (
                 track: track,
                 seconds: 0,
                 plays: 0,
@@ -280,7 +326,7 @@ struct ListeningHistoryCalendarSummary: Hashable {
             series.plays += 1
             series.days[dayIndex].seconds += seconds
             series.days[dayIndex].plays += 1
-            seriesByTrackID[track.id] = series
+            seriesByTrackID[entry.songIdentity] = series
         }
 
         days = dailyHistory
@@ -339,7 +385,7 @@ struct ListeningHistoryStatsSummary: Hashable {
         let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
         var total: TimeInterval = 0
         var playCount = 0
-        var songsByID: [UUID: (seconds: TimeInterval, plays: Int)] = [:]
+        var songsByID: [String: (track: Track, seconds: TimeInterval, plays: Int)] = [:]
         var artistsByName: [String: (seconds: TimeInterval, plays: Int)] = [:]
 
         for entry in entries {
@@ -349,13 +395,13 @@ struct ListeningHistoryStatsSummary: Hashable {
             total += seconds
             playCount += 1
 
-            var song = songsByID[entry.trackID] ?? (seconds: 0, plays: 0)
+            let displayTrack = entry.displayTrack(from: tracksByID)
+            var song = songsByID[entry.songIdentity] ?? (track: displayTrack, seconds: 0, plays: 0)
             song.seconds += seconds
             song.plays += 1
-            songsByID[entry.trackID] = song
+            songsByID[entry.songIdentity] = song
 
-            let rawArtist = tracksByID[entry.trackID]?.artist
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let rawArtist = displayTrack.artist.trimmingCharacters(in: .whitespacesAndNewlines)
             let artistName = rawArtist.isEmpty ? "Unknown artist" : rawArtist
             var artist = artistsByName[artistName] ?? (seconds: 0, plays: 0)
             artist.seconds += seconds
@@ -377,10 +423,9 @@ struct ListeningHistoryStatsSummary: Hashable {
                 return lhs.key.localizedStandardCompare(rhs.key) == .orderedAscending
             }
             .first?.key ?? "—"
-        songRanking = songsByID.compactMap { trackID, stats in
-            guard let track = tracksByID[trackID] else { return nil }
+        songRanking = songsByID.values.map { stats in
             return ListeningHistoryRankedSong(
-                track: track,
+                track: stats.track,
                 seconds: stats.seconds,
                 plays: stats.plays
             )

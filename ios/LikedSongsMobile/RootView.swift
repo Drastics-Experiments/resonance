@@ -1902,6 +1902,11 @@ private struct ServerConnectionSheet: View {
                         .onSubmit { focusedField = nil }
                         .textInputAutocapitalization(.words)
                         .autocorrectionDisabled()
+                    NavigationLink {
+                        MobileListeningHistoryView()
+                    } label: {
+                        Label("Listening History", systemImage: "clock.arrow.circlepath")
+                    }
                 } header: {
                     Text("Active Profile")
                 } footer: {
@@ -1969,6 +1974,98 @@ private struct ServerConnectionSheet: View {
                 }
             }
         }
+    }
+}
+
+private struct MobileListeningHistoryView: View {
+    @EnvironmentObject private var library: MusicLibrary
+
+    private var entries: [MobileListeningHistoryEntry] {
+        library.activeProfileListeningHistoryEntries.sorted { $0.startedAt > $1.startedAt }
+    }
+
+    private var totalSeconds: TimeInterval {
+        entries.reduce(0) { total, entry in
+            total + (entry.listenedSeconds.isFinite ? max(0, entry.listenedSeconds) : 0)
+        }
+    }
+
+    private var uniqueSongs: Int {
+        Set(entries.map { entry in
+            entry.remoteSongID ?? entry.trackID.uuidString
+        }).count
+    }
+
+    var body: some View {
+        List {
+            Section {
+                HStack(spacing: 0) {
+                    historyMetric(value: Self.durationText(totalSeconds), label: "Listened")
+                    Divider().frame(height: 38)
+                    historyMetric(value: "\(entries.count)", label: "Plays")
+                    Divider().frame(height: 38)
+                    historyMetric(value: "\(uniqueSongs)", label: "Songs")
+                }
+                .padding(.vertical, 6)
+            } footer: {
+                Text("Only activity for the \(library.syncProfileName) profile is shown and synchronized.")
+            }
+
+            if entries.isEmpty {
+                ContentUnavailableView(
+                    "No listening history",
+                    systemImage: "clock",
+                    description: Text("Songs you play with this profile will appear here.")
+                )
+            } else {
+                Section("Recent Plays") {
+                    ForEach(entries) { entry in
+                        let track = library.tracks.first { $0.id == entry.trackID }
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(nonEmpty(entry.title) ?? track?.title ?? "Removed song")
+                                .font(.body.weight(.semibold))
+                            Text(nonEmpty(entry.artist) ?? track?.artist ?? "Unknown artist")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            HStack {
+                                Text(entry.startedAt.formatted(date: .abbreviated, time: .shortened))
+                                Spacer()
+                                Text(Self.durationText(entry.listenedSeconds))
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 3)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Listening History")
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable { await library.syncListeningHistoryNow() }
+        .task { await library.syncListeningHistoryNow() }
+    }
+
+    private func historyMetric(value: String, label: String) -> some View {
+        VStack(spacing: 3) {
+            Text(value).font(.headline.monospacedDigit())
+            Text(label).font(.caption).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func nonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func durationText(_ seconds: TimeInterval) -> String {
+        guard seconds.isFinite, seconds > 0 else { return "0m" }
+        let totalMinutes = Int(seconds / 60)
+        if totalMinutes < 60 { return "\(max(totalMinutes, 1))m" }
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        return minutes == 0 ? "\(hours)h" : "\(hours)h \(minutes)m"
     }
 }
 

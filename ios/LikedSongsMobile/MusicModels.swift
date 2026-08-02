@@ -49,6 +49,114 @@ struct MobileTrack: Identifiable, Codable, Hashable {
     }
 }
 
+struct MobileListeningHistoryEntry: Identifiable, Codable, Hashable {
+    let id: UUID
+    var trackID: UUID
+    let startedAt: Date
+    var listenedSeconds: TimeInterval
+    var syncProfileID: String?
+    var syncEventID: String?
+    var remoteSongID: String?
+    var title: String?
+    var artist: String?
+    var album: String?
+    var duration: TimeInterval?
+
+    init(
+        id: UUID = UUID(),
+        trackID: UUID,
+        startedAt: Date = .now,
+        listenedSeconds: TimeInterval = 0,
+        syncProfileID: String? = nil,
+        syncEventID: String? = nil,
+        remoteSongID: String? = nil,
+        title: String? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        duration: TimeInterval? = nil
+    ) {
+        self.id = id
+        self.trackID = trackID
+        self.startedAt = startedAt
+        self.listenedSeconds = listenedSeconds
+        self.syncProfileID = syncProfileID
+        self.syncEventID = syncEventID
+        self.remoteSongID = remoteSongID
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.duration = duration
+    }
+
+    var networkEventID: String {
+        let value = syncEventID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? id.uuidString : value
+    }
+}
+
+struct MobileListeningHistoryUploadDocument: Encodable {
+    let client = "ios"
+    let entries: [MobileListeningHistoryUploadEntry]
+}
+
+struct MobileListeningHistoryUploadEntry: Encodable {
+    let id: String
+    let trackID: String
+    let songID: String?
+    let startedAt: String
+    let listenedSeconds: TimeInterval
+    let title: String?
+    let artist: String?
+    let album: String?
+    let durationSeconds: TimeInterval?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case trackID = "track_id"
+        case songID = "song_id"
+        case startedAt = "started_at"
+        case listenedSeconds = "listened_seconds"
+        case title
+        case artist
+        case album
+        case durationSeconds = "duration_seconds"
+    }
+}
+
+struct MobileRemoteListeningHistoryDocument: Decodable {
+    let profileID: String?
+    let entries: [MobileRemoteListeningHistoryEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case profileID = "profile_id"
+        case entries
+    }
+}
+
+struct MobileRemoteListeningHistoryEntry: Decodable {
+    let id: String
+    let trackID: String
+    let songID: String?
+    let startedAt: String
+    let listenedSeconds: TimeInterval
+    let title: String?
+    let artist: String?
+    let album: String?
+    let durationSeconds: TimeInterval?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case trackID = "track_id"
+        case songID = "song_id"
+        case startedAt = "started_at"
+        case listenedSeconds = "listened_seconds"
+        case title
+        case artist
+        case album
+        case durationSeconds = "duration_seconds"
+    }
+}
+
 struct MobilePlaylist: Identifiable, Codable, Hashable {
     let id: UUID
     var name: String
@@ -266,4 +374,5 @@ struct MobileStoredLibrary: Codable {
     var remoteLikedSongIDs: Set<String>?
     var dirtyRemoteLikeSongIDs: Set<String>?
     var likesDirty: Bool?
+    var listeningHistory: [MobileListeningHistoryEntry]?
 }

@@ -5,6 +5,7 @@ import {
   filterTracks,
   formatHistoryWindowLabel,
   formatTime,
+  mergeListeningHistory,
   mergePlaylistDocument,
   mergeSyncedTracks,
   nextIndex,
@@ -429,7 +430,7 @@ function historyDayDetailsMarkup(summary, dayKey) {
     .map((series) => {
       const activity = series.days[dayIndex];
       const track = state.tracks.find((item) => item.id === series.trackID);
-      return { activity, track, trackID: series.trackID };
+      return { activity, track, trackID: series.trackID, series };
     })
     .filter((item) => item.activity.seconds > 0 || item.activity.plays > 0)
     .sort((left, right) => right.activity.seconds - left.activity.seconds || right.activity.plays - left.activity.plays);
@@ -441,10 +442,10 @@ function historyDayDetailsMarkup(summary, dayKey) {
     year: "numeric",
     ...(hourly ? { hour: "numeric" } : {}),
   }).format(day.date);
-  const songRows = songs.map(({ activity, track, trackID }, index) => {
-    const title = track?.title || "Removed song";
-    const artist = track?.artist || "Unknown artist";
-    const album = track?.album || "Unknown album";
+  const songRows = songs.map(({ activity, track, trackID, series }, index) => {
+    const title = track?.title || series.title || "Removed song";
+    const artist = track?.artist || series.artist || "Unknown artist";
+    const album = track?.album || series.album || "Unknown album";
     return `<div class="history-day-song" role="row" data-history-track="${escapeHTML(trackID)}">
       <span class="history-day-song-number" role="cell">${index + 1}</span>
       <span role="cell">${artwork(track)}</span>
@@ -629,8 +630,8 @@ function renderListeningHistory() {
   const topTrack = state.tracks.find((track) => track.id === allTimeStats.topTrackID);
   const rankedSongs = allTimeStats.songRanking.map((song, index) => {
     const track = state.tracks.find((item) => item.id === song.trackID);
-    const title = track?.title || "Removed song";
-    const artist = track?.artist || "Unknown artist";
+    const title = track?.title || song.title || "Removed song";
+    const artist = track?.artist || song.artist || "Unknown artist";
     return `<article class="history-ranked-song">
       <span class="history-ranked-position">#${index + 1}</span>
       ${artwork(track)}
@@ -639,8 +640,8 @@ function renderListeningHistory() {
       <em>${escapeHTML(historyListenedTime(song.seconds))} · ${song.plays.toLocaleString()} ${song.plays === 1 ? "play" : "plays"}</em>
     </article>`;
   }).join("");
-  const topSongTitle = topTrack?.title || (allTimeStats.topTrackID ? "Removed song" : "No listening yet");
-  const topSongArtist = topTrack?.artist || (allTimeStats.topTrackID ? "Unknown artist" : "Play a song to build your ranking");
+  const topSongTitle = topTrack?.title || allTimeStats.songRanking[0]?.title || (allTimeStats.topTrackID ? "Removed song" : "No listening yet");
+  const topSongArtist = topTrack?.artist || allTimeStats.songRanking[0]?.artist || (allTimeStats.topTrackID ? "Unknown artist" : "Play a song to build your ranking");
   const dialog = $("#listeningHistoryDialog");
   const previousDialogScroll = dialog.classList.contains("day-expanded") ? dialog.scrollTop : 0;
   const stats = $("#listeningHistoryStats");
@@ -726,6 +727,9 @@ function openListeningHistory() {
   ensureListeningHistorySelection();
   renderListeningHistory();
   $("#listeningHistoryDialog").showModal();
+  void syncListeningHistoryNow({ force: true }).then(() => {
+    if ($("#listeningHistoryDialog").open) renderListeningHistory();
+  });
 }
 
 function beginListeningSession() {
@@ -737,8 +741,13 @@ function beginListeningSession() {
     id: crypto.randomUUID(),
     trackID: track.id,
     profileID: activeProfileID(),
+    remoteID: track.remoteID || null,
     startedAt: new Date().toISOString(),
     listenedSeconds: 0,
+    title: track.title || null,
+    artist: track.artist || null,
+    album: track.album || null,
+    duration: Number.isFinite(Number(track.duration)) ? Number(track.duration) : null,
   };
   state.listeningHistory = [...state.listeningHistory, entry].slice(-2000);
   activeListeningEntryID = entry.id;
@@ -788,13 +797,15 @@ function pendingListeningHistoryBatches() {
       entry: {
         id: entry.id,
         trackID: entry.trackID,
-        remoteID: optionalText(track?.remoteID, 128),
+        remoteID: optionalText(track?.remoteID ?? entry.remoteID, 128),
         startedAt: entry.startedAt,
         listenedSeconds,
-        title: optionalText(track?.title, 500),
-        artist: optionalText(track?.artist, 500),
-        album: optionalText(track?.album, 500),
-        duration: Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60 ? duration : null,
+        title: optionalText(track?.title ?? entry.title, 500),
+        artist: optionalText(track?.artist ?? entry.artist, 500),
+        album: optionalText(track?.album ?? entry.album, 500),
+        duration: Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60
+          ? duration
+          : (Number.isFinite(Number(entry.duration)) ? Number(entry.duration) : null),
       },
     };
     if (!entriesByProfile.has(profileID)) entriesByProfile.set(profileID, []);
@@ -811,7 +822,7 @@ function pendingListeningHistoryBatches() {
 
 function scheduleListeningHistorySync(delay = 1500) {
   clearTimeout(listeningHistorySyncTimer);
-  if (!serverToken.trim() || !state.listeningHistory.some((entry) => Number(entry.listenedSeconds) > 0)) return;
+  if (!serverToken.trim() || !state.serverURL) return;
   const retryDelay = Math.max(0, listeningHistoryRetryAt - Date.now());
   listeningHistorySyncTimer = setTimeout(() => {
     listeningHistorySyncTimer = null;
@@ -849,6 +860,31 @@ async function syncListeningHistoryNow({ force = false } = {}) {
       } catch {
         hadFailure = true;
       }
+    }
+    const pullProfileID = activeProfileID();
+    try {
+      const result = await api.fetchListeningHistory({
+        baseURL: state.serverURL,
+        token: serverToken,
+        profileID: pullProfileID,
+      });
+      if (result?.supported !== false) {
+        state.listeningHistory = mergeListeningHistory(state, pullProfileID, result?.entries);
+        const baseKey = normalizedServerKey(state.serverURL);
+        for (const entry of result?.entries || []) {
+          const eventID = typeof entry?.id === "string" ? entry.id : "";
+          if (!eventID) continue;
+          const listenedSeconds = Math.max(0, Number(entry.listenedSeconds ?? entry.listened_seconds) || 0);
+          listeningHistorySyncedSeconds.set(
+            `${baseKey}#profile=${pullProfileID}#event=${eventID}`,
+            listenedSeconds,
+          );
+        }
+        await persist({ refreshSidebar: false });
+        if ($("#listeningHistoryDialog").open) renderListeningHistory();
+      }
+    } catch {
+      hadFailure = true;
     }
     listeningHistoryRetryAt = hadFailure ? Date.now() + LISTENING_HISTORY_RETRY_DELAY : 0;
     return !hadFailure;

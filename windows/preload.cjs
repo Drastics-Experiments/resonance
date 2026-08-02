@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld("likedSongs", {
   fetchPlaylists: (settings) => ipcRenderer.invoke("server:playlists:get", settings),
   putPlaylists: (settings) => ipcRenderer.invoke("server:playlists:put", settings),
   postListeningHistory: (settings) => ipcRenderer.invoke("server:listening-history:post", settings),
+  fetchListeningHistory: (settings) => ipcRenderer.invoke("server:listening-history:get", settings),
   syncServer: (settings) => ipcRenderer.invoke("server:sync", settings),
   uploadServer: (settings) => ipcRenderer.invoke("server:upload", settings),
   cancelServerTransfer: () => ipcRenderer.invoke("server:cancel-transfer"),

@@ -143,6 +143,10 @@ function safeFilename(value) {
 }
 
 function safeListeningHistory(value) {
+  const optionalText = (text, maximumLength = 500) => {
+    const normalized = typeof text === "string" ? text.trim() : "";
+    return normalized ? normalized.slice(0, maximumLength) : null;
+  };
   return (Array.isArray(value) ? value : [])
     .filter((entry) =>
       entry
@@ -153,10 +157,17 @@ function safeListeningHistory(value) {
       id: entry.id,
       trackID: entry.trackID,
       profileID: typeof entry.profileID === "string" && entry.profileID ? entry.profileID : "default",
+      remoteID: optionalText(entry.remoteID, 128),
       startedAt: new Date(entry.startedAt).toISOString(),
       listenedSeconds: Math.max(0, Number(entry.listenedSeconds) || 0),
+      title: optionalText(entry.title),
+      artist: optionalText(entry.artist),
+      album: optionalText(entry.album),
+      duration: Number.isFinite(Number(entry.duration)) && Number(entry.duration) >= 0
+        ? Number(entry.duration)
+        : null,
     }))
-    .slice(-2000);
+    .slice(-10000);
 }
 
 async function ensureDirectories() {
@@ -890,6 +901,24 @@ ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token,
   if (response.status === 404) return { supported: false, accepted: 0 };
   if (!response.ok) throw await serverResponseError(response);
   return { supported: true, ...(await response.json()) };
+});
+
+ipcMain.handle("server:listening-history:get", async (_event, { baseURL, token, profileID }) => {
+  if (!token) throw new Error("Enter the server access token.");
+  const base = normalizeBaseURL(baseURL);
+  const response = await fetch(new URL("api/v1/listening-history?limit=2000", base), {
+    headers: profileHeaders(token, profileID),
+  });
+  if (response.status === 404 || response.status === 405) {
+    return { supported: false, profile_id: profileID || "default", entries: [] };
+  }
+  if (!response.ok) throw await serverResponseError(response);
+  const document = await response.json();
+  return {
+    supported: true,
+    profile_id: typeof document?.profile_id === "string" ? document.profile_id : (profileID || "default"),
+    entries: Array.isArray(document?.entries) ? document.entries : [],
+  };
 });
 
 ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existing = [], songIDs = null }) => {

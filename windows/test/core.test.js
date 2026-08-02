@@ -8,6 +8,7 @@ import {
   filterTracks,
   formatHistoryWindowLabel,
   formatTime,
+  mergeListeningHistory,
   mergePlaylistDocument,
   mergeSyncedTracks,
   nextIndex,
@@ -411,9 +412,11 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(preloadSource, /onPrepareToClose:[\s\S]+app:prepare-close/);
   assert.match(preloadSource, /readyToClose:[\s\S]+app:close-ready/);
   assert.match(preloadSource, /postListeningHistory:[\s\S]+server:listening-history:post/);
+  assert.match(preloadSource, /fetchListeningHistory:[\s\S]+server:listening-history:get/);
   assert.match(mainSource, /function safeListeningHistory\(value\)/);
   assert.match(mainSource, /listeningHistory: safeListeningHistory\(state\.listeningHistory\)/);
   assert.match(mainSource, /ipcMain\.handle\("server:listening-history:post"/);
+  assert.match(mainSource, /ipcMain\.handle\("server:listening-history:get"/);
   assert.match(mainSource, /api\/v1\/listening-history/);
   assert.match(mainSource, /JSON\.stringify\(\{ client: "windows", entries \}\)/);
   assert.match(mainSource, /response\.status === 404[\s\S]+supported: false/);
@@ -421,6 +424,8 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /profileID: activeProfileID\(\)/);
   assert.match(appSource, /function pendingListeningHistoryBatches\(\)/);
   assert.match(appSource, /api\.postListeningHistory\(\{/);
+  assert.match(appSource, /api\.fetchListeningHistory\(\{/);
+  assert.match(appSource, /mergeListeningHistory\(state, pullProfileID/);
   assert.match(appSource, /result\?\.supported === false/);
   assert.match(appSource, /scheduleListeningHistorySync\(\)/);
   assert.match(appSource, /syncListeningHistoryNow\(\{ force: true \}\)/);
@@ -574,6 +579,50 @@ test("summarizes persisted listening history by local day", () => {
   const previousWindow = summarizeListeningHistory(state, 7, now, 1);
   assert.equal(previousWindow.days.at(-1).date.getDate(), 23);
   assert.equal(previousWindow.totalSeconds, 0);
+});
+
+test("merges downloaded listening history only into its profile and maps shared songs locally", () => {
+  const state = normalizeState({
+    syncProfileID: "alpha",
+    tracks: [
+      { id: "local-song", remoteID: "server-song", syncProfileID: "alpha", title: "Local title", artist: "Local artist" },
+    ],
+    listeningHistory: [
+      { id: "same-event", trackID: "local-song", profileID: "alpha", startedAt: "2026-07-30T17:00:00Z", listenedSeconds: 20 },
+      { id: "default-event", trackID: "default-song", profileID: "default", startedAt: "2026-07-30T18:00:00Z", listenedSeconds: 15 },
+    ],
+  });
+  state.listeningHistory = mergeListeningHistory(state, "alpha", [
+    {
+      id: "same-event",
+      track_id: "other-device-track",
+      song_id: "server-song",
+      started_at: "2026-07-30T17:00:00Z",
+      listened_seconds: 45,
+      title: "Server title",
+      artist: "Server artist",
+    },
+    {
+      id: "remote-event",
+      track_id: "remote-only-track",
+      started_at: "2026-07-30T19:00:00Z",
+      listened_seconds: 30,
+      title: "Remote only",
+      artist: "Remote artist",
+    },
+  ]);
+
+  assert.equal(state.listeningHistory.length, 3);
+  const merged = state.listeningHistory.find((entry) => entry.id === "same-event");
+  assert.equal(merged.profileID, "alpha");
+  assert.equal(merged.trackID, "local-song");
+  assert.equal(merged.listenedSeconds, 45);
+  assert.equal(state.listeningHistory.find((entry) => entry.id === "default-event").profileID, "default");
+  const stats = summarizeListeningStats(state, new Date("2026-07-30T20:00:00Z"));
+  assert.equal(stats.totalSeconds, 75);
+  assert.equal(stats.plays, 2);
+  assert.equal(stats.topArtist, "Local artist");
+  assert.equal(stats.songRanking.find((song) => song.trackID === "remote-only-track").title, "Remote only");
 });
 
 test("summarizes all-time listening stats independently of the graph window", () => {
