@@ -29,12 +29,25 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published var shuffleEnabled = false { didSet { UserDefaults.standard.set(shuffleEnabled, forKey: "Resonance.shuffle") } }
     @Published var repeatEnabled = false { didSet { UserDefaults.standard.set(repeatEnabled, forKey: "Resonance.repeat") } }
     @Published var searchText = ""
-    @Published var serverURL = "https://music.unblocked.mov"
-    @Published var serverToken = "" { didSet { if !serverToken.isEmpty { Self.saveToken(serverToken, account: "client") } } }
+    @Published var serverURL = "https://music.unblocked.mov" {
+        didSet {
+            if serverURL != oldValue { isServerConnected = false }
+        }
+    }
+    @Published var serverToken = "" {
+        didSet {
+            if serverToken.isEmpty {
+                isServerConnected = false
+            } else {
+                Self.saveToken(serverToken, account: "client")
+            }
+        }
+    }
     @Published var serverAdminToken = "" { didSet { if !serverAdminToken.isEmpty { Self.saveToken(serverAdminToken, account: "admin") } } }
     @Published var remoteSongs: [MobileRemoteSong] = []
     @Published var selectedRemoteSongIDs: Set<String> = []
     @Published var serverMessage = "Not connected"
+    @Published private(set) var isServerConnected = false
     @Published var isSyncing = false
     @Published var isDownloading = false
     @Published var isUploading = false
@@ -45,6 +58,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published var uploadDetail = "Idle"
     @Published var isSyncingPlaylists = false
     @Published var playlistSyncDetail = "Not synced"
+    @Published var syncProfileID = "default"
+    @Published var syncProfileName = "Default"
 
     private let fileManager = FileManager.default
     private let root: URL
@@ -67,6 +82,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var deletedPlaylistIDs: Set<UUID> = []
     private var playlistSyncServerURL: String?
     private var playlistSyncTask: Task<Void, Never>?
+    private var remoteLikedSongIDs: Set<String> = []
+    private var dirtyRemoteLikeSongIDs: Set<String> = []
+    private var likesMutationGeneration: UInt64 = 0
+    private var likesDirty = false
 
     private struct EmbeddedMetadata {
         var title: String?
@@ -113,10 +132,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         return tracks.first { $0.id == currentTrackID }
     }
 
+    private var tracksForActiveProfile: [MobileTrack] {
+        tracks.filter {
+            $0.remoteID == nil || ($0.syncProfileID ?? "default") == syncProfileID
+        }
+    }
+
     var filteredTracks: [MobileTrack] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return tracks }
-        return tracks.filter {
+        guard !query.isEmpty else { return tracksForActiveProfile }
+        return tracksForActiveProfile.filter {
             $0.title.localizedCaseInsensitiveContains(query)
                 || $0.artist.localizedCaseInsensitiveContains(query)
                 || $0.album.localizedCaseInsensitiveContains(query)
@@ -161,12 +186,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             }
         }
         normalizeSystemPlaylist()
-        if currentTrackID == nil { currentTrackID = tracks.first?.id }
+        if currentTrackID == nil { currentTrackID = tracksForActiveProfile.first?.id }
         save()
     }
 
     func play(_ track: MobileTrack) {
-        play(track, in: tracks)
+        play(track, in: tracksForActiveProfile)
     }
 
     func play(_ track: MobileTrack, in queue: [MobileTrack], playlistID: UUID? = nil) {
@@ -206,6 +231,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         recordHistory: Bool = true,
         startingAt requestedPosition: TimeInterval = 0
     ) {
+        stopTimer()
         if recordHistory, currentTrackID != track.id, let currentTrackID {
             history.append(currentTrackID)
         }
@@ -217,7 +243,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             next.volume = Float(volume)
             next.rate = playbackRate
             next.prepareToPlay()
-            let resumePosition = min(max(requestedPosition, 0), next.duration)
+            let clampedPosition = min(max(requestedPosition, 0), next.duration)
+            let resumePosition = next.duration > 0 && clampedPosition >= next.duration ? 0 : clampedPosition
             next.currentTime = resumePosition
             guard next.play() else {
                 isPlaying = false
@@ -228,9 +255,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             UserDefaults.standard.set(track.id.uuidString, forKey: "Resonance.currentTrack")
             isPlaying = true
             position = resumePosition
+            UserDefaults.standard.set(position, forKey: "Resonance.position")
             startTimer()
             updateNowPlaying()
         } catch {
+            stopTimer()
             isPlaying = false
         }
     }
@@ -245,11 +274,21 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     func resumePlayback() {
         guard let player else {
-            if let track = currentTrack ?? tracks.first { play(track) }
+            guard let track = currentTrack ?? tracksForActiveProfile.first else { return }
+            if playbackQueue.isEmpty {
+                playbackQueue = tracksForActiveProfile.map(\.id)
+                playbackPlaylistID = nil
+            }
+            let resumePosition = track.id == currentTrackID ? position : 0
+            startPlayback(track, recordHistory: false, startingAt: resumePosition)
             return
         }
         do {
             try AVAudioSession.sharedInstance().setActive(true)
+            if player.duration > 0, player.currentTime >= player.duration {
+                player.currentTime = 0
+                position = 0
+            }
             player.rate = playbackRate
             isPlaying = player.play()
             if isPlaying { startTimer() }
@@ -260,7 +299,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func pausePlayback() {
-        player?.pause()
+        if let player {
+            player.pause()
+            position = player.currentTime
+            UserDefaults.standard.set(position, forKey: "Resonance.position")
+        }
+        stopTimer()
         isPlaying = false
         updateNowPlaying()
     }
@@ -269,6 +313,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         guard let player else { return }
         player.currentTime = player.duration * min(max(fraction, 0), 1)
         position = player.currentTime
+        UserDefaults.standard.set(position, forKey: "Resonance.position")
         updateNowPlaying()
     }
 
@@ -304,16 +349,71 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         startPlayback(queue[(index - 1 + queue.count) % queue.count], recordHistory: false)
     }
 
+    private func advanceAfterFinishing() {
+        stopTimer()
+        guard let track = currentTrack else {
+            completePlaybackAtQueueEnd()
+            return
+        }
+        if repeatEnabled {
+            startPlayback(track, recordHistory: false)
+            return
+        }
+
+        let queue = activeQueue
+        guard !queue.isEmpty else {
+            completePlaybackAtQueueEnd()
+            return
+        }
+        if shuffleEnabled {
+            guard queue.count > 1,
+                  let nextTrack = queue.filter({ $0.id != currentTrackID }).randomElement() else {
+                completePlaybackAtQueueEnd()
+                return
+            }
+            startPlayback(nextTrack)
+            return
+        }
+
+        guard let index = queue.firstIndex(where: { $0.id == currentTrackID }),
+              queue.indices.contains(index + 1) else {
+            completePlaybackAtQueueEnd()
+            return
+        }
+        startPlayback(queue[index + 1])
+    }
+
+    private func completePlaybackAtQueueEnd() {
+        stopTimer()
+        player?.currentTime = 0
+        position = 0
+        UserDefaults.standard.set(position, forKey: "Resonance.position")
+        isPlaying = false
+        updateNowPlaying()
+    }
+
     private var activeQueue: [MobileTrack] {
-        let queuedTracks = playbackQueue.compactMap { id in tracks.first { $0.id == id } }
+        let activeTrackIDs = Set(tracksForActiveProfile.map(\.id))
+        let queuedTracks: [MobileTrack] = playbackQueue.compactMap { id in
+            guard activeTrackIDs.contains(id) else { return nil }
+            return tracks.first { $0.id == id }
+        }
         if playbackPlaylistID != nil { return queuedTracks }
-        return queuedTracks.isEmpty ? tracks : queuedTracks
+        return queuedTracks.isEmpty ? tracksForActiveProfile : queuedTracks
     }
 
     func toggleFavorite(_ track: MobileTrack) {
-        if favorites.contains(track.id) { favorites.remove(track.id) } else { favorites.insert(track.id) }
+        let willLike = !favorites.contains(track.id)
+        if willLike { favorites.insert(track.id) } else { favorites.remove(track.id) }
+        if let remoteID = track.remoteID {
+            likesMutationGeneration &+= 1
+            if willLike { remoteLikedSongIDs.insert(remoteID) } else { remoteLikedSongIDs.remove(remoteID) }
+            dirtyRemoteLikeSongIDs.insert(remoteID)
+            likesDirty = true
+        }
         normalizeSystemPlaylist()
         save()
+        schedulePlaylistSync()
     }
 
     func createPlaylist(_ name: String) {
@@ -336,7 +436,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
         if playbackPlaylistID == playlist.id {
             playbackPlaylistID = nil
-            playbackQueue = tracks.map(\.id)
+            playbackQueue = tracksForActiveProfile.map(\.id)
         }
 
         save()
@@ -411,7 +511,13 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func remove(_ track: MobileTrack) {
-        if currentTrackID == track.id { player?.stop(); player = nil; isPlaying = false }
+        let removedCurrentTrack = currentTrackID == track.id
+        if removedCurrentTrack {
+            stopTimer()
+            player?.stop()
+            player = nil
+            isPlaying = false
+        }
         try? fileManager.removeItem(at: fileURL(for: track))
         if let artworkFilename = track.artworkFilename {
             try? fileManager.removeItem(at: artworkDirectory.appendingPathComponent(artworkFilename))
@@ -422,8 +528,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         history.removeAll { $0 == track.id }
         favorites.remove(track.id)
         for index in playlists.indices { playlists[index].trackIDs.removeAll { $0 == track.id } }
-        currentTrackID = tracks.first?.id
-        position = 0
+        if removedCurrentTrack {
+            currentTrackID = tracksForActiveProfile.first?.id
+            position = 0
+            UserDefaults.standard.set(position, forKey: "Resonance.position")
+            if let currentTrackID {
+                UserDefaults.standard.set(currentTrackID.uuidString, forKey: "Resonance.currentTrack")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "Resonance.currentTrack")
+            }
+            updateNowPlaying()
+        }
         normalizeSystemPlaylist()
         save()
     }
@@ -455,20 +570,36 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func isSynced(_ song: MobileRemoteSong) -> Bool {
-        tracks.contains { $0.remoteID == song.id }
+        tracks.contains {
+            $0.remoteID == song.id && ($0.syncProfileID ?? "default") == syncProfileID
+        }
     }
 
     private func sync(songIDs: Set<String>?) async {
-        guard let baseURL = normalizedServer() else { serverMessage = "Enter a valid server URL."; return }
-        guard !serverToken.isEmpty else { serverMessage = "Enter the access token."; return }
+        guard let baseURL = normalizedServer() else {
+            isServerConnected = false
+            remoteSongs.removeAll()
+            serverMessage = "Enter a valid server URL."
+            return
+        }
+        guard !serverToken.isEmpty else {
+            isServerConnected = false
+            remoteSongs.removeAll()
+            serverMessage = "Enter the access token."
+            return
+        }
         isSyncing = true
         defer { isSyncing = false }
+        var reachedCatalog = false
         do {
             var catalogRequest = URLRequest(url: baseURL.appendingPathComponent("api/v1/songs"))
             catalogRequest.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
+            setProfileHeader(on: &catalogRequest)
             let (catalogData, response) = try await URLSession.shared.data(for: catalogRequest)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
             let catalog = try JSONDecoder().decode(MobileRemoteCatalog.self, from: catalogData)
+            reachedCatalog = true
+            isServerConnected = true
             remoteSongs = catalog.songs
             selectedRemoteSongIDs.formIntersection(Set(catalog.songs.map(\.id)))
             if songIDs == nil || !(songIDs?.isEmpty ?? true) {
@@ -485,46 +616,86 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 downloadProgress = 0
                 defer { isDownloading = false }
                 var completed = 0
+                var failed = 0
+                var processed = 0
+                var downloadedSongIDs = Set<String>()
                 for song in songs {
+                    defer {
+                        processed += 1
+                        downloadProgress = Double(processed) / Double(max(songs.count, 1))
+                    }
                     downloadDetail = "Downloading \(completed + 1) of \(songs.count) • \(song.filename)"
-                    guard let remoteURL = URL(string: song.downloadURL, relativeTo: baseURL)?.absoluteURL else { continue }
+                    guard let remoteURL = URL(string: song.downloadURL, relativeTo: baseURL)?.absoluteURL else {
+                        failed += 1
+                        continue
+                    }
                     var request = URLRequest(url: remoteURL)
-                    request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
-                    let (data, downloadResponse) = try await URLSession.shared.data(for: request)
-                    guard (downloadResponse as? HTTPURLResponse)?.statusCode == 200 else { continue }
-                    let filename = uniqueFilename(song.filename)
-                    let destination = musicDirectory.appendingPathComponent(filename)
-                    try data.write(to: destination, options: .atomic)
-                    let audio = try AVAudioPlayer(contentsOf: destination)
-                    let metadata = await embeddedMetadata(at: destination)
-                    let trackID = UUID()
-                    tracks.append(MobileTrack(
-                        id: trackID,
-                        title: metadata.title ?? song.title,
-                        artist: metadata.artist ?? usefulFallback(song.artist, default: "Unknown Artist"),
-                        album: metadata.album ?? usefulFallback(song.album, default: "Server Library"),
-                        duration: metadata.duration ?? audio.duration,
-                        relativePath: filename,
-                        remoteID: song.id,
-                        sourceServer: baseURL.absoluteString,
-                        artworkFilename: saveArtwork(metadata.artworkData, for: trackID),
-                        artworkScanComplete: true
-                    ))
-                    completed += 1
-                    downloadProgress = Double(completed) / Double(max(songs.count, 1))
+                    if sameOrigin(remoteURL, baseURL) {
+                        request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
+                        setProfileHeader(on: &request)
+                    }
+                    do {
+                        let (temporaryURL, downloadResponse) = try await URLSession.shared.download(for: request)
+                        defer { try? fileManager.removeItem(at: temporaryURL) }
+                        guard (downloadResponse as? HTTPURLResponse)?.statusCode == 200 else {
+                            failed += 1
+                            continue
+                        }
+
+                        let audio = try AVAudioPlayer(contentsOf: temporaryURL)
+                        let metadata = await embeddedMetadata(at: temporaryURL)
+                        let filename = uniqueFilename(song.filename)
+                        let destination = musicDirectory.appendingPathComponent(filename)
+                        try fileManager.moveItem(at: temporaryURL, to: destination)
+                        let trackID = UUID()
+                        tracks.append(MobileTrack(
+                            id: trackID,
+                            title: metadata.title ?? song.title,
+                            artist: metadata.artist ?? usefulFallback(song.artist, default: "Unknown Artist"),
+                            album: metadata.album ?? usefulFallback(song.album, default: "Server Library"),
+                            duration: metadata.duration ?? audio.duration,
+                            relativePath: filename,
+                            remoteID: song.id,
+                            sourceServer: baseURL.absoluteString,
+                            syncProfileID: syncProfileID,
+                            artworkFilename: saveArtwork(metadata.artworkData, for: trackID),
+                            artworkScanComplete: true
+                        ))
+                        downloadedSongIDs.insert(song.id)
+                        completed += 1
+                    } catch is CancellationError {
+                        return
+                    } catch let error as URLError where error.code == .cancelled {
+                        return
+                    } catch {
+                        failed += 1
+                    }
                 }
                 normalizeSystemPlaylist()
                 hydrateRemotePlaylistTracks()
+                hydrateRemoteLikedTracks()
                 save()
-                selectedRemoteSongIDs.subtract(Set(songs.map(\.id)))
-                downloadDetail = "Downloaded \(completed) song\(completed == 1 ? "" : "s")"
-                serverMessage = "Synced \(completed) song\(completed == 1 ? "" : "s")"
+                selectedRemoteSongIDs.subtract(downloadedSongIDs)
+                if failed == 0 {
+                    downloadDetail = "Downloaded \(completed) song\(completed == 1 ? "" : "s")"
+                    serverMessage = "Synced \(completed) song\(completed == 1 ? "" : "s")"
+                } else {
+                    downloadDetail = "Downloaded \(completed) of \(songs.count) • \(failed) failed"
+                    serverMessage = completed == 0
+                        ? "Download failed. No songs were added."
+                        : "Synced \(completed) song\(completed == 1 ? "" : "s"); \(failed) failed"
+                }
             } else {
                 serverMessage = "Connected • \(catalog.count) song\(catalog.count == 1 ? "" : "s")"
             }
             Self.saveToken(serverToken, account: "client")
             if !serverAdminToken.isEmpty { Self.saveToken(serverAdminToken, account: "admin") }
         } catch {
+            if !reachedCatalog {
+                isServerConnected = false
+                remoteSongs.removeAll()
+                selectedRemoteSongIDs.removeAll()
+            }
             serverMessage = "Connection failed: \(error.localizedDescription)"
         }
     }
@@ -641,6 +812,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 var request = URLRequest(url: url)
                 request.httpMethod = "PUT"
                 request.setValue("Bearer \(serverAdminToken)", forHTTPHeaderField: "Authorization")
+                setProfileHeader(on: &request)
                 let (_, response) = try await URLSession.shared.upload(for: request, fromFile: source)
                 guard (response as? HTTPURLResponse)?.statusCode == 201 else { continue }
                 completed += 1
@@ -657,6 +829,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/admin/songs/\(song.id)"))
         request.httpMethod = "DELETE"
         request.setValue("Bearer \(serverAdminToken)", forHTTPHeaderField: "Authorization")
+        setProfileHeader(on: &request)
         if let (_, response) = try? await URLSession.shared.data(for: request),
            (response as? HTTPURLResponse)?.statusCode == 204 {
             remoteSongs.removeAll { $0.id == song.id }
@@ -675,7 +848,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             return
         }
 
-        let serverKey = baseURL.absoluteString
+        let serverKey = "\(baseURL.absoluteString)#profile=\(syncProfileID)"
         if playlistSyncServerURL != serverKey {
             playlistSyncServerURL = serverKey
             playlistRevision = 0
@@ -700,12 +873,19 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                     return
                 }
 
+                let submittedLikesGeneration = likesMutationGeneration
+                let submittedDirtyLikeIDs = dirtyRemoteLikeSongIDs
                 switch try await putRemotePlaylists(merge.document, to: baseURL) {
                 case .updated(let updated):
                     dirtyPlaylistIDs.removeAll()
                     deletedPlaylistIDs.removeAll()
+                    if likesMutationGeneration == submittedLikesGeneration {
+                        dirtyRemoteLikeSongIDs.subtract(submittedDirtyLikeIDs)
+                    }
+                    likesDirty = !dirtyRemoteLikeSongIDs.isEmpty
                     applyRemotePlaylists(updated)
                     playlistSyncDetail = "Synced \(updated.playlists.count) playlist\(updated.playlists.count == 1 ? "" : "s")"
+                    if likesDirty { schedulePlaylistSync() }
                     return
                 case .conflict(let current):
                     remoteDocument = current
@@ -750,6 +930,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private func fetchRemotePlaylists(from baseURL: URL) async throws -> MobileRemotePlaylistsDocument {
         var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/playlists"))
         request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
+        setProfileHeader(on: &request)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let status = (response as? HTTPURLResponse)?.statusCode else {
@@ -766,6 +947,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/playlists"))
         request.httpMethod = "PUT"
         request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
+        setProfileHeader(on: &request)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONEncoder().encode(document)
@@ -792,7 +974,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     ) -> (document: MobileRemotePlaylistsDocument, needsUpload: Bool) {
         var merged = remote.playlists.filter { !deletedPlaylistIDs.contains($0.id) }
         let remoteIDs = Set(remote.playlists.map(\.id))
-        var needsUpload = !deletedPlaylistIDs.isEmpty
+        var needsUpload = !deletedPlaylistIDs.isEmpty || likesDirty
 
         for playlist in playlists where !playlist.isSystem {
             let isUnsyncedLocalPlaylist = !remoteIDs.contains(playlist.id)
@@ -808,8 +990,22 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             needsUpload = true
         }
 
+        var likedSongIDs = Set(remote.likedSongIDs)
+        for remoteID in dirtyRemoteLikeSongIDs {
+            if remoteLikedSongIDs.contains(remoteID) {
+                likedSongIDs.insert(remoteID)
+            } else {
+                likedSongIDs.remove(remoteID)
+            }
+        }
+
         return (
-            MobileRemotePlaylistsDocument(revision: remote.revision, playlists: merged),
+            MobileRemotePlaylistsDocument(
+                profileID: syncProfileID,
+                revision: remote.revision,
+                playlists: merged,
+                likedSongIDs: Array(likedSongIDs)
+            ),
             needsUpload
         )
     }
@@ -848,9 +1044,20 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
 
         playlists = systemPlaylists + remotePlaylists
+        var mergedLikedSongIDs = Set(document.likedSongIDs)
+        for remoteID in dirtyRemoteLikeSongIDs {
+            if remoteLikedSongIDs.contains(remoteID) {
+                mergedLikedSongIDs.insert(remoteID)
+            } else {
+                mergedLikedSongIDs.remove(remoteID)
+            }
+        }
+        remoteLikedSongIDs = mergedLikedSongIDs
+        hydrateRemoteLikedTracks()
         playlistRevision = document.revision
         knownRemotePlaylistIDs = Set(document.playlists.map(\.id))
         dirtyPlaylistIDs.subtract(knownRemotePlaylistIDs)
+        likesDirty = !dirtyRemoteLikeSongIDs.isEmpty
         normalizeSystemPlaylist()
         save()
     }
@@ -867,6 +1074,19 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             hydrated.append(contentsOf: localOnlyTrackIDs.filter { !hydrated.contains($0) })
             playlists[index].trackIDs = hydrated
         }
+    }
+
+    private func hydrateRemoteLikedTracks() {
+        let localFavorites = favorites.filter { trackID in
+            tracks.first(where: { $0.id == trackID })?.remoteID == nil
+        }
+        let hydratedRemoteFavorites = tracks.compactMap { track -> UUID? in
+            guard let remoteID = track.remoteID,
+                  (track.syncProfileID ?? "default") == syncProfileID,
+                  remoteLikedSongIDs.contains(remoteID) else { return nil }
+            return track.id
+        }
+        favorites = Set(localFavorites).union(hydratedRemoteFavorites)
     }
 
     private func updateRemoteSongIDs(forPlaylistAt index: Int) {
@@ -891,11 +1111,133 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
     }
 
+    func activateSyncProfile(named rawName: String) async -> Bool {
+        let name = rawName
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        guard !name.isEmpty else {
+            serverMessage = "Enter a profile name."
+            return false
+        }
+        guard let baseURL = normalizedServer() else {
+            serverMessage = "Enter a valid server URL."
+            return false
+        }
+        guard !serverToken.isEmpty else {
+            serverMessage = "Enter the access token."
+            return false
+        }
+
+        do {
+            var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/profiles"))
+            request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let status = (response as? HTTPURLResponse)?.statusCode, status == 200 else {
+                throw URLError(.badServerResponse)
+            }
+            let payload = try JSONDecoder().decode(MobileSyncProfilesResponse.self, from: data)
+            if let profile = payload.profiles.first(where: {
+                $0.id == name || $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+            }) {
+                selectSyncProfile(profile.id, name: profile.name)
+                return true
+            }
+
+            var createRequest = URLRequest(url: baseURL.appendingPathComponent("api/v1/profiles"))
+            createRequest.httpMethod = "POST"
+            createRequest.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
+            createRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            createRequest.httpBody = try JSONEncoder().encode(["name": name])
+            let (createdData, createResponse) = try await URLSession.shared.data(for: createRequest)
+            guard let createStatus = (createResponse as? HTTPURLResponse)?.statusCode,
+                  createStatus == 201 else {
+                let message = try? JSONDecoder().decode(ServerErrorPayload.self, from: createdData).error
+                throw PlaylistServerError(
+                    status: (createResponse as? HTTPURLResponse)?.statusCode ?? 0,
+                    message: message
+                )
+            }
+            let profile = try JSONDecoder().decode(MobileSyncProfile.self, from: createdData)
+            selectSyncProfile(profile.id, name: profile.name)
+            return true
+        } catch {
+            serverMessage = "Could not activate profile: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    private func selectSyncProfile(_ id: String, name: String) {
+        guard !id.isEmpty else { return }
+        if id == syncProfileID {
+            syncProfileName = name
+            save()
+            return
+        }
+        let currentTrackBelongsToPreviousProfile = currentTrack.map {
+            $0.remoteID != nil && ($0.syncProfileID ?? "default") != id
+        } ?? false
+        if currentTrackBelongsToPreviousProfile {
+            stopTimer()
+            player?.stop()
+            player = nil
+            isPlaying = false
+            currentTrackID = nil
+            position = 0
+            UserDefaults.standard.removeObject(forKey: "Resonance.currentTrack")
+            UserDefaults.standard.set(position, forKey: "Resonance.position")
+        }
+        syncProfileID = id
+        syncProfileName = name
+        playbackPlaylistID = nil
+        playbackQueue = tracksForActiveProfile.map(\.id)
+        let activeTrackIDs = Set(playbackQueue)
+        history.removeAll { !activeTrackIDs.contains($0) }
+        playlists = playlists.filter(\.isSystem)
+        favorites = favorites.filter { trackID in
+            tracks.first(where: { $0.id == trackID })?.remoteID == nil
+        }
+        playlistRevision = 0
+        knownRemotePlaylistIDs.removeAll()
+        dirtyPlaylistIDs.removeAll()
+        deletedPlaylistIDs.removeAll()
+        playlistSyncServerURL = nil
+        remoteLikedSongIDs.removeAll()
+        dirtyRemoteLikeSongIDs.removeAll()
+        likesMutationGeneration &+= 1
+        likesDirty = false
+        remoteSongs.removeAll()
+        selectedRemoteSongIDs.removeAll()
+        normalizeSystemPlaylist()
+        save()
+        updateNowPlaying()
+    }
+
+    private func setProfileHeader(on request: inout URLRequest) {
+        request.setValue(syncProfileID, forHTTPHeaderField: "X-Resonance-Profile")
+    }
+
+    private func sameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.scheme?.lowercased() == rhs.scheme?.lowercased()
+            && lhs.host?.lowercased() == rhs.host?.lowercased()
+            && effectivePort(for: lhs) == effectivePort(for: rhs)
+    }
+
+    private func effectivePort(for url: URL) -> Int? {
+        if let port = url.port { return port }
+        switch url.scheme?.lowercased() {
+        case "http": return 80
+        case "https": return 443
+        default: return nil
+        }
+    }
+
     private func normalizedServer() -> URL? {
         guard var components = URLComponents(string: serverURL.trimmingCharacters(in: .whitespacesAndNewlines)),
               components.scheme == "https" || components.scheme == "http",
               components.host != nil else { return nil }
-        components.path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        while components.path.hasSuffix("/") {
+            components.path.removeLast()
+        }
         return components.url
     }
 
@@ -932,7 +1274,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             knownRemotePlaylistIDs: knownRemotePlaylistIDs,
             dirtyPlaylistIDs: dirtyPlaylistIDs,
             deletedPlaylistIDs: deletedPlaylistIDs,
-            playlistSyncServerURL: playlistSyncServerURL
+            playlistSyncServerURL: playlistSyncServerURL,
+            syncProfileID: syncProfileID,
+            syncProfileName: syncProfileName,
+            remoteLikedSongIDs: remoteLikedSongIDs,
+            dirtyRemoteLikeSongIDs: dirtyRemoteLikeSongIDs,
+            likesDirty: likesDirty
         )
         if let data = try? JSONEncoder().encode(stored) { try? data.write(to: stateURL, options: .atomic) }
     }
@@ -950,10 +1297,36 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         dirtyPlaylistIDs = stored.dirtyPlaylistIDs ?? []
         deletedPlaylistIDs = stored.deletedPlaylistIDs ?? []
         playlistSyncServerURL = stored.playlistSyncServerURL
+        syncProfileID = stored.syncProfileID ?? "default"
+        syncProfileName = stored.syncProfileName ?? (syncProfileID == "default" ? "Default" : syncProfileID)
+        let migratedLikedSongIDs = Set(favorites.compactMap { trackID in
+            tracks.first(where: {
+                $0.id == trackID && ($0.syncProfileID ?? "default") == syncProfileID
+            })?.remoteID
+        })
+        remoteLikedSongIDs = stored.remoteLikedSongIDs ?? migratedLikedSongIDs
+        if let storedDirtyLikeIDs = stored.dirtyRemoteLikeSongIDs {
+            dirtyRemoteLikeSongIDs = storedDirtyLikeIDs
+        } else if stored.likesDirty ?? false {
+            dirtyRemoteLikeSongIDs = Set(tracks.compactMap { track in
+                guard track.remoteID != nil,
+                      (track.syncProfileID ?? "default") == syncProfileID else { return nil }
+                return track.remoteID
+            })
+        } else if stored.remoteLikedSongIDs == nil {
+            // Before server-backed likes existed, favorites were only device-local.
+            // Upload those known likes on the first sync instead of letting an empty
+            // remote document erase them during migration.
+            dirtyRemoteLikeSongIDs = migratedLikedSongIDs
+        }
+        likesDirty = !dirtyRemoteLikeSongIDs.isEmpty
         hydrateRemotePlaylistTracks()
+        hydrateRemoteLikedTracks()
         normalizeSystemPlaylist()
         let savedID = UserDefaults.standard.string(forKey: "Resonance.currentTrack").flatMap(UUID.init(uuidString:))
-        currentTrackID = savedID.flatMap { wanted in tracks.first(where: { $0.id == wanted })?.id } ?? tracks.first?.id
+        currentTrackID = savedID.flatMap { wanted in
+            tracksForActiveProfile.first(where: { $0.id == wanted })?.id
+        } ?? tracksForActiveProfile.first?.id
         position = UserDefaults.standard.double(forKey: "Resonance.position")
     }
 
@@ -1004,6 +1377,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         switch type {
         case .began:
             wasPlayingBeforeInterruption = player?.isPlaying == true || isPlaying
+            stopTimer()
             isPlaying = false
             updateNowPlaying()
 
@@ -1056,18 +1430,30 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func startTimer() {
-        timer?.invalidate()
+        stopTimer()
+        guard player?.isPlaying == true else { return }
         let playbackTimer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let player = self.player else { return }
+                guard player.isPlaying else {
+                    self.stopTimer()
+                    self.isPlaying = false
+                    self.updateNowPlaying()
+                    return
+                }
                 self.position = player.currentTime
                 UserDefaults.standard.set(self.position, forKey: "Resonance.position")
-                self.isPlaying = player.isPlaying
+                self.isPlaying = true
                 self.updateNowPlaying()
             }
         }
         timer = playbackTimer
         RunLoop.main.add(playbackTimer, forMode: .common)
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
     }
 
     private func updateNowPlaying() {
@@ -1141,17 +1527,14 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if self.repeatEnabled, let track = self.currentTrack {
-                self.startPlayback(track, recordHistory: false)
-            } else {
-                self.next()
-            }
+            self.advanceAfterFinishing()
         }
     }
 
     nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: (any Error)?) {
         Task { @MainActor [weak self] in
             guard let self, self.player === player else { return }
+            self.stopTimer()
             self.isPlaying = false
             if self.activeQueue.count > 1 {
                 self.next()

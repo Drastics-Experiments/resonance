@@ -50,7 +50,7 @@ struct RootView: View {
         .preferredColorScheme(.dark)
         .fileImporter(
             isPresented: $importing,
-            allowedContentTypes: [.audio],
+            allowedContentTypes: [.audio, .movie],
             allowsMultipleSelection: true
         ) { result in
             if case .success(let urls) = result { Task { await library.importFiles(urls) } }
@@ -94,14 +94,26 @@ private struct PlayerAwareTab<Content: View>: View {
 private struct LibraryView: View {
     @EnvironmentObject private var library: MusicLibrary
     @Binding var importing: Bool
+    @State private var presentedSheet: LibrarySheet?
     @FocusState private var searchIsFocused: Bool
+
+    private var recentlyAddedTracks: [MobileTrack] {
+        Array(
+            library.tracks
+                .filter {
+                    $0.remoteID == nil || ($0.syncProfileID ?? "default") == library.syncProfileID
+                }
+                .sorted { $0.dateAdded > $1.dateAdded }
+                .prefix(6)
+        )
+    }
 
     var body: some View {
         ZStack {
             AppBackground()
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    HStack(alignment: .bottom) {
+                    HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("MUSIC LIBRARY").eyebrow()
                             Text("Resonance").font(.system(size: 38, weight: .regular, design: .rounded))
@@ -109,18 +121,26 @@ private struct LibraryView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        ArtworkTile(symbol: "waveform").frame(width: 86, height: 86)
+                        ProfileButton(profileName: library.syncProfileName) {
+                            presentedSheet = .profile
+                        }
                     }
                     HStack {
                         Button { library.togglePlay() } label: {
                             Label(library.isPlaying ? "Pause" : "Play", systemImage: library.isPlaying ? "pause.fill" : "play.fill")
                                 .pill(color: .accent)
                         }
+                        .disabled(library.tracks.isEmpty)
                         Button { library.shuffleEnabled.toggle() } label: {
                             Image(systemName: "shuffle").roundButton(active: library.shuffleEnabled)
                         }
+                        .disabled(library.tracks.isEmpty)
                         Spacer()
                         Button { importing = true } label: { Label("Import", systemImage: "plus").pill(color: .violet) }
+                    }
+                    if library.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       !recentlyAddedTracks.isEmpty {
+                        RecentlyAddedSection(tracks: recentlyAddedTracks)
                     }
                     TextField("Search your music", text: $library.searchText)
                         .focused($searchIsFocused)
@@ -130,7 +150,7 @@ private struct LibraryView: View {
                         .padding(13)
                         .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
                     if library.filteredTracks.isEmpty {
-                        ContentUnavailableView("No songs yet", systemImage: "music.note", description: Text("Import audio or sync your music server."))
+                        ContentUnavailableView("No songs yet", systemImage: "music.note", description: Text("Import audio or video, or sync your music server."))
                             .frame(maxWidth: .infinity).padding(.top, 40)
                     } else {
                         VStack(spacing: 0) {
@@ -152,10 +172,96 @@ private struct LibraryView: View {
             .scrollDismissesKeyboard(.interactively)
         }
         .navigationBarHidden(true)
+        .sheet(item: $presentedSheet) { sheet in
+            switch sheet {
+            case .profile:
+                ServerConnectionSheet()
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
                 Spacer()
                 Button("Done") { searchIsFocused = false }
+            }
+        }
+    }
+}
+
+private enum LibrarySheet: String, Identifiable {
+    case profile
+    var id: String { rawValue }
+}
+
+private struct ProfileButton: View {
+    let profileName: String
+    let action: () -> Void
+
+    private var displayName: String {
+        let trimmed = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Profile" : trimmed
+    }
+
+    private var initial: String {
+        String(displayName.prefix(1)).uppercased()
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Text(initial)
+                .font(.headline.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(Color.violet, in: Circle())
+                .overlay {
+                    Circle()
+                        .stroke(.white.opacity(0.18), lineWidth: 1)
+                }
+                .shadow(color: Color.violet.opacity(0.28), radius: 12, y: 5)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(displayName) profile")
+        .accessibilityHint("Opens profile and server connection settings")
+    }
+}
+
+private struct RecentlyAddedSection: View {
+    @EnvironmentObject private var library: MusicLibrary
+    let tracks: [MobileTrack]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Text("RECENTLY ADDED").eyebrow()
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 14) {
+                    ForEach(tracks) { track in
+                        Button {
+                            library.play(track)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                TrackArtwork(track: track)
+                                    .frame(width: 132, height: 132)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(track.title)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    Text(track.artist)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            .frame(width: 132, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Play \(track.title) by \(track.artist)")
+                        .accessibilityHint("Plays this recently added track")
+                    }
+                }
             }
         }
     }
@@ -682,8 +788,8 @@ private struct StorageView: View {
 
                         if !importedTracks.isEmpty {
                             StorageSection(
-                                title: "IMPORTED ON IPHONE",
-                                symbol: "iphone",
+                                title: "IMPORTED ON DEVICE",
+                                symbol: "internaldrive",
                                 tracks: importedTracks,
                                 fileSizes: fileSizes,
                                 isEditing: isEditing,
@@ -711,7 +817,7 @@ private struct StorageView: View {
             selectedTrackIDs.formIntersection(Set(library.tracks.map(\.id)))
         }
         .confirmationDialog(
-            "Delete \(selectedTrackIDs.count) songs from this iPhone?",
+            "Delete \(selectedTrackIDs.count) songs from this device?",
             isPresented: $showsBatchDeleteConfirmation,
             titleVisibility: .visible
         ) {
@@ -726,7 +832,7 @@ private struct StorageView: View {
             Text("This removes the local song files. Songs stored on your server are not deleted.")
         }
         .confirmationDialog(
-            "Delete \(deletionCandidate?.title ?? "this song") from this iPhone?",
+            "Delete \(deletionCandidate?.title ?? "this song") from this device?",
             isPresented: Binding(
                 get: { deletionCandidate != nil },
                 set: { if !$0 { deletionCandidate = nil } }
@@ -762,7 +868,7 @@ private enum StorageScope: String, CaseIterable, Identifiable {
         switch self {
         case .songs: "music.note.list"
         case .downloads: "icloud.and.arrow.down"
-        case .files: "iphone"
+        case .files: "internaldrive"
         }
     }
     var emptyTitle: String {
@@ -774,9 +880,9 @@ private enum StorageScope: String, CaseIterable, Identifiable {
     }
     var emptyMessage: String {
         switch self {
-        case .songs: "Import audio or download songs from your music server."
+        case .songs: "Import audio or video, or download songs from your music server."
         case .downloads: "Songs downloaded from the server will appear here."
-        case .files: "Audio imported on this iPhone will appear here."
+        case .files: "Audio and video imported on this device will appear here."
         }
     }
 }
@@ -873,7 +979,7 @@ private struct StorageSummaryCard: View {
                     Divider().padding(.horizontal, 10)
                     StorageMetric(color: .accent, title: "Server downloads", bytes: downloadedBytes, detail: "\(downloadedCount) files")
                     Divider().padding(.horizontal, 10)
-                    StorageMetric(color: Color(hex: 0x7BA7E8), title: "Available", bytes: availableBytes, detail: "on iPhone")
+                    StorageMetric(color: Color(hex: 0x7BA7E8), title: "Available", bytes: availableBytes, detail: "on device")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -990,7 +1096,7 @@ private struct StorageTrackRow: View {
                         Label("Play", systemImage: "play.fill")
                     }
                     Button(role: .destructive, action: onDelete) {
-                        Label("Delete from iPhone", systemImage: "trash")
+                        Label("Delete from Device", systemImage: "trash")
                     }
                 }
             }
@@ -1014,11 +1120,7 @@ private struct ServerView: View {
     @State private var isSelecting = false
     @FocusState private var searchIsFocused: Bool
 
-    private var isConnected: Bool {
-        !library.remoteSongs.isEmpty
-            || library.serverMessage.localizedCaseInsensitiveContains("connected")
-            || library.serverMessage.localizedCaseInsensitiveContains("synced")
-    }
+    private var isConnected: Bool { library.isServerConnected }
 
     private var syncedCount: Int {
         library.remoteSongs.reduce(0) { $0 + (library.isSynced($1) ? 1 : 0) }
@@ -1187,7 +1289,7 @@ private struct ServerView: View {
                   !library.isSyncingPlaylists else { return }
             await library.refreshCatalog()
         }
-        .fileImporter(isPresented: $choosingUploads, allowedContentTypes: [.audio], allowsMultipleSelection: true) { result in
+        .fileImporter(isPresented: $choosingUploads, allowedContentTypes: [.audio, .movie], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { Task { await library.uploadFiles(urls) } }
         }
         .sheet(item: $presentedSheet) { sheet in
@@ -1671,7 +1773,7 @@ private struct ServerSongRow: View {
     }
 
     private var trailingDetail: String {
-        localTrack?.durationText ?? formatBytes(song.size)
+        localTrack?.durationText ?? song.durationText ?? formatBytes(song.size)
     }
 
     var body: some View {
@@ -1694,7 +1796,7 @@ private struct ServerSongRow: View {
                         if let localTrack {
                             TrackArtwork(track: localTrack)
                         } else {
-                            ArtworkTile(symbol: "music.note")
+                            ServerArtwork(song: song)
                         }
                     }
                     .frame(width: 52, height: 52)
@@ -1763,9 +1865,11 @@ private struct ServerConnectionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @FocusState private var focusedField: ConnectionField?
+    @State private var profileName = ""
+    @State private var isApplyingProfile = false
 
     private enum ConnectionField: Hashable {
-        case url, accessToken, adminKey
+        case url, accessToken, adminKey, profile
     }
 
     var body: some View {
@@ -1787,33 +1891,55 @@ private struct ServerConnectionSheet: View {
                         .textContentType(.password)
                     SecureField("Server admin key", text: $library.serverAdminToken)
                         .focused($focusedField, equals: .adminKey)
+                        .submitLabel(.next)
+                        .onSubmit { focusedField = .profile }
+                        .textContentType(.password)
+                }
+                Section {
+                    TextField("Profile name", text: $profileName)
+                        .focused($focusedField, equals: .profile)
                         .submitLabel(.done)
                         .onSubmit { focusedField = nil }
-                        .textContentType(.password)
+                        .textInputAutocapitalization(.words)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("Active Profile")
+                } footer: {
+                    Text("Type one profile name. Existing names reconnect; new names are created.")
                 }
                 Section {
                     Button {
                         focusedField = nil
                         Task {
+                            isApplyingProfile = true
+                            defer { isApplyingProfile = false }
+                            guard await library.activateSyncProfile(named: profileName) else { return }
                             await library.refreshCatalog()
-                            if library.serverMessage.localizedCaseInsensitiveContains("connected") {
+                            if library.isServerConnected {
                                 dismiss()
                             }
                         }
                     } label: {
                         HStack {
                             Spacer()
-                            if library.isSyncing { ProgressView().padding(.trailing, 6) }
-                            Text(library.isSyncing ? "Connecting…" : "Connect")
+                            if isApplyingProfile || library.isSyncing {
+                                ProgressView().padding(.trailing, 6)
+                            }
+                            Text(isApplyingProfile || library.isSyncing ? "Connecting…" : "Connect")
                             Spacer()
                         }
                     }
-                    .disabled(library.isSyncing)
+                    .disabled(
+                        isApplyingProfile
+                            || library.isSyncing
+                            || profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
                 }
                 Section {
                     Text(library.serverMessage).foregroundStyle(.secondary)
                 }
             }
+            .onAppear { profileName = library.syncProfileName }
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Connection")
             .navigationBarTitleDisplayMode(.inline)
@@ -1821,8 +1947,21 @@ private struct ServerConnectionSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
                         focusedField = nil
-                        dismiss()
+                        let trimmed = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { return }
+                        guard trimmed != library.syncProfileName else {
+                            dismiss()
+                            return
+                        }
+                        Task {
+                            isApplyingProfile = true
+                            defer { isApplyingProfile = false }
+                            if await library.activateSyncProfile(named: trimmed) {
+                                dismiss()
+                            }
+                        }
                     }
+                    .disabled(isApplyingProfile)
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
@@ -1929,6 +2068,7 @@ private struct NowPlayingView: View {
 
                         progress(for: track)
                         transportControls
+                        volumeControl
                         playbackOptions
                         trackDetails(track)
                     }
@@ -2043,6 +2183,24 @@ private struct NowPlayingView: View {
         .buttonStyle(.plain)
     }
 
+    private var volumeControl: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Label("Volume", systemImage: "speaker.wave.2.fill")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(Int((library.volume * 100).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: $library.volume, in: 0...1)
+                .tint(.accent)
+                .accessibilityLabel("Volume")
+                .accessibilityValue("\(Int((library.volume * 100).rounded())) percent")
+        }
+        .padding(.horizontal, 10)
+    }
+
     private var playbackOptions: some View {
         HStack {
             Button { library.shuffleEnabled.toggle() } label: {
@@ -2145,6 +2303,41 @@ private struct TrackArtwork: View {
         }
         .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+    }
+}
+
+private struct ServerArtwork: View {
+    let song: MobileRemoteSong
+
+    var body: some View {
+        Group {
+            if let artworkURL = song.artworkURL {
+                AsyncImage(url: artworkURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    case .empty:
+                        ZStack {
+                            ArtworkTile(symbol: "music.note")
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white)
+                        }
+                    case .failure:
+                        ArtworkTile(symbol: "music.note")
+                    @unknown default:
+                        ArtworkTile(symbol: "music.note")
+                    }
+                }
+            } else {
+                ArtworkTile(symbol: "music.note")
+            }
+        }
+        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .accessibilityHidden(true)
     }
 }
 

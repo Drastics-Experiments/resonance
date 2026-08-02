@@ -9,6 +9,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
     var relativePath: String
     var remoteID: String?
     var sourceServer: String?
+    var syncProfileID: String?
     var artworkFilename: String?
     var artworkScanComplete: Bool?
     var dateAdded: Date
@@ -22,6 +23,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         relativePath: String,
         remoteID: String? = nil,
         sourceServer: String? = nil,
+        syncProfileID: String? = nil,
         artworkFilename: String? = nil,
         artworkScanComplete: Bool? = false,
         dateAdded: Date = .now
@@ -34,6 +36,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         self.relativePath = relativePath
         self.remoteID = remoteID
         self.sourceServer = sourceServer
+        self.syncProfileID = syncProfileID
         self.artworkFilename = artworkFilename
         self.artworkScanComplete = artworkScanComplete
         self.dateAdded = dateAdded
@@ -108,8 +111,79 @@ struct MobileRemotePlaylist: Codable, Hashable, Identifiable {
 }
 
 struct MobileRemotePlaylistsDocument: Codable, Hashable {
+    var profileID: String?
     var revision: Int
     var playlists: [MobileRemotePlaylist]
+    var likedSongIDs: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case revision, playlists
+        case profileID = "profile_id"
+        case likedSongIDs = "liked_song_ids"
+    }
+
+    init(
+        profileID: String? = nil,
+        revision: Int,
+        playlists: [MobileRemotePlaylist],
+        likedSongIDs: [String] = []
+    ) {
+        self.profileID = profileID
+        self.revision = revision
+        self.playlists = playlists
+        self.likedSongIDs = likedSongIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        profileID = try values.decodeIfPresent(String.self, forKey: .profileID)
+        revision = try values.decode(Int.self, forKey: .revision)
+        playlists = try values.decode([MobileRemotePlaylist].self, forKey: .playlists)
+        likedSongIDs = try values.decodeIfPresent([String].self, forKey: .likedSongIDs) ?? []
+    }
+}
+
+struct MobileSyncProfile: Codable, Hashable, Identifiable {
+    let id: String
+    var name: String
+    let isDefault: Bool
+    let songCount: Int
+    let playlistCount: Int
+    let likedCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case isDefault = "is_default"
+        case songCount = "song_count"
+        case playlistCount = "playlist_count"
+        case likedCount = "liked_count"
+    }
+
+    init(
+        id: String,
+        name: String,
+        isDefault: Bool = false,
+        songCount: Int = 0,
+        playlistCount: Int = 0,
+        likedCount: Int = 0
+    ) {
+        self.id = id
+        self.name = name
+        self.isDefault = isDefault
+        self.songCount = songCount
+        self.playlistCount = playlistCount
+        self.likedCount = likedCount
+    }
+}
+
+struct MobileSyncProfilesResponse: Codable {
+    let defaultProfileID: String
+    let profiles: [MobileSyncProfile]
+
+    enum CodingKeys: String, CodingKey {
+        case profiles
+        case defaultProfileID = "default_profile_id"
+    }
 }
 
 struct MobileRemoteSong: Identifiable, Decodable, Hashable {
@@ -123,6 +197,8 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
     let contentType: String
     let downloadURL: String
     let streamURL: String
+    let duration: TimeInterval?
+    let artworkURL: URL?
 
     enum CodingKeys: String, CodingKey {
         case id, filename, name, title, artist, album, size
@@ -131,6 +207,10 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
         case contentType = "content_type"
         case downloadURL = "download_url"
         case streamURL = "stream_url"
+        case durationSeconds = "duration_seconds"
+        case duration
+        case artworkURL = "artwork_url"
+        case artwork
     }
 
     init(from decoder: Decoder) throws {
@@ -146,6 +226,23 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
         contentType = try values.decodeIfPresent(String.self, forKey: .contentType) ?? "application/octet-stream"
         downloadURL = try values.decode(String.self, forKey: .downloadURL)
         streamURL = try values.decode(String.self, forKey: .streamURL)
+        let decodedDuration = try values.decodeIfPresent(Double.self, forKey: .durationSeconds)
+            ?? values.decodeIfPresent(Double.self, forKey: .duration)
+        duration = decodedDuration.flatMap { value in
+            value.isFinite && value > 0 ? value : nil
+        }
+        let decodedArtworkURL = try values.decodeIfPresent(String.self, forKey: .artworkURL)
+            ?? values.decodeIfPresent(String.self, forKey: .artwork)
+        artworkURL = decodedArtworkURL.flatMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : URL(string: trimmed)
+        }
+    }
+
+    var durationText: String? {
+        guard let duration else { return nil }
+        let seconds = Int(duration)
+        return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
     }
 }
 
@@ -164,4 +261,9 @@ struct MobileStoredLibrary: Codable {
     var dirtyPlaylistIDs: Set<UUID>?
     var deletedPlaylistIDs: Set<UUID>?
     var playlistSyncServerURL: String?
+    var syncProfileID: String?
+    var syncProfileName: String?
+    var remoteLikedSongIDs: Set<String>?
+    var dirtyRemoteLikeSongIDs: Set<String>?
+    var likesDirty: Bool?
 }
