@@ -53,8 +53,12 @@ private final class AsyncSignal: @unchecked Sendable {
 
 private final class LockedPlaylistServerState: @unchecked Sendable {
     private let lock = NSLock()
-    private var document = RemotePlaylistsDocument(revision: 0, playlists: [])
+    private var document: RemotePlaylistsDocument
     private var putCount = 0
+
+    init(document: RemotePlaylistsDocument = RemotePlaylistsDocument(revision: 0, playlists: [])) {
+        self.document = document
+    }
 
     func currentDocument() -> RemotePlaylistsDocument {
         lock.withLock { document }
@@ -79,6 +83,12 @@ private final class LockedPlaylistServerState: @unchecked Sendable {
     func snapshot() -> (putCount: Int, document: RemotePlaylistsDocument) {
         lock.withLock { (putCount, document) }
     }
+
+    func replace(with document: RemotePlaylistsDocument) {
+        lock.withLock {
+            self.document = document
+        }
+    }
 }
 
 private func regressionRequestBody(_ request: URLRequest) throws -> Data {
@@ -95,6 +105,13 @@ private func regressionRequestBody(_ request: URLRequest) throws -> Data {
         result.append(buffer, count: count)
     }
     return result
+}
+
+private struct LegacyListeningHistoryEntry: Encodable {
+    let id: UUID
+    let trackID: UUID
+    let startedAt: Date
+    let listenedSeconds: TimeInterval
 }
 
 @MainActor
@@ -171,6 +188,249 @@ struct PlayerModelRegressionTests {
 
     private func emptyPlaylists() throws -> Data {
         try JSONEncoder().encode(RemotePlaylistsDocument(revision: 0, playlists: []))
+    }
+
+    @Test
+    func metadataBackfillUsesAdminAuthorizationAndDefaultServerContextUntilComplete() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        var requestCount = 0
+        RegressionURLProtocol.handler = { request in
+            requestCount += 1
+            #expect(request.url?.path == "/api/v1/admin/metadata")
+            #expect(request.url?.query == "limit=8")
+            #expect(request.httpMethod == "POST")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer admin-token")
+            #expect(request.value(forHTTPHeaderField: "X-Resonance-Profile") == "default")
+            let payload: [String: Any] = requestCount == 1
+                ? ["processed": 8, "remaining": 2]
+                : ["processed": 2, "remaining": 0]
+            return (
+                try response(for: request),
+                try JSONSerialization.data(withJSONObject: payload)
+            )
+        }
+
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.serverAdminToken = "admin-token"
+
+        let processed = try await model.backfillServerMetadataIfAvailable(
+            base: URL(string: "https://music.test")!
+        )
+
+        #expect(processed == 10)
+        #expect(requestCount == 2)
+    }
+
+    @Test
+    func selectedServerProfilePersistsAcrossModelRelaunch() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        RegressionURLProtocol.handler = { request in
+            #expect(request.url?.path == "/api/v1/profiles")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
+            #expect(request.value(forHTTPHeaderField: "X-Resonance-Profile") == nil)
+            let payload: [String: Any] = [
+                "default_profile_id": "default",
+                "profiles": [
+                    ["id": "default", "name": "Default", "is_default": true],
+                    ["id": "drastic-id", "name": "Drastic", "is_default": false],
+                ],
+            ]
+            return (
+                try response(for: request),
+                try JSONSerialization.data(withJSONObject: payload)
+            )
+        }
+
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+
+        #expect(await model.selectSyncProfile(matching: "Drastic"))
+        #expect(model.syncProfileID == "drastic-id")
+        #expect(model.activeSyncProfileName == "Drastic")
+
+        let relaunched = PlayerModel(
+            loadPersistedLibrary: true,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        #expect(relaunched.syncProfileID == "drastic-id")
+        #expect(relaunched.activeSyncProfileName == "Drastic")
+    }
+
+    @Test
+    func missingRequestedProfileFallsBackToDefaultWithoutSendingItsStaleHeader() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        var includeDrastic = true
+        RegressionURLProtocol.handler = { request in
+            #expect(request.url?.path == "/api/v1/profiles")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
+            #expect(request.value(forHTTPHeaderField: "X-Resonance-Profile") == nil)
+            var profiles: [[String: Any]] = [
+                ["id": "default", "name": "Default", "is_default": true],
+            ]
+            if includeDrastic {
+                profiles.append(["id": "drastic-id", "name": "Drastic", "is_default": false])
+            }
+            let payload: [String: Any] = [
+                "default_profile_id": "default",
+                "profiles": profiles,
+            ]
+            return (
+                try response(for: request),
+                try JSONSerialization.data(withJSONObject: payload)
+            )
+        }
+
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+
+        #expect(await model.selectSyncProfile(matching: "Drastic"))
+        #expect(model.createPlaylist(named: "Unsynced Drastic playlist") != nil)
+        includeDrastic = false
+
+        #expect(await model.selectSyncProfile(matching: "Drastic"))
+        #expect(model.syncProfileID == "default")
+        #expect(model.activeSyncProfileName == "Default")
+        #expect(model.serverMessage == "Profile “Drastic” was not found • Switched to Default")
+    }
+
+    @Test
+    func legacyListeningHistoryMigratesToTheRestoredProfile() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let initial = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        await initial.importLocalFiles(at: [hero])
+        let track = try #require(initial.tracks.first)
+        let legacyEntry = LegacyListeningHistoryEntry(
+            id: UUID(),
+            trackID: track.id,
+            startedAt: .now,
+            listenedSeconds: 42
+        )
+        defaults.set(
+            try JSONEncoder().encode([legacyEntry]),
+            forKey: "LikedSongsFocus.listeningHistory.v1"
+        )
+
+        let relaunched = PlayerModel(
+            loadPersistedLibrary: true,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+
+        #expect(relaunched.listeningHistoryEntries.count == 1)
+        #expect(relaunched.listeningHistoryEntries.first?.syncProfileID == "default")
+        #expect(relaunched.activeProfileListeningHistoryEntries.count == 1)
+        let migratedData = try #require(
+            defaults.data(forKey: "LikedSongsFocus.listeningHistory.v1")
+        )
+        let migrated = try JSONDecoder().decode(
+            [ListeningHistoryEntry].self,
+            from: migratedData
+        )
+        #expect(migrated.first?.syncProfileID == "default")
+    }
+
+    @Test
+    func listeningHistoryIsIsolatedWhenSwitchingProfiles() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        RegressionURLProtocol.handler = { request in
+            #expect(request.url?.path == "/api/v1/profiles")
+            let payload: [String: Any] = [
+                "default_profile_id": "default",
+                "profiles": [
+                    ["id": "default", "name": "Default", "is_default": true],
+                    ["id": "drastic-id", "name": "Drastic", "is_default": false],
+                ],
+            ]
+            return (
+                try response(for: request),
+                try JSONSerialization.data(withJSONObject: payload)
+            )
+        }
+
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        await model.importLocalFiles(at: [hero])
+        let track = try #require(model.tracks.first)
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+
+        model.selectAndPlay(track)
+        try await Task.sleep(for: .milliseconds(300))
+        model.togglePlay()
+        #expect(model.listeningHistoryEntries.count == 1)
+        #expect(model.activeProfileListeningHistoryEntries.count == 1)
+        #expect(model.activeProfileListeningHistoryEntries.first?.syncProfileID == "default")
+
+        #expect(await model.selectSyncProfile(matching: "Drastic"))
+        #expect(model.activeProfileListeningHistoryEntries.isEmpty)
+
+        model.togglePlay()
+        try await Task.sleep(for: .milliseconds(300))
+        model.togglePlay()
+        #expect(model.listeningHistoryEntries.count == 2)
+        #expect(model.activeProfileListeningHistoryEntries.count == 1)
+        #expect(model.activeProfileListeningHistoryEntries.first?.syncProfileID == "drastic-id")
+
+        #expect(await model.selectSyncProfile(matching: "Default"))
+        #expect(model.activeProfileListeningHistoryEntries.count == 1)
+        #expect(model.activeProfileListeningHistoryEntries.first?.syncProfileID == "default")
     }
 
     @Test
@@ -402,6 +662,214 @@ struct PlayerModelRegressionTests {
         try await Task.sleep(for: .milliseconds(30))
         let putCountAfterSettling = serverState.snapshot().putCount
         #expect(putCountAfterSettling == finalPutCount)
+    }
+
+    @Test
+    func serverLikesPopulateAndRemoveTracksFromLikedSongs() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        let remote = Track(
+            title: "Remote",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .electric,
+            fileURL: glass,
+            remoteID: "remote-like-id"
+        )
+        let local = Track(
+            title: "Local",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .golden,
+            fileURL: ping
+        )
+        let serverState = LockedPlaylistServerState(
+            document: RemotePlaylistsDocument(
+                revision: 1,
+                playlists: [],
+                likedSongIDs: ["remote-like-id"]
+            )
+        )
+        RegressionURLProtocol.handler = { request in
+            let document = serverState.currentDocument()
+            return (try response(for: request), try JSONEncoder().encode(document))
+        }
+
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.tracks = [remote, local]
+        model.toggleFavorite(local)
+        model.serverURLString = "https://music.test"
+        model.serverToken = "playlist-token"
+
+        await model.syncPlaylistsNow()
+
+        #expect(model.favorites == [remote.id, local.id])
+        #expect(Set(model.playlists[0].trackIDs) == [remote.id, local.id])
+
+        serverState.replace(
+            with: RemotePlaylistsDocument(
+                revision: 2,
+                playlists: [],
+                likedSongIDs: []
+            )
+        )
+        await model.syncPlaylistsNow()
+
+        #expect(model.favorites == [local.id])
+        #expect(model.playlists[0].trackIDs == [local.id])
+    }
+
+    @Test
+    func unrelatedPlaylistUploadPreservesServerLikes() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        let track = Track(
+            title: "Remote",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .electric,
+            fileURL: glass,
+            remoteID: "remote-like-id"
+        )
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.tracks = [track]
+        _ = try #require(model.createPlaylist(named: "Local edit"))
+
+        var uploaded: RemotePlaylistsDocument?
+        RegressionURLProtocol.handler = { request in
+            if request.httpMethod == "PUT" {
+                var document = try JSONDecoder().decode(
+                    RemotePlaylistsDocument.self,
+                    from: regressionRequestBody(request)
+                )
+                uploaded = document
+                document.revision += 1
+                return (try response(for: request), try JSONEncoder().encode(document))
+            }
+            let remote = RemotePlaylistsDocument(
+                revision: 4,
+                playlists: [],
+                likedSongIDs: ["remote-like-id", "not-downloaded-like-id"]
+            )
+            return (try response(for: request), try JSONEncoder().encode(remote))
+        }
+
+        model.serverURLString = "https://music.test"
+        model.serverToken = "playlist-token"
+        await model.syncPlaylistsNow()
+
+        #expect(uploaded?.likedSongIDs == ["remote-like-id", "not-downloaded-like-id"])
+        #expect(model.favorites == [track.id])
+        #expect(model.playlists[0].trackIDs == [track.id])
+    }
+
+    @Test
+    func likeChangedDuringPutSurvivesTheStaleResponse() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        let first = Track(
+            title: "First",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .electric,
+            fileURL: glass,
+            remoteID: "first-remote-id"
+        )
+        let second = Track(
+            title: "Second",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .golden,
+            fileURL: ping,
+            remoteID: "second-remote-id"
+        )
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.tracks = [first, second]
+        model.toggleFavorite(first)
+
+        let putStarted = AsyncSignal()
+        let releaseFirstPut = DispatchSemaphore(value: 0)
+        let serverState = LockedPlaylistServerState()
+        RegressionURLProtocol.handler = { request in
+            if request.httpMethod == "GET" {
+                return (
+                    try response(for: request),
+                    try JSONEncoder().encode(serverState.currentDocument())
+                )
+            }
+            let uploaded = try JSONDecoder().decode(
+                RemotePlaylistsDocument.self,
+                from: regressionRequestBody(request)
+            )
+            let thisPut = serverState.beginPut()
+            if thisPut == 1 {
+                putStarted.signal()
+                _ = releaseFirstPut.wait(timeout: .now() + 5)
+            }
+            let accepted = serverState.accept(uploaded)
+            return (try response(for: request), try JSONEncoder().encode(accepted))
+        }
+
+        model.serverURLString = "https://music.test"
+        model.serverToken = "playlist-token"
+        let sync = Task { await model.syncPlaylistsNow() }
+        await putStarted.wait()
+
+        model.toggleFavorite(second)
+        releaseFirstPut.signal()
+        await sync.value
+
+        for _ in 0..<200 {
+            if serverState.snapshot().putCount >= 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        while model.isSyncingPlaylists {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let snapshot = serverState.snapshot()
+        #expect(snapshot.putCount == 2)
+        #expect(snapshot.document.likedSongIDs == ["first-remote-id", "second-remote-id"])
+        #expect(model.favorites == [first.id, second.id])
+        #expect(model.playlists[0].trackIDs == [first.id, second.id])
     }
 
     @Test

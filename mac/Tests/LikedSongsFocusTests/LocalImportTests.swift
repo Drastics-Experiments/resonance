@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreVideo
 import CryptoKit
 import Foundation
 import Testing
@@ -41,6 +42,66 @@ private final class LocalImportMockURLProtocol: URLProtocol {
         lock.lock()
         defer { lock.unlock() }
         return requestedHosts
+    }
+}
+
+private func makeLocalImportVideoFixture(at url: URL) async throws {
+    let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+    let input = AVAssetWriterInput(
+        mediaType: .video,
+        outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: 64,
+            AVVideoHeightKey: 64,
+            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 64_000],
+        ]
+    )
+    input.expectsMediaDataInRealTime = false
+    let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+        assetWriterInput: input,
+        sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: 64,
+            kCVPixelBufferHeightKey as String: 64,
+        ]
+    )
+    guard writer.canAdd(input) else { throw CocoaError(.featureUnsupported) }
+    writer.add(input)
+    guard writer.startWriting() else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
+    writer.startSession(atSourceTime: .zero)
+
+    for frame in 0...1 {
+        while !input.isReadyForMoreMediaData {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            64,
+            64,
+            kCVPixelFormatType_32BGRA,
+            nil,
+            &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pixelBuffer else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        if let base = CVPixelBufferGetBaseAddress(pixelBuffer) {
+            memset(base, frame == 0 ? 0x22 : 0x88, CVPixelBufferGetDataSize(pixelBuffer))
+        }
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+        guard adaptor.append(pixelBuffer, withPresentationTime: CMTime(seconds: Double(frame), preferredTimescale: 600)) else {
+            throw writer.error ?? CocoaError(.fileWriteUnknown)
+        }
+    }
+
+    input.markAsFinished()
+    await withCheckedContinuation { continuation in
+        writer.finishWriting { continuation.resume() }
+    }
+    guard writer.status == .completed else {
+        throw writer.error ?? CocoaError(.fileWriteUnknown)
     }
 }
 
@@ -104,6 +165,130 @@ struct LocalImportTests {
         #expect(throws: LocalImportError.self) {
             _ = try LocalImportParser.spotifyEmbed(html, expectedTrackID: "11dFghVXANMlKmJXsNCbNl")
         }
+    }
+
+    @Test
+    func parsesOnlyValidatedDebridVaultReleaseSources() throws {
+        let infoHash = String(repeating: "a", count: 40)
+        let payload: [String: Any] = [
+            "success": true,
+            "data": [
+                [
+                    "title": "Rick Astley - Never Gonna Give You Up 12&#39;&#39; [FLAC]",
+                    "infoHash": infoHash.uppercased(),
+                    "magnetLink": "magnet:?xt=urn:btih:\(infoHash)&dn=release",
+                    "size": 543_210_987,
+                    "seeders": 42,
+                    "leechers": 3,
+                    "indexer": "Music",
+                    "uploadDate": "2026-07-31",
+                    "quality": "FLAC",
+                ],
+                [
+                    "title": "Duplicate hash",
+                    "infoHash": infoHash,
+                    "magnetLink": "magnet:?xt=urn:btih:\(infoHash)&dn=duplicate",
+                ],
+                [
+                    "title": "Unsafe magnet",
+                    "infoHash": String(repeating: "b", count: 40),
+                    "magnetLink": "https://example.invalid/file",
+                ],
+            ],
+        ]
+        let releases = try LocalImportParser.debridVaultReleases(JSONSerialization.data(withJSONObject: payload))
+        let release = try #require(releases.first)
+        #expect(releases.count == 1)
+        #expect(release.infoHash == infoHash)
+        #expect(release.title.contains("12''"))
+        #expect(!release.title.contains("&#39;"))
+        #expect(release.seeders == 42)
+        #expect(release.size == 543_210_987)
+        #expect(LocalImportURL.isDebridVaultDocument(URL(string: "https://debridvault.elfhosted.com/api/torrents/search")!))
+        #expect(!LocalImportURL.isDebridVaultDocument(URL(string: "https://evil.debridvault.elfhosted.com/api/torrents/search")!))
+    }
+
+    @Test
+    func spotifyResolutionCanReturnDebridSourcesWhenYouTubeHasNoMatch() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LocalImportDebridSearch-\(UUID().uuidString)", isDirectory: true)
+        let library = root.appendingPathComponent("Library", isDirectory: true)
+        let temporary = root.appendingPathComponent("Temporary", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer {
+            LocalImportMockURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        LocalImportMockURLProtocol.reset()
+
+        let spotifyID = self.spotifyID
+        let infoHash = String(repeating: "c", count: 40)
+        LocalImportMockURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.host == "open.spotify.com", url.path == "/oembed" {
+                let payload: [String: Any] = [
+                    "provider_name": "Spotify",
+                    "type": "rich",
+                    "title": "Never Gonna Give You Up",
+                    "thumbnail_url": "https://image-cdn-ak.spotifycdn.com/image/cover",
+                    "html": "<iframe src=\"https://open.spotify.com/embed/track/\(spotifyID)\"></iframe>",
+                ]
+                let data = try JSONSerialization.data(withJSONObject: payload)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
+            }
+            if url.host == "open.spotify.com", url.path == "/embed/track/\(spotifyID)" {
+                let entity: [String: Any] = [
+                    "type": "track",
+                    "id": spotifyID,
+                    "title": "Never Gonna Give You Up",
+                    "artists": [["name": "Rick Astley"]],
+                    "duration": 213_573,
+                    "visualIdentity": ["image": [["url": "https://image-cdn-fa.spotifycdn.com/image/cover", "maxWidth": 640]]],
+                ]
+                let embedded: [String: Any] = ["props": ["pageProps": ["state": ["data": ["entity": entity]]]]]
+                let json = String(data: try JSONSerialization.data(withJSONObject: embedded), encoding: .utf8)!
+                let data = Data("<html><script id=\"__NEXT_DATA__\" type=\"application/json\">\(json)</script></html>".utf8)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
+            }
+            if url.host == "debridvault.elfhosted.com", url.path == "/api/torrents/search" {
+                #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "artist" })?.value == "Rick Astley")
+                let payload: [String: Any] = [
+                    "success": true,
+                    "data": [[
+                        "title": "Rick Astley - Whenever You Need Somebody [FLAC]",
+                        "infoHash": infoHash,
+                        "magnetLink": "magnet:?xt=urn:btih:\(infoHash)&dn=release",
+                        "size": 543_210_987,
+                        "seeders": 42,
+                        "quality": "FLAC",
+                    ]],
+                ]
+                let data = try JSONSerialization.data(withJSONObject: payload)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
+            }
+            if url.host == "music.youtube.com" || url.host == "www.youtube.com" {
+                let data = Data("<html></html>".utf8)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
+            }
+            throw URLError(.unsupportedURL)
+        }
+
+        let service = LocalDeviceImportService(
+            sessions: .testing(session),
+            localRoot: library,
+            temporaryRoot: temporary
+        )
+        let resolution = try await service.resolve(source: "https://open.spotify.com/track/\(spotifyID)") { _ in }
+        #expect(resolution.candidates.isEmpty)
+        #expect(resolution.releases.count == 1)
+        #expect(resolution.releases.first?.infoHash == infoHash)
+        let hosts = LocalImportMockURLProtocol.hosts()
+        #expect(hosts.contains("debridvault.elfhosted.com"))
+        #expect(!hosts.contains("music.test"))
     }
 
     @Test
@@ -260,6 +445,10 @@ struct LocalImportTests {
             stages.append(progress.stage)
         }
         let candidate = try #require(resolution.candidates.first)
+        let preview = try await service.previewStream(for: candidate)
+        #expect(preview.url.host?.hasSuffix("googlevideo.com") == true)
+        #expect(preview.httpHeaders["Origin"] == "https://www.youtube.com")
+        #expect(preview.httpHeaders["User-Agent"]?.isEmpty == false)
         let outcome = try await service.importCandidate(
             candidate,
             metadata: LocalImportMetadata(
@@ -315,6 +504,233 @@ struct LocalImportTests {
     }
 
     @Test
+    func youtubeVideoModeDownloadsPlayableMP4AndAddsAVideoTrack() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalVideoImport-\(UUID().uuidString)", isDirectory: true)
+        let library = root.appendingPathComponent("Library", isDirectory: true)
+        let temporary = root.appendingPathComponent("Temporary", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer {
+            LocalImportMockURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let fixtureURL = root.appendingPathComponent("fixture.mp4")
+        try await makeLocalImportVideoFixture(at: fixtureURL)
+        let fixture = try Data(contentsOf: fixtureURL)
+        #expect(!fixture.isEmpty)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        LocalImportMockURLProtocol.reset()
+        let videoID = self.videoID
+        LocalImportMockURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.path == "/watch" || url.path.hasPrefix("/embed/") {
+                let data = Data("<script>ytcfg.set({\"VISITOR_DATA\":\"visitor_video\"});</script>".utf8)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
+            }
+            if url.path == "/youtubei/v1/player" {
+                let player: [String: Any] = [
+                    "playabilityStatus": ["status": "OK"],
+                    "videoDetails": [
+                        "videoId": videoID,
+                        "title": "Local Test Video",
+                        "author": "Resonance",
+                        "lengthSeconds": "1",
+                    ],
+                    "streamingData": ["formats": [[
+                        "itag": 18,
+                        "url": "https://rr1.example.googlevideo.com/videoplayback",
+                        "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+                        "bitrate": 500_000,
+                        "contentLength": String(fixture.count),
+                        "qualityLabel": "360p",
+                        "height": 360,
+                        "audioQuality": "AUDIO_QUALITY_MEDIUM",
+                        "audioChannels": 2,
+                    ]]],
+                ]
+                let data = try JSONSerialization.data(withJSONObject: player)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
+            }
+            if url.host?.hasSuffix("googlevideo.com") == true {
+                #expect(request.value(forHTTPHeaderField: "Range") == "bytes=0-\(fixture.count - 1)")
+                return (HTTPURLResponse(
+                    url: url,
+                    statusCode: 206,
+                    httpVersion: nil,
+                    headerFields: [
+                        "Content-Range": "bytes 0-\(fixture.count - 1)/\(fixture.count)",
+                        "Content-Length": String(fixture.count),
+                    ]
+                )!, fixture)
+            }
+            throw URLError(.unsupportedURL)
+        }
+
+        let service = LocalDeviceImportService(
+            sessions: .testing(session),
+            localRoot: library,
+            temporaryRoot: temporary
+        )
+        let resolution = try await service.resolve(
+            source: "https://youtu.be/\(videoID)",
+            mediaMode: .video
+        ) { _ in }
+        let candidate = try #require(resolution.candidates.first)
+        let outcome = try await service.importCandidate(
+            candidate,
+            metadata: .init(
+                title: "Local Test Video",
+                artist: "Resonance",
+                album: "Device Videos",
+                artworkURL: nil,
+                sourceURL: "https://youtu.be/\(videoID)"
+            ),
+            existingTracks: [],
+            mediaMode: .video
+        ) { _ in }
+        guard case .created(let imported) = outcome else {
+            Issue.record("Expected a newly downloaded video")
+            return
+        }
+
+        #expect(imported.mediaMode == .video)
+        #expect(imported.fileURL.pathExtension == "mp4")
+        #expect(imported.duration > 0)
+        #expect(FileManager.default.fileExists(atPath: imported.fileURL.path))
+        let asset = AVURLAsset(url: imported.fileURL)
+        #expect(!(try await asset.loadTracks(withMediaType: .video)).isEmpty)
+
+        let suiteName = "LocalVideoImport.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        let track = model.insertLocalImportedAudio(imported)
+        #expect(track.kind == .video)
+        #expect(track.fileURL == imported.fileURL)
+    }
+
+    @Test
+    func youtubeVideoModeDownloadsAndMuxesSeparateAdaptiveStreams() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalAdaptiveVideoImport-\(UUID().uuidString)", isDirectory: true)
+        let library = root.appendingPathComponent("Library", isDirectory: true)
+        let temporary = root.appendingPathComponent("Temporary", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer {
+            LocalImportMockURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let videoFixtureURL = root.appendingPathComponent("video-only.mp4")
+        try await makeLocalImportVideoFixture(at: videoFixtureURL)
+        let videoFixture = try Data(contentsOf: videoFixtureURL)
+        let audioFixture = try Data(contentsOf: m4a)
+        #expect(!videoFixture.isEmpty)
+        #expect(!audioFixture.isEmpty)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        LocalImportMockURLProtocol.reset()
+        let videoID = self.videoID
+        LocalImportMockURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.path == "/watch" || url.path.hasPrefix("/embed/") {
+                let data = Data("<script>ytcfg.set({\"VISITOR_DATA\":\"visitor_adaptive_video\"});</script>".utf8)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
+            }
+            if url.path == "/youtubei/v1/player" {
+                let player: [String: Any] = [
+                    "playabilityStatus": ["status": "OK"],
+                    "videoDetails": [
+                        "videoId": videoID,
+                        "title": "Local Adaptive Video",
+                        "author": "Resonance",
+                        "lengthSeconds": "1",
+                    ],
+                    "streamingData": ["adaptiveFormats": [
+                        [
+                            "itag": 137,
+                            "url": "https://rr1.example.googlevideo.com/video-only",
+                            "mimeType": "video/mp4; codecs=\"avc1.640028\"",
+                            "bitrate": 5_000_000,
+                            "contentLength": String(videoFixture.count),
+                            "qualityLabel": "1080p",
+                            "height": 1080,
+                        ],
+                        [
+                            "itag": 140,
+                            "url": "https://rr1.example.googlevideo.com/audio-only",
+                            "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+                            "bitrate": 129_000,
+                            "contentLength": String(audioFixture.count),
+                            "audioQuality": "AUDIO_QUALITY_MEDIUM",
+                            "audioChannels": 2,
+                        ],
+                    ]],
+                ]
+                let data = try JSONSerialization.data(withJSONObject: player)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
+            }
+            if url.host?.hasSuffix("googlevideo.com") == true {
+                let fixture = url.path == "/audio-only" ? audioFixture : videoFixture
+                #expect(request.value(forHTTPHeaderField: "Range") == "bytes=0-\(fixture.count - 1)")
+                return (HTTPURLResponse(
+                    url: url,
+                    statusCode: 206,
+                    httpVersion: nil,
+                    headerFields: [
+                        "Content-Range": "bytes 0-\(fixture.count - 1)/\(fixture.count)",
+                        "Content-Length": String(fixture.count),
+                    ]
+                )!, fixture)
+            }
+            throw URLError(.unsupportedURL)
+        }
+
+        let service = LocalDeviceImportService(
+            sessions: .testing(session),
+            localRoot: library,
+            temporaryRoot: temporary
+        )
+        let resolution = try await service.resolve(
+            source: "https://youtu.be/\(videoID)",
+            mediaMode: .video
+        ) { _ in }
+        let candidate = try #require(resolution.candidates.first)
+        let outcome = try await service.importCandidate(
+            candidate,
+            metadata: .init(
+                title: "Local Adaptive Video",
+                artist: "Resonance",
+                album: "Device Videos",
+                artworkURL: nil,
+                sourceURL: "https://youtu.be/\(videoID)"
+            ),
+            existingTracks: [],
+            mediaMode: .video
+        ) { _ in }
+        guard case .created(let imported) = outcome else {
+            Issue.record("Expected a newly muxed adaptive video")
+            return
+        }
+
+        let asset = AVURLAsset(url: imported.fileURL)
+        #expect(imported.mediaMode == .video)
+        #expect(imported.fileURL.pathExtension == "mp4")
+        #expect(!(try await asset.loadTracks(withMediaType: .video)).isEmpty)
+        #expect(!(try await asset.loadTracks(withMediaType: .audio)).isEmpty)
+        #expect((try await asset.load(.duration)).seconds > 0)
+    }
+
+    @Test
     func nativeMetadataRemuxProducesPlayableTaggedM4A() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("LocalMediaTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -342,12 +758,33 @@ struct LocalImportTests {
     }
 
     @Test
-    func localImportRemainsVisibleAndUnownedAcrossProfileChanges() throws {
+    func localImportRemainsVisibleAndUnownedAcrossProfileChanges() async throws {
         let suiteName = "LocalImportProfiles.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            LocalImportMockURLProtocol.reset()
+            session.invalidateAndCancel()
+        }
+        LocalImportMockURLProtocol.reset()
+        LocalImportMockURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            #expect(url.path == "/api/v1/profiles")
+            let data = Data(#"{"default_profile_id":"default","profiles":[{"id":"default","name":"Default","is_default":true,"song_count":0,"playlist_count":0,"liked_count":0},{"id":"another-profile","name":"Another Profile","is_default":false,"song_count":0,"playlist_count":0,"liked_count":0}]}"#.utf8)
+            return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: session,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
         let imported = LocalImportedAudio(
             fileURL: m4a,
             metadata: .init(title: "Local", artist: "Device", album: "Only", artworkURL: nil, sourceURL: "https://youtu.be/\(videoID)"),
@@ -359,7 +796,7 @@ struct LocalImportTests {
         let track = model.insertLocalImportedAudio(imported)
         #expect(track.remoteID == nil)
         #expect(track.syncProfileID == nil)
-        model.selectSyncProfile("another-profile")
+        #expect(await model.selectSyncProfile(matching: "another-profile"))
         #expect(model.visibleTracks.contains(where: { $0.id == track.id }))
 
         let reloaded = PlayerModel(loadPersistedLibrary: true, defaults: defaults, persistServerCredentials: false)
@@ -412,6 +849,9 @@ struct LocalImportTests {
         }
         let localFile = root.appendingPathComponent("Local Upload.m4a")
         try FileManager.default.copyItem(at: m4a, to: localFile)
+        let uploadSize = try #require(
+            localFile.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        )
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [LocalImportMockURLProtocol.self]
@@ -420,12 +860,35 @@ struct LocalImportTests {
         LocalImportMockURLProtocol.reset()
         LocalImportMockURLProtocol.handler = { request in
             let url = try #require(request.url)
+            if request.httpMethod == "GET", url.path == "/api/v1/profiles" {
+                #expect(request.value(forHTTPHeaderField: "X-Resonance-Profile") == nil)
+                let data = Data(#"{"default_profile_id":"default","profiles":[{"id":"default","name":"Default","is_default":true,"song_count":0,"playlist_count":0,"liked_count":0},{"id":"profile-b","name":"Profile B","is_default":false,"song_count":0,"playlist_count":0,"liked_count":0}]}"#.utf8)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+            }
             #expect(request.value(forHTTPHeaderField: "X-Resonance-Profile") == "profile-b")
             if request.httpMethod == "PUT", url.path == "/api/v1/admin/songs" {
                 #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer admin-token")
+                #expect(request.value(forHTTPHeaderField: "Content-Type") == "audio/mp4")
+                #expect(request.value(forHTTPHeaderField: "Content-Length") == String(uploadSize))
                 let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
                 #expect(query?.first(where: { $0.name == "filename" })?.value == "Local Upload.m4a")
-                return (HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!, Data())
+                let data = Data(#"""
+                {
+                  "id":"uploaded-audio",
+                  "filename":"Local Upload.m4a",
+                  "title":"Local Upload",
+                  "artist":"Device",
+                  "album":"Only",
+                  "size":\#(uploadSize),
+                  "modified_at":"2026-08-02T00:00:00.000Z",
+                  "content_type":"audio/mp4",
+                  "duration_seconds":4,
+                  "artwork_url":null,
+                  "download_url":"/api/v1/songs/uploaded-audio/file",
+                  "stream_url":"/api/v1/songs/uploaded-audio/stream"
+                }
+                """#.utf8)
+                return (HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!, data)
             }
             if request.httpMethod == "GET", url.path == "/api/v1/songs" {
                 #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
@@ -449,7 +912,7 @@ struct LocalImportTests {
         model.serverURLString = "https://music.test"
         model.serverToken = "access-token"
         model.serverAdminToken = "admin-token"
-        model.selectSyncProfile("profile-b")
+        #expect(await model.selectSyncProfile(matching: "profile-b"))
         let track = model.insertLocalImportedAudio(LocalImportedAudio(
             fileURL: localFile,
             metadata: .init(title: "Local Upload", artist: "Device", album: "Only", artworkURL: nil, sourceURL: "https://youtu.be/\(videoID)"),
@@ -460,6 +923,7 @@ struct LocalImportTests {
         ))
 
         try await model.uploadLocalImportToActiveProfile(track)
+        #expect(model.remoteSongs.map(\.id) == ["uploaded-audio"])
         #expect(model.tracks.first(where: { $0.id == track.id })?.remoteID == nil)
         #expect(model.tracks.first(where: { $0.id == track.id })?.syncProfileID == nil)
 
@@ -478,6 +942,95 @@ struct LocalImportTests {
         #expect(FileManager.default.fileExists(atPath: localFile.path))
         #expect(model.visibleTracks.contains(where: { $0.id == track.id }))
         #expect(model.tracks.first(where: { $0.id == track.id })?.syncProfileID == nil)
+    }
+
+    @Test
+    func optionalVideoUploadUsesVideoContentTypeAndActiveProfile() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LocalVideoUpload-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            LocalImportMockURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+        }
+        let localFile = root.appendingPathComponent("Local Upload.mp4")
+        try Data(repeating: 0x44, count: 64).write(to: localFile, options: .atomic)
+        let uploadSize = try #require(
+            localFile.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        )
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        LocalImportMockURLProtocol.reset()
+        LocalImportMockURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if request.httpMethod == "GET", url.path == "/api/v1/profiles" {
+                #expect(request.value(forHTTPHeaderField: "X-Resonance-Profile") == nil)
+                let data = Data(#"{"default_profile_id":"default","profiles":[{"id":"default","name":"Default","is_default":true,"song_count":0,"playlist_count":0,"liked_count":0},{"id":"profile-b","name":"Profile B","is_default":false,"song_count":0,"playlist_count":0,"liked_count":0}]}"#.utf8)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+            }
+            #expect(request.value(forHTTPHeaderField: "X-Resonance-Profile") == "profile-b")
+            if request.httpMethod == "PUT", url.path == "/api/v1/admin/songs" {
+                #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer admin-token")
+                #expect(request.value(forHTTPHeaderField: "Content-Type") == "video/mp4")
+                #expect(request.value(forHTTPHeaderField: "Content-Length") == String(uploadSize))
+                let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+                #expect(query?.first(where: { $0.name == "filename" })?.value == "Local Upload.mp4")
+                let data = Data(#"""
+                {
+                  "id":"uploaded-video",
+                  "filename":"Local Upload.mp4",
+                  "title":"Local Video Upload",
+                  "artist":"Device",
+                  "album":"Only",
+                  "size":\#(uploadSize),
+                  "modified_at":"2026-08-02T00:00:00.000Z",
+                  "content_type":"video/mp4",
+                  "duration_seconds":1,
+                  "artwork_url":null,
+                  "download_url":"/api/v1/songs/uploaded-video/file",
+                  "stream_url":"/api/v1/songs/uploaded-video/stream"
+                }
+                """#.utf8)
+                return (HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!, data)
+            }
+            if request.httpMethod == "GET", url.path == "/api/v1/songs" {
+                #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
+                let data = Data(#"{"songs":[],"count":0}"#.utf8)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+            }
+            throw URLError(.unsupportedURL)
+        }
+
+        let suiteName = "LocalVideoUpload.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: session,
+            serverCacheRoot: root,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+        model.serverAdminToken = "admin-token"
+        #expect(await model.selectSyncProfile(matching: "profile-b"))
+        let track = model.insertLocalImportedAudio(LocalImportedAudio(
+            fileURL: localFile,
+            metadata: .init(title: "Local Video Upload", artist: "Device", album: "Only", artworkURL: nil, sourceURL: "https://youtu.be/\(videoID)"),
+            duration: 1,
+            artworkData: nil,
+            sourceSHA256: "video-upload-source-hash",
+            contentSHA256: "video-upload-content-hash",
+            mediaMode: .video
+        ))
+
+        #expect(track.kind == .video)
+        try await model.uploadLocalImportToActiveProfile(track)
+        #expect(model.remoteSongs.map(\.id) == ["uploaded-video"])
     }
 
     private func spotifyTrack() -> LocalImportSpotifyTrack {

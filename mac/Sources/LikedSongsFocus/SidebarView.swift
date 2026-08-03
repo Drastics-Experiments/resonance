@@ -5,6 +5,17 @@ struct SidebarView: View {
     @State private var showingNewPlaylist = false
     @State private var newPlaylistName = ""
 
+    private var newPlaylistNameError: String? {
+        let name = newPlaylistName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { return "Enter a playlist name." }
+        if model.playlists.contains(where: {
+            $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }) {
+            return "A playlist with this name already exists."
+        }
+        return nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Spacer().frame(height: 48)
@@ -75,8 +86,9 @@ struct SidebarView: View {
             TextField("Playlist name", text: $newPlaylistName)
             Button("Cancel", role: .cancel) {}
             Button("Create") { _ = model.createPlaylist(named: newPlaylistName) }
+                .disabled(newPlaylistNameError != nil)
         } message: {
-            Text("Create a playlist for songs in your local library.")
+            Text(newPlaylistNameError ?? "Create a playlist for songs in your local library.")
         }
         .onReceive(NotificationCenter.default.publisher(for: .newMusicPlaylist)) { _ in
             newPlaylistName = ""
@@ -211,6 +223,7 @@ private struct PlaylistSidebarRow: View {
     let deleteAction: (() -> Void)?
     let action: () -> Void
     @State private var isHovering = false
+    @State private var confirmingDeletion = false
 
     var body: some View {
         Button(action: action) {
@@ -250,9 +263,19 @@ private struct PlaylistSidebarRow: View {
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .contextMenu {
+            if deleteAction != nil {
+                Button("Delete Playlist", role: .destructive) {
+                    confirmingDeletion = true
+                }
+            }
+        }
+        .alert("Delete “\(playlist.name)”?", isPresented: $confirmingDeletion) {
+            Button("Cancel", role: .cancel) {}
             if let deleteAction {
                 Button("Delete Playlist", role: .destructive, action: deleteAction)
             }
+        } message: {
+            Text("The songs remain in your library. This playlist deletion will sync to your other devices.")
         }
     }
 }

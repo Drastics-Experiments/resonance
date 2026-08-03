@@ -8,16 +8,18 @@ import {
   filterTracks,
   formatHistoryWindowLabel,
   formatTime,
-  mergeListeningHistory,
   mergePlaylistDocument,
   mergeSyncedTracks,
   nextIndex,
   niceChartMaximum,
   normalizedVolume,
   normalizeState,
+  restoreProfileState,
   resolveSyncProfile,
+  storeActiveProfileState,
   summarizeListeningHistory,
   summarizeListeningStats,
+  tracksForActiveProfile,
   tracksForPlaylist,
   updatePlaylistRemoteSongIDs,
 } from "../ui/core.js";
@@ -286,7 +288,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   const packageSource = readFileSync(new URL("../package.json", import.meta.url), "utf8");
 
-  assert.match(mainSource, /RESONANCE_LOCAL_DEVICE_IMPORT === "1" \|\| !app\.isPackaged/);
+  assert.match(mainSource, /function localImportEnabled\(\) \{\s+return process\.env\.RESONANCE_LOCAL_DEVICE_IMPORT !== "0";\s+\}/);
   assert.match(mainSource, /ipcMain\.handle\("local-import:resolve"/);
   assert.match(mainSource, /ipcMain\.handle\("local-import:artwork"/);
   assert.match(mainSource, /ipcMain\.handle\("local-import:start"/);
@@ -440,11 +442,9 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(preloadSource, /onPrepareToClose:[\s\S]+app:prepare-close/);
   assert.match(preloadSource, /readyToClose:[\s\S]+app:close-ready/);
   assert.match(preloadSource, /postListeningHistory:[\s\S]+server:listening-history:post/);
-  assert.match(preloadSource, /fetchListeningHistory:[\s\S]+server:listening-history:get/);
   assert.match(mainSource, /function safeListeningHistory\(value\)/);
   assert.match(mainSource, /listeningHistory: safeListeningHistory\(state\.listeningHistory\)/);
   assert.match(mainSource, /ipcMain\.handle\("server:listening-history:post"/);
-  assert.match(mainSource, /ipcMain\.handle\("server:listening-history:get"/);
   assert.match(mainSource, /api\/v1\/listening-history/);
   assert.match(mainSource, /JSON\.stringify\(\{ client: "windows", entries \}\)/);
   assert.match(mainSource, /response\.status === 404[\s\S]+supported: false/);
@@ -452,12 +452,10 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /profileID: activeProfileID\(\)/);
   assert.match(appSource, /function pendingListeningHistoryBatches\(\)/);
   assert.match(appSource, /api\.postListeningHistory\(\{/);
-  assert.match(appSource, /api\.fetchListeningHistory\(\{/);
-  assert.match(appSource, /mergeListeningHistory\(state, pullProfileID/);
   assert.match(appSource, /result\?\.supported === false/);
   assert.match(appSource, /scheduleListeningHistorySync\(\)/);
   assert.match(appSource, /syncListeningHistoryNow\(\{ force: true \}\)/);
-  assert.match(mainSource, /librarySaveQueue[\s\S]+\.catch\(\(\) => \{\}\)[\s\S]+fs\.writeFile/);
+  assert.match(mainSource, /librarySaveQueue[\s\S]+\.catch\(\(\) => \{\}\)[\s\S]+atomicWriteFile/);
   assert.match(mainSource, /window\.webContents\.send\("app:prepare-close"\)/);
   assert.match(mainSource, /ipcMain\.on\("app:close-ready"/);
   assert.match(appSource, /const allTimeStats = summarizeListeningStats\(state, new Date\(\)\)/);
@@ -607,50 +605,6 @@ test("summarizes persisted listening history by local day", () => {
   const previousWindow = summarizeListeningHistory(state, 7, now, 1);
   assert.equal(previousWindow.days.at(-1).date.getDate(), 23);
   assert.equal(previousWindow.totalSeconds, 0);
-});
-
-test("merges downloaded listening history only into its profile and maps shared songs locally", () => {
-  const state = normalizeState({
-    syncProfileID: "alpha",
-    tracks: [
-      { id: "local-song", remoteID: "server-song", syncProfileID: "alpha", title: "Local title", artist: "Local artist" },
-    ],
-    listeningHistory: [
-      { id: "same-event", trackID: "local-song", profileID: "alpha", startedAt: "2026-07-30T17:00:00Z", listenedSeconds: 20 },
-      { id: "default-event", trackID: "default-song", profileID: "default", startedAt: "2026-07-30T18:00:00Z", listenedSeconds: 15 },
-    ],
-  });
-  state.listeningHistory = mergeListeningHistory(state, "alpha", [
-    {
-      id: "same-event",
-      track_id: "other-device-track",
-      song_id: "server-song",
-      started_at: "2026-07-30T17:00:00Z",
-      listened_seconds: 45,
-      title: "Server title",
-      artist: "Server artist",
-    },
-    {
-      id: "remote-event",
-      track_id: "remote-only-track",
-      started_at: "2026-07-30T19:00:00Z",
-      listened_seconds: 30,
-      title: "Remote only",
-      artist: "Remote artist",
-    },
-  ]);
-
-  assert.equal(state.listeningHistory.length, 3);
-  const merged = state.listeningHistory.find((entry) => entry.id === "same-event");
-  assert.equal(merged.profileID, "alpha");
-  assert.equal(merged.trackID, "local-song");
-  assert.equal(merged.listenedSeconds, 45);
-  assert.equal(state.listeningHistory.find((entry) => entry.id === "default-event").profileID, "default");
-  const stats = summarizeListeningStats(state, new Date("2026-07-30T20:00:00Z"));
-  assert.equal(stats.totalSeconds, 75);
-  assert.equal(stats.plays, 2);
-  assert.equal(stats.topArtist, "Local artist");
-  assert.equal(stats.songRanking.find((song) => song.trackID === "remote-only-track").title, "Remote only");
 });
 
 test("summarizes all-time listening stats independently of the graph window", () => {
@@ -833,6 +787,68 @@ test("normalizes persisted playback context against the current library", () => 
   });
   assert.deepEqual(state.playbackQueueIDs, ["b", "a"]);
   assert.equal(state.playbackPlaylistID, "playlist-1");
+});
+
+test("scopes downloaded tracks by both server and profile", () => {
+  const state = normalizeState({
+    ...createEmptyState(),
+    serverURL: "https://current.example/api/",
+    syncProfileID: "profile-a",
+    tracks: [
+      { id: "local", title: "Local" },
+      { id: "active", remoteID: "same-song", sourceServer: "https://current.example", syncProfileID: "profile-a" },
+      { id: "other-profile", remoteID: "same-song", sourceServer: "https://current.example", syncProfileID: "profile-b" },
+      { id: "other-server", remoteID: "same-song", sourceServer: "https://other.example", syncProfileID: "profile-a" },
+    ],
+    playlists: [{ id: "liked", name: "Liked Songs", trackIDs: [], isSystem: true }],
+    favorites: [],
+  });
+
+  assert.deepEqual(state.tracks.map((track) => track.id), ["local", "active", "other-profile", "other-server"]);
+  assert.deepEqual(tracksForActiveProfile(state).map((track) => track.id), ["local", "active"]);
+});
+
+test("preserves unsynced playlist state across profile switches", () => {
+  const state = normalizeState({
+    ...createEmptyState(),
+    serverURL: "https://music.example",
+    syncProfileID: "profile-a",
+  });
+  state.playlists.push({ id: "offline-mix", name: "Offline Mix", trackIDs: [], remoteSongIDs: [], isSystem: false });
+  state.dirtyPlaylistIDs = ["offline-mix"];
+  storeActiveProfileState(state);
+
+  restoreProfileState(state, "profile-b");
+  assert.deepEqual(state.playlists.map((playlist) => playlist.id), ["liked"]);
+  state.playlists.push({ id: "profile-b-mix", name: "Profile B Mix", trackIDs: [], remoteSongIDs: [], isSystem: false });
+  state.dirtyPlaylistIDs = ["profile-b-mix"];
+  storeActiveProfileState(state);
+
+  restoreProfileState(state, "profile-a");
+  assert.deepEqual(state.playlists.map((playlist) => playlist.id), ["liked", "offline-mix"]);
+  assert.deepEqual(state.dirtyPlaylistIDs, ["offline-mix"]);
+});
+
+test("guards profile transitions, authenticated downloads, persistence, and transfer memory", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const packageJSON = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const syncSource = mainSource.slice(mainSource.indexOf('ipcMain.handle("server:sync"'), mainSource.indexOf('ipcMain.handle("server:upload"'));
+  const uploadSource = mainSource.slice(mainSource.indexOf('ipcMain.handle("server:upload"'), mainSource.indexOf('ipcMain.handle("server:cancel-transfer"'));
+
+  assert.match(appSource, /storeActiveProfileState\(state\);[\s\S]+restoreProfileState\(state, profileID, serverURL\)/);
+  assert.match(appSource, /if \(!profileContextIsCurrent\(context\)\) return;/);
+  assert.match(appSource, /serverConnected = false;[\s\S]+serverCatalog = \[\];[\s\S]+selectedRemoteIDs\.clear\(\)/);
+  assert.match(appSource, /updatePlaylistRemoteSongIDs\(state, playlist\);[\s\S]+markPlaylistDirty\(playlist\)/);
+  assert.match(mainSource, /app\.requestSingleInstanceLock\(\)/);
+  assert.match(mainSource, /function atomicWriteFile\([\s\S]+fs\.rename\(temporary, destination\)/);
+  assert.match(syncSource, /fileURL\.origin !== base\.origin/);
+  assert.match(syncSource, /syncProfileID \|\| "default"\) === \(profileID \|\| "default"\)/);
+  assert.match(syncSource, /writeResponseToFile\(response, temporary/);
+  assert.doesNotMatch(syncSource, /response\.arrayBuffer\(\)/);
+  assert.match(uploadSource, /createReadStream\(filePath\)/);
+  assert.doesNotMatch(uploadSource, /fs\.readFile\(filePath\)/);
+  assert.match(packageJSON.scripts["package:win"], /electron-builder --dir --win --x64/);
 });
 
 test("replaces stale synced tracks instead of discarding the fresh download", () => {

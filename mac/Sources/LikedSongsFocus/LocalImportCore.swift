@@ -1,5 +1,14 @@
 import Foundation
 
+enum LocalImportMediaMode: String, CaseIterable, Hashable, Identifiable, Sendable {
+    case audio
+    case video
+
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+    var fileExtension: String { self == .video ? "mp4" : "m4a" }
+}
+
 struct LocalImportSpotifyTrack: Codable, Hashable, Sendable {
     let provider: String
     let type: String
@@ -43,6 +52,19 @@ struct LocalImportAudioSourceMatch: Codable, Hashable, Identifiable, Sendable {
     let match: MatchDetails
 }
 
+struct LocalImportDebridRelease: Codable, Hashable, Identifiable, Sendable {
+    var id: String { infoHash }
+    let title: String
+    let infoHash: String
+    let magnetLink: String
+    let size: Int64?
+    let seeders: Int?
+    let leechers: Int?
+    let indexer: String?
+    let uploadDate: String?
+    let quality: String?
+}
+
 struct LocalImportYouTubePreview: Codable, Hashable, Sendable {
     let videoID: String
     let title: String
@@ -69,6 +91,12 @@ struct LocalImportResolution: Hashable, Sendable {
     let kind: Kind
     let track: LocalImportSpotifyTrack
     let candidates: [LocalImportAudioSourceMatch]
+    let releases: [LocalImportDebridRelease]
+}
+
+struct LocalImportPreviewStream: Hashable, Sendable {
+    let url: URL
+    let httpHeaders: [String: String]
 }
 
 struct LocalImportedAudio: Hashable, Sendable {
@@ -78,6 +106,7 @@ struct LocalImportedAudio: Hashable, Sendable {
     let artworkData: Data?
     let sourceSHA256: String
     let contentSHA256: String
+    var mediaMode: LocalImportMediaMode = .audio
 }
 
 enum LocalImportOutcome: Hashable, Sendable {
@@ -122,6 +151,7 @@ enum LocalImportURL {
     private static let spotifyHosts = Set(["open.spotify.com", "www.open.spotify.com", "spotify.link", "www.spotify.link"])
     private static let youtubeHosts = Set(["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"])
     private static let youtubeEmbedHosts = Set(["youtube-nocookie.com", "www.youtube-nocookie.com"])
+    private static let debridVaultHost = "debridvault.elfhosted.com"
 
     static func isSpotify(_ value: String) -> Bool {
         guard let url = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -250,6 +280,15 @@ enum LocalImportURL {
         return host == "googlevideo.com" || host.hasSuffix(".googlevideo.com")
     }
 
+    static func isDebridVaultDocument(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https",
+              components.user == nil,
+              components.password == nil,
+              components.host?.lowercased() == debridVaultHost else { return false }
+        return true
+    }
+
     private static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
         let range = NSRange(value.startIndex..<value.endIndex, in: value)
         return expression.firstMatch(in: value, range: range)?.range == range
@@ -257,6 +296,42 @@ enum LocalImportURL {
 }
 
 enum LocalImportParser {
+    static func debridVaultReleases(_ data: Data) throws -> [LocalImportDebridRelease] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              root["success"] as? Bool == true,
+              let values = root["data"] as? [[String: Any]] else {
+            throw LocalImportError(
+                stage: .searchingCandidates,
+                code: "DEBRID_VAULT_INVALID_SEARCH",
+                message: "Debrid Vault returned an invalid release search."
+            )
+        }
+
+        var seen = Set<String>()
+        return values.compactMap { value in
+            guard let title = cleanProviderText(value["title"] as? String, maxLength: 1_000),
+                  let rawHash = clean(value["infoHash"] as? String, maxLength: 40) else { return nil }
+            let infoHash = rawHash.lowercased()
+            guard infoHash.range(of: "^[a-f0-9]{40}$", options: .regularExpression) != nil,
+                  let magnetLink = clean(value["magnetLink"] as? String, maxLength: 8_192),
+                  magnetLink.lowercased().hasPrefix("magnet:?xt=urn:btih:\(infoHash)"),
+                  seen.insert(infoHash).inserted else { return nil }
+            return LocalImportDebridRelease(
+                title: title,
+                infoHash: infoHash,
+                magnetLink: magnetLink,
+                size: nonnegativeInt64(value["size"]),
+                seeders: nonnegativeInt(value["seeders"]),
+                leechers: nonnegativeInt(value["leechers"]),
+                indexer: cleanProviderText(value["indexer"] as? String),
+                uploadDate: clean(value["uploadDate"] as? String, maxLength: 128),
+                quality: cleanProviderText(value["quality"] as? String, maxLength: 128)
+            )
+        }
+        .prefix(40)
+        .map { $0 }
+    }
+
     static func spotifyOEmbed(_ data: Data, expectedTrackID: String) throws -> (title: String, artworkURL: String?, embedURL: String) {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               object["provider_name"] as? String == "Spotify",
@@ -503,10 +578,48 @@ enum LocalImportParser {
         return 0
     }
 
-    private static func clean(_ value: String?) -> String? {
+    private static func clean(_ value: String?, maxLength: Int = 500) -> String? {
         guard let value else { return nil }
         let cleaned = value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? nil : String(cleaned.prefix(500))
+        return cleaned.isEmpty ? nil : String(cleaned.prefix(maxLength))
+    }
+
+    private static func cleanProviderText(_ value: String?, maxLength: Int = 500) -> String? {
+        guard var text = clean(value, maxLength: maxLength) else { return nil }
+        for (entity, replacement) in [
+            ("&amp;", "&"), ("&quot;", "\""), ("&apos;", "'"),
+            ("&lt;", "<"), ("&gt;", ">"),
+        ] {
+            text = text.replacingOccurrences(of: entity, with: replacement, options: .caseInsensitive)
+        }
+        let expression = try! NSRegularExpression(pattern: #"&#(x[0-9a-f]+|[0-9]+);"#, options: .caseInsensitive)
+        let matches = expression.matches(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text))
+        for match in matches.reversed() {
+            guard let entityRange = Range(match.range(at: 0), in: text),
+                  let valueRange = Range(match.range(at: 1), in: text) else { continue }
+            let encoded = String(text[valueRange])
+            let radix = encoded.lowercased().hasPrefix("x") ? 16 : 10
+            let digits = radix == 16 ? String(encoded.dropFirst()) : encoded
+            guard let scalarValue = UInt32(digits, radix: radix),
+                  let scalar = UnicodeScalar(scalarValue),
+                  !CharacterSet.controlCharacters.contains(scalar) else { continue }
+            text.replaceSubrange(entityRange, with: String(scalar))
+        }
+        return String(text.prefix(maxLength))
+    }
+
+    private static func nonnegativeInt(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber else { return nil }
+        let result = number.int64Value
+        guard result >= 0, result <= Int64(Int.max), Double(result) == number.doubleValue else { return nil }
+        return Int(result)
+    }
+
+    private static func nonnegativeInt64(_ value: Any?) -> Int64? {
+        guard let number = value as? NSNumber else { return nil }
+        let result = number.int64Value
+        guard result >= 0, Double(result) == number.doubleValue else { return nil }
+        return result
     }
 }
 

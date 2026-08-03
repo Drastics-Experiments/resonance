@@ -40,6 +40,50 @@ const cachedLocalImportPreviews = new Map();
 const pendingExternalImports = new Map();
 let librarySaveQueue = Promise.resolve();
 
+async function atomicWriteFile(destination, data, options = "utf8") {
+  const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporary, data, options);
+    await fs.rename(temporary, destination);
+  } catch (error) {
+    await fs.rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function writeResponseToFile(response, destination, { signal, expectedSize } = {}) {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("The server returned an empty download.");
+  const handle = await fs.open(destination, "wx");
+  let total = 0;
+  try {
+    while (true) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      if (done) break;
+      const buffer = Buffer.from(value);
+      let offset = 0;
+      while (offset < buffer.length) {
+        const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset);
+        if (!bytesWritten) throw new Error("The downloaded file could not be written.");
+        offset += bytesWritten;
+      }
+      total += buffer.length;
+    }
+    signal?.throwIfAborted();
+    if (Number.isFinite(expectedSize) && expectedSize >= 0 && total !== expectedSize) {
+      throw new Error("The downloaded file was incomplete.");
+    }
+    return total;
+  } catch (error) {
+    await reader.cancel(error).catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+    await handle.close();
+  }
+}
+
 function usesPreviewCredentialStore() {
   return process.platform === "darwin" && !app.isPackaged;
 }
@@ -82,7 +126,7 @@ function encryptedCredentialStorage() {
 }
 
 function localImportEnabled() {
-  return process.env.RESONANCE_LOCAL_DEVICE_IMPORT === "1" || !app.isPackaged;
+  return process.env.RESONANCE_LOCAL_DEVICE_IMPORT !== "0";
 }
 
 function beginLocalImport(event) {
@@ -175,10 +219,6 @@ function safeFilename(value) {
 }
 
 function safeListeningHistory(value) {
-  const optionalText = (text, maximumLength = 500) => {
-    const normalized = typeof text === "string" ? text.trim() : "";
-    return normalized ? normalized.slice(0, maximumLength) : null;
-  };
   return (Array.isArray(value) ? value : [])
     .filter((entry) =>
       entry
@@ -189,17 +229,10 @@ function safeListeningHistory(value) {
       id: entry.id,
       trackID: entry.trackID,
       profileID: typeof entry.profileID === "string" && entry.profileID ? entry.profileID : "default",
-      remoteID: optionalText(entry.remoteID, 128),
       startedAt: new Date(entry.startedAt).toISOString(),
       listenedSeconds: Math.max(0, Number(entry.listenedSeconds) || 0),
-      title: optionalText(entry.title),
-      artist: optionalText(entry.artist),
-      album: optionalText(entry.album),
-      duration: Number.isFinite(Number(entry.duration)) && Number(entry.duration) >= 0
-        ? Number(entry.duration)
-        : null,
     }))
-    .slice(-10000);
+    .slice(-2000);
 }
 
 async function ensureDirectories() {
@@ -277,6 +310,15 @@ function normalizeBaseURL(value) {
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Enter a complete http:// or https:// server URL.");
   url.pathname = url.pathname.replace(/\/+$/, "") + "/";
   return url;
+}
+
+function matchesServerOrigin(value, expectedOrigin) {
+  if (!value) return true;
+  try {
+    return new URL(value).origin === expectedOrigin;
+  } catch {
+    return false;
+  }
 }
 
 async function authenticatedJSON(url, token, signal) {
@@ -372,7 +414,18 @@ ipcMain.on("app:close-ready", (event) => {
   window.close();
 });
 
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
+
+app.on("second-instance", () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
+
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
   await cleanupLocalImportTemporaryFiles();
   await ensureDirectories();
   createWindow();
@@ -410,7 +463,7 @@ ipcMain.handle("library:load", async () => {
       }
     }));
     stored.tracks = tracks.filter(Boolean);
-    await fs.writeFile(state, JSON.stringify({
+    await atomicWriteFile(state, JSON.stringify({
       ...stored,
       tracks: stored.tracks.map(({ fileUrl, ...track }) => track),
     }, null, 2), "utf8");
@@ -449,6 +502,7 @@ ipcMain.handle("library:save", async (_event, state) => {
     playlistSyncServerURL: typeof state.playlistSyncServerURL === "string" ? state.playlistSyncServerURL : null,
     syncProfileID: typeof state.syncProfileID === "string" && state.syncProfileID ? state.syncProfileID : "default",
     syncProfiles: Array.isArray(state.syncProfiles) ? state.syncProfiles : [],
+    profileStates: state.profileStates && typeof state.profileStates === "object" ? state.profileStates : {},
     remoteLikedSongIDs: Array.isArray(state.remoteLikedSongIDs) ? state.remoteLikedSongIDs : [],
     dirtyRemoteLikeSongIDs: Array.isArray(state.dirtyRemoteLikeSongIDs) ? state.dirtyRemoteLikeSongIDs : [],
     likesDirty: Boolean(state.likesDirty),
@@ -456,7 +510,7 @@ ipcMain.handle("library:save", async (_event, state) => {
   };
   const save = librarySaveQueue
     .catch(() => {})
-    .then(() => fs.writeFile(paths.state, JSON.stringify(safeState, null, 2), "utf8"));
+    .then(() => atomicWriteFile(paths.state, JSON.stringify(safeState, null, 2), "utf8"));
   librarySaveQueue = save;
   await save;
   return true;
@@ -937,24 +991,6 @@ ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token,
   return { supported: true, ...(await response.json()) };
 });
 
-ipcMain.handle("server:listening-history:get", async (_event, { baseURL, token, profileID }) => {
-  if (!token) throw new Error("Enter the server access token.");
-  const base = normalizeBaseURL(baseURL);
-  const response = await fetch(new URL("api/v1/listening-history?limit=2000", base), {
-    headers: profileHeaders(token, profileID),
-  });
-  if (response.status === 404 || response.status === 405) {
-    return { supported: false, profile_id: profileID || "default", entries: [] };
-  }
-  if (!response.ok) throw await serverResponseError(response);
-  const document = await response.json();
-  return {
-    supported: true,
-    profile_id: typeof document?.profile_id === "string" ? document.profile_id : (profileID || "default"),
-    entries: Array.isArray(document?.entries) ? document.entries : [],
-  };
-});
-
 ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existing = [], songIDs = null }) => {
   if (!token) throw new Error("Enter the server access token.");
   const controller = beginServerTransfer(event);
@@ -977,7 +1013,10 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
     signal.throwIfAborted();
     const remoteName = song.filename || song.name || `Track-${song.id}.mp3`;
     const remoteModified = song.modified_at || song.modified_utc || null;
-    const matching = existing.find((item) => item.remoteID === song.id && (!item.sourceServer || item.sourceServer === base.origin));
+    const matching = existing.find((item) =>
+      item.remoteID === song.id
+      && matchesServerOrigin(item.sourceServer, base.origin)
+      && (item.syncProfileID || "default") === (profileID || "default"));
     let current = false;
     if (matching?.filePath) {
       try {
@@ -996,19 +1035,18 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
     }
     event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length });
     const fileURL = new URL(song.download_url, base);
+    if (fileURL.origin !== base.origin) {
+      throw new Error(`The server returned an unsafe cross-origin download URL for ${song.title || song.name || song.id}.`);
+    }
     const response = await fetch(fileURL, { headers: profileHeaders(token, profileID), signal });
     if (!response.ok) throw new Error(`Download failed for ${song.title || song.name || song.id} (HTTP ${response.status})`);
     const destination = matching?.filePath && path.dirname(path.resolve(matching.filePath)) === path.resolve(paths.remote)
       ? matching.filePath
       : await uniqueDestination(paths.remote, remoteName);
     const temporary = `${destination}.${randomUUID()}.part`;
-    const bytes = Buffer.from(await response.arrayBuffer());
-    signal.throwIfAborted();
-    if (Number.isFinite(Number(song.size)) && bytes.length !== Number(song.size)) {
-      throw new Error(`Incomplete download for ${song.title || song.name || song.id}`);
-    }
+    let downloadedSize = 0;
     try {
-      await fs.writeFile(temporary, bytes);
+      downloadedSize = await writeResponseToFile(response, temporary, { signal, expectedSize: Number(song.size) });
       signal.throwIfAborted();
       await fs.rename(temporary, destination);
     } catch (error) {
@@ -1025,7 +1063,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
       sourceServer: base.origin,
       syncProfileID: profileID || "default",
       remoteModified,
-      size: bytes.length,
+      size: downloadedSize,
     }));
     completed += 1;
     event.sender.send("server:transfer-progress", { direction: "download", currentFile: song.filename || song.name, completed, total: songs.length });
@@ -1056,11 +1094,29 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID }
     signal.throwIfAborted();
     const filename = path.basename(filePath);
     event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed: uploaded, total: selection.filePaths.length });
-    const body = await fs.readFile(filePath);
-    signal.throwIfAborted();
+    const information = await fs.stat(filePath);
     const url = new URL("api/v1/admin/songs", base);
     url.searchParams.set("filename", filename);
-    const response = await fetch(url, { method: "PUT", headers: { ...profileHeaders(adminToken, profileID), "Content-Type": "application/octet-stream" }, body, signal });
+    const body = createReadStream(filePath);
+    const abortBody = () => body.destroy(new Error("Upload cancelled"));
+    signal.addEventListener("abort", abortBody, { once: true });
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "PUT",
+        headers: {
+          ...profileHeaders(adminToken, profileID),
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(information.size),
+        },
+        body,
+        duplex: "half",
+        signal,
+      });
+    } finally {
+      signal.removeEventListener("abort", abortBody);
+      body.destroy();
+    }
     if (!response.ok) throw new Error(`Upload failed for ${filename} (HTTP ${response.status})`);
     uploaded += 1;
     event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed: uploaded, total: selection.filePaths.length });

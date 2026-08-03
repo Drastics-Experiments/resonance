@@ -73,6 +73,7 @@ final class UpdateManager: ObservableObject {
     @Published private(set) var downloadedArchive: URL?
     @Published private(set) var errorMessage: String?
 
+    let updatesEnabled: Bool
     private let manifestURL: URL
     private let session: URLSession
     private let updateDirectoryOverride: URL?
@@ -82,11 +83,14 @@ final class UpdateManager: ObservableObject {
     init(
         manifestURL: URL = UpdateManager.defaultManifestURL,
         session: URLSession = .shared,
-        updateDirectory: URL? = nil
+        updateDirectory: URL? = nil,
+        updatesEnabled: Bool? = nil
     ) {
         self.manifestURL = manifestURL
         self.session = session
         updateDirectoryOverride = updateDirectory
+        self.updatesEnabled = updatesEnabled
+            ?? (Bundle.main.bundleIdentifier != "com.gavindietrich.ResonancePreview")
     }
 
     var canInstall: Bool { downloadedArchive != nil && manifest != nil && !isBusy }
@@ -94,6 +98,10 @@ final class UpdateManager: ObservableObject {
     var hasUpdate: Bool { availableUpdate != nil }
 
     func automaticCheck() async {
+        guard updatesEnabled else {
+            status = "Updates are disabled in Preview builds"
+            return
+        }
         guard !isRunningAutomaticChecks else { return }
         isRunningAutomaticChecks = true
         defer { isRunningAutomaticChecks = false }
@@ -112,6 +120,14 @@ final class UpdateManager: ObservableObject {
     }
 
     func checkForUpdates(silent: Bool = false) async {
+        guard updatesEnabled else {
+            manifest = nil
+            availableUpdate = nil
+            downloadedArchive = nil
+            errorMessage = nil
+            status = "Updates are disabled in Preview builds"
+            return
+        }
         guard !isBusy else { return }
         isBusy = true
         errorMessage = nil
@@ -156,7 +172,7 @@ final class UpdateManager: ObservableObject {
     }
 
     func downloadUpdate() async {
-        guard let manifest, !isBusy else { return }
+        guard updatesEnabled, let manifest, !isBusy else { return }
         isBusy = true
         errorMessage = nil
         status = "Downloading \(manifest.version)…"
@@ -192,7 +208,9 @@ final class UpdateManager: ObservableObject {
     }
 
     func installAndRestart() {
-        guard let archive = downloadedArchive, let version = manifest?.version else { return }
+        guard updatesEnabled,
+              let archive = downloadedArchive,
+              let version = manifest?.version else { return }
         do {
             let bundleURL = Bundle.main.bundleURL.resolvingSymlinksInPath()
             guard bundleURL.pathExtension == "app" else { throw UpdateError.notPackagedApplication }

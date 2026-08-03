@@ -2940,7 +2940,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .clip-editor-wave-bars {
   position: absolute;
   z-index: 2;
-  inset: 14px 15px;
+  inset: 14px 8px;
   display: flex;
   align-items: center;
   gap: 3px;
@@ -2973,31 +2973,51 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   top: 50%;
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 52px;
-  border: 1px solid #8b68ff70;
-  border-radius: 8px;
-  background: #6841f1;
-  color: #fff;
-  font-size: 20px;
-  font-weight: 450;
-  line-height: 1;
-  box-shadow: 0 6px 14px #30198255, inset 0 1px #ffffff24;
+  width: 30px;
+  height: 54px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   cursor: ew-resize;
   touch-action: none;
   user-select: none;
   transform: translate(-50%, -50%);
 }
+.clip-editor-handle span {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 34px;
+  border-radius: 5px;
+  background: #6841f1;
+  color: #fff;
+  box-shadow: 0 0 12px #6841f159;
+  pointer-events: none;
+}
+.clip-editor-handle span svg {
+  display: block;
+  width: 8px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .clip-editor-handle:hover,
 .clip-editor-handle:focus-visible,
 .clip-editor-handle.dragging {
-  border-color: #c0adff;
+  outline: 0;
+}
+.clip-editor-handle:hover span,
+.clip-editor-handle:focus-visible span,
+.clip-editor-handle.dragging span {
   background: #7751ff;
-  box-shadow: 0 0 0 3px #7654ff2e, 0 9px 22px #30198280, inset 0 1px #ffffff2e;
+  box-shadow: 0 0 0 3px #7654ff2e, 0 0 12px #6841f159;
 }
 .clip-editor-handle.dragging { transform: translate(-50%, -50%) scale(1.04); }
-.clip-editor-handle-start { left: clamp(13px, var(--clip-selection-start), calc(100% - 13px)); }
-.clip-editor-handle-end { left: clamp(13px, var(--clip-selection-end), calc(100% - 13px)); }
+.clip-editor-handle-start { left: clamp(8px, var(--clip-selection-start), calc(100% - 8px)); }
+.clip-editor-handle-end { left: clamp(8px, var(--clip-selection-end), calc(100% - 8px)); }
 .clip-editor-selection-summary {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
