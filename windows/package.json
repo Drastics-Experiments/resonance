@@ -1,6 +1,6 @@
 {
   "name": "resonance-windows",
-  "version": "1.0.9",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Functional Resonance music player for Windows",
@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "electron-updater": "^6.6.2",
+    "ffmpeg-static": "^5.3.0",
     "music-metadata": "^11.13.0"
   },
   "devDependencies": {
@@ -32,12 +33,19 @@
     },
     "files": [
       "main.cjs",
+      "local-import-core.cjs",
+      "local-debrid.cjs",
+      "local-import-platform.cjs",
+      "local-youtube.cjs",
       "metadata.cjs",
       "updater-feed.cjs",
       "preload.cjs",
       "package.json",
       "resonance.ico",
       "ui/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**"
     ],
     "win": {
       "icon": "resonance.ico",

@@ -9,6 +9,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
     var relativePath: String
     var remoteID: String?
     var sourceServer: String?
+    var syncProfileID: String?
     var artworkFilename: String?
     var artworkScanComplete: Bool?
     var dateAdded: Date
@@ -22,6 +23,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         relativePath: String,
         remoteID: String? = nil,
         sourceServer: String? = nil,
+        syncProfileID: String? = nil,
         artworkFilename: String? = nil,
         artworkScanComplete: Bool? = false,
         dateAdded: Date = .now
@@ -34,6 +36,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         self.relativePath = relativePath
         self.remoteID = remoteID
         self.sourceServer = sourceServer
+        self.syncProfileID = syncProfileID
         self.artworkFilename = artworkFilename
         self.artworkScanComplete = artworkScanComplete
         self.dateAdded = dateAdded
@@ -43,6 +46,114 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         guard duration.isFinite, duration >= 0 else { return "0:00" }
         let seconds = Int(duration)
         return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
+    }
+}
+
+struct MobileListeningHistoryEntry: Identifiable, Codable, Hashable {
+    let id: UUID
+    var trackID: UUID
+    let startedAt: Date
+    var listenedSeconds: TimeInterval
+    var syncProfileID: String?
+    var syncEventID: String?
+    var remoteSongID: String?
+    var title: String?
+    var artist: String?
+    var album: String?
+    var duration: TimeInterval?
+
+    init(
+        id: UUID = UUID(),
+        trackID: UUID,
+        startedAt: Date = .now,
+        listenedSeconds: TimeInterval = 0,
+        syncProfileID: String? = nil,
+        syncEventID: String? = nil,
+        remoteSongID: String? = nil,
+        title: String? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        duration: TimeInterval? = nil
+    ) {
+        self.id = id
+        self.trackID = trackID
+        self.startedAt = startedAt
+        self.listenedSeconds = listenedSeconds
+        self.syncProfileID = syncProfileID
+        self.syncEventID = syncEventID
+        self.remoteSongID = remoteSongID
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.duration = duration
+    }
+
+    var networkEventID: String {
+        let value = syncEventID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? id.uuidString : value
+    }
+}
+
+struct MobileListeningHistoryUploadDocument: Encodable {
+    let client = "ios"
+    let entries: [MobileListeningHistoryUploadEntry]
+}
+
+struct MobileListeningHistoryUploadEntry: Encodable {
+    let id: String
+    let trackID: String
+    let songID: String?
+    let startedAt: String
+    let listenedSeconds: TimeInterval
+    let title: String?
+    let artist: String?
+    let album: String?
+    let durationSeconds: TimeInterval?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case trackID = "track_id"
+        case songID = "song_id"
+        case startedAt = "started_at"
+        case listenedSeconds = "listened_seconds"
+        case title
+        case artist
+        case album
+        case durationSeconds = "duration_seconds"
+    }
+}
+
+struct MobileRemoteListeningHistoryDocument: Decodable {
+    let profileID: String?
+    let entries: [MobileRemoteListeningHistoryEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case profileID = "profile_id"
+        case entries
+    }
+}
+
+struct MobileRemoteListeningHistoryEntry: Decodable {
+    let id: String
+    let trackID: String
+    let songID: String?
+    let startedAt: String
+    let listenedSeconds: TimeInterval
+    let title: String?
+    let artist: String?
+    let album: String?
+    let durationSeconds: TimeInterval?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case trackID = "track_id"
+        case songID = "song_id"
+        case startedAt = "started_at"
+        case listenedSeconds = "listened_seconds"
+        case title
+        case artist
+        case album
+        case durationSeconds = "duration_seconds"
     }
 }
 
@@ -108,8 +219,79 @@ struct MobileRemotePlaylist: Codable, Hashable, Identifiable {
 }
 
 struct MobileRemotePlaylistsDocument: Codable, Hashable {
+    var profileID: String?
     var revision: Int
     var playlists: [MobileRemotePlaylist]
+    var likedSongIDs: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case revision, playlists
+        case profileID = "profile_id"
+        case likedSongIDs = "liked_song_ids"
+    }
+
+    init(
+        profileID: String? = nil,
+        revision: Int,
+        playlists: [MobileRemotePlaylist],
+        likedSongIDs: [String] = []
+    ) {
+        self.profileID = profileID
+        self.revision = revision
+        self.playlists = playlists
+        self.likedSongIDs = likedSongIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        profileID = try values.decodeIfPresent(String.self, forKey: .profileID)
+        revision = try values.decode(Int.self, forKey: .revision)
+        playlists = try values.decode([MobileRemotePlaylist].self, forKey: .playlists)
+        likedSongIDs = try values.decodeIfPresent([String].self, forKey: .likedSongIDs) ?? []
+    }
+}
+
+struct MobileSyncProfile: Codable, Hashable, Identifiable {
+    let id: String
+    var name: String
+    let isDefault: Bool
+    let songCount: Int
+    let playlistCount: Int
+    let likedCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case isDefault = "is_default"
+        case songCount = "song_count"
+        case playlistCount = "playlist_count"
+        case likedCount = "liked_count"
+    }
+
+    init(
+        id: String,
+        name: String,
+        isDefault: Bool = false,
+        songCount: Int = 0,
+        playlistCount: Int = 0,
+        likedCount: Int = 0
+    ) {
+        self.id = id
+        self.name = name
+        self.isDefault = isDefault
+        self.songCount = songCount
+        self.playlistCount = playlistCount
+        self.likedCount = likedCount
+    }
+}
+
+struct MobileSyncProfilesResponse: Codable {
+    let defaultProfileID: String
+    let profiles: [MobileSyncProfile]
+
+    enum CodingKeys: String, CodingKey {
+        case profiles
+        case defaultProfileID = "default_profile_id"
+    }
 }
 
 struct MobileRemoteSong: Identifiable, Decodable, Hashable {
@@ -123,6 +305,8 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
     let contentType: String
     let downloadURL: String
     let streamURL: String
+    let duration: TimeInterval?
+    let artworkURL: URL?
 
     enum CodingKeys: String, CodingKey {
         case id, filename, name, title, artist, album, size
@@ -131,6 +315,10 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
         case contentType = "content_type"
         case downloadURL = "download_url"
         case streamURL = "stream_url"
+        case durationSeconds = "duration_seconds"
+        case duration
+        case artworkURL = "artwork_url"
+        case artwork
     }
 
     init(from decoder: Decoder) throws {
@@ -146,6 +334,23 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
         contentType = try values.decodeIfPresent(String.self, forKey: .contentType) ?? "application/octet-stream"
         downloadURL = try values.decode(String.self, forKey: .downloadURL)
         streamURL = try values.decode(String.self, forKey: .streamURL)
+        let decodedDuration = try values.decodeIfPresent(Double.self, forKey: .durationSeconds)
+            ?? values.decodeIfPresent(Double.self, forKey: .duration)
+        duration = decodedDuration.flatMap { value in
+            value.isFinite && value > 0 ? value : nil
+        }
+        let decodedArtworkURL = try values.decodeIfPresent(String.self, forKey: .artworkURL)
+            ?? values.decodeIfPresent(String.self, forKey: .artwork)
+        artworkURL = decodedArtworkURL.flatMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : URL(string: trimmed)
+        }
+    }
+
+    var durationText: String? {
+        guard let duration else { return nil }
+        let seconds = Int(duration)
+        return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
     }
 }
 
@@ -164,4 +369,10 @@ struct MobileStoredLibrary: Codable {
     var dirtyPlaylistIDs: Set<UUID>?
     var deletedPlaylistIDs: Set<UUID>?
     var playlistSyncServerURL: String?
+    var syncProfileID: String?
+    var syncProfileName: String?
+    var remoteLikedSongIDs: Set<String>?
+    var dirtyRemoteLikeSongIDs: Set<String>?
+    var likesDirty: Bool?
+    var listeningHistory: [MobileListeningHistoryEntry]?
 }

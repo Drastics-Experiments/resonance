@@ -17,30 +17,62 @@
         <button class="nav" data-section="storage"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 14h18"/><circle cx="17.5" cy="16.5" r=".75"/></svg><span>Song Storage</span></button>
         <button class="nav" data-section="server"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M11 6.5h7M11 17.5h7"/></svg><span>Music Server</span></button>
       </nav>
-      <div class="side-heading"><span>Your playlists</span><button id="newPlaylist" title="New Playlist">＋</button></div>
+      <div class="side-heading"><span>Your playlists</span><button id="newPlaylist" title="New Playlist" aria-label="Create a new playlist">＋</button></div>
       <div id="sidebarPlaylists" class="playlist-links"></div>
-      <div class="update-panel"><button id="checkForUpdates"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/></svg><span><strong>Check for updates</strong><small id="updateStatus">GitHub Releases</small></span></button><button id="installUpdate" hidden>Restart to update</button></div>
+      <div class="update-panel"><button id="checkForUpdates"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/></svg><span><strong>Check for updates</strong><small id="updateStatus" role="status" aria-live="polite">GitHub Releases</small></span></button><button id="installUpdate" hidden>Restart to update</button></div>
     </aside>
 
     <main>
-      <header class="topbar"><div class="history-buttons"><button id="navBack" disabled>‹</button><button id="navForward" disabled>›</button></div><div class="top-search-group"><label class="search"><span>⌕</span><input id="search" autocomplete="off" spellcheck="false" placeholder="Search your library…"></label><div id="searchSort" class="search-filter" hidden><button id="searchSortButton" type="button" aria-haspopup="listbox" aria-expanded="false"><span id="searchSortLabel">Title</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div id="searchSortMenu" class="search-sort-menu" role="listbox" aria-label="Sort results"></div></div></div></header>
+      <header class="topbar">
+        <div class="history-buttons"><button id="navBack" title="Back" aria-label="Back" disabled>‹</button><button id="navForward" title="Forward" aria-label="Forward" disabled>›</button></div>
+        <div class="top-search-group"><label class="search"><span aria-hidden="true">⌕</span><input id="search" autocomplete="off" spellcheck="false" placeholder="Search your library…" aria-label="Search your library"></label><div id="searchSort" class="search-filter" hidden><button id="searchSortButton" type="button" aria-haspopup="listbox" aria-expanded="false"><span id="searchSortLabel">Title</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div id="searchSortMenu" class="search-sort-menu" role="listbox" aria-label="Sort results"></div></div></div>
+        <div id="profileControl" class="profile-control" hidden>
+          <button id="profileButton" class="profile-button" type="button" aria-label="Open profile menu" aria-haspopup="menu" aria-expanded="false" aria-controls="profileMenu"><span id="profileInitial" aria-hidden="true">D</span></button>
+          <div id="profileMenu" class="profile-menu" role="menu" aria-label="Profile" hidden>
+            <div class="profile-menu-header">
+              <span id="profileMenuInitial" class="profile-menu-avatar" aria-hidden="true">D</span>
+              <span><strong id="profileMenuName">Default</strong><small>Local Profile</small></span>
+            </div>
+            <div class="profile-menu-divider"></div>
+            <button id="profileSwitch" class="profile-menu-item" type="button" role="menuitem">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.5 19v-1.5A4.5 4.5 0 0 1 8 13h2a4.5 4.5 0 0 1 4.5 4.5V19"/><path d="M16 6.5a3 3 0 0 1 0 5.8M17 14a4 4 0 0 1 3.5 4v1"/></svg>
+              <span>Switch Profile</span>
+            </button>
+            <button id="profileHistory" class="profile-menu-item" type="button" role="menuitem">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v5h5"/><path d="M5.5 8.5A8 8 0 1 1 4 13"/><path d="M12 7v5l3 2"/></svg>
+              <span>Listening History</span>
+            </button>
+            <button id="profileClipEditor" class="profile-menu-item" type="button" role="menuitem">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="7" r="3"/><circle cx="6" cy="17" r="3"/><path d="m8.5 8.5 11 7.5M8.5 15.5 19.5 8"/></svg>
+              <span>Clip Editor</span>
+              <small class="profile-menu-badge">Preview</small>
+            </button>
+            <button id="profileSettings" class="profile-menu-item" type="button" role="menuitem">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.07.07-2.76 2.76-.07-.07a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.1 1.65V21h-3.8v-.1A1.8 1.8 0 0 0 9 19.25a1.8 1.8 0 0 0-2 .36l-.07.07-2.76-2.76.07-.07a1.8 1.8 0 0 0 .36-2A1.8 1.8 0 0 0 2.95 13H3v-3.8h-.05A1.8 1.8 0 0 0 4.6 8a1.8 1.8 0 0 0-.36-2l-.07-.07 2.76-2.76.07.07a1.8 1.8 0 0 0 2 .36A1.8 1.8 0 0 0 10.1 2H14v.05A1.8 1.8 0 0 0 15 3.7a1.8 1.8 0 0 0 2-.36l.07-.07 2.76 2.76-.07.07a1.8 1.8 0 0 0-.36 2A1.8 1.8 0 0 0 21.05 9H21v4h.05A1.8 1.8 0 0 0 19.4 15Z"/></svg>
+              <span>Settings</span>
+            </button>
+          </div>
+        </div>
+      </header>
       <section id="content"></section>
     </main>
 
-    <div id="serverTransferToast" class="server-transfer-toast" hidden>
+    <div id="appNotice" class="app-notice" role="status" aria-live="polite" aria-atomic="true" hidden><span id="appNoticeText"></span><button id="dismissAppNotice" title="Dismiss message" aria-label="Dismiss message">×</button></div>
+
+    <div id="serverTransferToast" class="server-transfer-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
       <span id="serverTransferIcon" class="transfer-toast-icon" aria-hidden="true"></span>
       <div>
         <strong id="serverTransferTitle">Downloading</strong>
         <small id="serverTransferDetail">Preparing transfer…</small>
         <div class="transfer-toast-progress"><progress id="serverTransferProgress" max="1" value="0"></progress><span id="serverTransferPercent">0%</span></div>
       </div>
-      <button id="dismissServerTransfer" title="Dismiss" aria-label="Dismiss transfer status">×</button>
+      <button id="dismissServerTransfer" title="Cancel transfer" aria-label="Cancel transfer">×</button>
     </div>
 
     <footer class="playerbar">
-      <div class="player-track"><div class="mini-art">♪</div><div><strong id="bottomTitle">Nothing playing</strong><small id="bottomMeta">Local library</small></div><button id="favoriteCurrent">♡</button></div>
-      <div class="transport"><div><button id="shuffle" title="Shuffle" aria-label="Shuffle"><svg class="shuffle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h2.5a5 5 0 0 1 4 2l5 7a5 5 0 0 0 4 2H21"/><path d="m17 13 4 4-4 4"/><path d="M3 18h2.5a5 5 0 0 0 4-2l5-7a5 5 0 0 1 4-2H21"/><path d="m17 3 4 4-4 4"/></svg></button><button data-action="previous" title="Previous" aria-label="Previous"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14"/><path class="icon-fill" d="m18 6-9 6 9 6z"/></svg></button><button class="play-main" data-action="toggle" title="Play" aria-label="Play"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="M8 5v14l11-7z"/></svg></button><button data-action="next" title="Next" aria-label="Next"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="m6 6 9 6-9 6z"/><path d="M18 5v14"/></svg></button><button id="repeat" title="Repeat" aria-label="Repeat"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="m7 22-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg></button></div><div class="timeline"><span id="elapsed">0:00</span><input id="seek" type="range" min="0" max="1000" value="0"><span id="duration">0:00</span></div></div>
-      <div class="volume"><select id="speed"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select><span>🔊</span><input id="volume" type="range" min="0" max="1" step="0.01" value="0.78"><span id="volumeText">78%</span></div>
+      <div class="player-track"><div class="mini-art" aria-hidden="true">♪</div><div><strong id="bottomTitle">Nothing playing</strong><small id="bottomMeta">Local library</small></div><button id="favoriteCurrent" title="Add to Liked Songs" aria-label="Add current song to Liked Songs" aria-pressed="false">♡</button></div>
+      <div class="transport"><div><button id="shuffle" title="Shuffle" aria-label="Shuffle" aria-pressed="false"><svg class="shuffle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h2.5a5 5 0 0 1 4 2l5 7a5 5 0 0 0 4 2H21"/><path d="m17 13 4 4-4 4"/><path d="M3 18h2.5a5 5 0 0 0 4-2l5-7a5 5 0 0 1 4-2H21"/><path d="m17 3 4 4-4 4"/></svg></button><button data-action="previous" title="Previous" aria-label="Previous"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14"/><path class="icon-fill" d="m18 6-9 6 9 6z"/></svg></button><button class="play-main" data-action="toggle" title="Play" aria-label="Play"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="M8 5v14l11-7z"/></svg></button><button data-action="next" title="Next" aria-label="Next"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="m6 6 9 6-9 6z"/><path d="M18 5v14"/></svg></button><button id="repeat" title="Repeat current song" aria-label="Repeat current song" aria-pressed="false"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="m7 22-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg></button></div><div class="timeline"><span id="elapsed">0:00</span><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Playback position" aria-valuetext="0:00 of 0:00"><span id="duration">0:00</span></div></div>
+      <div class="volume"><select id="speed" aria-label="Playback speed"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select><span aria-hidden="true">🔊</span><input id="volume" type="range" min="0" max="1" step="0.01" value="0.78" aria-label="Volume" aria-valuetext="78 percent"><span id="volumeText">78%</span></div>
     </footer>
   </div>
   <dialog id="playlistDialog" class="playlist-dialog">
@@ -52,6 +84,106 @@
       <div class="dialog-actions"><button id="cancelPlaylist" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Create</button></div>
     </form>
   </dialog>
+  <dialog id="addSongsDialog" class="add-songs-dialog">
+    <div class="add-songs-shell">
+      <header><div><h2>Add Songs</h2><p id="addSongsPlaylistName"></p></div><button id="closeAddSongs" class="primary" type="button">Done</button></header>
+      <label class="add-songs-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg><input id="addSongsSearch" autocomplete="off" spellcheck="false" placeholder="Search songs, artists, or albums…" aria-label="Search songs to add"></label>
+      <div id="addSongsList" class="add-songs-list"></div>
+    </div>
+  </dialog>
+  <dialog id="profileSwitchDialog" class="profile-switch-dialog">
+    <form id="profileSwitchForm">
+      <div class="profile-switch-heading">
+        <div><h2>Switch Profile</h2><p>Choose an existing server profile</p></div>
+        <button id="cancelProfileSwitch" class="secondary" type="button">Cancel</button>
+      </div>
+      <div class="profile-switch-current">
+        <span id="profileSwitchInitial" class="profile-menu-avatar" aria-hidden="true">D</span>
+        <span><strong id="profileSwitchCurrentName">Default</strong><small>Current profile</small></span>
+      </div>
+      <label for="profileSwitchQuery">Profile name or ID</label>
+      <input id="profileSwitchQuery" autocomplete="off" spellcheck="false" required>
+      <p class="profile-switch-help">This switches profiles only; it does not create or delete them.</p>
+      <div class="profile-switch-footer">
+        <span id="profileSwitchStatus" role="status">Not connected</span>
+        <button id="confirmProfileSwitch" class="primary" type="submit">Switch</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="clipEditorDialog" class="clip-editor-dialog" aria-labelledby="clipEditorTitle">
+    <section class="clip-editor-panel">
+      <header>
+        <div><span class="eyebrow">CREATIVE TOOLS</span><h2 id="clipEditorTitle">Clip Editor</h2><p>Choose a song and mark the moment you want to turn into a clip.</p></div>
+        <button id="closeClipEditor" class="history-close" type="button" title="Close" aria-label="Close clip editor">×</button>
+      </header>
+      <div id="clipEditorEmpty" class="clip-editor-empty" hidden><strong>No songs to edit yet</strong><span>Import a song, then come back to create a clip.</span></div>
+      <div id="clipEditorWorkspace" class="clip-editor-workspace">
+        <label class="clip-editor-song" for="clipEditorTrack"><span>Song</span><select id="clipEditorTrack" aria-label="Song to clip"></select></label>
+        <div class="clip-editor-track">
+          <span id="clipEditorArtwork" class="clip-editor-artwork" aria-hidden="true">♪</span>
+          <span><strong id="clipEditorTrackTitle">Nothing selected</strong><small id="clipEditorTrackMeta">Choose a song above</small></span>
+          <time id="clipEditorTrackDuration">0:00</time>
+        </div>
+        <div id="clipEditorWaveform" class="clip-editor-waveform" role="group" aria-label="Clip range">
+          <div id="clipEditorWaveBars" class="clip-editor-wave-bars" aria-hidden="true"></div>
+          <span class="clip-editor-selection" aria-hidden="true"></span>
+          <button id="clipEditorStartHandle" class="clip-editor-handle clip-editor-handle-start" type="button" role="slider" aria-label="Clip start" aria-orientation="horizontal">›</button>
+          <button id="clipEditorEndHandle" class="clip-editor-handle clip-editor-handle-end" type="button" role="slider" aria-label="Clip end" aria-orientation="horizontal">‹</button>
+        </div>
+        <div class="clip-editor-selection-summary" aria-live="polite">
+          <label for="clipEditorStartInput"><small>START</small><input id="clipEditorStartInput" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="8" value="0:00" aria-label="Clip start time"></label>
+          <span class="clip-editor-selection-length"><small>CLIP LENGTH</small><strong id="clipEditorLengthLabel">0:00</strong></span>
+          <label for="clipEditorEndInput"><small>END</small><input id="clipEditorEndInput" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="8" value="0:00" aria-label="Clip end time"></label>
+        </div>
+      </div>
+      <footer>
+        <span>Clip rendering will be connected later.</span>
+        <button id="exportClip" class="primary" type="button" disabled>Export clip</button>
+      </footer>
+    </section>
+  </dialog>
+  <dialog id="listeningHistoryDialog" class="listening-history-dialog" aria-labelledby="listeningHistoryTitle">
+    <section class="listening-history-panel">
+      <header class="listening-history-header">
+        <div class="listening-history-title">
+          <span class="history-title-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg></span>
+          <h2 id="listeningHistoryTitle">Listening History</h2>
+        </div>
+        <div class="listening-history-controls">
+          <div id="listeningHistoryMode" class="history-mode" role="group" aria-label="Listening history view">
+            <button class="active" type="button" data-history-mode="overall" aria-pressed="true">Overall</button>
+            <button type="button" data-history-mode="stats" aria-pressed="false">Stats</button>
+          </div>
+          <button id="closeListeningHistory" class="history-close" type="button" title="Close" aria-label="Close listening history">×</button>
+        </div>
+      </header>
+      <div id="listeningHistoryToolbar" class="history-content-toolbar">
+        <span id="historyWindowLabel" class="history-window-label"></span>
+        <div class="history-window-controls" role="group" aria-label="Listening history time window">
+          <button id="historyPreviousWindow" class="history-window-button" type="button" title="Show previous time window" aria-label="Show previous time window">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg>
+          </button>
+          <label class="history-range">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 10h18"/></svg>
+            <select id="listeningHistoryRange" aria-label="Listening history range">
+              <option value="1">Last 1 day</option>
+              <option value="7">Last 7 days</option>
+              <option value="30" selected>Last 30 days</option>
+              <option value="90">Last 90 days</option>
+            </select>
+          </label>
+          <button id="historyNextWindow" class="history-window-button" type="button" title="Show next time window" aria-label="Show next time window" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="listeningHistoryStats" class="listening-history-stats"></div>
+      <section id="listeningHistoryChartSection" class="listening-history-chart" aria-label="Listening minutes by day">
+        <div id="listeningHistoryChart"></div>
+      </section>
+      <section id="listeningHistoryDayDetails" class="listening-history-day-details" aria-live="polite" hidden></section>
+    </section>
+  </dialog>
   <dialog id="serverSettingsDialog" class="playlist-dialog">
     <form id="serverSettingsForm">
       <span class="eyebrow">CONNECTION</span>
@@ -62,17 +194,52 @@
       <input id="serverToken" type="password" autocomplete="off" required>
       <label for="serverAdminToken">Server admin key</label>
       <input id="serverAdminToken" type="password" autocomplete="off" placeholder="Optional for uploads and deletion">
+      <label for="syncProfile">Sync profile</label>
+      <div class="profile-picker-row">
+        <select id="syncProfile"></select>
+        <button id="newSyncProfile" class="secondary" type="button">New profile</button>
+      </div>
       <div class="dialog-actions"><button id="cancelServerSettings" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Save & connect</button></div>
     </form>
   </dialog>
-  <dialog id="addSongsDialog" class="add-songs-dialog">
-    <div class="add-songs-shell">
-      <header><div><h2>Add Songs</h2><p id="addSongsPlaylistName"></p></div><button id="closeAddSongs" class="primary" type="button">Done</button></header>
-      <label class="add-songs-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg><input id="addSongsSearch" autocomplete="off" spellcheck="false" placeholder="Search songs, artists, or albums…" aria-label="Search songs to add"></label>
-      <div id="addSongsList" class="add-songs-list"></div>
-    </div>
+  <dialog id="localImportDialog" class="local-import-dialog" aria-labelledby="localImportTitle">
+    <section class="local-import-panel">
+      <header>
+        <h2 id="localImportTitle">Import from link</h2>
+        <div class="local-import-header-actions">
+          <fieldset id="localImportMediaKind" class="local-import-media-kind">
+            <legend>Download type</legend>
+            <div role="radiogroup" aria-label="YouTube download type">
+              <label><input type="radio" name="localImportMediaKind" value="audio" checked><span>Audio</span></label>
+              <label><input type="radio" name="localImportMediaKind" value="video"><span>Video</span></label>
+            </div>
+          </fieldset>
+          <button id="closeLocalImport" class="history-close" type="button" title="Close" aria-label="Close local import">×</button>
+        </div>
+      </header>
+      <div id="localImportStage" hidden aria-hidden="true"></div>
+      <label class="local-import-source" for="localImportSource">
+        <span>Spotify or YouTube URL</span>
+        <div>
+          <input id="localImportSource" type="url" autocomplete="url" spellcheck="false" placeholder="https://open.spotify.com/track/…" required>
+          <span class="local-import-source-spinner" aria-hidden="true"></span>
+        </div>
+      </label>
+      <div id="localImportResolved" class="local-import-resolved" hidden>
+        <div class="local-import-track"><span class="local-import-art" aria-hidden="true">♪</span><span><strong id="localImportTrackTitle"></strong><small id="localImportTrackMeta"></small></span></div>
+        <fieldset><legend id="localImportCandidateLegend">Choose the source to import</legend><div id="localImportCandidates" class="local-import-candidates"></div></fieldset>
+      </div>
+      <div id="localImportError" class="local-import-error" role="alert" hidden></div>
+      <footer>
+        <label id="localImportSyncRow" class="local-import-sync" hidden><input id="localImportSync" type="checkbox"><span>Upload to server</span></label>
+        <button id="cancelLocalImport" class="secondary" type="button" hidden>Cancel import</button>
+        <button id="chooseLocalFiles" class="secondary local-import-icon-action" type="button" title="Choose files" aria-label="Choose files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h6l2-2h8v13H4z"/></svg></button>
+        <button id="confirmLocalImport" class="primary local-import-icon-action" type="button" title="Download audio" aria-label="Download audio" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg></button>
+      </footer>
+    </section>
   </dialog>
   <div id="trackContextMenu" class="track-context-menu" role="menu" hidden></div>
+  <audio id="localImportPreview" preload="metadata"></audio>
   <audio id="audio"></audio>
   <script type="module" src="app.js"></script>
 </body>

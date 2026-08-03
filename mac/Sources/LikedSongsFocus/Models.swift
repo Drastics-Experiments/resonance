@@ -59,6 +59,10 @@ struct Track: Identifiable, Hashable, Codable {
     var fileURL: URL?
     var remoteID: String?
     var sourceServer: String?
+    var syncProfileID: String?
+    var sourceURL: String?
+    var sourceSHA256: String?
+    var contentSHA256: String?
     var dateAdded: Date
 
     init(
@@ -73,6 +77,10 @@ struct Track: Identifiable, Hashable, Codable {
         fileURL: URL? = nil,
         remoteID: String? = nil,
         sourceServer: String? = nil,
+        syncProfileID: String? = nil,
+        sourceURL: String? = nil,
+        sourceSHA256: String? = nil,
+        contentSHA256: String? = nil,
         dateAdded: Date = .now
     ) {
         self.id = id
@@ -86,6 +94,10 @@ struct Track: Identifiable, Hashable, Codable {
         self.fileURL = fileURL
         self.remoteID = remoteID
         self.sourceServer = sourceServer
+        self.syncProfileID = syncProfileID
+        self.sourceURL = sourceURL
+        self.sourceSHA256 = sourceSHA256
+        self.contentSHA256 = contentSHA256
         self.dateAdded = dateAdded
     }
 
@@ -175,8 +187,79 @@ struct RemotePlaylist: Codable, Hashable, Identifiable {
 }
 
 struct RemotePlaylistsDocument: Codable, Hashable {
+    var profileID: String?
     var revision: Int
     var playlists: [RemotePlaylist]
+    var likedSongIDs: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case revision, playlists
+        case profileID = "profile_id"
+        case likedSongIDs = "liked_song_ids"
+    }
+
+    init(
+        profileID: String? = nil,
+        revision: Int,
+        playlists: [RemotePlaylist],
+        likedSongIDs: [String] = []
+    ) {
+        self.profileID = profileID
+        self.revision = revision
+        self.playlists = playlists
+        self.likedSongIDs = likedSongIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        profileID = try values.decodeIfPresent(String.self, forKey: .profileID)
+        revision = try values.decode(Int.self, forKey: .revision)
+        playlists = try values.decode([RemotePlaylist].self, forKey: .playlists)
+        likedSongIDs = try values.decodeIfPresent([String].self, forKey: .likedSongIDs) ?? []
+    }
+}
+
+struct SyncProfile: Codable, Hashable, Identifiable {
+    let id: String
+    var name: String
+    let isDefault: Bool
+    let songCount: Int
+    let playlistCount: Int
+    let likedCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case isDefault = "is_default"
+        case songCount = "song_count"
+        case playlistCount = "playlist_count"
+        case likedCount = "liked_count"
+    }
+
+    init(
+        id: String,
+        name: String,
+        isDefault: Bool = false,
+        songCount: Int = 0,
+        playlistCount: Int = 0,
+        likedCount: Int = 0
+    ) {
+        self.id = id
+        self.name = name
+        self.isDefault = isDefault
+        self.songCount = songCount
+        self.playlistCount = playlistCount
+        self.likedCount = likedCount
+    }
+}
+
+struct SyncProfilesResponse: Codable {
+    let defaultProfileID: String
+    let profiles: [SyncProfile]
+
+    enum CodingKeys: String, CodingKey {
+        case profiles
+        case defaultProfileID = "default_profile_id"
+    }
 }
 
 struct RemoteSong: Identifiable, Hashable, Decodable {

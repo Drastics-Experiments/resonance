@@ -52,12 +52,12 @@ struct LikedSongsFocusApp: App {
             }
 
             CommandMenu("Updates") {
-                Button("Check for Updates…") {
+                Button(updateManager.updatesEnabled ? "Check for Updates…" : "Updates Disabled in Preview") {
                     Task { await updateManager.checkForUpdates() }
                 }
-                .disabled(updateManager.isBusy)
+                .disabled(!updateManager.updatesEnabled || updateManager.isBusy)
 
-                if updateManager.hasUpdate {
+                if updateManager.updatesEnabled, updateManager.hasUpdate {
                     Button(updateManager.canInstall ? "Restart to Install Update" : "Update and Restart") {
                         if updateManager.canInstall {
                             updateManager.installAndRestart()
