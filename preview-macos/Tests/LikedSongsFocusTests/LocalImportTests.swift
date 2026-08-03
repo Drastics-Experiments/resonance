@@ -849,6 +849,9 @@ struct LocalImportTests {
         }
         let localFile = root.appendingPathComponent("Local Upload.m4a")
         try FileManager.default.copyItem(at: m4a, to: localFile)
+        let uploadSize = try #require(
+            localFile.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        )
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [LocalImportMockURLProtocol.self]
@@ -866,9 +869,26 @@ struct LocalImportTests {
             if request.httpMethod == "PUT", url.path == "/api/v1/admin/songs" {
                 #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer admin-token")
                 #expect(request.value(forHTTPHeaderField: "Content-Type") == "audio/mp4")
+                #expect(request.value(forHTTPHeaderField: "Content-Length") == String(uploadSize))
                 let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
                 #expect(query?.first(where: { $0.name == "filename" })?.value == "Local Upload.m4a")
-                return (HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!, Data())
+                let data = Data(#"""
+                {
+                  "id":"uploaded-audio",
+                  "filename":"Local Upload.m4a",
+                  "title":"Local Upload",
+                  "artist":"Device",
+                  "album":"Only",
+                  "size":\#(uploadSize),
+                  "modified_at":"2026-08-02T00:00:00.000Z",
+                  "content_type":"audio/mp4",
+                  "duration_seconds":4,
+                  "artwork_url":null,
+                  "download_url":"/api/v1/songs/uploaded-audio/file",
+                  "stream_url":"/api/v1/songs/uploaded-audio/stream"
+                }
+                """#.utf8)
+                return (HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!, data)
             }
             if request.httpMethod == "GET", url.path == "/api/v1/songs" {
                 #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
@@ -903,6 +923,7 @@ struct LocalImportTests {
         ))
 
         try await model.uploadLocalImportToActiveProfile(track)
+        #expect(model.remoteSongs.map(\.id) == ["uploaded-audio"])
         #expect(model.tracks.first(where: { $0.id == track.id })?.remoteID == nil)
         #expect(model.tracks.first(where: { $0.id == track.id })?.syncProfileID == nil)
 
@@ -932,7 +953,10 @@ struct LocalImportTests {
             try? FileManager.default.removeItem(at: root)
         }
         let localFile = root.appendingPathComponent("Local Upload.mp4")
-        try await makeLocalImportVideoFixture(at: localFile)
+        try Data(repeating: 0x44, count: 64).write(to: localFile, options: .atomic)
+        let uploadSize = try #require(
+            localFile.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        )
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [LocalImportMockURLProtocol.self]
@@ -950,9 +974,26 @@ struct LocalImportTests {
             if request.httpMethod == "PUT", url.path == "/api/v1/admin/songs" {
                 #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer admin-token")
                 #expect(request.value(forHTTPHeaderField: "Content-Type") == "video/mp4")
+                #expect(request.value(forHTTPHeaderField: "Content-Length") == String(uploadSize))
                 let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
                 #expect(query?.first(where: { $0.name == "filename" })?.value == "Local Upload.mp4")
-                return (HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!, Data())
+                let data = Data(#"""
+                {
+                  "id":"uploaded-video",
+                  "filename":"Local Upload.mp4",
+                  "title":"Local Video Upload",
+                  "artist":"Device",
+                  "album":"Only",
+                  "size":\#(uploadSize),
+                  "modified_at":"2026-08-02T00:00:00.000Z",
+                  "content_type":"video/mp4",
+                  "duration_seconds":1,
+                  "artwork_url":null,
+                  "download_url":"/api/v1/songs/uploaded-video/file",
+                  "stream_url":"/api/v1/songs/uploaded-video/stream"
+                }
+                """#.utf8)
+                return (HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!, data)
             }
             if request.httpMethod == "GET", url.path == "/api/v1/songs" {
                 #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
@@ -989,6 +1030,7 @@ struct LocalImportTests {
 
         #expect(track.kind == .video)
         try await model.uploadLocalImportToActiveProfile(track)
+        #expect(model.remoteSongs.map(\.id) == ["uploaded-video"])
     }
 
     private func spotifyTrack() -> LocalImportSpotifyTrack {

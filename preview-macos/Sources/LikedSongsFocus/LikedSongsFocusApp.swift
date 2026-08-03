@@ -3,14 +3,24 @@ import SwiftUI
 
 @main
 struct LikedSongsFocusApp: App {
-    @StateObject private var model = PlayerModel()
+    @StateObject private var model: PlayerModel
+    @StateObject private var localImportModel: MacLocalImportViewModel
     @StateObject private var updateManager = UpdateManager()
     @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        let model = PlayerModel()
+        _model = StateObject(wrappedValue: model)
+        _localImportModel = StateObject(
+            wrappedValue: MacLocalImportViewModel(model: model)
+        )
+    }
 
     var body: some Scene {
         WindowGroup("Resonance") {
             ContentView()
                 .environmentObject(model)
+                .environmentObject(localImportModel)
                 .environmentObject(updateManager)
                 .background(WindowConfigurator())
                 .task { await model.runAutomaticPlaylistSync() }

@@ -75,6 +75,55 @@ struct TransferProgressOverlay: View {
     }
 }
 
+struct TransferResultOverlay: View {
+    let title: String
+    let detail: String
+    let symbol: String
+    let color: Color
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(color)
+                .frame(width: 42, height: 42)
+                .background(color.opacity(0.14), in: Circle())
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.appMuted)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.appMuted)
+                    .frame(width: 28, height: 28)
+                    .background(Color.white.opacity(0.045), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+            .accessibilityLabel("Dismiss upload error")
+        }
+        .padding(15)
+        .frame(width: 390)
+        .background(Color.appSurfaceRaised.opacity(0.98), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .stroke(color.opacity(0.24))
+        }
+        .shadow(color: .black.opacity(0.34), radius: 22, y: 10)
+        .accessibilityElement(children: .contain)
+    }
+}
+
 struct TrafficLightDots: View {
     var body: some View {
         HStack(spacing: 8) {

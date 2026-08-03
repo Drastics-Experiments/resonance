@@ -12,6 +12,7 @@ enum MacUpdateAlertState {
 
 struct ContentView: View {
     @EnvironmentObject private var model: PlayerModel
+    @EnvironmentObject private var localImportModel: MacLocalImportViewModel
     @EnvironmentObject private var updateManager: UpdateManager
     @State private var dismissedUpdateAlert: MacUpdateIdentity?
 
@@ -78,11 +79,41 @@ struct ContentView: View {
                         )
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
+
+                    if localImportModel.showsTransferPopup {
+                        TransferProgressOverlay(
+                            title: localImportModel.transferTitle,
+                            detail: localImportModel.transferDetail,
+                            status: localImportModel.transferStatus,
+                            progress: localImportModel.transferProgress,
+                            symbol: localImportModel.stage == .syncing
+                                ? "arrow.up.to.line"
+                                : "arrow.down.to.line",
+                            color: localImportModel.stage == .syncing
+                                ? Color.appAccent
+                                : Color.appViolet,
+                            cancel: localImportModel.cancel
+                        )
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+
+                    if localImportModel.showsFailurePopup, let error = localImportModel.error {
+                        TransferResultOverlay(
+                            title: "Saved locally; upload failed",
+                            detail: error.message,
+                            symbol: "exclamationmark.triangle.fill",
+                            color: Color.appAccent,
+                            dismiss: localImportModel.reset
+                        )
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                 }
                 .padding(.bottom, 100)
                 .animation(.easeInOut(duration: 0.2), value: model.isSyncingServer)
                 .animation(.easeInOut(duration: 0.2), value: model.isRefreshingServerCatalog)
                 .animation(.easeInOut(duration: 0.2), value: model.isUploadingServer)
+                .animation(.easeInOut(duration: 0.2), value: localImportModel.showsTransferPopup)
+                .animation(.easeInOut(duration: 0.2), value: localImportModel.showsFailurePopup)
             }
             .overlay(alignment: .topTrailing) {
                 if let update = updateAlert {

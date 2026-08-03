@@ -5,7 +5,6 @@ import {
   filterTracks,
   formatHistoryWindowLabel,
   formatTime,
-  mergeListeningHistory,
   mergePlaylistDocument,
   mergeSyncedTracks,
   nextIndex,
@@ -13,8 +12,12 @@ import {
   normalizedVolume,
   normalizeState,
   resolveSyncProfile,
+  restoreProfileState,
+  storeActiveProfileState,
   summarizeListeningHistory,
   summarizeListeningStats,
+  trackBelongsToActiveProfile,
+  tracksForActiveProfile,
   tracksForPlaylist,
   updatePlaylistRemoteSongIDs,
 } from "./core.js";
@@ -63,6 +66,7 @@ let libraryQuery = "";
 let playlistQuery = "";
 let recentlyAddedScrollLeft = 0;
 let playlistSyncInFlight = null;
+let playlistSyncPending = false;
 let playlistSyncTimer = null;
 let likesMutationGeneration = 0;
 let storageScope = "songs";
@@ -75,7 +79,9 @@ let serverScope = "all";
 let serverSort = "title";
 let serverSelecting = false;
 let serverConnectionText = "Not connected";
+let serverConnected = false;
 let serverConnectInFlight = false;
+let serverConnectPending = false;
 let serverAutoAttempted = false;
 let serverTransferActive = false;
 let serverTransferCancelRequested = false;
@@ -101,6 +107,7 @@ let localImportBatchContext = null;
 const LOCAL_IMPORT_AUTO_RESOLVE_DELAY = 450;
 let clipEditorStartSeconds = 0;
 let clipEditorEndSeconds = 30;
+let profileGeneration = 0;
 const activeProfileID = () => state.syncProfileID || "default";
 
 const $ = (selector) => document.querySelector(selector);
@@ -131,15 +138,17 @@ const contextDownloadIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d
 const contextOpenIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>`;
 const contextBackIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m5-5-5 5 5 5"/></svg>`;
 const escapeHTML = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
-const currentTrack = () => state.tracks.find((track) => track.id === currentID) || null;
-const playlistTracks = () => selectedPlaylistID ? tracksForPlaylist(state, selectedPlaylistID) : state.tracks;
+const currentTrack = () => state.tracks.find((track) => track.id === currentID && trackBelongsToActiveProfile(state, track)) || null;
+const playlistTracks = () => (selectedPlaylistID ? tracksForPlaylist(state, selectedPlaylistID) : tracksForActiveProfile(state))
+  .filter((track) => trackBelongsToActiveProfile(state, track));
+const activeRemoteTrack = (remoteID) => state.tracks.find((track) => track.remoteID === remoteID && trackBelongsToActiveProfile(state, track));
 const activeProfile = () => state.syncProfiles.find((profile) => profile.id === activeProfileID())
   || state.syncProfiles.find((profile) => profile.id === "default")
   || { id: "default", name: "Default" };
 
 function activePlaybackTracks() {
   return activePlaybackQueueIDs
-    .map((id) => state.tracks.find((track) => track.id === id))
+    .map((id) => state.tracks.find((track) => track.id === id && trackBelongsToActiveProfile(state, track)))
     .filter(Boolean);
 }
 
@@ -228,7 +237,7 @@ function toggleProfileMenu() {
 }
 
 function clipEditorTrack() {
-  return state.tracks.find((track) => track.id === $("#clipEditorTrack").value) || null;
+  return tracksForActiveProfile(state).find((track) => track.id === $("#clipEditorTrack").value) || null;
 }
 
 function clipEditorDuration(track = clipEditorTrack()) {
@@ -389,8 +398,9 @@ function renderClipEditorTrack({ resetRange = false } = {}) {
 function openClipEditor() {
   closeProfileMenu();
   const select = $("#clipEditorTrack");
-  select.innerHTML = state.tracks.map((track) => `<option value="${escapeHTML(track.id)}">${escapeHTML(track.title)} — ${escapeHTML(track.artist || "Unknown Artist")}</option>`).join("");
-  const preferredTrack = state.tracks.find((track) => track.id === currentID) || state.tracks[0];
+  const visibleTracks = tracksForActiveProfile(state);
+  select.innerHTML = visibleTracks.map((track) => `<option value="${escapeHTML(track.id)}">${escapeHTML(track.title)} — ${escapeHTML(track.artist || "Unknown Artist")}</option>`).join("");
+  const preferredTrack = visibleTracks.find((track) => track.id === currentID) || visibleTracks[0];
   if (preferredTrack) select.value = preferredTrack.id;
   renderClipEditorTrack({ resetRange: true });
   $("#clipEditorDialog").showModal();
@@ -440,7 +450,7 @@ function historyDayDetailsMarkup(summary, dayKey) {
     .map((series) => {
       const activity = series.days[dayIndex];
       const track = state.tracks.find((item) => item.id === series.trackID);
-      return { activity, track, trackID: series.trackID, series };
+      return { activity, track, trackID: series.trackID };
     })
     .filter((item) => item.activity.seconds > 0 || item.activity.plays > 0)
     .sort((left, right) => right.activity.seconds - left.activity.seconds || right.activity.plays - left.activity.plays);
@@ -452,10 +462,10 @@ function historyDayDetailsMarkup(summary, dayKey) {
     year: "numeric",
     ...(hourly ? { hour: "numeric" } : {}),
   }).format(day.date);
-  const songRows = songs.map(({ activity, track, trackID, series }, index) => {
-    const title = track?.title || series.title || "Removed song";
-    const artist = track?.artist || series.artist || "Unknown artist";
-    const album = track?.album || series.album || "Unknown album";
+  const songRows = songs.map(({ activity, track, trackID }, index) => {
+    const title = track?.title || "Removed song";
+    const artist = track?.artist || "Unknown artist";
+    const album = track?.album || "Unknown album";
     return `<div class="history-day-song" role="row" data-history-track="${escapeHTML(trackID)}" tabindex="0" aria-keyshortcuts="Shift+F10">
       <span class="history-day-song-number" role="cell">${index + 1}</span>
       <span role="cell">${artwork(track)}</span>
@@ -640,8 +650,8 @@ function renderListeningHistory() {
   const topTrack = state.tracks.find((track) => track.id === allTimeStats.topTrackID);
   const rankedSongs = allTimeStats.songRanking.map((song, index) => {
     const track = state.tracks.find((item) => item.id === song.trackID);
-    const title = track?.title || song.title || "Removed song";
-    const artist = track?.artist || song.artist || "Unknown artist";
+    const title = track?.title || "Removed song";
+    const artist = track?.artist || "Unknown artist";
     return `<article class="history-ranked-song" data-history-track="${escapeHTML(song.trackID)}" tabindex="0" aria-keyshortcuts="Shift+F10">
       <span class="history-ranked-position">#${index + 1}</span>
       ${artwork(track)}
@@ -650,8 +660,8 @@ function renderListeningHistory() {
       <em>${escapeHTML(historyListenedTime(song.seconds))} · ${song.plays.toLocaleString()} ${song.plays === 1 ? "play" : "plays"}</em>
     </article>`;
   }).join("");
-  const topSongTitle = topTrack?.title || allTimeStats.songRanking[0]?.title || (allTimeStats.topTrackID ? "Removed song" : "No listening yet");
-  const topSongArtist = topTrack?.artist || allTimeStats.songRanking[0]?.artist || (allTimeStats.topTrackID ? "Unknown artist" : "Play a song to build your ranking");
+  const topSongTitle = topTrack?.title || (allTimeStats.topTrackID ? "Removed song" : "No listening yet");
+  const topSongArtist = topTrack?.artist || (allTimeStats.topTrackID ? "Unknown artist" : "Play a song to build your ranking");
   const dialog = $("#listeningHistoryDialog");
   const previousDialogScroll = dialog.classList.contains("day-expanded") ? dialog.scrollTop : 0;
   const stats = $("#listeningHistoryStats");
@@ -728,7 +738,7 @@ function renderListeningHistory() {
     };
   }
   document.querySelectorAll("[data-history-track]").forEach((row) => {
-    const openMenu = (event) => openTrackContextMenu(event, row.dataset.historyTrack, { playbackTracks: state.tracks, playlistID: null });
+    const openMenu = (event) => openTrackContextMenu(event, row.dataset.historyTrack, { playbackTracks: tracksForActiveProfile(state), playlistID: null });
     row.oncontextmenu = openMenu;
     row.onkeydown = (event) => {
       if (event.target !== row) return;
@@ -748,9 +758,6 @@ function openListeningHistory() {
   ensureListeningHistorySelection();
   renderListeningHistory();
   $("#listeningHistoryDialog").showModal();
-  void syncListeningHistoryNow({ force: true }).then(() => {
-    if ($("#listeningHistoryDialog").open) renderListeningHistory();
-  });
 }
 
 function beginListeningSession() {
@@ -762,13 +769,8 @@ function beginListeningSession() {
     id: crypto.randomUUID(),
     trackID: track.id,
     profileID: activeProfileID(),
-    remoteID: track.remoteID || null,
     startedAt: new Date().toISOString(),
     listenedSeconds: 0,
-    title: track.title || null,
-    artist: track.artist || null,
-    album: track.album || null,
-    duration: Number.isFinite(Number(track.duration)) ? Number(track.duration) : null,
   };
   state.listeningHistory = [...state.listeningHistory, entry].slice(-2000);
   activeListeningEntryID = entry.id;
@@ -818,15 +820,13 @@ function pendingListeningHistoryBatches() {
       entry: {
         id: entry.id,
         trackID: entry.trackID,
-        remoteID: optionalText(track?.remoteID ?? entry.remoteID, 128),
+        remoteID: optionalText(track?.remoteID, 128),
         startedAt: entry.startedAt,
         listenedSeconds,
-        title: optionalText(track?.title ?? entry.title, 500),
-        artist: optionalText(track?.artist ?? entry.artist, 500),
-        album: optionalText(track?.album ?? entry.album, 500),
-        duration: Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60
-          ? duration
-          : (Number.isFinite(Number(entry.duration)) ? Number(entry.duration) : null),
+        title: optionalText(track?.title, 500),
+        artist: optionalText(track?.artist, 500),
+        album: optionalText(track?.album, 500),
+        duration: Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60 ? duration : null,
       },
     };
     if (!entriesByProfile.has(profileID)) entriesByProfile.set(profileID, []);
@@ -843,7 +843,7 @@ function pendingListeningHistoryBatches() {
 
 function scheduleListeningHistorySync(delay = 1500) {
   clearTimeout(listeningHistorySyncTimer);
-  if (!serverToken.trim() || !state.serverURL) return;
+  if (!serverToken.trim() || !state.listeningHistory.some((entry) => Number(entry.listenedSeconds) > 0)) return;
   const retryDelay = Math.max(0, listeningHistoryRetryAt - Date.now());
   listeningHistorySyncTimer = setTimeout(() => {
     listeningHistorySyncTimer = null;
@@ -881,31 +881,6 @@ async function syncListeningHistoryNow({ force = false } = {}) {
       } catch {
         hadFailure = true;
       }
-    }
-    const pullProfileID = activeProfileID();
-    try {
-      const result = await api.fetchListeningHistory({
-        baseURL: state.serverURL,
-        token: serverToken,
-        profileID: pullProfileID,
-      });
-      if (result?.supported !== false) {
-        state.listeningHistory = mergeListeningHistory(state, pullProfileID, result?.entries);
-        const baseKey = normalizedServerKey(state.serverURL);
-        for (const entry of result?.entries || []) {
-          const eventID = typeof entry?.id === "string" ? entry.id : "";
-          if (!eventID) continue;
-          const listenedSeconds = Math.max(0, Number(entry.listenedSeconds ?? entry.listened_seconds) || 0);
-          listeningHistorySyncedSeconds.set(
-            `${baseKey}#profile=${pullProfileID}#event=${eventID}`,
-            listenedSeconds,
-          );
-        }
-        await persist({ refreshSidebar: false });
-        if ($("#listeningHistoryDialog").open) renderListeningHistory();
-      }
-    } catch {
-      hadFailure = true;
     }
     listeningHistoryRetryAt = hadFailure ? Date.now() + LISTENING_HISTORY_RETRY_DELAY : 0;
     return !hadFailure;
@@ -994,7 +969,7 @@ function setCurrentSearchQuery(value) {
 
 async function persist({ refreshSidebar = true } = {}) {
   try {
-    normalizeState(state);
+    state = normalizeState(state);
     await api.saveLibrary(state);
     if (refreshSidebar) renderSidebar();
     return true;
@@ -1015,6 +990,27 @@ function normalizedServerKey(value) {
   url.search = "";
   url.pathname = url.pathname.replace(/\/+$/, "") + "/";
   return url.href;
+}
+
+function currentProfileContext() {
+  return {
+    generation: profileGeneration,
+    profileID: activeProfileID(),
+    serverURL: state.serverURL,
+    serverKey: normalizedServerKey(state.serverURL),
+    token: serverToken,
+  };
+}
+
+function profileContextIsCurrent(context) {
+  try {
+    return context.generation === profileGeneration
+      && context.profileID === activeProfileID()
+      && context.serverKey === normalizedServerKey(state.serverURL)
+      && context.token === serverToken;
+  } catch {
+    return false;
+  }
 }
 
 function serverArtworkKey(song) {
@@ -1056,17 +1052,19 @@ async function hydrateServerArtwork(song) {
     return;
   }
   let pending = serverArtworkPending.get(key);
+  const context = currentProfileContext();
   if (!pending) {
     pending = api.fetchServerArtwork({
-      baseURL: state.serverURL,
-      token: serverToken,
-      profileID: activeProfileID(),
+      baseURL: context.serverURL,
+      token: context.token,
+      profileID: context.profileID,
       songID: song.id,
     });
     serverArtworkPending.set(key, pending);
   }
   try {
     const dataURL = await pending;
+    if (!profileContextIsCurrent(context)) return;
     if (!dataURL) return;
     if (serverArtworkCache.size >= 256) serverArtworkCache.delete(serverArtworkCache.keys().next().value);
     serverArtworkCache.set(key, dataURL);
@@ -1111,7 +1109,11 @@ function schedulePlaylistSync() {
 }
 
 async function syncPlaylistsNow({ automatic = false } = {}) {
-  if (playlistSyncInFlight) return playlistSyncInFlight;
+  if (playlistSyncInFlight) {
+    playlistSyncPending = true;
+    return playlistSyncInFlight;
+  }
+  const context = currentProfileContext();
   playlistSyncInFlight = (async () => {
     if (!serverToken.trim()) {
       if (!automatic) showNotice("Enter the server access token.");
@@ -1119,7 +1121,7 @@ async function syncPlaylistsNow({ automatic = false } = {}) {
     }
 
     try {
-      const serverKey = `${normalizedServerKey(state.serverURL)}#profile=${activeProfileID()}`;
+      const serverKey = `${context.serverKey}#profile=${context.profileID}`;
       if (state.playlistSyncServerURL !== serverKey) {
         state.playlistSyncServerURL = serverKey;
         state.playlistRevision = 0;
@@ -1129,10 +1131,11 @@ async function syncPlaylistsNow({ automatic = false } = {}) {
       }
 
       let remoteDocument = await api.fetchPlaylists({
-        baseURL: state.serverURL,
-        token: serverToken,
-        profileID: activeProfileID(),
+        baseURL: context.serverURL,
+        token: context.token,
+        profileID: context.profileID,
       });
+      if (!profileContextIsCurrent(context)) return;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const merge = mergePlaylistDocument(state, remoteDocument);
         if (!merge.needsUpload) {
@@ -1145,11 +1148,12 @@ async function syncPlaylistsNow({ automatic = false } = {}) {
         const submittedLikesGeneration = likesMutationGeneration;
         const submittedDirtyLikeIDs = [...state.dirtyRemoteLikeSongIDs];
         const result = await api.putPlaylists({
-          baseURL: state.serverURL,
-          token: serverToken,
-          profileID: activeProfileID(),
+          baseURL: context.serverURL,
+          token: context.token,
+          profileID: context.profileID,
           document: merge.document,
         });
+        if (!profileContextIsCurrent(context)) return;
         if (result.status === 200) {
           state.dirtyPlaylistIDs = [];
           state.deletedPlaylistIDs = [];
@@ -1167,7 +1171,7 @@ async function syncPlaylistsNow({ automatic = false } = {}) {
       }
       throw new Error("Playlist sync conflicted; try again");
     } catch (error) {
-      if (!automatic) showNotice(`Playlist sync failed: ${error.message || "Unknown error"}`);
+      if (profileContextIsCurrent(context) && !automatic) showNotice(`Playlist sync failed: ${error.message || "Unknown error"}`);
     }
   })();
 
@@ -1175,6 +1179,10 @@ async function syncPlaylistsNow({ automatic = false } = {}) {
     await playlistSyncInFlight;
   } finally {
     playlistSyncInFlight = null;
+    if (playlistSyncPending) {
+      playlistSyncPending = false;
+      queueMicrotask(() => syncPlaylistsNow({ automatic: true }));
+    }
   }
 }
 
@@ -1339,7 +1347,7 @@ function renderLibrary() {
 
 function renderPlaylists() {
   updateTopSearch();
-  const playlists = filterPlaylists(state.playlists, state.tracks, playlistQuery);
+  const playlists = filterPlaylists(state.playlists, tracksForActiveProfile(state), playlistQuery);
   content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${playlist.id}" aria-keyshortcuts="Shift+F10"><div class="playlist-art">${playlist.isSystem ? "♥" : "♪"}</div><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
   $("#pageNewPlaylist").onclick = () => newPlaylist();
   $("#pageSyncPlaylists").onclick = () => syncPlaylistsNow();
@@ -1369,7 +1377,7 @@ function formatBytes(value) {
 }
 
 function storageTracks() {
-  let tracks = state.tracks.filter((track) => {
+  let tracks = tracksForActiveProfile(state).filter((track) => {
     if (storageScope === "downloads" && !track.remoteID) return false;
     if (storageScope === "files" && track.remoteID) return false;
     const haystack = `${track.title || ""} ${track.artist || ""} ${track.album || ""} ${track.filePath || ""}`.toLocaleLowerCase();
@@ -1397,9 +1405,19 @@ async function deleteStoredTracks(trackIDs) {
     }
   }
   const removed = new Set(deleted.map((track) => track.id));
+  let playlistMembershipChanged = false;
+  state.playlists.filter((playlist) => !playlist.isSystem).forEach((playlist) => {
+    const previousTrackIDs = playlist.trackIDs || [];
+    if (!previousTrackIDs.some((id) => removed.has(id))) return;
+    playlist.trackIDs = previousTrackIDs.filter((id) => !removed.has(id));
+    updatePlaylistRemoteSongIDs(state, playlist);
+    markPlaylistDirty(playlist);
+    playlistMembershipChanged = true;
+  });
   state.tracks = state.tracks.filter((track) => !removed.has(track.id));
   state.favorites = state.favorites.filter((id) => !removed.has(id));
-  state.playlists.forEach((playlist) => { playlist.trackIDs = playlist.trackIDs.filter((id) => !removed.has(id)); });
+  state.playlists.filter((playlist) => playlist.isSystem)
+    .forEach((playlist) => { playlist.trackIDs = playlist.trackIDs.filter((id) => !removed.has(id)); });
   activePlaybackQueueIDs = activePlaybackQueueIDs.filter((id) => !removed.has(id));
   state.playbackQueueIDs = [...activePlaybackQueueIDs];
   if (removed.has(currentID)) {
@@ -1410,7 +1428,10 @@ async function deleteStoredTracks(trackIDs) {
     state.position = 0;
   }
   selectedStorageIDs = new Set(failed.map(({ track }) => track.id));
-  if (removed.size) await persist();
+  if (removed.size) {
+    await persist();
+    if (playlistMembershipChanged) schedulePlaylistSync();
+  }
   render();
   updateChrome();
   if (failed.length) {
@@ -1422,8 +1443,9 @@ async function deleteStoredTracks(trackIDs) {
 function renderStorage() {
   updateTopSearch();
   const tracks = storageTracks();
-  const localTracks = state.tracks.filter((track) => !track.remoteID);
-  const remoteTracks = state.tracks.filter((track) => track.remoteID);
+  const visibleTracks = tracksForActiveProfile(state);
+  const localTracks = visibleTracks.filter((track) => !track.remoteID);
+  const remoteTracks = visibleTracks.filter((track) => track.remoteID);
   const localBytes = localTracks.reduce((sum, track) => sum + (track.size || 0), 0);
   const remoteBytes = remoteTracks.reduce((sum, track) => sum + (track.size || 0), 0);
   const total = Math.max(localBytes + remoteBytes, 1);
@@ -1517,10 +1539,10 @@ function renderStorage() {
 
 function renderServer() {
   updateTopSearch();
-  const downloaded = serverCatalog.filter((song) => state.tracks.some((track) => track.remoteID === song.id)).length;
+  const downloaded = serverCatalog.filter((song) => activeRemoteTrack(song.id)).length;
   const filteredCount = filteredServerCatalog().length;
   const playlistCount = state.playlists.filter((playlist) => !playlist.isSystem).length;
-  const connected = serverCatalog.length > 0 || serverConnectionText.startsWith("Connected");
+  const connected = serverConnected;
   const selectLabel = !serverSelecting
     ? "Choose songs to download"
     : selectedRemoteIDs.size
@@ -1572,7 +1594,7 @@ function renderServer() {
 function filteredServerCatalog() {
   const query = serverQuery.toLocaleLowerCase();
   return serverCatalog.filter((song) => {
-    const onDevice = state.tracks.some((track) => track.remoteID === song.id);
+    const onDevice = Boolean(activeRemoteTrack(song.id));
     if (serverScope === "device" && !onDevice) return false;
     if (serverScope === "available" && onDevice) return false;
     return `${song.title || song.name || ""} ${song.artist || ""} ${song.album || ""}`.toLocaleLowerCase().includes(query);
@@ -1585,7 +1607,7 @@ function filteredServerCatalog() {
 
 function remoteRows() {
   return filteredServerCatalog().map((song) => {
-    const onDevice = state.tracks.some((track) => track.remoteID === song.id);
+    const onDevice = Boolean(activeRemoteTrack(song.id));
     const selected = selectedRemoteIDs.has(song.id);
     const duration = Number(song.duration) > 0 ? formatTime(Number(song.duration)) : "—";
     return `<div class="remote-row ${serverSelecting ? "selecting" : ""} ${selected ? "selected" : ""}" data-remote-row="${song.id}" tabindex="0" aria-keyshortcuts="Shift+F10">
@@ -1677,22 +1699,29 @@ async function openProfileSwitcher() {
   }
 }
 
-async function activateProfile(profileID) {
-  if (!profileID || profileID === activeProfileID()) return;
-  state.syncProfileID = profileID;
-  state.playlists = state.playlists.filter((playlist) => playlist.isSystem);
-  state.favorites = state.favorites.filter((trackID) => !state.tracks.find((track) => track.id === trackID)?.remoteID);
-  state.playlistRevision = 0;
-  state.knownRemotePlaylistIDs = [];
-  state.dirtyPlaylistIDs = [];
-  state.deletedPlaylistIDs = [];
-  state.remoteLikedSongIDs = [];
-  state.dirtyRemoteLikeSongIDs = [];
-  state.likesDirty = false;
-  state.playlistSyncServerURL = `${normalizedServerKey(state.serverURL)}#profile=${profileID}`;
+async function activateProfile(profileID, serverURL = state.serverURL) {
+  if (!profileID) return;
+  const targetServerKey = normalizedServerKey(serverURL);
+  if (profileID === activeProfileID() && targetServerKey === normalizedServerKey(state.serverURL)) return;
+  storeActiveProfileState(state);
+  restoreProfileState(state, profileID, serverURL);
+  profileGeneration += 1;
+  if (playlistSyncInFlight) playlistSyncPending = true;
+  if (serverConnectInFlight) serverConnectPending = true;
+  serverConnected = false;
   serverCatalog = [];
   selectedRemoteIDs.clear();
   selectedPlaylistID = null;
+  const visibleTrackIDs = new Set(tracksForActiveProfile(state).map((track) => track.id));
+  activePlaybackQueueIDs = activePlaybackQueueIDs.filter((id) => visibleTrackIDs.has(id));
+  state.playbackQueueIDs = [...activePlaybackQueueIDs];
+  if (currentID && !visibleTrackIDs.has(currentID)) {
+    audio.pause();
+    audio.removeAttribute("src");
+    currentID = null;
+    state.currentTrackID = null;
+    state.position = 0;
+  }
   await persist();
 }
 
@@ -1706,10 +1735,10 @@ async function openServerSettings() {
 }
 
 async function saveServerForm() {
-  state.serverURL = $("#serverURL")?.value.trim() || state.serverURL;
+  const nextServerURL = $("#serverURL")?.value.trim() || state.serverURL;
   serverToken = $("#serverToken")?.value || serverToken;
   serverAdminToken = $("#serverAdminToken")?.value || serverAdminToken;
-  await activateProfile($("#syncProfile")?.value || activeProfileID());
+  await activateProfile($("#syncProfile")?.value || activeProfileID(), nextServerURL);
   await api.saveServerCredentials({ clientToken: serverToken, adminToken: serverAdminToken });
   await persist();
   updateProfileControl();
@@ -2024,7 +2053,7 @@ function renderTrackContextMenu(track, options = {}) {
   const activePlaylist = state.playlists.find((item) => item.id === options.playlistID && !item.isSystem);
   const playing = track.id === currentID && !audio.paused;
   const liked = state.favorites.includes(track.id);
-  const playbackTracks = options.playbackTracks?.length ? options.playbackTracks : state.tracks;
+  const playbackTracks = options.playbackTracks?.length ? options.playbackTracks : tracksForActiveProfile(state);
   const actions = [
     {
       label: playing ? "Pause" : "Play",
@@ -2068,7 +2097,7 @@ function renderTrackContextMenu(track, options = {}) {
 }
 
 function openTrackContextMenu(event, trackID, options = {}) {
-  const track = state.tracks.find((item) => item.id === trackID);
+  const track = state.tracks.find((item) => item.id === trackID && trackBelongsToActiveProfile(state, item));
   if (!track) return;
   beginContextMenu(event);
   renderTrackContextMenu(track, options);
@@ -2107,10 +2136,10 @@ function openServerTrackContextMenu(event, songID) {
   const song = serverCatalog.find((item) => item.id === songID);
   if (!song) return;
   beginContextMenu(event);
-  const localTrack = state.tracks.find((track) => track.remoteID === song.id);
+  const localTrack = activeRemoteTrack(song.id);
   const actions = [
     localTrack
-      ? { label: "Play on this device", icon: contextPlayIcon, onSelect: () => play(localTrack, state.tracks, { playlistID: null }) }
+      ? { label: "Play on this device", icon: contextPlayIcon, onSelect: () => play(localTrack, tracksForActiveProfile(state), { playlistID: null }) }
       : {
         label: "Download",
         icon: contextDownloadIcon,
@@ -2147,7 +2176,7 @@ async function importAudio() {
     if (!currentID && tracks[0]) {
       currentID = tracks[0].id;
       state.currentTrackID = currentID;
-      setPlaybackContext(state.tracks, null);
+      setPlaybackContext(tracksForActiveProfile(state), null);
     }
     await persist();
     render(); updateChrome();
@@ -2676,7 +2705,7 @@ async function confirmYouTubePlaylistImport() {
       if (!currentID) {
         currentID = importedTrack.id;
         state.currentTrackID = currentID;
-        setPlaybackContext(state.tracks, null);
+        setPlaybackContext(tracksForActiveProfile(state), null);
       }
       await persist();
       if (uploadRequested && importedTrack.filePath) {
@@ -2820,7 +2849,7 @@ async function confirmLinkImport() {
       if (!currentID) {
         currentID = importedTrack.id;
         state.currentTrackID = currentID;
-        setPlaybackContext(state.tracks, null);
+        setPlaybackContext(tracksForActiveProfile(state), null);
       }
       await persist();
       render();
@@ -2885,7 +2914,7 @@ function renderAddSongsDialog() {
   }
   $("#addSongsPlaylistName").textContent = playlist.name;
   const query = $("#addSongsSearch").value.trim().toLocaleLowerCase();
-  const tracks = state.tracks.filter((track) =>
+  const tracks = tracksForActiveProfile(state).filter((track) =>
     `${track.title || ""} ${track.artist || ""} ${track.album || ""}`.toLocaleLowerCase().includes(query));
   $("#addSongsList").innerHTML = tracks.length ? tracks.map((track) => {
     const added = playlist.isSystem ? state.favorites.includes(track.id) : playlist.trackIDs.includes(track.id);
@@ -2995,12 +3024,14 @@ function updateLocalImportTransfer(value = {}) {
 }
 
 async function serverAction(mode) {
-  if (serverConnectInFlight) return;
-  const url = $("#serverURL")?.value.trim() || state.serverURL;
-  const token = $("#serverToken")?.value || serverToken;
-  serverToken = token;
+  if (serverConnectInFlight) {
+    serverConnectPending = true;
+    return;
+  }
+  serverToken = $("#serverToken")?.value || serverToken;
   const status = $("#serverStatus");
   await saveServerForm();
+  const context = currentProfileContext();
   serverConnectInFlight = true;
   if (mode !== "catalog") {
     serverTransferCancelRequested = false;
@@ -3014,7 +3045,8 @@ async function serverAction(mode) {
     if (mode !== "catalog") {
       const songIDs = mode === "selected" ? [...selectedRemoteIDs] : null;
       if (mode === "selected" && !songIDs.length) throw new Error("Select one or more songs first.");
-      const result = await api.syncServer({ baseURL: url, token, profileID: activeProfileID(), existing: state.tracks, songIDs });
+      const result = await api.syncServer({ baseURL: context.serverURL, token: context.token, profileID: context.profileID, existing: state.tracks, songIDs });
+      if (!profileContextIsCurrent(context)) return;
       catalog = result.catalog;
       transferCancelled = Boolean(result.cancelled || serverTransferCancelRequested);
       mergeSyncedTracks(state, result);
@@ -3024,19 +3056,24 @@ async function serverAction(mode) {
       selectedRemoteIDs.clear();
       await persist();
     } else {
-      catalog = await api.fetchCatalog({ baseURL: url, token, profileID: activeProfileID() });
+      catalog = await api.fetchCatalog({ baseURL: context.serverURL, token: context.token, profileID: context.profileID });
+      if (!profileContextIsCurrent(context)) return;
       serverConnectionText = `Connected • ${catalog.count} song${catalog.count === 1 ? "" : "s"}`;
     }
     if (catalog) {
-      state.serverURL = url;
       serverCatalog = catalog.songs || [];
+      serverConnected = true;
       hydrateServerCatalogArtwork(serverCatalog);
     }
     await persist();
     renderSidebar();
     if (!transferCancelled) await syncPlaylistsNow({ automatic: true });
   } catch (error) {
+    if (!profileContextIsCurrent(context)) return;
     serverConnectionText = serverTransferCancelRequested ? "Download cancelled" : friendlyIPCError(error, "Connection failed");
+    serverConnected = false;
+    serverCatalog = [];
+    selectedRemoteIDs.clear();
     if (!serverTransferCancelRequested) showNotice(serverConnectionText);
   } finally {
     serverConnectInFlight = false;
@@ -3045,30 +3082,39 @@ async function serverAction(mode) {
       serverTransferCancelRequested = false;
     }
     if (section === "server") renderServer();
+    if (serverConnectPending) {
+      serverConnectPending = false;
+      queueMicrotask(() => serverAction("catalog"));
+    }
   }
 }
 
 async function uploadServerSongs() {
   await saveServerForm();
+  const context = currentProfileContext();
   const status = $("#serverStatus");
   serverTransferCancelRequested = false;
   updateServerTransfer({ direction: "upload", currentFile: "Choose songs to upload…", completed: 0, total: 1 });
   try {
-    const result = await api.uploadServer({ baseURL: state.serverURL, adminToken: serverAdminToken, profileID: activeProfileID() });
+    const result = await api.uploadServer({ baseURL: context.serverURL, adminToken: serverAdminToken, profileID: context.profileID });
+    if (!profileContextIsCurrent(context)) return;
     const cancelled = Boolean(result.cancelled || serverTransferCancelRequested);
     serverConnectionText = cancelled
       ? `Upload cancelled${result.uploaded ? ` • ${result.uploaded} completed` : ""}`
       : `Uploaded ${result.uploaded} song${result.uploaded === 1 ? "" : "s"}`;
     if (status) status.textContent = serverConnectionText;
     if (cancelled) {
-      const catalog = await api.fetchCatalog({ baseURL: state.serverURL, token: serverToken, profileID: activeProfileID() });
+      const catalog = await api.fetchCatalog({ baseURL: context.serverURL, token: context.token, profileID: context.profileID });
+      if (!profileContextIsCurrent(context)) return;
       serverCatalog = catalog.songs || [];
+      serverConnected = true;
       hydrateServerCatalogArtwork(serverCatalog);
       if (section === "server") renderServer();
     } else {
       await serverAction("catalog");
     }
   } catch (error) {
+    if (!profileContextIsCurrent(context)) return;
     serverConnectionText = serverTransferCancelRequested ? "Upload cancelled" : friendlyIPCError(error, "Upload failed");
     if (status) status.textContent = serverConnectionText;
     if (!serverTransferCancelRequested) showNotice(serverConnectionText);
@@ -3092,7 +3138,7 @@ function play(track, queue = null, options = {}) {
   if (!track) return;
   const { recordHistory = true, playlistID = activePlaybackPlaylistID } = options;
   if (Array.isArray(queue) && queue.length) setPlaybackContext(queue, playlistID);
-  else if (!activePlaybackQueueIDs.includes(track.id)) setPlaybackContext(state.tracks, null);
+  else if (!activePlaybackQueueIDs.includes(track.id)) setPlaybackContext(tracksForActiveProfile(state), null);
   if (recordHistory && currentID && currentID !== track.id) history.push(currentID);
   if (activeListeningEntryID) {
     updateListeningSession();
@@ -3115,7 +3161,11 @@ function play(track, queue = null, options = {}) {
 
 function toggle() {
   const track = currentTrack();
-  if (!track) { if (state.tracks[0]) play(state.tracks[0]); return; }
+  if (!track) {
+    const firstTrack = tracksForActiveProfile(state)[0];
+    if (firstTrack) play(firstTrack);
+    return;
+  }
   if (!audio.currentSrc && !audio.src) { play(track); return; }
   if (audio.paused) void requestPlayback();
   else audio.pause();
@@ -3135,13 +3185,14 @@ function previous() {
     return;
   }
   const previousID = history.pop();
-  const track = previousID && state.tracks.find((item) => item.id === previousID);
+  const track = previousID && state.tracks.find((item) => item.id === previousID && trackBelongsToActiveProfile(state, item));
   if (track) play(track, null, { recordHistory: false });
   else move(-1, false);
 }
 
 function toggleFavorite(id) {
-  const track = state.tracks.find((item) => item.id === id);
+  const track = state.tracks.find((item) => item.id === id && trackBelongsToActiveProfile(state, item));
+  if (!track) return;
   const willLike = !state.favorites.includes(id);
   state.favorites = willLike ? [...state.favorites, id] : state.favorites.filter((item) => item !== id);
   if (track?.remoteID) {
@@ -3184,7 +3235,7 @@ function renderQueue() {
   const index = tracks.findIndex((track) => track.id === currentID);
   const queue = index < 0 ? tracks : [...tracks.slice(index + 1), ...tracks.slice(0, index)];
   $("#queue").innerHTML = queue.slice(0, 12).map((track) => `<button data-queue="${track.id}">${artwork(track)}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)}</small></span><time>${formatTime(track.duration)}</time></button>`).join("") || `<div class="empty"><span>Queue is empty</span></div>`;
-  document.querySelectorAll("[data-queue]").forEach((button) => button.onclick = () => play(state.tracks.find((track) => track.id === button.dataset.queue)));
+  document.querySelectorAll("[data-queue]").forEach((button) => button.onclick = () => play(state.tracks.find((track) => track.id === button.dataset.queue && trackBelongsToActiveProfile(state, track))));
 }
 
 function updateChrome() {
@@ -3692,9 +3743,12 @@ paintRange($("#seek"));
 $("#speed").value = String(state.playbackRate || 1);
 $("#volumeText").textContent = `${Math.round(state.volume * 100)}%`;
 $("#volume").setAttribute("aria-valuetext", `${Math.round(state.volume * 100)} percent`);
-const restoredCurrentID = state.currentTrackID && state.tracks.some((track) => track.id === state.currentTrackID) ? state.currentTrackID : null;
-currentID = restoredCurrentID || state.tracks[0]?.id || null;
-activePlaybackQueueIDs = state.playbackQueueIDs.length ? [...state.playbackQueueIDs] : state.tracks.map((track) => track.id);
+const initialVisibleTracks = tracksForActiveProfile(state);
+const restoredCurrentID = state.currentTrackID && initialVisibleTracks.some((track) => track.id === state.currentTrackID) ? state.currentTrackID : null;
+currentID = restoredCurrentID || initialVisibleTracks[0]?.id || null;
+activePlaybackQueueIDs = state.playbackQueueIDs.length
+  ? state.playbackQueueIDs.filter((id) => initialVisibleTracks.some((track) => track.id === id))
+  : initialVisibleTracks.map((track) => track.id);
 activePlaybackPlaylistID = state.playbackPlaylistID;
 if (currentID && !activePlaybackQueueIDs.includes(currentID)) activePlaybackQueueIDs.unshift(currentID);
 state.playbackQueueIDs = [...activePlaybackQueueIDs];

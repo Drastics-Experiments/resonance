@@ -1,6 +1,6 @@
 {
   "name": "resonance-windows",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "type": "module",
   "description": "Functional Resonance music player for Windows",
@@ -9,7 +9,7 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test",
-    "package:win": "electron-packager . \"Resonance\" --platform=win32 --arch=x64 --out=dist --overwrite --asar --prune=false --icon=resonance.ico --ignore=^/dist$ --ignore=^/test$ --ignore=^/node_modules$ --ignore=^/pnpm-lock.yaml$ --ignore=^/.npmrc$",
+    "package:win": "electron-builder --dir --win --x64 --publish never --config.directories.output=dist",
     "installer:win": "electron-builder --win nsis --x64 --publish never",
     "release:win": "electron-builder --win nsis --x64 --publish always"
   },

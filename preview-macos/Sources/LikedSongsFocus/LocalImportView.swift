@@ -66,7 +66,19 @@ final class MacLocalImportViewModel: ObservableObject {
     }
 
     var showsTransferPopup: Bool {
-        stage == .downloading || stage == .syncing
+        LocalImportPresentationPolicy.showsGlobalTransfer(for: stage)
+    }
+
+    var showsFailurePopup: Bool {
+        LocalImportPresentationPolicy.showsGlobalFailure(
+            for: stage,
+            hasCompletedTrack: completedTrack != nil,
+            failedStage: error?.stage
+        )
+    }
+
+    var continuesAfterSheetDismissal: Bool {
+        LocalImportPresentationPolicy.continuesAfterSheetDismissal(for: stage)
     }
 
     var showsStageCard: Bool {
@@ -87,6 +99,25 @@ final class MacLocalImportViewModel: ObservableObject {
 
     var transferTitle: String {
         stage == .syncing ? "Uploading" : "Downloading"
+    }
+
+    var transferStatus: String {
+        switch stage {
+        case .inspectingSource:
+            "Inspecting source"
+        case .downloading:
+            "Downloading to this Mac"
+        case .processing:
+            "Preparing media"
+        case .savingLocal:
+            "Saving to your library"
+        case .localComplete:
+            "Saved on this Mac"
+        case .syncing:
+            "Uploading to \(activeProfileName)"
+        default:
+            "Preparing transfer"
+        }
     }
 
     var transferDetail: String {
@@ -150,8 +181,9 @@ final class MacLocalImportViewModel: ObservableObject {
         }
     }
 
-    func importSelected() {
-        guard !isRunning, let resolution, let candidate = selectedCandidate else { return }
+    @discardableResult
+    func importSelected() -> Bool {
+        guard !isRunning, let resolution, let candidate = selectedCandidate else { return false }
         stopPreview()
         task?.cancel()
         error = nil
@@ -221,6 +253,7 @@ final class MacLocalImportViewModel: ObservableObject {
             }
             task = nil
         }
+        return true
     }
 
     func selectCandidate(_ candidate: LocalImportAudioSourceMatch) {
@@ -370,13 +403,36 @@ enum LocalImportCandidatePreviewPolicy {
     }
 }
 
+enum LocalImportPresentationPolicy {
+    static func showsGlobalTransfer(for stage: LocalImportStage) -> Bool {
+        switch stage {
+        case .inspectingSource, .downloading, .processing, .savingLocal, .localComplete, .syncing:
+            true
+        default:
+            false
+        }
+    }
+
+    static func continuesAfterSheetDismissal(for stage: LocalImportStage) -> Bool {
+        showsGlobalTransfer(for: stage)
+    }
+
+    static func showsGlobalFailure(
+        for stage: LocalImportStage,
+        hasCompletedTrack: Bool,
+        failedStage: LocalImportStage?
+    ) -> Bool {
+        stage == .failed && hasCompletedTrack && failedStage == .syncing
+    }
+}
+
 struct MacLocalImportSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var viewModel: MacLocalImportViewModel
+    @ObservedObject private var viewModel: MacLocalImportViewModel
     @FocusState private var sourceFocused: Bool
 
-    init(model: PlayerModel) {
-        _viewModel = StateObject(wrappedValue: MacLocalImportViewModel(model: model))
+    init(viewModel: MacLocalImportViewModel) {
+        self.viewModel = viewModel
     }
 
     var body: some View {
@@ -419,26 +475,13 @@ struct MacLocalImportSheet: View {
         .frame(width: 680, height: 650)
         .background(Color.appBackground)
         .preferredColorScheme(.dark)
-        .overlay(alignment: .bottom) {
-            if viewModel.showsTransferPopup {
-                TransferProgressOverlay(
-                    title: viewModel.transferTitle,
-                    detail: viewModel.transferDetail,
-                    status: viewModel.stage == .syncing
-                        ? "Uploading to \(viewModel.activeProfileName)"
-                        : "Downloading to this Mac",
-                    progress: viewModel.transferProgress,
-                    symbol: viewModel.stage == .syncing ? "arrow.up.to.line" : "arrow.down.to.line",
-                    color: viewModel.stage == .syncing ? Color.appAccent : Color.appViolet,
-                    cancel: viewModel.cancel
-                )
-                .padding(.bottom, 80)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+        .onAppear { sourceFocused = true }
+        .onDisappear {
+            viewModel.stopPreview()
+            if !viewModel.continuesAfterSheetDismissal {
+                viewModel.cancel()
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: viewModel.showsTransferPopup)
-        .onAppear { sourceFocused = true }
-        .onDisappear { viewModel.cancel() }
     }
 
     private var header: some View {
@@ -866,7 +909,11 @@ struct MacLocalImportSheet: View {
                         .buttonStyle(.borderedProminent)
                         .tint(Color.appViolet)
                 } else {
-                    Button(action: viewModel.importSelected) {
+                    Button {
+                        if viewModel.importSelected() {
+                            dismiss()
+                        }
+                    } label: {
                         Image(systemName: "arrow.down.to.line")
                             .font(.system(size: 13, weight: .bold))
                             .frame(width: 24, height: 18)

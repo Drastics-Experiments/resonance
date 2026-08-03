@@ -63,6 +63,18 @@ struct LikedSongsFocusTests {
     }
 
     @Test
+    func clipTimeFieldsParseSecondsMinutesAndHours() throws {
+        #expect(clipTimeValue(from: "24.7") == 24.7)
+        #expect(clipTimeValue(from: "0:24.7") == 24.7)
+        #expect(clipTimeValue(from: "1:31.6") == 91.6)
+        #expect(clipTimeValue(from: "1:02:03.5") == 3_723.5)
+        #expect(clipTimeValue(from: " 1:02,5 ") == 62.5)
+        #expect(clipTimeValue(from: "") == nil)
+        #expect(clipTimeValue(from: "one minute") == nil)
+        #expect(clipTimeValue(from: "-1") == nil)
+    }
+
+    @Test
     func updaterRestoresAValidatedDownloadedArchiveAfterRelaunch() async throws {
         let updateDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -162,6 +174,63 @@ struct LikedSongsFocusTests {
     }
 
     @Test
+    func clipRangeClampsToTheSourceAndRejectsTinySelections() throws {
+        let range = try ClipRangePolicy.normalized(start: -4, end: 12, sourceDuration: 10)
+        #expect(range.lowerBound == 0)
+        #expect(range.upperBound == 10)
+        #expect(throws: ClipEditorError.self) {
+            try ClipRangePolicy.normalized(start: 1, end: 1.1, sourceDuration: 10)
+        }
+    }
+
+    @Test
+    func createsAnM4AClipAndPersistsItAsALocalLibraryTrack() async throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let clipDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ResonanceClipTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: clipDirectory) }
+
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            clipLibraryRoot: clipDirectory,
+            persistServerCredentials: false
+        )
+        await model.importLocalFiles(at: [hero])
+        let source = try #require(model.tracks.first)
+        let end = min(source.duration, 1.0)
+        #expect(end >= ClipRangePolicy.minimumDuration)
+
+        let clip = try await model.createClip(
+            from: source.id,
+            startTime: 0,
+            endTime: end,
+            title: "Hero Sample"
+        )
+        let clipURL = try #require(clip.fileURL)
+        #expect(clip.title == "Hero Sample")
+        #expect(clip.artist == source.artist)
+        #expect(clip.album == source.album)
+        #expect(clip.kind == .audio)
+        #expect(clip.remoteID == nil)
+        #expect(clip.syncProfileID == nil)
+        #expect(clipURL.pathExtension == "m4a")
+        #expect(clipURL.deletingLastPathComponent() == clipDirectory)
+        #expect(FileManager.default.fileExists(atPath: clipURL.path))
+        #expect(abs(clip.duration - end) < 0.2)
+        #expect(model.tracks.map(\.id).contains(clip.id))
+
+        let reloaded = PlayerModel(
+            loadPersistedLibrary: true,
+            defaults: defaults,
+            clipLibraryRoot: clipDirectory,
+            persistServerCredentials: false
+        )
+        #expect(reloaded.tracks.contains(where: { $0.id == clip.id && $0.fileURL == clipURL }))
+    }
+
+    @Test
     func actualAudioCanPlayPauseAndSeek() async throws {
         let (defaults, suite) = try defaults()
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -171,6 +240,11 @@ struct LikedSongsFocusTests {
 
         model.selectAndPlay(track)
         #expect(model.isPlaying)
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(model.listeningHistoryEntries.count == 1)
+        #expect(model.listeningHistoryEntries.first?.trackID == track.id)
+        #expect(model.listeningHistoryEntries.first?.syncProfileID == "default")
+        #expect((model.listeningHistoryEntries.first?.listenedSeconds ?? 0) > 0)
         model.seek(to: 0.5)
         #expect(abs(model.position - track.duration * 0.5) < 0.02)
         model.togglePlay()

@@ -3,14 +3,24 @@ import SwiftUI
 
 @main
 struct LikedSongsFocusApp: App {
-    @StateObject private var model = PlayerModel()
+    @StateObject private var model: PlayerModel
+    @StateObject private var localImportModel: MacLocalImportViewModel
     @StateObject private var updateManager = UpdateManager()
     @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        let model = PlayerModel()
+        _model = StateObject(wrappedValue: model)
+        _localImportModel = StateObject(
+            wrappedValue: MacLocalImportViewModel(model: model)
+        )
+    }
 
     var body: some Scene {
         WindowGroup("Resonance") {
             ContentView()
                 .environmentObject(model)
+                .environmentObject(localImportModel)
                 .environmentObject(updateManager)
                 .background(WindowConfigurator())
                 .task { await model.runAutomaticPlaylistSync() }
@@ -52,12 +62,12 @@ struct LikedSongsFocusApp: App {
             }
 
             CommandMenu("Updates") {
-                Button("Check for Updates…") {
+                Button(updateManager.updatesEnabled ? "Check for Updates…" : "Updates Disabled in Preview") {
                     Task { await updateManager.checkForUpdates() }
                 }
-                .disabled(updateManager.isBusy)
+                .disabled(!updateManager.updatesEnabled || updateManager.isBusy)
 
-                if updateManager.hasUpdate {
+                if updateManager.updatesEnabled, updateManager.hasUpdate {
                     Button(updateManager.canInstall ? "Restart to Install Update" : "Update and Restart") {
                         if updateManager.canInstall {
                             updateManager.installAndRestart()

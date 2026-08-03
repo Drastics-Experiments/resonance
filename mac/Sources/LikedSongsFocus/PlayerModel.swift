@@ -21,15 +21,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         var deletedPlaylistIDs: Set<UUID>?
         var playlistSyncServerURL: String?
         var syncProfileID: String?
-        var syncProfiles: [SyncProfile]?
-        var remoteLikedSongIDs: Set<String>?
-        var dirtyRemoteLikeSongIDs: Set<String>?
+        var syncProfileName: String?
         var likesDirty: Bool?
-    }
-
-    private struct StoredServerCredentials: Codable {
-        var clientToken = ""
-        var adminToken = ""
     }
 
     private enum StoredLibraryLoadResult {
@@ -67,6 +60,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         }
     }
 
+    private struct DuplicateSongUploadResponse: Decodable {
+        let duplicateOf: RemoteSong
+
+        enum CodingKeys: String, CodingKey {
+            case duplicateOf = "duplicate_of"
+        }
+    }
+
     private enum ServerSyncError: LocalizedError {
         case invalidURL
         case missingToken
@@ -99,7 +100,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private static let libraryRecoveryKey = "LikedSongsFocus.library.v2.recovery"
     private static let legacyTracksKey = "LikedSongsFocus.importedTracks.v1"
     private static let serverURLKey = "LikedSongsFocus.serverURL.v1"
-    private static let adminKeychainAccount = "music-server-admin-token"
+    private static let clientCredentialAccount = "music-server-client-token"
+    private static let adminCredentialAccount = "music-server-admin-token"
+    private static let knownDrasticProfileID = "4f633616-9cf0-44db-8864-09358970c8f9"
     private static let volumeKey = "LikedSongsFocus.volume.v1"
     private static let playbackRateKey = "LikedSongsFocus.playbackRate.v1"
     private static let shuffleKey = "LikedSongsFocus.shuffle.v1"
@@ -107,6 +110,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private static let currentTrackKey = "LikedSongsFocus.currentTrack.v1"
     private static let positionKey = "LikedSongsFocus.position.v1"
     private static let historyKey = "LikedSongsFocus.history.v1"
+    private static let listeningHistoryKey = "LikedSongsFocus.listeningHistory.v1"
     private static let playbackContextKey = "LikedSongsFocus.playbackContext.v1"
     private static let shuffleQueueKey = "LikedSongsFocus.shuffleQueue.v1"
 
@@ -136,6 +140,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         didSet { defaults.set(repeatEnabled, forKey: Self.repeatKey) }
     }
     @Published var favorites: Set<UUID>
+    @Published private(set) var listeningHistoryEntries: [ListeningHistoryEntry] = []
     @Published var searchText = ""
     @Published var filter: SongFilter = .all
     @Published var queueTab: QueueTab = .upNext
@@ -162,15 +167,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published var selectedRemoteSongIDs: Set<String> = []
     @Published var isSyncingPlaylists = false
     @Published var playlistSyncStatus = "Not synced"
-    @Published var syncProfileID = "default"
-    @Published var syncProfiles: [SyncProfile] = [
-        SyncProfile(id: "default", name: "Default", isDefault: true)
-    ]
     @Published var fileOperationError: String?
+    @Published private(set) var syncProfileID = "default"
+    @Published private(set) var activeSyncProfileName = "Default"
 
     private let defaults: UserDefaults
     private let networkSession: URLSession
     private let serverCacheRoot: URL?
+    private let clipLibraryRoot: URL?
     private let shouldPersistServerCredentials: Bool
     private var audioPlayer: AVAudioPlayer?
     private var loadedAudioTrackID: UUID?
@@ -178,6 +182,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var playbackContextTrackIDs: [UUID] = []
     private var shuffledTrackIDs: [UUID] = []
     private var historyTrackIDs: [UUID] = []
+    private var activeListeningEntryID: UUID?
+    private var lastListeningPosition: TimeInterval = 0
+    private var lastPersistedListeningSeconds: TimeInterval = 0
     private var navigationHistory: [NavigationLocation] = []
     private var navigationIndex = 0
     private var downloadTask: Task<Void, Never>?
@@ -191,8 +198,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var dirtyPlaylistIDs: Set<UUID> = []
     private var deletedPlaylistIDs: Set<UUID> = []
     private var playlistSyncServerURL: String?
-    private var remoteLikedSongIDs: Set<String> = []
-    private var dirtyRemoteLikeSongIDs: Set<String> = []
     private var likesDirty = false
 
     init(
@@ -200,14 +205,18 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         defaults: UserDefaults = .standard,
         networkSession: URLSession = .shared,
         serverCacheRoot: URL? = nil,
+        clipLibraryRoot: URL? = nil,
         persistServerCredentials: Bool = true
     ) {
         self.defaults = defaults
         self.networkSession = networkSession
         self.serverCacheRoot = serverCacheRoot
+        self.clipLibraryRoot = clipLibraryRoot
         self.shouldPersistServerCredentials = persistServerCredentials
 
-        if persistServerCredentials { Self.bootstrapCredentialStoreFromEnvironment() }
+        if persistServerCredentials {
+            Self.bootstrapCredentialStoreFromEnvironment()
+        }
 
         let loadResult = loadPersistedLibrary ? Self.loadLibrary(from: defaults) : .missing
         let stored: StoredLibrary?
@@ -226,13 +235,27 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             // This keeps manual recovery possible without boot-looping the app.
             defaults.set(data, forKey: Self.libraryRecoveryKey)
         }
+        let restoredSyncProfileID = stored?.syncProfileID ?? "default"
+        let restoredSyncProfileName = stored?.syncProfileName
+            ?? Self.fallbackProfileName(for: restoredSyncProfileID)
         // A file can be temporarily unavailable when an external or network volume is
         // disconnected. Keep its library record and let playback surface availability.
-        let existingTracks = stored?.tracks ?? []
+        let existingTracks = (stored?.tracks ?? []).map { track in
+            var migrated = track
+            if migrated.remoteID != nil, migrated.syncProfileID == nil {
+                migrated.syncProfileID = restoredSyncProfileID
+            }
+            if let filename = migrated.fileURL?.lastPathComponent,
+               MediaKindClassifier.kind(contentType: "", filename: filename) == .video {
+                migrated.kind = .video
+            }
+            return migrated
+        }
         var seenRemoteIDs = Set<String>()
         let availableTracks = existingTracks.filter { track in
             guard let remoteID = track.remoteID else { return true }
-            return seenRemoteIDs.insert(remoteID).inserted
+            let profileID = track.syncProfileID ?? "default"
+            return seenRemoteIDs.insert("\(profileID)\u{0}\(remoteID)").inserted
         }
         let validIDs = Set(availableTracks.map(\.id))
         let availableFavorites = (stored?.favorites ?? []).intersection(validIDs)
@@ -274,32 +297,15 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             ?? availableTracks.first?.id
         serverURLString = persistServerCredentials ? (defaults.string(forKey: Self.serverURLKey) ?? "") : ""
         serverToken = persistServerCredentials ? Self.readServerToken() : ""
-        serverAdminToken = persistServerCredentials ? Self.readServerToken(account: Self.adminKeychainAccount) : ""
+        serverAdminToken = persistServerCredentials ? Self.readServerToken(account: Self.adminCredentialAccount) : ""
         playlistRevision = stored?.playlistRevision ?? 0
         knownRemotePlaylistIDs = stored?.knownRemotePlaylistIDs ?? []
         dirtyPlaylistIDs = stored?.dirtyPlaylistIDs ?? []
         deletedPlaylistIDs = stored?.deletedPlaylistIDs ?? []
         playlistSyncServerURL = stored?.playlistSyncServerURL
-        let restoredSyncProfileID = stored?.syncProfileID ?? "default"
         syncProfileID = restoredSyncProfileID
-        syncProfiles = stored?.syncProfiles ?? [
-            SyncProfile(id: "default", name: "Default", isDefault: true)
-        ]
-        remoteLikedSongIDs = stored?.remoteLikedSongIDs ?? Set(availableFavorites.compactMap { trackID in
-            availableTracks.first(where: {
-                $0.id == trackID && ($0.syncProfileID ?? "default") == restoredSyncProfileID
-            })?.remoteID
-        })
-        if let storedDirtyLikeIDs = stored?.dirtyRemoteLikeSongIDs {
-            dirtyRemoteLikeSongIDs = storedDirtyLikeIDs
-        } else if stored?.likesDirty ?? false {
-            dirtyRemoteLikeSongIDs = Set(availableTracks.compactMap { track in
-                guard track.remoteID != nil,
-                      (track.syncProfileID ?? "default") == restoredSyncProfileID else { return nil }
-                return track.remoteID
-            })
-        }
-        likesDirty = !dirtyRemoteLikeSongIDs.isEmpty
+        activeSyncProfileName = restoredSyncProfileName
+        likesDirty = stored?.likesDirty ?? false
 
         super.init()
 
@@ -311,6 +317,34 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         historyTrackIDs = (defaults.stringArray(forKey: Self.historyKey) ?? [])
             .compactMap(UUID.init(uuidString:))
             .filter(validIDs.contains)
+        if
+            let listeningHistoryData = defaults.data(forKey: Self.listeningHistoryKey),
+            let decodedHistory = try? JSONDecoder().decode(
+                [ListeningHistoryEntry].self,
+                from: listeningHistoryData
+            )
+        {
+            let validHistory = decodedHistory.filter {
+                validIDs.contains($0.trackID)
+            }
+            let migratedLegacyHistory = validHistory.contains {
+                $0.syncProfileID == nil
+            }
+            listeningHistoryEntries = Array(
+                validHistory
+                    .map { entry in
+                        var scopedEntry = entry
+                        if scopedEntry.syncProfileID == nil {
+                            scopedEntry.syncProfileID = restoredSyncProfileID
+                        }
+                        return scopedEntry
+                    }
+                    .suffix(2_000)
+            )
+            if migratedLegacyHistory {
+                persistListeningHistory()
+            }
+        }
         let restoredContext = Self.restoredTrackIDs(
             from: defaults.stringArray(forKey: Self.playbackContextKey),
             validIDs: validIDs
@@ -330,7 +364,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         persistPlaybackContext()
         persistShuffleQueue()
         hydrateRemotePlaylistTracks()
-        hydrateRemoteLikedTracks()
 
         if loadPersistedLibrary, stored == nil, !libraryWasCorrupt {
             migrateLegacyLibraryIfNeeded()
@@ -408,10 +441,19 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         filter != .all || !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    var historyTracks: [Track] {
+        let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        return historyTrackIDs.reversed().compactMap { tracksByID[$0] }
+    }
+
+    var activeProfileListeningHistoryEntries: [ListeningHistoryEntry] {
+        listeningHistoryEntries.filter { $0.syncProfileID == syncProfileID }
+    }
+
     var queueTracks: [Track] {
         let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
         if queueTab == .history {
-            return historyTrackIDs.reversed().compactMap { tracksByID[$0] }
+            return historyTracks
         }
 
         let context = activePlaybackTracks
@@ -594,6 +636,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             playlists[index].trackIDs.removeAll { $0 == track.id }
         }
         historyTrackIDs.removeAll { $0 == track.id }
+        listeningHistoryEntries.removeAll { $0.trackID == track.id }
+        persistListeningHistory()
         shuffledTrackIDs.removeAll { $0 == track.id }
         playbackContextTrackIDs.removeAll { $0 == track.id }
 
@@ -685,6 +729,18 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         refreshServerCatalog()
     }
 
+    func clearServerCredentials() {
+        serverURLString = ""
+        serverToken = ""
+        serverAdminToken = ""
+        remoteSongs.removeAll()
+        selectedRemoteSongIDs.removeAll()
+        serverMessage = "Not connected"
+        downloadStatus = ""
+        uploadStatus = ""
+        playlistSyncStatus = ""
+    }
+
     func downloadSelectedServerSongs() {
         guard !selectedRemoteSongIDs.isEmpty else {
             downloadStatus = "Select one or more songs first"
@@ -757,8 +813,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         do {
             let base = try normalizedServerURL()
             try saveServerConfiguration(base: base)
-            await refreshSyncProfiles(base: base)
+            _ = try? await backfillServerMetadataIfAvailable(base: base)
             remoteSongs = try await fetchRemoteCatalog(base: base)
+            reconcileDownloadedMediaKinds(with: remoteSongs)
             selectedRemoteSongIDs.formIntersection(Set(remoteSongs.map(\.id)))
             serverMessage = "Connected • \(remoteSongs.count) \(remoteSongs.count == 1 ? "song" : "songs") available"
         } catch {
@@ -781,6 +838,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             try saveServerConfiguration(base: base)
             let catalogSongs = try await fetchRemoteCatalog(base: base)
             remoteSongs = catalogSongs
+            reconcileDownloadedMediaKinds(with: catalogSongs)
             let songs = songIDs.map { ids in catalogSongs.filter { ids.contains($0.id) } } ?? catalogSongs
             downloadStatus = songs.isEmpty ? "Nothing to download" : "Checking \(songs.count) songs"
             let cache = try serverCacheDirectory(for: base)
@@ -851,6 +909,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         artist: metadata.artist == "Unknown Artist" ? remote.artist : metadata.artist,
                         album: metadata.album == "Unknown Album" ? remote.album : metadata.album,
                         duration: player.duration,
+                        kind: remote.kind,
                         artwork: existingIndex.map { tracks[$0].artwork } ?? ArtworkStyle.allCases[tracks.count % ArtworkStyle.allCases.count],
                         artworkData: metadata.artworkData,
                         fileURL: destination,
@@ -883,7 +942,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
             if currentTrackID == nil { currentTrackID = tracks.first?.id }
             hydrateRemotePlaylistTracks()
-            hydrateRemoteLikedTracks()
             persistLibrary()
             reconcileShuffleOrderIfNeeded()
             serverMessage = failedCount > 0
@@ -954,6 +1012,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             let successCount = urls.count - failedCount
             uploadStatus = failedCount == 0 ? "Uploaded \(successCount) songs" : "Uploaded \(successCount); \(failedCount) failed"
             remoteSongs = try await fetchRemoteCatalog(base: base)
+            reconcileDownloadedMediaKinds(with: remoteSongs)
             serverMessage = "Connected • \(remoteSongs.count) songs available"
         } catch is CancellationError {
             uploadStatus = "Cancelled"
@@ -1065,8 +1124,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     func toggleFavorite(_ track: Track) {
         guard let likedIndex = playlists.firstIndex(where: \.isSystem) else { return }
-        let willLike = !favorites.contains(track.id)
-        if !willLike {
+        if favorites.contains(track.id) {
             favorites.remove(track.id)
             playlists[likedIndex].trackIDs.removeAll { $0 == track.id }
         } else {
@@ -1075,10 +1133,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 playlists[likedIndex].trackIDs.append(track.id)
             }
         }
-        if let remoteID = track.remoteID {
+        if track.remoteID != nil {
             playlistMutationGeneration &+= 1
-            if willLike { remoteLikedSongIDs.insert(remoteID) } else { remoteLikedSongIDs.remove(remoteID) }
-            dirtyRemoteLikeSongIDs.insert(remoteID)
             likesDirty = true
         }
         persistLibrary()
@@ -1108,19 +1164,21 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     func seek(to fraction: Double) {
         guard let track = currentTrack else { return }
+        updateListeningSession()
         position = track.duration * fraction.clamped(to: 0...1)
         if loadedAudioTrackID == track.id {
             audioPlayer?.currentTime = position
         }
+        lastListeningPosition = position
         persistPlaybackPosition()
     }
 
     func importLocalFiles() {
         let panel = NSOpenPanel()
         panel.title = "Add Music to Your Library"
-        panel.message = "Choose audio files or folders. Your files stay where they are on this Mac."
+        panel.message = "Choose audio or video files and folders. Your files stay where they are on this Mac."
         panel.prompt = "Add Music"
-        panel.allowedContentTypes = [.audio, .folder]
+        panel.allowedContentTypes = [.audio, .video, .folder]
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
@@ -1131,7 +1189,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func importLocalFiles(at selectedURLs: [URL]) async {
-        let urls = Self.expandedAudioURLs(from: selectedURLs)
+        let urls = Self.expandedMediaURLs(from: selectedURLs)
         var knownPaths = Set(tracks.compactMap { $0.fileURL?.standardizedFileURL.path })
         let styles: [ArtworkStyle] = [.midnight, .electric, .echoes, .golden, .weightless, .falling]
         var imported: [Track] = []
@@ -1144,6 +1202,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 artist: metadata.artist,
                 album: metadata.album,
                 duration: player.duration,
+                kind: MediaKindClassifier.kind(
+                    contentType: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "",
+                    filename: url.lastPathComponent
+                ),
                 artwork: styles[(tracks.count + imported.count) % styles.count],
                 artworkData: metadata.artworkData,
                 fileURL: url.standardizedFileURL,
@@ -1179,6 +1241,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             artist: imported.metadata.artist,
             album: imported.metadata.album ?? "Imported",
             duration: imported.duration,
+            kind: imported.mediaMode == .video ? .video : .audio,
             artwork: styles[tracks.count % styles.count],
             artworkData: imported.artworkData,
             fileURL: imported.fileURL.standardizedFileURL,
@@ -1197,6 +1260,65 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         return track
     }
 
+    @discardableResult
+    func createClip(
+        from trackID: UUID,
+        startTime: TimeInterval,
+        endTime: TimeInterval,
+        title rawTitle: String
+    ) async throws -> Track {
+        guard let source = tracks.first(where: { $0.id == trackID }),
+              let sourceURL = source.fileURL,
+              FileManager.default.fileExists(atPath: sourceURL.path) else {
+            throw ClipEditorError.missingSource
+        }
+        let range = try ClipRangePolicy.normalized(
+            start: startTime,
+            end: endTime,
+            sourceDuration: source.duration
+        )
+        let trimmedTitle = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = trimmedTitle.isEmpty ? "\(source.title) Clip" : trimmedTitle
+        let directory = try clipDirectory()
+        let destination = directory.appendingPathComponent(
+            "\(Self.safeClipFilenameStem(title))-\(UUID().uuidString.prefix(8)).m4a",
+            isDirectory: false
+        )
+
+        do {
+            try await ClipAudioProcessor.exportM4AClip(
+                input: sourceURL,
+                output: destination,
+                range: range,
+                title: title,
+                artist: source.artist,
+                album: source.album,
+                artwork: source.artworkData
+            )
+            let player = try AVAudioPlayer(contentsOf: destination)
+            guard player.duration > 0 else { throw ClipEditorError.exportFailed("The exported file is empty.") }
+            let clip = Track(
+                title: title,
+                artist: source.artist,
+                album: source.album,
+                duration: player.duration,
+                kind: .audio,
+                artwork: source.artwork,
+                artworkData: source.artworkData,
+                fileURL: destination.standardizedFileURL,
+                dateAdded: .now
+            )
+            tracks.append(clip)
+            if currentTrackID == nil { currentTrackID = clip.id }
+            persistLibrary()
+            reconcileShuffleOrderIfNeeded()
+            return clip
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+
     func uploadLocalImportToActiveProfile(_ track: Track) async throws {
         guard track.remoteID == nil, let fileURL = track.fileURL else {
             throw ServerSyncError.invalidMedia
@@ -1204,10 +1326,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !adminToken.isEmpty else { throw ServerSyncError.missingAdminToken }
         let values = try fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        let isVideo = track.kind == .video
+        let maximumSize = isVideo ? 1_024 * 1_024 * 1_024 : 256 * 1_024 * 1_024
         guard values.isRegularFile == true,
               let size = values.fileSize,
               size > 0,
-              size <= 256 * 1_024 * 1_024 else { throw ServerSyncError.invalidMedia }
+              size <= maximumSize else { throw ServerSyncError.invalidMedia }
 
         let base = try normalizedServerURL()
         try saveServerConfiguration(base: base)
@@ -1221,16 +1345,20 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         request.httpMethod = "PUT"
         request.timeoutInterval = 600
         request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("audio/mp4", forHTTPHeaderField: "Content-Type")
+        request.setValue(isVideo ? "video/mp4" : "audio/mp4", forHTTPHeaderField: "Content-Type")
+        request.setValue(String(size), forHTTPHeaderField: "Content-Length")
         setProfileHeader(on: &request)
-        let (_, response) = try await networkSession.upload(for: request, fromFile: fileURL)
-        try Self.validate(response)
-        remoteSongs = try await fetchRemoteCatalog(base: base)
+        let (data, response) = try await networkSession.upload(for: request, fromFile: fileURL)
+        let uploadedSong = try Self.uploadedSong(from: data, response: response)
+        let refreshedCatalog = (try? await fetchRemoteCatalog(base: base)) ?? remoteSongs
+        remoteSongs = Self.catalog(refreshedCatalog, preserving: uploadedSong)
+        reconcileDownloadedMediaKinds(with: remoteSongs)
         serverMessage = "Connected • \(remoteSongs.count) songs available"
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         guard player === audioPlayer else { return }
+        updateListeningSession()
         position = currentTrack?.duration ?? player.duration
         isPlaying = false
         stopPlaybackTimer()
@@ -1239,6 +1367,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
         guard player === audioPlayer else { return }
+        endListeningSession()
         isPlaying = false
         stopPlaybackTimer()
     }
@@ -1307,18 +1436,24 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         if position >= track.duration { position = 0 }
         audioPlayer?.currentTime = position
         isPlaying = audioPlayer?.play() ?? false
-        if isPlaying { startPlaybackTimer() }
+        if isPlaying {
+            beginListeningSession(for: track)
+            startPlaybackTimer()
+        }
     }
 
     private func pausePlayback() {
+        updateListeningSession()
         audioPlayer?.pause()
         position = audioPlayer?.currentTime ?? position
         isPlaying = false
         stopPlaybackTimer()
+        persistListeningHistory()
         persistPlaybackPosition()
     }
 
     private func stopCurrentPlayback() {
+        endListeningSession()
         audioPlayer?.stop()
         audioPlayer = nil
         loadedAudioTrackID = nil
@@ -1332,6 +1467,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             Task { @MainActor [weak self] in
                 guard let self, self.isPlaying else { return }
                 self.position = self.audioPlayer?.currentTime ?? self.position
+                self.updateListeningSession()
                 self.persistPlaybackPosition()
             }
         }
@@ -1388,6 +1524,76 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         defaults.set(historyTrackIDs.map(\.uuidString), forKey: Self.historyKey)
     }
 
+    private func beginListeningSession(for track: Track) {
+        if
+            let activeListeningEntryID,
+            let activeEntry = listeningHistoryEntries.first(where: {
+                $0.id == activeListeningEntryID
+            }),
+            activeEntry.trackID == track.id,
+            activeEntry.syncProfileID == syncProfileID
+        {
+            return
+        }
+
+        let entry = ListeningHistoryEntry(
+            trackID: track.id,
+            syncProfileID: syncProfileID
+        )
+        listeningHistoryEntries.append(entry)
+        if listeningHistoryEntries.count > 2_000 {
+            listeningHistoryEntries.removeFirst(
+                listeningHistoryEntries.count - 2_000
+            )
+        }
+        activeListeningEntryID = entry.id
+        lastListeningPosition = audioPlayer?.currentTime ?? position
+        lastPersistedListeningSeconds = 0
+        persistListeningHistory()
+    }
+
+    private func updateListeningSession() {
+        let currentPosition = audioPlayer?.currentTime ?? position
+        guard
+            let activeListeningEntryID,
+            let entryIndex = listeningHistoryEntries.firstIndex(where: {
+                $0.id == activeListeningEntryID
+            })
+        else {
+            lastListeningPosition = currentPosition
+            return
+        }
+
+        let delta = currentPosition - lastListeningPosition
+        if isPlaying, delta > 0, delta < 5 {
+            listeningHistoryEntries[entryIndex].listenedSeconds += delta
+        }
+        lastListeningPosition = currentPosition
+
+        let listenedSeconds = listeningHistoryEntries[entryIndex].listenedSeconds
+        if listenedSeconds - lastPersistedListeningSeconds >= 15 {
+            lastPersistedListeningSeconds = listenedSeconds
+            persistListeningHistory()
+        }
+    }
+
+    private func endListeningSession() {
+        updateListeningSession()
+        if activeListeningEntryID != nil {
+            persistListeningHistory()
+        }
+        activeListeningEntryID = nil
+        lastListeningPosition = 0
+        lastPersistedListeningSeconds = 0
+    }
+
+    private func persistListeningHistory() {
+        guard let data = try? JSONEncoder().encode(listeningHistoryEntries) else {
+            return
+        }
+        defaults.set(data, forKey: Self.listeningHistoryKey)
+    }
+
     private func persistPlaybackContext() {
         defaults.set(playbackContextTrackIDs.map(\.uuidString), forKey: Self.playbackContextKey)
     }
@@ -1407,9 +1613,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             deletedPlaylistIDs: deletedPlaylistIDs,
             playlistSyncServerURL: playlistSyncServerURL,
             syncProfileID: syncProfileID,
-            syncProfiles: syncProfiles,
-            remoteLikedSongIDs: remoteLikedSongIDs,
-            dirtyRemoteLikeSongIDs: dirtyRemoteLikeSongIDs,
+            syncProfileName: activeSyncProfileName,
             likesDirty: likesDirty
         )
         guard let data = try? JSONEncoder().encode(stored) else { return }
@@ -1425,80 +1629,174 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         defaults.set(position, forKey: Self.positionKey)
     }
 
-    func refreshSyncProfiles() async {
-        guard let base = try? normalizedServerURL(),
-              !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        await refreshSyncProfiles(base: base)
-    }
+    func selectSyncProfile(matching query: String) async -> Bool {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            serverMessage = "Enter a profile name or ID"
+            return false
+        }
+        guard !isSyncingServer, !isUploadingServer, !isSyncingPlaylists else {
+            serverMessage = "Wait for the current server transfer or sync to finish"
+            return false
+        }
 
-    private func refreshSyncProfiles(base: URL) async {
         do {
-            let request = authenticatedRequest(url: base.appendingPathComponent("api/v1/profiles"))
+            let base = try normalizedServerURL()
+            try saveServerConfiguration(base: base)
+            let request = authenticatedRequest(
+                url: base.appendingPathComponent("api/v1/profiles"),
+                includeProfile: false
+            )
             let (data, response) = try await networkSession.data(for: request)
             try Self.validate(response)
             let payload = try JSONDecoder().decode(SyncProfilesResponse.self, from: data)
-            syncProfiles = payload.profiles
-            if !syncProfiles.contains(where: { $0.id == syncProfileID }) {
-                selectSyncProfile(payload.defaultProfileID)
+            let requestedProfile = Self.syncProfile(matching: trimmed, in: payload.profiles)
+            guard let profile = requestedProfile
+                ?? payload.profiles.first(where: { $0.id == payload.defaultProfileID })
+                ?? payload.profiles.first(where: { $0.isDefault })
+            else {
+                serverMessage = "Profile “\(trimmed)” was not found"
+                return false
             }
+            let currentProfileStillExists = payload.profiles.contains { $0.id == syncProfileID }
+            if currentProfileStillExists,
+               (!dirtyPlaylistIDs.isEmpty || !deletedPlaylistIDs.isEmpty || likesDirty) {
+                await syncPlaylistsNow()
+                guard dirtyPlaylistIDs.isEmpty, deletedPlaylistIDs.isEmpty, !likesDirty else {
+                    serverMessage = "Sync the current profile before switching"
+                    return false
+                }
+            }
+            activateSyncProfile(profile)
+            if requestedProfile == nil {
+                serverMessage = "Profile “\(trimmed)” was not found • Switched to \(profile.name)"
+            }
+            return true
+        } catch {
+            serverMessage = "Could not switch profile: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    nonisolated static func syncProfile(matching query: String, in profiles: [SyncProfile]) -> SyncProfile? {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return profiles.first { $0.id == trimmed }
+            ?? profiles.first { $0.name.localizedCaseInsensitiveCompare(trimmed) == .orderedSame }
+    }
+
+    private static func fallbackProfileName(for id: String) -> String {
+        if id == "default" { return "Default" }
+        if id == knownDrasticProfileID { return "Drastic" }
+        return id
+    }
+
+    private func activateSyncProfile(_ profile: SyncProfile) {
+        guard !profile.id.isEmpty else { return }
+        activeSyncProfileName = profile.name
+        guard profile.id != syncProfileID else {
+            serverMessage = "Using \(profile.name)"
             persistLibrary()
-        } catch {
-            // Catalog refresh owns the visible connection error.
+            return
         }
-    }
 
-    func createSyncProfile(named name: String) async {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let base = try? normalizedServerURL(), !trimmed.isEmpty else { return }
-        do {
-            var request = authenticatedRequest(url: base.appendingPathComponent("api/v1/profiles"))
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["name": trimmed])
-            let (data, response) = try await networkSession.data(for: request)
-            try Self.validate(response)
-            let profile = try JSONDecoder().decode(SyncProfile.self, from: data)
-            syncProfiles.append(profile)
-            selectSyncProfile(profile.id)
-            await refreshServerCatalogNow()
-            await syncPlaylistsNow()
-        } catch {
-            serverMessage = "Could not create profile: \(error.localizedDescription)"
+        endListeningSession()
+        let oldProfileID = syncProfileID
+        let currentTrackBelongsToOldProfile = currentTrack.map {
+            $0.remoteID != nil && ($0.syncProfileID ?? "default") == oldProfileID
+        } ?? false
+        if currentTrackBelongsToOldProfile {
+            stopCurrentPlayback()
         }
-    }
 
-    func selectSyncProfile(_ id: String) {
-        guard !id.isEmpty, id != syncProfileID else { return }
-        if let currentTrack,
-           currentTrack.remoteID != nil,
-           (currentTrack.syncProfileID ?? "default") != id {
-            audioPlayer?.stop()
-            isPlaying = false
-        }
-        syncProfileID = id
+        playlistSyncDebounceTask?.cancel()
+        playlistSyncDebounceTask = nil
+        playlistSyncPending = false
+        syncProfileID = profile.id
         playlists = playlists.filter(\.isSystem)
         favorites = favorites.filter { trackID in
             tracks.first(where: { $0.id == trackID })?.remoteID == nil
         }
+        if let likedIndex = playlists.firstIndex(where: \.isSystem) {
+            playlists[likedIndex].trackIDs = visibleTracks.map(\.id).filter(favorites.contains)
+            selectedPlaylistID = playlists[likedIndex].id
+        }
+
         playlistRevision = 0
         knownRemotePlaylistIDs.removeAll()
         dirtyPlaylistIDs.removeAll()
         deletedPlaylistIDs.removeAll()
         playlistSyncServerURL = nil
-        remoteLikedSongIDs.removeAll()
-        dirtyRemoteLikeSongIDs.removeAll()
-        playlistMutationGeneration &+= 1
         likesDirty = false
         remoteSongs.removeAll()
         selectedRemoteSongIDs.removeAll()
-        if let likedIndex = playlists.firstIndex(where: \.isSystem) {
-            playlists[likedIndex].trackIDs = visibleTracks.map(\.id).filter(favorites.contains)
+
+        if currentTrackBelongsToOldProfile || currentTrackID.map({ id in
+            !visibleTracks.contains(where: { $0.id == id })
+        }) == true {
+            currentTrackID = visibleTracks.first?.id
+            position = 0
+            playbackContextTrackIDs = visibleTracks.map(\.id)
+            shuffledTrackIDs.removeAll()
+        } else {
+            playbackContextTrackIDs = playbackContextTrackIDs.filter { id in
+                visibleTracks.contains(where: { $0.id == id })
+            }
+            shuffledTrackIDs = shuffledTrackIDs.filter { id in
+                visibleTracks.contains(where: { $0.id == id })
+            }
         }
+
+        navigationHistory = [NavigationLocation(section: section, playlistID: selectedPlaylistID)]
+        navigationIndex = 0
+        serverMessage = "Switched to \(profile.name)"
+        persistPlaybackContext()
+        persistShuffleQueue()
+        persistPlaybackPosition()
         persistLibrary()
+        if isPlaying, let currentTrack {
+            beginListeningSession(for: currentTrack)
+        }
     }
 
     private func setProfileHeader(on request: inout URLRequest) {
         request.setValue(syncProfileID, forHTTPHeaderField: "X-Resonance-Profile")
+    }
+
+    @discardableResult
+    func backfillServerMetadataIfAvailable(base: URL) async throws -> Int {
+        let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !adminToken.isEmpty else { return 0 }
+
+        let endpoint = base.appendingPathComponent("api/v1/admin/metadata")
+        var processedTotal = 0
+        var requestsRemaining = 16
+
+        while requestsRemaining > 0 {
+            try Task.checkCancellation()
+            requestsRemaining -= 1
+
+            var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
+            components?.queryItems = [URLQueryItem(name: "limit", value: "8")]
+            guard let url = components?.url else { throw ServerSyncError.invalidURL }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 120
+            request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
+            setProfileHeader(on: &request)
+
+            let (data, response) = try await networkSession.data(for: request)
+            try Self.validate(response)
+            let result = try JSONDecoder().decode(RemoteMetadataBackfill.self, from: data)
+            processedTotal += result.processed
+
+            if result.remaining <= 0 || result.processed <= 0 {
+                break
+            }
+        }
+
+        return processedTotal
     }
 
     private func normalizedServerURL() throws -> URL {
@@ -1531,13 +1829,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         guard shouldPersistServerCredentials else { return }
         defaults.set(serverURLString, forKey: Self.serverURLKey)
         let token = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !token.isEmpty {
-            Self.saveServerToken(token)
-        }
+        Self.saveServerToken(token)
         let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !adminToken.isEmpty {
-            Self.saveServerToken(adminToken, account: Self.adminKeychainAccount)
-        }
+        Self.saveServerToken(adminToken, account: Self.adminCredentialAccount)
     }
 
     func syncPlaylists() {
@@ -1552,6 +1846,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func runAutomaticPlaylistSync() async {
+        await reconcileDownloadedMediaKindsAutomatically()
         await syncPlaylistsAutomatically()
         while !Task.isCancelled {
             do {
@@ -1613,7 +1908,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 let submittedGeneration = playlistMutationGeneration
                 let submittedDirtyIDs = dirtyPlaylistIDs
                 let submittedDeletedIDs = deletedPlaylistIDs
-                let submittedDirtyLikeIDs = dirtyRemoteLikeSongIDs
                 switch try await putRemotePlaylists(merge.document, base: base) {
                 case .updated(let updated):
                     guard playlistSyncContextMatches(serverKey: serverKey, token: syncToken) else {
@@ -1624,15 +1918,18 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     if playlistMutationGeneration == submittedGeneration {
                         dirtyPlaylistIDs.subtract(submittedDirtyIDs)
                         deletedPlaylistIDs.subtract(submittedDeletedIDs)
-                        dirtyRemoteLikeSongIDs.subtract(submittedDirtyLikeIDs)
-                        likesDirty = !dirtyRemoteLikeSongIDs.isEmpty
+                        likesDirty = false
                         applyRemotePlaylists(updated)
                         playlistSyncStatus = "Synced \(updated.playlists.count) playlist\(updated.playlists.count == 1 ? "" : "s")"
                     } else {
                         // The response represents the snapshot that was sent, not newer local
                         // edits. Apply only untouched remote playlists and immediately coalesce
                         // another pass for the remaining local mutations.
-                        applyRemotePlaylists(updated, preservingLocalIDs: dirtyPlaylistIDs)
+                        applyRemotePlaylists(
+                            updated,
+                            preservingLocalIDs: dirtyPlaylistIDs,
+                            preservingLocalLikes: likesDirty
+                        )
                         playlistSyncStatus = "Playlist changes pending sync…"
                         playlistSyncPending = true
                     }
@@ -1676,7 +1973,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         guard let status = (response as? HTTPURLResponse)?.statusCode else {
             throw ServerSyncError.invalidResponse
         }
-        guard status == 200 else { throw Self.playlistServerError(status: status, data: data) }
+        guard status == 200 else { throw Self.serverError(status: status, data: data) }
         return try JSONDecoder().decode(RemotePlaylistsDocument.self, from: data)
     }
 
@@ -1698,10 +1995,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         if status == 409 {
             return .conflict(try JSONDecoder().decode(RemotePlaylistsDocument.self, from: data))
         }
-        throw Self.playlistServerError(status: status, data: data)
+        throw Self.serverError(status: status, data: data)
     }
 
-    private static func playlistServerError(status: Int, data: Data) -> ServerSyncError {
+    private static func serverError(status: Int, data: Data) -> ServerSyncError {
         struct ErrorPayload: Decodable { let error: String }
         if let message = try? JSONDecoder().decode(ErrorPayload.self, from: data).error,
            !message.isEmpty {
@@ -1731,13 +2028,22 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             needsUpload = true
         }
 
-        var likedSongIDs = Set(remote.likedSongIDs)
-        for remoteID in dirtyRemoteLikeSongIDs {
-            if remoteLikedSongIDs.contains(remoteID) {
-                likedSongIDs.insert(remoteID)
-            } else {
-                likedSongIDs.remove(remoteID)
+        let activeRemoteIDs = Set(visibleTracks.compactMap(\.remoteID))
+        let likedSongIDs: [String]
+        if likesDirty {
+            var mergedLikedSongIDs = remote.likedSongIDs.filter { !activeRemoteIDs.contains($0) }
+            let likedTrackOrder = playlists.first(where: \.isSystem)?.trackIDs ?? []
+            let orderedFavoriteIDs = likedTrackOrder + favorites.filter { !likedTrackOrder.contains($0) }
+            for trackID in orderedFavoriteIDs {
+                guard favorites.contains(trackID),
+                      let track = visibleTracks.first(where: { $0.id == trackID }),
+                      let remoteID = track.remoteID,
+                      !mergedLikedSongIDs.contains(remoteID) else { continue }
+                mergedLikedSongIDs.append(remoteID)
             }
+            likedSongIDs = mergedLikedSongIDs
+        } else {
+            likedSongIDs = remote.likedSongIDs
         }
 
         return (
@@ -1745,7 +2051,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 profileID: syncProfileID,
                 revision: remote.revision,
                 playlists: merged,
-                likedSongIDs: Array(likedSongIDs)
+                likedSongIDs: likedSongIDs
             ),
             needsUpload
         )
@@ -1766,10 +2072,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private func applyRemotePlaylists(
         _ document: RemotePlaylistsDocument,
-        preservingLocalIDs: Set<UUID> = []
+        preservingLocalIDs: Set<UUID> = [],
+        preservingLocalLikes: Bool = false
     ) {
         let existing = Dictionary(uniqueKeysWithValues: playlists.filter { !$0.isSystem }.map { ($0.id, $0) })
         let systemPlaylists = playlists.filter(\.isSystem)
+        let existingLikedOrder = systemPlaylists.first(where: \.isSystem)?.trackIDs ?? []
         let styles: [ArtworkStyle] = [.lateNight, .softFocus, .onRepeat, .electric, .golden, .falling]
         var syncedPlaylists = document.playlists.enumerated().compactMap { offset, remote -> Playlist? in
             guard !deletedPlaylistIDs.contains(remote.id) else { return nil }
@@ -1800,19 +2108,29 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         })
 
         playlists = systemPlaylists + syncedPlaylists
-        var mergedLikedSongIDs = Set(document.likedSongIDs)
-        for remoteID in dirtyRemoteLikeSongIDs {
-            if remoteLikedSongIDs.contains(remoteID) {
-                mergedLikedSongIDs.insert(remoteID)
-            } else {
-                mergedLikedSongIDs.remove(remoteID)
+        var preferredRemoteFavoriteOrder: [UUID] = []
+        if !preservingLocalLikes {
+            let localFavorites = favorites.filter { trackID in
+                tracks.first(where: { $0.id == trackID })?.remoteID == nil
             }
+            preferredRemoteFavoriteOrder = document.likedSongIDs.compactMap { remoteID in
+                visibleTracks.first(where: { $0.remoteID == remoteID })?.id
+            }
+            favorites = Set(localFavorites).union(preferredRemoteFavoriteOrder)
+            likesDirty = false
         }
-        remoteLikedSongIDs = mergedLikedSongIDs
-        hydrateRemoteLikedTracks()
+
+        if let likedIndex = playlists.firstIndex(where: \.isSystem) {
+            var orderedFavorites = existingLikedOrder.filter(favorites.contains)
+            for trackID in preferredRemoteFavoriteOrder + visibleTracks.map(\.id)
+            where favorites.contains(trackID) && !orderedFavorites.contains(trackID) {
+                orderedFavorites.append(trackID)
+            }
+            playlists[likedIndex].trackIDs = orderedFavorites
+        }
+
         playlistRevision = document.revision
         knownRemotePlaylistIDs = Set(document.playlists.map(\.id))
-        likesDirty = !dirtyRemoteLikeSongIDs.isEmpty
         if let selectedPlaylistID, !playlists.contains(where: { $0.id == selectedPlaylistID }) {
             self.selectedPlaylistID = nil
             section = .playlists
@@ -1832,27 +2150,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             }
             hydrated.append(contentsOf: localOnlyTrackIDs.filter { !hydrated.contains($0) })
             playlists[index].trackIDs = hydrated
-        }
-    }
-
-    private func hydrateRemoteLikedTracks() {
-        let localFavorites = favorites.filter { trackID in
-            tracks.first(where: { $0.id == trackID })?.remoteID == nil
-        }
-        let hydratedRemoteFavorites = tracks.compactMap { track -> UUID? in
-            guard let remoteID = track.remoteID,
-                  (track.syncProfileID ?? "default") == syncProfileID,
-                  remoteLikedSongIDs.contains(remoteID) else { return nil }
-            return track.id
-        }
-        favorites = Set(localFavorites).union(hydratedRemoteFavorites)
-        if let likedIndex = playlists.firstIndex(where: \.isSystem) {
-            var ordered = playlists[likedIndex].trackIDs.filter(favorites.contains)
-            for trackID in visibleTracks.map(\.id)
-            where favorites.contains(trackID) && !ordered.contains(trackID) {
-                ordered.append(trackID)
-            }
-            playlists[likedIndex].trackIDs = ordered
         }
     }
 
@@ -1903,10 +2200,35 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         return try JSONDecoder().decode(RemoteCatalog.self, from: data).songs
     }
 
-    private func authenticatedRequest(url: URL) -> URLRequest {
+    @discardableResult
+    func reconcileDownloadedMediaKinds(with catalog: [RemoteSong]) -> Bool {
+        let kindsByRemoteID = Dictionary(uniqueKeysWithValues: catalog.map { ($0.id, $0.kind) })
+        var changed = false
+        for index in tracks.indices {
+            guard let remoteID = tracks[index].remoteID,
+                  let kind = kindsByRemoteID[remoteID],
+                  tracks[index].kind != kind else { continue }
+            tracks[index].kind = kind
+            changed = true
+        }
+        if changed { persistLibrary() }
+        return changed
+    }
+
+    private func reconcileDownloadedMediaKindsAutomatically() async {
+        guard !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let base = try? normalizedServerURL() else { return }
+        guard let catalog = try? await fetchRemoteCatalog(base: base) else { return }
+        remoteSongs = catalog
+        reconcileDownloadedMediaKinds(with: catalog)
+    }
+
+    private func authenticatedRequest(url: URL, includeProfile: Bool = true) -> URLRequest {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
-        setProfileHeader(on: &request)
+        if includeProfile {
+            setProfileHeader(on: &request)
+        }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         return request
     }
@@ -1983,6 +2305,25 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         guard (200..<300).contains(http.statusCode) else { throw ServerSyncError.server(http.statusCode) }
     }
 
+    private static func uploadedSong(from data: Data, response: URLResponse) throws -> RemoteSong {
+        guard let http = response as? HTTPURLResponse else { throw ServerSyncError.invalidResponse }
+        if (200..<300).contains(http.statusCode) {
+            guard let song = try? JSONDecoder().decode(RemoteSong.self, from: data) else {
+                throw ServerSyncError.invalidResponse
+            }
+            return song
+        }
+        if http.statusCode == 409,
+           let duplicate = try? JSONDecoder().decode(DuplicateSongUploadResponse.self, from: data) {
+            return duplicate.duplicateOf
+        }
+        throw serverError(status: http.statusCode, data: data)
+    }
+
+    private static func catalog(_ catalog: [RemoteSong], preserving uploadedSong: RemoteSong) -> [RemoteSong] {
+        [uploadedSong] + catalog.filter { $0.id != uploadedSong.id }
+    }
+
     private func serverCacheDirectory(for base: URL) throws -> URL {
         let root = try serverCacheRoot ?? FileManager.default.url(
             for: .applicationSupportDirectory,
@@ -2000,6 +2341,29 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         return directory
     }
 
+    private func clipDirectory() throws -> URL {
+        let directory: URL
+        if let clipLibraryRoot {
+            directory = clipLibraryRoot
+        } else {
+            directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Liked Songs", isDirectory: true)
+                .appendingPathComponent("Clips", isDirectory: true)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private static func safeClipFilenameStem(_ title: String) -> String {
+        let allowed = title.map { character in
+            character.isLetter || character.isNumber || character == " " || character == "-" || character == "_"
+                ? character
+                : "-"
+        }
+        let stem = String(allowed.prefix(80)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return stem.isEmpty ? "Clip" : stem
+    }
+
     private static var credentialStoreURL: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return support
@@ -2007,17 +2371,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             .appendingPathComponent("server-credentials.json")
     }
 
-    private static func readCredentials() -> StoredServerCredentials {
-        guard let data = try? Data(contentsOf: credentialStoreURL) else { return StoredServerCredentials() }
-        return (try? JSONDecoder().decode(StoredServerCredentials.self, from: data)) ?? StoredServerCredentials()
-    }
-
-    private static func writeCredentials(_ credentials: StoredServerCredentials) {
-        let url = credentialStoreURL
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        guard let data = try? JSONEncoder().encode(credentials) else { return }
-        try? data.write(to: url, options: [.atomic])
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    private static var credentialStore: LocalServerCredentialStore {
+        LocalServerCredentialStore(storeURL: credentialStoreURL)
     }
 
     private static func bootstrapCredentialStoreFromEnvironment() {
@@ -2025,30 +2380,31 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         guard let client = environment["LIKED_SONGS_CLIENT_TOKEN"],
               let admin = environment["LIKED_SONGS_ADMIN_TOKEN"],
               !client.isEmpty, !admin.isEmpty else { return }
-        writeCredentials(StoredServerCredentials(clientToken: client, adminToken: admin))
+        _ = credentialStore.save(client, account: clientCredentialAccount)
+        _ = credentialStore.save(admin, account: adminCredentialAccount)
         unsetenv("LIKED_SONGS_CLIENT_TOKEN")
         unsetenv("LIKED_SONGS_ADMIN_TOKEN")
     }
 
     private static func readServerToken() -> String {
-        readCredentials().clientToken
+        credentialStore.read(account: clientCredentialAccount) ?? ""
     }
 
     private static func readServerToken(account: String) -> String {
-        account == adminKeychainAccount ? readCredentials().adminToken : readCredentials().clientToken
+        credentialStore.read(
+            account: account == adminCredentialAccount ? adminCredentialAccount : clientCredentialAccount
+        ) ?? ""
     }
 
     private static func saveServerToken(_ token: String) {
-        var credentials = readCredentials()
-        credentials.clientToken = token
-        writeCredentials(credentials)
+        _ = credentialStore.save(token, account: clientCredentialAccount)
     }
 
     private static func saveServerToken(_ token: String, account: String) {
-        var credentials = readCredentials()
-        if account == adminKeychainAccount { credentials.adminToken = token }
-        else { credentials.clientToken = token }
-        writeCredentials(credentials)
+        _ = credentialStore.save(
+            token,
+            account: account == adminCredentialAccount ? adminCredentialAccount : clientCredentialAccount
+        )
     }
 
     private enum PathExtension {
@@ -2097,7 +2453,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         persistLibrary()
     }
 
-    private nonisolated static func expandedAudioURLs(from selectedURLs: [URL]) -> [URL] {
+    private nonisolated static func expandedMediaURLs(from selectedURLs: [URL]) -> [URL] {
         var results: [URL] = []
         let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey]
 
@@ -2110,18 +2466,25 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     options: [.skipsHiddenFiles, .skipsPackageDescendants]
                 )
                 while let item = enumerator?.nextObject() as? URL {
-                    if isSupportedAudioFile(item) { results.append(item) }
+                    if isSupportedMediaFile(item) { results.append(item) }
                 }
-            } else if isSupportedAudioFile(url) {
+            } else if isSupportedMediaFile(url) {
                 results.append(url)
             }
         }
         return results.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 
-    private nonisolated static func isSupportedAudioFile(_ url: URL) -> Bool {
+    nonisolated static func isSupportedMediaFile(_ url: URL) -> Bool {
+        let knownMediaExtensions: Set<String> = [
+            "aac", "ac3", "aif", "aiff", "caf", "flac", "m4a", "m4v",
+            "mov", "mp3", "mp4", "oga", "ogg", "opus", "wav", "webm",
+        ]
+        if knownMediaExtensions.contains(url.pathExtension.lowercased()) {
+            return true
+        }
         guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
-        return type.conforms(to: .audio)
+        return type.conforms(to: .audio) || type.conforms(to: .video)
     }
 
     private nonisolated static func metadata(for url: URL) async -> (title: String, artist: String, album: String, artworkData: Data?) {

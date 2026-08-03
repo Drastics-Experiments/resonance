@@ -4,6 +4,7 @@ import SwiftUI
 
 struct MainContentView: View {
     @EnvironmentObject private var model: PlayerModel
+    @EnvironmentObject private var localImportModel: MacLocalImportViewModel
     @State private var serverSearchText = ""
     @State private var serverScope: MacServerScope = .all
     @State private var serverSort: MacServerSort = .title
@@ -19,7 +20,7 @@ struct MainContentView: View {
                 .frame(height: 82)
 
             if model.section == .storage {
-                StorageView(onImportLink: { presentedSheet = .localImport })
+                StorageView(onImportLink: presentLocalImport)
             } else if model.section == .server {
                 ServerLibraryView(
                     searchText: $serverSearchText,
@@ -43,12 +44,19 @@ struct MainContentView: View {
         .sheet(item: $presentedSheet) { sheet in
             switch sheet {
             case .localImport:
-                MacLocalImportSheet(model: model)
+                MacLocalImportSheet(viewModel: localImportModel)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .importMusicFromLink)) { _ in
-            presentedSheet = .localImport
+            presentLocalImport()
         }
+    }
+
+    private func presentLocalImport() {
+        if !localImportModel.isRunning {
+            localImportModel.reset()
+        }
+        presentedSheet = .localImport
     }
 }
 
