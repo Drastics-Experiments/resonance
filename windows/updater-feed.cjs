@@ -40,8 +40,14 @@ function conciseUpdaterError(error) {
   return message.length > 240 ? `${message.slice(0, 237)}...` : message;
 }
 
+function installDownloadedWindowsUpdate(updater) {
+  updater.quitAndInstall(true, true);
+  return true;
+}
+
 module.exports = {
   RELEASES_API_URL,
   conciseUpdaterError,
+  installDownloadedWindowsUpdate,
   resolveWindowsUpdateFeed,
 };
