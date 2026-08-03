@@ -24,7 +24,7 @@ import {
 import metadata from "../metadata.cjs";
 import updaterFeed from "../updater-feed.cjs";
 
-const { conciseUpdaterError, resolveWindowsUpdateFeed } = updaterFeed;
+const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = updaterFeed;
 
 test("keeps contextual search and sorting in the persistent top bar", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
@@ -90,13 +90,15 @@ test("uploads link imports even when the selected source is already saved locall
   assert.doesNotMatch(appSource, /importedTrack\?\.filePath && response\.result\.kind === "created"/);
 });
 
-test("switches to existing server profiles or falls back to Default", () => {
+test("switches to or creates server profiles and falls back to Default", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   assert.match(htmlSource, /id="profileSwitchDialog"/);
   assert.match(htmlSource, /for="profileSwitchQuery">Profile name or ID/);
+  assert.match(htmlSource, /id="createProfileFromSwitcher"[\s\S]+Create profile/);
   assert.match(appSource, /api\.fetchProfiles\(\{ baseURL: state\.serverURL, token: serverToken \}\)/);
+  assert.match(appSource, /#createProfileFromSwitcher"\)\.onclick[\s\S]+api\.createProfile\([\s\S]+finishProfileSelection\(profile\)/);
   assert.match(appSource, /resolveSyncProfile\(state\.syncProfiles, query, response\.default_profile_id\)/);
   assert.match(appSource, /fellBackToDefault[\s\S]+Switched to/);
   assert.match(appSource, /track\.id === currentID \? toggle\(\) : play\(track, tracks, \{ playlistID: null \}\)/);
@@ -765,6 +767,26 @@ test("rejects release lists without a Windows manifest and shortens updater erro
     conciseUpdaterError(new Error("Cannot find latest.yml: 404 Not Found\nvery long response headers and stack")),
     "The Windows update feed is temporarily unavailable.",
   );
+});
+
+test("installs downloaded Windows updates silently in place", () => {
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  const readmeSource = readFileSync(new URL("../../installers/windows/README.md", import.meta.url), "utf8");
+  let installArguments = null;
+  assert.equal(installDownloadedWindowsUpdate({
+    quitAndInstall(...values) { installArguments = values; },
+  }), true);
+  assert.deepEqual(installArguments, [true, true]);
+  assert.match(mainSource, /autoUpdater\.autoDownload = true/);
+  assert.match(mainSource, /installDownloadedWindowsUpdate\(autoUpdater\)/);
+  assert.doesNotMatch(mainSource, /autoUpdater\.quitAndInstall\(false, true\)/);
+  assert.match(appSource, /Restarting to finish the update/);
+  assert.match(htmlSource, /Automatic in-app updates/);
+  assert.match(htmlSource, /Restart &amp; update/);
+  assert.match(readmeSource, /runs the verified NSIS update silently/);
+  assert.match(readmeSource, /does not show the setup wizard/);
 });
 
 test("converts embedded cover art into a renderable data URL", () => {

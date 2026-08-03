@@ -2807,7 +2807,26 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   border-radius: 10px;
   font-size: 16px;
 }
-.profile-switch-footer .primary:disabled {
+.profile-switch-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.profile-switch-actions .secondary {
+  padding: 11px 18px;
+  border: 1px solid #ffffff18;
+  border-radius: 10px;
+  background: #ffffff0b;
+  color: #e7e3ed;
+  font-size: 15px;
+  font-weight: 700;
+}
+.profile-switch-actions .secondary:hover {
+  border-color: #a98cff5c;
+  background: #a98cff14;
+  color: #fff;
+}
+.profile-switch-actions button:disabled {
   cursor: default;
   opacity: .55;
 }

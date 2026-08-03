@@ -6,7 +6,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { readAudioMetadata } = require("./metadata.cjs");
-const { conciseUpdaterError, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
+const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
 const { LocalImportError, searchYouTubeAudioSources } = require("./local-import-core.cjs");
 const { importFileBackedSource, searchFileBackedSources } = require("./local-debrid.cjs");
 const { artworkFileDataURL, fetchArtwork, importConfirmedSource, resolveLocalImportSource } = require("./local-import-platform.cjs");
@@ -390,8 +390,10 @@ ipcMain.handle("update:check", async () => {
 
 ipcMain.handle("update:install", () => {
   if (!app.isPackaged) return false;
-  autoUpdater.quitAndInstall(false, true);
-  return true;
+  // The assisted NSIS UI is useful for a first install, but an update already
+  // knows the existing install directory. Apply it silently and relaunch the
+  // app so upgrading never sends the user back through setup.
+  return installDownloadedWindowsUpdate(autoUpdater);
 });
 
 ipcMain.handle("library:load", async () => {

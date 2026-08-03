@@ -19,7 +19,7 @@
       </nav>
       <div class="side-heading"><span>Your playlists</span><button id="newPlaylist" title="New Playlist" aria-label="Create a new playlist">＋</button></div>
       <div id="sidebarPlaylists" class="playlist-links"></div>
-      <div class="update-panel"><button id="checkForUpdates"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/></svg><span><strong>Check for updates</strong><small id="updateStatus" role="status" aria-live="polite">GitHub Releases</small></span></button><button id="installUpdate" hidden>Restart to update</button></div>
+      <div class="update-panel"><button id="checkForUpdates"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/></svg><span><strong>Check for updates</strong><small id="updateStatus" role="status" aria-live="polite">Automatic in-app updates</small></span></button><button id="installUpdate" hidden>Restart &amp; update</button></div>
     </aside>
 
     <main>
@@ -94,7 +94,7 @@
   <dialog id="profileSwitchDialog" class="profile-switch-dialog">
     <form id="profileSwitchForm">
       <div class="profile-switch-heading">
-        <div><h2>Switch Profile</h2><p>Choose an existing server profile</p></div>
+        <div><h2>Switch Profile</h2><p>Choose an existing server profile or create a new one</p></div>
         <button id="cancelProfileSwitch" class="secondary" type="button">Cancel</button>
       </div>
       <div class="profile-switch-current">
@@ -102,11 +102,14 @@
         <span><strong id="profileSwitchCurrentName">Default</strong><small>Current profile</small></span>
       </div>
       <label for="profileSwitchQuery">Profile name or ID</label>
-      <input id="profileSwitchQuery" autocomplete="off" spellcheck="false" required>
-      <p class="profile-switch-help">This switches profiles only; it does not create or delete them.</p>
+      <input id="profileSwitchQuery" maxlength="80" autocomplete="off" spellcheck="false" required>
+      <p class="profile-switch-help">Enter an existing name or ID to switch, or enter a new name to create.</p>
       <div class="profile-switch-footer">
         <span id="profileSwitchStatus" role="status">Not connected</span>
-        <button id="confirmProfileSwitch" class="primary" type="submit">Switch</button>
+        <div class="profile-switch-actions">
+          <button id="createProfileFromSwitcher" class="secondary" type="button">Create profile</button>
+          <button id="confirmProfileSwitch" class="primary" type="submit">Switch</button>
+        </div>
       </div>
     </form>
   </dialog>

@@ -3419,6 +3419,55 @@ $("#serverSettingsForm").onsubmit = async (event) => {
   $("#serverSettingsDialog").close();
   if (section === "server") await serverAction("catalog");
 };
+
+async function finishProfileSelection(profile) {
+  renderProfileOptions(profile.id);
+  const previousProfileID = activeProfileID();
+  await activateProfile(profile.id);
+  await persist();
+  updateProfileControl();
+  $("#profileSwitchDialog").close();
+  render();
+  if (profile.id !== previousProfileID) {
+    schedulePlaylistSync();
+    scheduleListeningHistorySync();
+    await serverAction("catalog");
+  }
+}
+
+$("#createProfileFromSwitcher").onclick = async () => {
+  const name = $("#profileSwitchQuery").value.replace(/\s+/g, " ").trim();
+  const status = $("#profileSwitchStatus");
+  const create = $("#createProfileFromSwitcher");
+  const submit = $("#confirmProfileSwitch");
+  if (!name) {
+    status.textContent = "Enter a name for the new profile.";
+    return;
+  }
+  if (!state.serverURL || !serverToken) {
+    status.textContent = "Connect to the music server in Settings first.";
+    return;
+  }
+  create.disabled = true;
+  submit.disabled = true;
+  status.textContent = "Creating profile…";
+  try {
+    const profile = await api.createProfile({
+      baseURL: state.serverURL,
+      token: serverToken,
+      name,
+    });
+    state.syncProfiles = [...state.syncProfiles.filter((item) => item.id !== profile.id), profile];
+    await finishProfileSelection(profile);
+    showNotice(`Created and switched to ${profile.name || name}.`, "status");
+  } catch (error) {
+    status.textContent = error.message || "Could not create the profile.";
+  } finally {
+    create.disabled = false;
+    submit.disabled = false;
+  }
+};
+
 $("#profileSwitchForm").onsubmit = async (event) => {
   event.preventDefault();
   const query = $("#profileSwitchQuery").value.trim();
@@ -3440,18 +3489,7 @@ $("#profileSwitchForm").onsubmit = async (event) => {
     const resolution = resolveSyncProfile(state.syncProfiles, query, response.default_profile_id);
     const { profile } = resolution;
     if (!profile) throw new Error(`No server profile matches “${query}”.`);
-    renderProfileOptions(profile.id);
-    const previousProfileID = activeProfileID();
-    await activateProfile(profile.id);
-    await persist();
-    updateProfileControl();
-    $("#profileSwitchDialog").close();
-    render();
-    if (profile.id !== previousProfileID) {
-      schedulePlaylistSync();
-      scheduleListeningHistorySync();
-      await serverAction("catalog");
-    }
+    await finishProfileSelection(profile);
     if (resolution.fellBackToDefault) {
       showNotice(`Profile “${query}” was not found. Switched to ${profile.name || "Default"}.`, "status");
     }
@@ -3679,10 +3717,17 @@ api.onUpdateStatus((value) => {
   const status = $("#updateStatus");
   const install = $("#installUpdate");
   if (!status || !install) return;
+  if (value.type === "ready") {
+    status.textContent = `${value.version} downloaded`;
+    install.hidden = false;
+    install.disabled = false;
+    return;
+  }
+  install.hidden = true;
+  install.disabled = false;
   if (value.type === "checking") status.textContent = "Checking GitHub…";
   else if (value.type === "available") status.textContent = `Downloading ${value.version}…`;
   else if (value.type === "downloading") status.textContent = `Downloading… ${value.percent}%`;
-  else if (value.type === "ready") { status.textContent = `${value.version} is ready`; install.hidden = false; }
   else if (value.type === "current") status.textContent = "You’re up to date";
   else if (value.type === "error") status.textContent = value.message || "Update check failed";
 });
@@ -3694,7 +3739,22 @@ $("#checkForUpdates").onclick = async () => {
     $("#updateStatus").textContent = error.message || "Update check failed";
   }
 };
-$("#installUpdate").onclick = () => api.installUpdate();
+$("#installUpdate").onclick = async () => {
+  const install = $("#installUpdate");
+  const status = $("#updateStatus");
+  install.disabled = true;
+  status.textContent = "Restarting to finish the update…";
+  try {
+    const started = await api.installUpdate();
+    if (!started) {
+      install.hidden = true;
+      status.textContent = "Available in installed builds";
+    }
+  } catch (error) {
+    install.disabled = false;
+    status.textContent = error.message || "Could not install the update";
+  }
+};
 render(); updateChrome();
 syncPlaylistsNow({ automatic: true });
 syncListeningHistoryNow();
