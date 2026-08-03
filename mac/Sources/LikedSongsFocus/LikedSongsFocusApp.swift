@@ -32,6 +32,13 @@ struct LikedSongsFocusApp: App {
                     model.importLocalFiles()
                 }
                 .keyboardShortcut("o", modifiers: .command)
+
+                if LocalImportFeature.isEnabled {
+                    Button("Import from Link…") {
+                        NotificationCenter.default.post(name: .importMusicFromLink, object: nil)
+                    }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
+                }
             }
 
             CommandMenu("Navigate") {

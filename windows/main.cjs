@@ -38,11 +38,43 @@ const activeLocalImports = new Map();
 const activeLocalImportPreviews = new Map();
 const cachedLocalImportPreviews = new Map();
 const pendingExternalImports = new Map();
-let sessionServerCredentials = { clientToken: "", adminToken: "" };
 let librarySaveQueue = Promise.resolve();
 
-function usesSessionOnlyCredentialStore() {
+function usesPreviewCredentialStore() {
   return process.platform === "darwin" && !app.isPackaged;
+}
+
+function previewCredentialStorePath() {
+  return path.join(app.getPath("appData"), "Liked Songs", "server-credentials.json");
+}
+
+async function readPreviewCredentials() {
+  try {
+    const payload = JSON.parse(await fs.readFile(previewCredentialStorePath(), "utf8"));
+    return {
+      clientToken: String(payload?.clientToken || ""),
+      adminToken: String(payload?.adminToken || ""),
+    };
+  } catch {
+    return { clientToken: "", adminToken: "" };
+  }
+}
+
+async function writePreviewCredentials(credentials) {
+  const destination = previewCredentialStorePath();
+  const directory = path.dirname(destination);
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  await fs.chmod(directory, 0o700);
+  const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporary, JSON.stringify(credentials), { encoding: "utf8", mode: 0o600 });
+    await fs.chmod(temporary, 0o600);
+    await fs.rename(temporary, destination);
+    await fs.chmod(destination, 0o600);
+  } catch (error) {
+    await fs.rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 function encryptedCredentialStorage() {
@@ -429,7 +461,7 @@ ipcMain.handle("library:save", async (_event, state) => {
 });
 
 ipcMain.handle("server:credentials:load", async () => {
-  if (usesSessionOnlyCredentialStore()) return { ...sessionServerCredentials };
+  if (usesPreviewCredentialStore()) return readPreviewCredentials();
   const { credentials } = await ensureDirectories();
   const safeStorage = encryptedCredentialStorage();
   if (!safeStorage.isEncryptionAvailable()) return { clientToken: "", adminToken: "" };
@@ -446,8 +478,8 @@ ipcMain.handle("server:credentials:save", async (_event, value) => {
     clientToken: String(value.clientToken || ""),
     adminToken: String(value.adminToken || ""),
   };
-  if (usesSessionOnlyCredentialStore()) {
-    sessionServerCredentials = credentialsValue;
+  if (usesPreviewCredentialStore()) {
+    await writePreviewCredentials(credentialsValue);
     return true;
   }
   const safeStorage = encryptedCredentialStorage();
@@ -478,7 +510,7 @@ ipcMain.handle("library:import", async () => {
 
 ipcMain.handle("local-import:capabilities", () => ({
   enabled: localImportEnabled(),
-  sources: ["spotify", "youtube", "youtube_music", "debrid_vault", "torbox"],
+  sources: ["spotify", "youtube", "youtube_playlists", "youtube_music", "debrid_vault", "torbox"],
   outputFormats: { audio: "m4a", video: "mp4" },
 }));
 

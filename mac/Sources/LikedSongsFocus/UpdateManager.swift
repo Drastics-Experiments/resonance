@@ -8,9 +8,34 @@ struct MacUpdateManifest: Codable, Equatable {
     let build: String
     let url: URL
     let sha256: String
+
+    var identity: MacUpdateIdentity {
+        MacUpdateIdentity(version: version, build: build)
+    }
+}
+
+struct MacUpdateIdentity: Hashable {
+    let version: String
+    let build: String
 }
 
 enum MacUpdateVersion {
+    static func isUpdateAvailable(
+        currentVersion: String,
+        currentBuild: String,
+        candidateVersion: String,
+        candidateBuild: String
+    ) -> Bool {
+        switch compare(candidateVersion, currentVersion) {
+        case .orderedDescending:
+            return true
+        case .orderedAscending:
+            return false
+        case .orderedSame:
+            return compare(candidateBuild, currentBuild) == .orderedDescending
+        }
+    }
+
     static func compare(_ left: String, _ right: String) -> ComparisonResult {
         let lhs = split(left)
         let rhs = split(right)
@@ -43,7 +68,7 @@ final class UpdateManager: ObservableObject {
     nonisolated static let defaultManifestURL = URL(string: "https://github.com/Drastics-Experiments/resonance/releases/latest/download/latest-mac.json")!
 
     @Published private(set) var status = "GitHub Releases"
-    @Published private(set) var availableVersion: String?
+    @Published private(set) var availableUpdate: MacUpdateIdentity?
     @Published private(set) var isBusy = false
     @Published private(set) var downloadedArchive: URL?
     @Published private(set) var errorMessage: String?
@@ -65,7 +90,8 @@ final class UpdateManager: ObservableObject {
     }
 
     var canInstall: Bool { downloadedArchive != nil && manifest != nil && !isBusy }
-    var hasUpdate: Bool { availableVersion != nil }
+    var availableVersion: String? { availableUpdate?.version }
+    var hasUpdate: Bool { availableUpdate != nil }
 
     func automaticCheck() async {
         guard !isRunningAutomaticChecks else { return }
@@ -103,17 +129,23 @@ final class UpdateManager: ObservableObject {
             try Self.validate(response: response)
             let candidate = try JSONDecoder().decode(MacUpdateManifest.self, from: data)
             try Self.validate(candidate)
-            let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
-            if MacUpdateVersion.compare(current, candidate.version) == .orderedAscending {
+            let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+            let currentBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+            if MacUpdateVersion.isUpdateAvailable(
+                currentVersion: currentVersion,
+                currentBuild: currentBuild,
+                candidateVersion: candidate.version,
+                candidateBuild: candidate.build
+            ) {
                 manifest = candidate
-                availableVersion = candidate.version
+                availableUpdate = candidate.identity
                 downloadedArchive = validatedDownloadedArchive(for: candidate)
                 status = downloadedArchive == nil
                     ? "Version \(candidate.version) available"
                     : "Version \(candidate.version) ready"
             } else {
                 manifest = nil
-                availableVersion = nil
+                availableUpdate = nil
                 downloadedArchive = nil
                 status = "Resonance is up to date"
             }

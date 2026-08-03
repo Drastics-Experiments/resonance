@@ -97,6 +97,7 @@ let localImportPreviewLimitSeconds = 30;
 let localImportPreviewInterruptedPlayback = false;
 let localImportAutoResolveTimer = null;
 let localImportResolvedSourceKey = null;
+let localImportBatchContext = null;
 const LOCAL_IMPORT_AUTO_RESOLVE_DELAY = 450;
 let clipEditorStartSeconds = 0;
 let clipEditorEndSeconds = 30;
@@ -120,6 +121,15 @@ const historyClockIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx
 const historyPlaysIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h2m2-5v10m3-13v16m3-11v6m3-9v12m3-7v2"/></svg>`;
 const historyTodayIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V7l9-2v11"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="15.5" cy="16" r="2.5"/></svg>`;
 const historyLibraryIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v10H3z"/><path d="M3 7V5h7l2 2"/></svg>`;
+const contextPlayIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path class="context-icon-fill" d="M8 5v14l11-7z"/></svg>`;
+const contextPauseIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M16 6v12"/></svg>`;
+const contextHeartIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.8 5.8a5.2 5.2 0 0 0-7.4 0L12 7.2l-1.4-1.4a5.2 5.2 0 1 0-7.4 7.4L12 22l8.8-8.8a5.2 5.2 0 0 0 0-7.4Z"/></svg>`;
+const contextPlaylistIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M4 11h10M4 16h7"/><path d="M18 13v7M14.5 16.5h7"/></svg>`;
+const contextRemoveIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>`;
+const contextTrashIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 3h6l1 4M7 7l1 14h8l1-14M10 11v6M14 11v6"/></svg>`;
+const contextDownloadIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14"/></svg>`;
+const contextOpenIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>`;
+const contextBackIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m5-5-5 5 5 5"/></svg>`;
 const escapeHTML = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
 const currentTrack = () => state.tracks.find((track) => track.id === currentID) || null;
 const playlistTracks = () => selectedPlaylistID ? tracksForPlaylist(state, selectedPlaylistID) : state.tracks;
@@ -446,7 +456,7 @@ function historyDayDetailsMarkup(summary, dayKey) {
     const title = track?.title || series.title || "Removed song";
     const artist = track?.artist || series.artist || "Unknown artist";
     const album = track?.album || series.album || "Unknown album";
-    return `<div class="history-day-song" role="row" data-history-track="${escapeHTML(trackID)}">
+    return `<div class="history-day-song" role="row" data-history-track="${escapeHTML(trackID)}" tabindex="0" aria-keyshortcuts="Shift+F10">
       <span class="history-day-song-number" role="cell">${index + 1}</span>
       <span role="cell">${artwork(track)}</span>
       <span class="history-day-song-copy" role="cell"><strong>${escapeHTML(title)}</strong><small>${escapeHTML(artist)} / Audio</small></span>
@@ -632,7 +642,7 @@ function renderListeningHistory() {
     const track = state.tracks.find((item) => item.id === song.trackID);
     const title = track?.title || song.title || "Removed song";
     const artist = track?.artist || song.artist || "Unknown artist";
-    return `<article class="history-ranked-song">
+    return `<article class="history-ranked-song" data-history-track="${escapeHTML(song.trackID)}" tabindex="0" aria-keyshortcuts="Shift+F10">
       <span class="history-ranked-position">#${index + 1}</span>
       ${artwork(track)}
       <strong title="${escapeHTML(title)}">${escapeHTML(title)}</strong>
@@ -717,6 +727,17 @@ function renderListeningHistory() {
       requestAnimationFrame(() => $("#listeningHistoryChart .history-bar")?.focus());
     };
   }
+  document.querySelectorAll("[data-history-track]").forEach((row) => {
+    const openMenu = (event) => openTrackContextMenu(event, row.dataset.historyTrack, { playbackTracks: state.tracks, playlistID: null });
+    row.oncontextmenu = openMenu;
+    row.onkeydown = (event) => {
+      if (event.target !== row) return;
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        event.preventDefault();
+        openMenu(event);
+      }
+    };
+  });
 }
 
 function openListeningHistory() {
@@ -1297,18 +1318,18 @@ function renderLibrary() {
       if (!track) return;
       track.id === currentID ? toggle() : play(track, tracks, { playlistID: null });
     };
+    button.oncontextmenu = (event) => openTrackContextMenu(event, button.dataset.recentTrack, { playbackTracks: tracks, playlistID: null });
+    button.onkeydown = (event) => {
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        event.preventDefault();
+        openTrackContextMenu(event, button.dataset.recentTrack, { playbackTracks: tracks, playlistID: null });
+      }
+    };
   });
   const deleteButton = document.querySelector("[data-hero-delete]");
   if (deleteButton) deleteButton.onclick = async () => {
     closePlaylistMoreMenu();
-    if (!selectedPlaylist || !confirm(`Delete ${selectedPlaylist.name}?`)) return;
-    markPlaylistDeleted(selectedPlaylist);
-    state.playlists = state.playlists.filter((playlist) => playlist.id !== selectedPlaylist.id);
-    selectedPlaylistID = null;
-    section = "playlists";
-    await persist();
-    schedulePlaylistSync();
-    render();
+    await deletePlaylistFromContext(selectedPlaylist);
   };
   document.querySelectorAll("[data-library-filter]").forEach((button) => button.onclick = () => {
     libraryFilter = button.dataset.libraryFilter;
@@ -1319,10 +1340,19 @@ function renderLibrary() {
 function renderPlaylists() {
   updateTopSearch();
   const playlists = filterPlaylists(state.playlists, state.tracks, playlistQuery);
-  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${playlist.id}"><div class="playlist-art">${playlist.isSystem ? "♥" : "♪"}</div><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
+  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${playlist.id}" aria-keyshortcuts="Shift+F10"><div class="playlist-art">${playlist.isSystem ? "♥" : "♪"}</div><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
   $("#pageNewPlaylist").onclick = () => newPlaylist();
   $("#pageSyncPlaylists").onclick = () => syncPlaylistsNow();
-  document.querySelectorAll("[data-open-playlist]").forEach((button) => button.onclick = () => navigate("library", button.dataset.openPlaylist));
+  document.querySelectorAll("[data-open-playlist]").forEach((button) => {
+    button.onclick = () => navigate("library", button.dataset.openPlaylist);
+    button.oncontextmenu = (event) => openPlaylistContextMenu(event, button.dataset.openPlaylist);
+    button.onkeydown = (event) => {
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        event.preventDefault();
+        openPlaylistContextMenu(event, button.dataset.openPlaylist);
+      }
+    };
+  });
 }
 
 function formatBytes(value) {
@@ -1403,7 +1433,7 @@ function renderStorage() {
     <div class="segmented storage-tabs"><button class="${storageScope === "songs" ? "active" : ""}" data-storage-scope="songs">Songs</button><button class="${storageScope === "downloads" ? "active" : ""}" data-storage-scope="downloads">Downloads</button><button class="${storageScope === "files" ? "active" : ""}" data-storage-scope="files">Files</button></div>
     ${storageEditing ? `<div class="selection-bar"><span>${selectedStorageIDs.size} selected</span><button class="danger" id="deleteSelectedStorage" ${selectedStorageIDs.size ? "" : "disabled"}>Delete selected</button></div>` : ""}
     <div class="storage-section-heading"><strong>${storageScope === "downloads" ? "DOWNLOADED FROM SERVER" : storageScope === "files" ? "IMPORTED ON THIS PC" : "ALL SONGS"}</strong><span>${tracks.length} songs</span></div>
-    <div class="storage-list redesigned">${tracks.map((track) => `<div class="storage-row ${storageEditing ? "selecting" : ""}"><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${track.id}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(track.album || "Unknown Album")}</small></span><span class="storage-size">${formatBytes(track.size)}</span><button class="row-menu" data-delete="${track.id}" title="Remove from this device">•••</button></div>`).join("") || `<div class="empty"><b>No matching songs</b><span>Try another filter or import audio.</span></div>`}</div></div>`;
+    <div class="storage-list redesigned">${tracks.map((track) => `<div class="storage-row ${storageEditing ? "selecting" : ""}" data-storage-track="${track.id}" tabindex="0" aria-keyshortcuts="Shift+F10"><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${track.id}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(track.album || "Unknown Album")}</small></span><span class="storage-size">${formatBytes(track.size)}</span><button class="row-menu" data-storage-menu="${track.id}" title="More options" aria-label="More options for ${escapeHTML(track.title || "song")}">•••</button></div>`).join("") || `<div class="empty"><b>No matching songs</b><span>Try another filter or import audio.</span></div>`}</div></div>`;
   const importControl = $("#storageImportControl");
   const importButton = $("#storageImportMenuButton");
   const importMenu = $("#storageImportMenu");
@@ -1455,10 +1485,19 @@ function renderStorage() {
   if ($("#deleteSelectedStorage")) $("#deleteSelectedStorage").onclick = async () => {
     if (selectedStorageIDs.size && confirm(`Remove ${selectedStorageIDs.size} selected song${selectedStorageIDs.size === 1 ? "" : "s"} from this device?`)) await deleteStoredTracks([...selectedStorageIDs]);
   };
-  document.querySelectorAll("[data-delete]").forEach((button) => button.onclick = async () => {
-    const track = state.tracks.find((item) => item.id === button.dataset.delete);
-    if (!track || !confirm(`Remove ${track.title} from this device?`)) return;
-    await deleteStoredTracks([track.id]);
+  document.querySelectorAll("[data-storage-track]").forEach((row) => {
+    const openMenu = (event) => openTrackContextMenu(event, row.dataset.storageTrack, { source: "storage", playbackTracks: tracks, playlistID: null });
+    row.oncontextmenu = openMenu;
+    row.onkeydown = (event) => {
+      if (event.target !== row) return;
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        event.preventDefault();
+        openMenu(event);
+      }
+    };
+  });
+  document.querySelectorAll("[data-storage-menu]").forEach((button) => {
+    button.onclick = (event) => openTrackContextMenu(event, button.dataset.storageMenu, { source: "storage", playbackTracks: tracks, playlistID: null });
   });
   api.storageSummary().then((summary) => {
     if (section !== "storage") return;
@@ -1549,32 +1588,38 @@ function remoteRows() {
     const onDevice = state.tracks.some((track) => track.remoteID === song.id);
     const selected = selectedRemoteIDs.has(song.id);
     const duration = Number(song.duration) > 0 ? formatTime(Number(song.duration)) : "—";
-    return `<div class="remote-row ${serverSelecting ? "selecting" : ""} ${selected ? "selected" : ""}" data-remote-row="${song.id}">
+    return `<div class="remote-row ${serverSelecting ? "selecting" : ""} ${selected ? "selected" : ""}" data-remote-row="${song.id}" tabindex="0" aria-keyshortcuts="Shift+F10">
       <button class="remote-check ${selected ? "selected" : ""}" data-select-remote="${song.id}" ${serverSelecting ? "" : "hidden"} aria-label="${selected ? "Deselect" : "Select"} ${escapeHTML(song.title || song.name)}">${selected ? "✓" : ""}</button>
       ${artwork(song, { animateLoading: true })}
       <span class="server-song-title"><strong>${escapeHTML(song.title || song.name)}</strong>${onDevice ? '<small>On device</small>' : ""}</span>
       <span class="server-cell">${escapeHTML(song.artist || "Unknown Artist")}</span>
       <span class="server-cell server-album">${escapeHTML(song.album || "Server Library")}</span>
       <span class="server-cell server-duration">${duration}</span>
-      <button class="row-menu" data-delete-remote="${song.id}" title="Delete from server" aria-label="Delete ${escapeHTML(song.title || song.name)} from server">•••</button>
+      <button class="row-menu" data-remote-menu="${song.id}" title="More options" aria-label="More options for ${escapeHTML(song.title || song.name)}">•••</button>
     </div>`;
   }).join("");
 }
 
 function bindRemoteRows() {
   document.querySelectorAll("[data-select-remote]").forEach((button) => button.onclick = () => { selectedRemoteIDs.has(button.dataset.selectRemote) ? selectedRemoteIDs.delete(button.dataset.selectRemote) : selectedRemoteIDs.add(button.dataset.selectRemote); renderServer(); });
-  document.querySelectorAll("[data-remote-row]").forEach((row) => row.onclick = (event) => {
-    if (!serverSelecting || event.target.closest("button")) return;
-    const id = row.dataset.remoteRow;
-    selectedRemoteIDs.has(id) ? selectedRemoteIDs.delete(id) : selectedRemoteIDs.add(id);
-    renderServer();
+  document.querySelectorAll("[data-remote-row]").forEach((row) => {
+    row.onclick = (event) => {
+      if (!serverSelecting || event.target.closest("button")) return;
+      const id = row.dataset.remoteRow;
+      selectedRemoteIDs.has(id) ? selectedRemoteIDs.delete(id) : selectedRemoteIDs.add(id);
+      renderServer();
+    };
+    row.oncontextmenu = (event) => openServerTrackContextMenu(event, row.dataset.remoteRow);
+    row.onkeydown = (event) => {
+      if (event.target !== row) return;
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        event.preventDefault();
+        openServerTrackContextMenu(event, row.dataset.remoteRow);
+      }
+    };
   });
-  document.querySelectorAll("[data-delete-remote]").forEach((button) => button.onclick = async () => {
-    const song = serverCatalog.find((item) => item.id === button.dataset.deleteRemote);
-    if (!song || !confirm(`Delete ${song.title || song.name} from the server?`)) return;
-    await saveServerForm();
-    await api.deleteServerSong({ baseURL: state.serverURL, adminToken: serverAdminToken, profileID: activeProfileID(), songID: song.id });
-    await serverAction("catalog");
+  document.querySelectorAll("[data-remote-menu]").forEach((button) => {
+    button.onclick = (event) => openServerTrackContextMenu(event, button.dataset.remoteMenu);
   });
 }
 
@@ -1739,7 +1784,7 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       if (event.target.closest("button, select, input, a")) return;
       play(state.tracks.find((track) => track.id === row.dataset.track), playbackTracks, { playlistID: selectedPlaylistID });
     };
-    row.oncontextmenu = (event) => openTrackContextMenu(event, row.dataset.track);
+    row.oncontextmenu = (event) => openTrackContextMenu(event, row.dataset.track, { playbackTracks, playlistID: selectedPlaylistID });
     row.onkeydown = async (event) => {
       if (event.target !== row) return;
       if (event.key === "Enter" || event.key === " ") {
@@ -1749,7 +1794,7 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       }
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
         event.preventDefault();
-        openTrackContextMenu(event, row.dataset.track);
+        openTrackContextMenu(event, row.dataset.track, { playbackTracks, playlistID: selectedPlaylistID });
         return;
       }
       if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
@@ -1869,41 +1914,68 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
   });
 }
 
-function closeTrackContextMenu() {
+let activeContextMenuReturnFocus = null;
+let activeContextMenuPosition = { x: 8, y: 8 };
+
+function closeTrackContextMenu({ restoreFocus = false } = {}) {
   const menu = $("#trackContextMenu");
+  if (!menu) return;
   menu.hidden = true;
   menu.innerHTML = "";
   menu.onkeydown = null;
+  if (restoreFocus) activeContextMenuReturnFocus?.focus?.();
+  activeContextMenuReturnFocus = null;
 }
 
-function openTrackContextMenu(event, trackID) {
+function beginContextMenu(event) {
   event.preventDefault();
-  const returnFocus = event.currentTarget;
+  event.stopPropagation();
+  closeTrackContextMenu();
+  const anchor = event.currentTarget?.getBoundingClientRect?.();
+  activeContextMenuReturnFocus = event.currentTarget || null;
+  activeContextMenuPosition = {
+    x: Number(event.clientX) > 0 ? Number(event.clientX) : (anchor?.left ?? 8) + 24,
+    y: Number(event.clientY) > 0 ? Number(event.clientY) : (anchor?.top ?? 8) + 24,
+  };
+}
+
+function renderContextMenu({ title, subtitle, actions }) {
   const menu = $("#trackContextMenu");
-  const track = state.tracks.find((item) => item.id === trackID);
-  if (!track) return;
-  const activePlaylist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
-  const playlists = state.playlists.filter((item) => !item.isSystem && item.id !== activePlaylist?.id);
-  const removeAction = activePlaylist
-    ? `<button class="context-danger" role="menuitem" data-context-remove-playlist-track><span>−</span>Remove from ${escapeHTML(activePlaylist.name)}</button><div class="context-divider"></div><div class="context-section-label">ADD TO ANOTHER PLAYLIST</div>`
-    : "";
-  menu.innerHTML = `<div class="context-heading"><small>${activePlaylist ? "PLAYLIST TRACK" : "ADD TO PLAYLIST"}</small><strong>${escapeHTML(track.title)}</strong><em>${escapeHTML(track.artist || "Unknown artist")}</em></div>${removeAction}${playlists.length ? playlists.map((playlist) => {
-    const added = playlist.trackIDs.includes(trackID);
-    return `<button role="menuitem" data-context-playlist="${escapeHTML(playlist.id)}" ${added ? "disabled" : ""}><span>${added ? "✓" : "＋"}</span>${escapeHTML(playlist.name)}</button>`;
-  }).join("") : `<div class="context-empty">${activePlaylist ? "No other playlists yet" : "No playlists yet"}</div>`}<div class="context-divider"></div><button class="context-create" role="menuitem" data-context-new><span>＋</span>Create new playlist…</button>`;
+  menu.setAttribute("aria-label", `${title || "Item"} options`);
+  const actionMarkup = actions.map((action, index) => {
+    if (action.divider) return '<div class="context-divider" role="separator"></div>';
+    return `<button class="${action.danger ? "context-danger" : ""}" type="button" role="menuitem" data-context-action="${index}" ${action.disabled ? "disabled" : ""}>
+      <span class="context-action-icon" aria-hidden="true">${action.icon || ""}</span>
+      <span class="context-action-label">${escapeHTML(action.label)}</span>
+      ${action.trailing ? `<span class="context-action-trailing">${escapeHTML(action.trailing)}</span>` : ""}
+    </button>`;
+  }).join("");
+  menu.innerHTML = actionMarkup;
   menu.hidden = false;
-  const anchor = returnFocus?.getBoundingClientRect?.();
-  const requestedX = Number(event.clientX) > 0 ? Number(event.clientX) : (anchor?.left ?? 8) + 24;
-  const requestedY = Number(event.clientY) > 0 ? Number(event.clientY) : (anchor?.top ?? 8) + 24;
-  menu.style.left = `${Math.max(8, Math.min(requestedX, innerWidth - menu.offsetWidth - 8))}px`;
-  menu.style.top = `${Math.max(8, Math.min(requestedY, innerHeight - menu.offsetHeight - 8))}px`;
+  const positionMenu = () => {
+    menu.style.left = `${Math.max(8, Math.min(activeContextMenuPosition.x, innerWidth - menu.offsetWidth - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(activeContextMenuPosition.y, innerHeight - menu.offsetHeight - 8))}px`;
+  };
+  positionMenu();
+  menu.querySelectorAll("[data-context-action]").forEach((button) => {
+    const action = actions[Number(button.dataset.contextAction)];
+    button.onclick = async (clickEvent) => {
+      clickEvent.stopPropagation();
+      if (!action || action.disabled) return;
+      if (!action.keepOpen) closeTrackContextMenu();
+      try {
+        await action.onSelect?.();
+      } catch (error) {
+        showNotice(error?.message || "Resonance could not complete that action.");
+      }
+    };
+  });
   menu.onkeydown = (keyEvent) => {
     const items = [...menu.querySelectorAll('[role="menuitem"]:not(:disabled)')];
     const currentIndex = items.indexOf(document.activeElement);
     if (keyEvent.key === "Escape") {
       keyEvent.preventDefault();
-      closeTrackContextMenu();
-      returnFocus?.focus?.();
+      closeTrackContextMenu({ restoreFocus: true });
     } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(keyEvent.key) && items.length) {
       keyEvent.preventDefault();
       const nextItemIndex = keyEvent.key === "Home" ? 0
@@ -1912,36 +1984,159 @@ function openTrackContextMenu(event, trackID) {
       items[nextItemIndex].focus();
     }
   };
-  requestAnimationFrame(() => menu.querySelector('[role="menuitem"]:not(:disabled)')?.focus());
-  const removeButton = menu.querySelector("[data-context-remove-playlist-track]");
-  if (removeButton) removeButton.onclick = async () => {
-    activePlaylist.trackIDs = activePlaylist.trackIDs.filter((id) => id !== trackID);
-    updatePlaylistRemoteSongIDs(state, activePlaylist);
-    markPlaylistDirty(activePlaylist);
-    if (activePlaybackPlaylistID === activePlaylist.id) {
-      setPlaybackContext(tracksForPlaylist(state, activePlaylist.id), activePlaylist.id);
-    }
-    closeTrackContextMenu();
-    await persist();
-    schedulePlaylistSync();
-    renderLibrary();
-  };
-  menu.querySelectorAll("[data-context-playlist]").forEach((button) => button.onclick = async () => {
-    const playlist = state.playlists.find((item) => item.id === button.dataset.contextPlaylist);
-    if (playlist && !playlist.trackIDs.includes(trackID)) {
-      playlist.trackIDs.push(trackID);
-      updatePlaylistRemoteSongIDs(state, playlist);
-      markPlaylistDirty(playlist);
-      if (activePlaybackPlaylistID === playlist.id) setPlaybackContext(tracksForPlaylist(state, playlist.id), playlist.id);
-    }
-    closeTrackContextMenu();
-    await persist();
-    schedulePlaylistSync();
+  requestAnimationFrame(() => {
+    positionMenu();
+    menu.querySelector('[role="menuitem"]:not(:disabled)')?.focus();
   });
-  menu.querySelector("[data-context-new]").onclick = () => {
-    closeTrackContextMenu();
-    newPlaylist(trackID);
-  };
+}
+
+function renderTrackPlaylistContextMenu(track, options) {
+  const activePlaylist = state.playlists.find((item) => item.id === options.playlistID && !item.isSystem);
+  const playlists = state.playlists.filter((item) => !item.isSystem && item.id !== activePlaylist?.id);
+  renderContextMenu({
+    title: "Add to playlist",
+    subtitle: track.title || "Untitled",
+    actions: [
+      { label: "Back", icon: contextBackIcon, keepOpen: true, onSelect: () => renderTrackContextMenu(track, options) },
+      { divider: true },
+      ...playlists.map((playlist) => ({
+        label: playlist.name,
+        icon: contextPlaylistIcon,
+        disabled: playlist.trackIDs.includes(track.id),
+        trailing: playlist.trackIDs.includes(track.id) ? "Added" : "",
+        onSelect: async () => {
+          playlist.trackIDs.push(track.id);
+          updatePlaylistRemoteSongIDs(state, playlist);
+          markPlaylistDirty(playlist);
+          if (activePlaybackPlaylistID === playlist.id) setPlaybackContext(tracksForPlaylist(state, playlist.id), playlist.id);
+          await persist();
+          schedulePlaylistSync();
+          showNotice(`Added ${track.title || "song"} to ${playlist.name}.`, "status");
+        },
+      })),
+      ...(playlists.length ? [{ divider: true }] : []),
+      { label: "New playlist", icon: contextPlaylistIcon, onSelect: () => newPlaylist(track.id) },
+    ],
+  });
+}
+
+function renderTrackContextMenu(track, options = {}) {
+  const activePlaylist = state.playlists.find((item) => item.id === options.playlistID && !item.isSystem);
+  const playing = track.id === currentID && !audio.paused;
+  const liked = state.favorites.includes(track.id);
+  const playbackTracks = options.playbackTracks?.length ? options.playbackTracks : state.tracks;
+  const actions = [
+    {
+      label: playing ? "Pause" : "Play",
+      icon: playing ? contextPauseIcon : contextPlayIcon,
+      onSelect: () => track.id === currentID ? toggle() : play(track, playbackTracks, { playlistID: options.playlistID ?? null }),
+    },
+    { label: liked ? "Remove from Liked Songs" : "Add to Liked Songs", icon: contextHeartIcon, onSelect: () => toggleFavorite(track.id) },
+  ];
+  if (activePlaylist) {
+    actions.push({
+      label: `Remove from ${activePlaylist.name}`,
+      icon: contextRemoveIcon,
+      onSelect: async () => {
+        activePlaylist.trackIDs = activePlaylist.trackIDs.filter((id) => id !== track.id);
+        updatePlaylistRemoteSongIDs(state, activePlaylist);
+        markPlaylistDirty(activePlaylist);
+        if (activePlaybackPlaylistID === activePlaylist.id) setPlaybackContext(tracksForPlaylist(state, activePlaylist.id), activePlaylist.id);
+        await persist();
+        schedulePlaylistSync();
+        renderLibrary();
+      },
+    });
+  }
+  actions.push(
+    { label: "Add to playlist", icon: contextPlaylistIcon, trailing: "›", keepOpen: true, onSelect: () => renderTrackPlaylistContextMenu(track, options) },
+  );
+  if (options.source === "storage") {
+    actions.push(
+      { divider: true },
+      {
+        label: "Remove from device",
+        icon: contextTrashIcon,
+        danger: true,
+        onSelect: async () => {
+          if (confirm(`Remove ${track.title} from this device?`)) await deleteStoredTracks([track.id]);
+        },
+      },
+    );
+  }
+  renderContextMenu({ title: track.title || "Untitled", subtitle: track.artist || "Unknown artist", actions });
+}
+
+function openTrackContextMenu(event, trackID, options = {}) {
+  const track = state.tracks.find((item) => item.id === trackID);
+  if (!track) return;
+  beginContextMenu(event);
+  renderTrackContextMenu(track, options);
+}
+
+async function deletePlaylistFromContext(playlist) {
+  if (!playlist || playlist.isSystem || !confirm(`Delete ${playlist.name}?`)) return;
+  markPlaylistDeleted(playlist);
+  state.playlists = state.playlists.filter((item) => item.id !== playlist.id);
+  if (selectedPlaylistID === playlist.id) {
+    selectedPlaylistID = null;
+    section = "playlists";
+  }
+  await persist();
+  schedulePlaylistSync();
+  render();
+}
+
+function openPlaylistContextMenu(event, playlistID) {
+  const playlist = state.playlists.find((item) => item.id === playlistID);
+  if (!playlist) return;
+  beginContextMenu(event);
+  const tracks = tracksForPlaylist(state, playlist.id);
+  const actions = [
+    { label: "Open", icon: contextOpenIcon, onSelect: () => navigate("library", playlist.id) },
+    { label: "Play", icon: contextPlayIcon, disabled: !tracks.length, onSelect: () => play(tracks[0], tracks, { playlistID: playlist.id }) },
+  ];
+  if (!playlist.isSystem) actions.push(
+    { divider: true },
+    { label: "Delete playlist", icon: contextTrashIcon, danger: true, onSelect: () => deletePlaylistFromContext(playlist) },
+  );
+  renderContextMenu({ title: playlist.name, subtitle: `${tracks.length} track${tracks.length === 1 ? "" : "s"}`, actions });
+}
+
+function openServerTrackContextMenu(event, songID) {
+  const song = serverCatalog.find((item) => item.id === songID);
+  if (!song) return;
+  beginContextMenu(event);
+  const localTrack = state.tracks.find((track) => track.remoteID === song.id);
+  const actions = [
+    localTrack
+      ? { label: "Play on this device", icon: contextPlayIcon, onSelect: () => play(localTrack, state.tracks, { playlistID: null }) }
+      : {
+        label: "Download",
+        icon: contextDownloadIcon,
+        onSelect: async () => {
+          selectedRemoteIDs = new Set([song.id]);
+          await serverAction("selected");
+        },
+      },
+    { divider: true },
+    {
+      label: "Delete from server",
+      icon: contextTrashIcon,
+      danger: true,
+      onSelect: async () => {
+        if (!confirm(`Delete ${song.title || song.name} from the server?`)) return;
+        await saveServerForm();
+        await api.deleteServerSong({ baseURL: state.serverURL, adminToken: serverAdminToken, profileID: activeProfileID(), songID: song.id });
+        await serverAction("catalog");
+      },
+    },
+  ];
+  renderContextMenu({
+    title: song.title || song.name || "Server song",
+    subtitle: song.artist || (localTrack ? "On this device" : "Music Server"),
+    actions,
+  });
 }
 
 async function importAudio() {
@@ -1992,6 +2187,20 @@ function updateLocalImportMediaKindUI() {
   confirm.setAttribute("aria-label", confirmLabel);
 }
 
+function updateLocalImportConfirmLabel() {
+  const confirm = $("#confirmLocalImport");
+  if (localImportResolution?.kind === "youtube_playlist") {
+    const count = document.querySelectorAll('input[name="localImportPlaylistItem"]:checked').length;
+    const noun = selectedLocalImportMediaKind() === "video" ? "video" : "song";
+    const label = count ? `Download ${count} ${noun}${count === 1 ? "" : "s"}` : `Choose ${noun}s`;
+    confirm.title = label;
+    confirm.setAttribute("aria-label", label);
+    confirm.disabled = count === 0;
+    return;
+  }
+  updateLocalImportMediaKindUI();
+}
+
 function localImportSourceIsReady(value) {
   let url;
   try { url = new URL(String(value || "").trim()); }
@@ -2004,6 +2213,10 @@ function localImportSourceIsReady(value) {
     return segments[0] === "track" && /^[a-zA-Z0-9]{22}$/.test(segments[1] || "");
   }
   if (["spotify.link", "www.spotify.link"].includes(hostname)) return segments.length > 0;
+  if (["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"].includes(hostname)) {
+    const playlistID = url.searchParams.get("list");
+    if (playlistID && /^[a-zA-Z0-9_-]{10,150}$/.test(playlistID)) return true;
+  }
   if (["youtu.be", "www.youtu.be"].includes(hostname)) return /^[a-zA-Z0-9_-]{11}$/.test(segments[0] || "");
   if (["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"].includes(hostname)) {
     if (url.pathname === "/watch") return /^[a-zA-Z0-9_-]{11}$/.test(url.searchParams.get("v") || "");
@@ -2036,6 +2249,7 @@ function resetLocalImport() {
   clearLocalImportAutoResolve();
   localImportResolution = null;
   localImportResolvedSourceKey = null;
+  localImportBatchContext = null;
   localImportRunning = false;
   localImportArtworkRequest += 1;
   const audioKind = document.querySelector('input[name="localImportMediaKind"][value="audio"]');
@@ -2073,6 +2287,9 @@ function localImportProviderLabel(candidate) {
 }
 
 function localImportCandidateDetails(candidate) {
+  if (localImportResolution?.kind === "youtube_playlist") {
+    return [candidate.artist || "Unknown uploader", candidate.durationSeconds ? formatTime(candidate.durationSeconds) : null, "YouTube"];
+  }
   if (localImportResolution?.mediaKind === "video") {
     const dimensions = candidate.width && candidate.height ? `${candidate.width}×${candidate.height}` : null;
     return [candidate.qualityLabel || "MP4", dimensions, candidate.fps ? `${candidate.fps} fps` : null, candidate.durationSeconds ? formatTime(candidate.durationSeconds) : null, localImportProviderLabel(candidate)];
@@ -2191,7 +2408,7 @@ async function toggleLocalImportPreview(index) {
 }
 
 function updateLocalImportSyncForSelection() {
-  const selected = document.querySelector('input[name="localImportCandidate"]:checked');
+  const selected = document.querySelector('input[name="localImportCandidate"]:checked, input[name="localImportPlaylistItem"]:checked');
   const candidate = localImportResolution?.candidates?.[Number(selected?.value) || 0];
   const serverBacked = Boolean(candidate?.serverBacked);
   const canSync = Boolean(serverAdminToken.trim() && state.serverURL);
@@ -2205,6 +2422,44 @@ function updateLocalImportSyncForSelection() {
     : canSync
       ? "Upload a copy to the active server profile after downloading."
       : "Add a server admin key before importing to upload this copy.";
+  updateLocalImportConfirmLabel();
+}
+
+function localImportUploadConfigurationError(serverBacked = false) {
+  if (serverBacked || !$("#localImportSync").checked) return null;
+  if (!state.serverURL) {
+    return { stage: "syncing", code: "SERVER_URL_REQUIRED", message: "Add a server URL in Music Server settings before uploading." };
+  }
+  if (!serverAdminToken.trim()) {
+    return { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Add a server admin key in Music Server settings before uploading." };
+  }
+  return null;
+}
+
+async function uploadLocalImportTrack(track) {
+  if (!track?.filePath) {
+    return { ok: false, error: { stage: "syncing", code: "LOCAL_FILE_MISSING", message: "The local song file could not be found for server upload." } };
+  }
+  return api.uploadLocalImport({
+    baseURL: state.serverURL,
+    adminToken: serverAdminToken,
+    profileID: activeProfileID(),
+    filePath: track.filePath,
+  });
+}
+
+async function refreshServerCatalogAfterLocalImportUpload() {
+  if (!state.serverURL || !serverToken.trim()) return;
+  try {
+    const catalog = await api.fetchCatalog({ baseURL: state.serverURL, token: serverToken, profileID: activeProfileID() });
+    serverCatalog = catalog.songs || [];
+    hydrateServerCatalogArtwork(serverCatalog);
+    serverConnectionText = `Connected • ${catalog.count} song${catalog.count === 1 ? "" : "s"}`;
+    if (section === "server") renderServer();
+  } catch {
+    // The upload already succeeded. A catalog refresh failure should not report
+    // that the saved server copy was lost.
+  }
 }
 
 function resetLocalImportArtwork(node, mediaKind) {
@@ -2246,6 +2501,7 @@ async function renderLocalImportArtwork(track, candidates, mediaKind) {
 function renderLocalImportResolution() {
   const { track, candidates } = localImportResolution;
   const mediaKind = localImportResolution.mediaKind === "video" ? "video" : "audio";
+  const playlist = localImportResolution.kind === "youtube_playlist";
   const showPreviews = mediaKind === "audio" && candidates.length > 1;
   const selectedKind = document.querySelector(`input[name="localImportMediaKind"][value="${mediaKind}"]`);
   if (selectedKind) selectedKind.checked = true;
@@ -2253,15 +2509,19 @@ function renderLocalImportResolution() {
   $("#localImportSyncRow").hidden = false;
   void renderLocalImportArtwork(track, candidates, mediaKind);
   $("#localImportTrackTitle").textContent = track.title || "Untitled";
-  $("#localImportTrackMeta").textContent = [track.artist, track.album, track.durationSeconds ? formatTime(track.durationSeconds) : null]
+  $("#localImportTrackMeta").textContent = playlist
+    ? [track.artist, `${candidates.length} available video${candidates.length === 1 ? "" : "s"}`, localImportResolution.playlist?.unavailableCount ? `${localImportResolution.playlist.unavailableCount} unavailable` : null].filter(Boolean).join(" • ")
+    : [track.artist, track.album, track.durationSeconds ? formatTime(track.durationSeconds) : null]
     .filter(Boolean).join(" • ");
-  $("#localImportCandidates").innerHTML = candidates.map((candidate, index) => `<label class="local-import-candidate">
-    <input type="radio" name="localImportCandidate" value="${index}" ${index === 0 ? "checked" : ""}>
+  $("#localImportCandidateLegend").textContent = playlist ? "Choose videos to download" : "Choose the source to import";
+  $("#localImportCandidates").classList.toggle("playlist", playlist);
+  $("#localImportCandidates").innerHTML = candidates.map((candidate, index) => `<label class="local-import-candidate${playlist ? " playlist-item" : ""}">
+    <input type="${playlist ? "checkbox" : "radio"}" name="${playlist ? "localImportPlaylistItem" : "localImportCandidate"}" value="${index}" ${playlist || index === 0 ? "checked" : ""}>
     <span><strong>${escapeHTML(candidate.title || "Untitled source")}</strong><small>${escapeHTML(localImportCandidateDetails(candidate).filter(Boolean).join(" • "))}</small></span>
-    <span class="local-import-confidence">${escapeHTML(candidate.quality || candidate.confidence || "file")}</span>
+    <span class="local-import-confidence">${playlist ? candidate.playlistIndex || index + 1 : escapeHTML(candidate.quality || candidate.confidence || "file")}</span>
     ${showPreviews ? `<button class="local-import-preview-button" type="button" data-local-import-preview="${index}" aria-label="Preview ${escapeHTML(candidate.title || "source")}" aria-pressed="false" title="${localImportCandidateCanPreview(candidate) ? "Preview source" : "Preview unavailable for this source"}" ${localImportCandidateCanPreview(candidate) ? "" : "disabled"}><svg class="preview-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg><svg class="preview-pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M16 6v12"/></svg></button>` : ""}
   </label>`).join("");
-  document.querySelectorAll('input[name="localImportCandidate"]').forEach((input) => input.onchange = updateLocalImportSyncForSelection);
+  document.querySelectorAll('input[name="localImportCandidate"], input[name="localImportPlaylistItem"]').forEach((input) => input.onchange = updateLocalImportSyncForSelection);
   document.querySelectorAll("[data-local-import-preview]").forEach((button) => {
     button.onclick = (event) => {
       event.preventDefault();
@@ -2272,10 +2532,7 @@ function renderLocalImportResolution() {
   syncLocalImportPreviewButtons();
   updateLocalImportSyncForSelection();
   $("#confirmLocalImport").hidden = false;
-  $("#confirmLocalImport").disabled = false;
-  const confirmLabel = mediaKind === "video" ? "Download video" : "Download audio";
-  $("#confirmLocalImport").title = confirmLabel;
-  $("#confirmLocalImport").setAttribute("aria-label", confirmLabel);
+  updateLocalImportConfirmLabel();
   $("#cancelLocalImport").hidden = true;
   setLocalImportStage({ stage: "awaiting_selection" });
 }
@@ -2329,13 +2586,159 @@ async function resolveLinkImport() {
   }
 }
 
+async function confirmYouTubePlaylistImport() {
+  const selected = [...document.querySelectorAll('input[name="localImportPlaylistItem"]:checked')]
+    .map((input) => localImportResolution.candidates[Number(input.value)])
+    .filter(Boolean);
+  const mediaKind = localImportResolution.mediaKind === "video" ? "video" : "audio";
+  if (!selected.length) {
+    showLocalImportError({ stage: "awaiting_selection", message: `Choose at least one playlist ${mediaKind === "video" ? "video" : "song"} to download.` });
+    return;
+  }
+  const uploadConfigurationError = localImportUploadConfigurationError(false);
+  if (uploadConfigurationError) {
+    showLocalImportError(uploadConfigurationError);
+    return;
+  }
+  const playlistTitle = localImportResolution.playlist?.title || localImportResolution.track.title || "YouTube Playlist";
+  const uploadRequested = $("#localImportSync").checked;
+  await stopLocalImportPreview({ release: true, resumeMain: true });
+  localImportRunning = true;
+  $("#localImportError").hidden = true;
+  $("#confirmLocalImport").disabled = true;
+  $("#localImportSource").disabled = true;
+  $("#chooseLocalFiles").disabled = true;
+  setLocalImportMediaKindDisabled(true);
+  $("#cancelLocalImport").hidden = false;
+  serverTransferCancelRequested = false;
+  localImportKeepStateOnClose = true;
+  $("#localImportDialog").close();
+  const existing = state.tracks.map((track) => ({
+    id: track.id,
+    title: track.title,
+    filePath: track.filePath,
+    sourceSha256: track.sourceSha256 || null,
+    contentSha256: track.contentSha256 || null,
+  }));
+  const created = [];
+  let duplicates = 0;
+  let uploadedCount = 0;
+  let cancelled = false;
+  const failures = [];
+  const uploadFailures = [];
+  try {
+    for (let index = 0; index < selected.length; index += 1) {
+      if (serverTransferCancelRequested) { cancelled = true; break; }
+      const candidate = selected[index];
+      localImportBatchContext = { index, total: selected.length, title: candidate.title || `Playlist item ${index + 1}` };
+      updateLocalImportTransfer({ stage: "inspecting_source" });
+      const response = await api.startLocalImport({
+        sourceURL: candidate.sourceURL,
+        mediaKind,
+        metadata: {
+          title: candidate.title,
+          artist: candidate.artist || "Unknown uploader",
+          album: playlistTitle,
+          durationSeconds: candidate.durationSeconds,
+          artworkURL: candidate.thumbnailURL || localImportResolution.playlist?.artworkURL,
+          sourceURL: candidate.sourceURL,
+        },
+        existing,
+      });
+      if (!response?.ok) {
+        if (response?.error?.code === "CANCELLED") { cancelled = true; break; }
+        failures.push({ title: candidate.title, message: response?.error?.message || "Download failed." });
+        continue;
+      }
+      if (response.result.kind === "duplicate") {
+        duplicates += 1;
+        const duplicate = state.tracks.find((track) => track.id === response.result.trackID) || null;
+        if (uploadRequested && duplicate?.filePath) {
+          const uploaded = await uploadLocalImportTrack(duplicate);
+          if (!uploaded?.ok) uploadFailures.push({
+            title: candidate.title,
+            message: uploaded?.error?.message || "The local file was found, but the server upload failed.",
+          });
+          else uploadedCount += 1;
+        }
+        continue;
+      }
+      const importedTrack = response.result.track;
+      state.tracks.push(importedTrack);
+      created.push(importedTrack);
+      existing.push({
+        id: importedTrack.id,
+        title: importedTrack.title,
+        filePath: importedTrack.filePath,
+        sourceSha256: importedTrack.sourceSha256 || null,
+        contentSha256: importedTrack.contentSha256 || null,
+      });
+      if (!currentID) {
+        currentID = importedTrack.id;
+        state.currentTrackID = currentID;
+        setPlaybackContext(state.tracks, null);
+      }
+      await persist();
+      if (uploadRequested && importedTrack.filePath) {
+        const uploaded = await uploadLocalImportTrack(importedTrack);
+        if (!uploaded?.ok) uploadFailures.push({
+          title: candidate.title,
+          message: uploaded?.error?.message || "Saved locally, but the server upload failed.",
+        });
+        else uploadedCount += 1;
+      }
+    }
+    if (uploadedCount) await refreshServerCatalogAfterLocalImportUpload();
+    if (created.length) {
+      render();
+      updateChrome();
+    }
+    const completed = created.length + duplicates;
+    if (cancelled) {
+      showNotice(`Playlist download cancelled after ${completed} of ${selected.length} ${mediaKind === "video" ? "videos" : "songs"}.`, "status");
+      setLocalImportStage({ stage: "cancelled" });
+    } else if (failures.length) {
+      showNotice(`Downloaded ${created.length} of ${selected.length} playlist ${mediaKind === "video" ? "videos" : "songs"}; ${failures.length} item${failures.length === 1 ? "" : "s"} could not be completed.`);
+      setLocalImportStage({ stage: "failed" });
+    } else {
+      const duplicateText = duplicates ? ` ${duplicates} already on this device.` : "";
+      const uploadedText = uploadedCount ? ` Uploaded ${uploadedCount} to ${activeProfile().name || "the active server profile"}.` : "";
+      const uploadText = uploadFailures.length ? ` ${uploadFailures.length} server upload${uploadFailures.length === 1 ? "" : "s"} failed; the local files were kept.` : "";
+      showNotice(`Downloaded ${created.length} playlist ${mediaKind === "video" ? "video" : "song"}${created.length === 1 ? "" : "s"}.${duplicateText}${uploadedText}${uploadText}`, uploadFailures.length ? "error" : "status");
+      setLocalImportStage({ stage: "complete" });
+    }
+  } catch (error) {
+    showLocalImportError(error);
+    setLocalImportStage({ stage: "failed" });
+  } finally {
+    localImportBatchContext = null;
+    localImportRunning = false;
+    $("#confirmLocalImport").disabled = false;
+    $("#localImportSource").disabled = false;
+    $("#chooseLocalFiles").disabled = false;
+    setLocalImportMediaKindDisabled(false);
+    $("#cancelLocalImport").hidden = true;
+    hideServerTransfer("local-import");
+    serverTransferCancelRequested = false;
+  }
+}
+
 async function confirmLinkImport() {
   if (localImportRunning || !localImportResolution) return;
+  if (localImportResolution.kind === "youtube_playlist") {
+    await confirmYouTubePlaylistImport();
+    return;
+  }
   const selected = document.querySelector('input[name="localImportCandidate"]:checked');
   const candidate = localImportResolution.candidates[Number(selected?.value) || 0];
   const mediaKind = localImportResolution.mediaKind === "video" ? "video" : "audio";
   if (!candidate) {
     showLocalImportError({ stage: "awaiting_selection", message: `Choose one ${mediaKind} source to import.` });
+    return;
+  }
+  const uploadConfigurationError = localImportUploadConfigurationError(Boolean(candidate.serverBacked));
+  if (uploadConfigurationError) {
+    showLocalImportError(uploadConfigurationError);
     return;
   }
   await stopLocalImportPreview({ release: true, resumeMain: true });
@@ -2428,18 +2831,15 @@ async function confirmLinkImport() {
         : `${mediaKind === "video" ? "Downloaded" : "Imported"} ${importedTrack.title} on this device.`, "status");
     }
 
-    if (!response.result.serverBacked && $("#localImportSync").checked && importedTrack?.filePath && response.result.kind === "created") {
+    if (!response.result.serverBacked && $("#localImportSync").checked && importedTrack?.filePath) {
       setLocalImportStage({ stage: "syncing", profileID: activeProfileID() });
-      const uploaded = await api.uploadLocalImport({
-        baseURL: state.serverURL,
-        adminToken: serverAdminToken,
-        profileID: activeProfileID(),
-        filePath: importedTrack.filePath,
-      });
+      const uploaded = await uploadLocalImportTrack(importedTrack);
       if (!uploaded?.ok) {
         showLocalImportError(uploaded?.error || { stage: "syncing", message: "The song was saved locally, but its optional profile upload failed." });
         return;
       }
+      await refreshServerCatalogAfterLocalImportUpload();
+      showNotice(`Uploaded ${importedTrack.title} to ${activeProfile().name || "the active server profile"}.`, "status");
     }
     setLocalImportStage({ stage: "complete" });
     $("#confirmLocalImport").hidden = true;
@@ -2544,6 +2944,7 @@ async function cancelServerTransfer() {
 }
 
 function localImportTransferName() {
+  if (localImportBatchContext) return `${localImportBatchContext.index + 1} of ${localImportBatchContext.total} • ${localImportBatchContext.title}`;
   return localImportResolution?.track?.title
     || localImportResolution?.candidates?.[0]?.title
     || (selectedLocalImportMediaKind() === "video" ? "Video import" : "Audio import");
@@ -2764,8 +3165,17 @@ function newPlaylist(trackID = null) {
 
 function renderSidebar() {
   normalizeState(state);
-  $("#sidebarPlaylists").innerHTML = state.playlists.map((playlist) => `<button data-side-playlist="${playlist.id}"><span>${playlist.isSystem ? "♥" : "♪"}</span><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div></button>`).join("");
-  document.querySelectorAll("[data-side-playlist]").forEach((button) => button.onclick = () => navigate("library", button.dataset.sidePlaylist));
+  $("#sidebarPlaylists").innerHTML = state.playlists.map((playlist) => `<button data-side-playlist="${playlist.id}" aria-keyshortcuts="Shift+F10"><span>${playlist.isSystem ? "♥" : "♪"}</span><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div></button>`).join("");
+  document.querySelectorAll("[data-side-playlist]").forEach((button) => {
+    button.onclick = () => navigate("library", button.dataset.sidePlaylist);
+    button.oncontextmenu = (event) => openPlaylistContextMenu(event, button.dataset.sidePlaylist);
+    button.onkeydown = (event) => {
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        event.preventDefault();
+        openPlaylistContextMenu(event, button.dataset.sidePlaylist);
+      }
+    };
+  });
 }
 
 function renderQueue() {
@@ -3127,6 +3537,19 @@ $("#searchSortMenu").onclick = (event) => {
   closeSearchSort();
 };
 $("#favoriteCurrent").onclick = () => currentID && toggleFavorite(currentID);
+const playerTrackContextTarget = $(".player-track");
+playerTrackContextTarget.tabIndex = 0;
+playerTrackContextTarget.setAttribute("aria-keyshortcuts", "Shift+F10");
+playerTrackContextTarget.oncontextmenu = (event) => {
+  if (currentID) openTrackContextMenu(event, currentID, { playbackTracks: activePlaybackTracks(), playlistID: activePlaybackPlaylistID });
+};
+playerTrackContextTarget.onkeydown = (event) => {
+  if (event.target !== playerTrackContextTarget || !currentID) return;
+  if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+    event.preventDefault();
+    openTrackContextMenu(event, currentID, { playbackTracks: activePlaybackTracks(), playlistID: activePlaybackPlaylistID });
+  }
+};
 $("#shuffle").onclick = () => { shuffle = !shuffle; state.shuffle = shuffle; persistInBackground(); updateChrome(); };
 $("#repeat").onclick = () => { repeat = !repeat; state.repeat = repeat; persistInBackground(); updateChrome(); };
 function paintRange(input) {

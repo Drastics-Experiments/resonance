@@ -68,13 +68,26 @@ test("keeps contextual search and sorting in the persistent top bar", () => {
   assert.match(mainSource, /configured server URL is not serving this Resonance API route/);
 });
 
-test("avoids macOS Keychain access in the source Electron preview", () => {
+test("avoids macOS Keychain access while persisting source Preview credentials locally", () => {
   const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
   assert.doesNotMatch(mainSource, /\{ app, BrowserWindow, dialog, ipcMain, safeStorage, shell \}/);
-  assert.match(mainSource, /function usesSessionOnlyCredentialStore\(\)[\s\S]+process\.platform === "darwin" && !app\.isPackaged/);
-  assert.match(mainSource, /server:credentials:load[\s\S]+usesSessionOnlyCredentialStore\(\)[\s\S]+sessionServerCredentials/);
-  assert.match(mainSource, /server:credentials:save[\s\S]+usesSessionOnlyCredentialStore\(\)[\s\S]+sessionServerCredentials = credentialsValue/);
+  assert.match(mainSource, /function usesPreviewCredentialStore\(\)[\s\S]+process\.platform === "darwin" && !app\.isPackaged/);
+  assert.match(mainSource, /previewCredentialStorePath[\s\S]+"Liked Songs", "server-credentials\.json"/);
+  assert.match(mainSource, /fs\.mkdir\(directory, \{ recursive: true, mode: 0o700 \}\)/);
+  assert.match(mainSource, /fs\.chmod\(destination, 0o600\)/);
+  assert.match(mainSource, /server:credentials:load[\s\S]+usesPreviewCredentialStore\(\)[\s\S]+readPreviewCredentials/);
+  assert.match(mainSource, /server:credentials:save[\s\S]+usesPreviewCredentialStore\(\)[\s\S]+writePreviewCredentials/);
   assert.match(mainSource, /function encryptedCredentialStorage\(\)[\s\S]+require\("electron"\)\.safeStorage/);
+});
+
+test("uploads link imports even when the selected source is already saved locally", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  assert.match(appSource, /function localImportUploadConfigurationError/);
+  assert.match(appSource, /response\.result\.kind === "duplicate"[\s\S]+uploadLocalImportTrack\(duplicate\)/);
+  assert.match(appSource, /!response\.result\.serverBacked && \$\("#localImportSync"\)\.checked && importedTrack\?\.filePath\)/);
+  assert.match(appSource, /refreshServerCatalogAfterLocalImportUpload/);
+  assert.match(appSource, /Uploaded \$\{importedTrack\.title\}/);
+  assert.doesNotMatch(appSource, /importedTrack\?\.filePath && response\.result\.kind === "created"/);
 });
 
 test("switches to existing server profiles or falls back to Default", () => {
@@ -200,16 +213,23 @@ test("keeps playlist row controls and supports animated drag reordering", () => 
   assert.match(appSource, /data-reorder-track="1"/);
   assert.match(appSource, /data-remove-playlist-track/);
   assert.match(appSource, /row\.oncontextmenu\s*=\s*\(event\) => openTrackContextMenu/);
-  assert.match(appSource, /data-context-remove-playlist-track/);
-  assert.match(appSource, /ADD TO ANOTHER PLAYLIST/);
-  assert.match(appSource, /No other playlists yet/);
+  assert.match(appSource, /function renderContextMenu\(\{ title, subtitle, actions \}\)/);
+  assert.match(appSource, /function renderTrackPlaylistContextMenu\(track, options\)/);
+  assert.match(appSource, /label: "Add to playlist"/);
   assert.match(appSource, /activePlaybackPlaylistID === activePlaylist\.id/);
+  assert.match(appSource, /button\.oncontextmenu = \(event\) => openTrackContextMenu/);
+  assert.match(appSource, /data-storage-track/);
+  assert.match(appSource, /row\.oncontextmenu = \(event\) => openServerTrackContextMenu/);
+  assert.match(appSource, /button\.oncontextmenu = \(event\) => openPlaylistContextMenu/);
+  assert.match(appSource, /playerTrackContextTarget\.oncontextmenu/);
   assert.doesNotMatch(appSource, /data-playlist-sync-status/);
   assert.doesNotMatch(appSource, /Synced \$\{(?:remoteDocument|result\.document)\.playlists\.length/);
   assert.match(styleSource, /\.track-row\.playlist-draggable\s*\{/);
   assert.match(styleSource, /\.track-row\.playlist-drag-floating\s*\{/);
   assert.match(styleSource, /\.track-context-menu\s*\{/);
   assert.match(styleSource, /\.track-context-menu \.context-danger/);
+  assert.match(styleSource, /\.context-action-icon svg/);
+  assert.match(styleSource, /@keyframes context-menu-in/);
 });
 
 test("ports playback reliability, recovery notices, and keyboard operation into the current UI", () => {
@@ -336,10 +356,16 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /api\.onLocalImportProgress\(\(value\) => \{[\s\S]+updateLocalImportTransfer\(value\)/);
   assert.match(appSource, /sourceURL: candidate\.sourceURL/);
   assert.match(appSource, /state\.tracks\.push\(importedTrack\)[\s\S]+await persist\(\)/);
-  assert.match(appSource, /if \(!response\.result\.serverBacked && \$\("#localImportSync"\)\.checked[\s\S]+api\.uploadLocalImport/);
+  assert.match(appSource, /if \(!response\.result\.serverBacked && \$\("#localImportSync"\)\.checked[\s\S]+uploadLocalImportTrack\(importedTrack\)/);
+  assert.match(appSource, /function uploadLocalImportTrack\(track\)[\s\S]+api\.uploadLocalImport/);
   assert.doesNotMatch(appSource, /A failed upload will not remove or alter the local media file/);
   assert.match(appSource, /mediaKind: localImportResolution\.mediaKind|mediaKind,/);
   assert.match(mainSource, /outputFormats: \{ audio: "m4a", video: "mp4" \}/);
+  assert.match(mainSource, /sources: \["spotify", "youtube", "youtube_playlists"/);
+  assert.match(appSource, /localImportResolution\.kind === "youtube_playlist"/);
+  assert.match(appSource, /input\[name="localImportPlaylistItem"\]:checked/);
+  assert.match(appSource, /async function confirmYouTubePlaylistImport\(\)/);
+  assert.match(appSource, /for \(let index = 0; index < selected\.length; index \+= 1\)/);
   assert.match(mainSource, /mediaKind: value\.mediaKind/);
   assert.match(mainSource, /body\.on\("data", \(chunk\) => \{[\s\S]+publishUploadProgress\(\)/);
   assert.match(mainSource, /currentFile: filename,[\s\S]+completed,[\s\S]+total: information\.size/);

@@ -598,92 +598,107 @@ main {
   position: fixed;
   z-index: 100;
   display: grid;
-  gap: 3px;
-  width: min(276px, calc(100vw - 16px));
-  max-height: min(430px, calc(100vh - 16px));
-  padding: 8px;
+  gap: 1px;
+  width: min(246px, calc(100vw - 16px));
+  max-height: min(340px, calc(100vh - 16px));
+  padding: 5px;
   overflow-x: hidden;
   overflow-y: auto;
-  border: 1px solid #ffffff24;
-  border-radius: 14px;
-  background:
-    radial-gradient(circle at 92% 0, #7547ff20, transparent 48%),
-    #151720f5;
+  border: 1px solid #ffffff20;
+  border-radius: 11px;
+  background: linear-gradient(145deg, #171b24fa, #11151dfa);
   color: #f5f3fa;
-  box-shadow: 0 24px 70px #000c, inset 0 1px #ffffff10;
-  backdrop-filter: blur(18px) saturate(1.2);
+  box-shadow: 0 18px 48px #000c, inset 0 1px #ffffff0d;
+  backdrop-filter: blur(20px) saturate(1.08);
+  animation: context-menu-in 90ms ease-out;
 }
 .track-context-menu[hidden] { display: none; }
 .track-context-menu button {
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
-  gap: 8px;
+  display: flex;
+  gap: 9px;
   align-items: center;
   width: 100%;
-  min-height: 38px;
-  padding: 8px 10px;
-  border-radius: 9px;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
   background: transparent;
-  color: #e8e5ef;
-  font-size: 12px;
+  color: #efedf4;
+  font-size: 13px;
+  font-weight: 630;
   text-align: left;
 }
 .track-context-menu button:hover,
 .track-context-menu button:focus-visible {
-  background: #ffffff0d;
+  border-color: #ffffff10;
+  background: #ffffff0c;
   color: #fff;
+  outline: none;
 }
 .track-context-menu button:disabled {
-  color: #777482;
+  color: #696672;
   cursor: default;
 }
-.track-context-menu button:disabled:hover { background: transparent; }
-.track-context-menu button > span {
-  color: #a98cff;
-  font-size: 16px;
-  text-align: center;
+.track-context-menu button:disabled:hover {
+  border-color: transparent;
+  background: transparent;
 }
-.track-context-menu .context-danger { color: #ff9ba3; }
-.track-context-menu .context-danger > span { color: #ff7f8b; }
-.context-heading {
+.context-action-icon {
   display: grid;
-  gap: 2px;
-  padding: 7px 10px 10px;
+  place-items: center;
+  flex: 0 0 17px;
+  width: 17px;
+  height: 17px;
+  color: #a98cff !important;
 }
-.context-heading small,
-.context-section-label {
-  color: #8f8a9d;
-  font-size: 8px;
-  font-weight: 700;
-  letter-spacing: 1.3px;
+.context-action-icon svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
 }
-.context-heading strong {
+.context-action-icon .context-icon-fill {
+  fill: currentColor;
+  stroke: none;
+}
+.context-action-label {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
   overflow: hidden;
-  font-size: 13px;
+  color: #efedf4 !important;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.context-heading em {
-  overflow: hidden;
-  color: #9d99a8;
+.context-action-trailing {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: #85818e;
   font-size: 10px;
-  font-style: normal;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 650;
 }
-.context-section-label { padding: 4px 10px 2px; }
+.track-context-menu .context-danger { color: #ff929d; }
+.track-context-menu .context-danger .context-action-label { color: #ff929d !important; }
+.track-context-menu .context-danger .context-action-icon { color: #ff7784; }
+.track-context-menu .context-danger:hover,
+.track-context-menu .context-danger:focus-visible {
+  border-color: #ff7f8b22;
+  background: #ff5c6913;
+}
 .context-divider {
   height: 1px;
-  margin: 5px 3px;
-  background: #ffffff12;
+  margin: 3px 5px;
+  background: #ffffff0f;
 }
-.context-empty {
-  padding: 10px;
-  color: #8d8998;
-  font-size: 11px;
+@keyframes context-menu-in {
+  from { opacity: 0; transform: translateY(-3px) scale(.985); }
+  to { opacity: 1; transform: none; }
 }
-.track-context-menu .context-create {
-  color: #c8bcff;
+@media (prefers-reduced-motion: reduce) {
+  .track-context-menu { animation: none; }
 }
 .filters.library-top-filters {
   gap: 7px;
@@ -1573,6 +1588,15 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .storage-list.redesigned .storage-row { display: grid; grid-template-columns: 46px minmax(0, 1fr) 90px auto; gap: 12px; align-items: center; min-height: 64px; padding: 10px 8px; border-bottom: 1px solid var(--line); transition: background 130ms ease; }
 .storage-list.redesigned .storage-row.selecting { grid-template-columns: auto 46px minmax(0, 1fr) 90px auto; }
 .storage-list.redesigned .storage-row:hover { background: #ffffff05; }
+.storage-list.redesigned .storage-row:focus-visible,
+.remote-list.redesigned .remote-row:focus-visible,
+.history-day-song:focus-visible,
+.history-ranked-song:focus-visible,
+.player-track:focus-visible {
+  outline: 1px solid #9f83ff8c;
+  outline-offset: -1px;
+  background: #7547ff0d;
+}
 .remote-list.redesigned .remote-row { display: grid; grid-template-columns: 46px minmax(0, 1fr) 90px minmax(90px, auto) auto; gap: 12px; align-items: center; min-height: 64px; padding: 10px 8px; border-bottom: 1px solid var(--line); }
 .remote-list.redesigned .remote-row.selecting { grid-template-columns: auto 46px minmax(0, 1fr) 90px minmax(90px, auto) auto; }
 .storage-list.redesigned .storage-row:last-child,
@@ -3156,6 +3180,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .local-import-resolved fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .local-import-resolved legend { margin-bottom: 9px; color: #d8d5df; font-size: 12px; font-weight: 700; }
 .local-import-candidates { display: grid; gap: 8px; max-height: min(190px, 27vh); overflow-y: auto; padding-right: 3px; }
+.local-import-candidates.playlist { max-height: min(360px, 44vh); }
 .local-import-candidate {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
@@ -3170,6 +3195,8 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 }
 .local-import-candidate:has(input:checked) { border-color: #8d6aff; background: #7548ff16; box-shadow: inset 3px 0 #7b51ff; }
 .local-import-candidate input { accent-color: #7b51ff; }
+.local-import-candidate.playlist-item input { width: 15px; height: 15px; }
+.local-import-candidate.playlist-item .local-import-confidence { min-width: 20px; text-align: center; }
 .local-import-candidate strong,
 .local-import-candidate small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .local-import-candidate strong { font-size: 12px; }

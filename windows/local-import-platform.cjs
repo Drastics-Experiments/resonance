@@ -8,7 +8,9 @@ const {
   LocalImportError,
   isSpotifyURL,
   resolveSpotifyTrack,
+  resolveYouTubePlaylist,
   searchYouTubeAudioSources,
+  youtubePlaylistID,
   youtubeVideoID,
 } = require("./local-import-core.cjs");
 const {
@@ -295,8 +297,34 @@ async function resolveLocalImportSource(source, signal, onStage = () => {}, adap
     }
     return { kind: "spotify", mediaKind: "audio", track, candidates };
   }
+  const playlistID = youtubePlaylistID(source);
+  if (playlistID) {
+    onStage({ stage: "resolving_metadata" });
+    const playlistResolve = adapters.resolveYouTubePlaylist || resolveYouTubePlaylist;
+    const playlist = await playlistResolve(source, signal);
+    const durationSeconds = playlist.items.reduce((total, item) => total + (item.durationSeconds || 0), 0) || null;
+    return {
+      kind: "youtube_playlist",
+      mediaKind,
+      playlist,
+      track: {
+        provider: "youtube",
+        type: "playlist",
+        trackID: playlistID,
+        title: playlist.title,
+        artist: playlist.author || "YouTube",
+        album: null,
+        trackNumber: null,
+        durationSeconds,
+        artworkURL: playlist.artworkURL,
+        embedURL: null,
+        sourceURL: playlist.sourceURL,
+      },
+      candidates: playlist.items,
+    };
+  }
   const videoID = youtubeVideoID(source);
-  if (!videoID) throw localImportError("resolving_metadata", "UNSUPPORTED_SOURCE", "Enter a Spotify track or supported YouTube video URL.");
+  if (!videoID) throw localImportError("resolving_metadata", "UNSUPPORTED_SOURCE", "Enter a Spotify track or supported YouTube video or playlist URL.");
   onStage({ stage: "inspecting_source" });
   const preview = await youtubeInspect(source, signal);
   const track = directYouTubeMetadata(preview);

@@ -7,6 +7,7 @@ const SPOTIFY_HOSTS = new Set([
 ]);
 const SPOTIFY_ARTWORK_HOST = /(^|\.)((spotifycdn\.com)|(scdn\.co))$/i;
 const YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
+const YOUTUBE_PLAYLIST_ID = /^[A-Za-z0-9_-]{10,150}$/;
 const YOUTUBE_HOSTS = new Set([
   "youtube.com",
   "www.youtube.com",
@@ -21,6 +22,8 @@ const MAX_SOURCE_LENGTH = 8_192;
 const MAX_SPOTIFY_RESPONSE_BYTES = 6 * 1024 * 1024;
 const MAX_SEARCH_DOCUMENT_BYTES = 6 * 1024 * 1024;
 const MAX_RESULTS = 8;
+const MAX_PLAYLIST_ITEMS = 500;
+const MAX_PLAYLIST_CONTINUATIONS = 10;
 const SEARCH_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
@@ -119,18 +122,27 @@ function isSpotifyURL(value) {
   }
 }
 
+function youtubePlaylistID(source) {
+  const url = parseURL(source, "resolving_metadata", "Enter a Spotify track or YouTube URL.");
+  if (url.protocol !== "https:") return null;
+  if (url.username || url.password) {
+    throw importError("resolving_metadata", "SOURCE_HAS_CREDENTIALS", "Source URLs cannot contain credentials.");
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (![...YOUTUBE_HOSTS, "youtu.be", "www.youtu.be"].includes(hostname)) return null;
+  const playlistID = url.searchParams.get("list");
+  if (!playlistID) return null;
+  if (!YOUTUBE_PLAYLIST_ID.test(playlistID)) {
+    throw importError("resolving_metadata", "INVALID_YOUTUBE_PLAYLIST", "The YouTube playlist URL is invalid.");
+  }
+  return playlistID;
+}
+
 function youtubeVideoID(source) {
-  const url = parseURL(source, "inspecting_source", "Enter a Spotify track or YouTube video URL.");
+  const url = parseURL(source, "inspecting_source", "Enter a Spotify track or YouTube URL.");
   if (url.protocol !== "https:") return null;
   if (url.username || url.password) {
     throw importError("inspecting_source", "SOURCE_HAS_CREDENTIALS", "Source URLs cannot contain credentials.");
-  }
-  if (url.searchParams.has("list")) {
-    throw importError(
-      "inspecting_source",
-      "UNSUPPORTED_YOUTUBE_COLLECTION",
-      "Only individual YouTube videos are supported; playlists and channels are not.",
-    );
   }
   const hostname = url.hostname.toLowerCase();
   let candidate = null;
@@ -539,6 +551,240 @@ function webCandidate(renderer) {
   };
 }
 
+function playlistVideoCandidate(renderer, fallbackIndex = 0) {
+  const videoID = cleanText(renderer.videoId, 11);
+  const title = rendererText(renderer.title);
+  if (!videoID || !YOUTUBE_VIDEO_ID.test(videoID) || !title || renderer.isPlayable === false) return null;
+  const parsedIndex = Number(rendererText(renderer.index));
+  return {
+    videoID,
+    title,
+    artist: rendererText(renderer.shortBylineText) || rendererText(renderer.longBylineText) || "Unknown uploader",
+    album: null,
+    durationSeconds: parseDuration(rendererText(renderer.lengthText)),
+    thumbnailURL: safeThumbnail(renderer.thumbnail),
+    sourceProvider: "youtube",
+    officialArtist: false,
+    sourceURL: `https://www.youtube.com/watch?v=${videoID}`,
+    playlistIndex: Number.isSafeInteger(parsedIndex) && parsedIndex > 0 ? parsedIndex : fallbackIndex + 1,
+    score: 1,
+    confidence: "high",
+    match: { title: 1, artist: 1, album: null, duration: 1, durationDeltaSeconds: 0 },
+  };
+}
+
+function safeImageSources(value) {
+  if (!isRecord(value) || !Array.isArray(value.sources)) return null;
+  return value.sources.slice().sort((left, right) => safeNumber(right?.width) - safeNumber(left?.width))
+    .map((source) => cleanText(source?.url, 2_048)).find((candidate) => {
+      if (!candidate) return false;
+      try {
+        const url = new URL(candidate);
+        return url.protocol === "https:" &&
+          (url.hostname === "i.ytimg.com" || url.hostname.endsWith(".ytimg.com") || url.hostname.endsWith(".ggpht.com"));
+      } catch {
+        return false;
+      }
+    }) || null;
+}
+
+function lockupPlaylistCandidate(renderer, fallbackIndex = 0) {
+  const videoID = cleanText(renderer.contentId, 11);
+  if (renderer.contentType !== "LOCKUP_CONTENT_TYPE_VIDEO" || !videoID || !YOUTUBE_VIDEO_ID.test(videoID)) return null;
+  const metadata = renderer.metadata?.lockupMetadataViewModel;
+  const title = cleanText(metadata?.title?.content);
+  if (!title) return null;
+  const rows = metadata?.metadata?.contentMetadataViewModel?.metadataRows;
+  const artist = Array.isArray(rows?.[0]?.metadataParts)
+    ? cleanText(rows[0].metadataParts.map((part) => cleanText(part?.text?.content)).filter(Boolean).join(" • "))
+    : null;
+  const overlays = renderer.contentImage?.thumbnailViewModel?.overlays;
+  let durationSeconds = null;
+  if (Array.isArray(overlays)) {
+    for (const overlay of overlays) {
+      const badges = overlay?.thumbnailBottomOverlayViewModel?.badges;
+      if (!Array.isArray(badges)) continue;
+      for (const badge of badges) {
+        const duration = parseDuration(cleanText(badge?.thumbnailBadgeViewModel?.text));
+        if (duration !== null) { durationSeconds = duration; break; }
+      }
+      if (durationSeconds !== null) break;
+    }
+  }
+  return {
+    videoID,
+    title,
+    artist: artist || "Unknown uploader",
+    album: null,
+    durationSeconds,
+    thumbnailURL: safeImageSources(renderer.contentImage?.thumbnailViewModel?.image),
+    sourceProvider: "youtube",
+    officialArtist: false,
+    sourceURL: `https://www.youtube.com/watch?v=${videoID}`,
+    playlistIndex: fallbackIndex + 1,
+    score: 1,
+    confidence: "high",
+    match: { title: 1, artist: 1, album: null, duration: 1, durationDeltaSeconds: 0 },
+  };
+}
+
+function youtubePlaylistThumbnail(record) {
+  const renderer = record.playlistSidebarPrimaryInfoRenderer;
+  if (!isRecord(renderer?.thumbnailRenderer)) return null;
+  const thumbnail = renderer.thumbnailRenderer.playlistVideoThumbnailRenderer?.thumbnail
+    || renderer.thumbnailRenderer.playlistCustomThumbnailRenderer?.thumbnail;
+  return safeThumbnail(thumbnail);
+}
+
+function parseYouTubePlaylistData(value, expectedPlaylistID = null) {
+  const items = [];
+  let title = null;
+  let author = null;
+  let artworkURL = null;
+  let continuation = null;
+  let unavailableCount = 0;
+  walk(value, (record) => {
+    const metadata = record.playlistMetadataRenderer;
+    if (isRecord(metadata)) {
+      const metadataID = cleanText(metadata.playlistId, 150);
+      if (expectedPlaylistID && metadataID && metadataID !== expectedPlaylistID) {
+        throw importError("resolving_metadata", "YOUTUBE_PLAYLIST_MISMATCH", "YouTube returned the wrong playlist.");
+      }
+      title ||= cleanText(metadata.title);
+    }
+    const header = record.playlistHeaderRenderer;
+    if (isRecord(header)) {
+      title ||= rendererText(header.title);
+      author ||= rendererText(header.ownerText);
+    }
+    artworkURL ||= youtubePlaylistThumbnail(record);
+    const renderer = record.playlistVideoRenderer;
+    if (isRecord(renderer)) {
+      const item = playlistVideoCandidate(renderer, items.length);
+      if (item) items.push(item);
+      else unavailableCount += 1;
+    }
+    const lockup = record.lockupViewModel;
+    if (isRecord(lockup)) {
+      const item = lockupPlaylistCandidate(lockup, items.length);
+      if (item) items.push(item);
+    }
+    const token = record.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token;
+    if (typeof token === "string" && token.length > 0 && token.length <= 8_192) continuation = token;
+  });
+  return { title, author, artworkURL, items, continuation, unavailableCount };
+}
+
+function youtubeConfigurationValue(html, key, maximum = 2_048) {
+  const expression = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`);
+  const match = expression.exec(html);
+  if (!match?.[1]) return null;
+  try {
+    const value = JSON.parse(`"${match[1]}"`);
+    return typeof value === "string" && value.length <= maximum ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function youtubePlaylistContinuation(token, configuration, signal, fetchImpl) {
+  const endpoint = new URL("/youtubei/v1/browse", "https://www.youtube.com");
+  endpoint.searchParams.set("prettyPrint", "false");
+  endpoint.searchParams.set("key", configuration.apiKey);
+  let response;
+  try {
+    response = await fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": SEARCH_USER_AGENT,
+        "X-YouTube-Client-Name": "1",
+        "X-YouTube-Client-Version": configuration.clientVersion,
+        ...(configuration.visitorData ? { "X-Goog-Visitor-Id": configuration.visitorData } : {}),
+      },
+      body: JSON.stringify({
+        context: {
+          client: {
+            clientName: "WEB",
+            clientVersion: configuration.clientVersion,
+            hl: "en",
+            gl: "US",
+            ...(configuration.visitorData ? { visitorData: configuration.visitorData } : {}),
+          },
+        },
+        continuation: token,
+      }),
+      redirect: "error",
+      signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    return null;
+  }
+  if (!response.ok || !allowedYouTubeDocumentURL(response.url || endpoint.toString())) {
+    await response.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  try {
+    return JSON.parse(await responseTextWithLimit(
+      response,
+      MAX_SEARCH_DOCUMENT_BYTES,
+      importError("resolving_metadata", "YOUTUBE_PLAYLIST_RESPONSE_TOO_LARGE", "YouTube returned an oversized playlist response."),
+    ));
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    return null;
+  }
+}
+
+async function resolveYouTubePlaylist(source, signal, fetchImpl = fetch) {
+  const playlistID = youtubePlaylistID(source);
+  if (!playlistID) throw importError("resolving_metadata", "INVALID_YOUTUBE_PLAYLIST", "Enter a supported YouTube playlist URL.");
+  const playlistURL = new URL("/playlist", "https://www.youtube.com");
+  playlistURL.searchParams.set("list", playlistID);
+  const html = await searchDocument(playlistURL, signal, fetchImpl);
+  if (!html) throw importError("resolving_metadata", "YOUTUBE_PLAYLIST_UNREACHABLE", "YouTube could not load that playlist.");
+  const initialData = extractYouTubeInitialData(html);
+  if (!initialData) throw importError("resolving_metadata", "YOUTUBE_PLAYLIST_INVALID", "YouTube returned invalid playlist metadata.");
+  const firstPage = parseYouTubePlaylistData(initialData, playlistID);
+  const result = { ...firstPage, items: [...firstPage.items] };
+  const configuration = {
+    apiKey: youtubeConfigurationValue(html, "INNERTUBE_API_KEY", 256),
+    clientVersion: youtubeConfigurationValue(html, "INNERTUBE_CLIENT_VERSION", 128),
+    visitorData: youtubeConfigurationValue(html, "VISITOR_DATA", 2_048),
+  };
+  let continuation = firstPage.continuation;
+  let continuationCount = 0;
+  const seenTokens = new Set();
+  while (
+    continuation && configuration.apiKey && configuration.clientVersion
+    && result.items.length < MAX_PLAYLIST_ITEMS && continuationCount < MAX_PLAYLIST_CONTINUATIONS
+    && !seenTokens.has(continuation)
+  ) {
+    seenTokens.add(continuation);
+    const response = await youtubePlaylistContinuation(continuation, configuration, signal, fetchImpl);
+    if (!response) break;
+    const page = parseYouTubePlaylistData(response, playlistID);
+    result.items.push(...page.items.slice(0, MAX_PLAYLIST_ITEMS - result.items.length));
+    result.unavailableCount += page.unavailableCount;
+    continuation = page.continuation;
+    continuationCount += 1;
+  }
+  if (!result.items.length) {
+    throw importError("resolving_metadata", "YOUTUBE_PLAYLIST_EMPTY", "This playlist has no public, downloadable videos.");
+  }
+  return {
+    playlistID,
+    title: result.title || "YouTube Playlist",
+    author: result.author,
+    artworkURL: result.artworkURL || result.items[0]?.thumbnailURL || null,
+    sourceURL: playlistURL.toString(),
+    items: result.items,
+    unavailableCount: result.unavailableCount,
+    truncated: Boolean(continuation),
+  };
+}
+
 function parseYouTubeMusicSearch(html) {
   const results = [];
   walk(extractYouTubeInitialData(html), (record) => {
@@ -738,10 +984,13 @@ module.exports = {
   parseSpotifyEmbedEntity,
   parseSpotifyOEmbed,
   parseYouTubeMusicSearch,
+  parseYouTubePlaylistData,
   parseYouTubeWebSearch,
+  resolveYouTubePlaylist,
   resolveSpotifyTrack,
   scoreAudioSource,
   searchYouTubeAudioSources,
   spotifyArtworkURL,
+  youtubePlaylistID,
   youtubeVideoID,
 };

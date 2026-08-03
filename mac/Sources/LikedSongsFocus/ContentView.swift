@@ -1,13 +1,25 @@
 import SwiftUI
 
+enum MacUpdateAlertState {
+    static func visibleUpdate(
+        available: MacUpdateIdentity?,
+        dismissed: MacUpdateIdentity?
+    ) -> MacUpdateIdentity? {
+        guard let available, available != dismissed else { return nil }
+        return available
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject private var model: PlayerModel
     @EnvironmentObject private var updateManager: UpdateManager
-    @State private var dismissedUpdateAlert: String?
+    @State private var dismissedUpdateAlert: MacUpdateIdentity?
 
-    private var updateAlertVersion: String? {
-        guard let availableVersion = updateManager.availableVersion else { return nil }
-        return availableVersion == dismissedUpdateAlert ? nil : availableVersion
+    private var updateAlert: MacUpdateIdentity? {
+        MacUpdateAlertState.visibleUpdate(
+            available: updateManager.availableUpdate,
+            dismissed: dismissedUpdateAlert
+        )
     }
 
     var body: some View {
@@ -73,9 +85,9 @@ struct ContentView: View {
                 .animation(.easeInOut(duration: 0.2), value: model.isUploadingServer)
             }
             .overlay(alignment: .topTrailing) {
-                if let version = updateAlertVersion {
+                if let update = updateAlert {
                     UpdateAvailableAlert(
-                        version: version,
+                        version: update.version,
                         isBusy: updateManager.isBusy,
                         canInstall: updateManager.canInstall,
                         onPrimaryAction: {
@@ -85,14 +97,14 @@ struct ContentView: View {
                                 Task { await updateManager.downloadAndInstall() }
                             }
                         },
-                        onDismiss: { dismissedUpdateAlert = version }
+                        onDismiss: { dismissedUpdateAlert = update }
                     )
                     .padding(.top, 94)
                     .padding(.trailing, 18)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
-            .animation(.easeOut(duration: 0.22), value: updateAlertVersion)
+            .animation(.easeOut(duration: 0.22), value: updateAlert)
         }
         .background {
             ZStack {

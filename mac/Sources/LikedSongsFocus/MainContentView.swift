@@ -6,6 +6,7 @@ struct MainContentView: View {
     @State private var serverSearchText = ""
     @State private var serverScope: MacServerScope = .all
     @State private var serverSort: MacServerSort = .title
+    @State private var presentedSheet: MacMainSheet?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,7 +18,7 @@ struct MainContentView: View {
                 .frame(height: 82)
 
             if model.section == .storage {
-                StorageView()
+                StorageView(onImportLink: { presentedSheet = .localImport })
             } else if model.section == .server {
                 ServerLibraryView(
                     searchText: $serverSearchText,
@@ -38,7 +39,21 @@ struct MainContentView: View {
             )
         }
         .clipped()
+        .sheet(item: $presentedSheet) { sheet in
+            switch sheet {
+            case .localImport:
+                MacLocalImportSheet(model: model)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .importMusicFromLink)) { _ in
+            presentedSheet = .localImport
+        }
     }
+}
+
+private enum MacMainSheet: String, Identifiable {
+    case localImport
+    var id: String { rawValue }
 }
 
 private struct ServerLibraryView: View {
@@ -648,6 +663,7 @@ private struct MacServerSongRow: View {
 private struct MacServerConnectionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var model: PlayerModel
+    @State private var newProfileName = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -672,6 +688,29 @@ private struct MacServerConnectionSheet: View {
                 Label("Admin key", systemImage: "key.horizontal.fill").frame(maxWidth: .infinity, alignment: .leading)
                 SecureField("Required for uploads and deletion", text: $model.serverAdminToken)
                     .textFieldStyle(.roundedBorder)
+                Label("Sync profile", systemImage: "person.2.fill").frame(maxWidth: .infinity, alignment: .leading)
+                Picker(
+                    "Sync profile",
+                    selection: Binding(
+                        get: { model.syncProfileID },
+                        set: { model.selectSyncProfile($0) }
+                    )
+                ) {
+                    ForEach(model.syncProfiles) { profile in
+                        Text(profile.name).tag(profile.id)
+                    }
+                }
+                .labelsHidden()
+                HStack {
+                    TextField("New profile name", text: $newProfileName)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Create") {
+                        let name = newProfileName
+                        newProfileName = ""
+                        Task { await model.createSyncProfile(named: name) }
+                    }
+                    .disabled(newProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
             }
             .font(.system(size: 11, weight: .semibold))
 
@@ -699,6 +738,7 @@ private struct MacServerConnectionSheet: View {
         .padding(24)
         .frame(width: 480)
         .background(Color.appPanel)
+        .task { await model.refreshSyncProfiles() }
     }
 }
 
@@ -822,6 +862,8 @@ private struct TopBarView: View {
                 librarySearchField
                 Spacer(minLength: 0)
             }
+
+            MacProfileMenu()
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 10)
@@ -921,6 +963,84 @@ private struct TopBarView: View {
     }
 }
 
+private struct MacProfileMenu: View {
+    @EnvironmentObject private var model: PlayerModel
+    @State private var showingProfileSettings = false
+
+    private var activeProfile: SyncProfile? {
+        model.syncProfiles.first { $0.id == model.syncProfileID }
+    }
+
+    private var profileName: String {
+        let name = activeProfile?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? "Profile" : name
+    }
+
+    private var profileInitial: String {
+        String(profileName.prefix(1)).uppercased()
+    }
+
+    var body: some View {
+        Menu {
+            Section {
+                Label(profileName, systemImage: "person.crop.circle.fill")
+                    .disabled(true)
+            }
+
+            Section("Switch Profile") {
+                ForEach(model.syncProfiles) { profile in
+                    Button {
+                        model.selectSyncProfile(profile.id)
+                    } label: {
+                        Label(
+                            profile.name,
+                            systemImage: profile.id == model.syncProfileID ? "checkmark" : "person"
+                        )
+                    }
+                    .disabled(profile.id == model.syncProfileID)
+                }
+            }
+
+            Divider()
+
+            Button {
+                showingProfileSettings = true
+            } label: {
+                Label("Manage Profiles…", systemImage: "person.2")
+            }
+
+            SettingsLink {
+                Label("Settings…", systemImage: "gearshape")
+            }
+        } label: {
+            Text(profileInitial)
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(Color.white)
+                .frame(width: 38, height: 38)
+                .background(
+                    LinearGradient(
+                        colors: [Color.appAccent, Color.appViolet],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    in: Circle()
+                )
+                .overlay {
+                    Circle().stroke(Color.white.opacity(0.16), lineWidth: 1)
+                }
+                .contentShape(Circle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Profile and settings: \(profileName)")
+        .accessibilityLabel("Profile and settings, \(profileName)")
+        .sheet(isPresented: $showingProfileSettings) {
+            MacServerConnectionSheet()
+        }
+    }
+}
+
 private struct WindowDragArea: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         WindowDragNSView()
@@ -946,6 +1066,12 @@ private struct CollectionView: View {
                     CollectionHeroView(onAddSongs: presentSongPicker)
                         .frame(height: 310)
 
+                    if model.section == .library,
+                       !model.hasActiveLibraryFilter,
+                       !model.visibleTracks.isEmpty {
+                        RecentlyAddedSection()
+                    }
+
                     TrackAreaView(
                         showAlbum: proxy.size.width >= 535,
                         showHelperText: proxy.size.width > 560,
@@ -964,6 +1090,123 @@ private struct CollectionView: View {
     private func presentSongPicker() {
         guard let playlist = model.selectedPlaylist, !playlist.isSystem else { return }
         playlistForSongPicker = playlist
+    }
+}
+
+private struct RecentlyAddedSection: View {
+    @EnvironmentObject private var model: PlayerModel
+
+    private var tracks: [Track] {
+        Array(
+            model.visibleTracks
+                .sorted {
+                    if $0.dateAdded == $1.dateAdded {
+                        return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+                    }
+                    return $0.dateAdded > $1.dateAdded
+                }
+                .prefix(6)
+        )
+    }
+
+    private let columns = [
+        GridItem(.adaptive(minimum: 190, maximum: 320), spacing: 12)
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Recently Added")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(Color.appInk)
+
+                Text("The newest music in your library")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.appMuted)
+            }
+
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+                ForEach(tracks) { track in
+                    RecentlyAddedTrackButton(track: track)
+                }
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 22)
+        .padding(.bottom, 20)
+        .background(Color.appSurface.opacity(0.48))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.appLine).frame(height: 1)
+        }
+    }
+}
+
+private struct RecentlyAddedTrackButton: View {
+    @EnvironmentObject private var model: PlayerModel
+    let track: Track
+    @State private var isHovering = false
+
+    private var isCurrent: Bool {
+        model.currentTrackID == track.id
+    }
+
+    var body: some View {
+        Button {
+            model.selectAndPlay(track)
+        } label: {
+            HStack(spacing: 11) {
+                TrackArtworkView(
+                    track: track,
+                    symbol: track.kind == .video ? "play.fill" : "music.note",
+                    cornerRadius: 7
+                )
+                .frame(width: 48, height: 48)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(track.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(isCurrent ? Color.appAccent : Color.appInk)
+                        .lineLimit(1)
+
+                    Text(track.artist)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.appMuted)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 6)
+
+                Group {
+                    if isCurrent && model.isPlaying {
+                        EqualizerGlyph(isAnimating: true)
+                    } else {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                }
+                .foregroundStyle(Color.white)
+                .frame(width: 28, height: 28)
+                .background(Color.appAccent, in: Circle())
+                .opacity(isHovering || isCurrent ? 1 : 0)
+            }
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+            .background(
+                isHovering || isCurrent
+                    ? Color.white.opacity(0.07)
+                    : Color.white.opacity(0.035),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.appLine, lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(PressableScaleStyle())
+        .onHover { isHovering = $0 }
+        .help("Play \(track.title)")
+        .accessibilityLabel("Play \(track.title) by \(track.artist)")
     }
 }
 
@@ -1689,6 +1932,7 @@ private struct TrackRowView: View {
 
 private struct StorageView: View {
     @EnvironmentObject private var model: PlayerModel
+    let onImportLink: () -> Void
     @State private var searchText = ""
     @State private var scope: MacStorageScope = .songs
     @State private var sort: MacStorageSort = .title
@@ -1755,13 +1999,23 @@ private struct StorageView: View {
                     .buttonStyle(.bordered)
                     .disabled(model.tracks.isEmpty)
                     Button(action: model.importLocalFiles) {
-                        Label("Import Songs", systemImage: "plus")
+                        Label("Import Files", systemImage: "plus")
                             .font(.system(size: 11, weight: .bold))
                             .padding(.horizontal, 16)
                             .frame(height: 36)
                             .background(Color.appAccent, in: Capsule())
                     }
                     .buttonStyle(.plain)
+                    if LocalImportFeature.isEnabled {
+                        Button(action: onImportLink) {
+                            Label("Import from Link", systemImage: "link.badge.plus")
+                                .font(.system(size: 11, weight: .bold))
+                                .padding(.horizontal, 16)
+                                .frame(height: 36)
+                                .background(Color.appViolet, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
 
                 MacStorageSummaryCard(
@@ -1872,7 +2126,7 @@ private struct StorageView: View {
                 message: Text(track.remoteID == nil
                     ? "This permanently deletes \(track.title) from this Mac."
                     : "This removes the cached copy from this Mac. The song remains available on the music server."),
-                primaryButton: .destructive(Text("Delete")) { delete(track) },
+                primaryButton: .destructive(Text("Delete")) { _ = delete(track) },
                 secondaryButton: .cancel()
             )
         }
@@ -1880,17 +2134,33 @@ private struct StorageView: View {
             Button("Cancel", role: .cancel) {}
             Button("Delete Files", role: .destructive) {
                 let selected = model.tracks.filter { selectedTrackIDs.contains($0.id) }
-                selected.forEach(delete)
-                selectedTrackIDs.removeAll()
-                isEditing = false
+                let failedIDs = Set(selected.filter { !delete($0) }.map(\.id))
+                selectedTrackIDs = failedIDs
+                isEditing = !failedIDs.isEmpty
             }
         } message: {
             Text("Imported originals will be permanently deleted. Server downloads remain available to download again.")
         }
+        .alert(
+            "Couldn’t Delete File",
+            isPresented: Binding(
+                get: { model.fileOperationError != nil },
+                set: { if !$0 { model.fileOperationError = nil } }
+            )
+        ) {
+            Button("OK") { model.fileOperationError = nil }
+        } message: {
+            Text(model.fileOperationError ?? "The file could not be deleted.")
+        }
     }
 
-    private func delete(_ track: Track) {
-        track.remoteID == nil ? model.deleteOriginalFile(track) : model.deleteDownloadedCopy(track)
+    @discardableResult
+    private func delete(_ track: Track) -> Bool {
+        if track.remoteID == nil {
+            return model.deleteOriginalFile(track)
+        } else {
+            return model.deleteDownloadedCopy(track)
+        }
     }
 
     private func refreshStorageMetrics() {
@@ -2227,4 +2497,5 @@ private func storageByteText(_ bytes: Int64) -> String {
 extension Notification.Name {
     static let focusMusicSearch = Notification.Name("focusMusicSearch")
     static let newMusicPlaylist = Notification.Name("newMusicPlaylist")
+    static let importMusicFromLink = Notification.Name("importMusicFromLink")
 }

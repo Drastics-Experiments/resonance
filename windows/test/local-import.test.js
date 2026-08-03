@@ -18,8 +18,11 @@ const {
   parseSpotifyEmbedEntity,
   parseSpotifyOEmbed,
   parseYouTubeMusicSearch,
+  parseYouTubePlaylistData,
   parseYouTubeWebSearch,
+  resolveYouTubePlaylist,
   scoreAudioSource,
+  youtubePlaylistID,
   youtubeVideoID,
 } = core;
 const {
@@ -50,15 +53,118 @@ function spotifyEmbedFixture(overrides = {}) {
   })}</script></html>`;
 }
 
-test("accepts only supported Spotify tracks and individual YouTube video URL shapes", () => {
+test("accepts supported Spotify tracks and YouTube video or playlist URL shapes", () => {
   assert.equal(isSpotifyURL(`https://open.spotify.com/track/${spotifyTrackID}`), true);
   assert.equal(isSpotifyURL("https://open.spotify.example/track/example"), false);
   assert.equal(youtubeVideoID("https://www.youtube.com/watch?v=jNQXAC9IVRw"), "jNQXAC9IVRw");
   assert.equal(youtubeVideoID("https://youtu.be/jNQXAC9IVRw?t=3"), "jNQXAC9IVRw");
   assert.equal(youtubeVideoID("https://music.youtube.com/watch?v=jNQXAC9IVRw"), "jNQXAC9IVRw");
   assert.equal(youtubeVideoID("https://www.youtube.com/shorts/jNQXAC9IVRw"), "jNQXAC9IVRw");
-  assert.throws(() => youtubeVideoID("https://www.youtube.com/playlist?list=example"), /individual YouTube videos/);
+  assert.equal(youtubePlaylistID("https://www.youtube.com/playlist?list=PL1234567890abcdefghijklmnop"), "PL1234567890abcdefghijklmnop");
+  assert.equal(youtubePlaylistID("https://www.youtube.com/watch?v=jNQXAC9IVRw&list=PL1234567890abcdefghijklmnop"), "PL1234567890abcdefghijklmnop");
+  assert.equal(youtubePlaylistID("https://youtu.be/jNQXAC9IVRw"), null);
+  assert.throws(() => youtubePlaylistID("https://www.youtube.com/playlist?list=short"), /playlist URL is invalid/);
   assert.throws(() => youtubeVideoID("https://user:secret@youtube.com/watch?v=jNQXAC9IVRw"), /credentials/);
+});
+
+test("resolves YouTube playlist metadata and continuation items without inspecting every stream", async () => {
+  const playlistID = "PL1234567890abcdefghijklmnop";
+  const videoRenderer = (videoID, title, index) => ({
+    videoId: videoID,
+    title: { runs: [{ text: title }] },
+    shortBylineText: { runs: [{ text: "Playlist Artist" }] },
+    lengthText: { simpleText: index === 1 ? "3:33" : "4:05" },
+    index: { simpleText: String(index) },
+    thumbnail: { thumbnails: [{ url: `https://i.ytimg.com/vi/${videoID}/hqdefault.jpg`, width: 480 }] },
+    isPlayable: true,
+  });
+  const initialData = {
+    metadata: { playlistMetadataRenderer: { playlistId: playlistID, title: "Road Trip" } },
+    header: { playlistHeaderRenderer: { ownerText: { runs: [{ text: "Lily" }] } } },
+    contents: [
+      { playlistVideoRenderer: videoRenderer("jNQXAC9IVRw", "Me at the zoo", 1) },
+      { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next-page" } } } },
+    ],
+  };
+  const continuationData = {
+    onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [
+      { playlistVideoRenderer: videoRenderer("dQw4w9WgXcQ", "Never Gonna Give You Up", 2) },
+    ] } }],
+  };
+  const html = `<script>var ytInitialData = ${JSON.stringify(initialData)};</script><script>ytcfg.set(${JSON.stringify({
+    INNERTUBE_API_KEY: "test-key",
+    INNERTUBE_CLIENT_VERSION: "2.20260801.00.00",
+    VISITOR_DATA: "test-visitor",
+  })});</script>`;
+  const requests = [];
+  const playlist = await resolveYouTubePlaylist(
+    `https://www.youtube.com/playlist?list=${playlistID}`,
+    new AbortController().signal,
+    async (_url, options = {}) => {
+      requests.push(options.method || "GET");
+      return options.method === "POST"
+        ? new Response(JSON.stringify(continuationData), { status: 200, headers: { "content-type": "application/json" } })
+        : new Response(html, { status: 200, headers: { "content-type": "text/html" } });
+    },
+  );
+  assert.deepEqual(requests, ["GET", "POST"]);
+  assert.equal(playlist.title, "Road Trip");
+  assert.equal(playlist.author, "Lily");
+  assert.equal(playlist.items.length, 2);
+  assert.equal(playlist.items[1].sourceURL, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.equal(playlist.items[1].durationSeconds, 245);
+  assert.equal(playlist.truncated, false);
+  assert.equal(parseYouTubePlaylistData(initialData, playlistID).items[0].playlistIndex, 1);
+  const currentRenderer = parseYouTubePlaylistData({ contents: [{ lockupViewModel: {
+    contentId: "jNQXAC9IVRw",
+    contentType: "LOCKUP_CONTENT_TYPE_VIDEO",
+    contentImage: { thumbnailViewModel: {
+      image: { sources: [{ url: "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg", width: 480 }] },
+      overlays: [{ thumbnailBottomOverlayViewModel: { badges: [{ thumbnailBadgeViewModel: { text: "0:19" } }] } }],
+    } },
+    metadata: { lockupMetadataViewModel: {
+      title: { content: "Me at the zoo" },
+      metadata: { contentMetadataViewModel: { metadataRows: [{ metadataParts: [{ text: { content: "jawed" } }] }] } },
+    } },
+  } }] }, playlistID).items[0];
+  assert.equal(currentRenderer.title, "Me at the zoo");
+  assert.equal(currentRenderer.artist, "jawed");
+  assert.equal(currentRenderer.durationSeconds, 19);
+});
+
+test("returns a selectable batch for YouTube playlist imports", async () => {
+  const playlistID = "PL1234567890abcdefghijklmnop";
+  const result = await resolveLocalImportSource(
+    `https://www.youtube.com/playlist?list=${playlistID}`,
+    new AbortController().signal,
+    () => {},
+    {
+      resolveYouTubePlaylist: async () => ({
+        playlistID,
+        title: "Road Trip",
+        author: "Lily",
+        artworkURL: null,
+        sourceURL: `https://www.youtube.com/playlist?list=${playlistID}`,
+        items: [{
+          videoID: "jNQXAC9IVRw",
+          title: "Me at the zoo",
+          artist: "jawed",
+          durationSeconds: 19,
+          thumbnailURL: null,
+          sourceProvider: "youtube",
+          sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+          playlistIndex: 1,
+        }],
+        unavailableCount: 0,
+        truncated: false,
+      }),
+    },
+    { mediaKind: "audio" },
+  );
+  assert.equal(result.kind, "youtube_playlist");
+  assert.equal(result.track.type, "playlist");
+  assert.equal(result.track.title, "Road Trip");
+  assert.equal(result.candidates.length, 1);
 });
 
 test("chooses the highest verified progressive MP4 that contains video and audio", () => {
