@@ -4,7 +4,7 @@ Download `Resonance-Installer.pkg` from the latest GitHub release and open it.
 That single installer downloads the newest verified Resonance build and installs
 it into `/Applications` using the standard macOS Installer experience.
 
-Tagged releases publish these macOS assets:
+The centralized release workflow publishes these macOS assets:
 
 - `Resonance-Installer.pkg` — the only user-facing installation download
 - `Resonance-macOS.zip` — app archive consumed by the installer and in-app updater

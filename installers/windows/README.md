@@ -35,9 +35,9 @@ Use `-Silent` for an unattended per-user installation.
 
 ## Publishing an update
 
-1. Increase `windows/package.json`'s version.
-2. Commit and merge the change.
-3. Push a matching tag such as `v1.1.1`.
-4. The Windows workflow publishes `Resonance-Setup-1.1.1.exe`, its block map, and `latest.yml` to GitHub Releases.
+1. Create a release branch named `release/v<version>` from current `main`.
+2. Run `node scripts/release-version.mjs --set <version> <build>` from the repository root.
+3. Open the release PR and wait for the centralized `Bundle release candidate` job, including the Windows tests and NSIS build.
+4. Merge the release PR. The single publish workflow attaches `Resonance-Setup-<version>.exe`, its block map, and `latest.yml` alongside the other platform assets. Do not push a version tag manually.
 
 The current installer is unsigned. Windows SmartScreen may display a warning until a code-signing certificate is configured in the release workflow.

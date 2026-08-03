@@ -1,0 +1,166 @@
+name: Release candidate
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Validate release metadata
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/') }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      build: ${{ steps.release.outputs.build }}
+      tag: ${{ steps.release.outputs.tag }}
+      source_sha: ${{ steps.source.outputs.sha }}
+      source_tree: ${{ steps.source.outputs.tree }}
+
+    steps:
+      - name: Check out candidate source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Validate source and version
+        id: release
+        shell: bash
+        env:
+          ACTUAL_BRANCH: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          node scripts/release-version.mjs --github-output >> "$GITHUB_OUTPUT"
+          EXPECTED_BRANCH="$(node -e 'const value = require("./release/version.json"); process.stdout.write(`release/v${value.version}`)')"
+          [[ "$ACTUAL_BRANCH" == "$EXPECTED_BRANCH" ]]
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          read -r VERSION BUILD < <(node -e 'const value = require("./release/version.json"); console.log(value.version, value.build)')
+          read -r BASE_VERSION BASE_BUILD < <(git show "${BASE_SHA}:release/version.json" | node -e 'let text = ""; process.stdin.on("data", value => text += value); process.stdin.on("end", () => { const value = JSON.parse(text); console.log(value.version, value.build); });')
+          node -e '
+            const [current, previous] = process.argv.slice(1).map(value => value.split(".").map(Number));
+            for (let index = 0; index < 3; index += 1) {
+              if (current[index] > previous[index]) process.exit(0);
+              if (current[index] < previous[index]) process.exit(1);
+            }
+            process.exit(1);
+          ' "$VERSION" "$BASE_VERSION"
+          (( BUILD > BASE_BUILD ))
+          ! git show-ref --verify --quiet "refs/tags/v${VERSION}"
+
+      - name: Record candidate source
+        id: source
+        shell: bash
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
+  android:
+    name: Android candidate
+    needs: prepare
+    uses: ./.github/workflows/android.yml
+    with:
+      release_candidate: true
+      version: ${{ needs.prepare.outputs.version }}
+      build_number: ${{ needs.prepare.outputs.build }}
+      source_ref: ${{ needs.prepare.outputs.source_sha }}
+
+  ios:
+    name: iOS candidate
+    needs: prepare
+    uses: ./.github/workflows/ios.yml
+    with:
+      release_candidate: true
+      version: ${{ needs.prepare.outputs.version }}
+      build_number: ${{ needs.prepare.outputs.build }}
+      source_ref: ${{ needs.prepare.outputs.source_sha }}
+
+  macos:
+    name: macOS candidate
+    needs: prepare
+    uses: ./.github/workflows/macos.yml
+    with:
+      release_candidate: true
+      version: ${{ needs.prepare.outputs.version }}
+      build_number: ${{ needs.prepare.outputs.build }}
+      source_ref: ${{ needs.prepare.outputs.source_sha }}
+
+  windows:
+    name: Windows candidate
+    needs: prepare
+    uses: ./.github/workflows/windows.yml
+    with:
+      release_candidate: true
+      version: ${{ needs.prepare.outputs.version }}
+      build_number: ${{ needs.prepare.outputs.build }}
+      source_ref: ${{ needs.prepare.outputs.source_sha }}
+
+  bundle:
+    name: Bundle release candidate
+    needs:
+      - prepare
+      - android
+      - ios
+      - macos
+      - windows
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out candidate tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Download platform assets
+        uses: actions/download-artifact@v7
+        with:
+          pattern: release-*
+          path: candidate/assets
+          merge-multiple: true
+
+      - name: Validate complete asset set
+        run: node scripts/validate-release-assets.mjs candidate/assets "${{ needs.prepare.outputs.version }}"
+
+      - name: Write candidate provenance
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD: ${{ needs.prepare.outputs.build }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          SOURCE_TREE: ${{ needs.prepare.outputs.source_tree }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const value = {
+              version: process.env.VERSION,
+              build: Number(process.env.BUILD),
+              tag: process.env.TAG,
+              sourceSha: process.env.SOURCE_SHA,
+              sourceTree: process.env.SOURCE_TREE,
+              workflowRunId: Number(process.env.RUN_ID),
+            };
+            fs.writeFileSync("candidate/candidate.json", `${JSON.stringify(value, null, 2)}\n`);
+          '
+
+      - name: Upload complete release candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-candidate-${{ needs.prepare.outputs.tag }}-${{ needs.prepare.outputs.source_sha }}
+          path: candidate
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
