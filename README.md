@@ -10,6 +10,8 @@ Resonance is a cross-platform music player. Platform implementations and their i
 | `mac/` | Native SwiftUI macOS application, updater, tests, and release tooling |
 | `ios/` | Native SwiftUI iOS application |
 | `android/` | Native Kotlin and Jetpack Compose Android application |
+| `release/version.json` | Shared release version and build number |
+| `scripts/` | Release metadata and asset validation tools |
 | `installers/windows/` | Windows NSIS installer output and release documentation |
 | `installers/macos/` | macOS package installer, bootstrap installer, and release assets |
 
@@ -34,7 +36,7 @@ The installer is written to `installers/windows/dist/` and preserves Resonance's
 
 ## Releases and updates
 
-Tags matching `v*` run the Windows and macOS release workflows. They publish the NSIS and PKG installers plus platform update manifests to GitHub Releases. Installed builds check those release feeds and can download newer versions.
+Release PRs use branches named `release/v<version>`. Run `node scripts/release-version.mjs --set <version> <build>` to synchronize every platform, then let the centralized release-candidate workflow build all four apps once. Merging a successful release PR publishes those exact artifacts through the single publish workflow; do not manually push the version tag. Installed builds continue to use the GitHub Release update feeds.
 
 ## macOS development
 
@@ -50,7 +52,7 @@ Build the packaged application, `/Applications` installer, checksums, and update
 mac/scripts/build-release.sh
 ```
 
-The packaged app checks `latest-mac.json` on GitHub Releases, verifies the downloaded app archive with SHA-256, validates its bundle identity and code signature, replaces the installed app atomically, and relaunches it. Tagged releases publish both Windows and macOS update assets.
+The packaged app checks `latest-mac.json` on GitHub Releases, verifies the downloaded app archive with SHA-256, validates its bundle identity and code signature, replaces the installed app atomically, and relaunches it. The centralized publish workflow releases both Windows and macOS update assets together with Android and iOS Simulator artifacts.
 
 ## Android development
 

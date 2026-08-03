@@ -1,0 +1,213 @@
+name: Publish release
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v1.1.2.
+        required: true
+        type: string
+      candidate_sha:
+        description: Commit SHA used to build the successful candidate.
+        required: true
+        type: string
+      merged_sha:
+        description: Main-branch merge commit that contains the candidate.
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: resonance-release-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish verified candidate
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/v'))
+      }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve release inputs
+        id: release
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_MERGED_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          INPUT_MERGED_SHA: ${{ inputs.merged_sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            TAG="${PR_BRANCH#release/}"
+            CANDIDATE_SHA="$PR_CANDIDATE_SHA"
+            MERGED_SHA="$PR_MERGED_SHA"
+          else
+            TAG="$INPUT_TAG"
+            CANDIDATE_SHA="$INPUT_CANDIDATE_SHA"
+            MERGED_SHA="$INPUT_MERGED_SHA"
+          fi
+
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$MERGED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+          echo "merged_sha=$MERGED_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Check out merged source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.release.outputs.merged_sha }}
+          fetch-depth: 0
+
+      - name: Locate successful candidate run
+        id: candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ steps.release.outputs.candidate_sha }}
+        run: |
+          RUN_ID="$(
+            gh api \
+              "repos/${REPOSITORY}/actions/workflows/release-candidate.yml/runs?head_sha=${CANDIDATE_SHA}&status=success&per_page=20" \
+              --jq '.workflow_runs | map(select(.event == "pull_request")) | sort_by(.run_number) | last | .id'
+          )"
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download exact release candidate
+        uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-${{ steps.release.outputs.tag }}-${{ steps.release.outputs.candidate_sha }}
+          path: candidate
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.candidate.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify candidate assets and provenance
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          CANDIDATE_SHA: ${{ steps.release.outputs.candidate_sha }}
+          CANDIDATE_RUN_ID: ${{ steps.candidate.outputs.run_id }}
+        run: |
+          node scripts/release-version.mjs --check
+          node scripts/validate-release-assets.mjs candidate/assets "$VERSION"
+          git fetch --no-tags origin "$CANDIDATE_SHA"
+          export SOURCE_TREE="$(git rev-parse "${CANDIDATE_SHA}^{tree}")"
+          export BUILD="$(node -e 'const value = require("./release/version.json"); process.stdout.write(String(value.build))')"
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const value = JSON.parse(fs.readFileSync("candidate/candidate.json", "utf8"));
+            const expected = {
+              version: process.env.VERSION,
+              build: Number(process.env.BUILD),
+              tag: process.env.TAG,
+              sourceSha: process.env.CANDIDATE_SHA,
+              sourceTree: process.env.SOURCE_TREE,
+              workflowRunId: Number(process.env.CANDIDATE_RUN_ID),
+            };
+            for (const [key, expectedValue] of Object.entries(expected)) {
+              if (value[key] !== expectedValue) {
+                throw new Error(`candidate ${key} is ${value[key]}, expected ${expectedValue}`);
+              }
+            }
+          '
+
+      - name: Verify merged source and release state
+        id: verify
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          CANDIDATE_SHA: ${{ steps.release.outputs.candidate_sha }}
+          MERGED_SHA: ${{ steps.release.outputs.merged_sha }}
+        run: |
+          if git merge-base --is-ancestor "$CANDIDATE_SHA" "$MERGED_SHA"; then
+            RELEASE_TARGET="$CANDIDATE_SHA"
+          else
+            CANDIDATE_TREE="$(git rev-parse "${CANDIDATE_SHA}^{tree}")"
+            MERGED_TREE="$(git rev-parse "${MERGED_SHA}^{tree}")"
+            [[ "$CANDIDATE_TREE" == "$MERGED_TREE" ]]
+            RELEASE_TARGET="$MERGED_SHA"
+          fi
+
+          EXISTING="$(gh release view "$TAG" --repo "$REPOSITORY" --json isDraft,assets,url 2>/dev/null || true)"
+          if [[ -n "$EXISTING" ]]; then
+            [[ "$(jq -r '.isDraft' <<< "$EXISTING")" == "false" ]]
+            mapfile -t ACTUAL_ASSETS < <(jq -r '.assets[].name' <<< "$EXISTING" | sort)
+            EXPECTED_ASSETS=(
+              Resonance-Installer.pkg
+              Resonance-macOS.zip
+              Resonance-macOS.zip.sha256
+              latest-mac.json
+              "Resonance-Setup-${VERSION}.exe"
+              "Resonance-Setup-${VERSION}.exe.blockmap"
+              latest.yml
+              "Resonance-Android-${VERSION}.apk"
+              "Resonance-Android-${VERSION}.apk.sha256"
+              "Resonance-iOS-Simulator-${VERSION}.zip"
+              "Resonance-iOS-Simulator-${VERSION}.zip.sha256"
+            )
+            mapfile -t EXPECTED_ASSETS < <(printf '%s\n' "${EXPECTED_ASSETS[@]}" | sort)
+            [[ "${EXPECTED_ASSETS[*]}" == "${ACTUAL_ASSETS[*]}" ]]
+            TAG_TARGET="$(gh api "repos/${REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')"
+            [[ "$TAG_TARGET" == "$RELEASE_TARGET" ]]
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+            echo "Published release already verified: $(jq -r '.url' <<< "$EXISTING")"
+            exit 0
+          fi
+
+          if gh api "repos/${REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} exists without a published release; refusing to overwrite it." >&2
+            exit 1
+          fi
+
+          echo "already_published=false" >> "$GITHUB_OUTPUT"
+          echo "release_target=$RELEASE_TARGET" >> "$GITHUB_OUTPUT"
+
+      - name: Publish complete release atomically
+        if: ${{ steps.verify.outputs.already_published != 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_TARGET: ${{ steps.verify.outputs.release_target }}
+        run: |
+          assets=(candidate/assets/*)
+          [[ "${#assets[@]}" -eq 11 ]]
+          gh release create "$TAG" "${assets[@]}" \
+            --repo "$REPOSITORY" \
+            --target "$RELEASE_TARGET" \
+            --title "Resonance ${VERSION}" \
+            --generate-notes \
+            --latest
+
+          RELEASE_JSON="$(gh release view "$TAG" --repo "$REPOSITORY" --json isDraft,assets,url)"
+          [[ "$(jq -r '.isDraft' <<< "$RELEASE_JSON")" == "false" ]]
+          [[ "$(jq '.assets | length' <<< "$RELEASE_JSON")" -eq 11 ]]
+          TAG_TARGET="$(gh api "repos/${REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')"
+          [[ "$TAG_TARGET" == "$RELEASE_TARGET" ]]
+          echo "Published $(jq -r '.url' <<< "$RELEASE_JSON")"
