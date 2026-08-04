@@ -1,6 +1,15 @@
 name: macOS
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "mac/**"
+      - "installers/macos/**"
+      - "release/version.json"
+      - "scripts/release-version.mjs"
+      - ".github/workflows/macos.yml"
   pull_request:
     paths:
       - "mac/**"

@@ -1,6 +1,14 @@
 name: iOS
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "ios/**"
+      - "release/version.json"
+      - "scripts/release-version.mjs"
+      - ".github/workflows/ios.yml"
   pull_request:
     paths:
       - "ios/**"

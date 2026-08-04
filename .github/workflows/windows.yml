@@ -1,6 +1,15 @@
 name: Windows
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "windows/**"
+      - "installers/windows/**"
+      - "release/version.json"
+      - "scripts/release-version.mjs"
+      - ".github/workflows/windows.yml"
   pull_request:
     paths:
       - "windows/**"
