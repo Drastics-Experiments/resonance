@@ -91,6 +91,33 @@ class LibraryRepository(
         }
     }
 
+    suspend fun registerLocalImport(download: LinkImportDownload): Track =
+        withContext(Dispatchers.IO) {
+            val preferred = safeFilename(download.metadata.artist + " - " + download.metadata.title) + ".m4a"
+            val destination = uniqueMusicFile(preferred)
+            try {
+                if (!download.file.renameTo(destination)) {
+                    download.file.copyTo(destination)
+                    download.file.delete()
+                }
+                trackFromFile(
+                    file = destination,
+                    fallbackTitle = download.metadata.title,
+                    fallbackArtist = download.metadata.artist,
+                    fallbackAlbum = download.metadata.album ?: "Imported",
+                    fallbackDurationMs = download.durationMs,
+                    fallbackArtwork = download.artwork,
+                    sourceSHA256 = download.sourceSHA256,
+                    contentSHA256 = download.contentSHA256,
+                )
+            } catch (error: Throwable) {
+                destination.delete()
+                throw error
+            } finally {
+                download.file.parentFile?.deleteRecursively()
+            }
+        }
+
     /**
      * Registers a file already downloaded into this repository's Music directory.
      * The caller owns cleanup if metadata extraction fails.
@@ -99,6 +126,8 @@ class LibraryRepository(
         file: File,
         song: RemoteSong,
         sourceServer: String,
+        syncProfileID: String,
+        fallbackArtwork: ByteArray? = null,
     ): Track = withContext(Dispatchers.IO) {
         require(file.parentFile?.canonicalFile == musicDirectory.canonicalFile) {
             "Downloaded audio must be inside the Resonance Music directory"
@@ -111,6 +140,8 @@ class LibraryRepository(
                 fallbackAlbum = usefulFallback(song.album, "Server Library"),
                 remoteID = song.id,
                 sourceServer = sourceServer,
+                syncProfileID = syncProfileID,
+                fallbackArtwork = fallbackArtwork,
             )
         } catch (error: Throwable) {
             file.delete()
@@ -168,6 +199,12 @@ class LibraryRepository(
     fun artworkFile(track: Track): File? =
         track.artworkFilename?.let { File(artworkDirectory, it) }
 
+    suspend fun persistArtwork(track: Track, artwork: ByteArray): Track =
+        withContext(Dispatchers.IO) {
+            val filename = writeArtwork(track.id, artwork) ?: return@withContext track
+            track.copy(artworkFilename = filename, artworkScanComplete = true)
+        }
+
     internal fun newDownloadFile(preferredFilename: String): File =
         uniqueMusicFile(preferredFilename)
 
@@ -201,28 +238,39 @@ class LibraryRepository(
         fallbackAlbum: String = "Imported",
         remoteID: String? = null,
         sourceServer: String? = null,
+        syncProfileID: String? = null,
+        fallbackArtwork: ByteArray? = null,
+        fallbackDurationMs: Long = 0L,
+        sourceSHA256: String? = null,
+        contentSHA256: String? = null,
     ): Track {
         val metadata = readMetadata(file)
         val id = UUID.randomUUID().toString()
-        val artworkFilename = metadata.artwork?.let { artwork ->
-            val filename = "$id.artwork"
-            runCatching {
-                File(artworkDirectory, filename).writeBytes(artwork)
-                filename
-            }.getOrNull()
-        }
+        val artworkFilename = (metadata.artwork ?: fallbackArtwork)?.let { writeArtwork(id, it) }
         return Track(
             id = id,
             title = metadata.title ?: fallbackTitle,
             artist = metadata.artist ?: fallbackArtist,
             album = metadata.album ?: fallbackAlbum,
-            durationMs = metadata.durationMs,
+            durationMs = metadata.durationMs.takeIf { it > 0 } ?: fallbackDurationMs,
             relativePath = file.name,
             remoteID = remoteID,
             sourceServer = sourceServer,
+            syncProfileID = syncProfileID,
             artworkFilename = artworkFilename,
             artworkScanComplete = true,
+            sourceSHA256 = sourceSHA256,
+            contentSHA256 = contentSHA256,
         )
+    }
+
+    private fun writeArtwork(trackID: String, artwork: ByteArray): String? {
+        if (artwork.isEmpty()) return null
+        val filename = "$trackID.artwork"
+        return runCatching {
+            File(artworkDirectory, filename).writeBytes(artwork)
+            filename
+        }.getOrNull()
     }
 
     private fun readMetadata(file: File): ImportedMetadata {
@@ -284,6 +332,15 @@ class LibraryRepository(
             counter += 1
         }
         return candidate
+    }
+
+    private fun safeFilename(value: String): String {
+        val cleaned = value
+            .replace(Regex("""[<>:"/\\|?*\p{Cntrl}]"""), "-")
+            .trim()
+            .replace(Regex("""\s+"""), " ")
+            .take(180)
+        return cleaned.ifEmpty { "Track-" + System.currentTimeMillis() }
     }
 
     private fun usefulFallback(value: String, fallback: String): String {

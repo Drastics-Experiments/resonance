@@ -20,9 +20,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
@@ -36,6 +38,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,9 +62,17 @@ fun StorageScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
     var scope by remember { mutableStateOf(StorageScope.Songs) }
     var sort by remember { mutableStateOf(StorageSort.Title) }
     var filterMenu by remember { mutableStateOf(false) }
+    var importMenu by remember { mutableStateOf(false) }
+    var linkImportOpen by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var deleteCandidate by remember { mutableStateOf<Track?>(null) }
+
+    LaunchedEffect(state.tracks.map(Track::id)) {
+        selected = selected.intersect(state.tracks.mapTo(mutableSetOf(), Track::id))
+        if (selected.isEmpty() && state.tracks.isEmpty()) editing = false
+    }
 
     val downloaded = state.tracks.filter { it.sourceServer != null || it.remoteID != null }
     val imported = state.tracks.filter { it.sourceServer == null && it.remoteID == null }
@@ -95,6 +106,29 @@ fun StorageScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Song Storage", fontSize = 36.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Box {
+                    TextButton(onClick = { importMenu = true }) {
+                        Text("Import", fontWeight = FontWeight.SemiBold)
+                    }
+                    DropdownMenu(expanded = importMenu, onDismissRequest = { importMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Import from Link") },
+                            leadingIcon = { Icon(Icons.Default.Link, null) },
+                            onClick = {
+                                importMenu = false
+                                linkImportOpen = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Import Files") },
+                            leadingIcon = { Icon(Icons.Default.Add, null) },
+                            onClick = {
+                                importMenu = false
+                                actions.importAudio()
+                            },
+                        )
+                    }
+                }
                 TextButton(
                     enabled = state.tracks.isNotEmpty(),
                     onClick = {
@@ -172,17 +206,21 @@ fun StorageScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                 ) {
                     Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = Violet)
                     Text(if (query.isNotEmpty()) "No Results" else "No Stored Songs", style = MaterialTheme.typography.titleMedium)
-                    Text("Import audio or download songs from your music server.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
+                    Text("Import audio or video, or download songs from your music server.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
                 }
             }
         } else {
             if (visibleDownloaded.isNotEmpty()) item {
-                StorageSection("Downloaded from server", visibleDownloaded, state, actions, editing, selected) { id ->
+                StorageSection("Downloaded from server", visibleDownloaded, state, actions, editing, selected, { track ->
+                    deleteCandidate = track
+                }) { id ->
                     selected = if (id in selected) selected - id else selected + id
                 }
             }
             if (visibleImported.isNotEmpty()) item {
-                StorageSection("Imported on Android", visibleImported, state, actions, editing, selected) { id ->
+                StorageSection("Imported on device", visibleImported, state, actions, editing, selected, { track ->
+                    deleteCandidate = track
+                }) { id ->
                     selected = if (id in selected) selected - id else selected + id
                 }
             }
@@ -205,6 +243,23 @@ fun StorageScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
         )
+    }
+    deleteCandidate?.let { track ->
+        AlertDialog(
+            onDismissRequest = { deleteCandidate = null },
+            title = { Text("Delete ${track.title} from this device?") },
+            text = { Text("The server copy, if one exists, will remain available to download again.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    actions.deleteTracksFromDevice(setOf(track.id))
+                    deleteCandidate = null
+                }) { Text("Delete Song", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleteCandidate = null }) { Text("Cancel") } },
+        )
+    }
+    if (linkImportOpen) {
+        LinkImportDialog(state, actions) { linkImportOpen = false }
     }
 }
 
@@ -263,6 +318,7 @@ private fun StorageSection(
     actions: ResonanceActions,
     editing: Boolean,
     selected: Set<String>,
+    onDelete: (Track) -> Unit,
     onToggle: (String) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -270,20 +326,23 @@ private fun StorageSection(
             Eyebrow(title, Modifier.weight(1f))
             Text("${tracks.size} ${if (tracks.size == 1) "SONG" else "SONGS"}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
         }
-        Column(Modifier.fillMaxWidth().background(Color.White.copy(alpha = .045f), RoundedCornerShape(16.dp))) {
-            tracks.forEach { track ->
+        Column(Modifier.fillMaxWidth()) {
+            SongListHeader(trailingTitle = "Size")
+            tracks.forEachIndexed { index, track ->
                 TrackRow(
                     track = track,
                     state = state,
                     actions = actions,
+                    number = index + 1,
                     queue = tracks,
                     trailingText = formatBytes(state.trackSizesById[track.id] ?: 0),
                     showSelection = editing,
                     selected = track.id in selected,
                     onSelect = { onToggle(track.id) },
-                    allowDeleteFromDevice = false,
+                    allowDeleteFromDevice = true,
+                    onDeleteFromDevice = { onDelete(track) },
                     showFavorite = false,
-                    showMenu = false,
+                    showMenu = !editing,
                 )
             }
         }

@@ -13,6 +13,8 @@ struct MobileTrack: Identifiable, Codable, Hashable {
     var artworkFilename: String?
     var artworkScanComplete: Bool?
     var dateAdded: Date
+    var sourceSHA256: String?
+    var contentSHA256: String?
 
     init(
         id: UUID = UUID(),
@@ -26,7 +28,9 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         syncProfileID: String? = nil,
         artworkFilename: String? = nil,
         artworkScanComplete: Bool? = false,
-        dateAdded: Date = .now
+        dateAdded: Date = .now,
+        sourceSHA256: String? = nil,
+        contentSHA256: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -40,6 +44,8 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         self.artworkFilename = artworkFilename
         self.artworkScanComplete = artworkScanComplete
         self.dateAdded = dateAdded
+        self.sourceSHA256 = sourceSHA256
+        self.contentSHA256 = contentSHA256
     }
 
     var durationText: String {
@@ -49,111 +55,22 @@ struct MobileTrack: Identifiable, Codable, Hashable {
     }
 }
 
-struct MobileListeningHistoryEntry: Identifiable, Codable, Hashable {
-    let id: UUID
-    var trackID: UUID
-    let startedAt: Date
-    var listenedSeconds: TimeInterval
-    var syncProfileID: String?
-    var syncEventID: String?
-    var remoteSongID: String?
-    var title: String?
-    var artist: String?
-    var album: String?
-    var duration: TimeInterval?
+struct MobileClipRange: Codable, Hashable {
+    var startSeconds: TimeInterval
+    var endSeconds: TimeInterval
 
-    init(
-        id: UUID = UUID(),
-        trackID: UUID,
-        startedAt: Date = .now,
-        listenedSeconds: TimeInterval = 0,
-        syncProfileID: String? = nil,
-        syncEventID: String? = nil,
-        remoteSongID: String? = nil,
-        title: String? = nil,
-        artist: String? = nil,
-        album: String? = nil,
-        duration: TimeInterval? = nil
-    ) {
-        self.id = id
-        self.trackID = trackID
-        self.startedAt = startedAt
-        self.listenedSeconds = listenedSeconds
-        self.syncProfileID = syncProfileID
-        self.syncEventID = syncEventID
-        self.remoteSongID = remoteSongID
-        self.title = title
-        self.artist = artist
-        self.album = album
-        self.duration = duration
-    }
-
-    var networkEventID: String {
-        let value = syncEventID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return value.isEmpty ? id.uuidString : value
-    }
+    var duration: TimeInterval { max(0, endSeconds - startSeconds) }
 }
 
-struct MobileListeningHistoryUploadDocument: Encodable {
-    let client = "ios"
-    let entries: [MobileListeningHistoryUploadEntry]
-}
-
-struct MobileListeningHistoryUploadEntry: Encodable {
-    let id: String
-    let trackID: String
-    let songID: String?
-    let startedAt: String
-    let listenedSeconds: TimeInterval
-    let title: String?
-    let artist: String?
-    let album: String?
-    let durationSeconds: TimeInterval?
+struct MobileRemoteClipRange: Codable, Hashable {
+    var songID: String
+    var startSeconds: TimeInterval
+    var endSeconds: TimeInterval
 
     enum CodingKeys: String, CodingKey {
-        case id
-        case trackID = "track_id"
         case songID = "song_id"
-        case startedAt = "started_at"
-        case listenedSeconds = "listened_seconds"
-        case title
-        case artist
-        case album
-        case durationSeconds = "duration_seconds"
-    }
-}
-
-struct MobileRemoteListeningHistoryDocument: Decodable {
-    let profileID: String?
-    let entries: [MobileRemoteListeningHistoryEntry]
-
-    enum CodingKeys: String, CodingKey {
-        case profileID = "profile_id"
-        case entries
-    }
-}
-
-struct MobileRemoteListeningHistoryEntry: Decodable {
-    let id: String
-    let trackID: String
-    let songID: String?
-    let startedAt: String
-    let listenedSeconds: TimeInterval
-    let title: String?
-    let artist: String?
-    let album: String?
-    let durationSeconds: TimeInterval?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case trackID = "track_id"
-        case songID = "song_id"
-        case startedAt = "started_at"
-        case listenedSeconds = "listened_seconds"
-        case title
-        case artist
-        case album
-        case durationSeconds = "duration_seconds"
+        case startSeconds = "start_seconds"
+        case endSeconds = "end_seconds"
     }
 }
 
@@ -223,23 +140,27 @@ struct MobileRemotePlaylistsDocument: Codable, Hashable {
     var revision: Int
     var playlists: [MobileRemotePlaylist]
     var likedSongIDs: [String]
+    var clipRanges: [MobileRemoteClipRange]
 
     enum CodingKeys: String, CodingKey {
         case revision, playlists
         case profileID = "profile_id"
         case likedSongIDs = "liked_song_ids"
+        case clipRanges = "clip_ranges"
     }
 
     init(
         profileID: String? = nil,
         revision: Int,
         playlists: [MobileRemotePlaylist],
-        likedSongIDs: [String] = []
+        likedSongIDs: [String] = [],
+        clipRanges: [MobileRemoteClipRange] = []
     ) {
         self.profileID = profileID
         self.revision = revision
         self.playlists = playlists
         self.likedSongIDs = likedSongIDs
+        self.clipRanges = clipRanges
     }
 
     init(from decoder: Decoder) throws {
@@ -248,6 +169,7 @@ struct MobileRemotePlaylistsDocument: Codable, Hashable {
         revision = try values.decode(Int.self, forKey: .revision)
         playlists = try values.decode([MobileRemotePlaylist].self, forKey: .playlists)
         likedSongIDs = try values.decodeIfPresent([String].self, forKey: .likedSongIDs) ?? []
+        clipRanges = try values.decodeIfPresent([MobileRemoteClipRange].self, forKey: .clipRanges) ?? []
     }
 }
 
@@ -374,5 +296,7 @@ struct MobileStoredLibrary: Codable {
     var remoteLikedSongIDs: Set<String>?
     var dirtyRemoteLikeSongIDs: Set<String>?
     var likesDirty: Bool?
-    var listeningHistory: [MobileListeningHistoryEntry]?
+    var clipRanges: [String: MobileClipRange]?
+    var dirtyClipRangeKeys: Set<String>?
+    var deletedClipRangeKeys: Set<String>?
 }

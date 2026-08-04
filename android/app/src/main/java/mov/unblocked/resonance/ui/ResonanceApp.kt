@@ -9,6 +9,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cloud
@@ -17,6 +18,7 @@ import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.Icon
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -33,9 +35,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.dp
+import mov.unblocked.resonance.update.AndroidUpdateInfo
+import mov.unblocked.resonance.update.AndroidUpdateState
 
 @Composable
-fun ResonanceApp(state: ResonanceUiState, actions: ResonanceActions) {
+fun ResonanceApp(
+    state: ResonanceUiState,
+    actions: ResonanceActions,
+    updateState: AndroidUpdateState = AndroidUpdateState.Idle,
+    onDownloadUpdate: (AndroidUpdateInfo) -> Unit = {},
+    onInstallUpdate: (AndroidUpdateInfo) -> Unit = {},
+    onDismissUpdate: () -> Unit = {},
+) {
     ResonanceTheme {
         var selectedTab by rememberSaveable { mutableStateOf(ResonanceTab.Library) }
         var openPlaylistId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -94,7 +105,7 @@ fun ResonanceApp(state: ResonanceUiState, actions: ResonanceActions) {
                 }
             }
             AnimatedVisibility(
-                visible = state.isDownloading || state.isUploading || state.isSyncingPlaylists,
+                visible = shouldShowTransferPopup(state),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(horizontal = 18.dp)
@@ -107,14 +118,99 @@ fun ResonanceApp(state: ResonanceUiState, actions: ResonanceActions) {
             if (showNowPlaying && state.currentTrack != null) {
                 NowPlayingScreen(state, actions, onDismiss = { showNowPlaying = false })
             }
-            state.errorMessage?.let { message ->
+            val errorMessage = state.errorMessage
+            if (errorMessage != null) {
                 AlertDialog(
                     onDismissRequest = actions::dismissError,
                     title = { Text("Resonance") },
-                    text = { Text(message) },
+                    text = { Text(errorMessage) },
                     confirmButton = { TextButton(onClick = actions::dismissError) { Text("OK") } },
+                )
+            } else {
+                AndroidUpdateDialog(
+                    state = updateState,
+                    onDownload = onDownloadUpdate,
+                    onInstall = onInstallUpdate,
+                    onDismiss = onDismissUpdate,
                 )
             }
         }
+    }
+}
+
+internal fun shouldShowTransferPopup(state: ResonanceUiState): Boolean =
+    state.isDownloading || state.isUploading
+
+@Composable
+private fun AndroidUpdateDialog(
+    state: AndroidUpdateState,
+    onDownload: (AndroidUpdateInfo) -> Unit,
+    onInstall: (AndroidUpdateInfo) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    when (state) {
+        AndroidUpdateState.Idle, AndroidUpdateState.Checking -> Unit
+
+        is AndroidUpdateState.Available -> AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Update available") },
+            text = {
+                Column {
+                    Text("Resonance ${state.update.versionName} is ready to download.")
+                    state.update.releaseNotes?.let { notes ->
+                        Text(notes, modifier = Modifier.padding(top = 12.dp))
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { onDownload(state.update) }) { Text("Update") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Later") } },
+        )
+
+        is AndroidUpdateState.Downloading -> AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Downloading update") },
+            text = {
+                Column {
+                    Text("Resonance ${state.update.versionName}")
+                    if (state.progress == null) {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { state.progress },
+                            modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+        )
+
+        is AndroidUpdateState.ReadyToInstall -> AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Ready to install") },
+            text = {
+                Text("Android will ask you to confirm the Resonance ${state.update.versionName} update.")
+            },
+            confirmButton = {
+                TextButton(onClick = { onInstall(state.update) }) { Text("Install") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Later") } },
+        )
+
+        is AndroidUpdateState.Failed -> AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Update failed") },
+            text = { Text(state.message) },
+            confirmButton = {
+                state.update?.let { update ->
+                    TextButton(onClick = { onDownload(update) }) { Text("Retry") }
+                }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        )
     }
 }

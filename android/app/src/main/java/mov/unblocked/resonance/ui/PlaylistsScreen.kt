@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -206,14 +208,26 @@ private fun PlaylistDetailScreen(
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 Button(
+                    enabled = tracks.isNotEmpty(),
                     onClick = { if (isActivePlaylist) actions.togglePlayPause() else actions.playPlaylist(playlist.id) },
                     colors = ButtonDefaults.buttonColors(containerColor = Accent),
                 ) {
-                    Icon(if (state.isPlaying && isActivePlaylist) Icons.Default.Pause else Icons.Default.PlayArrow, null)
+                    Icon(
+                        if (state.isPlaying && isActivePlaylist) Icons.Default.Pause
+                        else if (state.shuffleEnabled && !isActivePlaylist) Icons.Default.Shuffle
+                        else Icons.Default.PlayArrow,
+                        null,
+                    )
                     Spacer(Modifier.size(6.dp))
-                    Text(if (state.isPlaying && isActivePlaylist) "Pause" else "Play", fontWeight = FontWeight.Bold)
+                    Text(
+                        if (state.isPlaying && isActivePlaylist) "Pause"
+                        else if (state.shuffleEnabled && !isActivePlaylist) "Shuffle Play"
+                        else "Play",
+                        fontWeight = FontWeight.Bold,
+                    )
                 }
                 IconButton(
+                    enabled = tracks.isNotEmpty(),
                     onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) },
                     modifier = Modifier.size(46.dp).background(if (state.shuffleEnabled) Violet else Color.White.copy(alpha = .08f), CircleShape),
                 ) { Icon(Icons.Default.Shuffle, "Shuffle") }
@@ -222,11 +236,19 @@ private fun PlaylistDetailScreen(
         if (tracks.isEmpty()) {
             item { EmptyPlaylistMessage("No Songs", if (playlist.isSystem) "Like songs to add them here." else "Add songs from your library.") }
         } else {
-            items(tracks, key = { it.id }) { track ->
-                val index = tracks.indexOfFirst { it.id == track.id }
+            item { SongListHeader() }
+            itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.weight(1f)) {
-                        TrackRow(track, state, actions, queue = tracks, playlistId = playlist.id, allowDeleteFromDevice = false)
+                        TrackRow(
+                            track,
+                            state,
+                            actions,
+                            number = index + 1,
+                            queue = tracks,
+                            playlistId = playlist.id,
+                            allowDeleteFromDevice = false,
+                        )
                     }
                     if (reorder) {
                         Column {
@@ -250,21 +272,40 @@ private fun PlaylistDetailScreen(
             title = { Text("Add Songs") },
             text = {
                 LazyColumn(Modifier.heightIn(max = 440.dp)) {
-                    items(state.tracks, key = { it.id }) { track ->
+                    item { SongListHeader() }
+                    itemsIndexed(state.tracks, key = { _, track -> track.id }) { index, track ->
                         val added = track.id in playlist.trackIDs
                         Row(
                             Modifier.fillMaxWidth().clickable {
                                 if (added) actions.removeTrackFromPlaylist(playlist.id, track.id)
                                 else actions.addTrackToPlaylist(playlist.id, track.id)
-                            }.padding(vertical = 8.dp),
+                            }.padding(horizontal = 8.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Artwork(state.artworkPathsByTrackId[track.id] ?: track.artworkFilename, Modifier.size(42.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(track.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(track.artist, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                            Text(
+                                (index + 1).toString(),
+                                modifier = Modifier.width(24.dp),
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f),
+                            )
+                            Artwork(state.artworkPathsByTrackId[track.id] ?: track.artworkFilename, Modifier.size(52.dp))
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text(track.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    "${track.artist} / ${track.mediaKindLabel}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                                    maxLines = 1,
+                                )
+                                Text(
+                                    track.album.ifBlank { "Unknown Album" },
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .42f),
+                                    maxLines = 1,
+                                )
                             }
+                            Text(durationText(track.durationMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                             Icon(if (added) Icons.Default.Check else Icons.Default.Add, null, tint = if (added) Accent else Color.White)
                         }
                     }

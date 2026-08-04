@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -41,6 +42,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -75,7 +77,7 @@ fun MiniPlayer(
     modifier: Modifier = Modifier,
 ) {
     val track = state.currentTrack ?: return
-    val fraction = (state.positionMs.toFloat() / track.durationMs.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val fraction = (state.playbackElapsedMs.toFloat() / state.playbackDurationMs).coerceIn(0f, 1f)
     Column(
         modifier = modifier.fillMaxWidth().background(Color(0xFA050609)).clickable(onClick = onOpen).padding(top = 8.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
@@ -131,7 +133,7 @@ fun NowPlayingScreen(
     val track = state.currentTrack ?: return
     var dragOffset by remember { mutableFloatStateOf(0f) }
     var speedMenu by remember { mutableStateOf(false) }
-    val fraction = (state.positionMs.toFloat() / track.durationMs.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val fraction = (state.playbackElapsedMs.toFloat() / state.playbackDurationMs).coerceIn(0f, 1f)
     val listState = rememberLazyListState()
     val dismissThreshold = with(LocalDensity.current) { 110.dp.toPx() }
     val dismissConnection = remember(listState, dismissThreshold, onDismiss) {
@@ -214,9 +216,9 @@ fun NowPlayingScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     PlayerSeekBar(fraction = fraction, onSeek = actions::seekToFraction)
                     Row {
-                        Text(durationText(state.positionMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
+                        Text(durationText(state.playbackElapsedMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
                         Spacer(Modifier.weight(1f))
-                        Text("-${durationText((track.durationMs - state.positionMs).coerceAtLeast(0))}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
+                        Text("-${durationText((state.playbackDurationMs - state.playbackElapsedMs).coerceAtLeast(0))}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
                     }
                 }
             }
@@ -239,6 +241,29 @@ fun NowPlayingScreen(
                     IconButton(onClick = actions::playNext, modifier = Modifier.size(60.dp)) {
                         Icon(Icons.Default.SkipNext, "Next", Modifier.size(35.dp))
                     }
+                }
+            }
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.AutoMirrored.Filled.VolumeUp, null, Modifier.size(18.dp))
+                        Spacer(Modifier.size(7.dp))
+                        Text("Volume", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "${(state.volume * 100).roundToInt()}%",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                        )
+                    }
+                    Slider(
+                        value = state.volume,
+                        onValueChange = actions::setVolume,
+                        valueRange = 0f..1f,
+                    )
                 }
             }
             item {

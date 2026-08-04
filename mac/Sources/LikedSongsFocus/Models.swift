@@ -136,19 +136,68 @@ struct ListeningHistoryEntry: Identifiable, Codable, Hashable {
     let startedAt: Date
     var listenedSeconds: TimeInterval
     var syncProfileID: String?
+    var remoteSongID: String?
+    var title: String?
+    var artist: String?
+    var album: String?
+    var duration: TimeInterval?
+    var originatedOnThisDevice: Bool?
 
     init(
         id: UUID = UUID(),
         trackID: UUID,
         startedAt: Date = .now,
         listenedSeconds: TimeInterval = 0,
-        syncProfileID: String? = nil
+        syncProfileID: String? = nil,
+        remoteSongID: String? = nil,
+        title: String? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        duration: TimeInterval? = nil,
+        originatedOnThisDevice: Bool? = true
     ) {
         self.id = id
         self.trackID = trackID
         self.startedAt = startedAt
         self.listenedSeconds = listenedSeconds
         self.syncProfileID = syncProfileID
+        self.remoteSongID = remoteSongID
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.duration = duration
+        self.originatedOnThisDevice = originatedOnThisDevice
+    }
+}
+
+struct RemoteListeningHistoryDocument: Decodable {
+    let profileID: String
+    let entries: [RemoteListeningHistoryEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case entries
+        case profileID = "profile_id"
+    }
+}
+
+struct RemoteListeningHistoryEntry: Decodable {
+    let id: String
+    let trackID: String
+    let songID: String?
+    let startedAt: String
+    let listenedSeconds: TimeInterval
+    let title: String?
+    let artist: String?
+    let album: String?
+    let durationSeconds: TimeInterval?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, artist, album
+        case trackID = "track_id"
+        case songID = "song_id"
+        case startedAt = "started_at"
+        case listenedSeconds = "listened_seconds"
+        case durationSeconds = "duration_seconds"
     }
 }
 

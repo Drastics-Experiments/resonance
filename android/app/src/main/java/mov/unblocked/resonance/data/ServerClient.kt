@@ -6,6 +6,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -19,6 +20,7 @@ class ServerClient(
     serverURL: String,
     private val accessToken: String,
     private val adminToken: String = "",
+    private val profileID: String = "default",
     private val json: Json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
@@ -36,6 +38,32 @@ class ServerClient(
         )
         requireStatus(response, setOf(HttpURLConnection.HTTP_OK))
         json.decodeFromString<RemoteCatalog>(response.body.toString(Charsets.UTF_8))
+    }
+
+    suspend fun fetchArtwork(song: RemoteSong): ByteArray? = withContext(Dispatchers.IO) {
+        val rawURL = song.artworkURL?.trim()?.takeIf(String::isNotEmpty) ?: return@withContext null
+        runCatching {
+            val url = resolveRemoteURL(rawURL)
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                instanceFollowRedirects = true
+                useCaches = false
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = DOWNLOAD_TIMEOUT_MS
+                if (hasSameOrigin(url, URL("$baseURL/"))) {
+                    setRequestProperty("Authorization", "Bearer ${requireAccessToken()}")
+                    setRequestProperty("X-Resonance-Profile", profileID)
+                }
+            }
+            try {
+                if (connection.responseCode !in 200..299) return@runCatching null
+                val contentLength = connection.contentLengthLong
+                if (contentLength > MAX_ARTWORK_BYTES) return@runCatching null
+                connection.inputStream.use(::readArtworkBytes)
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrNull()
     }
 
     suspend fun download(
@@ -56,7 +84,13 @@ class ServerClient(
                     ),
                 )
             }
-            repository.registerDownloadedFile(destination, song, baseURL)
+            repository.registerDownloadedFile(
+                destination,
+                song,
+                baseURL,
+                profileID,
+                fallbackArtwork = fetchArtwork(song),
+            )
                 .also {
                     onProgress(
                         TransferProgress(
@@ -174,6 +208,32 @@ class ServerClient(
         json.decodeFromString<RemotePlaylistsDocument>(response.body.toString(Charsets.UTF_8))
     }
 
+    suspend fun fetchProfiles(): SyncProfilesResponse = withContext(Dispatchers.IO) {
+        val response = request(
+            method = "GET",
+            url = endpoint("/api/v1/profiles"),
+            token = requireAccessToken(),
+            accept = "application/json",
+            includeProfile = false,
+        )
+        requireStatus(response, setOf(HttpURLConnection.HTTP_OK))
+        json.decodeFromString<SyncProfilesResponse>(response.body.toString(Charsets.UTF_8))
+    }
+
+    suspend fun createProfile(name: String): SyncProfile = withContext(Dispatchers.IO) {
+        val response = request(
+            method = "POST",
+            url = endpoint("/api/v1/profiles"),
+            token = requireAccessToken(),
+            body = json.encodeToString(CreateProfileRequest(name)).toByteArray(Charsets.UTF_8),
+            contentType = "application/json",
+            accept = "application/json",
+            includeProfile = false,
+        )
+        requireStatus(response, setOf(HttpURLConnection.HTTP_CREATED))
+        json.decodeFromString<SyncProfile>(response.body.toString(Charsets.UTF_8))
+    }
+
     suspend fun putPlaylists(document: RemotePlaylistsDocument): PlaylistPutResult =
         withContext(Dispatchers.IO) {
             val response = request(
@@ -223,7 +283,13 @@ class ServerClient(
                             ),
                         )
                     }
-                    add(repository.registerDownloadedFile(destination, song, baseURL))
+                    add(repository.registerDownloadedFile(
+                        destination,
+                        song,
+                        baseURL,
+                        profileID,
+                        fallbackArtwork = fetchArtwork(song),
+                    ))
                     onProgress(
                         TransferProgress(
                             completed = index + 1,
@@ -301,8 +367,9 @@ class ServerClient(
         body: ByteArray? = null,
         contentType: String? = null,
         accept: String? = null,
+        includeProfile: Boolean = true,
     ): Response {
-        val connection = open(url, method, token).apply {
+        val connection = open(url, method, token, includeProfile).apply {
             connectTimeout = CONNECT_TIMEOUT_MS
             readTimeout = REQUEST_TIMEOUT_MS
             accept?.let { setRequestProperty("Accept", it) }
@@ -320,12 +387,18 @@ class ServerClient(
         }
     }
 
-    private fun open(url: URL, method: String, token: String): HttpURLConnection =
+    private fun open(
+        url: URL,
+        method: String,
+        token: String,
+        includeProfile: Boolean = true,
+    ): HttpURLConnection =
         (url.openConnection() as HttpURLConnection).apply {
             requestMethod = method
             instanceFollowRedirects = true
             useCaches = false
             setRequestProperty("Authorization", "Bearer $token")
+            if (includeProfile) setRequestProperty("X-Resonance-Profile", profileID)
         }
 
     private fun HttpURLConnection.response(): Response {
@@ -350,6 +423,20 @@ class ServerClient(
     private fun resolveRemoteURL(pathOrURL: String): URL =
         runCatching { URL(pathOrURL) }.getOrElse { URL(URL("$baseURL/"), pathOrURL) }
 
+    private fun readArtworkBytes(input: java.io.InputStream): ByteArray? {
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(BUFFER_SIZE)
+        var total = 0L
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            total += read
+            if (total > MAX_ARTWORK_BYTES) return null
+            output.write(buffer, 0, read)
+        }
+        return output.toByteArray().takeIf(ByteArray::isNotEmpty)
+    }
+
     private fun requireAccessToken(): String =
         accessToken.trim().takeIf { it.isNotEmpty() }
             ?: throw IllegalStateException("Enter the access token")
@@ -366,11 +453,15 @@ class ServerClient(
     @Serializable
     private data class ServerErrorPayload(val error: String = "")
 
+    @Serializable
+    private data class CreateProfileRequest(val name: String)
+
     companion object {
         private const val CONNECT_TIMEOUT_MS = 20_000
         private const val REQUEST_TIMEOUT_MS = 60_000
         private const val DOWNLOAD_TIMEOUT_MS = 120_000
         private const val UPLOAD_TIMEOUT_MS = 600_000
+        private const val MAX_ARTWORK_BYTES = 10L * 1_024L * 1_024L
         private const val BUFFER_SIZE = 64 * 1_024
 
         fun normalizeServerURL(value: String): String {
@@ -384,6 +475,13 @@ class ServerClient(
             return trimmed
         }
     }
+}
+
+internal fun hasSameOrigin(first: URL, second: URL): Boolean {
+    fun URL.effectivePort(): Int = if (port >= 0) port else defaultPort
+    return first.protocol.equals(second.protocol, ignoreCase = true)
+        && first.host.equals(second.host, ignoreCase = true)
+        && first.effectivePort() == second.effectivePort()
 }
 
 @Serializable

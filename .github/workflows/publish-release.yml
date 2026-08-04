@@ -166,6 +166,7 @@ jobs:
               latest.yml
               "Resonance-Android-${VERSION}.apk"
               "Resonance-Android-${VERSION}.apk.sha256"
+              latest-android.json
               "Resonance-iOS-Simulator-${VERSION}.zip"
               "Resonance-iOS-Simulator-${VERSION}.zip.sha256"
             )
@@ -197,7 +198,7 @@ jobs:
           RELEASE_TARGET: ${{ steps.verify.outputs.release_target }}
         run: |
           assets=(candidate/assets/*)
-          [[ "${#assets[@]}" -eq 11 ]]
+          [[ "${#assets[@]}" -eq 12 ]]
           gh release create "$TAG" "${assets[@]}" \
             --repo "$REPOSITORY" \
             --target "$RELEASE_TARGET" \
@@ -207,7 +208,7 @@ jobs:
 
           RELEASE_JSON="$(gh release view "$TAG" --repo "$REPOSITORY" --json isDraft,assets,url)"
           [[ "$(jq -r '.isDraft' <<< "$RELEASE_JSON")" == "false" ]]
-          [[ "$(jq '.assets | length' <<< "$RELEASE_JSON")" -eq 11 ]]
+          [[ "$(jq '.assets | length' <<< "$RELEASE_JSON")" -eq 12 ]]
           TAG_TARGET="$(gh api "repos/${REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')"
           [[ "$TAG_TARGET" == "$RELEASE_TARGET" ]]
           echo "Published $(jq -r '.url' <<< "$RELEASE_JSON")"

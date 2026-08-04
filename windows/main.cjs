@@ -1,11 +1,12 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const { createReadStream } = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { readAudioMetadata } = require("./metadata.cjs");
+const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload } = require("./server-download.cjs");
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
 const { LocalImportError, searchYouTubeAudioSources } = require("./local-import-core.cjs");
 const { importFileBackedSource, searchFileBackedSources } = require("./local-debrid.cjs");
@@ -33,6 +34,7 @@ const MAX_LOCAL_IMPORT_UPLOAD_BYTES = 256 * 1024 * 1024;
 const MAX_LOCAL_IMPORT_PREVIEW_BYTES = 32 * 1024 * 1024;
 
 let mainWindow;
+let applicationQuitRequested = false;
 const activeServerTransfers = new Map();
 const activeLocalImports = new Map();
 const activeLocalImportPreviews = new Map();
@@ -51,10 +53,21 @@ async function atomicWriteFile(destination, data, options = "utf8") {
   }
 }
 
+async function fileSHA256(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
 async function writeResponseToFile(response, destination, { signal, expectedSize } = {}) {
   const reader = response.body?.getReader();
   if (!reader) throw new Error("The server returned an empty download.");
   const handle = await fs.open(destination, "wx");
+  const hash = createHash("sha256");
   let total = 0;
   try {
     while (true) {
@@ -62,6 +75,7 @@ async function writeResponseToFile(response, destination, { signal, expectedSize
       const { done, value } = await reader.read();
       if (done) break;
       const buffer = Buffer.from(value);
+      hash.update(buffer);
       let offset = 0;
       while (offset < buffer.length) {
         const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset);
@@ -74,7 +88,7 @@ async function writeResponseToFile(response, destination, { signal, expectedSize
     if (Number.isFinite(expectedSize) && expectedSize >= 0 && total !== expectedSize) {
       throw new Error("The downloaded file was incomplete.");
     }
-    return total;
+    return { size: total, sha256: hash.digest("hex") };
   } catch (error) {
     await reader.cancel(error).catch(() => undefined);
     throw error;
@@ -276,7 +290,7 @@ function publicTrack(filePath, details = {}) {
     id: details.id || randomUUID(),
     title: details.title || path.basename(filePath, path.extname(filePath)),
     artist: details.artist || "Local file",
-    album: details.album || "Imported",
+    album: details.album || "Unknown Album",
     duration: Number(details.duration) || 0,
     artwork: details.artwork || null,
     size: Number(details.size) || 0,
@@ -395,7 +409,8 @@ function createWindow() {
     window.webContents.send("app:prepare-close");
     window.resonanceCloseTimer = setTimeout(() => {
       window.resonanceCloseReady = true;
-      if (!window.isDestroyed()) window.close();
+      if (applicationQuitRequested) app.quit();
+      else if (!window.isDestroyed()) window.close();
     }, 3000);
     window.resonanceCloseTimer.unref?.();
   });
@@ -411,8 +426,11 @@ ipcMain.on("app:close-ready", (event) => {
   if (!window || window.isDestroyed() || !window.resonanceCloseRequested) return;
   window.resonanceCloseReady = true;
   if (window.resonanceCloseTimer) clearTimeout(window.resonanceCloseTimer);
-  window.close();
+  if (applicationQuitRequested) app.quit();
+  else window.close();
 });
+
+app.on("before-quit", () => { applicationQuitRequested = true; });
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
@@ -453,11 +471,16 @@ ipcMain.handle("library:load", async () => {
   const { state } = await ensureDirectories();
   try {
     const stored = JSON.parse(await fs.readFile(state, "utf8"));
+    const localUploadSizes = new Set((stored.tracks || [])
+      .filter((track) => !track?.remoteID && track?.contentSha256 && Number.isFinite(Number(track?.size)))
+      .map((track) => Number(track.size)));
     const tracks = await Promise.all((stored.tracks || []).filter((track) => track.filePath).map(async (track) => {
       try {
         const information = await fs.stat(track.filePath);
         if (!information.isFile()) return null;
-        return enrichedTrack(track.filePath, { ...track, size: information.size });
+        const contentSha256 = track.contentSha256
+          || (track.remoteID && localUploadSizes.has(information.size) ? await fileSHA256(track.filePath) : null);
+        return enrichedTrack(track.filePath, { ...track, size: information.size, contentSha256 });
       } catch {
         return null;
       }
@@ -839,9 +862,12 @@ ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profi
       duplex: "half",
       signal: controller.signal,
     });
-    if (!response.ok) throw await serverResponseError(response);
-    let remoteSong = null;
-    try { remoteSong = await response.json(); } catch { /* Some server versions return no JSON body. */ }
+    let responsePayload = null;
+    try { responsePayload = await response.json(); } catch { /* Some server versions return no JSON body. */ }
+    const remoteSong = response.status === 409
+      ? responsePayload?.duplicate_of || responsePayload?.duplicateOf || null
+      : responsePayload;
+    if (!response.ok && !(response.status === 409 && remoteSong?.id)) throw await serverResponseError(response);
     completed = information.size;
     publishUploadProgress();
     event.sender.send("local-import:progress", {
@@ -998,6 +1024,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
   let catalog = null;
   const downloaded = [];
   const replacedTrackIDs = [];
+  const failed = [];
   try {
   const base = normalizeBaseURL(baseURL);
   {
@@ -1034,43 +1061,69 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
       continue;
     }
     event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length });
-    const fileURL = new URL(song.download_url, base);
-    if (fileURL.origin !== base.origin) {
-      throw new Error(`The server returned an unsafe cross-origin download URL for ${song.title || song.name || song.id}.`);
-    }
-    const response = await fetch(fileURL, { headers: profileHeaders(token, profileID), signal });
-    if (!response.ok) throw new Error(`Download failed for ${song.title || song.name || song.id} (HTTP ${response.status})`);
-    const destination = matching?.filePath && path.dirname(path.resolve(matching.filePath)) === path.resolve(paths.remote)
-      ? matching.filePath
-      : await uniqueDestination(paths.remote, remoteName);
-    const temporary = `${destination}.${randomUUID()}.part`;
-    let downloadedSize = 0;
     try {
-      downloadedSize = await writeResponseToFile(response, temporary, { signal, expectedSize: Number(song.size) });
-      signal.throwIfAborted();
-      await fs.rename(temporary, destination);
+      const fileURL = new URL(song.download_url, base);
+      if (fileURL.origin !== base.origin) {
+        throw new Error(`The server returned an unsafe cross-origin download URL for ${song.title || song.name || song.id}.`);
+      }
+      const destination = matching?.filePath && path.dirname(path.resolve(matching.filePath)) === path.resolve(paths.remote)
+        ? matching.filePath
+        : await uniqueDestination(paths.remote, remoteName);
+      let downloadedSize = 0;
+      let downloadedSHA256 = null;
+      await retryServerDownload(async () => {
+        const response = await fetch(fileURL, { headers: profileHeaders(token, profileID), signal });
+        if (!response.ok) throw new Error(`Download failed for ${song.title || song.name || song.id} (HTTP ${response.status})`);
+        const temporary = `${destination}.${randomUUID()}.part`;
+        try {
+          const downloadedFile = await writeResponseToFile(response, temporary, { signal, expectedSize: Number(song.size) });
+          downloadedSize = downloadedFile.size;
+          downloadedSHA256 = downloadedFile.sha256;
+          signal.throwIfAborted();
+          await fs.rename(temporary, destination);
+        } catch (error) {
+          await fs.rm(temporary, { force: true });
+          throw error;
+        }
+      }, {
+        signal,
+        onRetry: ({ nextAttempt }) => event.sender.send("server:transfer-progress", {
+          direction: "download",
+          currentFile: `Retrying ${remoteName} (${nextAttempt}/${SERVER_DOWNLOAD_ATTEMPTS})`,
+          completed,
+          total: songs.length,
+        }),
+      });
+      if (matching?.id) replacedTrackIDs.push(matching.id);
+      downloaded.push(await enrichedTrack(destination, {
+        id: matching?.id,
+        title: song.title || path.basename(remoteName, path.extname(remoteName)),
+        artist: song.artist || "Unknown Artist",
+        album: song.album || "Server Library",
+        remoteID: song.id,
+        sourceServer: base.origin,
+        syncProfileID: profileID || "default",
+        remoteModified,
+        size: downloadedSize,
+        contentSha256: downloadedSHA256,
+      }));
     } catch (error) {
-      await fs.rm(temporary, { force: true });
-      throw error;
+      if (error?.name === "AbortError") throw error;
+      failed.push({
+        id: song.id,
+        title: song.title || song.name || path.basename(remoteName, path.extname(remoteName)),
+        artist: song.artist || "",
+        filename: remoteName,
+        attempts: SERVER_DOWNLOAD_ATTEMPTS,
+        message: error?.message || "Download failed.",
+      });
     }
-    if (matching?.id) replacedTrackIDs.push(matching.id);
-    downloaded.push(await enrichedTrack(destination, {
-      id: matching?.id,
-      title: song.title || path.basename(remoteName, path.extname(remoteName)),
-      artist: song.artist || "Unknown Artist",
-      album: song.album || "Server Library",
-      remoteID: song.id,
-      sourceServer: base.origin,
-      syncProfileID: profileID || "default",
-      remoteModified,
-      size: downloadedSize,
-    }));
     completed += 1;
     event.sender.send("server:transfer-progress", { direction: "download", currentFile: song.filename || song.name, completed, total: songs.length });
   }
-  return { catalog, downloaded, replacedTrackIDs };
+  return { catalog, downloaded, replacedTrackIDs, failed };
   } catch (error) {
-    if (error?.name === "AbortError") return { catalog, downloaded, replacedTrackIDs, cancelled: true };
+    if (error?.name === "AbortError") return { catalog, downloaded, replacedTrackIDs, failed, cancelled: true };
     throw error;
   } finally {
     finishServerTransfer(event, controller);

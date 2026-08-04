@@ -6,6 +6,7 @@ import {
   createEmptyState,
   filterPlaylists,
   filterTracks,
+  formatServerDownloadFailureNotice,
   formatHistoryWindowLabel,
   formatTime,
   mergePlaylistDocument,
@@ -14,9 +15,14 @@ import {
   niceChartMaximum,
   normalizedVolume,
   normalizeState,
+  playbackRangeForTrack,
+  reconcileServerBackedTrackDuplicates,
+  reconcileUploadedTrack,
+  removeClipRangeForTrack,
   restoreProfileState,
   resolveSyncProfile,
   storeActiveProfileState,
+  setClipRangeForTrack,
   summarizeListeningHistory,
   summarizeListeningStats,
   tracksForActiveProfile,
@@ -24,9 +30,11 @@ import {
   updatePlaylistRemoteSongIDs,
 } from "../ui/core.js";
 import metadata from "../metadata.cjs";
+import serverDownload from "../server-download.cjs";
 import updaterFeed from "../updater-feed.cjs";
 
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = updaterFeed;
+const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload } = serverDownload;
 
 test("keeps contextual search and sorting in the persistent top bar", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
@@ -70,6 +78,29 @@ test("keeps contextual search and sorting in the persistent top bar", () => {
   assert.match(mainSource, /configured server URL is not serving this Resonance API route/);
 });
 
+test("renders every Windows select through the themed custom dropdown", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
+  const customControls = htmlSource.match(/<div\b[^>]*\bdata-custom-select\b[^>]*>/gi) || [];
+
+  assert.doesNotMatch(htmlSource, /<select\b/i);
+  assert.equal(customControls.length, 5);
+  assert.match(appSource, /function initializeCustomSelects\(\)[\s\S]+querySelectorAll\("\[data-custom-select\]"\)/);
+  assert.match(appSource, /function setCustomSelectOptions\(/);
+  assert.match(appSource, /role\", \"listbox/);
+  assert.match(appSource, /role\", \"option/);
+  assert.match(appSource, /root\.dispatchEvent\(new Event\("change"/);
+  assert.match(appSource, /const openDialog = controller\.root\.closest\("dialog\[open\]"\)[\s\S]+openDialog\.append\(controller\.menu\)/);
+  assert.match(appSource, /controller\.menu\.parentElement !== controller\.root[\s\S]+controller\.root\.append\(controller\.menu\)/);
+  assert.match(appSource, /!controller\.root\.contains\(event\.target\) && !controller\.menu\.contains\(event\.target\)/);
+  assert.doesNotMatch(appSource, /MutationObserver/);
+  assert.match(styleSource, /\.resonance-select-menu\s*\{/);
+  assert.match(styleSource, /\.resonance-select-menu\.dialog-contained\s*\{\s*position: absolute/);
+  assert.match(styleSource, /\.resonance-select-option\.selected\s*\{/);
+  assert.doesNotMatch(styleSource, /\.resonance-select-native\s*\{/);
+});
+
 test("avoids macOS Keychain access while persisting source Preview credentials locally", () => {
   const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
   assert.doesNotMatch(mainSource, /\{ app, BrowserWindow, dialog, ipcMain, safeStorage, shell \}/);
@@ -103,24 +134,46 @@ test("switches to or creates server profiles and falls back to Default", () => {
   assert.match(appSource, /#createProfileFromSwitcher"\)\.onclick[\s\S]+api\.createProfile\([\s\S]+finishProfileSelection\(profile\)/);
   assert.match(appSource, /resolveSyncProfile\(state\.syncProfiles, query, response\.default_profile_id\)/);
   assert.match(appSource, /fellBackToDefault[\s\S]+Switched to/);
+  assert.match(appSource, /function matchingSyncProfile\(query\)/);
+  assert.match(appSource, /function updateProfileSwitchActions\(\{ busy = false \} = \{\}\)/);
+  assert.match(appSource, /createProfileFromSwitcher"\)\.disabled = busy \|\| !connected \|\| !query \|\| Boolean\(current\)/);
+  assert.match(appSource, /confirmProfileSwitch"\)\.disabled = busy \|\| !connected \|\| !query \|\| current\?\.id === activeProfileID\(\)/);
   assert.match(appSource, /track\.id === currentID \? toggle\(\) : play\(track, tracks, \{ playlistID: null \}\)/);
   assert.match(appSource, /function updateProfileControl\(\)[\s\S]+control\.hidden = false/);
-  assert.match(appSource, /function renderSettings\(\)[\s\S]+Under construction/);
+  assert.match(appSource, /function renderSettings\(\)[\s\S]+id="settingsServer"[\s\S]+id="settingsHistory"[\s\S]+id="settingsStorage"[\s\S]+id="settingsCheckUpdates"/);
+  assert.doesNotMatch(appSource, /Under construction/);
   assert.match(appSource, /#profileSettings"\)\.onclick = \(\) =>[\s\S]+navigate\("settings"\)/);
   assert.doesNotMatch(appSource, /#profileSettings"\)\.onclick = [\s\S]{0,160}openServerSettings/);
-  assert.match(styleSource, /\.settings-placeholder-card\s*\{/);
+  assert.match(styleSource, /\.settings-grid\s*\{/);
 });
 
-test("opens a profile-menu clip editor scaffold without claiming export support", () => {
+test("stores profile-menu clip ranges as playback metadata without exporting files", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const preloadSource = readFileSync(new URL("../preload.cjs", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
-  assert.match(htmlSource, /id="profileClipEditor"[\s\S]+Clip Editor[\s\S]+Preview/);
+  assert.match(htmlSource, /id="profileClipEditor"[\s\S]+Clip Editor/);
   assert.match(htmlSource, /id="clipEditorDialog"[\s\S]+id="clipEditorTrack"[\s\S]+id="clipEditorStartInput"[^>]+type="text"[\s\S]+id="clipEditorEndInput"[^>]+type="text"/);
   assert.match(htmlSource, /id="clipEditorStartHandle"[^>]+role="slider"[\s\S]+id="clipEditorEndHandle"[^>]+role="slider"/);
   assert.doesNotMatch(htmlSource, /id="clipEditor(?:Start|End)" type="range"/);
-  assert.match(htmlSource, /id="exportClip"[^>]+disabled/);
+  assert.match(htmlSource, /id="saveClipRange"[^>]+disabled/);
+  assert.match(htmlSource, /id="previewClipRange"[^>]+aria-pressed="false"[^>]+disabled[\s\S]+>Preview</);
+  assert.match(htmlSource, /id="clipEditorPreview"[^>]+preload="metadata"/);
+  assert.match(htmlSource, /id="clearClipRange"[^>]*>Use full song/);
+  assert.match(htmlSource, /id="clipEditorStatus"[^>]+role="status"/);
   assert.match(appSource, /function openClipEditor\(\)[\s\S]+clipEditorDialog[\s\S]+showModal\(\)/);
+  assert.match(appSource, /async function saveClipRange\(\)[\s\S]+setClipRangeForTrack\(state, track/);
+  assert.match(appSource, /#saveClipRange"\)\.onclick = saveClipRange/);
+  assert.match(appSource, /function finishClipPlaybackIfNeeded\(\)/);
+  assert.match(appSource, /clippedPlaybackPosition\(audio\.duration/);
+  assert.match(appSource, /async function toggleClipRangePreview\(\)[\s\S]+clipEditorPreviewAudio\.currentTime = clipEditorStartSeconds[\s\S]+clipEditorPreviewAudio\.play\(\)/);
+  assert.match(appSource, /function waitForClipRangePreviewMetadata\(\)[\s\S]+loadedmetadata/);
+  assert.match(appSource, /async function stopClipRangePreview\([\s\S]+resumePlaybackAfterClipRangePreview/);
+  assert.match(appSource, /clipEditorPreviewAudio\.ontimeupdate = \(\) =>[\s\S]+clipEditorPreviewEndSeconds[\s\S]+stopClipRangePreview/);
+  assert.match(appSource, /#previewClipRange"\)\.onclick = toggleClipRangePreview/);
+  assert.doesNotMatch(preloadSource, /exportClip|clip:export/);
+  assert.doesNotMatch(mainSource, /clip:export|Export Resonance clip/);
   assert.match(appSource, /#profileClipEditor"\)\.onclick = openClipEditor/);
   assert.match(appSource, /function updateClipEditorRange\(\)/);
   assert.match(appSource, /function parseClipEditorTime\(value\)/);
@@ -138,6 +191,37 @@ test("opens a profile-menu clip editor scaffold without claiming export support"
   assert.match(styleSource, /\.clip-editor-dialog\s*\{/);
   assert.match(styleSource, /\.clip-editor-waveform\s*\{/);
   assert.match(styleSource, /\.clip-editor-wave-bars i\.selected\s*\{/);
+  assert.match(styleSource, /\.clip-editor-preview\.playing\s*\{/);
+});
+
+test("keeps reviewed Windows empty, selection, filter, and metadata states truthful", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+
+  assert.match(appSource, /data-search-scope="\$\{value\}"/);
+  assert.match(appSource, /\["all", "All"\][\s\S]+\["device", "On Device"\][\s\S]+\["available", "Not Downloaded"\]/);
+  assert.match(appSource, /const selectLabel = serverSelecting \? "Cancel song selection"/);
+  assert.match(appSource, /id="syncAll"[\s\S]+serverSelecting && !selectedRemoteIDs\.size \? "disabled"/);
+  assert.match(appSource, /event\.key === "Escape"[\s\S]+serverSelecting = false;[\s\S]+selectedRemoteIDs\.clear\(\)/);
+  assert.match(appSource, /const resultSummary = filtered \? `Showing \$\{filteredCount\} of \$\{serverCatalog\.length\} tracks` : "All tracks"/);
+  assert.match(appSource, /const showConnectionDetail = !connected \|\| !serverConnectionText\.startsWith\("Connected •"\)/);
+
+  assert.match(appSource, /const emptyLibraryTitle = hasLibraryFilter \? "No matching songs"[\s\S]+"This playlist is empty"/);
+  assert.match(appSource, /id="playCollection" \$\{tracks\.length \? "" : "disabled"\}/);
+  assert.match(appSource, /tracks\.length \? `<button[^`]+data-hero-next>Next Track<\/button>` : ""/);
+  assert.match(appSource, /id="heroShuffle"[\s\S]+\$\{tracks\.length \? "" : "disabled"\}/);
+  assert.match(appSource, /aria-label="Library filter"[\s\S]+aria-pressed="\$\{libraryFilter === "all"\}"/);
+
+  assert.match(appSource, /storageScope === "downloads" \? "No server downloads yet"/);
+  assert.match(appSource, /id="storageEdit" \$\{!storageEditing && !tracks\.length \? "disabled"/);
+  assert.match(appSource, /aria-label="\$\{selectedStorageIDs\.has\(track\.id\) \? "Deselect" : "Select"\}/);
+  assert.match(appSource, /aria-label="Storage scope"[\s\S]+aria-pressed="\$\{storageScope === "songs"\}"/);
+
+  assert.match(appSource, /function displayAlbum\(track\)[\s\S]+"Unknown Album"/);
+  assert.match(mainSource, /album: details\.album \|\| "Unknown Album"/);
+  assert.match(htmlSource, /id="createPlaylist"[^>]+disabled/);
+  assert.match(appSource, /#playlistName"\)\.oninput[\s\S]+createPlaylist"\)\.disabled = !/);
 });
 
 test("resolves a missing requested profile to the server-declared Default", () => {
@@ -206,20 +290,67 @@ test("uses the macOS-inspired ambient, artwork, and action gradients", () => {
   assert.match(styleSource, /\.playerbar\s*\{[\s\S]*?linear-gradient\(180deg, #080910f7, #040509fc\)/);
 });
 
-test("keeps playlist row controls and supports animated drag reordering", () => {
+test("opens a synchronized full-screen Now Playing viewer from the mini-player", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
+
+  assert.match(htmlSource, /id="openNowPlaying"[\s\S]+id="nowPlayingDialog" class="full-player-dialog"/);
+  assert.match(htmlSource, /id="fullPlayerBackdrop"[\s\S]+id="fullPlayerArtwork"[\s\S]+id="fullPlayerTitle"[\s\S]+id="fullPlayerArtist"[\s\S]+id="fullPlayerAlbum"/);
+  assert.match(htmlSource, /id="fullPlayerSeek"[\s\S]+id="fullPlayerShuffle"[\s\S]+data-action="previous"[\s\S]+class="full-player-play"[^>]+data-action="toggle"[\s\S]+data-action="next"[\s\S]+id="fullPlayerRepeat"/);
+  assert.match(htmlSource, /id="fullPlayerSpeed"[\s\S]+id="fullPlayerVolume"[\s\S]+id="fullPlayerQueueToggle"[\s\S]+id="fullPlayerQueuePanel"/);
+  assert.match(htmlSource, /id="fullPlayerQueueTitle">Queue[\s\S]+id="fullPlayerQueueCount"[\s\S]+data-full-player-queue-tab="up-next">Up next[\s\S]+data-full-player-queue-tab="history">History/);
+  assert.match(appSource, /function openNowPlaying\(\)[\s\S]+renderFullPlayer\(\)[\s\S]+dialog\.showModal\(\)/);
+  assert.match(appSource, /function renderFullPlayer\(\)[\s\S]+fullPlayerBackdrop[\s\S]+fullPlayerFavorite[\s\S]+renderFullPlayerQueue\(\)/);
+  assert.match(appSource, /const backdropNode = \$\("#fullPlayerBackdrop"\)[\s\S]+backdropNode\.innerHTML = track\.artwork/);
+  assert.doesNotMatch(appSource, /fullPlayerBackdrop"\)\.style\.backgroundImage/);
+  assert.match(appSource, /function updateFullPlayerProgress\(\)/);
+  assert.match(appSource, /function fullPlayerQueueTracks\(\)/);
+  assert.match(appSource, /function fullPlayerHistoryTracks\(\)[\s\S]+\[\.\.\.history\]\.reverse\(\)/);
+  assert.match(appSource, /fullPlayerQueueTab === "history" \? fullPlayerHistoryTracks\(\) : fullPlayerQueueTracks\(\)/);
+  assert.match(appSource, /data-full-player-queue/);
+  assert.match(appSource, /#fullPlayerSeek"\)\.oninput[\s\S]+audio\.currentTime/);
+  assert.match(appSource, /#fullPlayerVolume"\)\.oninput[\s\S]+#volume/);
+  assert.match(appSource, /#fullPlayerSpeed"\)\.onchange[\s\S]+#speed/);
+  assert.match(appSource, /#fullPlayerMore"\)\.onclick[\s\S]+openTrackContextMenu/);
+  assert.match(appSource, /audio\.ontimeupdate = \(\) => \{[\s\S]+updateFullPlayerProgress\(\)/);
+  assert.match(styleSource, /\.full-player-dialog\s*\{[\s\S]*?position: fixed;[\s\S]*?inset: 0;[\s\S]*?width: auto;[\s\S]*?height: auto;/);
+  assert.match(styleSource, /\.full-player-shell\s*\{[\s\S]*?position: absolute;[\s\S]*?inset: 0;[\s\S]*?min-width: 0;[\s\S]*?min-height: 0;/);
+  assert.match(appSource, /const FULL_PLAYER_TRANSITION_MS = 380/);
+  assert.match(appSource, /function closeNowPlaying\(\)[\s\S]*?classList\.add\("closing"\)[\s\S]*?setTimeout\(finishNowPlayingClose, FULL_PLAYER_TRANSITION_MS \+ 80\)/);
+  assert.match(appSource, /animationName === "full-player-slide-out"[\s\S]*?finishNowPlayingClose\(\)/);
+  assert.match(styleSource, /\.full-player-dialog\[open\]\s*\{[\s\S]*?full-player-slide-in 380ms/);
+  assert.match(styleSource, /\.full-player-dialog\[open\]\.closing\s*\{[\s\S]*?full-player-slide-out 380ms/);
+  assert.match(styleSource, /@keyframes full-player-slide-in\s*\{[\s\S]*?translateY\(100%\)[\s\S]*?translateY\(0\)/);
+  assert.match(styleSource, /@keyframes full-player-slide-out\s*\{[\s\S]*?translateY\(0\)[\s\S]*?translateY\(100%\)/);
+  assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.full-player-dialog\[open\],[\s\S]*?\.full-player-dialog\[open\]\.closing \{ animation: none; \}/);
+  assert.match(styleSource, /\.full-player-backdrop\s*\{[\s\S]*?z-index: 0[\s\S]*?filter: blur\(64px\) saturate\(1\.18\)[\s\S]*?opacity: \.88/);
+  assert.match(styleSource, /\.full-player-backdrop img\s*\{[\s\S]*?object-fit: cover/);
+  assert.match(styleSource, /\.full-player-shade\s*\{[\s\S]*?z-index: 1[\s\S]*?linear-gradient\(180deg, #00000075 0%, #07071194 52%, #000000c2 100%\)/);
+  assert.match(styleSource, /\.full-player-layout\s*\{[\s\S]*?z-index: 2/);
+  assert.match(styleSource, /\.full-player-layout\s*\{[\s\S]+grid-template-columns/);
+  assert.match(styleSource, /\.full-player-artwork\s*\{[\s\S]+aspect-ratio: 1/);
+  assert.match(styleSource, /\.full-player-transport \.full-player-play\s*\{/);
+  assert.match(styleSource, /\.full-player-queue-panel\s*\{/);
+  assert.match(styleSource, /\.full-player-queue-tabs\s*\{[\s\S]+grid-template-columns: 1fr 1fr/);
+  assert.match(styleSource, /\.full-player-queue-tabs button\.active::after\s*\{[\s\S]+background: #9b7aff/);
+});
+
+test("hides inline playlist row buttons while preserving drag and context controls", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   assert.match(appSource, /data-playlist-draggable="true"/);
   assert.match(appSource, /trackTable\.ondrop\s*=\s*async/);
   assert.match(appSource, /row\.ondragstart\s*=/);
   assert.match(appSource, /drag-preview-up/);
-  assert.match(appSource, /data-reorder-track="-1"/);
-  assert.match(appSource, /data-reorder-track="1"/);
-  assert.match(appSource, /data-remove-playlist-track/);
+  assert.doesNotMatch(appSource, /data-reorder-track/);
+  assert.doesNotMatch(appSource, /data-remove-playlist-track/);
+  assert.doesNotMatch(appSource, /playlist-track-actions/);
   assert.match(appSource, /row\.oncontextmenu\s*=\s*\(event\) => openTrackContextMenu/);
   assert.match(appSource, /function renderContextMenu\(\{ title, subtitle, actions \}\)/);
   assert.match(appSource, /function renderTrackPlaylistContextMenu\(track, options\)/);
   assert.match(appSource, /label: "Add to playlist"/);
+  assert.match(appSource, /label: `Remove from \$\{activePlaylist\.name\}`,[\s\S]+danger: true/);
   assert.match(appSource, /activePlaybackPlaylistID === activePlaylist\.id/);
   assert.match(appSource, /button\.oncontextmenu = \(event\) => openTrackContextMenu/);
   assert.match(appSource, /data-storage-track/);
@@ -233,7 +364,29 @@ test("keeps playlist row controls and supports animated drag reordering", () => 
   assert.match(styleSource, /\.track-context-menu\s*\{/);
   assert.match(styleSource, /\.track-context-menu \.context-danger/);
   assert.match(styleSource, /\.context-action-icon svg/);
-  assert.match(styleSource, /@keyframes context-menu-in/);
+});
+
+test("uses the playlist dropdown treatment across app popup menus", () => {
+  const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
+  const shuffleStyleSource = readFileSync(new URL("../ui/shuffle-icon.css", import.meta.url), "utf8");
+  assert.match(styleSource, /--menu-surface: #201f29/);
+  assert.match(styleSource, /--menu-border: #5f5c69/);
+  assert.match(styleSource, /--menu-shadow: 0 22px 55px #000b/);
+  for (const selector of ["profile-menu", "search-sort-menu", "playlist-menu", "track-context-menu", "storage-import-menu"]) {
+    assert.match(styleSource, new RegExp(`\\.${selector}\\s*\\{[\\s\\S]+?var\\(--menu-(?:surface|border|shadow)\\)`));
+  }
+  assert.match(styleSource, /\.resonance-select-menu\s*\{[\s\S]+background: var\(--menu-surface\)[\s\S]+box-shadow: var\(--menu-shadow\)/);
+  assert.match(styleSource, /\.resonance-select-option\.selected\s*\{[\s\S]+background: var\(--accent-soft\)[\s\S]+color: #b6a3ff/);
+  assert.match(styleSource, /\.playlist-menu button:focus-visible[\s\S]+background: var\(--menu-hover\)/);
+  assert.match(styleSource, /\.storage-import-option:focus-visible[\s\S]+background: var\(--menu-hover\)/);
+  assert.match(styleSource, /\.playlist-menu,\s*\.track-context-menu\s*\{[\s\S]+gap: 2px[\s\S]+padding: 7px[\s\S]+border-radius: 12px[\s\S]+background: var\(--menu-surface\)/);
+  assert.match(styleSource, /\.playlist-menu button,\s*\.track-context-menu button\s*\{[\s\S]+padding: 8px 9px[\s\S]+border-radius: 7px[\s\S]+font-size: 14px[\s\S]+font-weight: 450/);
+  assert.match(styleSource, /\.track-context-menu\s*\{[\s\S]+width: max-content[\s\S]+min-width: 164px[\s\S]+max-width: min\(246px/);
+  assert.match(styleSource, /\.context-action-icon\s*\{\s*display: none/);
+  assert.match(styleSource, /\.context-action-label\s*\{[\s\S]+?width: 100%[\s\S]+?text-align: left/);
+  assert.match(styleSource, /\.playlist-menu \.danger-item,\s*\.track-context-menu \.context-danger\s*\{\s*color: #ff9ba3/);
+  assert.match(styleSource, /\.context-divider\s*\{\s*display: none/);
+  assert.doesNotMatch(shuffleStyleSource, /\.track-context-menu/);
 });
 
 test("ports playback reliability, recovery notices, and keyboard operation into the current UI", () => {
@@ -243,10 +396,13 @@ test("ports playback reliability, recovery notices, and keyboard operation into 
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   assert.match(appSource, /function activePlaybackTracks\(\)/);
   assert.match(appSource, /state\.playbackQueueIDs = \[\.\.\.activePlaybackQueueIDs\]/);
-  assert.match(appSource, /function previous\(\)[\s\S]+audio\.currentTime > 3[\s\S]+recordHistory: false/);
-  assert.match(appSource, /pendingRestorePosition[\s\S]+audio\.currentTime = Math\.min/);
+  assert.match(appSource, /function previous\(\)[\s\S]+audio\.currentTime > start \+ 3[\s\S]+recordHistory: false/);
+  assert.match(appSource, /pendingRestorePosition[\s\S]+audio\.currentTime = clippedPlaybackPosition\(Math\.min/);
   assert.match(appSource, /audio\.volume = normalizedVolume\(state\.volume\)/);
   assert.match(appSource, /function showNotice\(message, kind = "error"\)/);
+  assert.match(appSource, /const APP_NOTICE_LIFETIME_MS = 5000/);
+  assert.match(appSource, /function showNotice\(message, kind = "error"\)[\s\S]+clearTimeout\(appNoticeDismissTimer\)[\s\S]+setTimeout\([\s\S]+APP_NOTICE_LIFETIME_MS/);
+  assert.match(appSource, /function dismissNotice\(\)[\s\S]+clearTimeout\(appNoticeDismissTimer\)[\s\S]+notice\.hidden = true/);
   assert.match(appSource, /function friendlyIPCError\(error, fallback\)/);
   assert.match(appSource, /replace\(\/\^Error invoking remote method/);
   assert.match(appSource, /const deleted = \[\];[\s\S]+const failed = \[\];[\s\S]+The files remain in your library/);
@@ -325,9 +481,9 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /sync\.disabled = serverBacked/);
   assert.doesNotMatch(appSource, /sync\.disabled = serverBacked \|\| !canSync/);
   assert.doesNotMatch(htmlSource, /localImportSyncTitle|localImportSyncHelp|Upload after saving locally/);
-  assert.match(htmlSource, /id="chooseLocalFiles"[^>]+aria-label="Choose files"[\s\S]+<svg/);
-  assert.match(htmlSource, /id="confirmLocalImport"[^>]+aria-label="Download audio"[\s\S]+<svg/);
-  assert.doesNotMatch(htmlSource, /Choose files instead|>Import selected</);
+  assert.match(htmlSource, /Paste a link and Resonance will inspect it automatically/);
+  assert.match(htmlSource, /id="chooseLocalFiles"[\s\S]+Choose files instead/);
+  assert.match(htmlSource, /id="confirmLocalImport"[\s\S]+Import selected/);
   assert.match(htmlSource, /connect-src 'none'/);
   assert.match(appSource, /function resolveLinkImport\(\)/);
   assert.match(appSource, /const LOCAL_IMPORT_AUTO_RESOLVE_DELAY = 450/);
@@ -415,7 +571,7 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(htmlSource, /id="profileHistory"[\s\S]+Listening History/);
   assert.match(htmlSource, /id="listeningHistoryDialog"/);
   assert.match(htmlSource, /id="listeningHistoryRange"/);
-  assert.match(htmlSource, /<option value="1">Last 1 day<\/option>/);
+  assert.match(appSource, /value: "1", label: "Last 1 day"/);
   assert.match(htmlSource, /id="historyPreviousWindow"[\s\S]+id="historyNextWindow"[\s\S]+disabled/);
   assert.match(htmlSource, /<\/header>\s*<div id="listeningHistoryToolbar" class="history-content-toolbar">[\s\S]+class="history-window-controls"/);
   assert.match(htmlSource, /id="historyWindowLabel" class="history-window-label"/);
@@ -458,6 +614,8 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(mainSource, /librarySaveQueue[\s\S]+\.catch\(\(\) => \{\}\)[\s\S]+atomicWriteFile/);
   assert.match(mainSource, /window\.webContents\.send\("app:prepare-close"\)/);
   assert.match(mainSource, /ipcMain\.on\("app:close-ready"/);
+  assert.match(mainSource, /app\.on\("before-quit", \(\) => \{ applicationQuitRequested = true; \}\)/);
+  assert.match(mainSource, /if \(applicationQuitRequested\) app\.quit\(\);/);
   assert.match(appSource, /const allTimeStats = summarizeListeningStats\(state, new Date\(\)\)/);
   assert.match(appSource, /toolbar\.hidden = statsMode/);
   assert.match(appSource, /"Total Time Listened"[\s\S]+"Total Plays"[\s\S]+"Total Songs Heard"[\s\S]+"Most Popular Artist"/);
@@ -476,7 +634,9 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /class="history-y-axis"/);
   assert.doesNotMatch(appSource, /class="history-y-axis-line"/);
   assert.match(appSource, /const height = 250/);
-  assert.match(appSource, /const right = 40[\s\S]+const top = 8[\s\S]+const bottom = 8/);
+  assert.match(appSource, /const right = 40[\s\S]+const top = 8[\s\S]+const bottom = 28/);
+  assert.match(appSource, /class="history-x-axis"/);
+  assert.match(appSource, /historyDayDetailsMarkup[\s\S]+aria-label="Collapse day details"[\s\S]+<svg/);
   assert.match(appSource, /const axisMaximum = summary\.granularity === "hour" \? 60 : niceChartMaximum\(peak\)/);
   assert.match(appSource, /const yTicks = Array\.from\(\{ length: 5 \}[\s\S]+axisMaximum \* \(1 - index \/ 4\)/);
   assert.match(appSource, /Math\.min\(day\.seconds \/ 60, axisMaximum\)/);
@@ -829,6 +989,35 @@ test("preserves unsynced playlist state across profile switches", () => {
   assert.deepEqual(state.dirtyPlaylistIDs, ["offline-mix"]);
 });
 
+test("keeps clip ranges profile specific and migrates local ranges after upload", () => {
+  const track = { id: "local-track", title: "Range", duration: 120 };
+  const state = normalizeState({
+    ...createEmptyState(),
+    serverURL: "https://music.example",
+    syncProfileID: "profile-a",
+    tracks: [track],
+  });
+  assert.deepEqual(setClipRangeForTrack(state, track, 12.5, 41.25), {
+    startSeconds: 12.5,
+    endSeconds: 41.25,
+  });
+  assert.deepEqual(playbackRangeForTrack(state, track), { startSeconds: 12.5, endSeconds: 41.25 });
+  storeActiveProfileState(state);
+
+  restoreProfileState(state, "profile-b");
+  assert.equal(playbackRangeForTrack(state, track), null);
+  restoreProfileState(state, "profile-a");
+  assert.deepEqual(playbackRangeForTrack(state, track), { startSeconds: 12.5, endSeconds: 41.25 });
+
+  assert.equal(reconcileUploadedTrack(state, track.id, { id: "server-song" }, {
+    profileID: "profile-a",
+    serverURL: "https://music.example",
+  }), true);
+  assert.deepEqual(state.clipRanges["remote:server-song"], { startSeconds: 12.5, endSeconds: 41.25 });
+  assert.deepEqual(state.dirtyClipRangeKeys, ["remote:server-song"]);
+  assert.equal(state.clipRanges["local:local-track"], undefined);
+});
+
 test("guards profile transitions, authenticated downloads, persistence, and transfer memory", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
@@ -851,6 +1040,59 @@ test("guards profile transitions, authenticated downloads, persistence, and tran
   assert.match(packageJSON.scripts["package:win"], /electron-builder --dir --win --x64/);
 });
 
+test("retries individual server downloads and reports every song that still fails", async () => {
+  let transientAttempts = 0;
+  const retried = [];
+  const transientResult = await retryServerDownload(async () => {
+    transientAttempts += 1;
+    if (transientAttempts < SERVER_DOWNLOAD_ATTEMPTS) throw new Error("temporary failure");
+    return "downloaded";
+  }, {
+    pause: async () => undefined,
+    onRetry: ({ nextAttempt }) => retried.push(nextAttempt),
+  });
+  assert.equal(transientResult, "downloaded");
+  assert.equal(transientAttempts, 3);
+  assert.deepEqual(retried, [2, 3]);
+
+  let permanentAttempts = 0;
+  await assert.rejects(retryServerDownload(async () => {
+    permanentAttempts += 1;
+    throw new Error("still unavailable");
+  }, { pause: async () => undefined }), /still unavailable/);
+  assert.equal(permanentAttempts, 3);
+
+  const controller = new AbortController();
+  let cancelledAttempts = 0;
+  await assert.rejects(retryServerDownload(async () => {
+    cancelledAttempts += 1;
+    throw new Error("temporary failure");
+  }, {
+    signal: controller.signal,
+    pause: async () => undefined,
+    onRetry: () => controller.abort(new DOMException("Download cancelled", "AbortError")),
+  }), { name: "AbortError" });
+  assert.equal(cancelledAttempts, 1);
+
+  assert.equal(
+    formatServerDownloadFailureNotice([
+      { title: "Glass", artist: "Alice" },
+      { filename: "Ping.mp3" },
+    ]),
+    "2 songs failed to download after retrying: “Glass” — Alice; “Ping.mp3”.",
+  );
+
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const packageJSON = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const syncSource = mainSource.slice(mainSource.indexOf('ipcMain.handle("server:sync"'), mainSource.indexOf('ipcMain.handle("server:upload"'));
+  assert.match(syncSource, /retryServerDownload/);
+  assert.match(syncSource, /failed\.push\(\{/);
+  assert.match(syncSource, /return \{ catalog, downloaded, replacedTrackIDs, failed \}/);
+  assert.match(appSource, /showNotice\(formatServerDownloadFailureNotice\(failedDownloads\)\)/);
+  assert.ok(packageJSON.build.files.includes("server-download.cjs"));
+});
+
 test("replaces stale synced tracks instead of discarding the fresh download", () => {
   const state = normalizeState({
     ...createEmptyState(),
@@ -866,6 +1108,75 @@ test("replaces stale synced tracks instead of discarding the fresh download", ()
   assert.deepEqual(state.tracks.map((track) => track.id), ["local", "stale"]);
   assert.deepEqual(state.favorites, ["stale"]);
   assert.deepEqual(state.playlists.find((playlist) => playlist.id === "mix").trackIDs, ["stale", "local"]);
+});
+
+test("uploaded local tracks adopt server identity and preserve every client reference", () => {
+  const state = createEmptyState();
+  state.tracks = [
+    { id: "local", title: "Shared", remoteID: null, size: 42, contentSha256: "same-hash" },
+    {
+      id: "server-copy",
+      title: "Shared",
+      remoteID: "remote-song",
+      sourceServer: "https://music.unblocked.mov",
+      syncProfileID: "default",
+      size: 42,
+      contentSha256: "same-hash",
+    },
+  ];
+  state.playlists.push({
+    id: "12345678-1234-abcd-9876-abcdef123456",
+    name: "Shared mix",
+    trackIDs: ["local", "server-copy"],
+    remoteSongIDs: [],
+    isSystem: false,
+  });
+  state.favorites = ["server-copy"];
+  state.currentTrackID = "server-copy";
+  state.playbackQueueIDs = ["server-copy", "local"];
+  state.listeningHistory = [{
+    id: "history",
+    trackID: "server-copy",
+    profileID: "default",
+    startedAt: "2026-08-03T00:00:00.000Z",
+    listenedSeconds: 12,
+  }];
+
+  assert.equal(reconcileUploadedTrack(state, "local", { id: "remote-song" }, {
+    serverURL: "https://music.unblocked.mov",
+    profileID: "default",
+  }), true);
+  assert.deepEqual(state.tracks.map((track) => track.id), ["local"]);
+  assert.equal(state.tracks[0].remoteID, "remote-song");
+  assert.deepEqual(state.playlists[1].trackIDs, ["local"]);
+  assert.deepEqual(state.playlists[1].remoteSongIDs, ["remote-song"]);
+  assert.deepEqual(state.dirtyPlaylistIDs, ["12345678-1234-abcd-9876-abcdef123456"]);
+  assert.deepEqual(state.favorites, ["local"]);
+  assert.equal(state.currentTrackID, "local");
+  assert.deepEqual(state.playbackQueueIDs, ["local"]);
+  assert.equal(state.listeningHistory[0].trackID, "local");
+  assert.deepEqual(state.dirtyRemoteLikeSongIDs, ["remote-song"]);
+});
+
+test("matching cached server hashes reconcile old uploads during state normalization", () => {
+  const state = createEmptyState();
+  state.tracks = [
+    { id: "local", remoteID: null, size: 128, contentSha256: "content-hash" },
+    {
+      id: "server-copy",
+      remoteID: "remote-song",
+      sourceServer: state.serverURL,
+      syncProfileID: "default",
+      size: 128,
+      contentSha256: "content-hash",
+    },
+  ];
+  state.playlists.push({ id: "mix", name: "Mix", trackIDs: ["local"], remoteSongIDs: [], isSystem: false });
+
+  assert.equal(reconcileServerBackedTrackDuplicates(state), 1);
+  assert.deepEqual(state.tracks.map((track) => track.id), ["local"]);
+  assert.equal(state.tracks[0].remoteID, "remote-song");
+  assert.deepEqual(state.playlists[1].remoteSongIDs, ["remote-song"]);
 });
 
 test("merges dirty local playlists over the server without deleting unrelated playlists", () => {
@@ -893,6 +1204,48 @@ test("merges dirty local playlists over the server without deleting unrelated pl
   assert.deepEqual(merge.document.playlists.map((playlist) => playlist.name), ["Other device", "Windows order"]);
   assert.equal(merge.document.playlists[1].id, "12345678-1234-abcd-9876-abcdef123456");
   assert.deepEqual(merge.document.playlists[1].song_ids, ["a".repeat(24)]);
+});
+
+test("merges and applies profile clip ranges without overwriting newer local edits", () => {
+  const track = { id: "downloaded", remoteID: "song-a", duration: 180 };
+  const state = normalizeState({ ...createEmptyState(), tracks: [track] });
+  setClipRangeForTrack(state, track, 15, 45);
+
+  const merge = mergePlaylistDocument(state, {
+    revision: 4,
+    playlists: [],
+    liked_song_ids: [],
+    clip_ranges: [
+      { song_id: "song-a", start_seconds: 1, end_seconds: 2 },
+      { song_id: "song-b", start_seconds: 20, end_seconds: 40 },
+    ],
+  });
+  assert.equal(merge.needsUpload, true);
+  assert.deepEqual(merge.document.clip_ranges, [
+    { song_id: "song-a", start_seconds: 15, end_seconds: 45 },
+    { song_id: "song-b", start_seconds: 20, end_seconds: 40 },
+  ]);
+
+  applyRemotePlaylistDocument(state, {
+    revision: 5,
+    playlists: [],
+    liked_song_ids: [],
+    clip_ranges: [
+      { song_id: "song-a", start_seconds: 3, end_seconds: 9 },
+      { song_id: "song-b", start_seconds: 22, end_seconds: 44 },
+    ],
+  }, { preservingLocalClipKeys: state.dirtyClipRangeKeys });
+  assert.deepEqual(playbackRangeForTrack(state, track), { startSeconds: 15, endSeconds: 45 });
+  assert.deepEqual(state.clipRanges["remote:song-b"], { startSeconds: 22, endSeconds: 44 });
+
+  removeClipRangeForTrack(state, track);
+  const deletion = mergePlaylistDocument(state, {
+    revision: 5,
+    playlists: [],
+    liked_song_ids: [],
+    clip_ranges: [{ song_id: "song-a", start_seconds: 3, end_seconds: 9 }],
+  });
+  assert.deepEqual(deletion.document.clip_ranges, []);
 });
 
 test("applies remote ordering, preserves local-only songs, and hydrates later downloads", () => {
@@ -933,6 +1286,36 @@ test("deletions remove only the matching known server playlist", () => {
   });
   assert.equal(merge.needsUpload, true);
   assert.deepEqual(merge.document.playlists.map((playlist) => playlist.id), [retainedID]);
+});
+
+test("stale playlist responses preserve newer edits and in-flight deletions", () => {
+  const editedID = "12345678-1234-abcd-9876-abcdef123456";
+  const deletedID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const state = createEmptyState();
+  state.playlists.push(
+    { id: editedID, name: "New local name", trackIDs: [], remoteSongIDs: ["new-song"], isSystem: false },
+    { id: deletedID, name: "Delete me", trackIDs: [], remoteSongIDs: [], isSystem: false },
+  );
+  state.dirtyPlaylistIDs = [editedID];
+  state.deletedPlaylistIDs = [deletedID];
+
+  applyRemotePlaylistDocument(state, {
+    revision: 8,
+    playlists: [
+      { id: editedID, name: "Stale submitted name", song_ids: ["old-song"] },
+      { id: deletedID, name: "Delete me", song_ids: [] },
+    ],
+  }, { preservingLocalIDs: state.dirtyPlaylistIDs });
+
+  assert.equal(state.playlists.find((playlist) => playlist.id === editedID)?.name, "New local name");
+  assert.deepEqual(state.playlists.find((playlist) => playlist.id === editedID)?.remoteSongIDs, ["new-song"]);
+  assert.equal(state.playlists.some((playlist) => playlist.id === deletedID), false);
+  assert.deepEqual(state.dirtyPlaylistIDs, [editedID]);
+  assert.deepEqual(state.deletedPlaylistIDs, [deletedID]);
+
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  assert.match(appSource, /submittedPlaylistGeneration = playlistMutationGeneration/);
+  assert.match(appSource, /preservingLocalIDs:[\s\S]+state\.dirtyPlaylistIDs/);
 });
 
 test("removing a downloaded song updates remote membership while keeping unresolved songs", () => {

@@ -5,6 +5,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -30,13 +32,14 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -60,6 +63,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalFocusManager
@@ -69,6 +73,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import mov.unblocked.resonance.data.RemoteSong
@@ -128,7 +133,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Text(
-                        if (state.isConnected) "● Connected" else "● Not Connected",
+                        if (state.isConnected) "● Connected" else "● Offline",
                         color = if (state.isConnected) SuccessGreen else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 12.sp,
@@ -223,16 +228,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                 }
             }
         }
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("#", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .48f), modifier = Modifier.width(28.dp))
-                Text("Title", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .48f), modifier = Modifier.weight(1f))
-                Text("Size", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .48f))
-            }
-        }
+        item { SongListHeader() }
         if (visible.isEmpty()) {
             item {
                 Column(
@@ -317,7 +313,8 @@ private fun ServerActionBar(
     onToggleSelection: () -> Unit,
     onRefresh: () -> Unit,
 ) {
-    val enabled = !state.isDownloading && !state.isUploading
+    val enabled = !state.isDownloading && !state.isUploading &&
+        !state.isRefreshingServer && !state.isApplyingServerConnection && !state.isSyncingPlaylists
     val refreshRotation = remember { Animatable(0f) }
     LaunchedEffect(state.isRefreshingServer) {
         if (state.isRefreshingServer) {
@@ -340,7 +337,7 @@ private fun ServerActionBar(
         ServerAction(
             icon = Icons.Default.CloudDownload,
             label = "Download",
-            enabled = enabled,
+            enabled = enabled && (!selecting || state.selectedRemoteSongIds.isNotEmpty()),
             onClick = onDownload,
             modifier = Modifier.weight(1f),
         )
@@ -356,7 +353,7 @@ private fun ServerActionBar(
         ServerAction(
             icon = Icons.Default.Checklist,
             label = if (selecting) state.selectedRemoteSongIds.size.toString() else null,
-            enabled = true,
+            enabled = enabled,
             onClick = onToggleSelection,
             modifier = Modifier.width(53.dp),
         )
@@ -364,7 +361,7 @@ private fun ServerActionBar(
         ServerAction(
             icon = Icons.Default.Refresh,
             label = null,
-            enabled = enabled && !state.isRefreshingServer,
+            enabled = enabled,
             onClick = onRefresh,
             modifier = Modifier.width(53.dp),
             iconModifier = Modifier.rotate(refreshRotation.value),
@@ -420,21 +417,11 @@ private fun ActionDivider() {
 
 @Composable
 fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
-    val progress = when {
-        state.isDownloading -> state.downloadProgress
-        state.isUploading -> state.uploadProgress
-        else -> 0f
-    }.coerceIn(0f, 1f)
-    val title = when {
-        state.isDownloading -> "Downloading"
-        state.isUploading -> "Uploading"
-        else -> "Syncing Playlists"
-    }
-    val detail = when {
-        state.isDownloading -> state.downloadDetail
-        state.isUploading -> state.uploadDetail
-        else -> state.playlistSyncDetail
-    }
+    val isUploading = state.isUploading
+    val progress = (if (isUploading) state.uploadProgress else state.downloadProgress)
+        .coerceIn(0f, 1f)
+    val title = if (isUploading) "Uploading" else "Downloading"
+    val detail = if (isUploading) state.uploadDetail else state.downloadDetail
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -446,7 +433,7 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Icon(
-                if (state.isUploading) Icons.Default.CloudUpload else Icons.Default.CloudDownload,
+                if (isUploading) Icons.Default.CloudUpload else Icons.Default.CloudDownload,
                 null,
                 Modifier.size(40.dp).background(Violet.copy(alpha = .17f), CircleShape).padding(9.dp),
                 tint = Violet,
@@ -461,15 +448,9 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (!state.isSyncingPlaylists) {
-                Text("${(progress * 100).toInt()}%", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f))
-            }
+            Text("${(progress * 100).toInt()}%", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f))
         }
-        if (state.isSyncingPlaylists) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = Violet)
-        } else {
-            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(), color = Violet)
-        }
+        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(), color = Violet)
     }
 }
 
@@ -486,35 +467,98 @@ private fun ServerSongRow(
     val synced = song.id in state.downloadedRemoteSongIds
     val selected = song.id in state.selectedRemoteSongIds
     val local = state.tracks.firstOrNull { it.remoteID == song.id }
-    Row(
-        modifier = Modifier.fillMaxWidth().clickable {
-            when {
-                selecting -> actions.toggleRemoteSelection(song.id)
-                local != null -> actions.playTrack(local.id, state.tracks.map { it.id })
-                else -> actions.downloadRemoteSong(song.id)
+    val displayTitle = local?.title?.takeIf(String::isNotBlank) ?: song.title
+    val displayArtist = local?.artist?.takeIf { it.isNotBlank() && it != "Unknown Artist" } ?: song.artist
+    val displayAlbum = local?.album?.takeIf { it.isNotBlank() && it != "Server Library" } ?: song.album
+    val trailingDetail = local?.durationText ?: song.durationText ?: formatBytes(song.size)
+
+    Box(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 76.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(if (selected) Color.White.copy(alpha = .05f) else Color.Transparent)
+                .combinedClickable(
+                    onClick = {
+                        when {
+                            selecting -> actions.toggleRemoteSelection(song.id)
+                            local != null -> actions.playTrack(local.id, state.tracks.map { it.id })
+                            else -> actions.downloadRemoteSong(song.id)
+                        }
+                    },
+                    onLongClick = if (selecting) null else ({ menu = true }),
+                )
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(Modifier.width(24.dp), contentAlignment = Alignment.CenterStart) {
+                if (selecting) {
+                    Icon(
+                        if (selected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                        contentDescription = if (selected) "Selected" else "Not selected",
+                        modifier = Modifier.size(18.dp),
+                        tint = if (selected) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .42f),
+                    )
+                } else {
+                    Text(number.toString(), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f))
+                }
             }
-        }.padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(11.dp),
-    ) {
-        Text(number.toString(), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f), modifier = Modifier.width(18.dp))
-        if (selecting) {
-            Box(
-                Modifier.size(22.dp).background(if (selected) Accent else Color.White.copy(alpha = .08f), CircleShape),
-                contentAlignment = Alignment.Center,
-            ) { if (selected) Icon(Icons.Default.Check, null, Modifier.size(15.dp)) }
+            if (local != null) {
+                Artwork(
+                    state.artworkPathsByTrackId[local.id] ?: local.artworkFilename,
+                    Modifier.size(52.dp),
+                )
+            } else {
+                RemoteArtwork(song.artworkURL, state.serverUrl, Modifier.size(52.dp))
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        displayTitle,
+                        modifier = Modifier.weight(1f, fill = false),
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (synced) {
+                        Icon(
+                            Icons.Default.CheckCircle,
+                            contentDescription = "Downloaded",
+                            modifier = Modifier.size(9.dp),
+                            tint = SuccessGreen,
+                        )
+                    }
+                }
+                Text(
+                    "$displayArtist / ${song.mediaKindLabel}",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (displayAlbum.isNotBlank()) {
+                    Text(
+                        displayAlbum,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .43f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Text(
+                trailingDetail,
+                modifier = Modifier.width(44.dp),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                textAlign = TextAlign.End,
+                maxLines = 1,
+            )
         }
-        Artwork(local?.let { state.artworkPathsByTrackId[it.id] ?: it.artworkFilename }, Modifier.size(52.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(song.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(song.artist, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f), maxLines = 1)
-            Text(song.album, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .48f), maxLines = 1)
-        }
-        Text(formatBytes(song.size), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
-        Icon(if (synced) Icons.Default.CheckCircle else Icons.Default.CloudDownload, if (synced) "Downloaded" else "Download", tint = if (synced) SuccessGreen else Accent)
-        if (!selecting) {
-            Box {
-                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More") }
+        Box(Modifier.align(Alignment.CenterEnd)) {
+            if (!selecting) {
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     if (!synced) DropdownMenuItem(
                         text = { Text("Download") },
@@ -529,17 +573,40 @@ private fun ServerSongRow(
                 }
             }
         }
+        androidx.compose.material3.HorizontalDivider(
+            modifier = Modifier.align(Alignment.BottomCenter),
+            color = Color.White.copy(alpha = .10f),
+        )
     }
 }
 
+private val RemoteSong.mediaKindLabel: String
+    get() {
+        val extension = filename.substringAfterLast('.', "").lowercase()
+        return if (contentType.contains("video", ignoreCase = true) ||
+            extension in setOf("mp4", "mov", "m4v", "webm")
+        ) "Video" else "Audio"
+    }
+
 @Composable
-private fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions, dismiss: () -> Unit) {
+internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions, dismiss: () -> Unit) {
     var url by remember(state.serverUrl) { mutableStateOf(state.serverUrl) }
     var token by remember(state.serverToken) { mutableStateOf(state.serverToken) }
     var admin by remember(state.serverAdminKey) { mutableStateOf(state.serverAdminKey) }
+    var profileName by remember(state.syncProfileId, state.syncProfiles) {
+        mutableStateOf(activeSyncProfileName(state))
+    }
+    var connectRequested by remember { mutableStateOf(false) }
     val tokenFocus = remember { FocusRequester() }
     val adminFocus = remember { FocusRequester() }
+    val profileFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
+    val connecting = state.isApplyingServerConnection || state.isRefreshingServer
+
+    LaunchedEffect(connectRequested, connecting, state.isConnected) {
+        if (connectRequested && !connecting && state.isConnected) dismiss()
+    }
+
     AlertDialog(
         onDismissRequest = dismiss,
         title = { Text("Connection") },
@@ -570,6 +637,16 @@ private fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions,
                     label = { Text("Server admin key") },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                    keyboardActions = KeyboardActions(onNext = { profileFocus.requestFocus() }),
+                )
+                OutlinedTextField(
+                    profileName,
+                    { profileName = it },
+                    modifier = Modifier.focusRequester(profileFocus),
+                    label = { Text("Profile name") },
+                    supportingText = { Text("Existing names reconnect; new names are created.") },
+                    singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
                 )
@@ -577,7 +654,20 @@ private fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions,
             }
         },
         confirmButton = {
-            TextButton(onClick = { actions.saveServerConnection(url.trim(), token.trim(), admin.trim()); dismiss() }) { Text("Connect") }
+            TextButton(
+                enabled = !connecting && profileName.isNotBlank(),
+                onClick = {
+                    focusManager.clearFocus()
+                    connectRequested = true
+                    actions.saveServerConnection(url.trim(), token.trim(), admin.trim(), profileName)
+                },
+            ) {
+                if (connecting) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(7.dp))
+                }
+                Text(if (connecting) "Connecting…" else "Connect")
+            }
         },
         dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
     )

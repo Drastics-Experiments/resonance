@@ -11,6 +11,9 @@
 		A10000000000000000000003 /* MusicLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* MusicLibrary.swift */; };
 		A10000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* RootView.swift */; };
 		A10000000000000000000005 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* Assets.xcassets */; };
+		A10000000000000000000006 /* MobileLocalImportCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* MobileLocalImportCore.swift */; };
+		A10000000000000000000007 /* MobileLocalImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* MobileLocalImportService.swift */; };
+		A10000000000000000000008 /* MobileToolsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* MobileToolsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -21,6 +24,9 @@
 		A20000000000000000000005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A20000000000000000000006 /* Resonance.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Resonance.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000007 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A20000000000000000000008 /* MobileLocalImportCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileLocalImportCore.swift; sourceTree = "<group>"; };
+		A20000000000000000000009 /* MobileLocalImportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileLocalImportService.swift; sourceTree = "<group>"; };
+		A2000000000000000000000A /* MobileToolsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileToolsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -43,6 +49,9 @@
 				A20000000000000000000002 /* MusicModels.swift */,
 				A20000000000000000000003 /* MusicLibrary.swift */,
 				A20000000000000000000004 /* RootView.swift */,
+				A20000000000000000000008 /* MobileLocalImportCore.swift */,
+				A20000000000000000000009 /* MobileLocalImportService.swift */,
+				A2000000000000000000000A /* MobileToolsView.swift */,
 				A20000000000000000000005 /* Info.plist */,
 				A20000000000000000000007 /* Assets.xcassets */,
 			);
@@ -110,6 +119,9 @@
 				A10000000000000000000002 /* MusicModels.swift in Sources */,
 				A10000000000000000000003 /* MusicLibrary.swift in Sources */,
 				A10000000000000000000004 /* RootView.swift in Sources */,
+				A10000000000000000000006 /* MobileLocalImportCore.swift in Sources */,
+				A10000000000000000000007 /* MobileLocalImportService.swift in Sources */,
+				A10000000000000000000008 /* MobileToolsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

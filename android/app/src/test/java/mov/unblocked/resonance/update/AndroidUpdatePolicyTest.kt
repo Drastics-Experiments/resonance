@@ -1,0 +1,99 @@
+package mov.unblocked.resonance.update
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
+import org.junit.Test
+
+class AndroidUpdatePolicyTest {
+    @Test
+    fun newerManifestBecomesAvailableUpdate() {
+        val update = AndroidUpdatePolicy.availableUpdate(
+            rawManifest = manifest(versionCode = 7),
+            currentVersionCode = 6,
+        )
+
+        assertEquals(7L, update?.versionCode)
+        assertEquals("1.0.7", update?.versionName)
+        assertEquals(SHA256.lowercase(), update?.sha256)
+    }
+
+    @Test
+    fun installedOrOlderManifestDoesNotOfferUpdate() {
+        assertNull(AndroidUpdatePolicy.availableUpdate(manifest(versionCode = 6), 6))
+        assertNull(AndroidUpdatePolicy.availableUpdate(manifest(versionCode = 5), 6))
+    }
+
+    @Test
+    fun insecureDownloadUrlIsRejected() {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            AndroidUpdatePolicy.availableUpdate(
+                manifest(versionCode = 7, apkUrl = "http://example.com/resonance.apk"),
+                6,
+            )
+        }
+
+        assertEquals("The update download URL is not secure.", error.message)
+    }
+
+    @Test
+    fun emulatorTestCanExplicitlyAllowHttpDownload() {
+        val update = AndroidUpdatePolicy.availableUpdate(
+            rawManifest = manifest(
+                versionCode = 7,
+                apkUrl = "http://10.0.2.2:8765/Resonance-Android-1.0.7.apk",
+            ),
+            currentVersionCode = 6,
+            allowInsecureDownloadUrl = true,
+        )
+
+        assertEquals(7L, update?.versionCode)
+    }
+
+    @Test
+    fun malformedChecksumIsRejected() {
+        assertThrows(IllegalArgumentException::class.java) {
+            AndroidUpdatePolicy.availableUpdate(manifest(versionCode = 7, sha256 = "nope"), 6)
+        }
+    }
+
+    @Test
+    fun unknownFutureFieldsAreIgnored() {
+        val raw = manifest(versionCode = 7).dropLast(1) + ",\"futureField\":true}"
+
+        assertEquals(7L, AndroidUpdatePolicy.availableUpdate(raw, 6)?.versionCode)
+    }
+
+    @Test
+    fun downloadedPackageMustMatchManifestAndBeNewer() {
+        val update = requireNotNull(AndroidUpdatePolicy.availableUpdate(manifest(versionCode = 7), 6))
+
+        AndroidUpdatePolicy.requireMatchingDownloadedVersion(update, 7, "1.0.7", 6)
+        assertThrows(IllegalArgumentException::class.java) {
+            AndroidUpdatePolicy.requireMatchingDownloadedVersion(update, 8, "1.0.8", 6)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AndroidUpdatePolicy.requireMatchingDownloadedVersion(update, 7, "1.0.7", 7)
+        }
+    }
+
+    private fun manifest(
+        versionCode: Long,
+        apkUrl: String = "https://github.com/Drastics-Experiments/resonance/releases/download/v1.0.7/Resonance-Android-1.0.7.apk",
+        sha256: String = SHA256,
+    ): String = """
+        {
+          "schemaVersion": 1,
+          "versionCode": $versionCode,
+          "versionName": "1.0.7",
+          "apkUrl": "$apkUrl",
+          "sha256": "$sha256",
+          "sizeBytes": 1234,
+          "releaseNotes": "Updater support"
+        }
+    """.trimIndent()
+
+    private companion object {
+        const val SHA256 = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"
+    }
+}

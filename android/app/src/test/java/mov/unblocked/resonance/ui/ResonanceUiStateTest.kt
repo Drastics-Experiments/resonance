@@ -1,6 +1,10 @@
 package mov.unblocked.resonance.ui
 
+import mov.unblocked.resonance.data.ClipRange
 import mov.unblocked.resonance.data.RemoteSong
+import mov.unblocked.resonance.data.SyncProfile
+import mov.unblocked.resonance.data.Track
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -33,5 +37,74 @@ class ResonanceUiStateTest {
                 ),
             ).isConnected,
         )
+    }
+
+    @Test
+    fun recentlyAddedTracksAreNewestFirstAndCapped() {
+        val tracks = (1..8).map { index ->
+            Track(
+                id = "track-$index",
+                title = "Track $index",
+                relativePath = "track-$index.mp3",
+                dateAddedEpochMs = index.toLong(),
+            )
+        }
+
+        assertEquals(
+            listOf("track-8", "track-7", "track-6", "track-5", "track-4", "track-3"),
+            recentlyAddedTracks(tracks).map(Track::id),
+        )
+    }
+
+    @Test
+    fun profilePresentationUsesTheActiveSyncProfile() {
+        val state = ResonanceUiState(
+            syncProfileId = "lily",
+            syncProfiles = listOf(
+                SyncProfile(id = "default", name = "Default", isDefault = true),
+                SyncProfile(id = "lily", name = "Lily"),
+            ),
+        )
+
+        assertEquals("Lily", activeSyncProfileName(state))
+        assertEquals("L", syncProfileInitial(activeSyncProfileName(state)))
+    }
+
+    @Test
+    fun resolvesRelativeServerArtworkLikeTheIosCatalog() {
+        assertEquals(
+            "https://music.unblocked.mov/api/v1/songs/song-1/artwork",
+            resolveRemoteArtworkURL(
+                "https://music.unblocked.mov",
+                "/api/v1/songs/song-1/artwork",
+            ),
+        )
+    }
+
+    @Test
+    fun transferPopupOnlyAppearsForDownloadsAndUploads() {
+        assertFalse(shouldShowTransferPopup(ResonanceUiState(isSyncingPlaylists = true)))
+        assertTrue(shouldShowTransferPopup(ResonanceUiState(isDownloading = true)))
+        assertTrue(shouldShowTransferPopup(ResonanceUiState(isUploading = true)))
+    }
+
+    @Test
+    fun clipProgressIsRelativeToTheSavedPlaybackRange() {
+        val track = Track(
+            id = "track-1",
+            title = "Track",
+            relativePath = "track.m4a",
+            durationMs = 120_000,
+        )
+        val state = ResonanceUiState(
+            tracks = listOf(track),
+            currentTrackId = track.id,
+            positionMs = 45_000,
+            clipRangesByTrackId = mapOf(track.id to ClipRange(15_000, 75_000)),
+        )
+
+        assertEquals(15_000L, state.playbackStartMs)
+        assertEquals(60_000L, state.playbackDurationMs)
+        assertEquals(30_000L, state.playbackElapsedMs)
     }
 }
