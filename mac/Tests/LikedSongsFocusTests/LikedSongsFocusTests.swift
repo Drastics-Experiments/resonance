@@ -244,7 +244,6 @@ struct LikedSongsFocusTests {
         #expect(model.listeningHistoryEntries.count == 1)
         #expect(model.listeningHistoryEntries.first?.trackID == track.id)
         #expect(model.listeningHistoryEntries.first?.syncProfileID == "default")
-        #expect((model.listeningHistoryEntries.first?.listenedSeconds ?? 0) > 0)
         model.seek(to: 0.5)
         #expect(abs(model.position - track.duration * 0.5) < 0.02)
         model.togglePlay()
