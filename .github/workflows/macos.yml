@@ -66,6 +66,15 @@ jobs:
             [[ "$BUILD" == "$EXPECTED_BUILD" ]]
           fi
 
+      - name: Restore Swift build cache
+        id: swift-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: mac/.build
+          key: resonance-macos-swift-${{ runner.arch }}-${{ hashFiles('mac/Package.swift', 'mac/Sources/**', 'mac/Tests/**') }}
+          restore-keys: |
+            resonance-macos-swift-${{ runner.arch }}-
+
       - name: Verify Swift toolchain
         run: |
           xcodebuild -version
@@ -100,7 +109,7 @@ jobs:
         if: ${{ inputs.release_candidate }}
         uses: actions/upload-artifact@v7
         with:
-          name: release-macos
+          name: release-assets-macos
           path: |
             installers/macos/dist/Resonance-macOS.zip
             installers/macos/dist/Resonance-macOS.zip.sha256
@@ -109,3 +118,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           overwrite: true
+
+      - name: Save Swift build cache from main
+        if: ${{ github.ref == 'refs/heads/main' && steps.swift-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: mac/.build
+          key: ${{ steps.swift-cache.outputs.cache-primary-key }}

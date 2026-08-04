@@ -36,7 +36,21 @@ The installer is written to `installers/windows/dist/` and preserves Resonance's
 
 ## Releases and updates
 
-Release PRs use branches named `release/v<version>`. Run `node scripts/release-version.mjs --set <version> <build>` to synchronize every platform, then let the centralized release-candidate workflow build all four apps once. Merging a successful release PR publishes those exact artifacts through the single publish workflow; do not manually push the version tag. Installed builds continue to use the GitHub Release update feeds.
+From a clean branch containing the latest committed app updates, one command runs the complete release. It resolves the repository from its own installed path, so it can be invoked from any working directory:
+
+```bash
+/path/to/Resonance/app/scripts/release-now.mjs
+```
+
+It automatically increments the patch version and build number, creates one `release/v<version>` PR from the current commit, waits for Android, iOS, macOS, and Windows to build in parallel, merges only after the complete candidate passes, publishes the already-built artifacts, and downloads the public release for final validation. Use explicit metadata when needed:
+
+```bash
+/path/to/Resonance/app/scripts/release-now.mjs --version 1.2.0 --build 20
+```
+
+Use `--dry-run` for a read-only preflight. If a network interruption or fixable Actions failure stops the command, rerun it from the existing release branch; add `--retry-failed` to rerun failed jobs. The command refuses a dirty tree and never stages arbitrary app changes.
+
+Release PRs remain the publication approval boundary. Trusted `main` builds warm the Gradle, Swift, Xcode DerivedData, pnpm, and Electron packaging caches; release PRs restore those caches read-only. The candidate validator checks the complete asset set and provenance, while the publisher downloads the four validated platform artifacts directly instead of rebuilding or re-uploading a combined binary bundle. Do not manually push the version tag. Installed builds continue to use the GitHub Release update feeds.
 
 ## macOS development
 

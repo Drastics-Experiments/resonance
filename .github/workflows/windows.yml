@@ -79,6 +79,17 @@ jobs:
           cache: pnpm
           cache-dependency-path: windows/pnpm-lock.yaml
 
+      - name: Restore Electron packaging cache
+        id: electron-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~\AppData\Local\electron\Cache
+            ~\AppData\Local\electron-builder\Cache
+          key: resonance-windows-electron-${{ hashFiles('windows/pnpm-lock.yaml') }}
+          restore-keys: |
+            resonance-windows-electron-
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -113,7 +124,7 @@ jobs:
         if: ${{ inputs.release_candidate }}
         uses: actions/upload-artifact@v7
         with:
-          name: release-windows
+          name: release-assets-windows
           path: |
             installers/windows/dist/Resonance-Setup-${{ inputs.version }}.exe
             installers/windows/dist/Resonance-Setup-${{ inputs.version }}.exe.blockmap
@@ -121,3 +132,12 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           overwrite: true
+
+      - name: Save Electron packaging cache from main
+        if: ${{ github.ref == 'refs/heads/main' && steps.electron-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~\AppData\Local\electron\Cache
+            ~\AppData\Local\electron-builder\Cache
+          key: ${{ steps.electron-cache.outputs.cache-primary-key }}
