@@ -3,6 +3,7 @@ import {
   createEmptyState,
   filterPlaylists,
   filterTracks,
+  formatServerDownloadFailureNotice,
   formatHistoryWindowLabel,
   formatTime,
   mergePlaylistDocument,
@@ -11,9 +12,13 @@ import {
   niceChartMaximum,
   normalizedVolume,
   normalizeState,
+  playbackRangeForTrack,
+  reconcileUploadedTrack,
+  removeClipRangeForTrack,
   resolveSyncProfile,
   restoreProfileState,
   storeActiveProfileState,
+  setClipRangeForTrack,
   summarizeListeningHistory,
   summarizeListeningStats,
   trackBelongsToActiveProfile,
@@ -24,6 +29,7 @@ import {
 
 const api = window.likedSongs;
 const audio = document.querySelector("#audio");
+const clipEditorPreviewAudio = document.querySelector("#clipEditorPreview");
 const localImportPreviewAudio = document.querySelector("#localImportPreview");
 const content = document.querySelector("#content");
 let state = createEmptyState();
@@ -40,6 +46,7 @@ let selectedRemoteIDs = new Set();
 let shuffle = false;
 let repeat = false;
 let history = [];
+let fullPlayerQueueTab = "up-next";
 let activePlaybackQueueIDs = [];
 let activePlaybackPlaylistID = null;
 let pendingRestorePosition = null;
@@ -58,6 +65,10 @@ let listeningHistoryMode = "overall";
 let listeningHistoryWindowOffset = 0;
 let selectedListeningHistoryDayKey = null;
 let listeningHistorySongsExpanded = false;
+let appNoticeDismissTimer = null;
+const APP_NOTICE_LIFETIME_MS = 5000;
+let nowPlayingCloseTimer = null;
+const FULL_PLAYER_TRANSITION_MS = 380;
 let navigationHistory = [{ section: "library", playlistID: null }];
 let navigationIndex = 0;
 let pendingPlaylistTrackID = null;
@@ -68,7 +79,9 @@ let recentlyAddedScrollLeft = 0;
 let playlistSyncInFlight = null;
 let playlistSyncPending = false;
 let playlistSyncTimer = null;
+let playlistMutationGeneration = 0;
 let likesMutationGeneration = 0;
+let clipRangeMutationGeneration = 0;
 let storageScope = "songs";
 let storageQuery = "";
 let storageSort = "title";
@@ -107,6 +120,11 @@ let localImportBatchContext = null;
 const LOCAL_IMPORT_AUTO_RESOLVE_DELAY = 450;
 let clipEditorStartSeconds = 0;
 let clipEditorEndSeconds = 30;
+let clipEditorPreviewEndSeconds = 0;
+let clipEditorPreviewInterruptedPlayback = false;
+let clipEditorPreviewLoading = false;
+let clipEditorPreviewRequest = 0;
+let clipBoundaryTrackID = null;
 let profileGeneration = 0;
 const activeProfileID = () => state.syncProfileID || "default";
 
@@ -138,6 +156,278 @@ const contextDownloadIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d
 const contextOpenIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>`;
 const contextBackIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m5-5-5 5 5 5"/></svg>`;
 const escapeHTML = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
+const playbackSpeedOptions = [
+  { value: "0.75", label: "0.75×" },
+  { value: "1", label: "1×" },
+  { value: "1.25", label: "1.25×" },
+  { value: "1.5", label: "1.5×" },
+  { value: "2", label: "2×" },
+];
+const customSelectInitialOptions = {
+  speed: playbackSpeedOptions,
+  fullPlayerSpeed: playbackSpeedOptions,
+  listeningHistoryRange: [
+    { value: "1", label: "Last 1 day" },
+    { value: "7", label: "Last 7 days" },
+    { value: "30", label: "Last 30 days" },
+    { value: "90", label: "Last 90 days" },
+  ],
+};
+const customSelectControllers = new Map();
+
+function positionCustomSelect(controller) {
+  if (!controller?.root.classList.contains("open")) return;
+  const { root, trigger, menu } = controller;
+  const rectangle = trigger.getBoundingClientRect();
+  const openDialog = root.closest("dialog[open]");
+  const minimumWidth = Number(root.dataset.customSelectWidth) || 0;
+  const width = Math.min(window.innerWidth - 16, Math.max(rectangle.width, minimumWidth));
+  menu.style.width = `${width}px`;
+  const measuredHeight = Math.min(menu.scrollHeight, Math.max(120, window.innerHeight - 20));
+  const roomBelow = window.innerHeight - rectangle.bottom - 8;
+  const roomAbove = rectangle.top - 8;
+  const openAbove = roomBelow < Math.min(measuredHeight, 190) && roomAbove > roomBelow;
+  menu.classList.toggle("opens-up", openAbove);
+  menu.classList.toggle("dialog-contained", Boolean(openDialog));
+  if (openDialog) {
+    const dialogRectangle = openDialog.getBoundingClientRect();
+    const left = Math.max(dialogRectangle.left + 8, Math.min(dialogRectangle.right - width - 8, rectangle.left));
+    const top = Math.max(dialogRectangle.top + 8, openAbove
+      ? rectangle.top - measuredHeight - 6
+      : Math.min(dialogRectangle.bottom - measuredHeight - 8, rectangle.bottom + 6));
+    menu.style.left = `${left - dialogRectangle.left}px`;
+    menu.style.top = `${top - dialogRectangle.top}px`;
+    return;
+  }
+  menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, rectangle.left))}px`;
+  menu.style.top = `${Math.max(8, openAbove
+    ? rectangle.top - measuredHeight - 6
+    : Math.min(window.innerHeight - measuredHeight - 8, rectangle.bottom + 6))}px`;
+}
+
+function closeCustomSelect(control, { restoreFocus = false } = {}) {
+  const controller = customSelectControllers.get(control);
+  if (!controller || !controller.root.classList.contains("open")) return;
+  controller.root.classList.remove("open");
+  controller.trigger.setAttribute("aria-expanded", "false");
+  controller.menu.hidden = true;
+  controller.menu.classList.remove("dialog-contained");
+  if (controller.menu.parentElement !== controller.root) controller.root.append(controller.menu);
+  if (restoreFocus) controller.trigger.focus();
+}
+
+function closeAllCustomSelects(except = null) {
+  customSelectControllers.forEach((controller, control) => {
+    if (control !== except) closeCustomSelect(control);
+  });
+}
+
+function customSelectButtons(controller) {
+  return [...controller.menu.querySelectorAll("[role=option]:not(:disabled)")];
+}
+
+function focusCustomSelectOption(controller, requestedIndex) {
+  const buttons = customSelectButtons(controller);
+  if (!buttons.length) return;
+  const currentIndex = buttons.indexOf(document.activeElement);
+  const selectedIndex = buttons.findIndex((button) => button.getAttribute("aria-selected") === "true");
+  const baseIndex = currentIndex >= 0 ? currentIndex : Math.max(0, selectedIndex);
+  const nextIndex = requestedIndex === "first"
+    ? 0
+    : requestedIndex === "last"
+      ? buttons.length - 1
+      : (baseIndex + requestedIndex + buttons.length) % buttons.length;
+  buttons[nextIndex].focus();
+}
+
+function refreshCustomSelect(control) {
+  const controller = customSelectControllers.get(control);
+  if (!controller) return;
+  const selectedOption = controller.options.find((option) => option.value === controller.currentValue) || controller.options[0];
+  if (selectedOption) controller.currentValue = selectedOption.value;
+  controller.value.textContent = selectedOption?.label || "Choose…";
+  controller.trigger.disabled = controller.disabled || !controller.options.length;
+  controller.root.classList.toggle("disabled", controller.trigger.disabled);
+  controller.root.dataset.value = controller.currentValue;
+  controller.menu.replaceChildren(...controller.options.map((option) => {
+    const button = document.createElement("button");
+    const selected = option === selectedOption;
+    button.type = "button";
+    button.className = "resonance-select-option";
+    button.dataset.value = option.value;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(selected));
+    button.disabled = option.disabled;
+    if (selected) button.classList.add("selected");
+    const label = document.createElement("span");
+    label.textContent = option.label;
+    const check = document.createElement("svg");
+    check.setAttribute("viewBox", "0 0 16 16");
+    check.setAttribute("aria-hidden", "true");
+    check.innerHTML = '<path d="m3.5 8.5 3 3 6-7"/>';
+    button.append(label, check);
+    return button;
+  }));
+  if (controller.root.classList.contains("open")) requestAnimationFrame(() => positionCustomSelect(controller));
+}
+
+function setCustomSelectOptions(control, options, selectedValue = control?.value) {
+  const controller = customSelectControllers.get(control);
+  if (!controller) return;
+  controller.options = (Array.isArray(options) ? options : []).map((option) => ({
+    value: String(option?.value ?? ""),
+    label: String(option?.label ?? option?.value ?? ""),
+    disabled: Boolean(option?.disabled),
+  }));
+  const requestedValue = String(selectedValue ?? "");
+  controller.currentValue = controller.options.some((option) => option.value === requestedValue)
+    ? requestedValue
+    : controller.options[0]?.value || "";
+  refreshCustomSelect(control);
+}
+
+function setCustomSelectValue(control, value) {
+  if (!control) return;
+  control.value = String(value ?? "");
+}
+
+function openCustomSelect(control, focusDirection = 0) {
+  const controller = customSelectControllers.get(control);
+  if (!controller || controller.trigger.disabled) return;
+  closeAllCustomSelects(control);
+  const openDialog = controller.root.closest("dialog[open]");
+  if (openDialog) openDialog.append(controller.menu);
+  controller.root.classList.add("open");
+  controller.trigger.setAttribute("aria-expanded", "true");
+  controller.menu.hidden = false;
+  positionCustomSelect(controller);
+  if (focusDirection) requestAnimationFrame(() => focusCustomSelectOption(controller, focusDirection));
+}
+
+function initializeCustomSelect(root) {
+  if (!root || customSelectControllers.has(root)) return;
+  const trigger = document.createElement("button");
+  const value = document.createElement("span");
+  const chevron = document.createElement("svg");
+  const menu = document.createElement("div");
+  const controlName = root.id || `resonanceSelect${customSelectControllers.size + 1}`;
+  const accessibleLabel = root.getAttribute("aria-label") || "Choose an option";
+  const labelledBy = root.getAttribute("aria-labelledby");
+  root.classList.add("resonance-select");
+  trigger.id = `${controlName}Button`;
+  trigger.type = "button";
+  trigger.className = "resonance-select-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.setAttribute("aria-controls", `${controlName}Menu`);
+  if (labelledBy) trigger.setAttribute("aria-labelledby", labelledBy);
+  else trigger.setAttribute("aria-label", accessibleLabel);
+  value.className = "resonance-select-value";
+  chevron.classList.add("resonance-select-chevron");
+  chevron.setAttribute("viewBox", "0 0 16 16");
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.innerHTML = '<path d="m4 6 4 4 4-4"/>';
+  trigger.append(value, chevron);
+  menu.id = `${controlName}Menu`;
+  menu.className = "resonance-select-menu";
+  menu.setAttribute("role", "listbox");
+  if (labelledBy) menu.setAttribute("aria-labelledby", labelledBy);
+  else menu.setAttribute("aria-label", accessibleLabel);
+  menu.hidden = true;
+  root.removeAttribute("aria-label");
+  root.removeAttribute("aria-labelledby");
+  root.replaceChildren(trigger, menu);
+  const initialOptions = customSelectInitialOptions[controlName] || [];
+  const requestedValue = String(root.dataset.value || initialOptions[0]?.value || "");
+  const controller = {
+    root,
+    trigger,
+    value,
+    menu,
+    options: initialOptions.map((option) => ({ ...option })),
+    currentValue: requestedValue,
+    disabled: false,
+  };
+  Object.defineProperties(root, {
+    value: {
+      configurable: true,
+      get: () => controller.currentValue,
+      set: (nextValue) => {
+        const normalizedValue = String(nextValue ?? "");
+        if (controller.currentValue === normalizedValue) return;
+        controller.currentValue = normalizedValue;
+        refreshCustomSelect(root);
+      },
+    },
+    disabled: {
+      configurable: true,
+      get: () => controller.disabled,
+      set: (nextValue) => {
+        controller.disabled = Boolean(nextValue);
+        refreshCustomSelect(root);
+      },
+    },
+  });
+  customSelectControllers.set(root, controller);
+  trigger.onclick = () => {
+    if (root.classList.contains("open")) closeCustomSelect(root, { restoreFocus: true });
+    else openCustomSelect(root);
+  };
+  trigger.onkeydown = (event) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    if (!root.classList.contains("open")) openCustomSelect(root);
+    if (event.key === "ArrowDown") focusCustomSelectOption(controller, 1);
+    else if (event.key === "ArrowUp") focusCustomSelectOption(controller, -1);
+    else if (event.key === "Home") focusCustomSelectOption(controller, "first");
+    else if (event.key === "End") focusCustomSelectOption(controller, "last");
+    else focusCustomSelectOption(controller, 0);
+  };
+  menu.onclick = (event) => {
+    const option = event.target.closest("[role=option]");
+    if (!option || option.disabled) return;
+    root.value = option.dataset.value;
+    root.dispatchEvent(new Event("input", { bubbles: true }));
+    root.dispatchEvent(new Event("change", { bubbles: true }));
+    closeCustomSelect(root, { restoreFocus: true });
+  };
+  menu.onkeydown = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeCustomSelect(root, { restoreFocus: true });
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusCustomSelectOption(controller, 1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusCustomSelectOption(controller, -1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      focusCustomSelectOption(controller, "first");
+    } else if (event.key === "End") {
+      event.preventDefault();
+      focusCustomSelectOption(controller, "last");
+    } else if (event.key === "Tab") {
+      closeCustomSelect(root);
+    }
+  };
+  refreshCustomSelect(root);
+}
+
+function initializeCustomSelects() {
+  document.querySelectorAll("[data-custom-select]").forEach(initializeCustomSelect);
+  document.addEventListener("pointerdown", (event) => {
+    customSelectControllers.forEach((controller, control) => {
+      if (!controller.root.contains(event.target) && !controller.menu.contains(event.target)) closeCustomSelect(control);
+    });
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeAllCustomSelects();
+  });
+  window.addEventListener("resize", () => customSelectControllers.forEach(positionCustomSelect));
+  window.addEventListener("scroll", () => customSelectControllers.forEach(positionCustomSelect), true);
+}
+
 const currentTrack = () => state.tracks.find((track) => track.id === currentID && trackBelongsToActiveProfile(state, track)) || null;
 const playlistTracks = () => (selectedPlaylistID ? tracksForPlaylist(state, selectedPlaylistID) : tracksForActiveProfile(state))
   .filter((track) => trackBelongsToActiveProfile(state, track));
@@ -167,11 +457,16 @@ function isCurrentCollectionPlayback(tracks = playlistTracks()) {
 function showNotice(message, kind = "error") {
   const notice = $("#appNotice");
   if (!notice) return;
+  if (appNoticeDismissTimer) clearTimeout(appNoticeDismissTimer);
   $("#appNoticeText").textContent = String(message || "Something went wrong.");
   notice.dataset.kind = kind;
   notice.setAttribute("role", kind === "error" ? "alert" : "status");
   notice.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
   notice.hidden = false;
+  appNoticeDismissTimer = setTimeout(() => {
+    appNoticeDismissTimer = null;
+    notice.hidden = true;
+  }, APP_NOTICE_LIFETIME_MS);
 }
 
 function friendlyIPCError(error, fallback) {
@@ -181,6 +476,10 @@ function friendlyIPCError(error, fallback) {
 
 function dismissNotice() {
   const notice = $("#appNotice");
+  if (appNoticeDismissTimer) {
+    clearTimeout(appNoticeDismissTimer);
+    appNoticeDismissTimer = null;
+  }
   if (notice) notice.hidden = true;
 }
 
@@ -279,8 +578,13 @@ function setClipEditorBoundary(boundary, seconds) {
   if (!track) return;
   const duration = clipEditorDuration(track);
   const value = Math.max(0, Math.min(Math.round(Number(seconds) || 0), duration));
+  const previousStart = clipEditorStartSeconds;
+  const previousEnd = clipEditorEndSeconds;
   if (boundary === "start") clipEditorStartSeconds = Math.min(value, clipEditorEndSeconds - 1);
   else clipEditorEndSeconds = Math.max(clipEditorStartSeconds + 1, value);
+  if (previousStart !== clipEditorStartSeconds || previousEnd !== clipEditorEndSeconds) {
+    void stopClipRangePreview();
+  }
   updateClipEditorRange();
 }
 
@@ -380,31 +684,177 @@ function renderClipEditorTrack({ resetRange = false } = {}) {
   const empty = $("#clipEditorEmpty");
   workspace.hidden = !track;
   empty.hidden = Boolean(track);
-  if (!track) return;
+  $("#saveClipRange").disabled = !track;
+  $("#previewClipRange").disabled = !track?.fileUrl;
+  if (!track) {
+    $("#clearClipRange").hidden = true;
+    $("#clipEditorStatus").textContent = "Import or download a song before setting a clip range.";
+    return;
+  }
   const duration = clipEditorDuration(track);
   $("#clipEditorTrackTitle").textContent = track.title || "Unknown title";
-  $("#clipEditorTrackMeta").textContent = `${track.artist || "Unknown Artist"} · ${track.album || "Unknown Album"}`;
+  $("#clipEditorTrackMeta").textContent = `${track.artist || "Unknown Artist"} · ${displayAlbum(track)}`;
   $("#clipEditorTrackDuration").textContent = formatTime(duration);
   $("#clipEditorArtwork").innerHTML = track.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : "♪";
   $("#clipEditorWaveBars").innerHTML = clipEditorWaveBars(track);
   if (resetRange) {
+    const savedRange = playbackRangeForTrack(state, track);
     const defaultStart = duration > 60 ? 15 : 0;
-    clipEditorStartSeconds = defaultStart;
-    clipEditorEndSeconds = Math.min(duration, defaultStart + 45);
+    clipEditorStartSeconds = savedRange?.startSeconds ?? defaultStart;
+    clipEditorEndSeconds = savedRange?.endSeconds ?? Math.min(duration, defaultStart + 45);
   }
   updateClipEditorRange();
+  const savedRange = playbackRangeForTrack(state, track);
+  $("#clearClipRange").hidden = !savedRange;
+  $("#clipEditorStatus").textContent = savedRange
+    ? `This profile plays ${formatTime(savedRange.startSeconds)}–${formatTime(savedRange.endSeconds)}. The song file is unchanged.`
+    : "Choose a range. The song file is never changed.";
+}
+
+function syncClipRangePreviewButton() {
+  const button = $("#previewClipRange");
+  const playing = !clipEditorPreviewAudio.paused && !clipEditorPreviewAudio.ended;
+  button.classList.toggle("playing", playing);
+  button.setAttribute("aria-pressed", String(playing));
+  button.disabled = clipEditorPreviewLoading || !clipEditorTrack()?.fileUrl;
+  button.innerHTML = clipEditorPreviewLoading
+    ? '<span>Preparing…</span>'
+    : playing
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5"></rect></svg><span>Stop</span>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg><span>Preview</span>';
+}
+
+function waitForClipRangePreviewMetadata() {
+  if (clipEditorPreviewAudio.readyState >= 1) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clipEditorPreviewAudio.removeEventListener("loadedmetadata", loaded);
+      clipEditorPreviewAudio.removeEventListener("error", failed);
+    };
+    const loaded = () => { cleanup(); resolve(); };
+    const failed = () => { cleanup(); reject(new Error("Resonance could not load this song for preview.")); };
+    clipEditorPreviewAudio.addEventListener("loadedmetadata", loaded, { once: true });
+    clipEditorPreviewAudio.addEventListener("error", failed, { once: true });
+    clipEditorPreviewAudio.load();
+  });
+}
+
+async function resumePlaybackAfterClipRangePreview() {
+  if (!clipEditorPreviewInterruptedPlayback) return;
+  clipEditorPreviewInterruptedPlayback = false;
+  if (currentTrack() && audio.paused) await requestPlayback();
+}
+
+async function stopClipRangePreview({ resumeMain = true } = {}) {
+  const wasActive = clipEditorPreviewLoading || Boolean(clipEditorPreviewAudio.getAttribute("src"));
+  clipEditorPreviewRequest += 1;
+  clipEditorPreviewLoading = false;
+  clipEditorPreviewAudio.pause();
+  clipEditorPreviewAudio.removeAttribute("src");
+  clipEditorPreviewAudio.load();
+  clipEditorPreviewEndSeconds = 0;
+  syncClipRangePreviewButton();
+  if (wasActive && $("#clipEditorDialog").open) {
+    $("#clipEditorStatus").textContent = "Preview stopped. This does not save the range.";
+  }
+  if (resumeMain) await resumePlaybackAfterClipRangePreview();
+  else clipEditorPreviewInterruptedPlayback = false;
+}
+
+async function toggleClipRangePreview() {
+  if (!clipEditorPreviewAudio.paused) {
+    await stopClipRangePreview();
+    return;
+  }
+  const track = clipEditorTrack();
+  if (!track?.fileUrl) return;
+  await stopClipRangePreview();
+  const request = ++clipEditorPreviewRequest;
+  clipEditorPreviewLoading = true;
+  syncClipRangePreviewButton();
+  if (!audio.paused) {
+    clipEditorPreviewInterruptedPlayback = true;
+    audio.pause();
+  }
+  const status = $("#clipEditorStatus");
+  try {
+    clipEditorPreviewAudio.src = track.fileUrl;
+    clipEditorPreviewAudio.volume = normalizedVolume(state.volume);
+    await waitForClipRangePreviewMetadata();
+    if (request !== clipEditorPreviewRequest) return;
+    clipEditorPreviewAudio.currentTime = clipEditorStartSeconds;
+    clipEditorPreviewEndSeconds = clipEditorEndSeconds;
+    await clipEditorPreviewAudio.play();
+    status.textContent = `Previewing ${formatTime(clipEditorStartSeconds)}–${formatTime(clipEditorEndSeconds)}. This does not save the range.`;
+  } catch (error) {
+    if (request !== clipEditorPreviewRequest) return;
+    await stopClipRangePreview();
+    status.textContent = error?.message || "Resonance could not preview this clip range.";
+  } finally {
+    if (request === clipEditorPreviewRequest) {
+      clipEditorPreviewLoading = false;
+      syncClipRangePreviewButton();
+    }
+  }
 }
 
 function openClipEditor() {
   closeProfileMenu();
   const select = $("#clipEditorTrack");
   const visibleTracks = tracksForActiveProfile(state);
-  select.innerHTML = visibleTracks.map((track) => `<option value="${escapeHTML(track.id)}">${escapeHTML(track.title)} — ${escapeHTML(track.artist || "Unknown Artist")}</option>`).join("");
   const preferredTrack = visibleTracks.find((track) => track.id === currentID) || visibleTracks[0];
-  if (preferredTrack) select.value = preferredTrack.id;
+  setCustomSelectOptions(select, visibleTracks.map((track) => ({
+    value: track.id,
+    label: `${track.title} — ${track.artist || "Unknown Artist"}`,
+  })), preferredTrack?.id);
   renderClipEditorTrack({ resetRange: true });
   $("#clipEditorDialog").showModal();
-  requestAnimationFrame(() => (preferredTrack ? select : $("#closeClipEditor")).focus());
+  requestAnimationFrame(() => (preferredTrack ? customSelectControllers.get(select)?.trigger : $("#closeClipEditor"))?.focus());
+}
+
+async function saveClipRange() {
+  const track = clipEditorTrack();
+  if (!track) return;
+  await stopClipRangePreview();
+  const button = $("#saveClipRange");
+  const status = $("#clipEditorStatus");
+  button.disabled = true;
+  button.textContent = "Saving…";
+  try {
+    const range = setClipRangeForTrack(state, track, clipEditorStartSeconds, clipEditorEndSeconds);
+    if (!range) throw new Error("Choose a valid clip range.");
+    clipRangeMutationGeneration += 1;
+    if (currentID === track.id && (audio.currentTime < range.startSeconds || audio.currentTime >= range.endSeconds)) {
+      audio.currentTime = range.startSeconds;
+      state.position = range.startSeconds;
+    }
+    await persist();
+    if (track.remoteID) schedulePlaylistSync();
+    $("#clearClipRange").hidden = false;
+    const profileName = state.syncProfiles.find((profile) => profile.id === activeProfileID())?.name || activeProfileID();
+    status.textContent = track.remoteID
+      ? `Saved for ${profileName}. Syncing this range to the server…`
+      : `Saved for ${profileName} on this device. Upload the song to sync its range.`;
+    showNotice(`Playback for “${track.title}” is now limited to ${formatTime(range.startSeconds)}–${formatTime(range.endSeconds)}.`, "status");
+  } catch (error) {
+    status.textContent = error.message || "Resonance could not save this clip range.";
+  } finally {
+    button.disabled = false;
+    button.textContent = "Save range";
+  }
+}
+
+async function clearClipRange() {
+  const track = clipEditorTrack();
+  if (!track || !removeClipRangeForTrack(state, track)) return;
+  await stopClipRangePreview();
+  clipRangeMutationGeneration += 1;
+  await persist();
+  if (track.remoteID) schedulePlaylistSync();
+  clipEditorStartSeconds = 0;
+  clipEditorEndSeconds = clipEditorDuration(track);
+  renderClipEditorTrack();
+  $("#clipEditorStatus").textContent = "This profile now plays the full song. The song file is unchanged.";
 }
 
 function listeningHistoryMetric(icon, tone, value, suffix, label) {
@@ -465,7 +915,7 @@ function historyDayDetailsMarkup(summary, dayKey) {
   const songRows = songs.map(({ activity, track, trackID }, index) => {
     const title = track?.title || "Removed song";
     const artist = track?.artist || "Unknown artist";
-    const album = track?.album || "Unknown album";
+    const album = displayAlbum(track);
     return `<div class="history-day-song" role="row" data-history-track="${escapeHTML(trackID)}" tabindex="0" aria-keyshortcuts="Shift+F10">
       <span class="history-day-song-number" role="cell">${index + 1}</span>
       <span role="cell">${artwork(track)}</span>
@@ -481,7 +931,7 @@ function historyDayDetailsMarkup(summary, dayKey) {
       <span><strong>${escapeHTML(historyListenedTime(day.seconds))}</strong><small>Listening time</small></span>
       <span><strong>${day.plays.toLocaleString()}</strong><small>${day.plays === 1 ? "Play" : "Plays"}</small></span>
       <span><strong>${songs.length.toLocaleString()}</strong><small>${songs.length === 1 ? "Song" : "Songs"}</small></span>
-      <button id="closeHistoryDayDetails" type="button" title="Collapse day details" aria-label="Collapse day details">×</button>
+      <button id="closeHistoryDayDetails" type="button" title="Collapse day details" aria-label="Collapse day details"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg></button>
     </div>
       </header>
   <div class="history-day-song-list" role="table" tabindex="0" aria-label="Songs played ${hourly ? "during" : "on"} ${escapeHTML(date)}">
@@ -503,7 +953,7 @@ function historyChartMarkup(summary) {
   const left = 8;
   const right = 40;
   const top = 8;
-  const bottom = 8;
+  const bottom = 28;
   const plotWidth = width - left - right;
   const plotHeight = height - top - bottom;
   const peak = Math.max(0, ...summary.days.map((day) => day.seconds / 60));
@@ -523,6 +973,9 @@ function historyChartMarkup(summary) {
     const y = top + plotHeight - (value / axisMaximum * plotHeight);
     return `<text x="10" y="${y + 4}" text-anchor="start">${historyAxisLabel(value)}</text>`;
   }).join("");
+  const xTickInterval = Math.max(1, Math.ceil(summary.days.length / 6));
+  const xAxis = points.filter((point, index) => index % xTickInterval === 0 || index === points.length - 1).map((point) =>
+    `<text x="${point.x.toFixed(2)}" y="${height - 5}" text-anchor="middle">${escapeHTML(historyBucketLabel(summary, point.day.date))}</text>`).join("");
   const barDensity = Math.max(0.28, Math.min(0.72, 0.78 - summary.days.length / 180));
   const barWidth = Math.max(5, Math.min(38, plotWidth / summary.days.length * barDensity));
   const bars = points.map((point, index) => {
@@ -542,6 +995,7 @@ function historyChartMarkup(summary) {
     </defs>
     <g class="history-grid">${grid}</g>
     ${bars}
+    <g class="history-x-axis">${xAxis}</g>
     <line class="history-hover-guide" x1="0" y1="${top}" x2="0" y2="${top + plotHeight}" hidden/>
   </svg>${peak ? "" : '<p class="history-empty-chart">Play something and your activity will appear here.</p>'}</div><svg class="history-y-axis" width="52" height="${height}" viewBox="0 0 52 ${height}" aria-hidden="true"><g>${yAxis}</g></svg><div class="history-chart-tooltip" role="tooltip" hidden></div></div>`;
 }
@@ -933,11 +1387,7 @@ function updateTopSearch() {
     ], storageSort, "Sort storage results");
   } else if (section === "server") {
     sort.hidden = false;
-    updateSearchSort([
-      ["title", "Title"],
-      ["artist", "Artist"],
-      ["size", "File size"],
-    ], serverSort, "Sort server results");
+    updateServerSearchOptions();
   } else {
     closeSearchSort();
     sort.hidden = true;
@@ -958,6 +1408,30 @@ function updateSearchSort(options, value, label) {
     <button type="button" role="option" aria-selected="${optionValue === value}" class="${optionValue === value ? "selected" : ""}" data-search-sort="${optionValue}">
       <span>${optionLabel}</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8 3 3 6-6"/></svg>
     </button>`).join("");
+}
+
+function updateServerSearchOptions() {
+  const scopes = [
+    ["all", "All"],
+    ["device", "On Device"],
+    ["available", "Not Downloaded"],
+  ];
+  const sorts = [
+    ["title", "Title"],
+    ["artist", "Artist"],
+    ["size", "File size"],
+  ];
+  const selectedScope = scopes.find(([value]) => value === serverScope) || scopes[0];
+  const selectedSort = sorts.find(([value]) => value === serverSort) || sorts[0];
+  $("#searchSortButton").setAttribute("aria-label", "Filter and sort server results");
+  $("#searchSortLabel").textContent = `${selectedScope[1]} · ${selectedSort[1]}`;
+  $("#searchSortMenu").innerHTML = `<div class="search-sort-section-label" aria-hidden="true">Filter</div>${scopes.map(([value, label]) => `
+    <button type="button" role="option" aria-selected="${value === serverScope}" class="${value === serverScope ? "selected" : ""}" data-search-scope="${value}">
+      <span>${label}</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8 3 3 6-6"/></svg>
+    </button>`).join("")}<div class="search-sort-section-label" aria-hidden="true">Sort</div>${sorts.map(([value, label]) => `
+    <button type="button" role="option" aria-selected="${value === serverSort}" class="${value === serverSort ? "selected" : ""}" data-search-sort="${value}">
+      <span>${label}</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8 3 3 6-6"/></svg>
+    </button>`).join("")}`;
 }
 
 function setCurrentSearchQuery(value) {
@@ -1088,6 +1562,7 @@ function hydrateServerCatalogArtwork(songs) {
 
 function markPlaylistDirty(playlist) {
   if (!playlist || playlist.isSystem) return;
+  playlistMutationGeneration += 1;
   const id = playlist.id.toLocaleLowerCase();
   state.dirtyPlaylistIDs = [...new Set([...state.dirtyPlaylistIDs, id])];
   state.deletedPlaylistIDs = state.deletedPlaylistIDs.filter((item) => item !== id);
@@ -1095,11 +1570,10 @@ function markPlaylistDirty(playlist) {
 
 function markPlaylistDeleted(playlist) {
   if (!playlist || playlist.isSystem) return;
+  playlistMutationGeneration += 1;
   const id = playlist.id.toLocaleLowerCase();
   state.dirtyPlaylistIDs = state.dirtyPlaylistIDs.filter((item) => item !== id);
-  if (state.knownRemotePlaylistIDs.includes(id)) {
-    state.deletedPlaylistIDs = [...new Set([...state.deletedPlaylistIDs, id])];
-  }
+  state.deletedPlaylistIDs = [...new Set([...state.deletedPlaylistIDs, id])];
 }
 
 function schedulePlaylistSync() {
@@ -1140,13 +1614,20 @@ async function syncPlaylistsNow({ automatic = false } = {}) {
         const merge = mergePlaylistDocument(state, remoteDocument);
         if (!merge.needsUpload) {
           applyRemotePlaylistDocument(state, remoteDocument);
+          enforceCurrentClipRange();
           await persist();
           render();
           return;
         }
 
+        const submittedPlaylistGeneration = playlistMutationGeneration;
+        const submittedDirtyPlaylistIDs = [...state.dirtyPlaylistIDs];
+        const submittedDeletedPlaylistIDs = [...state.deletedPlaylistIDs];
         const submittedLikesGeneration = likesMutationGeneration;
         const submittedDirtyLikeIDs = [...state.dirtyRemoteLikeSongIDs];
+        const submittedClipRangeGeneration = clipRangeMutationGeneration;
+        const submittedDirtyClipRangeKeys = [...state.dirtyClipRangeKeys];
+        const submittedDeletedClipRangeKeys = [...state.deletedClipRangeKeys];
         const result = await api.putPlaylists({
           baseURL: context.serverURL,
           token: context.token,
@@ -1155,16 +1636,37 @@ async function syncPlaylistsNow({ automatic = false } = {}) {
         });
         if (!profileContextIsCurrent(context)) return;
         if (result.status === 200) {
-          state.dirtyPlaylistIDs = [];
-          state.deletedPlaylistIDs = [];
+          if ((submittedDirtyClipRangeKeys.length || submittedDeletedClipRangeKeys.length)
+              && !Array.isArray(result.document?.clip_ranges)) {
+            throw new Error("The music server does not support synced clip ranges yet.");
+          }
+          if (playlistMutationGeneration === submittedPlaylistGeneration) {
+            state.dirtyPlaylistIDs = state.dirtyPlaylistIDs.filter((id) => !submittedDirtyPlaylistIDs.includes(id));
+            state.deletedPlaylistIDs = state.deletedPlaylistIDs.filter((id) => !submittedDeletedPlaylistIDs.includes(id));
+          }
           if (likesMutationGeneration === submittedLikesGeneration) {
             state.dirtyRemoteLikeSongIDs = state.dirtyRemoteLikeSongIDs.filter((id) => !submittedDirtyLikeIDs.includes(id));
           }
+          if (clipRangeMutationGeneration === submittedClipRangeGeneration) {
+            state.dirtyClipRangeKeys = state.dirtyClipRangeKeys.filter((key) => !submittedDirtyClipRangeKeys.includes(key));
+            state.deletedClipRangeKeys = state.deletedClipRangeKeys.filter((key) => !submittedDeletedClipRangeKeys.includes(key));
+          }
           state.likesDirty = state.dirtyRemoteLikeSongIDs.length > 0;
-          applyRemotePlaylistDocument(state, result.document);
+          applyRemotePlaylistDocument(state, result.document, {
+            preservingLocalIDs: playlistMutationGeneration === submittedPlaylistGeneration
+              ? []
+              : state.dirtyPlaylistIDs,
+            preservingLocalClipKeys: clipRangeMutationGeneration === submittedClipRangeGeneration
+              ? []
+              : state.dirtyClipRangeKeys,
+          });
+          enforceCurrentClipRange();
           await persist();
           render();
-          if (state.likesDirty) schedulePlaylistSync();
+          if (state.dirtyPlaylistIDs.length || state.deletedPlaylistIDs.length || state.likesDirty
+              || state.dirtyClipRangeKeys.length || state.deletedClipRangeKeys.length) {
+            playlistSyncPending = true;
+          }
           return;
         }
         remoteDocument = result.document;
@@ -1197,6 +1699,11 @@ function artwork(track, { animateLoading = false } = {}) {
     <span class="server-artwork-placeholder" aria-hidden="true">♪</span>
     ${canRenderImage ? `<img src="${escapeHTML(source)}" alt="">` : ""}
   </div>`;
+}
+
+function displayAlbum(track) {
+  const album = String(track?.album || "").trim();
+  return !album || album.toLocaleLowerCase() === "imported" ? "Unknown Album" : album;
 }
 
 function bindServerArtworkLoadState(container) {
@@ -1240,14 +1747,11 @@ function trackRow(track, index) {
   const draggableAttributes = editablePlaylist
     ? ` draggable="true" data-playlist-draggable="true" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Shift+F10"`
     : ` aria-keyshortcuts="Enter Space Shift+F10"`;
-  const playlistActions = editablePlaylist
-    ? `<div class="playlist-track-actions"><button type="button" data-reorder-track="-1" data-playlist-track="${track.id}" title="Move up" aria-label="Move ${escapeHTML(track.title || "track")} up">↑</button><button type="button" data-reorder-track="1" data-playlist-track="${track.id}" title="Move down" aria-label="Move ${escapeHTML(track.title || "track")} down">↓</button><button type="button" data-remove-playlist-track="${track.id}" title="Remove from playlist" aria-label="Remove ${escapeHTML(track.title || "track")} from playlist">×</button></div>`
-    : `<span></span>`;
   return `<div class="track-row ${track.id === currentID ? "playing" : ""}${editablePlaylist ? " playlist-draggable" : ""}" data-track="${track.id}" tabindex="0" aria-label="${escapeHTML(actionLabel + reorderLabel)}"${draggableAttributes}>
     <span class="track-number" title="${track.id === currentID && !audio.paused ? "Now playing" : `Track ${index + 1}`}">${track.id === currentID && !audio.paused ? nowPlayingIcon : index + 1}</span>${artwork(track)}
     <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / Audio</small></div>
-    <span class="album">${escapeHTML(track.album)}</span><span class="track-time">${formatTime(track.duration)}</span>
-    <button type="button" class="heart" data-favorite="${track.id}" aria-label="${liked ? "Remove from" : "Add to"} Liked Songs" aria-pressed="${liked}">${liked ? "♥" : "♡"}</button>${playlistActions}
+    <span class="album">${escapeHTML(displayAlbum(track))}</span><span class="track-time">${formatTime(track.duration)}</span>
+    <button type="button" class="heart" data-favorite="${track.id}" aria-label="${liked ? "Remove from" : "Add to"} Liked Songs" aria-pressed="${liked}">${liked ? "♥" : "♡"}</button>
   </div>`;
 }
 
@@ -1271,7 +1775,7 @@ function renderLibrary() {
   const collectionPlaying = isCurrentCollectionPlayback(tracks) && !audio.paused;
   const playlistMenuItems = selectedPlaylist ? [
     `<button type="button" role="menuitem" data-hero-import>Import Songs…</button>`,
-    `<button type="button" role="menuitem" data-hero-next>Next Track</button>`,
+    tracks.length ? `<button type="button" role="menuitem" data-hero-next>Next Track</button>` : "",
     `<button type="button" role="menuitem" data-hero-sync>Sync Playlists</button>`,
     editablePlaylist ? `<button class="danger-item" type="button" role="menuitem" data-hero-delete>Delete Playlist</button>` : "",
   ].filter(Boolean).join("") : "";
@@ -1279,17 +1783,20 @@ function renderLibrary() {
     ? `<details class="playlist-more" id="playlistMore"><summary title="More options" aria-label="More playlist options"><span aria-hidden="true">•••</span></summary><div class="playlist-menu" role="menu">${playlistMenuItems}</div></details>`
     : "";
   const playlistCapsule = selectedPlaylist
-    ? `<div class="playlist-action-cluster"><button class="${shuffle ? "active" : ""}" id="heroShuffle" title="Shuffle" aria-label="Shuffle" aria-pressed="${shuffle}">${shuffleIcon}</button><button id="heroAdd" title="Add songs" aria-label="Add songs">${plusIcon}</button>${playlistMoreMenu}</div>`
+    ? `<div class="playlist-action-cluster"><button class="${shuffle ? "active" : ""}" id="heroShuffle" title="Shuffle" aria-label="Shuffle" aria-pressed="${shuffle}" ${tracks.length ? "" : "disabled"}>${shuffleIcon}</button><button id="heroAdd" title="Add songs" aria-label="Add songs">${plusIcon}</button>${playlistMoreMenu}</div>`
     : "";
-  const libraryFilters = `<div class="filters${selectedPlaylistID ? "" : " library-top-filters"}"><button class="${libraryFilter === "all" ? "active" : ""}" data-library-filter="all">All songs</button><button class="${libraryFilter === "recent" ? "active" : ""}" data-library-filter="recent">Recently added</button><button class="${libraryFilter === "audio" ? "active" : ""}" data-library-filter="audio">Audio</button></div>`;
+  const libraryFilters = `<div class="filters${selectedPlaylistID ? "" : " library-top-filters"}" role="group" aria-label="Library filter"><button class="${libraryFilter === "all" ? "active" : ""}" data-library-filter="all" aria-pressed="${libraryFilter === "all"}">All songs</button><button class="${libraryFilter === "recent" ? "active" : ""}" data-library-filter="recent" aria-pressed="${libraryFilter === "recent"}">Recently added</button><button class="${libraryFilter === "audio" ? "active" : ""}" data-library-filter="audio" aria-pressed="${libraryFilter === "audio"}">Audio</button></div>`;
+  const hasLibraryFilter = Boolean(libraryQuery.trim()) || libraryFilter !== "all";
+  const emptyLibraryTitle = hasLibraryFilter ? "No matching songs" : selectedPlaylistID ? "This playlist is empty" : "No songs yet";
+  const emptyLibraryHelp = hasLibraryFilter ? "Try another search or filter." : selectedPlaylistID ? "Like songs or add them from your Library." : "Import audio files or connect your music server.";
   const collectionHeader = selectedPlaylistID
-    ? `<div class="hero"><div class="hero-art">≋</div><div><span class="eyebrow">PLAYLIST</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions"><button class="primary playlist-play" id="playCollection"><span class="button-icon">${collectionPlaying ? playbackPauseIcon : playbackPlayIcon}</span><span>${collectionPlaying ? "Pause" : "Play"}</span></button>${playlistCapsule}</div></div></div>`
+    ? `<div class="hero"><div class="hero-art">≋</div><div><span class="eyebrow">PLAYLIST</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions"><button class="primary playlist-play" id="playCollection" ${tracks.length ? "" : "disabled"}><span class="button-icon">${collectionPlaying ? playbackPauseIcon : playbackPlayIcon}</span><span>${collectionPlaying ? "Pause" : "Play"}</span></button>${playlistCapsule}</div></div></div>`
     : libraryFilters;
   content.innerHTML = `<div class="collection-scroll">${collectionHeader}
     ${recentTracks.length ? `<section class="recently-added" aria-labelledby="recentlyAddedTitle"><div class="section-heading"><div><span class="eyebrow">FRESH TO YOUR LIBRARY</span><h2 id="recentlyAddedTitle">Recently Added</h2></div><span>${recentTracks.length} newest</span></div><div class="recent-track-list">${recentTracks.map(recentTrackItem).join("")}</div></section>` : ""}
     ${selectedPlaylistID ? libraryFilters : ""}
-    <div class="track-table"><div class="track-header"><span>#</span><span></span><span>Title</span><span>Album</span><span>Time</span><span></span><span>${selectedPlaylist && !selectedPlaylist.isSystem ? "Order" : ""}</span></div>
-    ${tracks.length ? tracks.map(trackRow).join("") : `<div class="empty"><b>${selectedPlaylistID ? "This playlist is empty" : "No songs yet"}</b><span>${selectedPlaylistID ? "Like songs or add them from your Library." : "Import audio files or connect your music server."}</span></div>`}</div></div>`;
+    <div class="track-table"><div class="track-header"><span>#</span><span></span><span>Title</span><span>Album</span><span>Time</span><span></span></div>
+    ${tracks.length ? tracks.map(trackRow).join("") : `<div class="empty"><b>${emptyLibraryTitle}</b><span>${emptyLibraryHelp}</span></div>`}</div></div>`;
   const recentTrackList = document.querySelector(".recent-track-list");
   if (recentTrackList) {
     recentTrackList.scrollLeft = recentlyAddedScrollLeft;
@@ -1450,12 +1957,15 @@ function renderStorage() {
   const remoteBytes = remoteTracks.reduce((sum, track) => sum + (track.size || 0), 0);
   const total = Math.max(localBytes + remoteBytes, 1);
   const localDegrees = Math.round(localBytes / total * 360);
-  content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><div><span class="eyebrow">ON THIS DEVICE</span><h1>Song Storage</h1></div><div class="page-title-actions"><div class="storage-import-control" id="storageImportControl"><button class="primary storage-import-trigger" id="storageImportMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="storageImportMenu"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg></span><span>Import</span><svg class="storage-import-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="storage-import-menu" id="storageImportMenu" role="menu" aria-label="Choose an import type" hidden>${localImportAvailable ? '<button class="storage-import-option" type="button" role="menuitem" data-storage-import="link"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span><span><strong>Import from link</strong><small>Spotify or YouTube URL</small></span></button>' : ""}<button class="storage-import-option" type="button" role="menuitem" data-storage-import="files"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4zM12 10v6m-3-3h6"/></svg></span><span><strong>Import files</strong><small>Choose audio from this device</small></span></button></div></div><button class="secondary" id="storageEdit">${storageEditing ? "Done" : "Edit"}</button></div></div>
+  const storageHasQuery = Boolean(storageQuery.trim());
+  const storageEmptyTitle = storageHasQuery ? "No matching songs" : storageScope === "downloads" ? "No server downloads yet" : storageScope === "files" ? "No imported files yet" : "No songs stored yet";
+  const storageEmptyHelp = storageHasQuery ? "Try another search." : storageScope === "downloads" ? "Download songs from Music Server to keep them on this device." : "Import audio files to add them to this device.";
+  content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><div><span class="eyebrow">ON THIS DEVICE</span><h1>Song Storage</h1></div><div class="page-title-actions"><div class="storage-import-control" id="storageImportControl"><button class="primary storage-import-trigger" id="storageImportMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="storageImportMenu"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg></span><span>Import</span><svg class="storage-import-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="storage-import-menu" id="storageImportMenu" role="menu" aria-label="Choose an import type" hidden>${localImportAvailable ? '<button class="storage-import-option" type="button" role="menuitem" data-storage-import="link"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span><span><strong>Import from link</strong><small>Spotify or YouTube URL</small></span></button>' : ""}<button class="storage-import-option" type="button" role="menuitem" data-storage-import="files"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4zM12 10v6m-3-3h6"/></svg></span><span><strong>Import files</strong><small>Choose audio from this device</small></span></button></div></div><button class="secondary" id="storageEdit" ${!storageEditing && !tracks.length ? "disabled" : ""}>${storageEditing ? "Done" : "Edit"}</button></div></div>
     <div class="storage-summary" id="storageSummary"><div class="storage-ring" style="--local:${localDegrees}deg"><span>♪</span></div><div class="storage-stat"><small>Local audio</small><strong>${formatBytes(localBytes)}</strong><span>${localTracks.length} files</span></div><div class="storage-stat"><small>Server downloads</small><strong>${formatBytes(remoteBytes)}</strong><span>${remoteTracks.length} files</span></div><div class="storage-stat"><small>Available</small><strong id="storageAvailable">Calculating…</strong><span id="storageFreePercent">Disk space</span></div></div>
-    <div class="segmented storage-tabs"><button class="${storageScope === "songs" ? "active" : ""}" data-storage-scope="songs">Songs</button><button class="${storageScope === "downloads" ? "active" : ""}" data-storage-scope="downloads">Downloads</button><button class="${storageScope === "files" ? "active" : ""}" data-storage-scope="files">Files</button></div>
+    <div class="segmented storage-tabs" role="group" aria-label="Storage scope"><button class="${storageScope === "songs" ? "active" : ""}" data-storage-scope="songs" aria-pressed="${storageScope === "songs"}">Songs</button><button class="${storageScope === "downloads" ? "active" : ""}" data-storage-scope="downloads" aria-pressed="${storageScope === "downloads"}">Downloads</button><button class="${storageScope === "files" ? "active" : ""}" data-storage-scope="files" aria-pressed="${storageScope === "files"}">Files</button></div>
     ${storageEditing ? `<div class="selection-bar"><span>${selectedStorageIDs.size} selected</span><button class="danger" id="deleteSelectedStorage" ${selectedStorageIDs.size ? "" : "disabled"}>Delete selected</button></div>` : ""}
     <div class="storage-section-heading"><strong>${storageScope === "downloads" ? "DOWNLOADED FROM SERVER" : storageScope === "files" ? "IMPORTED ON THIS PC" : "ALL SONGS"}</strong><span>${tracks.length} songs</span></div>
-    <div class="storage-list redesigned">${tracks.map((track) => `<div class="storage-row ${storageEditing ? "selecting" : ""}" data-storage-track="${track.id}" tabindex="0" aria-keyshortcuts="Shift+F10"><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${track.id}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(track.album || "Unknown Album")}</small></span><span class="storage-size">${formatBytes(track.size)}</span><button class="row-menu" data-storage-menu="${track.id}" title="More options" aria-label="More options for ${escapeHTML(track.title || "song")}">•••</button></div>`).join("") || `<div class="empty"><b>No matching songs</b><span>Try another filter or import audio.</span></div>`}</div></div>`;
+    <div class="storage-list redesigned">${tracks.map((track) => `<div class="storage-row ${storageEditing ? "selecting" : ""}" data-storage-track="${track.id}" tabindex="0" aria-keyshortcuts="Shift+F10"><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${track.id}" aria-label="${selectedStorageIDs.has(track.id) ? "Deselect" : "Select"} ${escapeHTML(track.title || "song")}" aria-pressed="${selectedStorageIDs.has(track.id)}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(displayAlbum(track))}</small></span><span class="storage-size">${formatBytes(track.size)}</span><button class="row-menu" data-storage-menu="${track.id}" title="More options" aria-label="More options for ${escapeHTML(track.title || "song")}">•••</button></div>`).join("") || `<div class="empty"><b>${storageEmptyTitle}</b><span>${storageEmptyHelp}</span></div>`}</div></div>`;
   const importControl = $("#storageImportControl");
   const importButton = $("#storageImportMenuButton");
   const importMenu = $("#storageImportMenu");
@@ -1502,7 +2012,12 @@ function renderStorage() {
     else importAudio();
   });
   $("#storageEdit").onclick = () => { storageEditing = !storageEditing; if (!storageEditing) selectedStorageIDs.clear(); renderStorage(); };
-  document.querySelectorAll("[data-storage-scope]").forEach((button) => button.onclick = () => { storageScope = button.dataset.storageScope; renderStorage(); });
+  document.querySelectorAll("[data-storage-scope]").forEach((button) => button.onclick = () => {
+    storageScope = button.dataset.storageScope;
+    storageEditing = false;
+    selectedStorageIDs.clear();
+    renderStorage();
+  });
   document.querySelectorAll("[data-storage-select]").forEach((button) => button.onclick = () => { selectedStorageIDs.has(button.dataset.storageSelect) ? selectedStorageIDs.delete(button.dataset.storageSelect) : selectedStorageIDs.add(button.dataset.storageSelect); renderStorage(); });
   if ($("#deleteSelectedStorage")) $("#deleteSelectedStorage").onclick = async () => {
     if (selectedStorageIDs.size && confirm(`Remove ${selectedStorageIDs.size} selected song${selectedStorageIDs.size === 1 ? "" : "s"} from this device?`)) await deleteStoredTracks([...selectedStorageIDs]);
@@ -1543,44 +2058,44 @@ function renderServer() {
   const filteredCount = filteredServerCatalog().length;
   const playlistCount = state.playlists.filter((playlist) => !playlist.isSystem).length;
   const connected = serverConnected;
-  const selectLabel = !serverSelecting
-    ? "Choose songs to download"
-    : selectedRemoteIDs.size
+  const showConnectionDetail = !connected || !serverConnectionText.startsWith("Connected •");
+  const selectLabel = serverSelecting ? "Cancel song selection" : "Choose songs to download";
+  const downloadLabel = serverSelecting
+    ? selectedRemoteIDs.size
       ? `Download ${selectedRemoteIDs.size} selected song${selectedRemoteIDs.size === 1 ? "" : "s"}`
-      : "Cancel song selection";
+      : "Select songs to download"
+    : "Download all songs";
+  const filtered = Boolean(serverQuery.trim()) || serverScope !== "all";
+  const resultSummary = filtered ? `Showing ${filteredCount} of ${serverCatalog.length} tracks` : "All tracks";
   content.innerHTML = `<div class="page server-page">
     <div class="server-heading"><h1>Music Server</h1><div class="server-status-line">
       <span id="serverStatus" class="connection-pill ${connected ? "connected" : ""}">● ${escapeHTML(connected ? "Connected" : serverConnectInFlight ? "Connecting" : "Offline")}</span>
-      <span class="server-connection-detail" role="status" aria-live="polite">${escapeHTML(serverConnectionText)}</span>
+      <span class="server-connection-detail" role="status" aria-live="polite" ${showConnectionDetail ? "" : "hidden"}>${escapeHTML(serverConnectionText)}</span>
       <button class="server-url" id="serverSettings" title="Edit server connection"><span>${escapeHTML(state.serverURL || "Add a server connection")}</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.5-1 10-10-3.5-3.5-10 10zM13.5 7l3.5 3.5"/></svg></button>
       <span class="server-dot">•</span><span class="server-inline-metric purple">${serverSongIcon}<strong id="serverSongCount">${serverCatalog.length}</strong><span>songs</span></span>
       <span class="server-dot">•</span><span class="server-inline-metric violet">${serverPlaylistMetricIcon}<strong>${playlistCount}</strong><span>playlists</span></span>
       <span class="server-dot">•</span><span class="server-inline-metric green">${serverDeviceIcon}<strong>${downloaded}</strong><span>on device</span></span>
     </div></div>
-    <div class="server-library-bar"><div><strong>SERVER LIBRARY</strong><span id="remoteCount">${filteredCount} songs</span></div><div class="server-actions">
+    <div class="server-library-bar"><div><strong>${resultSummary}</strong></div><div class="server-actions">
       <button id="uploadServer" title="Upload songs" aria-label="Upload songs">${serverUploadIcon}</button>
-      <button id="syncAll" title="Download all songs" aria-label="Download all songs">${serverDownloadIcon}</button>
-      <button id="syncSelected" class="${serverSelecting ? "active" : ""}" title="${selectLabel}" aria-label="${selectLabel}" aria-pressed="${serverSelecting}">${serverSelectIcon}${selectedRemoteIDs.size ? `<b>${selectedRemoteIDs.size}</b>` : ""}</button>
+      <button id="syncAll" title="${downloadLabel}" aria-label="${downloadLabel}" ${serverSelecting && !selectedRemoteIDs.size ? "disabled" : ""}>${serverDownloadIcon}</button>
+      <button id="syncSelected" class="${serverSelecting ? "active" : ""}" title="${selectLabel}" aria-label="${selectLabel}" aria-pressed="${serverSelecting}">${serverSelecting ? `<b>${selectedRemoteIDs.size}</b>` : serverSelectIcon}</button>
       <button id="syncServerPlaylists" title="Sync playlists" aria-label="Sync playlists">${serverPlaylistIcon}</button>
     </div></div>
-    <div class="server-table-head ${serverSelecting ? "selecting" : ""}">${serverSelecting ? "<span></span>" : ""}<span></span><button data-server-sort="title">TITLE ${serverSort === "title" ? "⌃" : ""}</button><button data-server-sort="artist">ARTIST ${serverSort === "artist" ? "⌃" : ""}</button><span>ALBUM</span><span>DURATION</span><span></span></div>
+    <div class="server-table-head ${serverSelecting ? "selecting" : ""}">${serverSelecting ? "<span></span>" : ""}<span></span><span>TITLE</span><span>ARTIST</span><span>ALBUM</span><span>DURATION</span><span></span></div>
     <div id="remoteSongs" class="remote-list redesigned server-library">${filteredCount ? remoteRows() : `<div class="empty"><b>${serverCatalog.length ? "No matching songs" : "No server songs"}</b><span>${serverConnectInFlight ? "Connecting to your server…" : serverCatalog.length ? "Try another search or filter." : "Open connection settings to connect."}</span></div>`}</div>
   </div>`;
   $("#serverSettings").onclick = openServerSettings;
-  document.querySelectorAll("[data-server-sort]").forEach((button) => button.onclick = () => { serverSort = button.dataset.serverSort; updateTopSearch(); renderServer(); });
   $("#syncSelected").onclick = () => {
     if (!serverSelecting) {
       serverSelecting = true;
-      selectedRemoteIDs.clear();
-      renderServer();
-    } else if (selectedRemoteIDs.size) {
-      serverAction("selected");
     } else {
       serverSelecting = false;
-      renderServer();
     }
+    selectedRemoteIDs.clear();
+    renderServer();
   };
-  $("#syncAll").onclick = () => serverAction("all");
+  $("#syncAll").onclick = () => serverAction(serverSelecting ? "selected" : "all");
   $("#uploadServer").onclick = uploadServerSongs;
   $("#syncServerPlaylists").onclick = () => syncPlaylistsNow();
   bindServerArtworkLoadStates();
@@ -1615,7 +2130,7 @@ function remoteRows() {
       ${artwork(song, { animateLoading: true })}
       <span class="server-song-title"><strong>${escapeHTML(song.title || song.name)}</strong>${onDevice ? '<small>On device</small>' : ""}</span>
       <span class="server-cell">${escapeHTML(song.artist || "Unknown Artist")}</span>
-      <span class="server-cell server-album">${escapeHTML(song.album || "Server Library")}</span>
+      <span class="server-cell server-album">${escapeHTML(displayAlbum(song))}</span>
       <span class="server-cell server-duration">${duration}</span>
       <button class="row-menu" data-remote-menu="${song.id}" title="More options" aria-label="More options for ${escapeHTML(song.title || song.name)}">•••</button>
     </div>`;
@@ -1648,9 +2163,10 @@ function bindRemoteRows() {
 function renderProfileOptions(selectedID = activeProfileID()) {
   const select = $("#syncProfile");
   if (!select) return;
-  select.innerHTML = state.syncProfiles.map((profile) =>
-    `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.name)}</option>`).join("");
-  select.value = state.syncProfiles.some((profile) => profile.id === selectedID) ? selectedID : "default";
+  setCustomSelectOptions(select, state.syncProfiles.map((profile) => ({
+    value: profile.id,
+    label: profile.name,
+  })), state.syncProfiles.some((profile) => profile.id === selectedID) ? selectedID : "default");
 }
 
 async function refreshProfiles() {
@@ -1675,6 +2191,28 @@ function updateProfileSwitchDialog({ resetQuery = true } = {}) {
   if (resetQuery) $("#profileSwitchQuery").value = name;
 }
 
+function matchingSyncProfile(query) {
+  const key = String(query || "").trim().toLocaleLowerCase();
+  if (!key) return null;
+  return state.syncProfiles.find((profile) =>
+    String(profile.id || "").toLocaleLowerCase() === key
+    || String(profile.name || "").toLocaleLowerCase() === key) || null;
+}
+
+function updateProfileSwitchActions({ busy = false } = {}) {
+  const query = $("#profileSwitchQuery").value.trim();
+  const current = matchingSyncProfile(query);
+  const connected = Boolean(state.serverURL && serverToken);
+  $("#createProfileFromSwitcher").disabled = busy || !connected || !query || Boolean(current);
+  $("#confirmProfileSwitch").disabled = busy || !connected || !query || current?.id === activeProfileID();
+  if (busy) return;
+  const status = $("#profileSwitchStatus");
+  if (!connected) status.textContent = "Not connected";
+  else if (current?.id === activeProfileID()) status.textContent = "Current profile";
+  else if (current) status.textContent = "Existing profile";
+  else status.textContent = "New profile name";
+}
+
 async function openProfileSwitcher() {
   closeProfileMenu();
   updateProfileSwitchDialog();
@@ -1684,18 +2222,21 @@ async function openProfileSwitcher() {
   $("#profileSwitchQuery").focus();
   $("#profileSwitchQuery").select();
   if (!state.serverURL || !serverToken) {
-    status.textContent = "Not connected";
+    updateProfileSwitchActions();
     return;
   }
   status.textContent = "Checking server profiles…";
+  updateProfileSwitchActions({ busy: true });
   try {
     const response = await api.fetchProfiles({ baseURL: state.serverURL, token: serverToken });
     state.syncProfiles = response.profiles || [];
     renderProfileOptions();
     updateProfileSwitchDialog({ resetQuery: false });
-    status.textContent = "Connected";
+    updateProfileSwitchActions();
   } catch (error) {
     status.textContent = error.message || "Could not load profiles";
+    $("#createProfileFromSwitcher").disabled = true;
+    $("#confirmProfileSwitch").disabled = true;
   }
 }
 
@@ -1721,6 +2262,12 @@ async function activateProfile(profileID, serverURL = state.serverURL) {
     currentID = null;
     state.currentTrackID = null;
     state.position = 0;
+  } else if (currentID) {
+    const range = activeClipRange();
+    if (range && (audio.currentTime < range.startSeconds || audio.currentTime >= range.endSeconds)) {
+      audio.currentTime = range.startSeconds;
+      state.position = range.startSeconds;
+    }
   }
   await persist();
 }
@@ -1748,14 +2295,22 @@ async function saveServerForm() {
 
 function renderSettings() {
   updateTopSearch();
-  content.innerHTML = `<div class="page settings-placeholder">
-    <section class="settings-placeholder-card" aria-labelledby="settingsPlaceholderTitle">
-      <span class="settings-placeholder-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.64 5.64l2.12 2.12M16.24 16.24l2.12 2.12M18.36 5.64l-2.12 2.12M7.76 16.24l-2.12 2.12"/><circle cx="12" cy="12" r="3.5"/></svg></span>
-      <span class="eyebrow">SETTINGS</span>
-      <h1 id="settingsPlaceholderTitle">Under construction</h1>
-      <p>This part of Resonance is still being built.</p>
-    </section>
+  const profile = activeProfile();
+  const track = currentTrack();
+  content.innerHTML = `<div class="page settings-page">
+    <span class="eyebrow">RESONANCE</span><h1>Settings</h1><p>Manage this device, your music server, playback tools, and updates.</p>
+    <div class="settings-grid">
+      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">${serverDeviceIcon}</span><div><h2>Music Server</h2><p>${serverConnected ? "Connected" : "Not connected"} · ${escapeHTML(profile.name || "Default")}</p><small>${escapeHTML(state.serverURL || "No server configured")}</small></div><button id="settingsServer" class="secondary" type="button">Connection settings</button></section>
+      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">${historyClockIcon}</span><div><h2>Listening & clips</h2><p>${track ? escapeHTML(track.title) : "Nothing selected"}</p><small>${Math.round(audio.volume * 100)}% volume · ${audio.playbackRate || 1}× speed</small></div><div class="settings-card-actions"><button id="settingsHistory" class="secondary" type="button">Listening History</button><button id="settingsClipEditor" class="secondary" type="button" ${track ? "" : "disabled"}>Clip Editor</button></div></section>
+      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">♪</span><div><h2>Local storage</h2><p>${tracksForActiveProfile(state).length} songs on this profile</p><small>Manage imports, downloads, and local files.</small></div><button id="settingsStorage" class="secondary" type="button">Manage storage</button></section>
+      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">↻</span><div><h2>Updates</h2><p id="settingsUpdateStatus">${escapeHTML($("#updateStatus").textContent || "Automatic in-app updates")}</p><small>Installed builds update through the GitHub release feed.</small></div><button id="settingsCheckUpdates" class="secondary" type="button">Check now</button></section>
+    </div>
   </div>`;
+  $("#settingsServer").onclick = openServerSettings;
+  $("#settingsHistory").onclick = openListeningHistory;
+  $("#settingsClipEditor").onclick = openClipEditor;
+  $("#settingsStorage").onclick = () => navigate("storage");
+  $("#settingsCheckUpdates").onclick = checkForUpdates;
 }
 
 function render() {
@@ -1913,34 +2468,6 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
     }
   });
   document.querySelectorAll("[data-favorite]").forEach((button) => button.onclick = (event) => { event.stopPropagation(); toggleFavorite(button.dataset.favorite); });
-  document.querySelectorAll("[data-reorder-track]").forEach((button) => button.onclick = async (event) => {
-    event.stopPropagation();
-    const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
-    if (!playlist) return;
-    const index = playlist.trackIDs.indexOf(button.dataset.playlistTrack);
-    const destination = index + Number(button.dataset.reorderTrack);
-    if (index < 0 || destination < 0 || destination >= playlist.trackIDs.length) return;
-    const [trackID] = playlist.trackIDs.splice(index, 1);
-    playlist.trackIDs.splice(destination, 0, trackID);
-    updatePlaylistRemoteSongIDs(state, playlist);
-    markPlaylistDirty(playlist);
-    if (activePlaybackPlaylistID === playlist.id) setPlaybackContext(tracksForPlaylist(state, playlist.id), playlist.id);
-    await persist();
-    schedulePlaylistSync();
-    renderLibrary();
-  });
-  document.querySelectorAll("[data-remove-playlist-track]").forEach((button) => button.onclick = async (event) => {
-    event.stopPropagation();
-    const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
-    if (!playlist) return;
-    playlist.trackIDs = playlist.trackIDs.filter((id) => id !== button.dataset.removePlaylistTrack);
-    updatePlaylistRemoteSongIDs(state, playlist);
-    markPlaylistDirty(playlist);
-    if (activePlaybackPlaylistID === playlist.id) setPlaybackContext(tracksForPlaylist(state, playlist.id), playlist.id);
-    await persist();
-    schedulePlaylistSync();
-    renderLibrary();
-  });
 }
 
 let activeContextMenuReturnFocus = null;
@@ -2066,6 +2593,7 @@ function renderTrackContextMenu(track, options = {}) {
     actions.push({
       label: `Remove from ${activePlaylist.name}`,
       icon: contextRemoveIcon,
+      danger: true,
       onSelect: async () => {
         activePlaylist.trackIDs = activePlaylist.trackIDs.filter((id) => id !== track.id);
         updatePlaylistRemoteSongIDs(state, activePlaylist);
@@ -2469,12 +2997,21 @@ async function uploadLocalImportTrack(track) {
   if (!track?.filePath) {
     return { ok: false, error: { stage: "syncing", code: "LOCAL_FILE_MISSING", message: "The local song file could not be found for server upload." } };
   }
-  return api.uploadLocalImport({
+  const result = await api.uploadLocalImport({
     baseURL: state.serverURL,
     adminToken: serverAdminToken,
     profileID: activeProfileID(),
     filePath: track.filePath,
   });
+  if (result?.ok && result.remoteSong && reconcileUploadedTrack(state, track.id, result.remoteSong, {
+    serverURL: state.serverURL,
+    profileID: activeProfileID(),
+  })) {
+    playlistMutationGeneration += 1;
+    await persist({ refreshSidebar: false });
+    schedulePlaylistSync();
+  }
+  return result;
 }
 
 async function refreshServerCatalogAfterLocalImportUpload() {
@@ -3050,10 +3587,17 @@ async function serverAction(mode) {
       catalog = result.catalog;
       transferCancelled = Boolean(result.cancelled || serverTransferCancelRequested);
       mergeSyncedTracks(state, result);
+      const failedDownloads = Array.isArray(result.failed) ? result.failed : [];
       serverConnectionText = transferCancelled
         ? `Download cancelled${result.downloaded.length ? ` • ${result.downloaded.length} completed` : ""}`
-        : `Synced ${result.downloaded.length} new song${result.downloaded.length === 1 ? "" : "s"}`;
+        : failedDownloads.length
+          ? `Downloaded ${result.downloaded.length} song${result.downloaded.length === 1 ? "" : "s"} • ${failedDownloads.length} failed`
+          : `Synced ${result.downloaded.length} new song${result.downloaded.length === 1 ? "" : "s"}`;
+      if (!transferCancelled && failedDownloads.length) {
+        showNotice(formatServerDownloadFailureNotice(failedDownloads));
+      }
       selectedRemoteIDs.clear();
+      if (mode === "selected") serverSelecting = false;
       await persist();
     } else {
       catalog = await api.fetchCatalog({ baseURL: context.serverURL, token: context.token, profileID: context.profileID });
@@ -3074,6 +3618,7 @@ async function serverAction(mode) {
     serverConnected = false;
     serverCatalog = [];
     selectedRemoteIDs.clear();
+    serverSelecting = false;
     if (!serverTransferCancelRequested) showNotice(serverConnectionText);
   } finally {
     serverConnectInFlight = false;
@@ -3134,6 +3679,41 @@ async function requestPlayback() {
   }
 }
 
+function activeClipRange(track = currentTrack()) {
+  return track ? playbackRangeForTrack(state, track) : null;
+}
+
+function clippedPlaybackPosition(value, track = currentTrack()) {
+  const range = activeClipRange(track);
+  const position = Math.max(0, Number(value) || 0);
+  return range ? Math.max(range.startSeconds, Math.min(position, range.endSeconds)) : position;
+}
+
+function enforceCurrentClipRange() {
+  const range = activeClipRange();
+  if (!range || (audio.currentTime >= range.startSeconds && audio.currentTime < range.endSeconds)) return;
+  audio.currentTime = range.startSeconds;
+  state.position = range.startSeconds;
+}
+
+function finishClipPlaybackIfNeeded() {
+  const track = currentTrack();
+  const range = activeClipRange(track);
+  if (!track || !range || audio.currentTime + 0.02 < range.endSeconds || clipBoundaryTrackID === track.id) return false;
+  clipBoundaryTrackID = track.id;
+  updateListeningSession();
+  scheduleListeningHistorySync();
+  if (repeat) {
+    audio.currentTime = range.startSeconds;
+    state.position = range.startSeconds;
+    void requestPlayback();
+  } else {
+    move(1);
+  }
+  queueMicrotask(() => { clipBoundaryTrackID = null; });
+  return true;
+}
+
 function play(track, queue = null, options = {}) {
   if (!track) return;
   const { recordHistory = true, playlistID = activePlaybackPlaylistID } = options;
@@ -3148,10 +3728,11 @@ function play(track, queue = null, options = {}) {
   activeListeningEntryID = null;
   lastListeningPosition = 0;
   lastPersistedListeningSeconds = 0;
-  pendingRestorePosition = null;
   currentID = track.id;
   state.currentTrackID = currentID;
-  state.position = 0;
+  const range = playbackRangeForTrack(state, track);
+  state.position = range?.startSeconds ?? 0;
+  pendingRestorePosition = state.position;
   audio.src = track.fileUrl;
   audio.volume = normalizedVolume(state.volume);
   audio.playbackRate = Number($("#speed").value) || 1;
@@ -3167,8 +3748,14 @@ function toggle() {
     return;
   }
   if (!audio.currentSrc && !audio.src) { play(track); return; }
-  if (audio.paused) void requestPlayback();
-  else audio.pause();
+  if (audio.paused) {
+    const range = activeClipRange(track);
+    if (range && (audio.currentTime < range.startSeconds || audio.currentTime >= range.endSeconds)) {
+      audio.currentTime = range.startSeconds;
+      state.position = range.startSeconds;
+    }
+    void requestPlayback();
+  } else audio.pause();
   updateChrome();
 }
 
@@ -3179,9 +3766,11 @@ function move(direction, recordHistory = direction > 0) {
 }
 
 function previous() {
-  if (audio.currentTime > 3) {
-    audio.currentTime = 0;
-    state.position = 0;
+  const range = activeClipRange();
+  const start = range?.startSeconds ?? 0;
+  if (audio.currentTime > start + 3) {
+    audio.currentTime = start;
+    state.position = start;
     return;
   }
   const previousID = history.pop();
@@ -3210,6 +3799,7 @@ function newPlaylist(trackID = null) {
   pendingPlaylistTrackID = typeof trackID === "string" ? trackID : null;
   const dialog = $("#playlistDialog");
   $("#playlistName").value = "";
+  $("#createPlaylist").disabled = true;
   dialog.showModal();
   requestAnimationFrame(() => $("#playlistName").focus());
 }
@@ -3238,6 +3828,134 @@ function renderQueue() {
   document.querySelectorAll("[data-queue]").forEach((button) => button.onclick = () => play(state.tracks.find((track) => track.id === button.dataset.queue && trackBelongsToActiveProfile(state, track))));
 }
 
+function fullPlayerQueueTracks() {
+  const tracks = activePlaybackTracks();
+  const index = tracks.findIndex((track) => track.id === currentID);
+  return index < 0 ? tracks : [...tracks.slice(index + 1), ...tracks.slice(0, index)];
+}
+
+function fullPlayerHistoryTracks() {
+  const tracksByID = new Map(tracksForActiveProfile(state).map((track) => [track.id, track]));
+  return [...history].reverse().map((trackID) => tracksByID.get(trackID)).filter(Boolean);
+}
+
+function renderFullPlayerQueue() {
+  const queue = fullPlayerQueueTab === "history" ? fullPlayerHistoryTracks() : fullPlayerQueueTracks();
+  const count = queue.length;
+  $("#fullPlayerQueueCount").textContent = `${count} ${count === 1 ? "song" : "songs"}`;
+  document.querySelectorAll("[data-full-player-queue-tab]").forEach((button) => {
+    const active = button.dataset.fullPlayerQueueTab === fullPlayerQueueTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  $("#fullPlayerQueue").setAttribute("aria-labelledby", fullPlayerQueueTab === "history" ? "fullPlayerQueueHistoryTab" : "fullPlayerQueueUpNextTab");
+  $("#fullPlayerQueue").innerHTML = queue.length ? queue.map((track) => `<button class="full-player-queue-item" type="button" data-full-player-queue="${escapeHTML(track.id)}" aria-label="Play ${escapeHTML(track.title || "Untitled")} by ${escapeHTML(track.artist || "Unknown Artist")}">
+    ${artwork(track)}<span><strong>${escapeHTML(track.title || "Untitled")}</strong><small>${escapeHTML(track.artist || "Unknown Artist")}</small></span><time>${formatTime(track.duration)}</time>
+  </button>`).join("") : `<div class="full-player-queue-empty"><span>${fullPlayerQueueTab === "history" ? "Nothing played yet." : "Nothing else is queued."}</span></div>`;
+  document.querySelectorAll("[data-full-player-queue]").forEach((button) => {
+    button.onclick = () => play(state.tracks.find((track) => track.id === button.dataset.fullPlayerQueue && trackBelongsToActiveProfile(state, track)));
+  });
+}
+
+function updateFullPlayerProgress() {
+  const elapsed = Number(audio.currentTime) || 0;
+  const duration = Number(audio.duration) || Number(currentTrack()?.duration) || 0;
+  const seek = $("#fullPlayerSeek");
+  $("#fullPlayerElapsed").textContent = formatTime(elapsed);
+  $("#fullPlayerDuration").textContent = formatTime(duration);
+  seek.value = duration ? String(Math.round(elapsed / duration * 1000)) : "0";
+  seek.setAttribute("aria-valuetext", `${formatTime(elapsed)} of ${formatTime(duration)}`);
+  paintRange(seek);
+}
+
+function renderFullPlayer() {
+  const dialog = $("#nowPlayingDialog");
+  const track = currentTrack();
+  if (!track) {
+    $("#openNowPlaying").disabled = true;
+    if (dialog.open) dialog.close();
+    return;
+  }
+  const liked = state.favorites.includes(track.id);
+  $("#openNowPlaying").disabled = false;
+  $("#openNowPlaying").setAttribute("aria-label", `Open Now Playing for ${track.title || "current song"}`);
+  $("#fullPlayerTitle").textContent = track.title || "Untitled";
+  $("#fullPlayerArtist").textContent = track.artist || "Unknown Artist";
+  const releaseYear = Number(track.year || track.releaseYear) || null;
+  $("#fullPlayerAlbum").textContent = [displayAlbum(track), releaseYear].filter(Boolean).join(" • ");
+  const artworkNode = $("#fullPlayerArtwork");
+  artworkNode.innerHTML = track.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : '<span aria-hidden="true">♪</span>';
+  artworkNode.setAttribute("aria-label", `Artwork for ${track.title || "current song"}`);
+  const backdropNode = $("#fullPlayerBackdrop");
+  backdropNode.innerHTML = track.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : "";
+  const favorite = $("#fullPlayerFavorite");
+  favorite.classList.toggle("active", liked);
+  favorite.setAttribute("aria-pressed", String(liked));
+  favorite.setAttribute("aria-label", liked ? "Remove current song from Liked Songs" : "Add current song to Liked Songs");
+  favorite.title = liked ? "Remove from Liked Songs" : "Add to Liked Songs";
+  $("#fullPlayerShuffle").classList.toggle("active", shuffle);
+  $("#fullPlayerShuffle").setAttribute("aria-pressed", String(shuffle));
+  $("#fullPlayerRepeat").classList.toggle("active", repeat);
+  $("#fullPlayerRepeat").setAttribute("aria-pressed", String(repeat));
+  setCustomSelectValue($("#fullPlayerSpeed"), audio.playbackRate || state.playbackRate || 1);
+  $("#fullPlayerVolume").value = String(audio.volume);
+  $("#fullPlayerVolume").setAttribute("aria-valuetext", `${Math.round(audio.volume * 100)} percent`);
+  paintRange($("#fullPlayerVolume"));
+  updateFullPlayerProgress();
+  renderFullPlayerQueue();
+}
+
+function setFullPlayerQueueVisible(visible) {
+  $("#fullPlayerQueuePanel").hidden = !visible;
+  $("#fullPlayerQueueToggle").setAttribute("aria-expanded", String(visible));
+  if (visible) {
+    renderFullPlayerQueue();
+    requestAnimationFrame(() => $("#closeFullPlayerQueue").focus());
+  } else {
+    $("#fullPlayerQueueToggle").focus();
+  }
+}
+
+function openNowPlaying() {
+  if (!currentTrack()) return;
+  closeTrackContextMenu();
+  renderFullPlayer();
+  const dialog = $("#nowPlayingDialog");
+  const menu = $("#trackContextMenu");
+  if (nowPlayingCloseTimer) {
+    clearTimeout(nowPlayingCloseTimer);
+    nowPlayingCloseTimer = null;
+  }
+  dialog.classList.remove("closing");
+  $(".full-player-shell").append(menu);
+  if (!dialog.open) dialog.showModal();
+  requestAnimationFrame(() => $("#closeNowPlaying").focus());
+}
+
+function finishNowPlayingClose() {
+  if (nowPlayingCloseTimer) {
+    clearTimeout(nowPlayingCloseTimer);
+    nowPlayingCloseTimer = null;
+  }
+  const dialog = $("#nowPlayingDialog");
+  if (dialog.open) dialog.close();
+  dialog.classList.remove("closing");
+}
+
+function closeNowPlaying() {
+  closeTrackContextMenu();
+  setFullPlayerQueueVisible(false);
+  const dialog = $("#nowPlayingDialog");
+  if (!dialog.open || dialog.classList.contains("closing")) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    finishNowPlayingClose();
+    return;
+  }
+  dialog.classList.add("closing");
+  nowPlayingCloseTimer = setTimeout(finishNowPlayingClose, FULL_PLAYER_TRANSITION_MS + 80);
+}
+
 function updateChrome() {
   const track = currentTrack();
   const playing = track && !audio.paused;
@@ -3263,6 +3981,7 @@ function updateChrome() {
   $("#shuffle").setAttribute("aria-pressed", String(shuffle));
   $("#repeat").setAttribute("aria-pressed", String(repeat));
   $("#heroShuffle")?.setAttribute("aria-pressed", String(shuffle));
+  renderFullPlayer();
 }
 
 function setActiveNav() { document.querySelectorAll(".nav").forEach((button) => button.classList.toggle("active", button.dataset.section === section)); }
@@ -3286,12 +4005,58 @@ function navigate(nextSection, playlistID = null) {
   applyNavigation(next);
 }
 
+initializeCustomSelects();
 document.querySelectorAll(".nav").forEach((button) => button.onclick = () => navigate(button.dataset.section));
 $("#navBack").onclick = () => { if (navigationIndex > 0) { navigationIndex -= 1; applyNavigation(navigationHistory[navigationIndex]); } };
 $("#navForward").onclick = () => { if (navigationIndex + 1 < navigationHistory.length) { navigationIndex += 1; applyNavigation(navigationHistory[navigationIndex]); } };
 document.querySelectorAll("[data-action=toggle]").forEach((button) => button.onclick = toggle);
 document.querySelectorAll("[data-action=next]").forEach((button) => button.onclick = () => move(1));
 document.querySelectorAll("[data-action=previous]").forEach((button) => button.onclick = previous);
+$("#openNowPlaying").onclick = openNowPlaying;
+$("#closeNowPlaying").onclick = closeNowPlaying;
+$("#nowPlayingDialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeNowPlaying();
+});
+$("#nowPlayingDialog").addEventListener("animationend", (event) => {
+  if (event.target === $("#nowPlayingDialog") && event.animationName === "full-player-slide-out") {
+    finishNowPlayingClose();
+  }
+});
+$("#nowPlayingDialog").addEventListener("close", () => {
+  if (nowPlayingCloseTimer) {
+    clearTimeout(nowPlayingCloseTimer);
+    nowPlayingCloseTimer = null;
+  }
+  $("#nowPlayingDialog").classList.remove("closing");
+  const menu = $("#trackContextMenu");
+  document.body.insertBefore(menu, $("#localImportPreview"));
+  $("#fullPlayerQueuePanel").hidden = true;
+  $("#fullPlayerQueueToggle").setAttribute("aria-expanded", "false");
+  $("#openNowPlaying").focus();
+});
+$("#fullPlayerFavorite").onclick = () => currentID && toggleFavorite(currentID);
+$("#fullPlayerMore").onclick = (event) => currentID && openTrackContextMenu(event, currentID, { playbackTracks: activePlaybackTracks(), playlistID: activePlaybackPlaylistID });
+$("#fullPlayerQueueToggle").onclick = () => setFullPlayerQueueVisible($("#fullPlayerQueuePanel").hidden);
+$("#closeFullPlayerQueue").onclick = () => setFullPlayerQueueVisible(false);
+document.querySelectorAll("[data-full-player-queue-tab]").forEach((button) => {
+  button.onclick = () => {
+    fullPlayerQueueTab = button.dataset.fullPlayerQueueTab;
+    renderFullPlayerQueue();
+  };
+});
+$("#fullPlayerShuffle").onclick = () => {
+  shuffle = !shuffle;
+  state.shuffle = shuffle;
+  persistInBackground();
+  updateChrome();
+};
+$("#fullPlayerRepeat").onclick = () => {
+  repeat = !repeat;
+  state.repeat = repeat;
+  persistInBackground();
+  updateChrome();
+};
 $("#newPlaylist").onclick = () => newPlaylist();
 $("#profileButton").onclick = toggleProfileMenu;
 $("#profileSwitch").onclick = openProfileSwitcher;
@@ -3304,9 +4069,13 @@ $("#profileSettings").onclick = () => {
 $("#dismissServerTransfer").onclick = cancelServerTransfer;
 $("#dismissAppNotice").onclick = dismissNotice;
 $("#cancelPlaylist").onclick = () => { pendingPlaylistTrackID = null; $("#playlistDialog").close(); };
+$("#playlistName").oninput = () => { $("#createPlaylist").disabled = !$("#playlistName").value.trim(); };
 $("#closeAddSongs").onclick = () => $("#addSongsDialog").close();
-$("#closeClipEditor").onclick = () => $("#clipEditorDialog").close();
-$("#clipEditorTrack").onchange = () => renderClipEditorTrack({ resetRange: true });
+$("#closeClipEditor").onclick = async () => { await stopClipRangePreview(); $("#clipEditorDialog").close(); };
+$("#previewClipRange").onclick = toggleClipRangePreview;
+$("#saveClipRange").onclick = saveClipRange;
+$("#clearClipRange").onclick = clearClipRange;
+$("#clipEditorTrack").onchange = async () => { await stopClipRangePreview(); renderClipEditorTrack({ resetRange: true }); };
 bindClipEditorHandle("start");
 bindClipEditorHandle("end");
 ["start", "end"].forEach((boundary) => {
@@ -3325,7 +4094,16 @@ bindClipEditorHandle("end");
   };
 });
 $("#clipEditorDialog").onclick = (event) => {
-  if (event.target === $("#clipEditorDialog")) $("#clipEditorDialog").close();
+  if (event.target === $("#clipEditorDialog")) {
+    void stopClipRangePreview().then(() => $("#clipEditorDialog").close());
+  }
+};
+clipEditorPreviewAudio.onplay = syncClipRangePreviewButton;
+clipEditorPreviewAudio.onpause = syncClipRangePreviewButton;
+clipEditorPreviewAudio.onended = () => { void stopClipRangePreview(); };
+clipEditorPreviewAudio.ontimeupdate = () => {
+  if (!clipEditorPreviewEndSeconds || clipEditorPreviewAudio.currentTime + 0.02 < clipEditorPreviewEndSeconds) return;
+  void stopClipRangePreview();
 };
 $("#addSongsSearch").oninput = renderAddSongsDialog;
 $("#confirmLocalImport").onclick = confirmLinkImport;
@@ -3495,6 +4273,12 @@ $("#createProfileFromSwitcher").onclick = async () => {
     status.textContent = "Enter a name for the new profile.";
     return;
   }
+  const existing = matchingSyncProfile(name);
+  if (existing) {
+    status.textContent = existing.id === activeProfileID() ? "That is already the current profile." : "That profile already exists. Use Switch instead.";
+    updateProfileSwitchActions();
+    return;
+  }
   if (!state.serverURL || !serverToken) {
     status.textContent = "Connect to the music server in Settings first.";
     return;
@@ -3514,8 +4298,7 @@ $("#createProfileFromSwitcher").onclick = async () => {
   } catch (error) {
     status.textContent = error.message || "Could not create the profile.";
   } finally {
-    create.disabled = false;
-    submit.disabled = false;
+    if ($("#profileSwitchDialog").open) updateProfileSwitchActions();
   }
 };
 
@@ -3547,9 +4330,10 @@ $("#profileSwitchForm").onsubmit = async (event) => {
   } catch (error) {
     status.textContent = error.message || "Could not switch profiles.";
   } finally {
-    submit.disabled = false;
+    if ($("#profileSwitchDialog").open) updateProfileSwitchActions();
   }
 };
+$("#profileSwitchQuery").oninput = () => updateProfileSwitchActions();
 document.addEventListener("click", (event) => {
   if (!$("#profileControl")?.contains(event.target)) closeProfileMenu();
 });
@@ -3592,6 +4376,11 @@ document.addEventListener("keydown", (event) => {
     closeTrackContextMenu();
     closeSearchSort();
     $("#playlistMore")?.removeAttribute("open");
+    if (section === "server" && serverSelecting) {
+      serverSelecting = false;
+      selectedRemoteIDs.clear();
+      renderServer();
+    }
   }
 });
 window.addEventListener("blur", closeTrackContextMenu);
@@ -3613,6 +4402,13 @@ $("#searchSortButton").onclick = () => {
   $("#searchSortButton").setAttribute("aria-expanded", String(open));
 };
 $("#searchSortMenu").onclick = (event) => {
+  const scopeOption = event.target.closest("[data-search-scope]");
+  if (section === "server" && scopeOption) {
+    serverScope = scopeOption.dataset.searchScope;
+    renderServer();
+    closeSearchSort();
+    return;
+  }
   const option = event.target.closest("[data-search-sort]");
   if (!option) return;
   if (section === "storage") {
@@ -3654,25 +4450,58 @@ $("#volume").oninput = async (event) => {
   $("#volumeText").textContent = `${percent}%`;
   event.target.setAttribute("aria-valuetext", `${percent} percent`);
   paintRange(event.target);
+  $("#fullPlayerVolume").value = String(audio.volume);
+  $("#fullPlayerVolume").setAttribute("aria-valuetext", `${percent} percent`);
+  paintRange($("#fullPlayerVolume"));
+  await persist();
+};
+$("#fullPlayerVolume").oninput = async (event) => {
+  audio.volume = normalizedVolume(event.target.value);
+  state.volume = audio.volume;
+  const percent = Math.round(audio.volume * 100);
+  event.target.setAttribute("aria-valuetext", `${percent} percent`);
+  paintRange(event.target);
+  $("#volume").value = String(audio.volume);
+  $("#volumeText").textContent = `${percent}%`;
+  $("#volume").setAttribute("aria-valuetext", `${percent} percent`);
+  paintRange($("#volume"));
   await persist();
 };
 $("#speed").onchange = (event) => {
   audio.playbackRate = Number(event.target.value);
   state.playbackRate = audio.playbackRate;
+  setCustomSelectValue($("#fullPlayerSpeed"), audio.playbackRate);
+  persistInBackground();
+};
+$("#fullPlayerSpeed").onchange = (event) => {
+  audio.playbackRate = Number(event.target.value);
+  state.playbackRate = audio.playbackRate;
+  setCustomSelectValue($("#speed"), audio.playbackRate);
   persistInBackground();
 };
 $("#seek").oninput = (event) => {
-  if (audio.duration) audio.currentTime = audio.duration * Number(event.target.value) / 1000;
+  if (audio.duration) audio.currentTime = clippedPlaybackPosition(audio.duration * Number(event.target.value) / 1000);
+  event.target.value = audio.duration ? String(Math.round(audio.currentTime / audio.duration * 1000)) : "0";
   event.target.setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(audio.duration)}`);
   paintRange(event.target);
 };
+$("#fullPlayerSeek").oninput = (event) => {
+  if (audio.duration) audio.currentTime = clippedPlaybackPosition(audio.duration * Number(event.target.value) / 1000);
+  event.target.value = audio.duration ? String(Math.round(audio.currentTime / audio.duration * 1000)) : "0";
+  updateFullPlayerProgress();
+  $("#seek").value = event.target.value;
+  $("#seek").setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(audio.duration)}`);
+  paintRange($("#seek"));
+};
 audio.ontimeupdate = () => {
   if (pendingRestorePosition !== null) return;
+  if (finishClipPlaybackIfNeeded()) return;
   $("#elapsed").textContent = formatTime(audio.currentTime);
   $("#duration").textContent = formatTime(audio.duration);
   $("#seek").value = audio.duration ? String(Math.round(audio.currentTime / audio.duration * 1000)) : "0";
   $("#seek").setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(audio.duration)}`);
   paintRange($("#seek"));
+  updateFullPlayerProgress();
   state.position = audio.currentTime;
   updateListeningSession();
   schedulePlaybackProgressSave();
@@ -3691,7 +4520,13 @@ audio.onpause = () => {
 audio.onended = () => {
   updateListeningSession();
   scheduleListeningHistorySync();
-  repeat ? play(currentTrack(), null, { recordHistory: false }) : move(1);
+  const range = activeClipRange();
+  if (repeat && range) {
+    audio.currentTime = range.startSeconds;
+    state.position = range.startSeconds;
+    void requestPlayback();
+  } else if (repeat) play(currentTrack(), null, { recordHistory: false });
+  else move(1);
 };
 audio.onerror = () => {
   updateChrome();
@@ -3701,7 +4536,7 @@ audio.onloadedmetadata = async () => {
   const track = currentTrack();
   if (pendingRestorePosition !== null) {
     if (Number.isFinite(audio.duration) && audio.duration > 0) {
-      audio.currentTime = Math.min(pendingRestorePosition, Math.max(0, audio.duration - 0.25));
+      audio.currentTime = clippedPlaybackPosition(Math.min(pendingRestorePosition, Math.max(0, audio.duration - 0.25)));
       state.position = audio.currentTime;
     }
     pendingRestorePosition = null;
@@ -3740,7 +4575,8 @@ state.volume = normalizedVolume(state.volume);
 $("#volume").value = state.volume;
 paintRange($("#volume"));
 paintRange($("#seek"));
-$("#speed").value = String(state.playbackRate || 1);
+setCustomSelectValue($("#speed"), state.playbackRate || 1);
+setCustomSelectValue($("#fullPlayerSpeed"), state.playbackRate || 1);
 $("#volumeText").textContent = `${Math.round(state.volume * 100)}%`;
 $("#volume").setAttribute("aria-valuetext", `${Math.round(state.volume * 100)} percent`);
 const initialVisibleTracks = tracksForActiveProfile(state);
@@ -3767,32 +4603,40 @@ api.onTransferProgress((value) => {
 api.onLocalImportProgress((value) => {
   updateLocalImportTransfer(value);
 });
+function setUpdateStatus(message) {
+  $("#updateStatus").textContent = message;
+  const settingsStatus = $("#settingsUpdateStatus");
+  if (settingsStatus) settingsStatus.textContent = message;
+}
+
+async function checkForUpdates() {
+  setUpdateStatus("Checking for updates…");
+  try {
+    const result = await api.checkForUpdates();
+    if (!result.supported) setUpdateStatus("Available in installed builds");
+  } catch (error) {
+    setUpdateStatus(error.message || "Update check failed");
+  }
+}
+
 api.onUpdateStatus((value) => {
-  const status = $("#updateStatus");
   const install = $("#installUpdate");
-  if (!status || !install) return;
+  if (!install) return;
   if (value.type === "ready") {
-    status.textContent = `${value.version} downloaded`;
+    setUpdateStatus(`${value.version} downloaded`);
     install.hidden = false;
     install.disabled = false;
     return;
   }
   install.hidden = true;
   install.disabled = false;
-  if (value.type === "checking") status.textContent = "Checking GitHub…";
-  else if (value.type === "available") status.textContent = `Downloading ${value.version}…`;
-  else if (value.type === "downloading") status.textContent = `Downloading… ${value.percent}%`;
-  else if (value.type === "current") status.textContent = "You’re up to date";
-  else if (value.type === "error") status.textContent = value.message || "Update check failed";
+  if (value.type === "checking") setUpdateStatus("Checking GitHub…");
+  else if (value.type === "available") setUpdateStatus(`Downloading ${value.version}…`);
+  else if (value.type === "downloading") setUpdateStatus(`Downloading… ${value.percent}%`);
+  else if (value.type === "current") setUpdateStatus("You’re up to date");
+  else if (value.type === "error") setUpdateStatus(value.message || "Update check failed");
 });
-$("#checkForUpdates").onclick = async () => {
-  try {
-    const result = await api.checkForUpdates();
-    if (!result.supported) $("#updateStatus").textContent = "Available in installed builds";
-  } catch (error) {
-    $("#updateStatus").textContent = error.message || "Update check failed";
-  }
-};
+$("#checkForUpdates").onclick = checkForUpdates;
 $("#installUpdate").onclick = async () => {
   const install = $("#installUpdate");
   const status = $("#updateStatus");

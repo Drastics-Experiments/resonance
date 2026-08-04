@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import java.util.UUID
@@ -28,9 +29,12 @@ data class Track(
     val relativePath: String,
     val remoteID: String? = null,
     val sourceServer: String? = null,
+    val syncProfileID: String? = null,
     val artworkFilename: String? = null,
     val artworkScanComplete: Boolean? = false,
     val dateAddedEpochMs: Long = System.currentTimeMillis(),
+    val sourceSHA256: String? = null,
+    val contentSHA256: String? = null,
 ) {
     val durationText: String
         get() {
@@ -48,6 +52,21 @@ data class Playlist(
     val remoteSongIDs: List<String>? = null,
 )
 
+@Serializable
+data class ClipRange(
+    val startMs: Long,
+    val endMs: Long,
+) {
+    val durationMs: Long get() = (endMs - startMs).coerceAtLeast(0L)
+}
+
+@Serializable
+data class RemoteClipRange(
+    @SerialName("song_id") val songID: String,
+    @SerialName("start_seconds") val startSeconds: Double,
+    @SerialName("end_seconds") val endSeconds: Double,
+)
+
 @Serializable(with = RemoteSongSerializer::class)
 data class RemoteSong(
     val id: String,
@@ -60,7 +79,15 @@ data class RemoteSong(
     val contentType: String,
     val downloadURL: String,
     val streamURL: String,
-)
+    val durationSeconds: Double? = null,
+    val artworkURL: String? = null,
+) {
+    val durationText: String?
+        get() = durationSeconds
+            ?.takeIf { it.isFinite() && it > 0.0 }
+            ?.toLong()
+            ?.let { seconds -> "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}" }
+}
 
 @Serializable
 data class RemoteCatalog(
@@ -77,8 +104,27 @@ data class RemotePlaylist(
 
 @Serializable
 data class RemotePlaylistsDocument(
+    @SerialName("profile_id") val profileID: String? = null,
     val revision: Int = 0,
     val playlists: List<RemotePlaylist> = emptyList(),
+    @SerialName("liked_song_ids") val likedSongIDs: List<String> = emptyList(),
+    @SerialName("clip_ranges") val clipRanges: List<RemoteClipRange> = emptyList(),
+)
+
+@Serializable
+data class SyncProfile(
+    val id: String,
+    val name: String,
+    @SerialName("is_default") val isDefault: Boolean = false,
+    @SerialName("song_count") val songCount: Int = 0,
+    @SerialName("playlist_count") val playlistCount: Int = 0,
+    @SerialName("liked_count") val likedCount: Int = 0,
+)
+
+@Serializable
+data class SyncProfilesResponse(
+    @SerialName("default_profile_id") val defaultProfileID: String = "default",
+    val profiles: List<SyncProfile> = emptyList(),
 )
 
 @Serializable
@@ -92,6 +138,14 @@ data class StoredLibrary(
     val dirtyPlaylistIDs: Set<String>? = emptySet(),
     val deletedPlaylistIDs: Set<String>? = emptySet(),
     val playlistSyncServerURL: String? = null,
+    val syncProfileID: String = "default",
+    val syncProfiles: List<SyncProfile> = listOf(SyncProfile("default", "Default", true)),
+    val remoteLikedSongIDs: Set<String>? = null,
+    val dirtyRemoteLikeSongIDs: Set<String>? = null,
+    val likesDirty: Boolean = false,
+    val clipRanges: Map<String, ClipRange> = emptyMap(),
+    val dirtyClipRangeKeys: Set<String> = emptySet(),
+    val deletedClipRangeKeys: Set<String> = emptySet(),
 )
 
 data class StorageStats(
@@ -136,6 +190,9 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
         fun string(key: String): String? =
             objectValue[key]?.jsonPrimitive?.contentOrNull
 
+        fun double(key: String): Double? =
+            objectValue[key]?.jsonPrimitive?.doubleOrNull
+
         val filename = string("filename") ?: string("name")
             ?: error("Remote song is missing filename")
         return RemoteSong(
@@ -153,6 +210,11 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
                 ?: error("Remote song is missing download_url"),
             streamURL = string("stream_url")
                 ?: error("Remote song is missing stream_url"),
+            durationSeconds = (double("duration_seconds") ?: double("duration"))
+                ?.takeIf { it.isFinite() && it > 0.0 },
+            artworkURL = (string("artwork_url") ?: string("artwork"))
+                ?.trim()
+                ?.takeIf(String::isNotEmpty),
         )
     }
 
@@ -170,6 +232,8 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
             put("content_type", JsonPrimitive(value.contentType))
             put("download_url", JsonPrimitive(value.downloadURL))
             put("stream_url", JsonPrimitive(value.streamURL))
+            value.durationSeconds?.let { put("duration_seconds", JsonPrimitive(it)) }
+            value.artworkURL?.let { put("artwork_url", JsonPrimitive(it)) }
         })
     }
 }

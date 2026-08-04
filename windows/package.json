@@ -38,6 +38,7 @@
       "local-import-platform.cjs",
       "local-youtube.cjs",
       "metadata.cjs",
+      "server-download.cjs",
       "updater-feed.cjs",
       "preload.cjs",
       "package.json",

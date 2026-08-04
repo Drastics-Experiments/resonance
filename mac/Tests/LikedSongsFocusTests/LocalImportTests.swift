@@ -872,22 +872,7 @@ struct LocalImportTests {
                 #expect(request.value(forHTTPHeaderField: "Content-Length") == String(uploadSize))
                 let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
                 #expect(query?.first(where: { $0.name == "filename" })?.value == "Local Upload.m4a")
-                let data = Data(#"""
-                {
-                  "id":"uploaded-audio",
-                  "filename":"Local Upload.m4a",
-                  "title":"Local Upload",
-                  "artist":"Device",
-                  "album":"Only",
-                  "size":\#(uploadSize),
-                  "modified_at":"2026-08-02T00:00:00.000Z",
-                  "content_type":"audio/mp4",
-                  "duration_seconds":4,
-                  "artwork_url":null,
-                  "download_url":"/api/v1/songs/uploaded-audio/file",
-                  "stream_url":"/api/v1/songs/uploaded-audio/stream"
-                }
-                """#.utf8)
+                let data = Data(#"{"id":"uploaded-audio","filename":"Local Upload.m4a","title":"Local Upload","artist":"Device","album":"Only","size":1,"modified_at":"2026-08-03T00:00:00Z","content_type":"audio/mp4","duration_seconds":4,"artwork_url":null,"download_url":"/api/v1/songs/uploaded-audio/file","stream_url":"/api/v1/songs/uploaded-audio/stream"}"#.utf8)
                 return (HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!, data)
             }
             if request.httpMethod == "GET", url.path == "/api/v1/songs" {
@@ -923,9 +908,8 @@ struct LocalImportTests {
         ))
 
         try await model.uploadLocalImportToActiveProfile(track)
-        #expect(model.remoteSongs.map(\.id) == ["uploaded-audio"])
-        #expect(model.tracks.first(where: { $0.id == track.id })?.remoteID == nil)
-        #expect(model.tracks.first(where: { $0.id == track.id })?.syncProfileID == nil)
+        #expect(model.tracks.first(where: { $0.id == track.id })?.remoteID == "uploaded-audio")
+        #expect(model.tracks.first(where: { $0.id == track.id })?.syncProfileID == "profile-b")
 
         LocalImportMockURLProtocol.handler = { request in
             let url = try #require(request.url)
@@ -941,7 +925,67 @@ struct LocalImportTests {
         #expect(uploadFailed)
         #expect(FileManager.default.fileExists(atPath: localFile.path))
         #expect(model.visibleTracks.contains(where: { $0.id == track.id }))
-        #expect(model.tracks.first(where: { $0.id == track.id })?.syncProfileID == nil)
+        #expect(model.tracks.first(where: { $0.id == track.id })?.syncProfileID == "profile-b")
+    }
+
+    @Test
+    func cachedServerCopyReconcilesIntoOriginalPlaylistTrack() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CachedUploadReconciliation-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let localFile = root.appendingPathComponent("Local.m4a")
+        let serverFile = root.appendingPathComponent("Server.m4a")
+        let bytes = Data(repeating: 0x5a, count: 8_192)
+        try bytes.write(to: localFile, options: .atomic)
+        try bytes.write(to: serverFile, options: .atomic)
+        let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+
+        let suiteName = "CachedUploadReconciliation.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            serverCacheRoot: root,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        let local = model.insertLocalImportedAudio(LocalImportedAudio(
+            fileURL: localFile,
+            metadata: .init(title: "Shared song", artist: "Artist", album: "Album", artworkURL: nil, sourceURL: "https://youtu.be/reconcile"),
+            duration: 4,
+            artworkData: nil,
+            sourceSHA256: hash,
+            contentSHA256: hash
+        ))
+        let playlist = try #require(model.createPlaylist(named: "Shared mix"))
+        model.addTrack(local, to: playlist)
+        let duplicate = Track(
+            title: local.title,
+            artist: local.artist,
+            album: local.album,
+            duration: local.duration,
+            artwork: .electric,
+            fileURL: serverFile,
+            remoteID: "remote-song",
+            sourceServer: "https://music.test/",
+            syncProfileID: "default"
+        )
+        model.tracks.append(duplicate)
+        model.favorites.insert(duplicate.id)
+
+        #expect(await model.reconcileCachedUploadedLocalTracks())
+        let reconciled = try #require(model.tracks.first(where: { $0.id == local.id }))
+        #expect(reconciled.remoteID == "remote-song")
+        #expect(reconciled.syncProfileID == "default")
+        #expect(!model.tracks.contains(where: { $0.id == duplicate.id }))
+        let reconciledPlaylist = try #require(model.playlists.first(where: { $0.id == playlist.id }))
+        #expect(reconciledPlaylist.trackIDs == [local.id])
+        #expect(reconciledPlaylist.remoteSongIDs == ["remote-song"])
+        #expect(model.favorites.contains(local.id))
+        #expect(!model.favorites.contains(duplicate.id))
     }
 
     @Test

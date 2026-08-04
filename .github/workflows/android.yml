@@ -26,6 +26,15 @@ on:
         required: false
         type: string
         default: ""
+    secrets:
+      RESONANCE_ANDROID_KEYSTORE_BASE64:
+        required: true
+      RESONANCE_ANDROID_KEYSTORE_PASSWORD:
+        required: true
+      RESONANCE_ANDROID_KEY_ALIAS:
+        required: true
+      RESONANCE_ANDROID_KEY_PASSWORD:
+        required: true
   workflow_dispatch:
 
 permissions:
@@ -78,16 +87,72 @@ jobs:
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
-      - name: Package Android release candidate
+      - name: Validate Android release-signing secrets
+        if: ${{ inputs.release_candidate }}
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RESONANCE_ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.RESONANCE_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RESONANCE_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RESONANCE_ANDROID_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" || -z "$KEYSTORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
+            echo "::error::The four RESONANCE_ANDROID release-signing secrets are required for release candidates."
+            exit 1
+          fi
+
+      - name: Decode Android release keystore
+        if: ${{ inputs.release_candidate }}
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RESONANCE_ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/resonance-release.jks"
+          chmod 600 "$RUNNER_TEMP/resonance-release.jks"
+
+      - name: Build signed Android release
+        if: ${{ inputs.release_candidate }}
+        env:
+          RESONANCE_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/resonance-release.jks
+          RESONANCE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RESONANCE_ANDROID_KEYSTORE_PASSWORD }}
+          RESONANCE_ANDROID_KEY_ALIAS: ${{ secrets.RESONANCE_ANDROID_KEY_ALIAS }}
+          RESONANCE_ANDROID_KEY_PASSWORD: ${{ secrets.RESONANCE_ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Package signed Android release candidate
         if: ${{ inputs.release_candidate }}
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
         run: |
+          METADATA="app/build/outputs/apk/release/output-metadata.json"
+          APK="app/build/outputs/apk/release/app-release.apk"
+          VERSION_NAME="$(jq -r '.elements[0].versionName' "$METADATA")"
+          VERSION_CODE="$(jq -r '.elements[0].versionCode' "$METADATA")"
+          if [[ "$VERSION_NAME" != "$VERSION" ]]; then
+            echo "::error::Candidate version $VERSION does not match Android versionName $VERSION_NAME."
+            exit 1
+          fi
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
+          if [[ -z "$APKSIGNER" ]]; then
+            echo "::error::Android apksigner was not found."
+            exit 1
+          fi
+          "$APKSIGNER" verify --verbose "$APK"
           mkdir -p ../installers/android/dist
-          cp app/build/outputs/apk/debug/app-debug.apk "../installers/android/dist/Resonance-Android-${VERSION}.apk"
-          cd ../installers/android/dist
-          sha256sum "Resonance-Android-${VERSION}.apk" > "Resonance-Android-${VERSION}.apk.sha256"
+          RELEASE_APK="Resonance-Android-${VERSION}.apk"
+          cp "$APK" "../installers/android/dist/$RELEASE_APK"
+          SHA256="$(sha256sum "../installers/android/dist/$RELEASE_APK" | awk '{print $1}')"
+          SIZE_BYTES="$(stat -c '%s' "../installers/android/dist/$RELEASE_APK")"
+          printf '%s  %s\n' "$SHA256" "$RELEASE_APK" > "../installers/android/dist/$RELEASE_APK.sha256"
+          jq -n \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg versionName "$VERSION_NAME" \
+            --arg apkUrl "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${RELEASE_APK}" \
+            --arg sha256 "$SHA256" \
+            --argjson sizeBytes "$SIZE_BYTES" \
+            '{schemaVersion: 1, versionCode: $versionCode, versionName: $versionName, apkUrl: $apkUrl, sha256: $sha256, sizeBytes: $sizeBytes}' \
+            > ../installers/android/dist/latest-android.json
 
       - name: Upload Android release candidate
         if: ${{ inputs.release_candidate }}
@@ -97,6 +162,7 @@ jobs:
           path: |
             installers/android/dist/Resonance-Android-${{ inputs.version }}.apk
             installers/android/dist/Resonance-Android-${{ inputs.version }}.apk.sha256
+            installers/android/dist/latest-android.json
           if-no-files-found: error
           retention-days: 14
           overwrite: true

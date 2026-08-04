@@ -1,37 +1,37 @@
 package mov.unblocked.resonance.ui
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Text
@@ -39,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -50,11 +51,17 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import mov.unblocked.resonance.data.Playlist
 import mov.unblocked.resonance.data.Track
 import java.text.DecimalFormat
+import java.net.HttpURLConnection
+import java.net.URI
+import java.net.URL
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun ResonanceBackground(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
@@ -107,6 +114,66 @@ fun Artwork(
 }
 
 @Composable
+fun RemoteArtwork(
+    artworkURL: String?,
+    serverURL: String,
+    modifier: Modifier = Modifier,
+) {
+    val resolvedURL = remember(artworkURL, serverURL) {
+        resolveRemoteArtworkURL(serverURL, artworkURL)
+    }
+    val bitmap by produceState<Bitmap?>(initialValue = null, key1 = resolvedURL) {
+        value = resolvedURL?.let { url ->
+            withContext(Dispatchers.IO) { loadRemoteArtwork(url) }
+        }
+    }
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Brush.linearGradient(listOf(Violet, Color(0xFF874BFF), Color(0xFFB079FF)))),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap!!.asImageBitmap(),
+                contentDescription = "Album artwork",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Default.MusicNote,
+                contentDescription = null,
+                tint = Color.White.copy(alpha = .94f),
+                modifier = Modifier.size(28.dp),
+            )
+        }
+    }
+}
+
+internal fun resolveRemoteArtworkURL(serverURL: String, artworkURL: String?): String? {
+    val trimmed = artworkURL?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    return runCatching {
+        val artwork = URI(trimmed)
+        if (artwork.isAbsolute) artwork.toString()
+        else URI(serverURL.trimEnd('/') + "/").resolve(artwork).toString()
+    }.getOrNull()
+}
+
+private fun loadRemoteArtwork(url: String): Bitmap? = runCatching {
+    val connection = URL(url).openConnection() as HttpURLConnection
+    try {
+        connection.connectTimeout = 10_000
+        connection.readTimeout = 20_000
+        connection.instanceFollowRedirects = true
+        if (connection.responseCode !in 200..299) return@runCatching null
+        connection.inputStream.use(BitmapFactory::decodeStream)
+    } finally {
+        connection.disconnect()
+    }
+}.getOrNull()
+
+@Composable
 fun Eyebrow(text: String, modifier: Modifier = Modifier) {
     Text(
         text = text.uppercase(),
@@ -155,11 +222,47 @@ fun SegmentedControl(
 }
 
 @Composable
+fun SongListHeader(
+    trailingTitle: String = "Time",
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().height(38.dp).padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                "#",
+                modifier = Modifier.width(24.dp),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f),
+            )
+            Text(
+                "Title",
+                modifier = Modifier.weight(1f),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f),
+            )
+            Text(
+                trailingTitle,
+                modifier = Modifier.width(44.dp),
+                textAlign = TextAlign.End,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f),
+            )
+        }
+        HorizontalDivider(color = Color.White.copy(alpha = .10f))
+    }
+}
+
+@Composable
 fun TrackRow(
     track: Track,
     state: ResonanceUiState,
     actions: ResonanceActions,
     modifier: Modifier = Modifier,
+    number: Int? = null,
     queue: List<Track> = state.tracks,
     playlistId: String? = null,
     playlistsForAdding: List<Playlist> = state.playlists.filterNot { it.isSystem },
@@ -168,72 +271,118 @@ fun TrackRow(
     selected: Boolean = false,
     onSelect: (() -> Unit)? = null,
     allowDeleteFromDevice: Boolean = true,
+    onDeleteFromDevice: (() -> Unit)? = null,
     showFavorite: Boolean = true,
     showMenu: Boolean = true,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable {
-                if (showSelection) onSelect?.invoke()
-                else actions.playTrack(track.id, queue.map { it.id }, playlistId)
+    val displayedNumber = number ?: queue.indexOfFirst { it.id == track.id }.takeIf { it >= 0 }?.plus(1)
+    Box(modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 76.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(if (selected) Color.White.copy(alpha = .05f) else Color.Transparent)
+                .combinedClickable(
+                    onClick = {
+                        if (showSelection) onSelect?.invoke()
+                        else actions.playTrack(track.id, queue.map { it.id }, playlistId)
+                    },
+                    onLongClick = if (!showSelection && showMenu) ({ menuOpen = true }) else null,
+                )
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(Modifier.width(24.dp), contentAlignment = Alignment.CenterStart) {
+                if (showSelection) {
+                    Icon(
+                        if (selected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                        contentDescription = if (selected) "Selected" else "Not selected",
+                        modifier = Modifier.size(18.dp),
+                        tint = if (selected) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .42f),
+                    )
+                } else {
+                    Text(
+                        displayedNumber?.toString().orEmpty(),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                    )
+                }
             }
-            .padding(horizontal = 12.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        if (showSelection) {
-            Box(
-                modifier = Modifier
-                    .size(22.dp)
-                    .clip(CircleShape)
-                    .background(if (selected) Accent else Color.Transparent)
-                    .then(if (selected) Modifier else Modifier.background(Color.White.copy(alpha = .08f))),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (selected) Icon(Icons.Default.Check, null, Modifier.size(15.dp), tint = Color.White)
+            Artwork(
+                path = state.artworkPathsByTrackId[track.id] ?: track.artworkFilename,
+                modifier = Modifier.size(52.dp),
+                showWaveform = state.currentTrackId == track.id && state.isPlaying,
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        track.title,
+                        modifier = Modifier.weight(1f, fill = false),
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Icon(
+                        Icons.Default.CheckCircle,
+                        contentDescription = "Stored on device",
+                        modifier = Modifier.size(9.dp),
+                        tint = SuccessGreen,
+                    )
+                }
+                Text(
+                    "${track.artist} / ${track.mediaKindLabel}",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    track.album.ifBlank { "Unknown Album" },
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .43f),
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
-        }
-        Artwork(
-            path = state.artworkPathsByTrackId[track.id] ?: track.artworkFilename,
-            modifier = Modifier.size(50.dp),
-            showWaveform = state.currentTrackId == track.id && state.isPlaying,
-        )
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(track.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
-                "${track.artist} • ${track.album}",
+                trailingText,
+                modifier = Modifier.width(44.dp),
+                fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
-                fontSize = 12.sp,
+                textAlign = TextAlign.End,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
             )
         }
-        Text(trailingText, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
-        if (!showSelection) {
-            if (showFavorite) {
-                IconButton(onClick = { actions.toggleFavorite(track.id) }, modifier = Modifier.size(38.dp)) {
-                    Icon(
-                        if (track.id in state.favoriteTrackIds) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                        contentDescription = "Favorite",
-                        tint = if (track.id in state.favoriteTrackIds) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
-                    )
-                }
-            }
-            if (showMenu) Box {
-                IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(38.dp)) {
-                    Icon(Icons.Default.MoreVert, "More options")
-                }
+        HorizontalDivider(
+            modifier = Modifier.align(Alignment.BottomCenter),
+            color = Color.White.copy(alpha = .10f),
+        )
+        if (!showSelection && showMenu) {
+            Box(Modifier.align(Alignment.CenterEnd)) {
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(
-                        text = { Text("Play") },
-                        leadingIcon = { Icon(Icons.Default.PlayArrow, null) },
-                        onClick = {
-                            menuOpen = false
-                            actions.playTrack(track.id, queue.map { it.id }, playlistId)
-                        },
-                    )
+                    if (!showFavorite) {
+                        DropdownMenuItem(
+                            text = { Text("Play") },
+                            leadingIcon = { Icon(Icons.Default.PlayArrow, null) },
+                            onClick = {
+                                menuOpen = false
+                                actions.playTrack(track.id, queue.map { it.id }, playlistId)
+                            },
+                        )
+                    } else {
+                        val liked = track.id in state.favoriteTrackIds
+                        DropdownMenuItem(
+                            text = { Text(if (liked) "Remove from Liked Songs" else "Add to Liked Songs") },
+                            leadingIcon = { Icon(if (liked) Icons.Default.Favorite else Icons.Default.FavoriteBorder, null) },
+                            onClick = {
+                                menuOpen = false
+                                actions.toggleFavorite(track.id)
+                            },
+                        )
+                    }
                     if (playlistId != null) {
                         DropdownMenuItem(
                             text = { Text("Remove from playlist") },
@@ -266,7 +415,8 @@ fun TrackRow(
                             leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
                             onClick = {
                                 menuOpen = false
-                                actions.deleteTracksFromDevice(setOf(track.id))
+                                onDeleteFromDevice?.invoke()
+                                    ?: actions.deleteTracksFromDevice(setOf(track.id))
                             },
                         )
                     }
@@ -275,6 +425,12 @@ fun TrackRow(
         }
     }
 }
+
+internal val Track.mediaKindLabel: String
+    get() {
+        val extension = relativePath.substringAfterLast('.', "").lowercase()
+        return if (extension in setOf("mp4", "mov", "m4v", "webm")) "Video" else "Audio"
+    }
 
 fun durationText(milliseconds: Long): String {
     val seconds = (milliseconds.coerceAtLeast(0) / 1_000).toInt()

@@ -159,6 +159,127 @@ struct PlayerModelRegressionTests {
         )!
     }
 
+    @Test
+    func listeningHistoryUploadsEveryLocalProfileAndMergesTheActiveProfile() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        let seed = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        await seed.importLocalFiles(at: [hero])
+        let localTrack = try #require(seed.tracks.first)
+        let defaultEventID = UUID()
+        let otherProfileEventID = UUID()
+        let startedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        defaults.set(
+            try JSONEncoder().encode([
+                ListeningHistoryEntry(
+                    id: defaultEventID,
+                    trackID: localTrack.id,
+                    startedAt: startedAt,
+                    listenedSeconds: 42,
+                    syncProfileID: "default",
+                    title: "Mac song",
+                    artist: "Mac artist",
+                    originatedOnThisDevice: true
+                ),
+                ListeningHistoryEntry(
+                    id: otherProfileEventID,
+                    trackID: localTrack.id,
+                    startedAt: startedAt.addingTimeInterval(30),
+                    listenedSeconds: 18,
+                    syncProfileID: "profile-b",
+                    title: "Other profile song",
+                    originatedOnThisDevice: true
+                ),
+            ]),
+            forKey: "LikedSongsFocus.listeningHistory.v1"
+        )
+
+        let remoteEventID = UUID()
+        let remoteTrackID = UUID()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var postedProfiles: [String] = []
+        RegressionURLProtocol.handler = { request in
+            #expect(request.url?.path == "/api/v1/listening-history")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
+            let profileID = try #require(request.value(forHTTPHeaderField: "X-Resonance-Profile"))
+            if request.httpMethod == "POST" {
+                postedProfiles.append(profileID)
+                let body = try #require(
+                    try JSONSerialization.jsonObject(with: regressionRequestBody(request)) as? [String: Any]
+                )
+                #expect(body["client"] as? String == "macos")
+                #expect(!(body["device_id"] as? String ?? "").isEmpty)
+                let entries = try #require(body["entries"] as? [[String: Any]])
+                #expect(entries.count == 1)
+                #expect(((entries[0]["listened_seconds"] as? Double) ?? 0) > 0)
+                return (
+                    try response(for: request),
+                    Data("{\"profile_id\":\"\(profileID)\",\"accepted\":1}".utf8)
+                )
+            }
+
+            #expect(request.httpMethod == "GET")
+            #expect(profileID == "default")
+            #expect(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "limit" })?.value == "2000")
+            let document: [String: Any] = [
+                "profile_id": "default",
+                "entries": [[
+                    "id": remoteEventID.uuidString.lowercased(),
+                    "track_id": remoteTrackID.uuidString.lowercased(),
+                    "started_at": formatter.string(from: startedAt.addingTimeInterval(60)),
+                    "listened_seconds": 75,
+                    "title": "Windows song",
+                    "artist": "Windows artist",
+                    "duration_seconds": 180,
+                ]],
+            ]
+            return (
+                try response(for: request),
+                try JSONSerialization.data(withJSONObject: document)
+            )
+        }
+
+        let model = PlayerModel(
+            loadPersistedLibrary: true,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+        await model.syncListeningHistoryNow()
+
+        #expect(Set(postedProfiles) == Set(["default", "profile-b"]))
+        #expect(model.activeProfileListeningHistoryEntries.count == 2)
+        #expect(model.listeningHistoryEntries.contains(where: {
+            $0.id == otherProfileEventID && $0.syncProfileID == "profile-b"
+        }))
+        let remoteEntry = try #require(
+            model.listeningHistoryEntries.first(where: { $0.id == remoteEventID })
+        )
+        #expect(remoteEntry.originatedOnThisDevice == false)
+        #expect(remoteEntry.title == "Windows song")
+
+        let reloaded = PlayerModel(
+            loadPersistedLibrary: true,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        #expect(reloaded.listeningHistoryEntries.contains(where: { $0.id == remoteEventID }))
+    }
+
     private func catalog(
         id: String,
         filename: String = "Glass.aiff",

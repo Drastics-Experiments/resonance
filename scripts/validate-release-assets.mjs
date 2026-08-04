@@ -24,6 +24,7 @@ const expectedAssets = [
   "latest.yml",
   androidPackage,
   `${androidPackage}.sha256`,
+  "latest-android.json",
   iosArchive,
   `${iosArchive}.sha256`,
 ].sort();
@@ -90,6 +91,23 @@ if (macManifest.sha256 !== macSha256) {
 }
 if (!String(macManifest.url).endsWith(`/releases/download/v${version}/Resonance-macOS.zip`)) {
   fail(`latest-mac.json has an unexpected URL: ${macManifest.url}`);
+}
+
+const androidManifest = JSON.parse(readAsset("latest-android.json").toString("utf8"));
+if (androidManifest.versionName !== version) {
+  fail(`latest-android.json version is ${androidManifest.versionName}, expected ${version}`);
+}
+if (!Number.isSafeInteger(androidManifest.versionCode) || androidManifest.versionCode < 1) {
+  fail("latest-android.json has an invalid versionCode");
+}
+if (androidManifest.sha256 !== digest(androidPackage, "sha256", "hex")) {
+  fail("latest-android.json SHA-256 does not match the Android package");
+}
+if (androidManifest.sizeBytes !== fs.statSync(path.join(assetDirectory, androidPackage)).size) {
+  fail("latest-android.json size does not match the Android package");
+}
+if (!String(androidManifest.apkUrl).endsWith(`/releases/download/v${version}/${androidPackage}`)) {
+  fail(`latest-android.json has an unexpected URL: ${androidManifest.apkUrl}`);
 }
 
 const windowsManifest = readAsset("latest.yml").toString("utf8");

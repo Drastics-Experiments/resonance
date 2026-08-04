@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ComponentName
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Bundle
 import android.provider.OpenableColumns
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
@@ -28,10 +29,17 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import mov.unblocked.resonance.data.CredentialStore
+import mov.unblocked.resonance.data.ClipRange
+import mov.unblocked.resonance.data.LinkImportException
+import mov.unblocked.resonance.data.LinkImportProgress
+import mov.unblocked.resonance.data.LinkImportService
+import mov.unblocked.resonance.data.LinkImportStage
+import mov.unblocked.resonance.data.LinkImportTrack
 import mov.unblocked.resonance.data.LibraryRepository
 import mov.unblocked.resonance.data.Playlist
 import mov.unblocked.resonance.data.PlaylistPutResult
 import mov.unblocked.resonance.data.RemotePlaylist
+import mov.unblocked.resonance.data.RemoteClipRange
 import mov.unblocked.resonance.data.RemotePlaylistsDocument
 import mov.unblocked.resonance.data.RemoteSong
 import mov.unblocked.resonance.data.ServerClient
@@ -41,10 +49,12 @@ import mov.unblocked.resonance.playback.PlaybackService
 import mov.unblocked.resonance.playback.DownloadPolicy
 import mov.unblocked.resonance.ui.ResonanceActions
 import mov.unblocked.resonance.ui.ResonanceUiState
+import mov.unblocked.resonance.ui.LinkImportUiState
 
 class ResonanceViewModel(application: Application) : AndroidViewModel(application), ResonanceActions {
     private val context = application.applicationContext
     private val repository = LibraryRepository(context)
+    private val linkImportService = LinkImportService(context)
     private val credentials = CredentialStore(context)
     private val preferences = context.getSharedPreferences("resonance.playback", 0)
     private val mutableState = MutableStateFlow(
@@ -55,6 +65,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             shuffleEnabled = preferences.getBoolean("shuffle", false),
             repeatEnabled = preferences.getBoolean("repeat", false),
             playbackSpeed = preferences.getFloat("speed", 1f),
+            volume = preferences.getFloat("volume", .8f).coerceIn(0f, 1f),
         ),
     )
     val uiState = mutableState.asStateFlow()
@@ -70,6 +81,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private var activeQueue: List<String> = emptyList()
     private var activePlaylistId: String? = null
     private var syncDebounce: Job? = null
+    private var likesMutationGeneration = 0L
+    private var clipRangeMutationGeneration = 0L
+    private var linkImportJob: Job? = null
 
     override fun dismissError() {
         mutableState.value = mutableState.value.copy(errorMessage = null)
@@ -78,7 +92,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     init {
         connectController()
         viewModelScope.launch {
-            library = repository.load().copy(serverURL = credentials.serverURL)
+            library = migrateRemoteLikes(repository.load().copy(serverURL = credentials.serverURL))
             refreshLibraryState()
             refreshStorage()
             syncPlaylistsAutomatically()
@@ -104,9 +118,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         future.addListener({
             runCatching { future.get() }.onSuccess { mediaController ->
                 controller = mediaController
-                mediaController.repeatMode = if (mutableState.value.repeatEnabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_ALL
+                mediaController.repeatMode = repeatModeFor(mutableState.value.repeatEnabled)
                 mediaController.shuffleModeEnabled = mutableState.value.shuffleEnabled
                 mediaController.setPlaybackSpeed(mutableState.value.playbackSpeed)
+                mediaController.volume = mutableState.value.volume
                 mediaController.addListener(object : Player.Listener {
                     override fun onEvents(player: Player, events: Player.Events) = refreshPlaybackState()
                 })
@@ -133,6 +148,129 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 persistLibrary()
             }
         }
+    }
+
+    override fun resolveLinkImport(source: String) {
+        val value = source.trim()
+        if (value.isEmpty()) {
+            mutableState.value = mutableState.value.copy(
+                linkImport = LinkImportUiState(
+                    stage = LinkImportStage.Failed,
+                    errorCode = "MISSING_SOURCE",
+                    errorMessage = "Paste a Spotify track or YouTube video URL first.",
+                ),
+            )
+            return
+        }
+        linkImportJob?.cancel()
+        mutableState.value = mutableState.value.copy(
+            linkImport = LinkImportUiState(stage = LinkImportStage.ResolvingMetadata),
+        )
+        linkImportJob = viewModelScope.launch {
+            runCatching {
+                linkImportService.resolve(value, ::applyLinkImportProgress)
+            }.onSuccess { resolution ->
+                mutableState.value = mutableState.value.copy(
+                    linkImport = mutableState.value.linkImport.copy(
+                        stage = LinkImportStage.AwaitingSelection,
+                        resolution = resolution,
+                        selectedVideoId = resolution.candidates.firstOrNull()?.videoID,
+                        errorCode = null,
+                        errorMessage = null,
+                    ),
+                )
+            }.onFailure(::applyLinkImportFailure)
+        }
+    }
+
+    override fun selectLinkImportCandidate(videoId: String) {
+        val current = mutableState.value.linkImport
+        if (current.resolution?.candidates?.any { it.videoID == videoId } != true) return
+        mutableState.value = mutableState.value.copy(
+            linkImport = current.copy(selectedVideoId = videoId),
+        )
+    }
+
+    override fun confirmLinkImport() {
+        val current = mutableState.value.linkImport
+        val resolution = current.resolution ?: return
+        val candidate = resolution.candidates.firstOrNull { it.videoID == current.selectedVideoId } ?: return
+        linkImportJob?.cancel()
+        mutableState.value = mutableState.value.copy(
+            linkImport = current.copy(
+                stage = LinkImportStage.InspectingSource,
+                completedBytes = 0,
+                totalBytes = 0,
+                errorCode = null,
+                errorMessage = null,
+            ),
+        )
+        linkImportJob = viewModelScope.launch {
+            runCatching {
+                val metadata = LinkImportTrack(
+                    title = resolution.track.title,
+                    artist = resolution.track.artist,
+                    album = resolution.track.album,
+                    durationSeconds = resolution.track.durationSeconds,
+                    artworkURL = resolution.track.artworkURL ?: candidate.thumbnailURL,
+                    sourceURL = resolution.track.sourceURL,
+                )
+                val download = linkImportService.download(candidate, metadata, ::applyLinkImportProgress)
+                val duplicate = library.tracks.firstOrNull {
+                    it.sourceSHA256 == download.sourceSHA256
+                        || it.contentSHA256 == download.sourceSHA256
+                        || it.contentSHA256 == download.contentSHA256
+                }
+                if (duplicate != null) {
+                    download.file.parentFile?.deleteRecursively()
+                    duplicate
+                } else {
+                    applyLinkImportProgress(LinkImportProgress(LinkImportStage.SavingLocal))
+                    repository.registerLocalImport(download)
+                }
+            }.onSuccess { track ->
+                if (library.tracks.none { it.id == track.id }) {
+                    library = normalizeLiked(library.copy(tracks = library.tracks + track))
+                    persistLibrary()
+                }
+                mutableState.value = mutableState.value.copy(
+                    linkImport = mutableState.value.linkImport.copy(
+                        stage = LinkImportStage.Complete,
+                        completedTrackTitle = track.title,
+                    ),
+                )
+            }.onFailure(::applyLinkImportFailure)
+        }
+    }
+
+    override fun cancelLinkImport() {
+        linkImportJob?.cancel()
+        linkImportJob = null
+        mutableState.value = mutableState.value.copy(
+            linkImport = LinkImportUiState(stage = LinkImportStage.Cancelled),
+        )
+    }
+
+    private fun applyLinkImportProgress(progress: LinkImportProgress) {
+        mutableState.value = mutableState.value.copy(
+            linkImport = mutableState.value.linkImport.copy(
+                stage = progress.stage,
+                completedBytes = progress.completedBytes,
+                totalBytes = progress.totalBytes,
+            ),
+        )
+    }
+
+    private fun applyLinkImportFailure(error: Throwable) {
+        if (error is kotlinx.coroutines.CancellationException) return
+        val failure = error as? LinkImportException
+        mutableState.value = mutableState.value.copy(
+            linkImport = mutableState.value.linkImport.copy(
+                stage = LinkImportStage.Failed,
+                errorCode = failure?.code ?: "LOCAL_IMPORT_FAILED",
+                errorMessage = error.message ?: "The link import failed.",
+            ),
+        )
     }
 
     override fun uploadAudio() { mutableUploadRequests.tryEmit(Unit) }
@@ -185,7 +323,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         if (index < 0) return
         activeQueue = ids
         activePlaylistId = playlistId
-        player.setMediaItems(items, index, 0L)
+        val start = playbackRange(library.tracks.first { it.id == trackId }).startMs
+        player.setMediaItems(items, index, start)
         player.prepare()
         player.play()
         refreshPlaybackState()
@@ -195,19 +334,33 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val player = controller ?: return
         if (player.mediaItemCount == 0) {
             library.tracks.firstOrNull()?.let { playTrack(it.id) }
-        } else if (player.isPlaying) player.pause() else player.play()
+        } else if (player.isPlaying) {
+            player.pause()
+        } else {
+            val track = player.currentMediaItem?.mediaId?.let { id -> library.tracks.firstOrNull { it.id == id } }
+            if (track != null) {
+                val range = playbackRange(track)
+                if (player.currentPosition !in range.startMs until range.endMs) player.seekTo(range.startMs)
+            }
+            player.play()
+        }
     }
 
     override fun playNext() { controller?.seekToNextMediaItem() }
 
     override fun playPrevious() {
-        controller?.let { if (it.currentPosition > 3_000) it.seekTo(0) else it.seekToPreviousMediaItem() }
+        controller?.let { player ->
+            val track = player.currentMediaItem?.mediaId?.let { id -> library.tracks.firstOrNull { it.id == id } }
+            val start = track?.let(::playbackRange)?.startMs ?: 0L
+            if (player.currentPosition > start + 3_000) player.seekTo(start) else player.seekToPreviousMediaItem()
+        }
     }
 
     override fun seekToFraction(fraction: Float) {
         controller?.let { player ->
-            val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0 } ?: return
-            player.seekTo((duration * fraction.coerceIn(0f, 1f)).toLong())
+            val track = player.currentMediaItem?.mediaId?.let { id -> library.tracks.firstOrNull { it.id == id } } ?: return
+            val range = playbackRange(track)
+            player.seekTo(range.startMs + (range.durationMs * fraction.coerceIn(0f, 1f)).toLong())
         }
     }
 
@@ -218,7 +371,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun setRepeatEnabled(enabled: Boolean) {
-        controller?.repeatMode = if (enabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_ALL
+        controller?.repeatMode = repeatModeFor(enabled)
         mutableState.value = mutableState.value.copy(repeatEnabled = enabled)
         preferences.edit().putBoolean("repeat", enabled).apply()
     }
@@ -229,18 +382,85 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         preferences.edit().putFloat("speed", speed).apply()
     }
 
+    override fun setVolume(volume: Float) {
+        val clamped = volume.coerceIn(0f, 1f)
+        controller?.volume = clamped
+        mutableState.value = mutableState.value.copy(volume = clamped)
+        preferences.edit().putFloat("volume", clamped).apply()
+    }
+
     override fun toggleFavorite(trackId: String) {
         val favorites = if (trackId in library.favorites) library.favorites - trackId else library.favorites + trackId
-        library = normalizeLiked(library.copy(favorites = favorites))
-        saveSoon()
+        val remoteID = library.tracks.firstOrNull { it.id == trackId }?.remoteID
+        val remoteLikedSongIDs = library.remoteLikedSongIDs.orEmpty().toMutableSet()
+        val dirtyRemoteLikeSongIDs = library.dirtyRemoteLikeSongIDs.orEmpty().toMutableSet()
+        if (remoteID != null) {
+            likesMutationGeneration += 1
+            if (trackId in favorites) remoteLikedSongIDs += remoteID else remoteLikedSongIDs -= remoteID
+            dirtyRemoteLikeSongIDs += remoteID
+        }
+        library = normalizeLiked(library.copy(
+            favorites = favorites,
+            remoteLikedSongIDs = remoteLikedSongIDs,
+            dirtyRemoteLikeSongIDs = dirtyRemoteLikeSongIDs,
+            likesDirty = dirtyRemoteLikeSongIDs.isNotEmpty(),
+        ))
+        saveAndScheduleSync()
     }
 
     override fun deleteTracksFromDevice(trackIds: Set<String>) {
         viewModelScope.launch {
             if (mutableState.value.currentTrackId in trackIds) controller?.stop()
+            val suffixes = library.tracks.filter { it.id in trackIds }.flatMap { track ->
+                listOf("|local:" + track.id) + listOfNotNull(track.remoteID?.let { "|remote:" + it })
+            }
             library = repository.deleteLocalTracks(library, trackIds)
+            library = library.copy(
+                clipRanges = library.clipRanges.filterKeys { key -> suffixes.none(key::endsWith) },
+                dirtyClipRangeKeys = library.dirtyClipRangeKeys.filterTo(mutableSetOf()) { key -> suffixes.none(key::endsWith) },
+                deletedClipRangeKeys = library.deletedClipRangeKeys.filterTo(mutableSetOf()) { key -> suffixes.none(key::endsWith) },
+            )
             persistLibrary()
         }
+    }
+
+    override fun saveClipRange(trackId: String, startMs: Long, endMs: Long) {
+        val track = library.tracks.firstOrNull { it.id == trackId } ?: return
+        val start = startMs.coerceIn(0L, track.durationMs)
+        val end = endMs.coerceIn(0L, track.durationMs)
+        if (end - start < 250L) return
+        val key = clipRangeKey(track)
+        val ranges = library.clipRanges + (key to ClipRange(start, end))
+        val dirty = library.dirtyClipRangeKeys.toMutableSet()
+        val deleted = library.deletedClipRangeKeys.toMutableSet()
+        if (track.remoteID != null) {
+            dirty += key
+            deleted -= key
+        }
+        clipRangeMutationGeneration += 1
+        library = library.copy(clipRanges = ranges, dirtyClipRangeKeys = dirty, deletedClipRangeKeys = deleted)
+        refreshQueuedClipMetadata()
+        saveAndScheduleSync()
+    }
+
+    override fun clearClipRange(trackId: String) {
+        val track = library.tracks.firstOrNull { it.id == trackId } ?: return
+        val key = clipRangeKey(track)
+        if (key !in library.clipRanges) return
+        val dirty = library.dirtyClipRangeKeys.toMutableSet()
+        val deleted = library.deletedClipRangeKeys.toMutableSet()
+        if (track.remoteID != null) {
+            dirty += key
+            deleted += key
+        }
+        clipRangeMutationGeneration += 1
+        library = library.copy(
+            clipRanges = library.clipRanges - key,
+            dirtyClipRangeKeys = dirty,
+            deletedClipRangeKeys = deleted,
+        )
+        refreshQueuedClipMetadata()
+        saveAndScheduleSync()
     }
 
     override fun createPlaylist(name: String) {
@@ -311,30 +531,153 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun refreshServer() {
         if (mutableState.value.isRefreshingServer) return
-        viewModelScope.launch {
-            mutableState.value = mutableState.value.copy(isRefreshingServer = true, serverMessage = "Connecting…")
-            runCatching { serverClient().fetchCatalog() }
-                .onSuccess { catalog ->
-                    mutableState.value = mutableState.value.copy(
-                        remoteSongs = catalog.songs,
-                        serverMessage = "Connected • ${catalog.count} song${if (catalog.count == 1) "" else "s"}",
-                    )
-                    syncPlaylistsNow()
-                }
-                .onFailure { error -> mutableState.value = mutableState.value.copy(serverMessage = error.message ?: "Connection failed", errorMessage = error.message) }
-            mutableState.value = mutableState.value.copy(isRefreshingServer = false)
-        }
+        viewModelScope.launch { refreshServerNow() }
     }
 
-    override fun saveServerConnection(url: String, accessToken: String, adminKey: String) {
+    private suspend fun refreshServerNow() {
+        mutableState.value = mutableState.value.copy(isRefreshingServer = true, serverMessage = "Connecting…")
+        runCatching {
+            val client = serverClient()
+            val profiles = client.fetchProfiles()
+            val catalog = client.fetchCatalog()
+            Triple(client, catalog, profiles)
+        }
+            .onSuccess { (client, catalog, profiles) ->
+                library = library.copy(syncProfiles = profiles.profiles)
+                mutableState.value = mutableState.value.copy(
+                    remoteSongs = catalog.songs,
+                    syncProfiles = profiles.profiles,
+                    serverMessage = "Connected • ${catalog.count} song${if (catalog.count == 1) "" else "s"}",
+                )
+                if (backfillDownloadedArtwork(client, catalog.songs)) {
+                    persistLibrary()
+                } else {
+                    saveSoon()
+                }
+                syncPlaylistsNow()
+            }
+            .onFailure { error ->
+                mutableState.value = mutableState.value.copy(
+                    serverMessage = error.message ?: "Connection failed",
+                    errorMessage = error.message.takeUnless { mutableState.value.isApplyingServerConnection },
+                )
+            }
+        mutableState.value = mutableState.value.copy(isRefreshingServer = false)
+    }
+
+    private suspend fun backfillDownloadedArtwork(
+        client: ServerClient,
+        songs: List<RemoteSong>,
+    ): Boolean {
+        val songsByID = songs.associateBy(RemoteSong::id)
+        val updatedTracks = ArrayList<Track>(library.tracks.size)
+        var changed = false
+
+        for (track in library.tracks) {
+            val existingArtwork = repository.artworkFile(track)?.takeIf(File::isFile)
+            val song = track.remoteID?.let(songsByID::get)
+            if ((track.syncProfileID ?: "default") != library.syncProfileID
+                || existingArtwork?.length()?.let { it > 0L } == true
+                || song?.artworkURL.isNullOrBlank()
+            ) {
+                updatedTracks += track
+                continue
+            }
+
+            val repaired = runCatching {
+                client.fetchArtwork(song)?.let { repository.persistArtwork(track, it) }
+            }.getOrNull() ?: track
+            updatedTracks += repaired
+            changed = changed || repaired != track
+        }
+
+        if (changed) library = library.copy(tracks = updatedTracks)
+        return changed
+    }
+
+    override fun saveServerConnection(url: String, accessToken: String, adminKey: String, profileName: String) {
         val normalized = runCatching { ServerClient.normalizeServerURL(url) }.getOrElse { showError(it); return }
+        val normalizedProfileName = normalizeProfileName(profileName)
+        if (normalizedProfileName.isEmpty()) {
+            mutableState.value = mutableState.value.copy(serverMessage = "Enter a profile name.")
+            return
+        }
+        if (accessToken.isBlank()) {
+            mutableState.value = mutableState.value.copy(serverMessage = "Enter the access token.")
+            return
+        }
         credentials.serverURL = normalized
         credentials.clientToken = accessToken
         credentials.adminToken = adminKey
         library = library.copy(serverURL = normalized)
-        mutableState.value = mutableState.value.copy(serverUrl = normalized, serverToken = accessToken, serverAdminKey = adminKey)
-        saveSoon()
-        refreshServer()
+        mutableState.value = mutableState.value.copy(
+            serverUrl = normalized,
+            serverToken = accessToken,
+            serverAdminKey = adminKey,
+            remoteSongs = emptyList(),
+            selectedRemoteSongIds = emptySet(),
+            isApplyingServerConnection = true,
+            serverMessage = "Connecting…",
+            errorMessage = null,
+        )
+        viewModelScope.launch {
+            runCatching {
+                val client = ServerClient(normalized, accessToken, adminKey, library.syncProfileID)
+                val response = client.fetchProfiles()
+                val profile = response.profiles.firstOrNull {
+                    it.id == normalizedProfileName || it.name.equals(normalizedProfileName, ignoreCase = true)
+                } ?: client.createProfile(normalizedProfileName)
+                val profiles = (response.profiles + profile).distinctBy { it.id }
+                library = library.copy(syncProfiles = profiles)
+                activateProfile(profile.id)
+                persistLibrary()
+            }
+                .onSuccess {
+                    refreshServerNow()
+                }
+                .onFailure { error ->
+                    mutableState.value = mutableState.value.copy(
+                        serverMessage = "Could not activate profile: ${error.message ?: "Unknown error"}",
+                    )
+                }
+            mutableState.value = mutableState.value.copy(isApplyingServerConnection = false)
+        }
+    }
+
+    private fun activateProfile(profileId: String) {
+        if (profileId.isBlank() || profileId == library.syncProfileID) return
+        val currentTrack = mutableState.value.currentTrackId?.let { id ->
+            library.tracks.firstOrNull { it.id == id }
+        }
+        if (currentTrack?.remoteID != null && (currentTrack.syncProfileID ?: "default") != profileId) {
+            controller?.stop()
+            controller?.clearMediaItems()
+            activeQueue = emptyList()
+            activePlaylistId = null
+        }
+        val system = library.playlists.filter(Playlist::isSystem)
+        val localFavorites = library.favorites.filterTo(mutableSetOf()) { id ->
+            library.tracks.firstOrNull { it.id == id }?.remoteID == null
+        }
+        library = normalizeLiked(library.copy(
+            playlists = system,
+            favorites = localFavorites,
+            playlistRevision = 0,
+            knownRemotePlaylistIDs = emptySet(),
+            dirtyPlaylistIDs = emptySet(),
+            deletedPlaylistIDs = emptySet(),
+            playlistSyncServerURL = null,
+            syncProfileID = profileId,
+            remoteLikedSongIDs = emptySet(),
+            dirtyRemoteLikeSongIDs = emptySet(),
+            likesDirty = false,
+        ))
+        likesMutationGeneration += 1
+        mutableState.value = mutableState.value.copy(
+            syncProfileId = profileId,
+            remoteSongs = emptyList(),
+            selectedRemoteSongIds = emptySet(),
+        )
     }
 
     override fun downloadRemoteSong(songId: String) { downloadSongs(setOf(songId)) }
@@ -365,7 +708,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     catalog,
                     ids,
                     repository,
-                    library.tracks.mapNotNullTo(mutableSetOf(), Track::remoteID),
+                    library.tracks
+                        .filter { it.remoteID == null || (it.syncProfileID ?: "default") == library.syncProfileID }
+                        .mapNotNullTo(mutableSetOf(), Track::remoteID),
                 ) { progress ->
                     mutableState.value = mutableState.value.copy(
                         downloadProgress = progress.fraction,
@@ -373,7 +718,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     )
                 }
             }.onSuccess { tracks ->
-                library = hydrateRemotePlaylists(library.copy(tracks = library.tracks + tracks))
+                library = hydrateRemoteLikes(hydrateRemotePlaylists(library.copy(tracks = library.tracks + tracks)))
                 persistLibrary()
                 mutableState.value = mutableState.value.copy(
                     selectedRemoteSongIds = emptySet(),
@@ -414,7 +759,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     private suspend fun syncPlaylistsNow() {
         if (mutableState.value.isSyncingPlaylists || credentials.clientToken.isBlank()) return
-        val serverKey = runCatching { ServerClient.normalizeServerURL(credentials.serverURL) }.getOrNull() ?: return
+        val normalizedServer = runCatching { ServerClient.normalizeServerURL(credentials.serverURL) }.getOrNull() ?: return
+        val serverKey = "$normalizedServer#profile=${library.syncProfileID}"
         if (library.playlistSyncServerURL != serverKey) {
             library = library.copy(
                 playlistSyncServerURL = serverKey,
@@ -430,9 +776,34 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             repeat(2) {
                 val merge = mergePlaylists(remote)
                 if (!merge.second) { applyRemotePlaylists(remote); return@runCatching remote }
+                val submittedLikesGeneration = likesMutationGeneration
+                val submittedDirtyLikeIDs = library.dirtyRemoteLikeSongIDs.orEmpty()
+                val submittedClipGeneration = clipRangeMutationGeneration
+                val submittedDirtyClipKeys = library.dirtyClipRangeKeys.filterTo(mutableSetOf(), ::activeClipKey)
                 when (val result = serverClient().putPlaylists(merge.first)) {
                     is PlaylistPutResult.Updated -> {
-                        library = library.copy(dirtyPlaylistIDs = emptySet(), deletedPlaylistIDs = emptySet())
+                        val remainingDirtyLikeIDs = if (likesMutationGeneration == submittedLikesGeneration) {
+                            library.dirtyRemoteLikeSongIDs.orEmpty() - submittedDirtyLikeIDs
+                        } else {
+                            library.dirtyRemoteLikeSongIDs.orEmpty()
+                        }
+                        val remainingDirtyClipKeys = if (clipRangeMutationGeneration == submittedClipGeneration) {
+                            library.dirtyClipRangeKeys - submittedDirtyClipKeys
+                        } else {
+                            library.dirtyClipRangeKeys
+                        }
+                        library = library.copy(
+                            dirtyPlaylistIDs = emptySet(),
+                            deletedPlaylistIDs = emptySet(),
+                            dirtyRemoteLikeSongIDs = remainingDirtyLikeIDs,
+                            likesDirty = remainingDirtyLikeIDs.isNotEmpty(),
+                            dirtyClipRangeKeys = remainingDirtyClipKeys,
+                            deletedClipRangeKeys = if (clipRangeMutationGeneration == submittedClipGeneration) {
+                                library.deletedClipRangeKeys - submittedDirtyClipKeys
+                            } else {
+                                library.deletedClipRangeKeys
+                            },
+                        )
                         applyRemotePlaylists(result.document)
                         return@runCatching result.document
                     }
@@ -444,6 +815,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             mutableState.value = mutableState.value.copy(playlistSyncDetail = "Synced ${document.playlists.size} playlist${if (document.playlists.size == 1) "" else "s"}")
         }.onFailure { mutableState.value = mutableState.value.copy(playlistSyncDetail = "Playlist sync failed: ${it.message}") }
         mutableState.value = mutableState.value.copy(isSyncingPlaylists = false)
+        if (library.likesDirty || library.dirtyClipRangeKeys.any(::activeClipKey)) {
+            syncDebounce?.cancel()
+            syncDebounce = viewModelScope.launch { delay(100); syncPlaylistsNow() }
+        }
     }
 
     private fun mergePlaylists(remote: RemotePlaylistsDocument): Pair<RemotePlaylistsDocument, Boolean> {
@@ -452,7 +827,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val dirty = library.dirtyPlaylistIDs.orEmpty()
         val merged = remote.playlists.filterNot { it.id in deleted }.toMutableList()
         val remoteIds = remote.playlists.mapTo(mutableSetOf(), RemotePlaylist::id)
-        var needsUpload = deleted.isNotEmpty()
+        var needsUpload = deleted.isNotEmpty() || library.likesDirty
         library.playlists.filterNot(Playlist::isSystem).forEach { playlist ->
             val unsynced = playlist.id !in remoteIds && playlist.id !in known
             if (playlist.id !in dirty && !unsynced) return@forEach
@@ -461,7 +836,35 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             if (index >= 0) merged[index] = payload else merged += payload
             needsUpload = true
         }
-        return RemotePlaylistsDocument(remote.revision, merged) to needsUpload
+        val likedSongIds = remote.likedSongIDs.toMutableSet()
+        val intendedLikedSongIDs = library.remoteLikedSongIDs.orEmpty()
+        library.dirtyRemoteLikeSongIDs.orEmpty().forEach { remoteID ->
+            if (remoteID in intendedLikedSongIDs) likedSongIds += remoteID else likedSongIds -= remoteID
+        }
+        val rangesBySongId = remote.clipRanges.associateBy(RemoteClipRange::songID).toMutableMap()
+        val activeDirtyClipKeys = library.dirtyClipRangeKeys.filter(::activeClipKey)
+        activeDirtyClipKeys.forEach { key ->
+            val songID = key.substringAfter("|remote:", "")
+            if (songID.isEmpty()) return@forEach
+            if (key in library.deletedClipRangeKeys) {
+                rangesBySongId -= songID
+            } else {
+                library.clipRanges[key]?.let { range ->
+                    rangesBySongId[songID] = RemoteClipRange(
+                        songID,
+                        range.startMs / 1_000.0,
+                        range.endMs / 1_000.0,
+                    )
+                }
+            }
+        }
+        return RemotePlaylistsDocument(
+            profileID = library.syncProfileID,
+            revision = remote.revision,
+            playlists = merged,
+            likedSongIDs = likedSongIds.toList(),
+            clipRanges = rangesBySongId.values.toList(),
+        ) to (needsUpload || activeDirtyClipKeys.isNotEmpty())
     }
 
     private fun remotePlaylist(playlist: Playlist): RemotePlaylist {
@@ -478,12 +881,32 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             val downloaded = remote.songIDs.mapNotNull { remoteId -> library.tracks.firstOrNull { it.remoteID == remoteId }?.id }
             Playlist(remote.id, remote.name, (downloaded + localOnly).distinct(), false, remote.songIDs)
         }
-        library = normalizeLiked(library.copy(
+        val mergedLikedSongIDs = document.likedSongIDs.toMutableSet()
+        val intendedLikedSongIDs = library.remoteLikedSongIDs.orEmpty()
+        library.dirtyRemoteLikeSongIDs.orEmpty().forEach { remoteID ->
+            if (remoteID in intendedLikedSongIDs) mergedLikedSongIDs += remoteID else mergedLikedSongIDs -= remoteID
+        }
+        val activeDirtyClipKeys = library.dirtyClipRangeKeys.filter(::activeClipKey)
+        val mergedClipRanges = library.clipRanges.filterKeys { key ->
+            !activeClipKey(key) || "|local:" in key || key in activeDirtyClipKeys
+        }.toMutableMap()
+        document.clipRanges.forEach { payload ->
+            val key = library.syncProfileID + "|remote:" + payload.songID
+            if (key in activeDirtyClipKeys || key in library.deletedClipRangeKeys) return@forEach
+            val start = (payload.startSeconds * 1_000).toLong()
+            val end = (payload.endSeconds * 1_000).toLong()
+            if (end - start >= 250L) mergedClipRanges[key] = ClipRange(start, end)
+        }
+        library = hydrateRemoteLikes(normalizeLiked(library.copy(
             playlists = system + custom,
+            remoteLikedSongIDs = mergedLikedSongIDs,
             playlistRevision = document.revision,
             knownRemotePlaylistIDs = document.playlists.mapTo(mutableSetOf(), RemotePlaylist::id),
             dirtyPlaylistIDs = library.dirtyPlaylistIDs.orEmpty() - document.playlists.map(RemotePlaylist::id).toSet(),
-        ))
+            likesDirty = library.dirtyRemoteLikeSongIDs.orEmpty().isNotEmpty(),
+            clipRanges = mergedClipRanges,
+        )))
+        refreshQueuedClipMetadata()
         persistLibrary()
     }
 
@@ -496,6 +919,39 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             }
         },
     )
+
+    private fun migrateRemoteLikes(value: StoredLibrary): StoredLibrary {
+        val remoteLikedSongIDs = value.remoteLikedSongIDs ?: value.favorites.mapNotNullTo(mutableSetOf()) { trackID ->
+            value.tracks.firstOrNull {
+                it.id == trackID && (it.syncProfileID ?: "default") == value.syncProfileID
+            }?.remoteID
+        }
+        val dirtyRemoteLikeSongIDs = value.dirtyRemoteLikeSongIDs ?: if (value.likesDirty) {
+            value.tracks.mapNotNullTo(mutableSetOf()) { track ->
+                track.remoteID?.takeIf { (track.syncProfileID ?: "default") == value.syncProfileID }
+            }
+        } else {
+            emptySet()
+        }
+        return hydrateRemoteLikes(value.copy(
+            remoteLikedSongIDs = remoteLikedSongIDs,
+            dirtyRemoteLikeSongIDs = dirtyRemoteLikeSongIDs,
+            likesDirty = dirtyRemoteLikeSongIDs.isNotEmpty(),
+        ))
+    }
+
+    private fun hydrateRemoteLikes(value: StoredLibrary): StoredLibrary {
+        val localFavorites = value.favorites.filterTo(mutableSetOf()) { id ->
+            value.tracks.firstOrNull { it.id == id }?.remoteID == null
+        }
+        val remoteFavorites = value.tracks.mapNotNullTo(mutableSetOf()) { track ->
+            track.id.takeIf {
+                track.remoteID?.let { it in value.remoteLikedSongIDs.orEmpty() } == true
+                    && (track.syncProfileID ?: "default") == value.syncProfileID
+            }
+        }
+        return normalizeLiked(value.copy(favorites = localFavorites + remoteFavorites))
+    }
 
     private fun updateRemoteSongIds(playlist: Playlist): Playlist {
         val unresolved = playlist.remoteSongIDs.orEmpty().filter { remoteId -> library.tracks.none { it.remoteID == remoteId } }
@@ -531,18 +987,29 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun refreshLibraryState() {
-        val trackSizes = library.tracks.associate { it.id to repository.fileForTrack(it).length() }
-        val artwork = library.tracks.mapNotNull { track -> repository.artworkFile(track)?.takeIf(File::isFile)?.absolutePath?.let { track.id to it } }.toMap()
+        val visibleTracks = library.tracks.filter { track ->
+            track.remoteID == null || (track.syncProfileID ?: "default") == library.syncProfileID
+        }
+        val trackSizes = visibleTracks.associate { it.id to repository.fileForTrack(it).length() }
+        val filePaths = visibleTracks.associate { it.id to repository.fileForTrack(it).absolutePath }
+        val artwork = visibleTracks.mapNotNull { track -> repository.artworkFile(track)?.takeIf(File::isFile)?.absolutePath?.let { track.id to it } }.toMap()
+        val visibleClipRanges = visibleTracks.mapNotNull { track ->
+            library.clipRanges[clipRangeKey(track)]?.let { track.id to it }
+        }.toMap()
         mutableState.value = mutableState.value.copy(
-            tracks = library.tracks,
+            tracks = visibleTracks,
             playlists = library.playlists,
             favoriteTrackIds = library.favorites,
             trackSizesById = trackSizes,
+            trackFilePathsById = filePaths,
+            clipRangesByTrackId = visibleClipRanges,
             artworkPathsByTrackId = artwork,
-            downloadedRemoteSongIds = library.tracks.mapNotNullTo(mutableSetOf(), Track::remoteID),
+            downloadedRemoteSongIds = visibleTracks.mapNotNullTo(mutableSetOf(), Track::remoteID),
             serverUrl = credentials.serverURL,
             serverToken = credentials.clientToken,
             serverAdminKey = credentials.adminToken,
+            syncProfileId = library.syncProfileID,
+            syncProfiles = library.syncProfiles,
         )
     }
 
@@ -560,17 +1027,24 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             isPlaying = player.isPlaying,
             positionMs = player.currentPosition.coerceAtLeast(0L),
             playbackSpeed = player.playbackParameters.speed,
+            volume = player.volume.coerceIn(0f, 1f),
         )
     }
 
     private fun mediaItem(id: String): MediaItem? {
         val track = library.tracks.firstOrNull { it.id == id } ?: return null
         val artworkUri = repository.artworkFile(track)?.takeIf(File::isFile)?.let(Uri::fromFile)
+        val clip = playbackRange(track)
+        val extras = Bundle().apply {
+            putLong(PlaybackService.CLIP_START_MS, clip.startMs)
+            putLong(PlaybackService.CLIP_END_MS, clip.endMs)
+        }
         val metadata = MediaMetadata.Builder()
             .setTitle(track.title)
             .setArtist(track.artist)
             .setAlbumTitle(track.album)
             .setArtworkUri(artworkUri)
+            .setExtras(extras)
             .build()
         return MediaItem.Builder()
             .setMediaId(track.id)
@@ -579,7 +1053,44 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             .build()
     }
 
-    private fun serverClient() = ServerClient(credentials.serverURL, credentials.clientToken, credentials.adminToken)
+    private fun refreshQueuedClipMetadata() {
+        val player = controller ?: return
+        if (player.mediaItemCount == 0) return
+        val ids = activeQueue.ifEmpty {
+            (0 until player.mediaItemCount).map { player.getMediaItemAt(it).mediaId }
+        }
+        val currentID = player.currentMediaItem?.mediaId ?: return
+        val items = ids.mapNotNull(::mediaItem)
+        val index = items.indexOfFirst { it.mediaId == currentID }
+        val track = library.tracks.firstOrNull { it.id == currentID }
+        if (index < 0 || track == null) return
+        val range = playbackRange(track)
+        val position = player.currentPosition.coerceIn(range.startMs, (range.endMs - 1).coerceAtLeast(range.startMs))
+        val wasPlaying = player.playWhenReady
+        player.setMediaItems(items, index, position)
+        player.prepare()
+        if (wasPlaying) player.play() else player.pause()
+    }
+
+    private fun clipRangeKey(track: Track): String =
+        library.syncProfileID + if (track.remoteID != null) "|remote:" + track.remoteID else "|local:" + track.id
+
+    private fun activeClipKey(key: String): Boolean = key.startsWith(library.syncProfileID + "|")
+
+    private fun playbackRange(track: Track): ClipRange {
+        val stored = library.clipRanges[clipRangeKey(track)]
+        if (stored == null) return ClipRange(0, track.durationMs.coerceAtLeast(1L))
+        val start = stored.startMs.coerceIn(0, track.durationMs)
+        val end = stored.endMs.coerceIn(start, track.durationMs)
+        return if (end - start >= 250) ClipRange(start, end) else ClipRange(0, track.durationMs.coerceAtLeast(1L))
+    }
+
+    private fun serverClient() = ServerClient(
+        credentials.serverURL,
+        credentials.clientToken,
+        credentials.adminToken,
+        library.syncProfileID,
+    )
 
     private fun displayName(uri: Uri): String? = runCatching {
         context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
@@ -591,3 +1102,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         mutableState.value = mutableState.value.copy(errorMessage = error.message ?: "Something went wrong")
     }
 }
+
+internal fun normalizeProfileName(value: String): String =
+    value.trim().split(Regex("\\s+")).filter(String::isNotEmpty).joinToString(" ")
+
+internal fun repeatModeFor(enabled: Boolean): Int =
+    if (enabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF

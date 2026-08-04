@@ -16,7 +16,7 @@ struct RootView: View {
         ZStack {
             TabView(selection: $selection) {
                 PlayerAwareTab(showsNowPlaying: $showsNowPlaying) {
-                    NavigationStack { LibraryView(importing: $importing) }
+                    NavigationStack { LibraryView() }
                 }
                     .tabItem { Label("Library", systemImage: "waveform") }
                     .tag(MobileSection.library)
@@ -26,7 +26,7 @@ struct RootView: View {
                     .tabItem { Label("Playlists", systemImage: "square.stack") }
                     .tag(MobileSection.playlists)
                 PlayerAwareTab(showsNowPlaying: $showsNowPlaying) {
-                    NavigationStack { StorageView() }
+                    NavigationStack { StorageView(importing: $importing) }
                 }
                     .tabItem { Label("Storage", systemImage: "externaldrive") }
                     .tag(MobileSection.storage)
@@ -93,7 +93,6 @@ private struct PlayerAwareTab<Content: View>: View {
 
 private struct LibraryView: View {
     @EnvironmentObject private var library: MusicLibrary
-    @Binding var importing: Bool
     @State private var presentedSheet: LibrarySheet?
     @FocusState private var searchIsFocused: Bool
 
@@ -121,9 +120,11 @@ private struct LibraryView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        ProfileButton(profileName: library.syncProfileName) {
-                            presentedSheet = .profile
-                        }
+                        ProfileButton(
+                            profileName: library.syncProfileName,
+                            onClipEditor: { presentedSheet = .clipEditor },
+                            onConnection: { presentedSheet = .profile }
+                        )
                     }
                     HStack {
                         Button { library.togglePlay() } label: {
@@ -136,7 +137,6 @@ private struct LibraryView: View {
                         }
                         .disabled(library.tracks.isEmpty)
                         Spacer()
-                        Button { importing = true } label: { Label("Import", systemImage: "plus").pill(color: .violet) }
                     }
                     if library.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                        !recentlyAddedTracks.isEmpty {
@@ -176,6 +176,8 @@ private struct LibraryView: View {
             switch sheet {
             case .profile:
                 ServerConnectionSheet()
+            case .clipEditor:
+                MobileClipEditorSheet()
             }
         }
         .toolbar {
@@ -188,13 +190,14 @@ private struct LibraryView: View {
 }
 
 private enum LibrarySheet: String, Identifiable {
-    case profile
+    case profile, clipEditor
     var id: String { rawValue }
 }
 
 private struct ProfileButton: View {
     let profileName: String
-    let action: () -> Void
+    let onClipEditor: () -> Void
+    let onConnection: () -> Void
 
     private var displayName: String {
         let trimmed = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -206,21 +209,26 @@ private struct ProfileButton: View {
     }
 
     var body: some View {
-        Button(action: action) {
+        Menu {
+            Section(displayName) {
+                Button("Clip Editor", systemImage: "waveform.path.ecg", action: onClipEditor)
+            }
+            Button("Profile & Connection", systemImage: "person.crop.circle", action: onConnection)
+        } label: {
             Text(initial)
-                .font(.headline.weight(.bold))
-                .foregroundStyle(.white)
-                .frame(width: 44, height: 44)
-                .background(Color.violet, in: Circle())
-                .overlay {
-                    Circle()
-                        .stroke(.white.opacity(0.18), lineWidth: 1)
-                }
-                .shadow(color: Color.violet.opacity(0.28), radius: 12, y: 5)
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 44)
+                    .background(Color.violet, in: Circle())
+                    .overlay {
+                        Circle()
+                            .stroke(.white.opacity(0.18), lineWidth: 1)
+                    }
+                    .shadow(color: Color.violet.opacity(0.28), radius: 12, y: 5)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(displayName) profile")
-        .accessibilityHint("Opens profile and server connection settings")
+        .accessibilityHint("Opens profile tools")
     }
 }
 
@@ -621,6 +629,7 @@ private struct PlaylistSongPicker: View {
 
 private struct StorageView: View {
     @EnvironmentObject private var library: MusicLibrary
+    @Binding var importing: Bool
     @State private var searchText = ""
     @State private var scope: StorageScope = .songs
     @State private var sort: StorageSort = .title
@@ -630,6 +639,7 @@ private struct StorageView: View {
     @State private var availableBytes: Int64 = 0
     @State private var deletionCandidate: MobileTrack?
     @State private var showsBatchDeleteConfirmation = false
+    @State private var presentedSheet: StorageSheet?
     @FocusState private var searchIsFocused: Bool
 
     private var visibleTracks: [MobileTrack] {
@@ -690,6 +700,19 @@ private struct StorageView: View {
                         Text("Song Storage")
                             .font(.system(size: 36, weight: .bold, design: .rounded))
                         Spacer()
+                        Menu {
+                            Button("Import from Link", systemImage: "link.badge.plus") {
+                                presentedSheet = .linkImport
+                            }
+                            Button("Import Files", systemImage: "doc.badge.plus") {
+                                importing = true
+                            }
+                        } label: {
+                            Text("Import")
+                                .font(.headline)
+                                .foregroundStyle(Color.violet)
+                        }
+                        .accessibilityHint("Choose a link or files to import")
                         Button(isEditing ? "Done" : "Edit") {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 isEditing.toggle()
@@ -806,6 +829,12 @@ private struct StorageView: View {
             .scrollDismissesKeyboard(.interactively)
         }
         .navigationBarHidden(true)
+        .sheet(item: $presentedSheet) { sheet in
+            switch sheet {
+            case .linkImport:
+                MobileLocalImportSheet()
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
                 Spacer()
@@ -856,6 +885,11 @@ private struct StorageView: View {
         let values = try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         availableBytes = max(values?.volumeAvailableCapacityForImportantUsage ?? 0, 0)
     }
+}
+
+private enum StorageSheet: String, Identifiable {
+    case linkImport
+    var id: String { rawValue }
 }
 
 private enum StorageScope: String, CaseIterable, Identifiable {
@@ -1902,11 +1936,6 @@ private struct ServerConnectionSheet: View {
                         .onSubmit { focusedField = nil }
                         .textInputAutocapitalization(.words)
                         .autocorrectionDisabled()
-                    NavigationLink {
-                        MobileListeningHistoryView()
-                    } label: {
-                        Label("Listening History", systemImage: "clock.arrow.circlepath")
-                    }
                 } header: {
                     Text("Active Profile")
                 } footer: {
@@ -1977,98 +2006,6 @@ private struct ServerConnectionSheet: View {
     }
 }
 
-private struct MobileListeningHistoryView: View {
-    @EnvironmentObject private var library: MusicLibrary
-
-    private var entries: [MobileListeningHistoryEntry] {
-        library.activeProfileListeningHistoryEntries.sorted { $0.startedAt > $1.startedAt }
-    }
-
-    private var totalSeconds: TimeInterval {
-        entries.reduce(0) { total, entry in
-            total + (entry.listenedSeconds.isFinite ? max(0, entry.listenedSeconds) : 0)
-        }
-    }
-
-    private var uniqueSongs: Int {
-        Set(entries.map { entry in
-            entry.remoteSongID ?? entry.trackID.uuidString
-        }).count
-    }
-
-    var body: some View {
-        List {
-            Section {
-                HStack(spacing: 0) {
-                    historyMetric(value: Self.durationText(totalSeconds), label: "Listened")
-                    Divider().frame(height: 38)
-                    historyMetric(value: "\(entries.count)", label: "Plays")
-                    Divider().frame(height: 38)
-                    historyMetric(value: "\(uniqueSongs)", label: "Songs")
-                }
-                .padding(.vertical, 6)
-            } footer: {
-                Text("Only activity for the \(library.syncProfileName) profile is shown and synchronized.")
-            }
-
-            if entries.isEmpty {
-                ContentUnavailableView(
-                    "No listening history",
-                    systemImage: "clock",
-                    description: Text("Songs you play with this profile will appear here.")
-                )
-            } else {
-                Section("Recent Plays") {
-                    ForEach(entries) { entry in
-                        let track = library.tracks.first { $0.id == entry.trackID }
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(nonEmpty(entry.title) ?? track?.title ?? "Removed song")
-                                .font(.body.weight(.semibold))
-                            Text(nonEmpty(entry.artist) ?? track?.artist ?? "Unknown artist")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                            HStack {
-                                Text(entry.startedAt.formatted(date: .abbreviated, time: .shortened))
-                                Spacer()
-                                Text(Self.durationText(entry.listenedSeconds))
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                        }
-                        .padding(.vertical, 3)
-                    }
-                }
-            }
-        }
-        .navigationTitle("Listening History")
-        .navigationBarTitleDisplayMode(.inline)
-        .refreshable { await library.syncListeningHistoryNow() }
-        .task { await library.syncListeningHistoryNow() }
-    }
-
-    private func historyMetric(value: String, label: String) -> some View {
-        VStack(spacing: 3) {
-            Text(value).font(.headline.monospacedDigit())
-            Text(label).font(.caption).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func nonEmpty(_ value: String?) -> String? {
-        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private static func durationText(_ seconds: TimeInterval) -> String {
-        guard seconds.isFinite, seconds > 0 else { return "0m" }
-        let totalMinutes = Int(seconds / 60)
-        if totalMinutes < 60 { return "\(max(totalMinutes, 1))m" }
-        let hours = totalMinutes / 60
-        let minutes = totalMinutes % 60
-        return minutes == 0 ? "\(hours)h" : "\(hours)h \(minutes)m"
-    }
-}
-
 private struct MobilePlayerBar: View {
     @EnvironmentObject private var library: MusicLibrary
     @Binding var showsNowPlaying: Bool
@@ -2107,10 +2044,9 @@ private struct MobilePlayerBar: View {
                     Button { library.next() } label: { Image(systemName: "forward.end.fill") }
                 }
                 GeometryReader { geometry in
-                    let duration = max(track.duration, 0.01)
                     ZStack(alignment: .leading) {
                         Capsule().fill(.white.opacity(0.13)).frame(height: 3)
-                        Capsule().fill(Color.accent).frame(width: geometry.size.width * min(library.position / duration, 1), height: 3)
+                        Capsule().fill(Color.accent).frame(width: geometry.size.width * library.playbackProgress(for: track), height: 3)
                     }
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0).onChanged { library.seek(to: $0.location.x / max(geometry.size.width, 1)) })
@@ -2243,16 +2179,16 @@ private struct NowPlayingView: View {
         VStack(spacing: 6) {
             Slider(
                 value: Binding(
-                    get: { min(max(library.position / max(track.duration, 0.01), 0), 1) },
+                    get: { library.playbackProgress(for: track) },
                     set: { library.seek(to: $0) }
                 ),
                 in: 0...1
             )
             .tint(.accent)
             HStack {
-                Text(timeText(library.position))
+                Text(timeText(library.playbackElapsed(for: track)))
                 Spacer()
-                Text("-\(timeText(max(track.duration - library.position, 0)))")
+                Text("-\(timeText(max(library.playbackDuration(for: track) - library.playbackElapsed(for: track), 0)))")
             }
             .font(.caption.monospacedDigit())
             .foregroundStyle(.secondary)
@@ -2383,7 +2319,7 @@ private struct ArtworkTile: View {
     }
 }
 
-private struct TrackArtwork: View {
+struct TrackArtwork: View {
     @EnvironmentObject private var library: MusicLibrary
     let track: MobileTrack
     var fallbackSymbol = "music.note"
@@ -2438,7 +2374,7 @@ private struct ServerArtwork: View {
     }
 }
 
-private extension Color {
+extension Color {
     static let appBackground = Color(hex: 0x020305)
     static let appSurface = Color(hex: 0x0B0C11)
     static let appSurfaceRaised = Color(hex: 0x12131A)
@@ -2450,11 +2386,11 @@ private extension Color {
     }
 }
 
-private extension Text {
+extension Text {
     func eyebrow() -> some View { font(.caption2.weight(.semibold)).tracking(1.6).foregroundStyle(.secondary) }
 }
 
-private extension View {
+extension View {
     func pill(color: Color) -> some View { font(.subheadline.weight(.bold)).padding(.horizontal, 17).frame(height: 42).background(color, in: Capsule()).foregroundStyle(.white) }
     func roundButton(active: Bool) -> some View { frame(width: 42, height: 42).background(active ? Color.violet : .white.opacity(0.08), in: Circle()).foregroundStyle(.white) }
     func serverActionButton() -> some View {

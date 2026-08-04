@@ -1,6 +1,7 @@
 package mov.unblocked.resonance.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
@@ -14,19 +15,24 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -34,17 +40,28 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import mov.unblocked.resonance.data.Track
 
 @Composable
 fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: Modifier = Modifier) {
+    var connectionOpen by remember { mutableStateOf(false) }
+    var clipEditorOpen by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val query = state.librarySearch.trim()
     val tracks = if (query.isEmpty()) state.tracks else state.tracks.filter {
@@ -57,7 +74,11 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         item {
-            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Eyebrow("Music Library")
                     Text("Resonance", fontSize = 38.sp, fontWeight = FontWeight.Normal)
@@ -67,12 +88,17 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
                 }
-                Artwork(null, Modifier.size(86.dp), showWaveform = true)
+                ProfileButton(
+                    state = state,
+                    onConnection = { connectionOpen = true },
+                    onClipEditor = { clipEditorOpen = true },
+                )
             }
         }
         item {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
+                    enabled = state.tracks.isNotEmpty(),
                     onClick = actions::togglePlayPause,
                     colors = ButtonDefaults.buttonColors(containerColor = Accent),
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
@@ -82,20 +108,23 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                     Text(if (state.isPlaying) "Pause" else "Play", fontWeight = FontWeight.Bold)
                 }
                 IconButton(
+                    enabled = state.tracks.isNotEmpty(),
                     onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) },
                     modifier = Modifier
                         .size(46.dp)
                         .background(if (state.shuffleEnabled) Violet else Color.White.copy(alpha = .08f), CircleShape),
                 ) { Icon(Icons.Default.Shuffle, "Shuffle") }
                 Spacer(Modifier.weight(1f))
-                Button(
-                    onClick = actions::importAudio,
-                    colors = ButtonDefaults.buttonColors(containerColor = Violet),
-                ) {
-                    Icon(Icons.Default.Add, null)
-                    Spacer(Modifier.size(6.dp))
-                    Text("Import", fontWeight = FontWeight.Bold)
-                }
+            }
+        }
+        val recentlyAdded = recentlyAddedTracks(state.tracks)
+        if (query.isEmpty() && recentlyAdded.isNotEmpty()) {
+            item {
+                RecentlyAddedSection(
+                    tracks = recentlyAdded,
+                    state = state,
+                    actions = actions,
+                )
             }
         }
         item {
@@ -126,22 +155,135 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                     Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = Violet)
                     Text(if (state.tracks.isEmpty()) "No songs yet" else "No results", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        if (state.tracks.isEmpty()) "Import audio or sync your music server." else "Try another search term.",
+                        if (state.tracks.isEmpty()) "Import audio or video, or sync your music server." else "Try another search term.",
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
                 }
             }
         } else {
             item {
-                Column(
-                    modifier = Modifier.fillMaxWidth().background(Color.White.copy(alpha = .035f), RoundedCornerShape(16.dp)),
-                ) {
-                    tracks.forEach { track ->
-                        TrackRow(track, state, actions, queue = tracks)
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    SongListHeader()
+                    tracks.forEachIndexed { index, track ->
+                        TrackRow(track, state, actions, number = index + 1, queue = tracks)
                     }
                 }
             }
         }
         item { Spacer(Modifier.height(8.dp)) }
     }
+
+    if (connectionOpen) {
+        ConnectionDialog(state, actions) { connectionOpen = false }
+    }
+    if (clipEditorOpen) {
+        ClipEditorDialog(state, actions) { clipEditorOpen = false }
+    }
+}
+
+@Composable
+private fun ProfileButton(
+    state: ResonanceUiState,
+    onConnection: () -> Unit,
+    onClipEditor: () -> Unit,
+) {
+    val profileName = activeSyncProfileName(state)
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(
+            onClick = { expanded = true },
+            modifier = Modifier
+                .size(44.dp)
+                .background(Violet, CircleShape)
+                .semantics {
+                    contentDescription = "Profile: $profileName. Open profile tools"
+                },
+        ) {
+            Text(
+                text = syncProfileInitial(profileName),
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.clearAndSetSemantics { },
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text("Clip Editor") },
+                leadingIcon = { Icon(Icons.Default.GraphicEq, null) },
+                onClick = {
+                    expanded = false
+                    onClipEditor()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Profile & Connection") },
+                leadingIcon = { Icon(Icons.Default.Settings, null) },
+                onClick = {
+                    expanded = false
+                    onConnection()
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun RecentlyAddedSection(
+    tracks: List<Track>,
+    state: ResonanceUiState,
+    actions: ResonanceActions,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Eyebrow("Recently Added")
+        LazyRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(tracks, key = Track::id) { track ->
+                Column(
+                    modifier = Modifier
+                        .width(132.dp)
+                        .clickable { actions.playTrack(track.id, state.tracks.map(Track::id)) },
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Artwork(
+                        path = state.artworkPathsByTrackId[track.id] ?: track.artworkFilename,
+                        modifier = Modifier.size(132.dp),
+                        showWaveform = state.currentTrackId == track.id && state.isPlaying,
+                    )
+                    Text(
+                        text = track.title,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = track.artist,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+internal fun activeSyncProfileName(state: ResonanceUiState): String =
+    state.syncProfiles
+        .firstOrNull { it.id == state.syncProfileId }
+        ?.name
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
+        ?: "Default"
+
+internal fun syncProfileInitial(name: String): String =
+    name.trim().firstOrNull(Char::isLetterOrDigit)?.uppercase() ?: "?"
+
+internal fun recentlyAddedTracks(tracks: List<Track>, limit: Int = 6): List<Track> {
+    if (limit <= 0) return emptyList()
+    return tracks.sortedByDescending(Track::dateAddedEpochMs).take(limit)
 }

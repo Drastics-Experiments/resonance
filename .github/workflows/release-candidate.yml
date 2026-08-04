@@ -71,6 +71,7 @@ jobs:
     name: Android candidate
     needs: prepare
     uses: ./.github/workflows/android.yml
+    secrets: inherit
     with:
       release_candidate: true
       version: ${{ needs.prepare.outputs.version }}
