@@ -1,7 +1,10 @@
 package mov.unblocked.resonance
 
 import androidx.media3.common.Player
+import mov.unblocked.resonance.ui.isVideoClipPath
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidParityTest {
@@ -14,5 +17,12 @@ class AndroidParityTest {
     fun repeatOffStopsAtTheEndOfTheQueue() {
         assertEquals(Player.REPEAT_MODE_OFF, repeatModeFor(false))
         assertEquals(Player.REPEAT_MODE_ONE, repeatModeFor(true))
+    }
+
+    @Test
+    fun clipEditorShowsInlinePreviewsOnlyForVideoFiles() {
+        assertTrue(isVideoClipPath("downloads/preview.MP4"))
+        assertTrue(isVideoClipPath("imports/movie.webm"))
+        assertFalse(isVideoClipPath("library/song.m4a"))
     }
 }

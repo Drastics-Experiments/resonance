@@ -177,6 +177,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                     selecting = false
                 },
                 onUpload = actions::uploadAudio,
+                onUploadMissing = actions::uploadMissingDownloads,
                 onToggleSelection = {
                     selecting = !selecting
                     if (selecting) scope = ServerScope.NotDownloaded else actions.clearRemoteSelection()
@@ -310,6 +311,7 @@ private fun ServerActionBar(
     selecting: Boolean,
     onDownload: () -> Unit,
     onUpload: () -> Unit,
+    onUploadMissing: () -> Unit,
     onToggleSelection: () -> Unit,
     onRefresh: () -> Unit,
 ) {
@@ -344,7 +346,15 @@ private fun ServerActionBar(
         ActionDivider()
         ServerAction(
             icon = Icons.Default.CloudUpload,
-            label = "Upload",
+            label = "Downloads",
+            enabled = enabled,
+            onClick = onUploadMissing,
+            modifier = Modifier.weight(1f),
+        )
+        ActionDivider()
+        ServerAction(
+            icon = Icons.Default.CloudUpload,
+            label = "Files",
             enabled = enabled,
             onClick = onUpload,
             modifier = Modifier.weight(1f),

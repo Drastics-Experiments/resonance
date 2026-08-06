@@ -81,6 +81,7 @@ data class RemoteSong(
     val streamURL: String,
     val durationSeconds: Double? = null,
     val artworkURL: String? = null,
+    val contentSHA256: String? = null,
 ) {
     val durationText: String?
         get() = durationSeconds
@@ -215,6 +216,7 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
             artworkURL = (string("artwork_url") ?: string("artwork"))
                 ?.trim()
                 ?.takeIf(String::isNotEmpty),
+            contentSHA256 = string("content_sha256")?.trim()?.lowercase()?.takeIf(String::isNotEmpty),
         )
     }
 
@@ -234,6 +236,7 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
             put("stream_url", JsonPrimitive(value.streamURL))
             value.durationSeconds?.let { put("duration_seconds", JsonPrimitive(it)) }
             value.artworkURL?.let { put("artwork_url", JsonPrimitive(it)) }
+            value.contentSHA256?.let { put("content_sha256", JsonPrimitive(it)) }
         })
     }
 }

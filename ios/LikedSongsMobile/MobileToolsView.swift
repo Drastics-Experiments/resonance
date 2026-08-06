@@ -1,47 +1,101 @@
 import AVFoundation
+import AVKit
 import SwiftUI
+import UIKit
 
 @MainActor
 private final class MobileClipPreviewPlayer: ObservableObject {
     @Published private(set) var isPlaying = false
-    private var player: AVAudioPlayer?
-    private var timer: Timer?
-    private var end: TimeInterval = 0
+    @Published private(set) var position: TimeInterval = 0
+    @Published private(set) var player: AVPlayer?
 
-    func toggle(url: URL, start: TimeInterval, end: TimeInterval, volume: Double) {
-        if isPlaying {
-            stop()
-            return
+    private var timer: Timer?
+    private var sourceURL: URL?
+    private var rangeStart: TimeInterval = 0
+    private var rangeEnd: TimeInterval = 0
+
+    func prepare(url: URL, start: TimeInterval, end: TimeInterval, volume: Double) {
+        let nextStart = max(0, start)
+        let nextEnd = max(nextStart, end)
+        if sourceURL?.standardizedFileURL != url.standardizedFileURL {
+            clear()
+            let player = AVPlayer(url: url)
+            self.player = player
+            sourceURL = url
+            installTimer()
         }
-        do {
-            let next = try AVAudioPlayer(contentsOf: url)
-            next.volume = Float(volume)
-            next.currentTime = min(max(start, 0), next.duration)
-            self.end = min(max(end, next.currentTime), next.duration)
-            guard self.end - next.currentTime >= 0.25, next.play() else { return }
-            player = next
-            isPlaying = true
-            let previewTimer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
-                Task { @MainActor in
-                    guard let self, let player = self.player else { return }
-                    if !player.isPlaying || player.currentTime + 0.02 >= self.end {
-                        self.stop()
-                    }
-                }
-            }
-            timer = previewTimer
-            RunLoop.main.add(previewTimer, forMode: .common)
-        } catch {
-            stop()
-        }
+        player?.volume = PlaybackVolumePolicy.gain(for: volume)
+        rangeStart = nextStart
+        rangeEnd = nextEnd
+        pause()
+        seek(to: nextStart)
     }
 
-    func stop() {
+    func updateRange(start: TimeInterval, end: TimeInterval) {
+        rangeStart = max(0, start)
+        rangeEnd = max(rangeStart, end)
+        pause()
+        seek(to: rangeStart)
+    }
+
+    func toggle() {
+        guard let player, rangeEnd - rangeStart >= 0.25 else { return }
+        if isPlaying {
+            pause()
+            return
+        }
+        if position >= rangeEnd - 0.02 || position < rangeStart {
+            seek(to: rangeStart)
+        }
+        player.play()
+        isPlaying = true
+    }
+
+    func seek(to time: TimeInterval) {
+        guard let player else { return }
+        let target = min(max(time, rangeStart), rangeEnd)
+        player.seek(
+            to: CMTime(seconds: target, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+        position = target
+    }
+
+    func pause() {
+        player?.pause()
+        isPlaying = false
+    }
+
+    func clear() {
+        player?.pause()
+        player = nil
+        sourceURL = nil
         timer?.invalidate()
         timer = nil
-        player?.stop()
-        player = nil
+        rangeStart = 0
+        rangeEnd = 0
+        position = 0
         isPlaying = false
+    }
+
+    private func installTimer() {
+        let previewTimer = Timer(timeInterval: 0.05, repeats: true) { [weak self] timer in
+            Task { @MainActor [weak self] in
+                guard let self, let player = self.player else {
+                    timer.invalidate()
+                    return
+                }
+                let current = player.currentTime().seconds
+                if current.isFinite { self.position = current }
+                if self.isPlaying && current >= self.rangeEnd - 0.02 {
+                    self.position = self.rangeEnd
+                    self.pause()
+                }
+            }
+        }
+        timer = previewTimer
+        RunLoop.main.add(previewTimer, forMode: .common)
     }
 }
 
@@ -83,8 +137,10 @@ struct MobileClipEditorSheet: View {
                             trackPicker
                             if let track = selectedTrack {
                                 trackSummary(track)
+                                videoPreview(track)
                                 waveform(track)
                                 timeFields(track)
+                                previewTransport(track)
                                 Text("The range is saved for \(library.syncProfileName). The song file is never changed.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -117,9 +173,19 @@ struct MobileClipEditorSheet: View {
         }
         .onChange(of: selectedTrackID) {
             stopPreview(resumeMain: true)
+            preview.clear()
             resetRange()
         }
-        .onDisappear { stopPreview(resumeMain: true) }
+        .onChange(of: preview.isPlaying) { wasPlaying, isPlaying in
+            if wasPlaying, !isPlaying, wasPlayingBeforePreview {
+                wasPlayingBeforePreview = false
+                library.resumePlayback()
+            }
+        }
+        .onDisappear {
+            stopPreview(resumeMain: true)
+            preview.clear()
+        }
     }
 
     private var trackPicker: some View {
@@ -156,6 +222,36 @@ struct MobileClipEditorSheet: View {
         }
     }
 
+    @ViewBuilder
+    private func videoPreview(_ track: MobileTrack) -> some View {
+        if isVideoClipTrack(track) {
+            ZStack {
+                MobileClipVideoPlayer(player: preview.player)
+                    .aspectRatio(16 / 9, contentMode: .fit)
+
+                if !preview.isPlaying {
+                    Image(systemName: "play.fill")
+                        .font(.title3.bold())
+                        .foregroundStyle(.white)
+                        .frame(width: 52, height: 52)
+                        .background(.black.opacity(0.58), in: Circle())
+                        .allowsHitTesting(false)
+                }
+            }
+            .background(.black, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(alignment: .topLeading) {
+                Label("Video preview", systemImage: "film")
+                    .font(.caption2.bold())
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.65), in: Capsule())
+                    .padding(10)
+            }
+            .accessibilityLabel("Video preview for \(track.title)")
+        }
+    }
+
     private func waveform(_ track: MobileTrack) -> some View {
         GeometryReader { geometry in
             let width = max(geometry.size.width, 1)
@@ -182,6 +278,17 @@ struct MobileClipEditorSheet: View {
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("clip-waveform")).onChanged {
                         setBoundary(.end, seconds: Double($0.location.x / width) * duration)
                     })
+
+                if preview.player != nil {
+                    Rectangle()
+                        .fill(Color(hex: 0xFF7568))
+                        .frame(width: 2, height: 88)
+                        .position(
+                            x: min(max(width * preview.position / duration, 1), width - 1),
+                            y: 52
+                        )
+                        .allowsHitTesting(false)
+                }
             }
             .coordinateSpace(name: "clip-waveform")
             .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
@@ -236,50 +343,85 @@ struct MobileClipEditorSheet: View {
     }
 
     private func controls(_ track: MobileTrack) -> some View {
-        VStack(spacing: 12) {
+        HStack {
+            if library.clipRange(for: track) != nil {
+                Button("Use Full Song") {
+                    stopPreview(resumeMain: true)
+                    library.clearClipRange(for: track)
+                    resetRange()
+                }
+                .buttonStyle(.bordered)
+            }
+            Spacer()
+            Button("Save Range") {
+                focusedBoundary = nil
+                stopPreview(resumeMain: true)
+                library.saveClipRange(for: track, start: startSeconds, end: endSeconds)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.violet)
+        }
+    }
+
+    private func previewTransport(_ track: MobileTrack) -> some View {
+        let sliderRange = startSeconds...max(endSeconds, startSeconds + 0.25)
+        return HStack(spacing: 10) {
             Button {
                 if preview.isPlaying {
                     stopPreview(resumeMain: true)
                 } else {
                     wasPlayingBeforePreview = library.isPlaying
                     if wasPlayingBeforePreview { library.pausePlayback() }
-                    preview.toggle(
-                        url: library.fileURL(for: track),
-                        start: startSeconds,
-                        end: endSeconds,
-                        volume: library.volume
-                    )
+                    if preview.player == nil {
+                        preview.prepare(
+                            url: library.fileURL(for: track),
+                            start: startSeconds,
+                            end: endSeconds,
+                            volume: library.volume
+                        )
+                    }
+                    preview.toggle()
                 }
             } label: {
-                Label(preview.isPlaying ? "Stop Preview" : "Preview Range", systemImage: preview.isPlaying ? "stop.fill" : "play.fill")
-                    .frame(maxWidth: .infinity)
+                Image(systemName: preview.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.callout.bold())
+                    .frame(width: 38, height: 38)
+                    .background(Color.violet, in: Circle())
+                    .foregroundStyle(.white)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.plain)
+            .accessibilityLabel(preview.isPlaying ? "Pause preview" : "Play preview")
 
-            HStack {
-                if library.clipRange(for: track) != nil {
-                    Button("Use Full Song") {
-                        stopPreview(resumeMain: true)
-                        library.clearClipRange(for: track)
-                        resetRange()
-                    }
-                    .buttonStyle(.bordered)
-                }
-                Spacer()
-                Button("Save Range") {
-                    focusedBoundary = nil
-                    stopPreview(resumeMain: true)
-                    library.saveClipRange(for: track, start: startSeconds, end: endSeconds)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.violet)
-            }
+            Text(formatTime(preview.position))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 38, alignment: .trailing)
+
+            Slider(
+                value: Binding(
+                    get: { min(max(preview.position, sliderRange.lowerBound), sliderRange.upperBound) },
+                    set: { preview.seek(to: $0) }
+                ),
+                in: sliderRange
+            )
+            .tint(.violet)
+            .accessibilityLabel("Preview position")
+
+            Text(formatTime(endSeconds))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 38, alignment: .leading)
+        }
+        .padding(12)
+        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.08), lineWidth: 1)
         }
     }
 
     private func setBoundary(_ boundary: ClipBoundary, seconds: TimeInterval) {
         guard let track = selectedTrack else { return }
-        preview.stop()
+        stopPreview(resumeMain: true)
         let value = min(max(seconds, 0), track.duration)
         if boundary == .start {
             startSeconds = min(value, endSeconds - 0.25)
@@ -287,6 +429,7 @@ struct MobileClipEditorSheet: View {
             endSeconds = max(startSeconds + 0.25, value)
         }
         updateTexts()
+        preview.updateRange(start: startSeconds, end: endSeconds)
     }
 
     private func commit(_ boundary: ClipBoundary) {
@@ -309,6 +452,12 @@ struct MobileClipEditorSheet: View {
             endSeconds = max(track.duration, 0.25)
         }
         updateTexts()
+        preview.prepare(
+            url: library.fileURL(for: track),
+            start: startSeconds,
+            end: endSeconds,
+            volume: library.volume
+        )
     }
 
     private func updateTexts() {
@@ -318,8 +467,8 @@ struct MobileClipEditorSheet: View {
 
     private func stopPreview(resumeMain: Bool) {
         let shouldResume = resumeMain && wasPlayingBeforePreview
-        preview.stop()
         wasPlayingBeforePreview = false
+        preview.pause()
         if shouldResume { library.resumePlayback() }
     }
 
@@ -336,23 +485,56 @@ struct MobileClipEditorSheet: View {
     }
 }
 
+private struct MobileClipVideoPlayer: UIViewControllerRepresentable {
+    let player: AVPlayer?
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.showsPlaybackControls = false
+        controller.videoGravity = .resizeAspect
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        controller.player = player
+    }
+}
+
+private func isVideoClipTrack(_ track: MobileTrack) -> Bool {
+    ["mp4", "mov", "m4v", "webm"].contains(
+        URL(fileURLWithPath: track.relativePath).pathExtension.lowercased()
+    )
+}
+
 @MainActor
 private final class MobileLocalImportViewModel: ObservableObject {
     @Published var source = ""
+    @Published var syncAfterImport = true
     @Published private(set) var stage: LocalImportStage = .idle
     @Published private(set) var completedBytes: Int64 = 0
     @Published private(set) var totalBytes: Int64 = 0
     @Published private(set) var resolution: LocalImportResolution?
+    @Published private(set) var searchResponse: LocalImportSearchResponse?
+    @Published private(set) var selectedSearchResultID: String?
     @Published var selectedVideoID: String?
+    @Published var selectedPlaylistTrackIDs: Set<String> = []
     @Published private(set) var error: LocalImportError?
     @Published private(set) var completedTrack: MobileTrack?
+    @Published private(set) var completedSummary: String?
+    @Published private(set) var batchCurrentTitle: String?
+    @Published private(set) var previewingVideoID: String?
+    @Published private(set) var previewLoadingVideoID: String?
+    @Published private(set) var previewError: String?
 
     private let service = LocalDeviceImportService()
     private var task: Task<Void, Never>?
+    private var previewTask: Task<Void, Never>?
+    private var previewStopTask: Task<Void, Never>?
+    private var previewPlayer: AVPlayer?
 
     var isRunning: Bool {
         switch stage {
-        case .resolvingMetadata, .searchingCandidates, .inspectingSource, .downloading, .processing, .savingLocal:
+        case .resolvingMetadata, .searchingCandidates, .inspectingSource, .downloading, .processing, .savingLocal, .localComplete, .syncing:
             true
         default:
             false
@@ -364,28 +546,78 @@ private final class MobileLocalImportViewModel: ObservableObject {
         return resolution?.candidates.first { $0.videoID == selectedVideoID }
     }
 
+    func searchResults(for provider: LocalImportSearchProvider) -> [LocalImportSearchResult] {
+        searchResponse?.results(for: provider) ?? []
+    }
+
+    var isPlaylist: Bool {
+        resolution.map { $0.kind == .spotifyPlaylist || $0.kind == .soundCloudPlaylist } ?? false
+    }
+
+    var playlistProviderName: String {
+        resolution?.kind == .soundCloudPlaylist ? "SoundCloud" : "Spotify"
+    }
+
+    var selectedPlaylistItems: [LocalImportPlaylistItem] {
+        resolution?.playlist?.items.filter { selectedPlaylistTrackIDs.contains($0.track.trackID) } ?? []
+    }
+
+    var continuesAfterSheetDismissal: Bool {
+        switch stage {
+        case .inspectingSource, .downloading, .processing, .savingLocal, .localComplete, .syncing:
+            true
+        default:
+            false
+        }
+    }
+
     func resolve() {
         guard !isRunning else { return }
         let value = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else {
-            error = LocalImportError(stage: .resolvingMetadata, code: "MISSING_SOURCE", message: "Paste a Spotify track or YouTube video URL first.")
+            error = LocalImportError(stage: .resolvingMetadata, code: "MISSING_SOURCE", message: "Enter a song, artist, album, or supported Spotify, SoundCloud, or YouTube link first.")
             stage = .failed
             return
         }
+        stopPreview()
         task?.cancel()
         error = nil
         resolution = nil
+        searchResponse = nil
+        selectedSearchResultID = nil
+        selectedVideoID = nil
+        selectedPlaylistTrackIDs = []
         completedTrack = nil
-        stage = .resolvingMetadata
+        completedSummary = nil
+        batchCurrentTitle = nil
+        let searchesProviders = !LocalImportInput.looksLikeLink(value)
+        stage = searchesProviders ? .searchingCandidates : .resolvingMetadata
         task = Task { [weak self] in
             guard let self else { return }
             do {
+                if searchesProviders {
+                    let response = try await service.search(query: value)
+                    try Task.checkCancellation()
+                    searchResponse = response
+                    guard let first = response.results.first else {
+                        throw LocalImportError(
+                            stage: .searchingCandidates,
+                            code: "NO_SEARCH_RESULTS",
+                            message: "Spotify, SoundCloud, and YouTube returned no previewable results for that search."
+                        )
+                    }
+                    selectSearchResult(first)
+                    stage = .awaitingSelection
+                    task = nil
+                    return
+                }
                 let result = try await service.resolve(source: value) { [weak self] progress in
                     self?.apply(progress)
                 }
                 try Task.checkCancellation()
                 resolution = result
                 selectedVideoID = result.candidates.first?.videoID
+                selectedPlaylistTrackIDs = Set(result.playlist?.items.map { $0.track.trackID } ?? [])
                 stage = .awaitingSelection
             } catch is CancellationError {
                 stage = .cancelled
@@ -400,8 +632,42 @@ private final class MobileLocalImportViewModel: ObservableObject {
         }
     }
 
-    func importSelected(into library: MusicLibrary) {
-        guard !isRunning, let resolution, let candidate = selectedCandidate else { return }
+    func selectSearchResult(_ result: LocalImportSearchResult) {
+        if previewingVideoID != result.candidates.first?.videoID {
+            stopPreview()
+        }
+        resolution = result.resolution
+        selectedSearchResultID = result.id
+        selectedVideoID = result.candidates.first?.videoID
+        selectedPlaylistTrackIDs = []
+        previewError = nil
+    }
+
+    func toggleSearchPreview(_ result: LocalImportSearchResult) {
+        selectSearchResult(result)
+        guard let candidate = result.candidates.first else { return }
+        togglePreview(candidate)
+    }
+
+    @discardableResult
+    func importSelected(into library: MusicLibrary) -> Bool {
+        guard !isRunning, let resolution else { return false }
+        if syncAfterImport, !library.canUploadLocalImports {
+            error = LocalImportError(
+                stage: .syncing,
+                code: "SERVER_UPLOAD_NOT_CONFIGURED",
+                message: "Connect the music server and save both the access token and admin key, or turn off server upload."
+            )
+            stage = .failed
+            return false
+        }
+        stopPreview()
+        library.dismissTransferNotice()
+        if isPlaylist {
+            importPlaylist(resolution, into: library)
+            return true
+        }
+        guard let candidate = selectedCandidate else { return false }
         task?.cancel()
         error = nil
         completedBytes = 0
@@ -414,39 +680,47 @@ private final class MobileLocalImportViewModel: ObservableObject {
             artworkURL: resolution.track.artworkURL ?? candidate.thumbnailURL,
             sourceURL: resolution.track.sourceURL
         )
-        let existing = library.tracks
-        task = Task { [weak self, weak library] in
-            guard let self, let library else { return }
-            do {
-                let outcome = try await service.importCandidate(
-                    candidate,
-                    metadata: metadata,
-                    existingTracks: existing
-                ) { [weak self] progress in
-                    self?.apply(progress)
-                }
-                try Task.checkCancellation()
-                switch outcome {
-                case .created(let imported):
-                    completedTrack = try library.insertLocalImportedAudio(imported)
-                case .duplicate(let id):
-                    completedTrack = library.tracks.first { $0.id == id }
-                }
-                stage = .complete
-            } catch is CancellationError {
-                stage = .cancelled
-            } catch let failure as LocalImportError {
-                error = failure
-                stage = .failed
-            } catch {
-                self.error = LocalImportError(stage: stage, code: "LOCAL_IMPORT_FAILED", message: error.localizedDescription)
-                stage = .failed
-            }
+        let candidates = [candidate] + resolution.candidates.filter { $0.videoID != candidate.videoID }
+        let shouldSync = syncAfterImport
+        task = Task { [self, library] in
+            await runSingleImport(
+                spotifyTrack: resolution.track,
+                metadata: metadata,
+                candidates: candidates,
+                shouldSync: shouldSync,
+                library: library
+            )
+            task = nil
+        }
+        return true
+    }
+
+    func togglePlaylistItem(_ item: LocalImportPlaylistItem) {
+        if selectedPlaylistTrackIDs.contains(item.track.trackID) {
+            selectedPlaylistTrackIDs.remove(item.track.trackID)
+        } else {
+            selectedPlaylistTrackIDs.insert(item.track.trackID)
+        }
+    }
+
+    private func importPlaylist(_ resolution: LocalImportResolution, into library: MusicLibrary) {
+        let items = selectedPlaylistItems
+        guard let playlist = resolution.playlist, !items.isEmpty else { return }
+        task?.cancel()
+        error = nil
+        completedBytes = 0
+        totalBytes = 0
+        completedSummary = nil
+        stage = .inspectingSource
+        let shouldSync = syncAfterImport
+        task = Task { [self, library] in
+            await runPlaylistImport(items: items, playlist: playlist, shouldSync: shouldSync, library: library)
             task = nil
         }
     }
 
     func cancel() {
+        stopPreview()
         task?.cancel()
         task = nil
         if isRunning { stage = .cancelled }
@@ -456,6 +730,352 @@ private final class MobileLocalImportViewModel: ObservableObject {
         stage = progress.stage
         completedBytes = progress.completed
         totalBytes = progress.total
+    }
+
+    func existingStatus(for track: LocalImportSpotifyTrack, in library: MusicLibrary) -> String? {
+        let match = LocalImportExistingSongPolicy.match(
+            spotifyTrack: track,
+            deviceTracks: library.tracks,
+            activeServerSongs: library.remoteSongs
+        )
+        switch (match.isOnDevice, match.isOnServer) {
+        case (true, true): return "On device and server — both transfers will be skipped"
+        case (true, false): return "On device — download will be skipped"
+        case (false, true): return "On server — upload will be skipped"
+        case (false, false): return nil
+        }
+    }
+
+    func togglePreview(_ candidate: LocalImportAudioSourceMatch) {
+        if previewingVideoID == candidate.videoID || previewLoadingVideoID == candidate.videoID {
+            stopPreview()
+            return
+        }
+        stopPreview()
+        previewError = nil
+        previewLoadingVideoID = candidate.videoID
+        previewTask = Task { [self] in
+            do {
+                let stream = try await service.previewStream(for: candidate)
+                try Task.checkCancellation()
+                let asset = AVURLAsset(
+                    url: stream.url,
+                    options: ["AVURLAssetHTTPHeaderFieldsKey": stream.httpHeaders]
+                )
+                let player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+                previewPlayer = player
+                previewLoadingVideoID = nil
+                previewingVideoID = candidate.videoID
+                player.play()
+                previewStopTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(30))
+                    guard !Task.isCancelled else { return }
+                    self?.stopPreview()
+                }
+            } catch is CancellationError {
+                previewLoadingVideoID = nil
+            } catch {
+                previewLoadingVideoID = nil
+                previewError = "Preview unavailable: \(error.localizedDescription)"
+            }
+            previewTask = nil
+        }
+    }
+
+    func stopPreview() {
+        previewTask?.cancel()
+        previewStopTask?.cancel()
+        previewTask = nil
+        previewStopTask = nil
+        previewPlayer?.pause()
+        previewPlayer = nil
+        previewLoadingVideoID = nil
+        previewingVideoID = nil
+    }
+
+    private func runSingleImport(
+        spotifyTrack: LocalImportSpotifyTrack,
+        metadata: LocalImportMetadata,
+        candidates: [LocalImportAudioSourceMatch],
+        shouldSync: Bool,
+        library: MusicLibrary
+    ) async {
+        var catalogWarning: String?
+        if shouldSync {
+            do { try await library.refreshRemoteCatalogForImport() }
+            catch { catalogWarning = error.localizedDescription }
+        }
+        do {
+            try Task.checkCancellation()
+            var match = LocalImportExistingSongPolicy.match(
+                spotifyTrack: spotifyTrack,
+                deviceTracks: library.tracks,
+                activeServerSongs: library.remoteSongs
+            )
+            var track = match.deviceTrackID.flatMap { id in library.tracks.first { $0.id == id } }
+            let plannedDownloads = track == nil ? 1 : 0
+            if plannedDownloads > 0 {
+                beginDownloads(total: plannedDownloads, library: library)
+                batchCurrentTitle = "1 of 1 • \(spotifyTrack.title)"
+                track = try await downloadTrack(
+                    spotifyTrack,
+                    metadata: metadata,
+                    candidates: candidates,
+                    completedBefore: 0,
+                    total: plannedDownloads,
+                    library: library
+                )
+                library.downloadProgress = 1
+            }
+            library.isDownloading = false
+            guard let track else {
+                throw LocalImportError(stage: .savingLocal, code: "LOCAL_IMPORT_MISSING", message: "The imported song could not be found on this device.")
+            }
+            completedTrack = track
+            match = LocalImportExistingSongPolicy.match(
+                spotifyTrack: spotifyTrack,
+                deviceTracks: library.tracks,
+                activeServerSongs: library.remoteSongs
+            )
+            if let serverID = match.serverSongID {
+                _ = library.reconcileLocalImportWithServer(trackID: track.id, remoteID: serverID)
+            }
+            var uploadFailure: String?
+            if shouldSync, match.serverSongID == nil {
+                stage = .syncing
+                beginUploads(total: 1, library: library)
+                do {
+                    _ = try await uploadWithRetry(track, index: 0, total: 1, library: library)
+                    library.uploadProgress = 1
+                } catch {
+                    uploadFailure = error.localizedDescription
+                }
+            }
+            finishTransfers(library)
+            batchCurrentTitle = nil
+            if let uploadFailure {
+                let detail = "\(track.title) — \(track.artist) (\(uploadFailure))"
+                self.error = LocalImportError(stage: .syncing, code: "SERVER_UPLOAD_FAILED", message: detail)
+                stage = .failed
+                library.showTransferNotice(title: "Saved locally; upload failed", detail: detail, isError: true)
+            } else {
+                stage = .complete
+                let localDetail = plannedDownloads == 0 ? "Already on this device." : "Downloaded to this device."
+                let serverDetail = shouldSync ? (match.serverSongID == nil ? " Uploaded to the server." : " Already on the server.") : ""
+                let warning = catalogWarning.map { " Server refresh warning: \($0)" } ?? ""
+                completedSummary = localDetail + serverDetail
+                library.showTransferNotice(title: "Import complete", detail: localDetail + serverDetail + warning, isError: false)
+            }
+        } catch is CancellationError {
+            finishTransfers(library)
+            stage = .cancelled
+        } catch {
+            finishTransfers(library)
+            let message = (error as? LocalImportError)?.message ?? error.localizedDescription
+            self.error = LocalImportError(stage: stage, code: "LOCAL_IMPORT_FAILED", message: message)
+            stage = .failed
+            library.showTransferNotice(title: "Import failed", detail: "\(spotifyTrack.title) — \(spotifyTrack.artist): \(message)", isError: true)
+        }
+    }
+
+    private func runPlaylistImport(
+        items: [LocalImportPlaylistItem],
+        playlist: LocalImportPlaylist,
+        shouldSync: Bool,
+        library: MusicLibrary
+    ) async {
+        var catalogWarning: String?
+        if shouldSync {
+            do { try await library.refreshRemoteCatalogForImport() }
+            catch { catalogWarning = error.localizedDescription }
+        }
+        var importedTracks: [(item: LocalImportPlaylistItem, track: MobileTrack)] = []
+        var downloadFailures: [String] = []
+        var uploadFailures: [String] = []
+        do {
+            let initialMatches = Dictionary(uniqueKeysWithValues: items.map { item in
+                (item.track.trackID, LocalImportExistingSongPolicy.match(
+                    spotifyTrack: item.track,
+                    deviceTracks: library.tracks,
+                    activeServerSongs: library.remoteSongs
+                ))
+            })
+            let downloadItems = items.filter { initialMatches[$0.track.trackID]?.deviceTrackID == nil }
+            if !downloadItems.isEmpty { beginDownloads(total: downloadItems.count, library: library) }
+            var completedDownloads = 0
+            for item in items {
+                try Task.checkCancellation()
+                let initialMatch = initialMatches[item.track.trackID]
+                var track = initialMatch?.deviceTrackID.flatMap { id in library.tracks.first { $0.id == id } }
+                if track == nil {
+                    let metadata = LocalImportMetadata(
+                        title: item.track.title,
+                        artist: item.track.artist,
+                        album: item.track.album,
+                        artworkURL: item.track.artworkURL ?? item.candidate.thumbnailURL,
+                        sourceURL: item.track.sourceURL
+                    )
+                    batchCurrentTitle = "\(completedDownloads + 1) of \(downloadItems.count) • \(item.track.title)"
+                    do {
+                        track = try await downloadTrack(
+                            item.track,
+                            metadata: metadata,
+                            candidates: item.downloadCandidates,
+                            completedBefore: completedDownloads,
+                            total: downloadItems.count,
+                            library: library
+                        )
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        downloadFailures.append("\(item.track.title) — \(item.track.artist) (\(error.localizedDescription))")
+                    }
+                    completedDownloads += 1
+                    library.downloadProgress = Double(completedDownloads) / Double(max(downloadItems.count, 1))
+                }
+                if let track {
+                    if let serverID = initialMatch?.serverSongID {
+                        _ = library.reconcileLocalImportWithServer(trackID: track.id, remoteID: serverID)
+                    }
+                    if !importedTracks.contains(where: { $0.track.id == track.id }) {
+                        importedTracks.append((item, track))
+                        completedTrack = importedTracks.first?.track
+                    }
+                }
+            }
+            library.isDownloading = false
+            library.upsertImportedPlaylist(named: playlist.title, tracks: importedTracks.map(\.track))
+
+            let uploadQueue = shouldSync ? importedTracks.filter { pair in
+                LocalImportExistingSongPolicy.match(
+                    spotifyTrack: pair.item.track,
+                    deviceTracks: library.tracks,
+                    activeServerSongs: library.remoteSongs
+                ).serverSongID == nil
+            } : []
+            if !uploadQueue.isEmpty {
+                stage = .syncing
+                beginUploads(total: uploadQueue.count, library: library)
+                for (index, pair) in uploadQueue.enumerated() {
+                    try Task.checkCancellation()
+                    do {
+                        _ = try await uploadWithRetry(pair.track, index: index, total: uploadQueue.count, library: library)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        uploadFailures.append("\(pair.track.title) — \(pair.track.artist) (\(error.localizedDescription))")
+                    }
+                    library.uploadProgress = Double(index + 1) / Double(uploadQueue.count)
+                }
+            }
+            finishTransfers(library)
+            batchCurrentTitle = nil
+            completedSummary = "Kept \(importedTracks.count) of \(items.count) selected songs in \(playlist.title)."
+            if !downloadFailures.isEmpty {
+                let detail = "Kept \(importedTracks.count) song\(importedTracks.count == 1 ? "" : "s"). Downloads failed after retrying: \(downloadFailures.joined(separator: "; "))"
+                error = LocalImportError(stage: .downloading, code: "PLAYLIST_DOWNLOAD_PARTIAL_FAILURE", message: detail)
+                stage = .failed
+                library.showTransferNotice(title: "Playlist import incomplete", detail: detail, isError: true)
+            } else if !uploadFailures.isEmpty {
+                let detail = "Saved every downloaded song locally. Server uploads failed after retrying: \(uploadFailures.joined(separator: "; "))"
+                error = LocalImportError(stage: .syncing, code: "PLAYLIST_UPLOAD_PARTIAL_FAILURE", message: detail)
+                stage = .failed
+                library.showTransferNotice(title: "Saved locally; upload failed", detail: detail, isError: true)
+            } else {
+                stage = .complete
+                let deviceSkips = initialMatches.values.filter(\.isOnDevice).count
+                let serverSkips = shouldSync ? initialMatches.values.filter(\.isOnServer).count : 0
+                let refreshWarning = catalogWarning.map { " Server refresh warning: \($0)" } ?? ""
+                let detail = "Imported \(importedTracks.count) song\(importedTracks.count == 1 ? "" : "s"). Skipped \(deviceSkips) device download\(deviceSkips == 1 ? "" : "s") and \(serverSkips) server upload\(serverSkips == 1 ? "" : "s")." + refreshWarning
+                library.showTransferNotice(title: "Playlist import complete", detail: detail, isError: false)
+            }
+        } catch is CancellationError {
+            library.upsertImportedPlaylist(named: playlist.title, tracks: importedTracks.map(\.track))
+            finishTransfers(library)
+            stage = .cancelled
+        } catch {
+            library.upsertImportedPlaylist(named: playlist.title, tracks: importedTracks.map(\.track))
+            finishTransfers(library)
+            let message = error.localizedDescription
+            self.error = LocalImportError(stage: stage, code: "LOCAL_IMPORT_FAILED", message: message)
+            stage = .failed
+            library.showTransferNotice(title: "Playlist import failed", detail: message, isError: true)
+        }
+    }
+
+    private func downloadTrack(
+        _ spotifyTrack: LocalImportSpotifyTrack,
+        metadata: LocalImportMetadata,
+        candidates: [LocalImportAudioSourceMatch],
+        completedBefore: Int,
+        total: Int,
+        library: MusicLibrary
+    ) async throws -> MobileTrack {
+        var lastError: Error?
+        for (candidateIndex, candidate) in candidates.enumerated() {
+            do {
+                if candidateIndex > 0 { try await Task.sleep(for: .milliseconds(400)) }
+                let outcome = try await service.importCandidate(
+                    candidate,
+                    metadata: metadata,
+                    existingTracks: library.tracks
+                ) { [weak self, weak library] progress in
+                    self?.apply(progress)
+                    guard let library else { return }
+                    let byteFraction = progress.total > 0
+                        ? min(max(Double(progress.completed) / Double(progress.total), 0), 1)
+                        : 0
+                    library.downloadProgress = (Double(completedBefore) + byteFraction) / Double(max(total, 1))
+                    library.downloadDetail = "Downloading \(completedBefore + 1) of \(total) • \(spotifyTrack.title)"
+                }
+                switch outcome {
+                case .created(let imported): return try library.insertLocalImportedAudio(imported)
+                case .duplicate(let id):
+                    if let track = library.tracks.first(where: { $0.id == id }) { return track }
+                    throw LocalImportError(stage: .savingLocal, code: "DUPLICATE_NOT_FOUND", message: "The existing local song could not be found.")
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? LocalImportError(stage: .downloading, code: "ALL_SOURCES_FAILED", message: "Every matched audio source failed.")
+    }
+
+    private func uploadWithRetry(_ track: MobileTrack, index: Int, total: Int, library: MusicLibrary) async throws -> Bool {
+        var lastError: Error?
+        for attempt in 1...3 {
+            do {
+                if attempt > 1 { try await Task.sleep(for: .milliseconds(attempt == 2 ? 500 : 1_500)) }
+                library.uploadDetail = "Uploading \(index + 1) of \(total) • \(track.title)"
+                return try await library.uploadLocalImportToActiveProfile(track)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? URLError(.cannotConnectToHost)
+    }
+
+    private func beginDownloads(total: Int, library: MusicLibrary) {
+        library.isUploading = false
+        library.isDownloading = true
+        library.downloadProgress = 0
+        library.downloadDetail = "Preparing 1 of \(total)"
+    }
+
+    private func beginUploads(total: Int, library: MusicLibrary) {
+        library.isDownloading = false
+        library.isUploading = true
+        library.uploadProgress = 0
+        library.uploadDetail = "Preparing 1 of \(total)"
+    }
+
+    private func finishTransfers(_ library: MusicLibrary) {
+        library.isDownloading = false
+        library.isUploading = false
     }
 }
 
@@ -472,24 +1092,50 @@ struct MobileLocalImportSheet: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("SOURCE URL").eyebrow()
-                            TextField("Spotify track or YouTube video", text: $viewModel.source)
-                                .focused($sourceFocused)
-                                .submitLabel(.search)
-                                .onSubmit(viewModel.resolve)
-                                .textContentType(.URL)
-                                .keyboardType(.URL)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .padding(13)
-                                .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+                            Text("SEARCH OR LINK").eyebrow()
+                            HStack(spacing: 8) {
+                                TextField("Song, artist, album, or link", text: $viewModel.source)
+                                    .focused($sourceFocused)
+                                    .submitLabel(.search)
+                                    .onSubmit(viewModel.resolve)
+                                    .keyboardType(.default)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                                    .padding(13)
+                                    .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+                                Button("Paste") {
+                                    if let pasted = UIPasteboard.general.string, !pasted.isEmpty {
+                                        viewModel.source = pasted
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                            }
                         }
+
+                        Toggle(isOn: $viewModel.syncAfterImport) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Upload after downloading")
+                                    .font(.subheadline.weight(.semibold))
+                                Text(library.canUploadLocalImports
+                                     ? "Downloads every selected song first, then uploads missing songs to \(library.syncProfileName)."
+                                     : "Configure the server access token and admin key, or turn this off for a local-only import.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .tint(.violet)
 
                         stageCard
 
-                        if let resolution = viewModel.resolution {
+                        if let response = viewModel.searchResponse {
+                            searchResultList(response)
+                        } else if let resolution = viewModel.resolution {
                             resolvedTrack(resolution.track)
-                            candidateList(resolution.candidates)
+                            if let playlist = resolution.playlist {
+                                playlistItemList(playlist)
+                            } else {
+                                candidateList(resolution.candidates)
+                            }
                         }
 
                         if let error = viewModel.error {
@@ -503,6 +1149,11 @@ struct MobileLocalImportSheet: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(Color.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 13))
                         }
+                        if let previewError = viewModel.previewError {
+                            Text(previewError)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                     }
                     .padding(20)
                 }
@@ -512,15 +1163,20 @@ struct MobileLocalImportSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    Button("Close") {
+                        if !viewModel.continuesAfterSheetDismissal { viewModel.cancel() }
+                        dismiss()
+                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     if viewModel.resolution == nil {
                         Button("Find Audio", action: viewModel.resolve)
                             .disabled(viewModel.isRunning)
                     } else {
-                        Button("Import") { viewModel.importSelected(into: library) }
-                            .disabled(viewModel.isRunning || viewModel.selectedCandidate == nil)
+                        Button("Import") {
+                            if viewModel.importSelected(into: library) { dismiss() }
+                        }
+                            .disabled(viewModel.isRunning || (viewModel.isPlaylist ? viewModel.selectedPlaylistItems.isEmpty : viewModel.selectedCandidate == nil))
                     }
                 }
                 ToolbarItemGroup(placement: .keyboard) {
@@ -530,7 +1186,10 @@ struct MobileLocalImportSheet: View {
             }
         }
         .onAppear { sourceFocused = true }
-        .onDisappear { viewModel.cancel() }
+        .onDisappear {
+            viewModel.stopPreview()
+            if !viewModel.continuesAfterSheetDismissal { viewModel.cancel() }
+        }
     }
 
     private var stageCard: some View {
@@ -556,9 +1215,141 @@ struct MobileLocalImportSheet: View {
                     .font(.subheadline)
                     .foregroundStyle(.green)
             }
+            if let summary = viewModel.completedSummary {
+                Text(summary).font(.subheadline).foregroundStyle(.green)
+            }
         }
         .padding(14)
         .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 13))
+    }
+
+    private func searchResultList(_ response: LocalImportSearchResponse) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("SEARCH RESULTS").eyebrow()
+                Spacer()
+                Text("\(response.results.count) previewable")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.violet)
+            }
+
+            ForEach(LocalImportSearchProvider.allCases) { provider in
+                let results = viewModel.searchResults(for: provider)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(provider.displayName.uppercased()).eyebrow()
+                        Spacer()
+                        Text("\(results.count) result\(results.count == 1 ? "" : "s")")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    if results.isEmpty {
+                        Text("No previewable results.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 11))
+                    } else {
+                        ForEach(results) { result in
+                            searchResultRow(result)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func searchResultRow(_ result: LocalImportSearchResult) -> some View {
+        let selected = viewModel.selectedSearchResultID == result.id
+        let candidate = result.candidates.first
+        return HStack(spacing: 9) {
+            Button {
+                viewModel.selectSearchResult(result)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(Color.violet)
+                    searchResultArtwork(result)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(result.track.title)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(2)
+                        Text(searchResultDetails(result))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                        if let status = viewModel.existingStatus(for: result.track, in: library) {
+                            Text(status)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    Spacer(minLength: 4)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if let candidate {
+                Button { viewModel.toggleSearchPreview(result) } label: {
+                    if viewModel.previewLoadingVideoID == candidate.videoID {
+                        ProgressView().frame(width: 34, height: 34)
+                    } else {
+                        Image(systemName: viewModel.previewingVideoID == candidate.videoID ? "stop.fill" : "play.fill")
+                            .frame(width: 34, height: 34)
+                            .background(Color.violet.opacity(0.18), in: Circle())
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(viewModel.previewingVideoID == candidate.videoID ? "Stop preview" : "Preview \(result.track.title)")
+            }
+        }
+        .padding(12)
+        .background(.white.opacity(selected ? 0.08 : 0.035), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(selected ? Color.violet.opacity(0.45) : Color.white.opacity(0.05))
+        }
+        .disabled(viewModel.isRunning)
+    }
+
+    private func searchResultArtwork(_ result: LocalImportSearchResult) -> some View {
+        let artworkURL = (result.track.artworkURL ?? result.candidates.first?.thumbnailURL).flatMap(URL.init(string:))
+        return ZStack {
+            LinearGradient(
+                colors: [Color.violet.opacity(0.42), Color.purple.opacity(0.22)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            Image(systemName: "music.note").foregroundStyle(.white.opacity(0.8))
+            if let artworkURL {
+                AsyncImage(url: artworkURL) { phase in
+                    if case .success(let image) = phase {
+                        image.resizable().scaledToFill()
+                    }
+                }
+            }
+        }
+        .frame(width: 44, height: 44)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .accessibilityLabel("\(result.track.title) artwork")
+    }
+
+    private func searchResultDetails(_ result: LocalImportSearchResult) -> String {
+        var values: [String?] = [
+            result.track.artist,
+            result.track.album,
+            result.track.durationSeconds.map { formatTime(TimeInterval($0)) },
+            result.provider.displayName,
+        ]
+        if let candidate = result.candidates.first {
+            let previewProvider = sourceProviderName(candidate.sourceProvider)
+            if previewProvider != result.provider.displayName {
+                values.append("Preview via \(previewProvider)")
+            }
+        }
+        return values.compactMap { $0 }.joined(separator: " • ")
     }
 
     private func resolvedTrack(_ track: LocalImportSpotifyTrack) -> some View {
@@ -570,6 +1361,11 @@ struct MobileLocalImportSheet: View {
             if let duration = track.durationSeconds {
                 Text(formatTime(TimeInterval(duration))).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
+            if let status = viewModel.existingStatus(for: track, in: library) {
+                Label(status, systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
@@ -580,30 +1376,137 @@ struct MobileLocalImportSheet: View {
         VStack(alignment: .leading, spacing: 9) {
             Text("AUDIO SOURCE").eyebrow()
             ForEach(candidates) { candidate in
-                Button {
-                    viewModel.selectedVideoID = candidate.videoID
-                } label: {
-                    HStack(spacing: 11) {
-                        Image(systemName: viewModel.selectedVideoID == candidate.videoID ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(Color.violet)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(candidate.title).font(.subheadline.weight(.semibold)).lineLimit(2)
-                            Text([
-                                candidate.artist ?? "Unknown uploader",
-                                candidate.durationSeconds.map { formatTime(TimeInterval($0)) },
-                                candidate.sourceProvider == .youtubeMusic ? "YouTube Music" : "YouTube"
-                            ].compactMap { $0 }.joined(separator: " • "))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Button {
+                        viewModel.selectedVideoID = candidate.videoID
+                    } label: {
+                        HStack(spacing: 11) {
+                            Image(systemName: viewModel.selectedVideoID == candidate.videoID ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(Color.violet)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(candidate.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                                Text([
+                                    candidate.artist ?? "Unknown uploader",
+                                    candidate.durationSeconds.map { formatTime(TimeInterval($0)) },
+                                    sourceProviderName(candidate.sourceProvider)
+                                ].compactMap { $0 }.joined(separator: " • "))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
+                            Spacer()
                         }
-                        Spacer()
+                        .contentShape(Rectangle())
                     }
-                    .padding(12)
-                    .background(.white.opacity(viewModel.selectedVideoID == candidate.videoID ? 0.08 : 0.035), in: RoundedRectangle(cornerRadius: 12))
+                    .buttonStyle(.plain)
+
+                    Button { viewModel.togglePreview(candidate) } label: {
+                        if viewModel.previewLoadingVideoID == candidate.videoID {
+                            ProgressView().frame(width: 32, height: 32)
+                        } else {
+                            Image(systemName: viewModel.previewingVideoID == candidate.videoID ? "stop.fill" : "play.fill")
+                                .frame(width: 32, height: 32)
+                                .background(Color.violet.opacity(0.18), in: Circle())
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(viewModel.previewingVideoID == candidate.videoID ? "Stop preview" : "Preview \(candidate.title)")
                 }
-                .buttonStyle(.plain)
+                .padding(12)
+                .background(.white.opacity(viewModel.selectedVideoID == candidate.videoID ? 0.08 : 0.035), in: RoundedRectangle(cornerRadius: 12))
             }
         }
+    }
+
+    private func playlistItemList(_ playlist: LocalImportPlaylist) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text("TRACKS TO IMPORT").eyebrow()
+                Spacer()
+                Text("\(viewModel.selectedPlaylistItems.count) of \(playlist.items.count)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.violet)
+            }
+            if playlist.unavailableCount > 0 {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("SKIPPED BY \(viewModel.playlistProviderName.uppercased()) OR MATCHING").eyebrow()
+                    ForEach(playlist.skippedItems) { skipped in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(skipped.position). \(skipped.title)\(skipped.artist.map { " — \($0)" } ?? "")")
+                                .font(.caption.weight(.semibold))
+                            Text(skipped.reason)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .padding(12)
+                .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+            }
+            ForEach(playlist.items) { item in
+                let selected = viewModel.selectedPlaylistTrackIDs.contains(item.track.trackID)
+                HStack(spacing: 8) {
+                    Button { viewModel.togglePlaylistItem(item) } label: {
+                        HStack(spacing: 11) {
+                            Image(systemName: selected ? "checkmark.square.fill" : "square").foregroundStyle(Color.violet)
+                            Text("\(item.position)").font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 24)
+                            playlistItemArtwork(item)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(item.track.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                                Text([item.track.artist, item.track.durationSeconds.map { formatTime(TimeInterval($0)) }].compactMap { $0 }.joined(separator: " • "))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                if let status = viewModel.existingStatus(for: item.track, in: library) {
+                                    Text(status)
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.green)
+                                }
+                            }
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button { viewModel.togglePreview(item.candidate) } label: {
+                        if viewModel.previewLoadingVideoID == item.candidate.videoID {
+                            ProgressView().frame(width: 32, height: 32)
+                        } else {
+                            Image(systemName: viewModel.previewingVideoID == item.candidate.videoID ? "stop.fill" : "play.fill")
+                                .frame(width: 32, height: 32)
+                                .background(Color.violet.opacity(0.18), in: Circle())
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(viewModel.previewingVideoID == item.candidate.videoID ? "Stop preview" : "Preview \(item.track.title)")
+                }
+                .padding(12)
+                .background(.white.opacity(selected ? 0.08 : 0.035), in: RoundedRectangle(cornerRadius: 12))
+                .disabled(viewModel.isRunning)
+            }
+        }
+    }
+
+    private func playlistItemArtwork(_ item: LocalImportPlaylistItem) -> some View {
+        let artworkURL = (item.track.artworkURL ?? item.candidate.thumbnailURL).flatMap(URL.init(string:))
+        return ZStack {
+            LinearGradient(
+                colors: [Color.violet.opacity(0.42), Color.purple.opacity(0.22)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            Image(systemName: "music.note")
+                .foregroundStyle(.white.opacity(0.8))
+            if let artworkURL {
+                AsyncImage(url: artworkURL) { phase in
+                    if case .success(let image) = phase {
+                        image.resizable().scaledToFill()
+                    }
+                }
+            }
+        }
+        .frame(width: 44, height: 44)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .accessibilityLabel("\(item.track.title) artwork")
     }
 }
 
@@ -649,11 +1552,11 @@ private func stageTitle(_ stage: LocalImportStage) -> String {
 
 private func stageDetail(_ stage: LocalImportStage) -> String {
     switch stage {
-    case .idle: "Paste a Spotify track or supported YouTube video URL."
+    case .idle: "Enter text to search Spotify, SoundCloud, and YouTube, or paste a supported link."
     case .resolvingMetadata: "Reading the track title, artist, artwork, and duration."
-    case .searchingCandidates: "Ranking YouTube Music and YouTube results."
+    case .searchingCandidates: "Finding direct provider audio or a close alternate source."
     case .awaitingSelection: "Review the match before saving audio on this device."
-    case .inspectingSource: "Verifying a direct M4A audio stream."
+    case .inspectingSource: "Verifying a direct audio stream."
     case .downloading: "Downloading verified audio directly to this device."
     case .processing: "Preserving metadata and artwork in the local M4A."
     case .savingLocal: "Adding the finished file to Resonance."
@@ -661,6 +1564,14 @@ private func stageDetail(_ stage: LocalImportStage) -> String {
     case .syncing: "Uploading the local import to the active profile."
     case .failed: "Review the error below and try another source."
     case .cancelled: "No unfinished import was kept."
+    }
+}
+
+private func sourceProviderName(_ provider: LocalImportAudioSourceMatch.Provider) -> String {
+    switch provider {
+    case .youtubeMusic: "YouTube Music"
+    case .youtube: "YouTube"
+    case .soundcloud: "SoundCloud"
     }
 }
 

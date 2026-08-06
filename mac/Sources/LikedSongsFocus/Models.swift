@@ -37,6 +37,70 @@ enum MediaKindClassifier {
     }
 }
 
+enum ServerUploadNaming {
+    static func filename(for sourceURL: URL, title: String? = nil) -> String {
+        let fileExtension = sourceURL.pathExtension.filter { $0.isLetter || $0.isNumber }
+        var preferredStem = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let extensionSuffix = fileExtension.isEmpty ? "" : ".\(fileExtension)"
+        if !extensionSuffix.isEmpty,
+           preferredStem.lowercased().hasSuffix(extensionSuffix.lowercased()) {
+            preferredStem.removeLast(extensionSuffix.count)
+        }
+        let sourceStem = sourceURL.deletingPathExtension().lastPathComponent
+        let stem = cleanStem(preferredStem).isEmpty ? cleanStem(sourceStem) : cleanStem(preferredStem)
+        let resolvedStem = stem.isEmpty ? "Untitled song" : stem
+        return fileExtension.isEmpty ? resolvedStem : "\(resolvedStem).\(fileExtension)"
+    }
+
+    private static func cleanStem(_ value: String) -> String {
+        let invalid = CharacterSet(charactersIn: "<>:\"/\\|?*").union(.controlCharacters)
+        let sanitized = value.unicodeScalars.map { invalid.contains($0) ? "-" : String($0) }.joined()
+        let collapsed = sanitized
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+        return String(collapsed.prefix(180))
+    }
+}
+
+enum ServerSongIdentityPolicy {
+    static func metadataMatches(
+        expectedTitle: String,
+        expectedArtist: String,
+        expectedDuration: Double?,
+        actualTitle: String,
+        actualArtist: String,
+        actualDuration: Double?
+    ) -> Bool {
+        guard normalize(expectedTitle) == normalize(actualTitle) else { return false }
+        let expectedArtists = artistTokens(expectedArtist)
+        let actualArtists = artistTokens(actualArtist)
+        guard !expectedArtists.isEmpty, expectedArtists == actualArtists else { return false }
+        if let expectedDuration, expectedDuration > 0,
+           let actualDuration, actualDuration > 0 {
+            return abs(expectedDuration - actualDuration) <= 5
+        }
+        return true
+    }
+
+    private static func artistTokens(_ value: String) -> Set<Substring> {
+        let ignored: Set<Substring> = [
+            "and", "feat", "featuring", "ft", "with",
+            "unknown", "artist", "local", "file",
+        ]
+        return Set(normalize(value).split(separator: " ")).subtracting(ignored)
+    }
+
+    private static func normalize(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .map { $0.isLetter || $0.isNumber ? String($0) : " " }
+            .joined()
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+}
+
 enum StorageSelectionPolicy {
     static func visibleSelection(
         from selectedTrackIDs: Set<UUID>,
@@ -122,12 +186,94 @@ struct Track: Identifiable, Hashable, Codable {
 
     var durationText: String { Self.timeText(duration) }
 
+    var installedVideoURL: URL? {
+        guard kind == .video,
+              let fileURL,
+              fileURL.isFileURL,
+              FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+        return fileURL
+    }
+
     static func timeText(_ seconds: TimeInterval) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "0:00" }
         let total = Int(seconds.rounded(.down))
         return "\(total / 60):\(String(format: "%02d", total % 60))"
     }
 
+}
+
+struct MissingServerUploadPlan: Equatable {
+    let uploadTrackIDs: [UUID]
+    let existingRemoteIDsByTrackID: [UUID: String]
+}
+
+enum MissingServerUploadPolicy {
+    static func plan(
+        tracks: [Track],
+        catalog: [RemoteSong],
+        activeProfileID: String,
+        activeServerURL: URL
+    ) -> MissingServerUploadPlan {
+        let liveRemoteIDs = Set(catalog.map(\.id))
+        let remoteIDByHash = Dictionary(
+            catalog.compactMap { song -> (String, String)? in
+                guard let hash = normalizedHash(song.contentSHA256) else { return nil }
+                return (hash, song.id)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let serverOrigin = origin(of: activeServerURL)
+        var uploadTrackIDs: [UUID] = []
+        var existingRemoteIDsByTrackID: [UUID: String] = [:]
+
+        for track in tracks {
+            guard track.fileURL != nil,
+                  track.remoteID != nil || track.sourceServer != nil,
+                  (track.syncProfileID ?? "default") == activeProfileID else { continue }
+            if let sourceServer = track.sourceServer {
+                guard let sourceURL = URL(string: sourceServer),
+                      origin(of: sourceURL) == serverOrigin else { continue }
+            }
+            if let remoteID = track.remoteID, liveRemoteIDs.contains(remoteID) {
+                continue
+            }
+            if let hash = normalizedHash(track.contentSHA256),
+               let existingRemoteID = remoteIDByHash[hash] {
+                existingRemoteIDsByTrackID[track.id] = existingRemoteID
+            } else if let existing = catalog.first(where: { song in
+                ServerSongIdentityPolicy.metadataMatches(
+                    expectedTitle: track.title,
+                    expectedArtist: track.artist,
+                    expectedDuration: track.duration,
+                    actualTitle: song.title,
+                    actualArtist: song.artist,
+                    actualDuration: song.durationSeconds
+                )
+            }) {
+                existingRemoteIDsByTrackID[track.id] = existing.id
+            } else {
+                uploadTrackIDs.append(track.id)
+            }
+        }
+
+        return MissingServerUploadPlan(
+            uploadTrackIDs: uploadTrackIDs,
+            existingRemoteIDsByTrackID: existingRemoteIDsByTrackID
+        )
+    }
+
+    private static func normalizedHash(_ value: String?) -> String? {
+        guard let hash = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !hash.isEmpty else { return nil }
+        return hash
+    }
+
+    private static func origin(of url: URL) -> String {
+        let scheme = url.scheme?.lowercased() ?? ""
+        let host = url.host?.lowercased() ?? ""
+        let port = url.port ?? (scheme == "https" ? 443 : 80)
+        return "\(scheme)://\(host):\(port)"
+    }
 }
 
 struct ListeningHistoryEntry: Identifiable, Codable, Hashable {
@@ -167,6 +313,55 @@ struct ListeningHistoryEntry: Identifiable, Codable, Hashable {
         self.album = album
         self.duration = duration
         self.originatedOnThisDevice = originatedOnThisDevice
+    }
+}
+
+enum ListeningHistoryTrackResolver {
+    static func identity(for entry: ListeningHistoryEntry) -> String {
+        let profileID = entry.syncProfileID ?? "default"
+        if let remoteSongID = nonempty(entry.remoteSongID) {
+            return "\(profileID)#remote:\(remoteSongID)"
+        }
+        return "\(profileID)#track:\(entry.trackID.uuidString.lowercased())"
+    }
+
+    static func remoteIdentity(profileID: String?, remoteSongID: String) -> String {
+        "\(profileID ?? "default")#remote:\(remoteSongID)"
+    }
+
+    static func track(
+        for entry: ListeningHistoryEntry,
+        tracksByID: [UUID: Track],
+        tracksByRemoteIdentity: [String: Track]
+    ) -> Track {
+        if let remoteSongID = nonempty(entry.remoteSongID),
+           let track = tracksByRemoteIdentity[remoteIdentity(
+               profileID: entry.syncProfileID,
+               remoteSongID: remoteSongID
+           )] {
+            return track
+        }
+        if let track = tracksByID[entry.trackID] { return track }
+
+        let duration = entry.duration.flatMap { value in
+            value.isFinite && value >= 0 ? value : nil
+        } ?? 0
+        return Track(
+            id: entry.trackID,
+            title: nonempty(entry.title) ?? "Unknown song",
+            artist: nonempty(entry.artist) ?? "Unknown artist",
+            album: nonempty(entry.album) ?? "Unknown Album",
+            duration: duration,
+            artwork: .weightless,
+            remoteID: nonempty(entry.remoteSongID),
+            syncProfileID: entry.syncProfileID ?? "default",
+            dateAdded: entry.startedAt
+        )
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        let text = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return text.isEmpty ? nil : text
     }
 }
 
@@ -281,11 +476,19 @@ struct ListeningHistoryCalendarSummary: Hashable {
             }
         )
         let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        var tracksByRemoteIdentity: [String: Track] = [:]
+        for track in tracks {
+            guard let remoteID = track.remoteID else { continue }
+            tracksByRemoteIdentity[ListeningHistoryTrackResolver.remoteIdentity(
+                profileID: track.syncProfileID,
+                remoteSongID: remoteID
+            )] = track
+        }
         var todayListeningSeconds: TimeInterval = 0
         var todayListeningPlays = 0
-        var activeTrackIDs = Set<UUID>()
+        var activeTrackIDs = Set<String>()
         var seriesByTrackID: [
-            UUID: (
+            String: (
                 track: Track,
                 seconds: TimeInterval,
                 plays: Int,
@@ -314,10 +517,15 @@ struct ListeningHistoryCalendarSummary: Hashable {
             guard let dayIndex = dayIndexByDate[entryDate] else { continue }
             dailyHistory[dayIndex].seconds += seconds
             dailyHistory[dayIndex].plays += 1
-            activeTrackIDs.insert(entry.trackID)
+            let identity = ListeningHistoryTrackResolver.identity(for: entry)
+            let track = ListeningHistoryTrackResolver.track(
+                for: entry,
+                tracksByID: tracksByID,
+                tracksByRemoteIdentity: tracksByRemoteIdentity
+            )
+            activeTrackIDs.insert(identity)
 
-            guard let track = tracksByID[entry.trackID] else { continue }
-            var series = seriesByTrackID[track.id] ?? (
+            var series = seriesByTrackID[identity] ?? (
                 track: track,
                 seconds: 0,
                 plays: 0,
@@ -329,7 +537,7 @@ struct ListeningHistoryCalendarSummary: Hashable {
             series.plays += 1
             series.days[dayIndex].seconds += seconds
             series.days[dayIndex].plays += 1
-            seriesByTrackID[track.id] = series
+            seriesByTrackID[identity] = series
         }
 
         days = dailyHistory
@@ -386,9 +594,17 @@ struct ListeningHistoryStatsSummary: Hashable {
 
     init(entries: [ListeningHistoryEntry], tracks: [Track]) {
         let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        var tracksByRemoteIdentity: [String: Track] = [:]
+        for track in tracks {
+            guard let remoteID = track.remoteID else { continue }
+            tracksByRemoteIdentity[ListeningHistoryTrackResolver.remoteIdentity(
+                profileID: track.syncProfileID,
+                remoteSongID: remoteID
+            )] = track
+        }
         var total: TimeInterval = 0
         var playCount = 0
-        var songsByID: [UUID: (seconds: TimeInterval, plays: Int)] = [:]
+        var songsByID: [String: (track: Track, seconds: TimeInterval, plays: Int)] = [:]
         var artistsByName: [String: (seconds: TimeInterval, plays: Int)] = [:]
 
         for entry in entries {
@@ -398,13 +614,18 @@ struct ListeningHistoryStatsSummary: Hashable {
             total += seconds
             playCount += 1
 
-            var song = songsByID[entry.trackID] ?? (seconds: 0, plays: 0)
+            let identity = ListeningHistoryTrackResolver.identity(for: entry)
+            let track = ListeningHistoryTrackResolver.track(
+                for: entry,
+                tracksByID: tracksByID,
+                tracksByRemoteIdentity: tracksByRemoteIdentity
+            )
+            var song = songsByID[identity] ?? (track: track, seconds: 0, plays: 0)
             song.seconds += seconds
             song.plays += 1
-            songsByID[entry.trackID] = song
+            songsByID[identity] = song
 
-            let rawArtist = tracksByID[entry.trackID]?.artist
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let rawArtist = track.artist.trimmingCharacters(in: .whitespacesAndNewlines)
             let artistName = rawArtist.isEmpty ? "Unknown artist" : rawArtist
             var artist = artistsByName[artistName] ?? (seconds: 0, plays: 0)
             artist.seconds += seconds
@@ -426,10 +647,9 @@ struct ListeningHistoryStatsSummary: Hashable {
                 return lhs.key.localizedStandardCompare(rhs.key) == .orderedAscending
             }
             .first?.key ?? "—"
-        songRanking = songsByID.compactMap { trackID, stats in
-            guard let track = tracksByID[trackID] else { return nil }
+        songRanking = songsByID.map { _, stats in
             return ListeningHistoryRankedSong(
-                track: track,
+                track: stats.track,
                 seconds: stats.seconds,
                 plays: stats.plays
             )
@@ -589,6 +809,7 @@ struct RemoteSong: Identifiable, Hashable, Decodable {
     let artworkURL: String?
     let downloadURL: String
     let streamURL: String
+    let contentSHA256: String?
 
     enum CodingKeys: String, CodingKey {
         case id, filename, name, title, artist, album, size, duration, artwork
@@ -599,6 +820,7 @@ struct RemoteSong: Identifiable, Hashable, Decodable {
         case artworkURL = "artwork_url"
         case downloadURL = "download_url"
         case streamURL = "stream_url"
+        case contentSHA256 = "content_sha256"
     }
 
     init(from decoder: Decoder) throws {
@@ -625,6 +847,7 @@ struct RemoteSong: Identifiable, Hashable, Decodable {
             ?? values.decodeIfPresent(String.self, forKey: .artwork)
         downloadURL = try values.decode(String.self, forKey: .downloadURL)
         streamURL = try values.decode(String.self, forKey: .streamURL)
+        contentSHA256 = try values.decodeIfPresent(String.self, forKey: .contentSHA256)
     }
 
     var kind: SongFilter {

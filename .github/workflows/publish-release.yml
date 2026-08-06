@@ -92,10 +92,20 @@ jobs:
           [[ "$RUN_ID" =~ ^[0-9]+$ ]]
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Download exact release candidate
+      - name: Download exact candidate assets
         uses: actions/download-artifact@v7
         with:
-          name: release-candidate-${{ steps.release.outputs.tag }}-${{ steps.release.outputs.candidate_sha }}
+          pattern: release-assets-*
+          path: candidate/assets
+          merge-multiple: true
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.candidate.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download exact candidate provenance
+        uses: actions/download-artifact@v7
+        with:
+          name: release-provenance-${{ steps.release.outputs.tag }}-${{ steps.release.outputs.candidate_sha }}
           path: candidate
           repository: ${{ github.repository }}
           run-id: ${{ steps.candidate.outputs.run_id }}

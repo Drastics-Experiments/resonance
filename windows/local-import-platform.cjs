@@ -7,6 +7,8 @@ const { spawn } = require("node:child_process");
 const {
   LocalImportError,
   isSpotifyURL,
+  spotifyPlaylistURL,
+  resolveSpotifyPlaylist,
   resolveSpotifyTrack,
   resolveYouTubePlaylist,
   searchYouTubeAudioSources,
@@ -19,6 +21,12 @@ const {
   inspectYouTubeAudio,
   inspectYouTubeVideo,
 } = require("./local-youtube.cjs");
+const {
+  directSoundCloudCandidate,
+  downloadSoundCloudAudio,
+  isSoundCloudURL,
+  resolveSoundCloudSource,
+} = require("./local-soundcloud.cjs");
 
 const MAX_ARTWORK_BYTES = 10 * 1024 * 1024;
 const ARTWORK_CONTENT_TYPES = new Map([
@@ -27,7 +35,7 @@ const ARTWORK_CONTENT_TYPES = new Map([
   ["image/webp", ".webp"],
   ["image/avif", ".avif"],
 ]);
-const ARTWORK_HOST = /(^|\.)((spotifycdn\.com)|(scdn\.co)|(ytimg\.com)|(ggpht\.com))$/i;
+const ARTWORK_HOST = /(^|\.)((spotifycdn\.com)|(scdn\.co)|(sndcdn\.com)|(ytimg\.com)|(ggpht\.com))$/i;
 
 function localImportError(stage, code, message) {
   return new LocalImportError(stage, code, message);
@@ -229,7 +237,9 @@ function m4aTagArguments(input, output, metadata, artwork) {
   if (artwork) args.push("-i", artwork);
   args.push("-map", "0:a:0");
   if (artwork) args.push("-map", "1:v:0");
-  args.push("-c:a", "copy", "-movflags", "+faststart");
+  if (path.extname(input).toLowerCase() === ".mp3") args.push("-c:a", "aac", "-b:a", "192k");
+  else args.push("-c:a", "copy");
+  args.push("-movflags", "+faststart");
   if (artwork) args.push("-c:v", "mjpeg", "-disposition:v:0", "attached_pic");
   args.push("-map_metadata", "-1", "-metadata", `title=${metadata.title}`, "-metadata", `artist=${metadata.artist}`);
   if (metadata.album) args.push("-metadata", `album=${metadata.album}`);
@@ -276,6 +286,11 @@ function directYouTubeMetadata(preview) {
   };
 }
 
+function publicSoundCloudMetadata(track) {
+  const { directlyImportable: _directlyImportable, ...metadata } = track;
+  return metadata;
+}
+
 async function resolveLocalImportSource(source, signal, onStage = () => {}, adapters = {}, options = {}) {
   const mediaKind = normalizedMediaKind(options.mediaKind);
   const spotifyResolve = adapters.resolveSpotifyTrack || resolveSpotifyTrack;
@@ -284,11 +299,159 @@ async function resolveLocalImportSource(source, signal, onStage = () => {}, adap
     ? adapters.inspectYouTubeVideo || inspectYouTubeVideo
     : adapters.inspectYouTubeAudio || inspectYouTubeAudio;
   assertNotAborted(signal);
+  if (isSoundCloudURL(source)) {
+    if (mediaKind === "video") {
+      throw localImportError("resolving_metadata", "SOUNDCLOUD_AUDIO_ONLY", "SoundCloud links can only be imported as audio.");
+    }
+    onStage({ stage: "resolving_metadata" });
+    const soundCloudResolve = adapters.resolveSoundCloudSource || resolveSoundCloudSource;
+    const resolved = await soundCloudResolve(source, signal);
+    if (resolved.kind === "track") {
+      const track = publicSoundCloudMetadata(resolved.track);
+      onStage({ stage: "searching_candidates", track });
+      const candidates = resolved.track.directlyImportable ? [directSoundCloudCandidate(resolved.track)] : [];
+      if (!candidates.length) {
+        try {
+          candidates.push(...await candidateSearch(track, signal));
+        } catch (error) {
+          if (error?.name === "AbortError") throw error;
+        }
+      }
+      if (!candidates.length) {
+        throw localImportError(
+          "searching_candidates",
+          "SOUNDCLOUD_STREAM_UNAVAILABLE",
+          "This SoundCloud track has no direct public audio rendition and no matching alternate source was found.",
+        );
+      }
+      return { kind: "soundcloud", mediaKind: "audio", track, candidates };
+    }
+
+    const playlist = resolved.playlist;
+    onStage({ stage: "searching_candidates", completed: 0, total: playlist.items.length });
+    const matched = [];
+    let completed = 0;
+    for (let offset = 0; offset < playlist.items.length; offset += 4) {
+      const chunk = playlist.items.slice(offset, offset + 4);
+      const results = await Promise.all(chunk.map(async (sourceTrack) => {
+        const track = publicSoundCloudMetadata(sourceTrack);
+        const direct = sourceTrack.directlyImportable ? directSoundCloudCandidate(sourceTrack) : null;
+        if (direct) {
+          return { ...direct, importMetadata: track, playlistIndex: track.trackNumber, fallbackCandidates: [] };
+        }
+        let alternatives = [];
+        try {
+          alternatives = await candidateSearch(track, signal, undefined, { maxResults: 3, enrich: false });
+        } catch (error) {
+          if (error?.name === "AbortError") throw error;
+        }
+        const candidate = alternatives[0] || null;
+        if (!candidate) return null;
+        return {
+          ...candidate,
+          importMetadata: track,
+          playlistIndex: track.trackNumber,
+          fallbackCandidates: alternatives.slice(1),
+        };
+      }));
+      matched.push(...results.filter(Boolean));
+      completed += chunk.length;
+      onStage({ stage: "searching_candidates", completed, total: playlist.items.length });
+    }
+    if (!matched.length) {
+      throw localImportError("searching_candidates", "NO_AUDIO_MATCH", "No public audio source could be imported from this SoundCloud playlist.");
+    }
+    const durationSeconds = playlist.items.reduce((total, item) => total + (item.durationSeconds || 0), 0) || null;
+    const unavailableCount = playlist.unavailableCount + playlist.items.length - matched.length;
+    return {
+      kind: "soundcloud_playlist",
+      mediaKind: "audio",
+      playlist: { ...playlist, unavailableCount },
+      track: {
+        provider: "soundcloud",
+        type: "playlist",
+        trackID: playlist.playlistID,
+        title: playlist.title,
+        artist: playlist.author || "SoundCloud",
+        album: null,
+        trackNumber: null,
+        durationSeconds,
+        artworkURL: playlist.artworkURL,
+        embedURL: null,
+        sourceURL: playlist.sourceURL,
+      },
+      candidates: matched,
+    };
+  }
   if (isSpotifyURL(source)) {
     if (mediaKind === "video") {
       throw localImportError("resolving_metadata", "YOUTUBE_VIDEO_REQUIRED", "Video downloads require a direct YouTube video URL. Spotify links can only be imported as audio.");
     }
     onStage({ stage: "resolving_metadata" });
+    const playlistResolve = adapters.resolveSpotifyPlaylist || resolveSpotifyPlaylist;
+    let directPlaylist = null;
+    try { directPlaylist = spotifyPlaylistURL(source); } catch (error) { throw error; }
+    let playlist = null;
+    if (directPlaylist) {
+      playlist = await playlistResolve(source, signal);
+    } else if (!adapters.resolveSpotifyTrack && !["open.spotify.com", "www.open.spotify.com"].includes(new URL(source).hostname.toLowerCase())) {
+      try {
+        const track = await spotifyResolve(source, signal);
+        onStage({ stage: "searching_candidates", track });
+        const candidates = await candidateSearch(track, signal);
+        if (!candidates.length) {
+          throw localImportError("searching_candidates", "NO_AUDIO_MATCH", "No file-backed audio source matched this Spotify track. Try a direct YouTube URL instead.");
+        }
+        return { kind: "spotify", mediaKind: "audio", track, candidates };
+      } catch (error) {
+        if (error?.code !== "SPOTIFY_INVALID_REDIRECT") throw error;
+        playlist = await playlistResolve(source, signal);
+      }
+    }
+    if (playlist) {
+      onStage({ stage: "searching_candidates", completed: 0, total: playlist.items.length });
+      const matched = [];
+      let completed = 0;
+      for (let offset = 0; offset < playlist.items.length; offset += 4) {
+        const chunk = playlist.items.slice(offset, offset + 4);
+        const results = await Promise.all(chunk.map(async (track) => {
+          try {
+            const candidates = await candidateSearch(track, signal, undefined, { maxResults: 1, enrich: false });
+            return candidates[0] ? { ...candidates[0], importMetadata: track, playlistIndex: track.trackNumber } : null;
+          } catch (error) {
+            if (error?.name === "AbortError") throw error;
+            return null;
+          }
+        }));
+        matched.push(...results.filter(Boolean));
+        completed += chunk.length;
+        onStage({ stage: "searching_candidates", completed, total: playlist.items.length });
+      }
+      if (!matched.length) {
+        throw localImportError("searching_candidates", "NO_AUDIO_MATCH", "No file-backed audio source matched the public tracks in this Spotify playlist.");
+      }
+      const durationSeconds = playlist.items.reduce((total, item) => total + (item.durationSeconds || 0), 0) || null;
+      const unavailableCount = playlist.unavailableCount + playlist.items.length - matched.length;
+      return {
+        kind: "spotify_playlist",
+        mediaKind: "audio",
+        playlist: { ...playlist, unavailableCount },
+        track: {
+          provider: "spotify",
+          type: "playlist",
+          trackID: playlist.playlistID,
+          title: playlist.title,
+          artist: playlist.author || "Spotify",
+          album: null,
+          trackNumber: null,
+          durationSeconds,
+          artworkURL: playlist.artworkURL,
+          embedURL: null,
+          sourceURL: playlist.sourceURL,
+        },
+        candidates: matched,
+      };
+    }
     const track = await spotifyResolve(source, signal);
     onStage({ stage: "searching_candidates", track });
     const candidates = await candidateSearch(track, signal);
@@ -324,7 +487,7 @@ async function resolveLocalImportSource(source, signal, onStage = () => {}, adap
     };
   }
   const videoID = youtubeVideoID(source);
-  if (!videoID) throw localImportError("resolving_metadata", "UNSUPPORTED_SOURCE", "Enter a Spotify track or supported YouTube video or playlist URL.");
+  if (!videoID) throw localImportError("resolving_metadata", "UNSUPPORTED_SOURCE", "Enter a Spotify, SoundCloud, or supported YouTube track or playlist URL.");
   onStage({ stage: "inspecting_source" });
   const preview = await youtubeInspect(source, signal);
   const track = directYouTubeMetadata(preview);
@@ -357,24 +520,31 @@ async function resolveLocalImportSource(source, signal, onStage = () => {}, adap
 
 async function importConfirmedSource(input, signal, onStage = () => {}, adapters = {}) {
   const mediaKind = normalizedMediaKind(input.mediaKind);
+  const soundCloudSource = isSoundCloudURL(input.sourceURL);
+  if (soundCloudSource && mediaKind === "video") {
+    throw localImportError("inspecting_source", "SOUNDCLOUD_AUDIO_ONLY", "SoundCloud links can only be imported as audio.");
+  }
   const youtubeDownload = mediaKind === "video"
     ? adapters.downloadYouTubeVideo || downloadYouTubeVideo
     : adapters.downloadYouTubeAudio || downloadYouTubeAudio;
+  const soundCloudDownload = adapters.downloadSoundCloudAudio || downloadSoundCloudAudio;
   const artworkFetch = adapters.fetchArtwork || fetchArtwork;
   const m4aTag = adapters.tagM4A || tagM4A;
   const fileHash = adapters.hashFile || hashFile;
   const fileMove = adapters.moveFile || moveFile;
   const temporaryRoot = input.temporaryRoot || os.tmpdir();
   const temporary = await fs.mkdtemp(path.join(temporaryRoot, "resonance-local-import-"));
-  const sourcePath = path.join(temporary, mediaKind === "video" ? "source.mp4" : "source.m4a");
+  const sourcePath = path.join(temporary, mediaKind === "video" ? "source.mp4" : soundCloudSource ? "source.mp3" : "source.m4a");
   const outputPath = path.join(temporary, "tagged.m4a");
   let savedPath = null;
   try {
     assertNotAborted(signal);
-    const videoID = youtubeVideoID(input.sourceURL);
-    if (!videoID) throw localImportError("inspecting_source", "INVALID_YOUTUBE_VIDEO", "The selected source is not a supported YouTube video.");
+    if (!soundCloudSource) {
+      const videoID = youtubeVideoID(input.sourceURL);
+      if (!videoID) throw localImportError("inspecting_source", "INVALID_YOUTUBE_VIDEO", "The selected source is not a supported YouTube video.");
+    }
     onStage({ stage: "inspecting_source", selected: input.sourceURL });
-    const result = await youtubeDownload(
+    const result = await (soundCloudSource ? soundCloudDownload : youtubeDownload)(
       input.sourceURL,
       sourcePath,
       signal,

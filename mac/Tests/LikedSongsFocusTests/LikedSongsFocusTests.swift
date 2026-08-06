@@ -1,4 +1,6 @@
+import Combine
 import Foundation
+import MediaPlayer
 import Testing
 @testable import LikedSongsFocus
 
@@ -40,6 +42,24 @@ private func requestBodyData(_ request: URLRequest) throws -> Data {
 }
 
 @MainActor
+private final class RecordingMacSystemPlaybackController: MacSystemPlaybackControlling {
+    var handlers = MacSystemPlaybackHandlers()
+    private(set) var lastSnapshot: MacNowPlayingSnapshot?
+    private(set) var publishCount = 0
+    private(set) var invalidated = false
+
+    func publish(_ snapshot: MacNowPlayingSnapshot?) {
+        lastSnapshot = snapshot
+        publishCount += 1
+    }
+
+    func invalidate() {
+        invalidated = true
+        lastSnapshot = nil
+    }
+}
+
+@MainActor
 @Suite(.serialized)
 struct LikedSongsFocusTests {
     private let glass = URL(fileURLWithPath: "/System/Library/Sounds/Glass.aiff")
@@ -60,6 +80,69 @@ struct LikedSongsFocusTests {
         #expect(Track.timeText(59.99) == "0:59")
         #expect(Track.timeText(60) == "1:00")
         #expect(Track.timeText(222) == "3:42")
+    }
+
+    @Test
+    func serverUploadNamesUseTrackTitlesInsteadOfManagedCacheHashes() {
+        let cached = URL(fileURLWithPath: "/ServerCache/980026786a7d6c4928bb9b3fdd9e42b9b53eb7432473cac2b.m4a")
+        #expect(ServerUploadNaming.filename(for: cached, title: "No Dogs Allowed") == "No Dogs Allowed.m4a")
+        #expect(ServerUploadNaming.filename(for: cached, title: "Real/Song?.m4a") == "Real-Song-.m4a")
+        #expect(ServerUploadNaming.filename(for: URL(fileURLWithPath: "/Music/Real Song.mp3")) == "Real Song.mp3")
+    }
+
+    @Test
+    func missingServerUploadPolicyOnlyUploadsActiveProfileDownloadsMissingFromCatalog() throws {
+        let catalogData = Data("""
+        {"songs":[
+          {"id":"live-id","filename":"live.m4a","title":"Live","artist":"Artist","album":"Album","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/live","stream_url":"/stream/live"},
+          {"id":"hash-id","filename":"hash.m4a","title":"Hash","artist":"Artist","album":"Album","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/hash","stream_url":"/stream/hash","content_sha256":"ABC123"},
+          {"id":"metadata-id","filename":"All for You - Radio Version.m4a","title":"All for You Radio Version","artist":"Ace of Base","album":"Imported","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/metadata","stream_url":"/stream/metadata","duration_seconds":217.9}
+        ],"count":3}
+        """.utf8)
+        let catalog = try JSONDecoder().decode(RemoteCatalog.self, from: catalogData).songs
+        let fileURL = URL(fileURLWithPath: "/tmp/downloaded.m4a")
+        let present = Track(
+            title: "Present", artist: "Artist", album: "Album", duration: 1, artwork: .liked,
+            fileURL: fileURL, remoteID: "live-id", sourceServer: "https://music.test/",
+            syncProfileID: "profile-a"
+        )
+        let hashMatch = Track(
+            title: "Hash", artist: "Artist", album: "Album", duration: 1, artwork: .liked,
+            fileURL: fileURL, remoteID: "deleted-id", sourceServer: "https://music.test",
+            syncProfileID: "profile-a", contentSHA256: "abc123"
+        )
+        let missing = Track(
+            title: "Missing", artist: "Artist", album: "Album", duration: 1, artwork: .liked,
+            fileURL: fileURL, remoteID: "missing-id", sourceServer: "https://music.test",
+            syncProfileID: "profile-a"
+        )
+        let metadataMatch = Track(
+            title: "All for You - Radio Version", artist: "Ace of Base", album: "The Golden Ratio",
+            duration: 217.1, artwork: .liked, fileURL: fileURL, remoteID: "stale-metadata-id",
+            sourceServer: "https://music.test", syncProfileID: "profile-a"
+        )
+        let localImport = Track(
+            title: "Local", artist: "Artist", album: "Album", duration: 1, artwork: .liked,
+            fileURL: fileURL, syncProfileID: "profile-a"
+        )
+        let anotherProfile = Track(
+            title: "Other Profile", artist: "Artist", album: "Album", duration: 1, artwork: .liked,
+            fileURL: fileURL, remoteID: "other-profile", sourceServer: "https://music.test",
+            syncProfileID: "profile-b"
+        )
+
+        let plan = MissingServerUploadPolicy.plan(
+            tracks: [present, hashMatch, metadataMatch, missing, localImport, anotherProfile],
+            catalog: catalog,
+            activeProfileID: "profile-a",
+            activeServerURL: try #require(URL(string: "https://music.test"))
+        )
+
+        #expect(plan.uploadTrackIDs == [missing.id])
+        #expect(plan.existingRemoteIDsByTrackID == [
+            hashMatch.id: "hash-id",
+            metadataMatch.id: "metadata-id",
+        ])
     }
 
     @Test
@@ -248,9 +331,162 @@ struct LikedSongsFocusTests {
         #expect(abs(model.position - track.duration * 0.5) < 0.02)
         model.togglePlay()
         #expect(!model.isPlaying)
+        #expect((model.listeningHistoryEntries.first?.listenedSeconds ?? 0) > 0)
         model.togglePlay()
         #expect(model.isPlaying)
         model.togglePlay()
+    }
+
+    @Test
+    func playbackProgressDoesNotInvalidateTheWholeLibraryGraph() async throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        await model.importLocalFiles(at: [hero])
+        let track = try #require(model.tracks.first)
+        model.selectAndPlay(track)
+
+        var modelUpdates = 0
+        var positionUpdates = 0
+        let modelObservation = model.objectWillChange.sink { modelUpdates += 1 }
+        let positionObservation = model.playbackPositionState.objectWillChange.sink {
+            positionUpdates += 1
+        }
+        let startingPosition = model.playbackPositionState.position
+
+        try await Task.sleep(for: .milliseconds(650))
+
+        #expect(modelUpdates == 0)
+        #expect(positionUpdates >= 2)
+        #expect(model.playbackPositionState.position > startingPosition)
+        _ = (modelObservation, positionObservation)
+        model.togglePlay()
+    }
+
+    @Test
+    func nativeMacPlaybackPublishesMetadataAndHandlesSystemControls() async throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let controller = RecordingMacSystemPlaybackController()
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false,
+            systemPlaybackController: controller
+        )
+        await model.importLocalFiles(at: [glass, ping])
+        let first = try #require(model.tracks.first)
+
+        model.selectAndPlay(first)
+        var snapshot = try #require(controller.lastSnapshot)
+        #expect(snapshot.trackID == first.id)
+        #expect(snapshot.title == first.title)
+        #expect(snapshot.artist == first.artist)
+        #expect(snapshot.album == first.album)
+        #expect(snapshot.isPlaying)
+        #expect(snapshot.queueCount == 2)
+        #expect(snapshot.assetURL == first.fileURL)
+
+        controller.handlers.seek(first.duration * 0.5)
+        snapshot = try #require(controller.lastSnapshot)
+        #expect(abs(snapshot.elapsedTime - first.duration * 0.5) < 0.02)
+        controller.handlers.changeRate(1.5)
+        #expect(model.playbackRate == 1.5)
+        #expect(controller.lastSnapshot?.playbackRate == 1.5)
+        controller.handlers.setFavorite(true)
+        #expect(model.favorites.contains(first.id))
+        #expect(controller.lastSnapshot?.isFavorite == true)
+
+        controller.handlers.next()
+        let second = try #require(model.currentTrack)
+        #expect(second.id != first.id)
+        #expect(controller.lastSnapshot?.trackID == second.id)
+        controller.handlers.pause()
+        #expect(!model.isPlaying)
+        #expect(controller.lastSnapshot?.isPlaying == false)
+        controller.handlers.play()
+        #expect(model.isPlaying)
+        #expect(controller.lastSnapshot?.isPlaying == true)
+        controller.handlers.pause()
+    }
+
+    @Test
+    func nativeMacPlaybackSnapshotSanitizesSystemMetadata() {
+        let track = Track(
+            title: "  ",
+            artist: "",
+            album: "Album",
+            duration: 120,
+            kind: .video,
+            artwork: .electric,
+            remoteID: "server-song",
+            syncProfileID: "profile-a"
+        )
+        let snapshot = MacNowPlayingSnapshot(
+            track: track,
+            position: 500,
+            playbackRate: -.infinity,
+            isPlaying: false,
+            queue: [],
+            isFavorite: false,
+            shuffleEnabled: false,
+            repeatEnabled: true,
+            profileID: "default"
+        )
+
+        #expect(snapshot.title == "Unknown song")
+        #expect(snapshot.artist == "Unknown artist")
+        #expect(snapshot.elapsedTime == 120)
+        #expect(snapshot.playbackRate == 1)
+        #expect(snapshot.isVideo)
+        #expect(snapshot.contentIdentifier == "server-song")
+        #expect(snapshot.profileID == "profile-a")
+        #expect(snapshot.queueIndex == 0)
+        #expect(snapshot.queueCount == 1)
+    }
+
+    @Test
+    func nativeMacPlaybackControllerPublishesToMediaPlayer() throws {
+        let track = Track(
+            title: "Native Song",
+            artist: "Native Artist",
+            album: "Native Album",
+            duration: 180,
+            artwork: .midnight,
+            remoteID: "native-song",
+            syncProfileID: "default"
+        )
+        let snapshot = MacNowPlayingSnapshot(
+            track: track,
+            position: 45,
+            playbackRate: 1.25,
+            isPlaying: true,
+            queue: [track],
+            isFavorite: true,
+            shuffleEnabled: false,
+            repeatEnabled: true,
+            profileID: "default"
+        )
+        let controller = MacSystemPlaybackController()
+        defer { controller.invalidate() }
+
+        controller.publish(snapshot)
+
+        let info = try #require(MPNowPlayingInfoCenter.default().nowPlayingInfo)
+        #expect(info[MPMediaItemPropertyTitle] as? String == "Native Song")
+        #expect(info[MPMediaItemPropertyArtist] as? String == "Native Artist")
+        #expect(info[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double == 45)
+        #expect(info[MPNowPlayingInfoPropertyPlaybackRate] as? Double == 1.25)
+        #expect(info[MPMediaItemPropertyArtwork] is MPMediaItemArtwork)
+        #expect(MPNowPlayingInfoCenter.default().playbackState == .playing)
+        #expect(!MPRemoteCommandCenter.shared().playCommand.isEnabled)
+        #expect(MPRemoteCommandCenter.shared().pauseCommand.isEnabled)
+        #expect(MPRemoteCommandCenter.shared().likeCommand.isActive)
+        #expect(MPRemoteCommandCenter.shared().changeRepeatModeCommand.currentRepeatType == .one)
     }
 
     @Test

@@ -271,6 +271,12 @@ struct PlayerModelRegressionTests {
         )
         #expect(remoteEntry.originatedOnThisDevice == false)
         #expect(remoteEntry.title == "Windows song")
+        model.queueTab = .history
+        let serverOnlyQueueTrack = try #require(model.queueTracks.first)
+        #expect(serverOnlyQueueTrack.id == remoteTrackID)
+        #expect(serverOnlyQueueTrack.title == "Windows song")
+        #expect(serverOnlyQueueTrack.artist == "Windows artist")
+        #expect(serverOnlyQueueTrack.fileURL == nil)
 
         let reloaded = PlayerModel(
             loadPersistedLibrary: true,

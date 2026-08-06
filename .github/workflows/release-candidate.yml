@@ -127,7 +127,7 @@ jobs:
       - name: Download platform assets
         uses: actions/download-artifact@v7
         with:
-          pattern: release-*
+          pattern: release-assets-*
           path: candidate/assets
           merge-multiple: true
 
@@ -157,11 +157,11 @@ jobs:
             fs.writeFileSync("candidate/candidate.json", `${JSON.stringify(value, null, 2)}\n`);
           '
 
-      - name: Upload complete release candidate
+      - name: Upload validated candidate provenance
         uses: actions/upload-artifact@v7
         with:
-          name: release-candidate-${{ needs.prepare.outputs.tag }}-${{ needs.prepare.outputs.source_sha }}
-          path: candidate
+          name: release-provenance-${{ needs.prepare.outputs.tag }}-${{ needs.prepare.outputs.source_sha }}
+          path: candidate/candidate.json
           if-no-files-found: error
           retention-days: 14
           overwrite: true

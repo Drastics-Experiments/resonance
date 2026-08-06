@@ -15,6 +15,7 @@ struct ContentView: View {
     @EnvironmentObject private var localImportModel: MacLocalImportViewModel
     @EnvironmentObject private var updateManager: UpdateManager
     @State private var dismissedUpdateAlert: MacUpdateIdentity?
+    @State private var isNowPlayingPresented = false
 
     private var updateAlert: MacUpdateIdentity? {
         MacUpdateAlertState.visibleUpdate(
@@ -49,9 +50,13 @@ struct ContentView: View {
                     .fill(Color.appLine)
                     .frame(height: 1)
 
-                PlayerBarView(compact: width < 980)
+                PlayerBarView(
+                    compact: width < 980,
+                    onOpenNowPlaying: { isNowPlayingPresented = true }
+                )
                     .frame(height: 83)
             }
+            .accessibilityHidden(isNowPlayingPresented)
             .overlay(alignment: .bottom) {
                 VStack(spacing: 10) {
                     if model.isSyncingServer && !model.isRefreshingServerCatalog {
@@ -99,7 +104,7 @@ struct ContentView: View {
 
                     if localImportModel.showsFailurePopup, let error = localImportModel.error {
                         TransferResultOverlay(
-                            title: "Saved locally; upload failed",
+                            title: localImportModel.failurePopupTitle,
                             detail: error.message,
                             symbol: "exclamationmark.triangle.fill",
                             color: Color.appAccent,
@@ -136,7 +141,16 @@ struct ContentView: View {
                 }
             }
             .animation(.easeOut(duration: 0.22), value: updateAlert)
+            .overlay {
+                if isNowPlayingPresented {
+                    NowPlayingView(onDismiss: { isNowPlayingPresented = false })
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .zIndex(10)
+                }
+            }
+            .animation(.spring(response: 0.38, dampingFraction: 0.9), value: isNowPlayingPresented)
         }
+        .environmentObject(model.playbackPositionState)
         .background {
             ZStack {
                 Color.appBackground

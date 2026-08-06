@@ -31,7 +31,9 @@ private final class LocalImportRedirectDelegate: NSObject, URLSessionTaskDelegat
 
 struct LocalImportSessions: @unchecked Sendable {
     let spotify: URLSession
+    let soundcloud: URLSession
     let youtube: URLSession
+    let debridVault: URLSession
     let googleVideo: URLSession
     let artwork: URLSession
 
@@ -49,16 +51,27 @@ struct LocalImportSessions: @unchecked Sendable {
             spotify: session { url in
                 (try? LocalImportURL.spotifySource(url.absoluteString)) != nil
             },
+            soundcloud: session { LocalImportURL.isSoundCloudRequest($0) },
             youtube: session { LocalImportURL.isYouTubeDocument($0) },
+            debridVault: session { LocalImportURL.isDebridVaultDocument($0) },
             googleVideo: session { LocalImportURL.isGoogleVideo($0) },
             artwork: session { url in
-                LocalImportURL.spotifyArtwork(url.absoluteString) != nil || LocalImportURL.youtubeArtwork(url.absoluteString) != nil
+                LocalImportURL.spotifyArtwork(url.absoluteString) != nil
+                    || LocalImportURL.soundCloudArtwork(url.absoluteString) != nil
+                    || LocalImportURL.youtubeArtwork(url.absoluteString) != nil
             }
         )
     }
 
     static func testing(_ session: URLSession) -> LocalImportSessions {
-        LocalImportSessions(spotify: session, youtube: session, googleVideo: session, artwork: session)
+        LocalImportSessions(
+            spotify: session,
+            soundcloud: session,
+            youtube: session,
+            debridVault: session,
+            googleVideo: session,
+            artwork: session
+        )
     }
 }
 
@@ -132,11 +145,115 @@ actor LocalDeviceImportService {
         }
     }
 
+    func search(query: String) async throws -> LocalImportSearchResponse {
+        try Task.checkCancellation()
+        return try await LocalImportSearchEngine(sessions: sessions).search(query)
+    }
+
     func resolve(source: String, progress: LocalImportProgressHandler) async throws -> LocalImportResolution {
         try Task.checkCancellation()
         try await prepareDirectories()
+        if LocalImportURL.isSoundCloud(source) {
+            await progress(.init(stage: .resolvingMetadata))
+            let soundCloudSource = try await LocalImportSoundCloud.resolve(source: source, session: sessions.soundcloud)
+            switch soundCloudSource {
+            case .track(let soundCloudTrack):
+                let track = soundCloudTrack.metadata
+                await progress(.init(stage: .searchingCandidates))
+                var candidates = [soundCloudTrack.directCandidate].compactMap { $0 }
+                if candidates.isEmpty {
+                    do {
+                        candidates = try await searchCandidates(for: track)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        candidates = []
+                    }
+                }
+                guard !candidates.isEmpty else {
+                    throw LocalImportError(
+                        stage: .searchingCandidates,
+                        code: "SOUNDCLOUD_STREAM_UNAVAILABLE",
+                        message: "This SoundCloud track has no direct public audio rendition and no matching alternate source was found."
+                    )
+                }
+                return LocalImportResolution(kind: .soundCloud, track: track, candidates: candidates)
+
+            case .playlist(let soundCloudPlaylist):
+                await progress(.init(stage: .searchingCandidates))
+                let matches = try await matchSoundCloudPlaylistTracks(soundCloudPlaylist.tracks)
+                guard !matches.items.isEmpty else {
+                    throw LocalImportError(
+                        stage: .searchingCandidates,
+                        code: "NO_AUDIO_MATCH",
+                        message: "No public audio source could be imported from this SoundCloud playlist."
+                    )
+                }
+                let playlist = LocalImportPlaylist(
+                    playlistID: soundCloudPlaylist.playlistID,
+                    title: soundCloudPlaylist.title,
+                    author: soundCloudPlaylist.author,
+                    artworkURL: soundCloudPlaylist.artworkURL,
+                    sourceURL: soundCloudPlaylist.sourceURL,
+                    items: matches.items,
+                    skippedItems: (matches.skippedItems + soundCloudUnavailableItems(soundCloudPlaylist))
+                        .sorted { $0.position < $1.position }
+                )
+                let duration = soundCloudPlaylist.tracks.compactMap(\.metadata.durationSeconds).reduce(0, +)
+                let summary = LocalImportSpotifyTrack(
+                    provider: "soundcloud", type: "playlist", trackID: soundCloudPlaylist.playlistID,
+                    title: soundCloudPlaylist.title, artist: soundCloudPlaylist.author, album: nil,
+                    trackNumber: nil, durationSeconds: duration > 0 ? duration : nil,
+                    artworkURL: soundCloudPlaylist.artworkURL, embedURL: "", sourceURL: soundCloudPlaylist.sourceURL
+                )
+                return LocalImportResolution(
+                    kind: .soundCloudPlaylist,
+                    track: summary,
+                    candidates: matches.items.map(\.candidate),
+                    playlist: playlist
+                )
+            }
+        }
         if LocalImportURL.isSpotify(source) {
             await progress(.init(stage: .resolvingMetadata))
+            let canonicalSource = try await canonicalSpotifySource(source)
+            if let canonicalPlaylist = try LocalImportURL.spotifyPlaylist(canonicalSource.absoluteString) {
+                let playlistMetadata = try await resolveSpotifyPlaylist(canonicalPlaylist)
+                await progress(.init(stage: .searchingCandidates))
+                let matches = try await matchSpotifyPlaylistTracks(playlistMetadata.tracks)
+                guard !matches.items.isEmpty else {
+                    throw LocalImportError(
+                        stage: .searchingCandidates,
+                        code: "NO_AUDIO_MATCH",
+                        message: "No close YouTube audio match was found for the public tracks in this Spotify playlist."
+                    )
+                }
+                let playlist = LocalImportPlaylist(
+                    playlistID: canonicalPlaylist.playlistID,
+                    title: playlistMetadata.title,
+                    author: playlistMetadata.author,
+                    artworkURL: playlistMetadata.artworkURL,
+                    sourceURL: canonicalPlaylist.url.absoluteString,
+                    items: matches.items,
+                    skippedItems: (playlistMetadata.skippedItems + matches.skippedItems)
+                        .sorted { $0.position < $1.position }
+                )
+                let duration = playlistMetadata.tracks.compactMap(\.durationSeconds).reduce(0, +)
+                let summary = LocalImportSpotifyTrack(
+                    provider: "spotify", type: "playlist", trackID: canonicalPlaylist.playlistID,
+                    title: playlistMetadata.title, artist: playlistMetadata.author, album: nil,
+                    trackNumber: nil, durationSeconds: duration > 0 ? duration : nil,
+                    artworkURL: playlistMetadata.artworkURL,
+                    embedURL: "https://open.spotify.com/embed/playlist/\(canonicalPlaylist.playlistID)",
+                    sourceURL: canonicalPlaylist.url.absoluteString
+                )
+                return LocalImportResolution(
+                    kind: .spotifyPlaylist,
+                    track: summary,
+                    candidates: matches.items.map(\.candidate),
+                    playlist: playlist
+                )
+            }
             let track = try await resolveSpotify(source)
             await progress(.init(stage: .searchingCandidates))
             let candidates = try await searchCandidates(for: track)
@@ -151,7 +268,7 @@ actor LocalDeviceImportService {
         }
 
         guard let videoID = try LocalImportURL.youtubeVideoID(source) else {
-            throw LocalImportError(stage: .resolvingMetadata, code: "UNSUPPORTED_SOURCE", message: "Enter a Spotify track or supported YouTube video URL.")
+            throw LocalImportError(stage: .resolvingMetadata, code: "UNSUPPORTED_SOURCE", message: "Enter a Spotify, SoundCloud, or supported YouTube track or playlist URL.")
         }
         await progress(.init(stage: .inspectingSource))
         let resolved = try await resolveYouTubeAudio(videoID: videoID)
@@ -194,6 +311,14 @@ actor LocalDeviceImportService {
     ) async throws -> LocalImportOutcome {
         try Task.checkCancellation()
         try await prepareDirectories()
+        if candidate.sourceProvider == .soundcloud {
+            return try await importSoundCloudCandidate(
+                candidate,
+                metadata: inputMetadata,
+                existingTracks: existingTracks,
+                progress: progress
+            )
+        }
         let temporary = temporaryRoot.appendingPathComponent("resonance-import-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? fileManager.removeItem(at: temporary) }
@@ -263,6 +388,110 @@ actor LocalDeviceImportService {
         }
     }
 
+    private func importSoundCloudCandidate(
+        _ candidate: LocalImportAudioSourceMatch,
+        metadata inputMetadata: LocalImportMetadata,
+        existingTracks: [MobileTrack],
+        progress: LocalImportProgressHandler
+    ) async throws -> LocalImportOutcome {
+        let temporary = temporaryRoot.appendingPathComponent("resonance-import-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: temporary) }
+
+        let source = temporary.appendingPathComponent("source.mp3")
+        let processed = temporary.appendingPathComponent("processed.m4a")
+        await progress(.init(stage: .inspectingSource))
+        let stream = try await LocalImportSoundCloud.resolveAudio(
+            source: candidate.sourceURL,
+            session: sessions.soundcloud
+        )
+        let sourceHash = try await LocalImportSoundCloud.download(
+            stream,
+            to: source,
+            session: sessions.soundcloud,
+            fileManager: fileManager,
+            progress: progress
+        )
+        if let duplicate = existingTracks.first(where: {
+            $0.sourceSHA256 == sourceHash || $0.contentSHA256 == sourceHash
+        }) {
+            return .duplicate(duplicate.id)
+        }
+
+        try Task.checkCancellation()
+        await progress(.init(stage: .processing))
+        let metadata = LocalImportMetadata(
+            title: cleanMetadata(inputMetadata.title, fallback: stream.track.title),
+            artist: cleanMetadata(inputMetadata.artist, fallback: stream.track.artist),
+            album: cleanMetadata(inputMetadata.album, fallback: stream.track.album ?? "SoundCloud"),
+            artworkURL: inputMetadata.artworkURL ?? stream.track.artworkURL,
+            sourceURL: inputMetadata.sourceURL
+        )
+        let artwork = await fetchArtwork(metadata.artworkURL)
+        try Task.checkCancellation()
+        do {
+            try await LocalImportMediaProcessor.remuxM4A(input: source, output: processed, metadata: metadata, artwork: artwork)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch where artwork != nil {
+            try? fileManager.removeItem(at: processed)
+            try await LocalImportMediaProcessor.remuxM4A(input: source, output: processed, metadata: metadata, artwork: nil)
+        }
+        let contentHash = try hashFile(processed)
+        if let duplicate = existingTracks.first(where: {
+            $0.sourceSHA256 == sourceHash || $0.contentSHA256 == sourceHash || $0.contentSHA256 == contentHash
+        }) {
+            return .duplicate(duplicate.id)
+        }
+
+        try Task.checkCancellation()
+        await progress(.init(stage: .savingLocal))
+        let filename = safeFilename("\(metadata.artist) - \(metadata.title)") + ".m4a"
+        let destination = try uniqueDestination(preferredFilename: filename)
+        do {
+            try fileManager.moveItem(at: processed, to: destination)
+            guard let player = try? AVAudioPlayer(contentsOf: destination), player.duration > 0 else {
+                try? fileManager.removeItem(at: destination)
+                throw LocalImportError(
+                    stage: .savingLocal,
+                    code: "INVALID_LOCAL_MEDIA",
+                    message: "The completed local SoundCloud audio file is not playable."
+                )
+            }
+            return .created(LocalImportedAudio(
+                fileURL: destination,
+                metadata: metadata,
+                duration: player.duration,
+                artworkData: artwork,
+                sourceSHA256: sourceHash,
+                contentSHA256: contentHash
+            ))
+        } catch {
+            try? fileManager.removeItem(at: destination)
+            throw error
+        }
+    }
+
+    func previewStream(for candidate: LocalImportAudioSourceMatch) async throws -> LocalImportPreviewStream {
+        try Task.checkCancellation()
+        if candidate.sourceProvider == .soundcloud {
+            let stream = try await LocalImportSoundCloud.resolveAudio(
+                source: candidate.sourceURL,
+                session: sessions.soundcloud
+            )
+            return LocalImportPreviewStream(url: stream.streamingURL, httpHeaders: [:])
+        }
+        guard let videoID = try LocalImportURL.youtubeVideoID(candidate.sourceURL) else {
+            throw LocalImportError(
+                stage: .inspectingSource,
+                code: "INVALID_YOUTUBE_VIDEO",
+                message: "The selected source is not a supported YouTube video."
+            )
+        }
+        let resolved = try await resolveYouTubeAudio(videoID: videoID)
+        return LocalImportPreviewStream(url: resolved.streamingURL, httpHeaders: resolved.streamingHeaders)
+    }
+
     private func resolveSpotify(_ source: String) async throws -> LocalImportSpotifyTrack {
         let canonical: (url: URL, trackID: String)
         if let direct = try LocalImportURL.spotifyTrack(source) {
@@ -318,6 +547,232 @@ actor LocalDeviceImportService {
             embedURL: oEmbed.embedURL,
             sourceURL: canonical.url.absoluteString
         )
+    }
+
+    private func canonicalSpotifySource(_ source: String) async throws -> URL {
+        let sourceURL = try LocalImportURL.spotifySource(source)
+        if ["open.spotify.com", "www.open.spotify.com"].contains(sourceURL.host?.lowercased() ?? "") { return sourceURL }
+        var request = URLRequest(url: sourceURL)
+        request.httpMethod = "HEAD"
+        let (_, response) = try await responseData(session: sessions.spotify, request: request, limit: 1)
+        guard (200..<300).contains(response.statusCode), let final = response.url,
+              ["open.spotify.com", "www.open.spotify.com"].contains(final.host?.lowercased() ?? "") else {
+            throw spotifyFailure(response)
+        }
+        return final
+    }
+
+    private func resolveSpotifyPlaylist(
+        _ canonical: (url: URL, playlistID: String)
+    ) async throws -> (title: String, author: String, artworkURL: String?, tracks: [LocalImportSpotifyTrack], skippedItems: [LocalImportPlaylistSkippedItem]) {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "open.spotify.com"
+        components.path = "/oembed"
+        components.queryItems = [URLQueryItem(name: "url", value: canonical.url.absoluteString)]
+        guard let oEmbedURL = components.url else {
+            throw LocalImportError(stage: .resolvingMetadata, code: "SPOTIFY_INVALID_PREVIEW", message: "Spotify returned an invalid playlist preview.")
+        }
+        var request = URLRequest(url: oEmbedURL)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (oEmbedData, oEmbedResponse) = try await responseData(session: sessions.spotify, request: request, limit: 256 * 1_024)
+        guard (200..<300).contains(oEmbedResponse.statusCode) else { throw spotifyFailure(oEmbedResponse) }
+        let oEmbed = try LocalImportParser.spotifyPlaylistOEmbed(oEmbedData, expectedPlaylistID: canonical.playlistID)
+        guard let embedURL = URL(string: oEmbed.embedURL) else {
+            throw LocalImportError(stage: .resolvingMetadata, code: "SPOTIFY_INVALID_PREVIEW", message: "Spotify returned an invalid playlist preview.")
+        }
+        request = URLRequest(url: embedURL)
+        request.setValue("text/html", forHTTPHeaderField: "Accept")
+        request.setValue("Resonance/1.0", forHTTPHeaderField: "User-Agent")
+        let (embedData, embedResponse) = try await responseData(session: sessions.spotify, request: request, limit: maxDocumentBytes)
+        guard (200..<300).contains(embedResponse.statusCode), let html = String(data: embedData, encoding: .utf8) else {
+            throw spotifyFailure(embedResponse)
+        }
+        let embedded = try LocalImportParser.spotifyPlaylistEmbed(html, expectedPlaylistID: canonical.playlistID)
+        let artworkURL = embedded.artworkURL ?? oEmbed.artworkURL
+        let tracks = try await hydrateSpotifyPlaylistTrackArtwork(embedded.tracks)
+        return (embedded.title, embedded.author, artworkURL, tracks, embedded.skippedItems)
+    }
+
+    private func hydrateSpotifyPlaylistTrackArtwork(
+        _ tracks: [LocalImportSpotifyTrack]
+    ) async throws -> [LocalImportSpotifyTrack] {
+        var hydrated: [LocalImportSpotifyTrack] = []
+        hydrated.reserveCapacity(tracks.count)
+        for track in tracks {
+            try Task.checkCancellation()
+            let artworkURL: String?
+            do {
+                var components = URLComponents()
+                components.scheme = "https"
+                components.host = "open.spotify.com"
+                components.path = "/oembed"
+                components.queryItems = [URLQueryItem(name: "url", value: track.sourceURL)]
+                guard let url = components.url else { throw URLError(.badURL) }
+                var request = URLRequest(url: url)
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
+                let (data, response) = try await responseData(
+                    session: sessions.spotify,
+                    request: request,
+                    limit: 256 * 1_024
+                )
+                guard (200..<300).contains(response.statusCode) else { throw spotifyFailure(response) }
+                artworkURL = try LocalImportParser.spotifyOEmbed(
+                    data,
+                    expectedTrackID: track.trackID
+                ).artworkURL
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                artworkURL = nil
+            }
+            hydrated.append(LocalImportSpotifyTrack(
+                provider: track.provider,
+                type: track.type,
+                trackID: track.trackID,
+                title: track.title,
+                artist: track.artist,
+                album: track.album,
+                trackNumber: track.trackNumber,
+                durationSeconds: track.durationSeconds,
+                artworkURL: artworkURL,
+                embedURL: track.embedURL,
+                sourceURL: track.sourceURL
+            ))
+        }
+        return hydrated
+    }
+
+    private struct SpotifyPlaylistTrackMatch: Sendable {
+        let track: LocalImportSpotifyTrack
+        let item: LocalImportPlaylistItem?
+        let failureReason: String?
+    }
+
+    private func matchSpotifyPlaylistTracks(
+        _ tracks: [LocalImportSpotifyTrack]
+    ) async throws -> (items: [LocalImportPlaylistItem], skippedItems: [LocalImportPlaylistSkippedItem]) {
+        var output: [LocalImportPlaylistItem] = []
+        var unresolved: [SpotifyPlaylistTrackMatch] = []
+        for (index, track) in tracks.enumerated() {
+            try Task.checkCancellation()
+            if index > 0 { try await Task.sleep(for: .milliseconds(250)) }
+            let match = try await matchSpotifyPlaylistTrack(track)
+            if let item = match.item { output.append(item) }
+            else { unresolved.append(match) }
+        }
+        if !unresolved.isEmpty {
+            var remaining: [SpotifyPlaylistTrackMatch] = []
+            for match in unresolved.sorted(by: { ($0.track.trackNumber ?? 0) < ($1.track.trackNumber ?? 0) }) {
+                try Task.checkCancellation()
+                try await Task.sleep(for: .milliseconds(500))
+                let retried = try await matchSpotifyPlaylistTrack(match.track)
+                if let item = retried.item { output.append(item) }
+                else { remaining.append(retried) }
+            }
+            unresolved = remaining
+        }
+        let skippedItems = unresolved.map { match in
+            LocalImportPlaylistSkippedItem(
+                position: match.track.trackNumber ?? 0,
+                title: match.track.title,
+                artist: match.track.artist,
+                reason: "\(match.failureReason ?? "Audio source search failed") after a paced retry"
+            )
+        }
+        return (
+            output.sorted { $0.position < $1.position },
+            skippedItems.sorted { $0.position < $1.position }
+        )
+    }
+
+    private func matchSoundCloudPlaylistTracks(
+        _ tracks: [LocalImportSoundCloudTrack]
+    ) async throws -> (items: [LocalImportPlaylistItem], skippedItems: [LocalImportPlaylistSkippedItem]) {
+        var items: [LocalImportPlaylistItem] = []
+        var skippedItems: [LocalImportPlaylistSkippedItem] = []
+        var searchedTrackCount = 0
+        for (index, soundCloudTrack) in tracks.enumerated() {
+            try Task.checkCancellation()
+            let track = soundCloudTrack.metadata
+            if let direct = soundCloudTrack.directCandidate {
+                items.append(LocalImportPlaylistItem(
+                    position: track.trackNumber ?? index + 1,
+                    track: track,
+                    candidate: direct
+                ))
+                continue
+            }
+            if searchedTrackCount > 0 { try await Task.sleep(for: .milliseconds(250)) }
+            searchedTrackCount += 1
+            let alternatives: [LocalImportAudioSourceMatch]
+            do {
+                alternatives = try await searchCandidates(for: track)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                alternatives = []
+            }
+            if let candidate = alternatives.first {
+                items.append(LocalImportPlaylistItem(
+                    position: track.trackNumber ?? index + 1,
+                    track: track,
+                    candidate: candidate,
+                    fallbackCandidates: Array(alternatives.dropFirst())
+                ))
+            } else {
+                skippedItems.append(LocalImportPlaylistSkippedItem(
+                    position: track.trackNumber ?? index + 1,
+                    title: track.title,
+                    artist: track.artist,
+                    reason: "No public SoundCloud rendition or close alternate audio match"
+                ))
+            }
+        }
+        return (
+            items.sorted { $0.position < $1.position },
+            skippedItems.sorted { $0.position < $1.position }
+        )
+    }
+
+    private func soundCloudUnavailableItems(
+        _ playlist: LocalImportSoundCloudPlaylist
+    ) -> [LocalImportPlaylistSkippedItem] {
+        guard playlist.unavailableCount > 0 else { return [] }
+        let firstPosition = (playlist.tracks.compactMap(\.metadata.trackNumber).max() ?? playlist.tracks.count) + 1
+        return (0..<playlist.unavailableCount).map { offset in
+            LocalImportPlaylistSkippedItem(
+                position: firstPosition + offset,
+                title: "Unavailable SoundCloud track",
+                artist: nil,
+                reason: "SoundCloud did not return public metadata for this playlist item"
+            )
+        }
+    }
+
+    private func matchSpotifyPlaylistTrack(
+        _ track: LocalImportSpotifyTrack
+    ) async throws -> SpotifyPlaylistTrackMatch {
+        do {
+            let candidates = try await searchCandidates(for: track)
+            guard let candidate = candidates.first else {
+                return .init(track: track, item: nil, failureReason: "No close YouTube audio match")
+            }
+            return .init(
+                track: track,
+                item: LocalImportPlaylistItem(
+                    position: track.trackNumber ?? 0,
+                    track: track,
+                    candidate: candidate,
+                    fallbackCandidates: Array(candidates.dropFirst())
+                ),
+                failureReason: nil
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return .init(track: track, item: nil, failureReason: "Audio source search failed")
+        }
     }
 
     private func spotifyFailure(_ response: HTTPURLResponse) -> LocalImportError {
@@ -705,7 +1160,9 @@ actor LocalDeviceImportService {
     }
 
     private func fetchArtwork(_ value: String?) async -> Data? {
-        let url = LocalImportURL.spotifyArtwork(value) ?? LocalImportURL.youtubeArtwork(value)
+        let url = LocalImportURL.spotifyArtwork(value)
+            ?? LocalImportURL.soundCloudArtwork(value)
+            ?? LocalImportURL.youtubeArtwork(value)
         guard let url else { return nil }
         var request = URLRequest(url: url)
         request.setValue("image/avif,image/webp,image/png,image/jpeg", forHTTPHeaderField: "Accept")
@@ -902,7 +1359,10 @@ enum LocalImportMediaProcessor {
         artwork: Data?
     ) async throws {
         let asset = AVURLAsset(url: input)
-        guard let exporter = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough),
+        let preset = input.pathExtension.lowercased() == "mp3"
+            ? AVAssetExportPresetAppleM4A
+            : AVAssetExportPresetPassthrough
+        guard let exporter = AVAssetExportSession(asset: asset, presetName: preset),
               exporter.supportedFileTypes.contains(.m4a) else {
             throw LocalImportError(stage: .processing, code: "MEDIA_PROCESSOR_UNAVAILABLE", message: "The local media processor cannot remux this M4A file.")
         }

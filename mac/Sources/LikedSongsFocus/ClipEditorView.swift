@@ -1,32 +1,87 @@
 import AVFoundation
+import AVKit
 import SwiftUI
 
 @MainActor
 final class ClipPreviewController: ObservableObject {
     @Published private(set) var isPlaying = false
     @Published private(set) var position: TimeInterval = 0
+    @Published private(set) var player: AVPlayer?
 
-    private var player: AVPlayer?
     private var timer: Timer?
+    private var sourceURL: URL?
+    private var rangeStart: TimeInterval = 0
+    private var rangeEnd: TimeInterval = 0
 
-    func toggle(url: URL, start: TimeInterval, end: TimeInterval, volume: Double) {
+    func prepare(url: URL, start: TimeInterval, end: TimeInterval, volume: Double) {
+        let nextStart = max(0, start)
+        let nextEnd = max(nextStart, end)
+        let shouldReplacePlayer = sourceURL?.standardizedFileURL != url.standardizedFileURL
+
+        if shouldReplacePlayer {
+            clear()
+            let player = AVPlayer(url: url)
+            self.player = player
+            sourceURL = url
+            installTimer()
+        }
+
+        player?.volume = PlaybackVolumePolicy.gain(for: volume)
+        rangeStart = nextStart
+        rangeEnd = nextEnd
+        pause()
+        seek(to: nextStart)
+    }
+
+    func updateRange(start: TimeInterval, end: TimeInterval) {
+        rangeStart = max(0, start)
+        rangeEnd = max(rangeStart, end)
+        pause()
+        seek(to: rangeStart)
+    }
+
+    func toggle() {
+        guard let player, rangeEnd - rangeStart >= ClipRangePolicy.minimumDuration else { return }
         if isPlaying {
-            stop()
+            pause()
             return
         }
-        stop()
-        let player = AVPlayer(url: url)
-        player.volume = Float(min(max(volume, 0), 1))
+        if position >= rangeEnd - 0.02 || position < rangeStart {
+            seek(to: rangeStart)
+        }
+        player.play()
+        isPlaying = true
+    }
+
+    func seek(to time: TimeInterval) {
+        guard let player else { return }
+        let target = min(max(time, rangeStart), rangeEnd)
         player.seek(
-            to: CMTime(seconds: start, preferredTimescale: 600),
+            to: CMTime(seconds: target, preferredTimescale: 600),
             toleranceBefore: .zero,
             toleranceAfter: .zero
         )
-        player.play()
-        self.player = player
-        position = start
-        isPlaying = true
+        position = target
+    }
 
+    func pause() {
+        player?.pause()
+        isPlaying = false
+    }
+
+    func clear() {
+        player?.pause()
+        player = nil
+        sourceURL = nil
+        timer?.invalidate()
+        timer = nil
+        position = 0
+        rangeStart = 0
+        rangeEnd = 0
+        isPlaying = false
+    }
+
+    private func installTimer() {
         let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] timer in
             Task { @MainActor [weak self] in
                 guard let self, let player = self.player else {
@@ -35,21 +90,14 @@ final class ClipPreviewController: ObservableObject {
                 }
                 let current = player.currentTime().seconds
                 if current.isFinite { self.position = current }
-                if current >= end || player.timeControlStatus == .paused {
-                    self.stop()
+                if self.isPlaying && current >= self.rangeEnd - 0.02 {
+                    self.position = self.rangeEnd
+                    self.pause()
                 }
             }
         }
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
-    }
-
-    func stop() {
-        player?.pause()
-        player = nil
-        timer?.invalidate()
-        timer = nil
-        isPlaying = false
     }
 }
 
@@ -107,7 +155,7 @@ struct MacClipEditorSheet: View {
                 editor
             }
         }
-        .frame(width: 700, height: 520)
+        .frame(width: 760, height: 720)
         .background(Color.appPanel)
         .task {
             if selectedTrackID == nil {
@@ -120,14 +168,14 @@ struct MacClipEditorSheet: View {
             await loadWaveform()
         }
         .onChange(of: startTime) { _, _ in
-            if preview.isPlaying { preview.stop() }
+            preview.updateRange(start: startTime, end: endTime)
             successMessage = nil
         }
         .onChange(of: endTime) { _, _ in
-            if preview.isPlaying { preview.stop() }
+            preview.updateRange(start: startTime, end: endTime)
             successMessage = nil
         }
-        .onDisappear { preview.stop() }
+        .onDisappear { preview.clear() }
     }
 
     private var header: some View {
@@ -150,7 +198,7 @@ struct MacClipEditorSheet: View {
             Spacer()
 
             Button {
-                preview.stop()
+                preview.clear()
                 dismiss()
             } label: {
                 Image(systemName: "xmark")
@@ -188,70 +236,74 @@ struct MacClipEditorSheet: View {
     }
 
     private var editor: some View {
-        VStack(spacing: 15) {
-            sourceTrackRow
+        ScrollView {
+            VStack(spacing: 12) {
+                sourceTrackRow
 
-            VStack(alignment: .leading, spacing: 9) {
-                HStack {
-                    Text("SELECT RANGE")
-                        .font(.system(size: 9, weight: .semibold))
-                        .tracking(1.4)
-                        .foregroundStyle(Color.appMuted)
-                    Spacer()
-                    Text("\(clipTimeText(startTime))  –  \(clipTimeText(endTime))")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Color.appInk)
-                }
+                videoPreview
 
-                ZStack {
-                    ClipWaveformRangeSelector(
-                        samples: waveformSamples,
-                        duration: selectedDuration,
-                        startTime: $startTime,
-                        endTime: $endTime,
-                        previewPosition: preview.isPlaying ? preview.position : nil
-                    )
-                    .frame(height: 112)
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack {
+                        Text("SELECT RANGE")
+                            .font(.system(size: 9, weight: .semibold))
+                            .tracking(1.4)
+                            .foregroundStyle(Color.appMuted)
+                        Spacer()
+                        Text("\(clipTimeText(startTime))  –  \(clipTimeText(endTime))")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Color.appInk)
+                    }
 
-                    if isLoadingWaveform {
-                        ProgressView()
-                            .controlSize(.small)
+                    ZStack {
+                        ClipWaveformRangeSelector(
+                            samples: waveformSamples,
+                            duration: selectedDuration,
+                            startTime: $startTime,
+                            endTime: $endTime,
+                            previewPosition: preview.player == nil ? nil : preview.position
+                        )
+                        .frame(height: 112)
+
+                        if isLoadingWaveform {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
                     }
                 }
-            }
-            .padding(14)
-            .background(Color.appSurfaceRaised, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.appLine, lineWidth: 1)
-            }
-
-            HStack(spacing: 10) {
-                ClipTimeControl(
-                    label: "Start",
-                    value: $startTime,
-                    range: 0...max(endTime - ClipRangePolicy.minimumDuration, 0)
-                )
-                ClipTimeControl(
-                    label: "End",
-                    value: $endTime,
-                    range: min(startTime + ClipRangePolicy.minimumDuration, selectedDuration)...selectedDuration
-                )
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Length")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Color.appMuted)
-                    Text(clipTimeText(clipLength))
-                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Color.appViolet)
+                .padding(14)
+                .background(Color.appSurfaceRaised, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.appLine, lineWidth: 1)
                 }
-                .padding(.horizontal, 13)
-                .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
-                .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
 
-            HStack(spacing: 10) {
+                HStack(spacing: 10) {
+                    ClipTimeControl(
+                        label: "Start",
+                        value: $startTime,
+                        range: 0...max(endTime - ClipRangePolicy.minimumDuration, 0)
+                    )
+                    ClipTimeControl(
+                        label: "End",
+                        value: $endTime,
+                        range: min(startTime + ClipRangePolicy.minimumDuration, selectedDuration)...selectedDuration
+                    )
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Length")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Color.appMuted)
+                        Text(clipTimeText(clipLength))
+                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Color.appViolet)
+                    }
+                    .padding(.horizontal, 13)
+                    .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                    .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                previewTransport
+
                 VStack(alignment: .leading, spacing: 5) {
                     Text("CLIP NAME")
                         .font(.system(size: 9, weight: .semibold))
@@ -270,22 +322,84 @@ struct MacClipEditorSheet: View {
                         .stroke(Color.appLine, lineWidth: 1)
                 }
 
-                Button {
-                    togglePreview()
-                } label: {
-                    Label(preview.isPlaying ? "Stop" : "Preview", systemImage: preview.isPlaying ? "stop.fill" : "play.fill")
-                        .font(.system(size: 11, weight: .semibold))
-                        .frame(width: 94, height: 50)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.appInk)
-                .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .disabled(selectedTrack?.fileURL == nil)
+                footer
             }
-
-            footer
+            .padding(18)
         }
-        .padding(18)
+        .scrollIndicators(.hidden)
+    }
+
+    @ViewBuilder
+    private var videoPreview: some View {
+        if selectedTrack?.kind == .video {
+            ZStack {
+                ClipVideoPlayer(player: preview.player)
+                    .frame(height: 150)
+
+                if !preview.isPlaying {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(Color.white)
+                        .frame(width: 48, height: 48)
+                        .background(Color.black.opacity(0.55), in: Circle())
+                        .allowsHitTesting(false)
+                }
+            }
+            .background(Color.black, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(alignment: .topLeading) {
+                Label("Video preview", systemImage: "film")
+                    .font(.system(size: 9, weight: .semibold))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.62), in: Capsule())
+                    .padding(10)
+            }
+            .accessibilityLabel("Video preview for \(selectedTrack?.title ?? "selected track")")
+        }
+    }
+
+    private var previewTransport: some View {
+        let sliderRange = startTime...max(endTime, startTime + ClipRangePolicy.minimumDuration)
+        return HStack(spacing: 11) {
+            Button(action: togglePreview) {
+                Image(systemName: preview.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 34, height: 34)
+                    .background(Color.appViolet, in: Circle())
+                    .foregroundStyle(Color.white)
+            }
+            .buttonStyle(.plain)
+            .disabled(selectedTrack?.fileURL == nil)
+            .accessibilityLabel(preview.isPlaying ? "Pause preview" : "Play preview")
+
+            Text(clipTimeText(preview.position))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(Color.appMuted)
+                .frame(width: 42, alignment: .trailing)
+
+            Slider(
+                value: Binding(
+                    get: { min(max(preview.position, sliderRange.lowerBound), sliderRange.upperBound) },
+                    set: { preview.seek(to: $0) }
+                ),
+                in: sliderRange
+            )
+            .tint(Color.appViolet)
+            .accessibilityLabel("Preview position")
+
+            Text(clipTimeText(endTime))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(Color.appMuted)
+                .frame(width: 42, alignment: .leading)
+        }
+        .padding(.horizontal, 13)
+        .frame(height: 54)
+        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.appLine, lineWidth: 1)
+        }
     }
 
     private var sourceTrackRow: some View {
@@ -361,7 +475,7 @@ struct MacClipEditorSheet: View {
             Spacer()
 
             Button("Cancel") {
-                preview.stop()
+                preview.clear()
                 dismiss()
             }
 
@@ -383,7 +497,7 @@ struct MacClipEditorSheet: View {
     }
 
     private func chooseTrack(_ track: Track?) {
-        preview.stop()
+        preview.clear()
         selectedTrackID = track?.id
         startTime = 0
         endTime = min(track?.duration ?? 0, 30)
@@ -391,6 +505,9 @@ struct MacClipEditorSheet: View {
         errorMessage = nil
         successMessage = nil
         waveformSamples = []
+        if let track, let url = track.fileURL {
+            preview.prepare(url: url, start: startTime, end: endTime, volume: model.volume)
+        }
     }
 
     private func loadWaveform() async {
@@ -406,19 +523,17 @@ struct MacClipEditorSheet: View {
     }
 
     private func togglePreview() {
-        guard let url = selectedTrack?.fileURL else { return }
+        guard let track = selectedTrack, let url = track.fileURL else { return }
         errorMessage = nil
-        preview.toggle(
-            url: url,
-            start: startTime,
-            end: endTime,
-            volume: model.volume
-        )
+        if preview.player == nil {
+            preview.prepare(url: url, start: startTime, end: endTime, volume: model.volume)
+        }
+        preview.toggle()
     }
 
     private func createClip() {
         guard let selectedTrackID else { return }
-        preview.stop()
+        preview.pause()
         errorMessage = nil
         successMessage = nil
         isExporting = true
@@ -439,6 +554,21 @@ struct MacClipEditorSheet: View {
             }
             isExporting = false
         }
+    }
+}
+
+private struct ClipVideoPlayer: NSViewRepresentable {
+    let player: AVPlayer?
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .none
+        view.videoGravity = .resizeAspect
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        view.player = player
     }
 }
 

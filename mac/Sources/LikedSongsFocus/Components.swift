@@ -302,10 +302,10 @@ struct TrackArtworkView: View {
 
     var body: some View {
         Group {
-            if let artworkData = track.artworkData, let image = NSImage(data: artworkData) {
+            if let artworkData = track.artworkData, let image = ArtworkCropping.squareImage(from: artworkData) {
                 Image(nsImage: image)
                     .resizable()
-                    .scaledToFill()
+                    .scaledToFit()
             } else {
                 ArtworkView(
                     style: track.artwork,

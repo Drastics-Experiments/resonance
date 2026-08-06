@@ -69,6 +69,15 @@ jobs:
           XCODE_MAJOR="$(xcodebuild -version | awk 'NR == 1 { split($2, version, "."); print version[1] }')"
           (( XCODE_MAJOR >= 26 ))
 
+      - name: Restore iOS DerivedData cache
+        id: ios-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/ResonanceDerivedData
+          key: resonance-ios-derived-data-${{ runner.arch }}-${{ hashFiles('ios/LikedSongsMobile.xcodeproj/project.pbxproj', 'ios/LikedSongsMobile/**') }}
+          restore-keys: |
+            resonance-ios-derived-data-${{ runner.arch }}-
+
       - name: Build for iOS Simulator
         run: |
           xcodebuild \
@@ -116,10 +125,17 @@ jobs:
         if: ${{ inputs.release_candidate }}
         uses: actions/upload-artifact@v7
         with:
-          name: release-ios
+          name: release-assets-ios
           path: |
             installers/ios/dist/Resonance-iOS-Simulator-${{ inputs.version }}.zip
             installers/ios/dist/Resonance-iOS-Simulator-${{ inputs.version }}.zip.sha256
           if-no-files-found: error
           retention-days: 14
           overwrite: true
+
+      - name: Save iOS DerivedData cache from main
+        if: ${{ github.ref == 'refs/heads/main' && steps.ios-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/ResonanceDerivedData
+          key: ${{ steps.ios-cache.outputs.cache-primary-key }}

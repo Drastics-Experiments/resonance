@@ -82,18 +82,9 @@ jobs:
           java-version: "17"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v5
-
-      - name: Validate and build Android app
-        run: ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug
-
-      - name: Upload debug APK
-        if: ${{ !inputs.release_candidate }}
-        uses: actions/upload-artifact@v7
+        uses: gradle/actions/setup-gradle@v6
         with:
-          name: Resonance-Android-Debug-${{ github.sha }}
-          path: android/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
       - name: Validate Android release-signing secrets
         if: ${{ inputs.release_candidate }}
@@ -118,14 +109,26 @@ jobs:
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/resonance-release.jks"
           chmod 600 "$RUNNER_TEMP/resonance-release.jks"
 
-      - name: Build signed Android release
+      - name: Validate and build Android app
+        if: ${{ !inputs.release_candidate }}
+        run: ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug
+
+      - name: Validate and build signed Android release
         if: ${{ inputs.release_candidate }}
         env:
           RESONANCE_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/resonance-release.jks
           RESONANCE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RESONANCE_ANDROID_KEYSTORE_PASSWORD }}
           RESONANCE_ANDROID_KEY_ALIAS: ${{ secrets.RESONANCE_ANDROID_KEY_ALIAS }}
           RESONANCE_ANDROID_KEY_PASSWORD: ${{ secrets.RESONANCE_ANDROID_KEY_PASSWORD }}
-        run: ./gradlew --no-daemon assembleRelease
+        run: ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug assembleRelease
+
+      - name: Upload debug APK
+        if: ${{ !inputs.release_candidate }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: Resonance-Android-Debug-${{ github.sha }}
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
 
       - name: Package signed Android release candidate
         if: ${{ inputs.release_candidate }}
@@ -166,7 +169,7 @@ jobs:
         if: ${{ inputs.release_candidate }}
         uses: actions/upload-artifact@v7
         with:
-          name: release-android
+          name: release-assets-android
           path: |
             installers/android/dist/Resonance-Android-${{ inputs.version }}.apk
             installers/android/dist/Resonance-Android-${{ inputs.version }}.apk.sha256

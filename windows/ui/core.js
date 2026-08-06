@@ -30,6 +30,121 @@ export function createEmptyState() {
   };
 }
 
+export function titleMarqueeMetrics(contentWidth, availableWidth) {
+  const content = Number.isFinite(Number(contentWidth)) ? Math.max(Number(contentWidth), 0) : 0;
+  const available = Number.isFinite(Number(availableWidth)) ? Math.max(Number(availableWidth), 0) : 0;
+  const travel = Math.max(content - available, 0);
+  return {
+    travel,
+    durationSeconds: travel > 0 ? Math.max(8, travel / 28) : 0,
+  };
+}
+
+export function isInstalledVideoTrack(track) {
+  const fileURL = String(track?.fileUrl || "").trim();
+  if (!/^file:/i.test(fileURL)) return false;
+  const source = String(track?.filePath || fileURL).split(/[?#]/, 1)[0];
+  return /\.(?:mp4|mov|m4v|webm)$/i.test(source);
+}
+
+export function squareArtworkCropRect(
+  pixels,
+  sampleWidth,
+  sampleHeight,
+  sourceWidth = sampleWidth,
+  sourceHeight = sampleHeight,
+) {
+  const width = Math.max(1, Math.floor(Number(sampleWidth) || 0));
+  const height = Math.max(1, Math.floor(Number(sampleHeight) || 0));
+  const naturalWidth = Math.max(1, Number(sourceWidth) || width);
+  const naturalHeight = Math.max(1, Number(sourceHeight) || height);
+  const centeredSquare = () => {
+    const side = Math.min(naturalWidth, naturalHeight);
+    return {
+      x: (naturalWidth - side) / 2,
+      y: (naturalHeight - side) / 2,
+      width: side,
+      height: side,
+    };
+  };
+  if (!pixels || pixels.length < width * height * 4) return centeredSquare();
+
+  const bytesPerPixel = 4;
+  const bytesPerRow = width * bytesPerPixel;
+  const stats = (offsets) => {
+    if (!offsets.length) return { channels: [0, 0, 0, 0], deviation: 255 };
+    const totals = [0, 0, 0, 0];
+    for (const offset of offsets) {
+      for (let channel = 0; channel < bytesPerPixel; channel += 1) totals[channel] += pixels[offset + channel];
+    }
+    const channels = totals.map((total) => total / offsets.length);
+    let totalDeviation = 0;
+    for (const offset of offsets) {
+      for (let channel = 0; channel < bytesPerPixel; channel += 1) {
+        totalDeviation += Math.abs(pixels[offset + channel] - channels[channel]);
+      }
+    }
+    return { channels, deviation: totalDeviation / (offsets.length * bytesPerPixel) };
+  };
+  const rowStats = (row) => stats(Array.from({ length: width }, (_, column) => row * bytesPerRow + column * bytesPerPixel));
+  const columnStats = (column, startRow, endRow) => stats(Array.from(
+    { length: Math.max(0, endRow - startRow) },
+    (_, row) => (row + startRow) * bytesPerRow + column * bytesPerPixel,
+  ));
+  const colorDistance = (left, right) => left.channels.reduce(
+    (total, channel, index) => total + Math.abs(channel - right.channels[index]),
+    0,
+  ) / bytesPerPixel;
+  const borderRun = (lineCount, statsAt, fromStart) => {
+    if (lineCount < 6) return 0;
+    const reference = statsAt(fromStart ? 0 : lineCount - 1);
+    if (reference.deviation > 10) return 0;
+    let count = 0;
+    for (let offset = 0; offset < Math.floor(lineCount / 2); offset += 1) {
+      const index = fromStart ? offset : lineCount - 1 - offset;
+      const candidate = statsAt(index);
+      if (candidate.deviation > 13 || colorDistance(candidate, reference) > 18) break;
+      count += 1;
+    }
+    return count;
+  };
+  const symmetricInsets = (first, second, length) => {
+    if (first < 2 || second < 2 || first + second >= length * 3 / 4) return [0, 0];
+    const tolerance = Math.max(2, Math.floor(Math.min(first, second) / 3));
+    return Math.abs(first - second) <= tolerance ? [first, second] : [0, 0];
+  };
+
+  const [top, bottom] = symmetricInsets(
+    borderRun(height, rowStats, true),
+    borderRun(height, rowStats, false),
+    height,
+  );
+  const contentEndRow = height - bottom;
+  const statsForColumn = (column) => columnStats(column, top, contentEndRow);
+  const [left, right] = symmetricInsets(
+    borderRun(width, statsForColumn, true),
+    borderRun(width, statsForColumn, false),
+    width,
+  );
+
+  const scaleX = naturalWidth / width;
+  const scaleY = naturalHeight / height;
+  const content = {
+    x: left * scaleX,
+    y: top * scaleY,
+    width: (width - left - right) * scaleX,
+    height: (height - top - bottom) * scaleY,
+  };
+  const side = Math.min(content.width, content.height);
+  if (!(side > 0)) return centeredSquare();
+  return {
+    x: Math.max(0, Math.min(naturalWidth - side, content.x + (content.width - side) / 2)),
+    y: Math.max(0, Math.min(naturalHeight - side, content.y + (content.height - side) / 2)),
+    width: side,
+    height: side,
+  };
+}
+
 function unique(values) {
   return [...new Set(values)];
 }
@@ -46,6 +161,35 @@ function normalizedServerOrigin(value) {
   }
 }
 
+function normalizedServerSongIdentityText(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function serverSongArtistTokens(value) {
+  const connectors = new Set(["and", "feat", "featuring", "ft", "with"]);
+  const placeholders = new Set(["unknown", "artist", "local", "file"]);
+  return new Set(normalizedServerSongIdentityText(value)
+    .split(" ")
+    .filter(Boolean)
+    .filter((token) => !connectors.has(token) && !placeholders.has(token)));
+}
+
+export function serverSongMetadataMatches(track, song) {
+  if (normalizedServerSongIdentityText(track?.title) !== normalizedServerSongIdentityText(song?.title)) return false;
+  const trackArtists = serverSongArtistTokens(track?.artist);
+  const songArtists = serverSongArtistTokens(song?.artist);
+  if (!trackArtists.size || trackArtists.size !== songArtists.size) return false;
+  if ([...trackArtists].some((token) => !songArtists.has(token))) return false;
+  const trackDuration = Number(track?.duration);
+  const songDuration = Number(song?.duration_seconds ?? song?.durationSeconds ?? song?.duration);
+  return !(trackDuration > 0 && songDuration > 0) || Math.abs(trackDuration - songDuration) <= 5;
+}
+
 function normalizedClipRanges(value = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value).flatMap(([key, range]) => {
@@ -54,6 +198,42 @@ function normalizedClipRanges(value = {}) {
     if (!key || !Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || startSeconds < 0 || endSeconds - startSeconds < 0.25) return [];
     return [[key, { startSeconds, endSeconds }]];
   }));
+}
+
+function optionalHistoryText(value, maximumLength = 500) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text ? text.slice(0, maximumLength) : null;
+}
+
+function normalizedHistoryDuration(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const duration = Number(value);
+  return Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60 ? duration : null;
+}
+
+function listeningHistorySongKey(entry) {
+  const profileID = entry?.profileID || "default";
+  const remoteID = optionalHistoryText(entry?.remoteID, 128);
+  return remoteID ? `${profileID}#remote:${remoteID}` : `${profileID}#track:${entry?.trackID || "unknown"}`;
+}
+
+function listeningHistoryTrackSnapshot(state, entry) {
+  const profileID = entry?.profileID || "default";
+  const remoteID = optionalHistoryText(entry?.remoteID, 128);
+  const activeTracks = tracksForActiveProfile(state);
+  const track = activeTracks.find((item) => item?.id === entry?.trackID)
+    || (remoteID ? activeTracks.find((item) =>
+      item?.remoteID === remoteID && (item.syncProfileID || "default") === profileID) : null);
+  return {
+    id: track?.id || entry?.trackID,
+    remoteID: track?.remoteID || remoteID,
+    title: optionalHistoryText(track?.title) || optionalHistoryText(entry?.title) || "Unknown song",
+    artist: optionalHistoryText(track?.artist) || optionalHistoryText(entry?.artist) || "Unknown artist",
+    album: optionalHistoryText(track?.album) || optionalHistoryText(entry?.album) || "Unknown Album",
+    duration: normalizedHistoryDuration(track?.duration) ?? normalizedHistoryDuration(entry?.duration) ?? 0,
+    artwork: track?.artwork || null,
+    fileUrl: track?.fileUrl || null,
+  };
 }
 
 export function clipRangeKey(track) {
@@ -245,6 +425,12 @@ export function normalizeState(value) {
       profileID: typeof entry.profileID === "string" && entry.profileID ? entry.profileID : "default",
       startedAt: new Date(entry.startedAt).toISOString(),
       listenedSeconds: Math.max(0, Number(entry.listenedSeconds) || 0),
+      remoteID: optionalHistoryText(entry.remoteID, 128),
+      title: optionalHistoryText(entry.title),
+      artist: optionalHistoryText(entry.artist),
+      album: optionalHistoryText(entry.album),
+      duration: normalizedHistoryDuration(entry.duration),
+      originatedOnThisDevice: entry.originatedOnThisDevice !== false,
     }))
     .slice(-2000);
   const activeServerOrigin = normalizedServerOrigin(state.serverURL);
@@ -330,7 +516,7 @@ export function summarizeListeningHistory(state, dayCount = 30, now = new Date()
   });
   const byKey = new Map(days.map((day) => [day.key, day]));
   const dayIndexByKey = new Map(days.map((day, index) => [day.key, index]));
-  const trackIDs = new Set();
+  const songKeys = new Set();
   const songSeries = new Map();
   const todayKey = localDayKey(now);
   let todaySeconds = 0;
@@ -350,16 +536,25 @@ export function summarizeListeningHistory(state, dayCount = 30, now = new Date()
     day.seconds += seconds;
     day.plays += 1;
     if (entry.trackID) {
-      trackIDs.add(entry.trackID);
-      if (!songSeries.has(entry.trackID)) {
-        songSeries.set(entry.trackID, {
-          trackID: entry.trackID,
+      const songKey = listeningHistorySongKey(entry);
+      const snapshot = listeningHistoryTrackSnapshot(state, entry);
+      songKeys.add(songKey);
+      if (!songSeries.has(songKey)) {
+        songSeries.set(songKey, {
+          trackID: snapshot.id,
+          remoteID: snapshot.remoteID,
+          title: snapshot.title,
+          artist: snapshot.artist,
+          album: snapshot.album,
+          duration: snapshot.duration,
+          artwork: snapshot.artwork,
+          fileUrl: snapshot.fileUrl,
           seconds: 0,
           plays: 0,
           days: days.map((item) => ({ key: item.key, date: item.date, seconds: 0, plays: 0 })),
         });
       }
-      const series = songSeries.get(entry.trackID);
+      const series = songSeries.get(songKey);
       const seriesDay = series.days[dayIndexByKey.get(key)];
       series.seconds += seconds;
       series.plays += 1;
@@ -374,13 +569,12 @@ export function summarizeListeningHistory(state, dayCount = 30, now = new Date()
     plays: days.reduce((total, day) => total + day.plays, 0),
     todaySeconds,
     todayPlays,
-    songs: trackIDs.size,
+    songs: songKeys.size,
     songSeries: [...songSeries.values()].sort((left, right) => right.seconds - left.seconds || right.plays - left.plays),
   };
 }
 
 export function summarizeListeningStats(state, now = new Date()) {
-  const tracks = new Map((state?.tracks || []).map((track) => [track.id, track]));
   const songs = new Map();
   const artists = new Map();
   const todayKey = localDayKey(now);
@@ -398,12 +592,25 @@ export function summarizeListeningStats(state, now = new Date()) {
     if (localDayKey(timestamp) === todayKey) todaySeconds += seconds;
     if (!entry.trackID) continue;
 
-    const song = songs.get(entry.trackID) || { trackID: entry.trackID, seconds: 0, plays: 0 };
+    const songKey = listeningHistorySongKey(entry);
+    const snapshot = listeningHistoryTrackSnapshot(state, entry);
+    const song = songs.get(songKey) || {
+      trackID: snapshot.id,
+      remoteID: snapshot.remoteID,
+      title: snapshot.title,
+      artist: snapshot.artist,
+      album: snapshot.album,
+      duration: snapshot.duration,
+      artwork: snapshot.artwork,
+      fileUrl: snapshot.fileUrl,
+      seconds: 0,
+      plays: 0,
+    };
     song.seconds += seconds;
     song.plays += 1;
-    songs.set(entry.trackID, song);
+    songs.set(songKey, song);
 
-    const artist = tracks.get(entry.trackID)?.artist?.trim() || "Unknown artist";
+    const artist = snapshot.artist;
     const artistStats = artists.get(artist) || { artist, seconds: 0, plays: 0 };
     artistStats.seconds += seconds;
     artistStats.plays += 1;
@@ -422,6 +629,52 @@ export function summarizeListeningStats(state, now = new Date()) {
     topArtist: rankedArtists[0]?.artist || "—",
     songRanking: rankedSongs,
   };
+}
+
+export function mergeListeningHistoryDocument(state, document, requestedProfileID = state?.syncProfileID || "default") {
+  const profileID = typeof document?.profile_id === "string" && document.profile_id
+    ? document.profile_id
+    : typeof document?.profileID === "string" && document.profileID
+      ? document.profileID
+      : requestedProfileID;
+  if (profileID !== requestedProfileID || !Array.isArray(document?.entries)) return false;
+
+  const entriesByID = new Map((state.listeningHistory || []).map((entry) => [entry.id, entry]));
+  const activeTracks = tracksForActiveProfile(state);
+  const tracksByID = new Map(activeTracks.map((track) => [track.id, track]));
+  const tracksByRemoteID = new Map(activeTracks
+    .filter((track) => track?.remoteID && (track.syncProfileID || "default") === profileID)
+    .map((track) => [track.remoteID, track]));
+
+  for (const remote of document.entries) {
+    const id = optionalHistoryText(remote?.id, 128);
+    const rawTrackID = optionalHistoryText(remote?.track_id ?? remote?.trackID, 128);
+    const startedAt = new Date(remote?.started_at ?? remote?.startedAt);
+    if (!id || !rawTrackID || !Number.isFinite(startedAt.getTime())) continue;
+    const existing = entriesByID.get(id);
+    const remoteID = optionalHistoryText(remote?.song_id ?? remote?.remoteID, 128)
+      || existing?.remoteID;
+    const mappedTrack = (remoteID && tracksByRemoteID.get(remoteID)) || tracksByID.get(rawTrackID);
+    entriesByID.set(id, {
+      id,
+      trackID: mappedTrack?.id || existing?.trackID || rawTrackID,
+      profileID,
+      startedAt: existing?.startedAt || startedAt.toISOString(),
+      listenedSeconds: Math.max(existing?.listenedSeconds || 0, Number(remote?.listened_seconds ?? remote?.listenedSeconds) || 0),
+      remoteID: remoteID || mappedTrack?.remoteID || null,
+      title: optionalHistoryText(remote?.title) || existing?.title || optionalHistoryText(mappedTrack?.title),
+      artist: optionalHistoryText(remote?.artist) || existing?.artist || optionalHistoryText(mappedTrack?.artist),
+      album: optionalHistoryText(remote?.album) || existing?.album || optionalHistoryText(mappedTrack?.album),
+      duration: normalizedHistoryDuration(remote?.duration_seconds ?? remote?.duration)
+        ?? existing?.duration
+        ?? normalizedHistoryDuration(mappedTrack?.duration),
+      originatedOnThisDevice: existing?.originatedOnThisDevice ?? false,
+    });
+  }
+  state.listeningHistory = [...entriesByID.values()]
+    .sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt))
+    .slice(-2000);
+  return true;
 }
 
 export function formatHistoryWindowLabel(summary, now = new Date(), locale = undefined) {
@@ -482,6 +735,11 @@ export function normalizedVolume(value, fallback = 0.78) {
   return Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : fallback;
 }
 
+export function playbackGainForVolume(sliderValue) {
+  const normalized = normalizedVolume(sliderValue, 0);
+  return normalized * normalized;
+}
+
 export function filterTracks(tracks, query, mode = "all") {
   const value = String(query || "").trim().toLocaleLowerCase();
   let filtered = value
@@ -535,6 +793,7 @@ export function reconcileUploadedTrack(state, trackID, remoteSong, options = {})
   if (!target || !remoteID) return false;
   const profileID = String(options.profileID || state.syncProfileID || "default");
   const sourceServer = normalizedServerOrigin(options.serverURL || state.serverURL);
+  const previousRemoteID = String(target.remoteID || "").trim() || null;
   const duplicateIDs = new Set(state.tracks
     .filter((track) =>
       track?.id !== target.id
@@ -568,9 +827,14 @@ export function reconcileUploadedTrack(state, trackID, remoteSong, options = {})
   if (wasFavorite && !state.favorites.includes(target.id)) state.favorites.push(target.id);
 
   for (const playlist of state.playlists) {
-    const affected = (playlist.trackIDs || []).some((id) => id === target.id || duplicateIDs.has(id));
+    const affected = (playlist.trackIDs || []).some((id) => id === target.id || duplicateIDs.has(id))
+      || Boolean(previousRemoteID && (playlist.remoteSongIDs || []).includes(previousRemoteID));
     playlist.trackIDs = remap(playlist.trackIDs);
     if (!affected || playlist.isSystem) continue;
+    if (previousRemoteID && previousRemoteID !== remoteID) {
+      playlist.remoteSongIDs = unique((playlist.remoteSongIDs || [])
+        .map((id) => id === previousRemoteID ? remoteID : id));
+    }
     updatePlaylistRemoteSongIDs(state, playlist);
     const id = normalizedPlaylistID(playlist.id);
     state.deletedPlaylistIDs = state.deletedPlaylistIDs.filter((value) => normalizedPlaylistID(value) !== id);
@@ -584,16 +848,32 @@ export function reconcileUploadedTrack(state, trackID, remoteSong, options = {})
   state.tracks = state.tracks.filter((track) => !duplicateIDs.has(track.id));
 
   if (wasFavorite) {
-    state.remoteLikedSongIDs = unique([...state.remoteLikedSongIDs, remoteID]);
-    state.dirtyRemoteLikeSongIDs = unique([...state.dirtyRemoteLikeSongIDs, remoteID]);
+    state.remoteLikedSongIDs = unique([
+      ...state.remoteLikedSongIDs.filter((id) => id !== previousRemoteID),
+      remoteID,
+    ]);
+    state.dirtyRemoteLikeSongIDs = unique([
+      ...state.dirtyRemoteLikeSongIDs,
+      ...(previousRemoteID && previousRemoteID !== remoteID ? [previousRemoteID] : []),
+      remoteID,
+    ]);
     state.likesDirty = true;
   }
-  if (localClipRange) {
-    const remoteClipKey = `remote:${remoteID}`;
-    state.clipRanges[remoteClipKey] = localClipRange;
-    delete state.clipRanges[localClipKey];
-    state.dirtyClipRangeKeys = unique([...state.dirtyClipRangeKeys, remoteClipKey]);
-    state.deletedClipRangeKeys = state.deletedClipRangeKeys.filter((key) => key !== remoteClipKey);
+  const previousClipKey = previousRemoteID ? `remote:${previousRemoteID}` : localClipKey;
+  const previousClipRange = state.clipRanges?.[previousClipKey] || localClipRange;
+  const remoteClipKey = `remote:${remoteID}`;
+  if (previousClipRange && previousClipKey !== remoteClipKey) {
+    state.clipRanges[remoteClipKey] = previousClipRange;
+    delete state.clipRanges[previousClipKey];
+    state.dirtyClipRangeKeys = unique([
+      ...state.dirtyClipRangeKeys,
+      ...(previousRemoteID ? [previousClipKey] : []),
+      remoteClipKey,
+    ]);
+    state.deletedClipRangeKeys = unique([
+      ...state.deletedClipRangeKeys.filter((key) => key !== remoteClipKey),
+      ...(previousRemoteID ? [previousClipKey] : []),
+    ]);
   }
   hydrateRemotePlaylistTracks(state);
   hydrateRemoteLikedTracks(state);
@@ -644,6 +924,43 @@ export function formatServerDownloadFailureNotice(failures) {
   });
   if (!items.length) return "";
   return `${items.length} song${items.length === 1 ? "" : "s"} failed to download after retrying: ${items.join("; ")}.`;
+}
+
+export function planMissingDownloadedUploads(state, catalog) {
+  const songs = Array.isArray(catalog) ? catalog : [];
+  const remoteIDs = new Set(songs.map((song) => String(song?.id || "").trim()).filter(Boolean));
+  const remoteByHash = new Map(songs.map((song) => [
+    String(song?.content_sha256 || song?.contentSha256 || "").trim().toLocaleLowerCase(),
+    song,
+  ]).filter(([hash]) => hash));
+  const uploadTracks = [];
+  const matches = [];
+  const activeProfileID = String(state?.syncProfileID || "default");
+  const activeServer = normalizedServerOrigin(state?.serverURL);
+
+  for (const track of state.tracks || []) {
+    if (!track?.filePath || (!track.remoteID && !track.sourceServer)) continue;
+    if (String(track.syncProfileID || "default") !== activeProfileID) continue;
+    const sourceServer = normalizedServerOrigin(track.sourceServer);
+    if (track.sourceServer && (!sourceServer || sourceServer !== activeServer)) continue;
+    if (track.remoteID && remoteIDs.has(String(track.remoteID))) continue;
+    const hash = String(track.contentSha256 || "").trim().toLocaleLowerCase();
+    const remoteSong = (hash ? remoteByHash.get(hash) : null)
+      || songs.find((song) => serverSongMetadataMatches(track, song));
+    if (remoteSong) matches.push({ trackID: track.id, remoteSong });
+    else uploadTracks.push(track);
+  }
+  return { uploadTracks, matches };
+}
+
+export function formatServerUploadFailureNotice(failures) {
+  const items = (Array.isArray(failures) ? failures : []).map((failure) => {
+    const title = String(failure?.title || failure?.filename || "Unknown song").trim();
+    const artist = String(failure?.artist || "").trim();
+    return artist ? `“${title}” — ${artist}` : `“${title}”`;
+  });
+  if (!items.length) return "";
+  return `${items.length} song${items.length === 1 ? "" : "s"} failed to upload after retrying: ${items.join("; ")}.`;
 }
 
 export function updatePlaylistRemoteSongIDs(state, playlist) {

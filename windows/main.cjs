@@ -5,13 +5,17 @@ const { createReadStream } = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { isManagedLibraryFile } = require("./library-paths.cjs");
 const { readAudioMetadata } = require("./metadata.cjs");
 const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload } = require("./server-download.cjs");
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
 const { LocalImportError, searchYouTubeAudioSources } = require("./local-import-core.cjs");
 const { importFileBackedSource, searchFileBackedSources } = require("./local-debrid.cjs");
 const { artworkFileDataURL, fetchArtwork, importConfirmedSource, resolveLocalImportSource } = require("./local-import-platform.cjs");
+const { looksLikeLink, searchAllPlatforms } = require("./local-search.cjs");
+const { downloadResolvedSoundCloudAudio, isSoundCloudURL, resolveSoundCloudAudio } = require("./local-soundcloud.cjs");
 const { downloadResolvedAudio, resolveYouTubeAudio } = require("./local-youtube.cjs");
+const { serverUploadFilename } = require("./server-upload.cjs");
 
 function protectDetachedOutput(stream) {
   if (!stream?.on) return;
@@ -32,6 +36,8 @@ const SERVER_ARTWORK_TYPES = new Set(["image/avif", "image/gif", "image/jpeg", "
 const MAX_SERVER_ARTWORK_BYTES = 8 * 1024 * 1024;
 const MAX_LOCAL_IMPORT_UPLOAD_BYTES = 256 * 1024 * 1024;
 const MAX_LOCAL_IMPORT_PREVIEW_BYTES = 32 * 1024 * 1024;
+const AUTOMATIC_UPDATE_CHECK_DELAY_MS = 10_000;
+const AUTOMATIC_UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
 let mainWindow;
 let applicationQuitRequested = false;
@@ -41,6 +47,10 @@ const activeLocalImportPreviews = new Map();
 const cachedLocalImportPreviews = new Map();
 const pendingExternalImports = new Map();
 let librarySaveQueue = Promise.resolve();
+let currentWindowsUpdateStatus = { type: "idle" };
+let windowsUpdateCheckPromise = null;
+let automaticUpdateCheckTimer = null;
+let automaticUpdateCheckInterval = null;
 
 async function atomicWriteFile(destination, data, options = "utf8") {
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
@@ -202,7 +212,13 @@ autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 
 function publishUpdateStatus(type, details = {}) {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("update:status", { type, ...details });
+  const previousVersion = currentWindowsUpdateStatus.version;
+  currentWindowsUpdateStatus = {
+    type,
+    ...(type !== "current" && (details.version || previousVersion) ? { version: details.version || previousVersion } : {}),
+    ...details,
+  };
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("update:status", currentWindowsUpdateStatus);
 }
 
 autoUpdater.on("checking-for-update", () => publishUpdateStatus("checking"));
@@ -213,9 +229,33 @@ autoUpdater.on("update-downloaded", (information) => publishUpdateStatus("ready"
 autoUpdater.on("error", (error) => publishUpdateStatus("error", { message: conciseUpdaterError(error) }));
 
 async function checkForWindowsUpdates() {
-  const { feedURL } = await resolveWindowsUpdateFeed();
-  autoUpdater.setFeedURL({ provider: "generic", url: feedURL });
-  return autoUpdater.checkForUpdates();
+  if (windowsUpdateCheckPromise) return windowsUpdateCheckPromise;
+  windowsUpdateCheckPromise = (async () => {
+    const { feedURL } = await resolveWindowsUpdateFeed();
+    autoUpdater.setFeedURL({ provider: "generic", url: feedURL });
+    return autoUpdater.checkForUpdates();
+  })();
+  try {
+    return await windowsUpdateCheckPromise;
+  } finally {
+    windowsUpdateCheckPromise = null;
+  }
+}
+
+function runAutomaticUpdateCheck() {
+  if (!app.isPackaged || ["available", "downloading", "ready"].includes(currentWindowsUpdateStatus.type)) return;
+  void checkForWindowsUpdates().catch((error) => publishUpdateStatus("error", { message: conciseUpdaterError(error) }));
+}
+
+function startAutomaticUpdateChecks() {
+  if (!app.isPackaged || automaticUpdateCheckTimer || automaticUpdateCheckInterval) return;
+  automaticUpdateCheckTimer = setTimeout(() => {
+    automaticUpdateCheckTimer = null;
+    runAutomaticUpdateCheck();
+    automaticUpdateCheckInterval = setInterval(runAutomaticUpdateCheck, AUTOMATIC_UPDATE_CHECK_INTERVAL_MS);
+    automaticUpdateCheckInterval.unref?.();
+  }, AUTOMATIC_UPDATE_CHECK_DELAY_MS);
+  automaticUpdateCheckTimer.unref?.();
 }
 
 function applicationPaths() {
@@ -233,6 +273,10 @@ function safeFilename(value) {
 }
 
 function safeListeningHistory(value) {
+  const optionalText = (candidate, maximumLength = 500) => {
+    const text = typeof candidate === "string" ? candidate.trim() : "";
+    return text ? text.slice(0, maximumLength) : null;
+  };
   return (Array.isArray(value) ? value : [])
     .filter((entry) =>
       entry
@@ -245,6 +289,15 @@ function safeListeningHistory(value) {
       profileID: typeof entry.profileID === "string" && entry.profileID ? entry.profileID : "default",
       startedAt: new Date(entry.startedAt).toISOString(),
       listenedSeconds: Math.max(0, Number(entry.listenedSeconds) || 0),
+      remoteID: optionalText(entry.remoteID, 128),
+      title: optionalText(entry.title),
+      artist: optionalText(entry.artist),
+      album: optionalText(entry.album),
+      duration: entry.duration !== null && entry.duration !== undefined && entry.duration !== ""
+        && Number.isFinite(Number(entry.duration)) && Number(entry.duration) >= 0
+        ? Math.min(Number(entry.duration), 7 * 24 * 60 * 60)
+        : null,
+      originatedOnThisDevice: entry.originatedOnThisDevice !== false,
     }))
     .slice(-2000);
 }
@@ -430,7 +483,13 @@ ipcMain.on("app:close-ready", (event) => {
   else window.close();
 });
 
-app.on("before-quit", () => { applicationQuitRequested = true; });
+app.on("before-quit", () => {
+  applicationQuitRequested = true;
+  if (automaticUpdateCheckTimer) clearTimeout(automaticUpdateCheckTimer);
+  if (automaticUpdateCheckInterval) clearInterval(automaticUpdateCheckInterval);
+  automaticUpdateCheckTimer = null;
+  automaticUpdateCheckInterval = null;
+});
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
@@ -447,17 +506,22 @@ app.whenReady().then(async () => {
   await cleanupLocalImportTemporaryFiles();
   await ensureDirectories();
   createWindow();
-  if (app.isPackaged) setTimeout(() => checkForWindowsUpdates().catch(() => {}), 10000);
+  startAutomaticUpdateChecks();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
-app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
+// This is the Windows client even when it is previewed from macOS. Closing its
+// only window should terminate the preview instead of leaving a hidden process
+// that can recreate the window on activation.
+app.on("window-all-closed", () => app.quit());
 
 ipcMain.handle("update:check", async () => {
   if (!app.isPackaged) return { supported: false };
   await checkForWindowsUpdates();
   return { supported: true };
 });
+
+ipcMain.handle("update:state", () => currentWindowsUpdateStatus);
 
 ipcMain.handle("update:install", () => {
   if (!app.isPackaged) return false;
@@ -589,7 +653,8 @@ ipcMain.handle("library:import", async () => {
 
 ipcMain.handle("local-import:capabilities", () => ({
   enabled: localImportEnabled(),
-  sources: ["spotify", "youtube", "youtube_playlists", "youtube_music", "debrid_vault", "torbox"],
+  sources: ["spotify", "spotify_playlists", "soundcloud", "soundcloud_playlists", "youtube", "youtube_playlists", "youtube_music", "debrid_vault", "torbox"],
+  searchProviders: ["spotify", "soundcloud", "youtube"],
   outputFormats: { audio: "m4a", video: "mp4" },
 }));
 
@@ -624,15 +689,19 @@ ipcMain.handle("local-import:preview", async (event, { sourceURL } = {}) => {
   await clearLocalImportPreview(senderID);
   const controller = new AbortController();
   const directory = await fs.mkdtemp(path.join(app.getPath("temp"), "resonance-local-import-preview-"));
-  const filePath = path.join(directory, "preview.m4a");
+  const soundCloudSource = isSoundCloudURL(source);
+  const filePath = path.join(directory, soundCloudSource ? "preview.mp3" : "preview.m4a");
   const operation = { controller, directory };
   activeLocalImportPreviews.set(senderID, operation);
   try {
-    const resolved = await resolveYouTubeAudio(source, controller.signal);
+    const resolved = soundCloudSource
+      ? await resolveSoundCloudAudio(source, controller.signal)
+      : await resolveYouTubeAudio(source, controller.signal);
     if (resolved.contentLength > MAX_LOCAL_IMPORT_PREVIEW_BYTES) {
       throw new LocalImportError("previewing", "PREVIEW_TOO_LARGE", "This source is too large to preview. You can still select and import it.");
     }
-    await downloadResolvedAudio(resolved, filePath, controller.signal);
+    if (soundCloudSource) await downloadResolvedSoundCloudAudio(resolved, filePath, controller.signal);
+    else await downloadResolvedAudio(resolved, filePath, controller.signal);
     controller.signal.throwIfAborted();
     const value = { sourceURL: source, filePath, directory, durationSeconds: Math.min(30, resolved.durationSeconds || 30) };
     cachedLocalImportPreviews.set(senderID, value);
@@ -669,7 +738,10 @@ ipcMain.handle("local-import:resolve", async (event, { source, mediaKind, baseUR
   try {
     pendingExternalImports.delete(event.sender.id);
     const sourceWarnings = [];
-    const result = await resolveLocalImportSource(String(source || ""), controller.signal, publish, {
+    const input = String(source || "").trim();
+    const result = !looksLikeLink(input)
+      ? await searchAllPlatforms(input, controller.signal)
+      : await resolveLocalImportSource(input, controller.signal, publish, {
       searchYouTubeAudioSources: async (track, signal) => {
         const [youtubeResult, externalResult] = await Promise.allSettled([
           searchYouTubeAudioSources(track, signal),
@@ -810,7 +882,7 @@ ipcMain.handle("local-import:cancel", (event) => {
   return true;
 });
 
-ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profileID, filePath } = {}) => {
+ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profileID, filePath, title } = {}) => {
   if (!localImportEnabled()) {
     return { ok: false, error: { stage: "syncing", code: "FEATURE_DISABLED", message: "Local link import is disabled in this build." } };
   }
@@ -818,8 +890,9 @@ ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profi
   try {
     const paths = await ensureDirectories();
     const absolute = path.resolve(String(filePath || ""));
-    if (!absolute.startsWith(path.resolve(paths.local) + path.sep)) {
-      throw new LocalImportError("syncing", "INVALID_LOCAL_FILE", "Only a song already saved in the local Resonance library can be uploaded.");
+    const managedRoots = [paths.local, paths.remote];
+    if (!isManagedLibraryFile(absolute, managedRoots)) {
+      throw new LocalImportError("syncing", "INVALID_LOCAL_FILE", "Only a song already saved in the managed Resonance library can be uploaded.");
     }
     const information = await fs.stat(absolute);
     if (!information.isFile() || information.size <= 0 || information.size > MAX_LOCAL_IMPORT_UPLOAD_BYTES) {
@@ -829,7 +902,7 @@ ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profi
       throw new LocalImportError("syncing", "ADMIN_KEY_REQUIRED", "Add a server admin key before uploading this local song.");
     }
     const base = normalizeBaseURL(baseURL);
-    const filename = safeFilename(path.basename(absolute));
+    const filename = serverUploadFilename(absolute, title);
     const url = new URL("api/v1/admin/songs", base);
     url.searchParams.set("filename", filename);
     let completed = 0;
@@ -1012,7 +1085,25 @@ ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token,
     },
     body: JSON.stringify({ client: "windows", entries }),
   });
-  if (response.status === 404) return { supported: false, accepted: 0 };
+  if (response.status === 404 || response.status === 405) return { supported: false, accepted: 0 };
+  if (!response.ok) throw await serverResponseError(response);
+  return { supported: true, ...(await response.json()) };
+});
+
+ipcMain.handle("server:listening-history:get", async (_event, { baseURL, token, profileID, limit = 2000 }) => {
+  if (!token) throw new Error("Enter the server access token.");
+  const base = normalizeBaseURL(baseURL);
+  const url = new URL("api/v1/listening-history", base);
+  url.searchParams.set("limit", String(Math.max(1, Math.min(2000, Math.floor(Number(limit) || 2000)))));
+  const response = await fetch(url, {
+    headers: {
+      ...profileHeaders(token, profileID),
+      Accept: "application/json",
+    },
+  });
+  if (response.status === 404 || response.status === 405) {
+    return { supported: false, profile_id: profileID || "default", entries: [] };
+  }
   if (!response.ok) throw await serverResponseError(response);
   return { supported: true, ...(await response.json()) };
 });
@@ -1044,20 +1135,21 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
       item.remoteID === song.id
       && matchesServerOrigin(item.sourceServer, base.origin)
       && (item.syncProfileID || "default") === (profileID || "default"));
-    let current = false;
+    let alreadyDownloaded = false;
     if (matching?.filePath) {
       try {
         const information = await fs.stat(matching.filePath);
         const correctSize = !Number.isFinite(Number(song.size)) || information.size === Number(song.size);
         const correctRevision = !matching.remoteModified || !remoteModified || matching.remoteModified === remoteModified;
-        current = information.isFile() && correctSize && correctRevision;
+        alreadyDownloaded = information.isFile() && correctSize && correctRevision;
       } catch {
-        current = false;
+        alreadyDownloaded = false;
       }
     }
-    if (current) {
+    if (alreadyDownloaded) {
       completed += 1;
       event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length });
+      // Skip only this song. The rest of a Download All batch must still run.
       continue;
     }
     event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length });
@@ -1130,53 +1222,102 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
   }
 });
 
-ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID }) => {
+ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, files } = {}) => {
   if (!adminToken) throw new Error("Enter the server admin key.");
-  const selection = await dialog.showOpenDialog(mainWindow, {
-    title: "Upload music to Resonance Server",
-    properties: ["openFile", "multiSelections"],
-    filters: [{ name: "Audio", extensions: [...AUDIO_EXTENSIONS].map((item) => item.slice(1)) }],
-  });
-  if (selection.canceled) return { uploaded: 0 };
+  let requestedFiles;
+  if (Array.isArray(files)) {
+    const paths = await ensureDirectories();
+    const managedRoots = [paths.local, paths.remote];
+    requestedFiles = files.map((item) => ({
+      trackID: String(item?.trackID || ""),
+      filePath: path.resolve(String(item?.filePath || "")),
+      title: String(item?.title || ""),
+      artist: String(item?.artist || ""),
+      uploadFilename: serverUploadFilename(item?.filePath, item?.title),
+    }));
+    if (requestedFiles.some((item) => !item.trackID || !isManagedLibraryFile(item.filePath, managedRoots))) {
+      throw new Error("Only songs stored in the managed Resonance library can be batch uploaded.");
+    }
+  } else {
+    const selection = await dialog.showOpenDialog(mainWindow, {
+      title: "Upload music to Resonance Server",
+      properties: ["openFile", "multiSelections"],
+      filters: [{ name: "Audio", extensions: [...AUDIO_EXTENSIONS].map((item) => item.slice(1)) }],
+    });
+    if (selection.canceled) return { uploaded: 0, results: [], failed: [] };
+    requestedFiles = selection.filePaths.map((filePath) => ({
+      filePath,
+      title: path.basename(filePath, path.extname(filePath)),
+      artist: "",
+      uploadFilename: serverUploadFilename(filePath),
+    }));
+  }
   const controller = beginServerTransfer(event);
   const { signal } = controller;
   let uploaded = 0;
+  let completed = 0;
+  const results = [];
+  const failed = [];
   try {
   const base = normalizeBaseURL(baseURL);
-  for (const filePath of selection.filePaths) {
+  for (const item of requestedFiles) {
     signal.throwIfAborted();
-    const filename = path.basename(filePath);
-    event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed: uploaded, total: selection.filePaths.length });
-    const information = await fs.stat(filePath);
-    const url = new URL("api/v1/admin/songs", base);
-    url.searchParams.set("filename", filename);
-    const body = createReadStream(filePath);
-    const abortBody = () => body.destroy(new Error("Upload cancelled"));
-    signal.addEventListener("abort", abortBody, { once: true });
-    let response;
-    try {
-      response = await fetch(url, {
-        method: "PUT",
-        headers: {
-          ...profileHeaders(adminToken, profileID),
-          "Content-Type": "application/octet-stream",
-          "Content-Length": String(information.size),
-        },
-        body,
-        duplex: "half",
-        signal,
-      });
-    } finally {
-      signal.removeEventListener("abort", abortBody);
-      body.destroy();
+    const filePath = item.filePath;
+    const filename = item.uploadFilename || serverUploadFilename(filePath, item.title);
+    event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed, total: requestedFiles.length });
+    let remoteSong = null;
+    let lastError = null;
+    let attempts = 0;
+    while (attempts < 3 && !remoteSong) {
+      attempts += 1;
+      const url = new URL("api/v1/admin/songs", base);
+      url.searchParams.set("filename", filename);
+      let body = null;
+      const abortBody = () => body?.destroy(new Error("Upload cancelled"));
+      try {
+        const information = await fs.stat(filePath);
+        if (!information.isFile() || information.size <= 0) throw new Error("The local song file is missing or empty.");
+        body = createReadStream(filePath);
+        signal.addEventListener("abort", abortBody, { once: true });
+        const response = await fetch(url, {
+          method: "PUT",
+          headers: {
+            ...profileHeaders(adminToken, profileID),
+            "Content-Type": "application/octet-stream",
+            "Content-Length": String(information.size),
+          },
+          body,
+          duplex: "half",
+          signal,
+        });
+        let payload = null;
+        try { payload = await response.json(); } catch { /* Preserve the HTTP error below. */ }
+        remoteSong = response.status === 409 ? payload?.duplicate_of || payload?.duplicateOf || null : payload;
+        if (!response.ok && !(response.status === 409 && remoteSong?.id)) {
+          throw new Error(payload?.error || `Server returned HTTP ${response.status}.`);
+        }
+        if (!remoteSong?.id) throw new Error(`Server did not return the uploaded song for ${filename}.`);
+      } catch (error) {
+        if (signal.aborted || error?.name === "AbortError") throw error;
+        lastError = error;
+        if (attempts < 3) await new Promise((resolve) => setTimeout(resolve, attempts === 1 ? 400 : 1200));
+      } finally {
+        signal.removeEventListener("abort", abortBody);
+        body?.destroy();
+      }
     }
-    if (!response.ok) throw new Error(`Upload failed for ${filename} (HTTP ${response.status})`);
-    uploaded += 1;
-    event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed: uploaded, total: selection.filePaths.length });
+    if (remoteSong) {
+      uploaded += 1;
+      results.push({ trackID: item.trackID || null, filePath, remoteSong });
+    } else {
+      failed.push({ trackID: item.trackID || null, title: item.title || path.basename(filename, path.extname(filename)), artist: item.artist, filename, attempts, message: lastError?.message || "Upload failed." });
+    }
+    completed += 1;
+    event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed, total: requestedFiles.length });
   }
-  return { uploaded };
+  return { uploaded, results, failed };
   } catch (error) {
-    if (error?.name === "AbortError") return { uploaded, cancelled: true };
+    if (error?.name === "AbortError" || signal.aborted) return { uploaded, results, failed, cancelled: true };
     throw error;
   } finally {
     finishServerTransfer(event, controller);

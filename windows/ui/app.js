@@ -4,23 +4,31 @@ import {
   filterPlaylists,
   filterTracks,
   formatServerDownloadFailureNotice,
+  formatServerUploadFailureNotice,
   formatHistoryWindowLabel,
   formatTime,
+  isInstalledVideoTrack,
+  mergeListeningHistoryDocument,
   mergePlaylistDocument,
   mergeSyncedTracks,
   nextIndex,
   niceChartMaximum,
   normalizedVolume,
+  playbackGainForVolume,
   normalizeState,
   playbackRangeForTrack,
+  planMissingDownloadedUploads,
   reconcileUploadedTrack,
   removeClipRangeForTrack,
   resolveSyncProfile,
   restoreProfileState,
+  serverSongMetadataMatches,
   storeActiveProfileState,
   setClipRangeForTrack,
+  squareArtworkCropRect,
   summarizeListeningHistory,
   summarizeListeningStats,
+  titleMarqueeMetrics,
   trackBelongsToActiveProfile,
   tracksForActiveProfile,
   tracksForPlaylist,
@@ -30,6 +38,7 @@ import {
 const api = window.likedSongs;
 const audio = document.querySelector("#audio");
 const clipEditorPreviewAudio = document.querySelector("#clipEditorPreview");
+const installedVideoPlayer = document.querySelector("#installedVideoPlayer");
 const localImportPreviewAudio = document.querySelector("#localImportPreview");
 const content = document.querySelector("#content");
 let state = createEmptyState();
@@ -42,6 +51,8 @@ let serverAdminToken = "";
 let serverCatalog = [];
 const serverArtworkCache = new Map();
 const serverArtworkPending = new Map();
+const squareArtworkCache = new Map();
+const squareArtworkPending = new Map();
 let selectedRemoteIDs = new Set();
 let shuffle = false;
 let repeat = false;
@@ -68,7 +79,12 @@ let listeningHistorySongsExpanded = false;
 let appNoticeDismissTimer = null;
 const APP_NOTICE_LIFETIME_MS = 5000;
 let nowPlayingCloseTimer = null;
+let fullPlayerTitleMarqueeFrame = null;
+let installedVideoSession = null;
+let installedVideoTransitionTimer = null;
 const FULL_PLAYER_TRANSITION_MS = 380;
+const INSTALLED_VIDEO_TRANSITION_MS = 520;
+const INSTALLED_VIDEO_REVEAL_MS = 220;
 let navigationHistory = [{ section: "library", playlistID: null }];
 let navigationIndex = 0;
 let pendingPlaylistTrackID = null;
@@ -117,6 +133,9 @@ let localImportPreviewInterruptedPlayback = false;
 let localImportAutoResolveTimer = null;
 let localImportResolvedSourceKey = null;
 let localImportBatchContext = null;
+let availableWindowsUpdateVersion = null;
+let dismissedWindowsUpdateVersion = null;
+let windowsUpdateReady = false;
 const LOCAL_IMPORT_AUTO_RESOLVE_DELAY = 450;
 let clipEditorStartSeconds = 0;
 let clipEditorEndSeconds = 30;
@@ -129,6 +148,107 @@ let profileGeneration = 0;
 const activeProfileID = () => state.syncProfileID || "default";
 
 const $ = (selector) => document.querySelector(selector);
+
+function rememberSquareArtwork(source, cropped) {
+  if (squareArtworkCache.size >= 256) squareArtworkCache.delete(squareArtworkCache.keys().next().value);
+  squareArtworkCache.set(source, cropped);
+  return cropped;
+}
+
+async function squareArtworkSource(value) {
+  const source = String(value || "");
+  if (!source) return source;
+  if (squareArtworkCache.has(source)) return squareArtworkCache.get(source);
+  if (squareArtworkPending.has(source)) return squareArtworkPending.get(source);
+
+  const pending = (async () => {
+    const image = new Image();
+    image.decoding = "async";
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = reject;
+      image.src = source;
+    });
+    const naturalWidth = image.naturalWidth;
+    const naturalHeight = image.naturalHeight;
+    if (!(naturalWidth > 0 && naturalHeight > 0)) return source;
+
+    const sampleScale = Math.min(1, 160 / Math.max(naturalWidth, naturalHeight));
+    const sampleWidth = Math.max(1, Math.round(naturalWidth * sampleScale));
+    const sampleHeight = Math.max(1, Math.round(naturalHeight * sampleScale));
+    const sample = document.createElement("canvas");
+    sample.width = sampleWidth;
+    sample.height = sampleHeight;
+    const sampleContext = sample.getContext("2d", { willReadFrequently: true });
+    if (!sampleContext) return source;
+    sampleContext.drawImage(image, 0, 0, sampleWidth, sampleHeight);
+    const pixels = sampleContext.getImageData(0, 0, sampleWidth, sampleHeight).data;
+    const crop = squareArtworkCropRect(pixels, sampleWidth, sampleHeight, naturalWidth, naturalHeight);
+    const isUnchangedSquare = naturalWidth === naturalHeight
+      && Math.abs(crop.x) < 0.5
+      && Math.abs(crop.y) < 0.5
+      && Math.abs(crop.width - naturalWidth) < 0.5
+      && Math.abs(crop.height - naturalHeight) < 0.5;
+    if (isUnchangedSquare) return source;
+
+    const outputSize = Math.max(1, Math.min(1024, Math.round(crop.width)));
+    const output = document.createElement("canvas");
+    output.width = outputSize;
+    output.height = outputSize;
+    const outputContext = output.getContext("2d");
+    if (!outputContext) return source;
+    outputContext.imageSmoothingEnabled = true;
+    outputContext.imageSmoothingQuality = "high";
+    outputContext.drawImage(
+      image,
+      crop.x,
+      crop.y,
+      crop.width,
+      crop.height,
+      0,
+      0,
+      outputSize,
+      outputSize,
+    );
+    return output.toDataURL("image/png");
+  })().catch(() => source).then((cropped) => rememberSquareArtwork(source, cropped));
+  squareArtworkPending.set(source, pending);
+  try {
+    return await pending;
+  } finally {
+    if (squareArtworkPending.get(source) === pending) squareArtworkPending.delete(source);
+  }
+}
+
+function squareArtworkImageMarkup(source, alt = "") {
+  const displaySource = squareArtworkCache.get(String(source || "")) || source;
+  return `<img data-square-artwork src="${escapeHTML(displaySource)}" alt="${escapeHTML(alt)}">`;
+}
+
+function bindSquareArtworkImage(image) {
+  if (!(image instanceof HTMLImageElement)
+      || !image.hasAttribute("data-square-artwork")
+      || image.dataset.squareArtworkProcessed) return;
+  const source = image.currentSrc || image.src;
+  if (!source) return;
+  image.dataset.squareArtworkProcessed = "pending";
+  void squareArtworkSource(source).then((cropped) => {
+    if ((image.currentSrc || image.src) !== source) return;
+    image.dataset.squareArtworkProcessed = "true";
+    if (cropped !== source) image.src = cropped;
+  });
+}
+
+function bindSquareArtworkImages(root = document) {
+  root.querySelectorAll("img[data-square-artwork]").forEach((image) => {
+    if (image.complete && image.naturalWidth > 0) bindSquareArtworkImage(image);
+    else image.addEventListener("load", () => bindSquareArtworkImage(image), { once: true });
+  });
+}
+
+document.addEventListener("load", (event) => {
+  bindSquareArtworkImage(event.target);
+}, true);
 const shuffleIcon = `<svg class="shuffle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h2.5a5 5 0 0 1 4 2l5 7a5 5 0 0 0 4 2H21"/><path d="m17 13 4 4-4 4"/><path d="M3 18h2.5a5 5 0 0 0 4-2l5-7a5 5 0 0 1 4-2H21"/><path d="m17 3 4 4-4 4"/></svg>`;
 const plusIcon = `<svg class="plus-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>`;
 const checkIcon = `<svg class="check-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.3 4.3L19 7"/></svg>`;
@@ -136,6 +256,7 @@ const playbackPlayIcon = `<svg class="transport-icon" viewBox="0 0 24 24" aria-h
 const playbackPauseIcon = `<svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><rect class="icon-fill" x="6" y="5" width="4.5" height="14" rx="1.5"/><rect class="icon-fill" x="13.5" y="5" width="4.5" height="14" rx="1.5"/></svg>`;
 const nowPlayingIcon = `<svg class="now-playing-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 9.5h4l5-4v13l-5-4h-4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>`;
 const serverUploadIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14v5h14v-5"/></svg>`;
+const serverUploadMissingIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V5m0 0L8 9m4-4 4 4"/><path d="M6 18.5h12"/><path d="M5 13a4 4 0 0 1 3.8-4A5 5 0 0 1 18 10.5a3.5 3.5 0 0 1-.5 7"/></svg>`;
 const serverDownloadIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0 4.5-4.5M12 16l-4.5-4.5"/><path d="M5 19h14"/></svg>`;
 const serverSelectIcon = `<svg class="server-selection-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3.5 7 2 2 4-4"/><path d="M13 6h8"/><path d="m3.5 17 2 2 4-4"/><path d="M13 16h8"/></svg>`;
 const serverPlaylistIcon = `<svg class="server-playlist-sync-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 0-15.1-6.6L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.1 6.6L21 16"/><path d="M21 21v-5h-5"/></svg>`;
@@ -147,6 +268,7 @@ const historyPlaysIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M
 const historyTodayIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V7l9-2v11"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="15.5" cy="16" r="2.5"/></svg>`;
 const historyLibraryIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v10H3z"/><path d="M3 7V5h7l2 2"/></svg>`;
 const contextPlayIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path class="context-icon-fill" d="M8 5v14l11-7z"/></svg>`;
+const contextVideoIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/></svg>`;
 const contextPauseIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M16 6v12"/></svg>`;
 const contextHeartIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.8 5.8a5.2 5.2 0 0 0-7.4 0L12 7.2l-1.4-1.4a5.2 5.2 0 1 0-7.4 7.4L12 22l8.8-8.8a5.2 5.2 0 0 0 0-7.4Z"/></svg>`;
 const contextPlaylistIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M4 11h10M4 16h7"/><path d="M18 13v7M14.5 16.5h7"/></svg>`;
@@ -425,6 +547,9 @@ function initializeCustomSelects() {
     if (event.key === "Escape") closeAllCustomSelects();
   });
   window.addEventListener("resize", () => customSelectControllers.forEach(positionCustomSelect));
+  window.addEventListener("resize", () => {
+    if ($("#nowPlayingDialog").open) syncFullPlayerTitleMarquee();
+  });
   window.addEventListener("scroll", () => customSelectControllers.forEach(positionCustomSelect), true);
 }
 
@@ -543,6 +668,11 @@ function clipEditorDuration(track = clipEditorTrack()) {
   return Math.max(1, Math.round(Number(track?.duration) || 30));
 }
 
+function clipEditorTrackIsVideo(track = clipEditorTrack()) {
+  const source = String(track?.filePath || track?.fileUrl || "").split(/[?#]/, 1)[0];
+  return /\.(?:mp4|mov|m4v|webm)$/i.test(source);
+}
+
 function clipEditorWaveBars(track) {
   const seed = Array.from(`${track?.id || "resonance"}${track?.title || "clip"}`)
     .reduce((total, character) => total + character.codePointAt(0), 0);
@@ -583,7 +713,7 @@ function setClipEditorBoundary(boundary, seconds) {
   if (boundary === "start") clipEditorStartSeconds = Math.min(value, clipEditorEndSeconds - 1);
   else clipEditorEndSeconds = Math.max(clipEditorStartSeconds + 1, value);
   if (previousStart !== clipEditorStartSeconds || previousEnd !== clipEditorEndSeconds) {
-    void stopClipRangePreview();
+    void stopClipRangePreview({ unload: false });
   }
   updateClipEditorRange();
 }
@@ -676,6 +806,8 @@ function updateClipEditorRange() {
     const position = (index + .5) / bars.length;
     bar.classList.toggle("selected", position >= startRatio && position <= endRatio);
   });
+  clipEditorPreviewEndSeconds = end;
+  syncClipRangePreviewTransport();
 }
 
 function renderClipEditorTrack({ resetRange = false } = {}) {
@@ -688,15 +820,25 @@ function renderClipEditorTrack({ resetRange = false } = {}) {
   $("#previewClipRange").disabled = !track?.fileUrl;
   if (!track) {
     $("#clearClipRange").hidden = true;
+    $("#clipEditorVideoFrame").hidden = true;
     $("#clipEditorStatus").textContent = "Import or download a song before setting a clip range.";
+    syncClipRangePreviewTransport();
     return;
   }
   const duration = clipEditorDuration(track);
   $("#clipEditorTrackTitle").textContent = track.title || "Unknown title";
   $("#clipEditorTrackMeta").textContent = `${track.artist || "Unknown Artist"} · ${displayAlbum(track)}`;
   $("#clipEditorTrackDuration").textContent = formatTime(duration);
-  $("#clipEditorArtwork").innerHTML = track.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : "♪";
+  $("#clipEditorArtwork").innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : "♪";
   $("#clipEditorWaveBars").innerHTML = clipEditorWaveBars(track);
+  $("#clipEditorVideoFrame").hidden = !clipEditorTrackIsVideo(track);
+  clipEditorPreviewAudio.poster = track.artwork || "";
+  if (track.artwork) {
+    const trackID = track.id;
+    void squareArtworkSource(track.artwork).then((cropped) => {
+      if (clipEditorTrack()?.id === trackID) clipEditorPreviewAudio.poster = cropped;
+    });
+  }
   if (resetRange) {
     const savedRange = playbackRangeForTrack(state, track);
     const defaultStart = duration > 60 ? 15 : 0;
@@ -709,6 +851,9 @@ function renderClipEditorTrack({ resetRange = false } = {}) {
   $("#clipEditorStatus").textContent = savedRange
     ? `This profile plays ${formatTime(savedRange.startSeconds)}–${formatTime(savedRange.endSeconds)}. The song file is unchanged.`
     : "Choose a range. The song file is never changed.";
+  void prepareClipRangePreviewMedia(track, { seekToStart: true }).catch(() => {
+    $("#clipEditorStatus").textContent = "Resonance could not load this song for preview.";
+  });
 }
 
 function syncClipRangePreviewButton() {
@@ -716,12 +861,30 @@ function syncClipRangePreviewButton() {
   const playing = !clipEditorPreviewAudio.paused && !clipEditorPreviewAudio.ended;
   button.classList.toggle("playing", playing);
   button.setAttribute("aria-pressed", String(playing));
+  button.setAttribute("aria-label", playing ? "Pause preview" : "Play preview");
   button.disabled = clipEditorPreviewLoading || !clipEditorTrack()?.fileUrl;
   button.innerHTML = clipEditorPreviewLoading
     ? '<span>Preparing…</span>'
     : playing
-    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5"></rect></svg><span>Stop</span>'
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="5" width="3.5" height="14" rx="1"></rect><rect x="13.5" y="5" width="3.5" height="14" rx="1"></rect></svg><span>Pause</span>'
     : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg><span>Preview</span>';
+}
+
+function syncClipRangePreviewTransport() {
+  const seek = $("#clipEditorPreviewSeek");
+  const track = clipEditorTrack();
+  const start = clipEditorStartSeconds;
+  const end = Math.max(start + .25, clipEditorEndSeconds);
+  const rawPosition = Number(clipEditorPreviewAudio.currentTime);
+  const position = Math.min(Math.max(Number.isFinite(rawPosition) && rawPosition > 0 ? rawPosition : start, start), end);
+  seek.min = String(start);
+  seek.max = String(end);
+  seek.step = "0.01";
+  seek.value = String(position);
+  seek.disabled = clipEditorPreviewLoading || !track?.fileUrl;
+  seek.setAttribute("aria-valuetext", `${formatTime(position)} of ${formatTime(end)}`);
+  $("#clipEditorPreviewCurrent").textContent = formatTime(position);
+  $("#clipEditorPreviewEnd").textContent = formatTime(end);
 }
 
 function waitForClipRangePreviewMetadata() {
@@ -739,21 +902,48 @@ function waitForClipRangePreviewMetadata() {
   });
 }
 
+async function prepareClipRangePreviewMedia(track = clipEditorTrack(), { seekToStart = false } = {}) {
+  if (!track?.fileUrl) {
+    syncClipRangePreviewButton();
+    syncClipRangePreviewTransport();
+    return false;
+  }
+  if (clipEditorPreviewAudio.getAttribute("src") !== track.fileUrl) {
+    clipEditorPreviewAudio.pause();
+    clipEditorPreviewAudio.src = track.fileUrl;
+    clipEditorPreviewAudio.volume = playbackGainForVolume(state.volume);
+    await waitForClipRangePreviewMetadata();
+  }
+  clipEditorPreviewEndSeconds = clipEditorEndSeconds;
+  if (seekToStart || clipEditorPreviewAudio.currentTime < clipEditorStartSeconds || clipEditorPreviewAudio.currentTime >= clipEditorEndSeconds) {
+    clipEditorPreviewAudio.currentTime = clipEditorStartSeconds;
+  }
+  syncClipRangePreviewButton();
+  syncClipRangePreviewTransport();
+  return true;
+}
+
 async function resumePlaybackAfterClipRangePreview() {
   if (!clipEditorPreviewInterruptedPlayback) return;
   clipEditorPreviewInterruptedPlayback = false;
   if (currentTrack() && audio.paused) await requestPlayback();
 }
 
-async function stopClipRangePreview({ resumeMain = true } = {}) {
+async function stopClipRangePreview({ resumeMain = true, unload = true } = {}) {
   const wasActive = clipEditorPreviewLoading || Boolean(clipEditorPreviewAudio.getAttribute("src"));
   clipEditorPreviewRequest += 1;
   clipEditorPreviewLoading = false;
   clipEditorPreviewAudio.pause();
-  clipEditorPreviewAudio.removeAttribute("src");
-  clipEditorPreviewAudio.load();
-  clipEditorPreviewEndSeconds = 0;
+  if (unload) {
+    clipEditorPreviewAudio.removeAttribute("src");
+    clipEditorPreviewAudio.load();
+    clipEditorPreviewEndSeconds = 0;
+  } else {
+    clipEditorPreviewEndSeconds = clipEditorEndSeconds;
+    if (clipEditorPreviewAudio.readyState >= 1) clipEditorPreviewAudio.currentTime = clipEditorStartSeconds;
+  }
   syncClipRangePreviewButton();
+  syncClipRangePreviewTransport();
   if (wasActive && $("#clipEditorDialog").open) {
     $("#clipEditorStatus").textContent = "Preview stopped. This does not save the range.";
   }
@@ -763,12 +953,14 @@ async function stopClipRangePreview({ resumeMain = true } = {}) {
 
 async function toggleClipRangePreview() {
   if (!clipEditorPreviewAudio.paused) {
-    await stopClipRangePreview();
+    clipEditorPreviewAudio.pause();
+    syncClipRangePreviewButton();
+    syncClipRangePreviewTransport();
+    await resumePlaybackAfterClipRangePreview();
     return;
   }
   const track = clipEditorTrack();
   if (!track?.fileUrl) return;
-  await stopClipRangePreview();
   const request = ++clipEditorPreviewRequest;
   clipEditorPreviewLoading = true;
   syncClipRangePreviewButton();
@@ -778,11 +970,11 @@ async function toggleClipRangePreview() {
   }
   const status = $("#clipEditorStatus");
   try {
-    clipEditorPreviewAudio.src = track.fileUrl;
-    clipEditorPreviewAudio.volume = normalizedVolume(state.volume);
-    await waitForClipRangePreviewMetadata();
+    await prepareClipRangePreviewMedia(track);
     if (request !== clipEditorPreviewRequest) return;
-    clipEditorPreviewAudio.currentTime = clipEditorStartSeconds;
+    if (clipEditorPreviewAudio.currentTime >= clipEditorEndSeconds - .02) {
+      clipEditorPreviewAudio.currentTime = clipEditorStartSeconds;
+    }
     clipEditorPreviewEndSeconds = clipEditorEndSeconds;
     await clipEditorPreviewAudio.play();
     status.textContent = `Previewing ${formatTime(clipEditorStartSeconds)}–${formatTime(clipEditorEndSeconds)}. This does not save the range.`;
@@ -794,6 +986,7 @@ async function toggleClipRangePreview() {
     if (request === clipEditorPreviewRequest) {
       clipEditorPreviewLoading = false;
       syncClipRangePreviewButton();
+      syncClipRangePreviewTransport();
     }
   }
 }
@@ -896,10 +1089,13 @@ function historyDayDetailsMarkup(summary, dayKey) {
   const dayIndex = summary.days.findIndex((day) => day.key === dayKey);
   if (dayIndex < 0) return "";
   const day = summary.days[dayIndex];
+  const activeTracks = tracksForActiveProfile(state);
   const songs = summary.songSeries
     .map((series) => {
       const activity = series.days[dayIndex];
-      const track = state.tracks.find((item) => item.id === series.trackID);
+      const track = activeTracks.find((item) => item.id === series.trackID)
+        || activeTracks.find((item) => series.remoteID && item.remoteID === series.remoteID)
+        || series;
       return { activity, track, trackID: series.trackID };
     })
     .filter((item) => item.activity.seconds > 0 || item.activity.plays > 0)
@@ -913,7 +1109,7 @@ function historyDayDetailsMarkup(summary, dayKey) {
     ...(hourly ? { hour: "numeric" } : {}),
   }).format(day.date);
   const songRows = songs.map(({ activity, track, trackID }, index) => {
-    const title = track?.title || "Removed song";
+    const title = track?.title || "Unknown song";
     const artist = track?.artist || "Unknown artist";
     const album = displayAlbum(track);
     return `<div class="history-day-song" role="row" data-history-track="${escapeHTML(trackID)}" tabindex="0" aria-keyshortcuts="Shift+F10">
@@ -1048,7 +1244,10 @@ function bindListeningHistoryChartInteractions(summary) {
       .map((series) => ({ series, day: series.days[dayIndex] }))
       .filter((item) => item.day.seconds > 0 || item.day.plays > 0);
     const top = activeSeries.sort((left, right) => right.day.seconds - left.day.seconds)[0];
-    const topTrack = top && state.tracks.find((track) => track.id === top.series.trackID);
+    const activeTracks = tracksForActiveProfile(state);
+    const topTrack = top && (activeTracks.find((track) => track.id === top.series.trackID)
+      || activeTracks.find((track) => top.series.remoteID && track.remoteID === top.series.remoteID)
+      || top.series);
     tooltip.innerHTML = `<span class="history-tooltip-date">${escapeHTML(date)}</span>
       <span><b>${Math.round(day.seconds / 60).toLocaleString()} min</b><small>${day.plays.toLocaleString()} ${day.plays === 1 ? "play" : "plays"}</small></span>
       <em>${topTrack ? `Top song: ${escapeHTML(topTrack.title)}` : "No listening recorded"}</em>`;
@@ -1101,11 +1300,17 @@ function renderListeningHistory() {
   const range = Number($("#listeningHistoryRange").value) || 30;
   const summary = currentListeningHistorySummary();
   const allTimeStats = summarizeListeningStats(state, new Date());
-  const topTrack = state.tracks.find((track) => track.id === allTimeStats.topTrackID);
+  const activeTracks = tracksForActiveProfile(state);
+  const topSong = allTimeStats.songRanking[0];
+  const topTrack = activeTracks.find((track) => track.id === allTimeStats.topTrackID)
+    || activeTracks.find((track) => topSong?.remoteID && track.remoteID === topSong.remoteID)
+    || topSong;
   const rankedSongs = allTimeStats.songRanking.map((song, index) => {
-    const track = state.tracks.find((item) => item.id === song.trackID);
-    const title = track?.title || "Removed song";
-    const artist = track?.artist || "Unknown artist";
+    const track = activeTracks.find((item) => item.id === song.trackID)
+      || activeTracks.find((item) => song.remoteID && item.remoteID === song.remoteID)
+      || song;
+    const title = track.title || "Unknown song";
+    const artist = track.artist || "Unknown artist";
     return `<article class="history-ranked-song" data-history-track="${escapeHTML(song.trackID)}" tabindex="0" aria-keyshortcuts="Shift+F10">
       <span class="history-ranked-position">#${index + 1}</span>
       ${artwork(track)}
@@ -1114,7 +1319,7 @@ function renderListeningHistory() {
       <em>${escapeHTML(historyListenedTime(song.seconds))} · ${song.plays.toLocaleString()} ${song.plays === 1 ? "play" : "plays"}</em>
     </article>`;
   }).join("");
-  const topSongTitle = topTrack?.title || (allTimeStats.topTrackID ? "Removed song" : "No listening yet");
+  const topSongTitle = topTrack?.title || (allTimeStats.topTrackID ? "Unknown song" : "No listening yet");
   const topSongArtist = topTrack?.artist || (allTimeStats.topTrackID ? "Unknown artist" : "Play a song to build your ranking");
   const dialog = $("#listeningHistoryDialog");
   const previousDialogScroll = dialog.classList.contains("day-expanded") ? dialog.scrollTop : 0;
@@ -1225,6 +1430,12 @@ function beginListeningSession() {
     profileID: activeProfileID(),
     startedAt: new Date().toISOString(),
     listenedSeconds: 0,
+    remoteID: track.remoteID || null,
+    title: track.title || null,
+    artist: track.artist || null,
+    album: track.album || null,
+    duration: Number.isFinite(Number(track.duration)) ? Number(track.duration) : null,
+    originatedOnThisDevice: true,
   };
   state.listeningHistory = [...state.listeningHistory, entry].slice(-2000);
   activeListeningEntryID = entry.id;
@@ -1260,6 +1471,7 @@ function pendingListeningHistoryBatches() {
     return text ? text.slice(0, maximumLength) : null;
   };
   for (const entry of state.listeningHistory) {
+    if (entry.originatedOnThisDevice === false) continue;
     const listenedSeconds = Math.max(0, Number(entry.listenedSeconds) || 0);
     if (listenedSeconds <= 0 || listenedSeconds > 31 * 24 * 60 * 60) continue;
     if (!entry.id || entry.id.length > 128 || !entry.trackID || entry.trackID.length > 128) continue;
@@ -1274,13 +1486,15 @@ function pendingListeningHistoryBatches() {
       entry: {
         id: entry.id,
         trackID: entry.trackID,
-        remoteID: optionalText(track?.remoteID, 128),
+        remoteID: optionalText(entry.remoteID || track?.remoteID, 128),
         startedAt: entry.startedAt,
         listenedSeconds,
-        title: optionalText(track?.title, 500),
-        artist: optionalText(track?.artist, 500),
-        album: optionalText(track?.album, 500),
-        duration: Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60 ? duration : null,
+        title: optionalText(entry.title || track?.title, 500),
+        artist: optionalText(entry.artist || track?.artist, 500),
+        album: optionalText(entry.album || track?.album, 500),
+        duration: Number.isFinite(Number(entry.duration))
+          ? Number(entry.duration)
+          : Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60 ? duration : null,
       },
     };
     if (!entriesByProfile.has(profileID)) entriesByProfile.set(profileID, []);
@@ -1313,6 +1527,7 @@ async function syncListeningHistoryNow({ force = false } = {}) {
   }
   listeningHistorySyncInFlight = (async () => {
     let hadFailure = false;
+    const requestedProfileID = activeProfileID();
     let batches;
     try {
       batches = pendingListeningHistoryBatches();
@@ -1335,6 +1550,23 @@ async function syncListeningHistoryNow({ force = false } = {}) {
       } catch {
         hadFailure = true;
       }
+    }
+    try {
+      const remoteDocument = await api.fetchListeningHistory({
+        baseURL: state.serverURL,
+        token: serverToken,
+        profileID: requestedProfileID,
+        limit: 2000,
+      });
+      if (remoteDocument?.supported !== false && requestedProfileID === activeProfileID()) {
+        if (mergeListeningHistoryDocument(state, remoteDocument, requestedProfileID)) {
+          await persist({ refreshSidebar: false });
+          if ($("#listeningHistoryDialog").open) renderListeningHistory();
+          if ($("#nowPlayingDialog").open && fullPlayerQueueTab === "history") renderFullPlayerQueue();
+        }
+      }
+    } catch {
+      hadFailure = true;
     }
     listeningHistoryRetryAt = hadFailure ? Date.now() + LISTENING_HISTORY_RETRY_DELAY : 0;
     return !hadFailure;
@@ -1508,6 +1740,7 @@ function updateServerArtworkNode(song) {
   }
   const image = document.createElement("img");
   image.alt = "";
+  image.dataset.squareArtwork = "";
   container.append(image);
   container.classList.add("has-image");
   container.setAttribute("aria-busy", "true");
@@ -1566,6 +1799,28 @@ function markPlaylistDirty(playlist) {
   const id = playlist.id.toLocaleLowerCase();
   state.dirtyPlaylistIDs = [...new Set([...state.dirtyPlaylistIDs, id])];
   state.deletedPlaylistIDs = state.deletedPlaylistIDs.filter((item) => item !== id);
+}
+
+function upsertImportedPlaylist(name, trackIDs) {
+  const cleanName = String(name || "Imported Playlist").trim() || "Imported Playlist";
+  const orderedIDs = [...new Set(trackIDs)].filter((id) => state.tracks.some((track) => track.id === id));
+  if (!orderedIDs.length) return null;
+  let playlist = state.playlists.find((item) =>
+    !item.isSystem && item.name.localeCompare(cleanName, undefined, { sensitivity: "accent" }) === 0);
+  if (!playlist) {
+    playlist = {
+      id: crypto.randomUUID().toLocaleLowerCase(),
+      name: cleanName,
+      trackIDs: [],
+      remoteSongIDs: [],
+      isSystem: false,
+    };
+    state.playlists.push(playlist);
+  }
+  playlist.trackIDs = [...new Set([...(playlist.trackIDs || []), ...orderedIDs])];
+  updatePlaylistRemoteSongIDs(state, playlist);
+  markPlaylistDirty(playlist);
+  return playlist;
 }
 
 function markPlaylistDeleted(playlist) {
@@ -1693,11 +1948,11 @@ function artwork(track, { animateLoading = false } = {}) {
   const hasRemoteArtwork = animateLoading && Boolean(source || track?.artwork_url);
   const canRenderImage = source && !/^https?:/i.test(source);
   if (!hasRemoteArtwork) {
-    return `<div class="row-art">${source ? `<img src="${escapeHTML(source)}" alt="">` : "♪"}</div>`;
+    return `<div class="row-art">${source ? squareArtworkImageMarkup(source) : "♪"}</div>`;
   }
   return `<div class="row-art server-artwork-loading${canRenderImage ? " has-image" : ""}" data-server-artwork-id="${escapeHTML(track?.id || "")}" aria-busy="true">
     <span class="server-artwork-placeholder" aria-hidden="true">♪</span>
-    ${canRenderImage ? `<img src="${escapeHTML(source)}" alt="">` : ""}
+    ${canRenderImage ? squareArtworkImageMarkup(source) : ""}
   </div>`;
 }
 
@@ -1734,13 +1989,14 @@ function recentTrackItem(track) {
   const title = track.title || "Untitled";
   const artist = track.artist || "Unknown Artist";
   return `<button class="recent-track-item" type="button" data-recent-track="${escapeHTML(track.id)}" aria-label="Play ${escapeHTML(title)} by ${escapeHTML(artist)}">
-    <span class="recent-track-art">${track?.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : "<span aria-hidden=\"true\">♪</span>"}<span class="recent-track-play" aria-hidden="true">${playbackPlayIcon}</span></span>
+    <span class="recent-track-art">${track?.artwork ? squareArtworkImageMarkup(track.artwork) : "<span aria-hidden=\"true\">♪</span>"}<span class="recent-track-play" aria-hidden="true">${playbackPlayIcon}</span></span>
     <span class="recent-track-copy"><strong>${escapeHTML(title)}</strong><small>${escapeHTML(artist)}</small></span>
   </button>`;
 }
 
 function trackRow(track, index) {
   const liked = state.favorites.includes(track.id);
+  const mediaKind = isInstalledVideoTrack(track) ? "Video" : "Audio";
   const editablePlaylist = state.playlists.find((playlist) => playlist.id === selectedPlaylistID && !playlist.isSystem);
   const actionLabel = `Play ${track.title || "Untitled"} by ${track.artist || "Unknown artist"}`;
   const reorderLabel = editablePlaylist ? ". Press Alt+Up or Alt+Down to reorder" : "";
@@ -1749,7 +2005,7 @@ function trackRow(track, index) {
     : ` aria-keyshortcuts="Enter Space Shift+F10"`;
   return `<div class="track-row ${track.id === currentID ? "playing" : ""}${editablePlaylist ? " playlist-draggable" : ""}" data-track="${track.id}" tabindex="0" aria-label="${escapeHTML(actionLabel + reorderLabel)}"${draggableAttributes}>
     <span class="track-number" title="${track.id === currentID && !audio.paused ? "Now playing" : `Track ${index + 1}`}">${track.id === currentID && !audio.paused ? nowPlayingIcon : index + 1}</span>${artwork(track)}
-    <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / Audio</small></div>
+    <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / ${mediaKind}</small></div>
     <span class="album">${escapeHTML(displayAlbum(track))}</span><span class="track-time">${formatTime(track.duration)}</span>
     <button type="button" class="heart" data-favorite="${track.id}" aria-label="${liked ? "Remove from" : "Add to"} Liked Songs" aria-pressed="${liked}">${liked ? "♥" : "♡"}</button>
   </div>`;
@@ -1960,7 +2216,7 @@ function renderStorage() {
   const storageHasQuery = Boolean(storageQuery.trim());
   const storageEmptyTitle = storageHasQuery ? "No matching songs" : storageScope === "downloads" ? "No server downloads yet" : storageScope === "files" ? "No imported files yet" : "No songs stored yet";
   const storageEmptyHelp = storageHasQuery ? "Try another search." : storageScope === "downloads" ? "Download songs from Music Server to keep them on this device." : "Import audio files to add them to this device.";
-  content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><div><span class="eyebrow">ON THIS DEVICE</span><h1>Song Storage</h1></div><div class="page-title-actions"><div class="storage-import-control" id="storageImportControl"><button class="primary storage-import-trigger" id="storageImportMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="storageImportMenu"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg></span><span>Import</span><svg class="storage-import-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="storage-import-menu" id="storageImportMenu" role="menu" aria-label="Choose an import type" hidden>${localImportAvailable ? '<button class="storage-import-option" type="button" role="menuitem" data-storage-import="link"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span><span><strong>Import from link</strong><small>Spotify or YouTube URL</small></span></button>' : ""}<button class="storage-import-option" type="button" role="menuitem" data-storage-import="files"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4zM12 10v6m-3-3h6"/></svg></span><span><strong>Import files</strong><small>Choose audio from this device</small></span></button></div></div><button class="secondary" id="storageEdit" ${!storageEditing && !tracks.length ? "disabled" : ""}>${storageEditing ? "Done" : "Edit"}</button></div></div>
+  content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><div><span class="eyebrow">ON THIS DEVICE</span><h1>Song Storage</h1></div><div class="page-title-actions"><div class="storage-import-control" id="storageImportControl"><button class="primary storage-import-trigger" id="storageImportMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="storageImportMenu"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg></span><span>Import</span><svg class="storage-import-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="storage-import-menu" id="storageImportMenu" role="menu" aria-label="Choose an import type" hidden>${localImportAvailable ? '<button class="storage-import-option" type="button" role="menuitem" data-storage-import="link"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span><span><strong>Import from link</strong><small>Paste a link or search music</small></span></button>' : ""}<button class="storage-import-option" type="button" role="menuitem" data-storage-import="files"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4zM12 10v6m-3-3h6"/></svg></span><span><strong>Import files</strong><small>Choose audio from this device</small></span></button></div></div><button class="secondary" id="storageEdit" ${!storageEditing && !tracks.length ? "disabled" : ""}>${storageEditing ? "Done" : "Edit"}</button></div></div>
     <div class="storage-summary" id="storageSummary"><div class="storage-ring" style="--local:${localDegrees}deg"><span>♪</span></div><div class="storage-stat"><small>Local audio</small><strong>${formatBytes(localBytes)}</strong><span>${localTracks.length} files</span></div><div class="storage-stat"><small>Server downloads</small><strong>${formatBytes(remoteBytes)}</strong><span>${remoteTracks.length} files</span></div><div class="storage-stat"><small>Available</small><strong id="storageAvailable">Calculating…</strong><span id="storageFreePercent">Disk space</span></div></div>
     <div class="segmented storage-tabs" role="group" aria-label="Storage scope"><button class="${storageScope === "songs" ? "active" : ""}" data-storage-scope="songs" aria-pressed="${storageScope === "songs"}">Songs</button><button class="${storageScope === "downloads" ? "active" : ""}" data-storage-scope="downloads" aria-pressed="${storageScope === "downloads"}">Downloads</button><button class="${storageScope === "files" ? "active" : ""}" data-storage-scope="files" aria-pressed="${storageScope === "files"}">Files</button></div>
     ${storageEditing ? `<div class="selection-bar"><span>${selectedStorageIDs.size} selected</span><button class="danger" id="deleteSelectedStorage" ${selectedStorageIDs.size ? "" : "disabled"}>Delete selected</button></div>` : ""}
@@ -2058,7 +2314,7 @@ function renderServer() {
   const filteredCount = filteredServerCatalog().length;
   const playlistCount = state.playlists.filter((playlist) => !playlist.isSystem).length;
   const connected = serverConnected;
-  const showConnectionDetail = !connected || !serverConnectionText.startsWith("Connected •");
+  const showConnectionDetail = !connected;
   const selectLabel = serverSelecting ? "Cancel song selection" : "Choose songs to download";
   const downloadLabel = serverSelecting
     ? selectedRemoteIDs.size
@@ -2077,7 +2333,8 @@ function renderServer() {
       <span class="server-dot">•</span><span class="server-inline-metric green">${serverDeviceIcon}<strong>${downloaded}</strong><span>on device</span></span>
     </div></div>
     <div class="server-library-bar"><div><strong>${resultSummary}</strong></div><div class="server-actions">
-      <button id="uploadServer" title="Upload songs" aria-label="Upload songs">${serverUploadIcon}</button>
+      <button id="uploadMissingDownloads" title="Upload downloaded songs missing from the server" aria-label="Upload downloaded songs missing from the server">${serverUploadMissingIcon}</button>
+      <button id="uploadServer" title="Upload files" aria-label="Upload files">${serverUploadIcon}</button>
       <button id="syncAll" title="${downloadLabel}" aria-label="${downloadLabel}" ${serverSelecting && !selectedRemoteIDs.size ? "disabled" : ""}>${serverDownloadIcon}</button>
       <button id="syncSelected" class="${serverSelecting ? "active" : ""}" title="${selectLabel}" aria-label="${selectLabel}" aria-pressed="${serverSelecting}">${serverSelecting ? `<b>${selectedRemoteIDs.size}</b>` : serverSelectIcon}</button>
       <button id="syncServerPlaylists" title="Sync playlists" aria-label="Sync playlists">${serverPlaylistIcon}</button>
@@ -2096,6 +2353,7 @@ function renderServer() {
     renderServer();
   };
   $("#syncAll").onclick = () => serverAction(serverSelecting ? "selected" : "all");
+  $("#uploadMissingDownloads").onclick = uploadMissingDownloadedSongs;
   $("#uploadServer").onclick = uploadServerSongs;
   $("#syncServerPlaylists").onclick = () => syncPlaylistsNow();
   bindServerArtworkLoadStates();
@@ -2301,7 +2559,7 @@ function renderSettings() {
     <span class="eyebrow">RESONANCE</span><h1>Settings</h1><p>Manage this device, your music server, playback tools, and updates.</p>
     <div class="settings-grid">
       <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">${serverDeviceIcon}</span><div><h2>Music Server</h2><p>${serverConnected ? "Connected" : "Not connected"} · ${escapeHTML(profile.name || "Default")}</p><small>${escapeHTML(state.serverURL || "No server configured")}</small></div><button id="settingsServer" class="secondary" type="button">Connection settings</button></section>
-      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">${historyClockIcon}</span><div><h2>Listening & clips</h2><p>${track ? escapeHTML(track.title) : "Nothing selected"}</p><small>${Math.round(audio.volume * 100)}% volume · ${audio.playbackRate || 1}× speed</small></div><div class="settings-card-actions"><button id="settingsHistory" class="secondary" type="button">Listening History</button><button id="settingsClipEditor" class="secondary" type="button" ${track ? "" : "disabled"}>Clip Editor</button></div></section>
+      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">${historyClockIcon}</span><div><h2>Listening & clips</h2><p>${track ? escapeHTML(track.title) : "Nothing selected"}</p><small>${Math.round(state.volume * 100)}% volume · ${audio.playbackRate || 1}× speed</small></div><div class="settings-card-actions"><button id="settingsHistory" class="secondary" type="button">Listening History</button><button id="settingsClipEditor" class="secondary" type="button" ${track ? "" : "disabled"}>Clip Editor</button></div></section>
       <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">♪</span><div><h2>Local storage</h2><p>${tracksForActiveProfile(state).length} songs on this profile</p><small>Manage imports, downloads, and local files.</small></div><button id="settingsStorage" class="secondary" type="button">Manage storage</button></section>
       <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">↻</span><div><h2>Updates</h2><p id="settingsUpdateStatus">${escapeHTML($("#updateStatus").textContent || "Automatic in-app updates")}</p><small>Installed builds update through the GitHub release feed.</small></div><button id="settingsCheckUpdates" class="secondary" type="button">Check now</button></section>
     </div>
@@ -2323,6 +2581,7 @@ function render() {
   renderQueue();
   $("#navBack").disabled = navigationIndex === 0;
   $("#navForward").disabled = navigationIndex + 1 >= navigationHistory.length;
+  bindSquareArtworkImages();
 }
 
 function bindTrackRows(playbackTracks = playlistTracks()) {
@@ -2472,6 +2731,7 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
 
 let activeContextMenuReturnFocus = null;
 let activeContextMenuPosition = { x: 8, y: 8 };
+let activeContextMenuAlignEnd = false;
 
 function closeTrackContextMenu({ restoreFocus = false } = {}) {
   const menu = $("#trackContextMenu");
@@ -2479,37 +2739,45 @@ function closeTrackContextMenu({ restoreFocus = false } = {}) {
   menu.hidden = true;
   menu.innerHTML = "";
   menu.onkeydown = null;
+  menu.classList.remove("full-player-context");
   if (restoreFocus) activeContextMenuReturnFocus?.focus?.();
   activeContextMenuReturnFocus = null;
+  activeContextMenuAlignEnd = false;
 }
 
-function beginContextMenu(event) {
+function beginContextMenu(event, { alignToEnd = false } = {}) {
   event.preventDefault();
   event.stopPropagation();
   closeTrackContextMenu();
   const anchor = event.currentTarget?.getBoundingClientRect?.();
   activeContextMenuReturnFocus = event.currentTarget || null;
+  activeContextMenuAlignEnd = alignToEnd;
   activeContextMenuPosition = {
-    x: Number(event.clientX) > 0 ? Number(event.clientX) : (anchor?.left ?? 8) + 24,
-    y: Number(event.clientY) > 0 ? Number(event.clientY) : (anchor?.top ?? 8) + 24,
+    x: alignToEnd ? (anchor?.right ?? 8) : Number(event.clientX) > 0 ? Number(event.clientX) : (anchor?.left ?? 8) + 24,
+    y: alignToEnd ? (anchor?.bottom ?? 8) + 8 : Number(event.clientY) > 0 ? Number(event.clientY) : (anchor?.top ?? 8) + 24,
   };
 }
 
 function renderContextMenu({ title, subtitle, actions }) {
+  const showHeader = arguments[0]?.showHeader === true;
   const menu = $("#trackContextMenu");
   menu.setAttribute("aria-label", `${title || "Item"} options`);
+  menu.classList.toggle("full-player-context", showHeader);
   const actionMarkup = actions.map((action, index) => {
     if (action.divider) return '<div class="context-divider" role="separator"></div>';
-    return `<button class="${action.danger ? "context-danger" : ""}" type="button" role="menuitem" data-context-action="${index}" ${action.disabled ? "disabled" : ""}>
+    const classes = [action.danger ? "context-danger" : "", action.emphasis ? "context-emphasis" : ""].filter(Boolean).join(" ");
+    return `<button class="${classes}" type="button" role="menuitem" data-context-action="${index}" ${action.disabled ? "disabled" : ""}>
       <span class="context-action-icon" aria-hidden="true">${action.icon || ""}</span>
       <span class="context-action-label">${escapeHTML(action.label)}</span>
       ${action.trailing ? `<span class="context-action-trailing">${escapeHTML(action.trailing)}</span>` : ""}
     </button>`;
   }).join("");
-  menu.innerHTML = actionMarkup;
+  const headerMarkup = showHeader ? `<div class="context-menu-header"><strong>${escapeHTML(title || "Untitled")}</strong><small>${escapeHTML(subtitle || "Unknown artist")}</small></div>` : "";
+  menu.innerHTML = `${headerMarkup}${actionMarkup}`;
   menu.hidden = false;
   const positionMenu = () => {
-    menu.style.left = `${Math.max(8, Math.min(activeContextMenuPosition.x, innerWidth - menu.offsetWidth - 8))}px`;
+    const requestedLeft = activeContextMenuAlignEnd ? activeContextMenuPosition.x - menu.offsetWidth : activeContextMenuPosition.x;
+    menu.style.left = `${Math.max(8, Math.min(requestedLeft, innerWidth - menu.offsetWidth - 8))}px`;
     menu.style.top = `${Math.max(8, Math.min(activeContextMenuPosition.y, innerHeight - menu.offsetHeight - 8))}px`;
   };
   positionMenu();
@@ -2589,6 +2857,17 @@ function renderTrackContextMenu(track, options = {}) {
     },
     { label: liked ? "Remove from Liked Songs" : "Add to Liked Songs", icon: contextHeartIcon, onSelect: () => toggleFavorite(track.id) },
   ];
+  if (options.source === "full-player" && isInstalledVideoTrack(track)) {
+    actions.unshift(
+      {
+        label: "Watch Video",
+        icon: contextVideoIcon,
+        emphasis: true,
+        onSelect: () => openInstalledVideo(track),
+      },
+      { divider: true },
+    );
+  }
   if (activePlaylist) {
     actions.push({
       label: `Remove from ${activePlaylist.name}`,
@@ -2621,13 +2900,18 @@ function renderTrackContextMenu(track, options = {}) {
       },
     );
   }
-  renderContextMenu({ title: track.title || "Untitled", subtitle: track.artist || "Unknown artist", actions });
+  renderContextMenu({
+    title: track.title || "Untitled",
+    subtitle: track.artist || "Unknown artist",
+    actions,
+    showHeader: options.source === "full-player",
+  });
 }
 
 function openTrackContextMenu(event, trackID, options = {}) {
   const track = state.tracks.find((item) => item.id === trackID && trackBelongsToActiveProfile(state, item));
   if (!track) return;
-  beginContextMenu(event);
+  beginContextMenu(event, { alignToEnd: options.alignToEnd });
   renderTrackContextMenu(track, options);
 }
 
@@ -2746,7 +3030,7 @@ function updateLocalImportMediaKindUI() {
 
 function updateLocalImportConfirmLabel() {
   const confirm = $("#confirmLocalImport");
-  if (localImportResolution?.kind === "youtube_playlist") {
+  if (localImportResolution?.kind?.endsWith("_playlist")) {
     const count = document.querySelectorAll('input[name="localImportPlaylistItem"]:checked').length;
     const noun = selectedLocalImportMediaKind() === "video" ? "video" : "song";
     const label = count ? `Download ${count} ${noun}${count === 1 ? "" : "s"}` : `Choose ${noun}s`;
@@ -2767,9 +3051,11 @@ function localImportSourceIsReady(value) {
   const segments = url.pathname.split("/").filter(Boolean);
   if (["open.spotify.com", "www.open.spotify.com"].includes(hostname)) {
     if (segments[0]?.startsWith("intl-")) segments.shift();
-    return segments[0] === "track" && /^[a-zA-Z0-9]{22}$/.test(segments[1] || "");
+    return ["track", "playlist"].includes(segments[0]) && /^[a-zA-Z0-9]{22}$/.test(segments[1] || "");
   }
   if (["spotify.link", "www.spotify.link"].includes(hostname)) return segments.length > 0;
+  if (["soundcloud.com", "www.soundcloud.com", "m.soundcloud.com"].includes(hostname)) return segments.length >= 2;
+  if (hostname === "on.soundcloud.com") return segments.length > 0;
   if (["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"].includes(hostname)) {
     const playlistID = url.searchParams.get("list");
     if (playlistID && /^[a-zA-Z0-9_-]{10,150}$/.test(playlistID)) return true;
@@ -2781,6 +3067,29 @@ function localImportSourceIsReady(value) {
       && /^[a-zA-Z0-9_-]{11}$/.test(segments[1] || "");
   }
   return false;
+}
+
+function localImportInputIsLink(value) {
+  const input = String(value || "").trim();
+  if (!input || /\s/.test(input)) return /^[a-z][a-z0-9+.-]*:\/\//i.test(input);
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(input)
+    || /^www\./i.test(input)
+    || /^[^/?#]+\.[a-z]{2,}(?:[/?#:]|$)/i.test(input);
+}
+
+function normalizeLocalImportMediaKindForSource() {
+  const source = $("#localImportSource").value.trim();
+  let hostname = "";
+  try { hostname = new URL(source).hostname.toLowerCase(); }
+  catch { /* Plain-text searches are audio-only. */ }
+  const audioOnly = Boolean(source) && !localImportInputIsLink(source) || [
+    "open.spotify.com", "www.open.spotify.com", "spotify.link", "www.spotify.link",
+    "soundcloud.com", "www.soundcloud.com", "m.soundcloud.com", "on.soundcloud.com",
+  ].includes(hostname);
+  if (!audioOnly || selectedLocalImportMediaKind() === "audio") return;
+  const audioKind = document.querySelector('input[name="localImportMediaKind"][value="audio"]');
+  if (audioKind) audioKind.checked = true;
+  updateLocalImportMediaKindUI();
 }
 
 function clearLocalImportAutoResolve() {
@@ -2837,6 +3146,10 @@ function openLocalImport() {
 }
 
 function localImportProviderLabel(candidate) {
+  if (candidate.searchProvider === "spotify") return "Spotify";
+  if (candidate.searchProvider === "soundcloud") return "SoundCloud";
+  if (candidate.searchProvider === "youtube") return "YouTube";
+  if (candidate.sourceProvider === "soundcloud") return "SoundCloud";
   if (candidate.sourceProvider === "youtube_music") return "YouTube Music";
   if (candidate.sourceProvider === "debrid_vault") return "Debrid Vault";
   if (candidate.sourceProvider === "torbox_file") return "TorBox file";
@@ -2844,8 +3157,22 @@ function localImportProviderLabel(candidate) {
 }
 
 function localImportCandidateDetails(candidate) {
-  if (localImportResolution?.kind === "youtube_playlist") {
-    return [candidate.artist || "Unknown uploader", candidate.durationSeconds ? formatTime(candidate.durationSeconds) : null, "YouTube"];
+  if (localImportResolution?.kind === "search_results") {
+    const metadata = candidate.importMetadata || candidate;
+    const previewProvider = candidate.sourceProvider === "soundcloud"
+      ? "SoundCloud"
+      : candidate.sourceProvider === "youtube_music" ? "YouTube Music" : "YouTube";
+    const resultProvider = localImportProviderLabel(candidate);
+    return [
+      metadata.artist || "Unknown artist",
+      metadata.album,
+      metadata.durationSeconds ? formatTime(metadata.durationSeconds) : null,
+      previewProvider !== resultProvider ? `Preview via ${previewProvider}` : null,
+    ];
+  }
+  if (localImportResolution?.kind?.endsWith("_playlist")) {
+    const metadata = candidate.importMetadata || candidate;
+    return [metadata.artist || "Unknown artist", metadata.durationSeconds ? formatTime(metadata.durationSeconds) : null, localImportProviderLabel(candidate)];
   }
   if (localImportResolution?.mediaKind === "video") {
     const dimensions = candidate.width && candidate.height ? `${candidate.width}×${candidate.height}` : null;
@@ -2863,7 +3190,7 @@ function localImportCandidateDetails(candidate) {
 function localImportCandidateCanPreview(candidate) {
   return localImportResolution?.mediaKind === "audio"
     && !candidate?.serverBacked
-    && ["youtube", "youtube_music"].includes(candidate?.sourceProvider)
+    && ["soundcloud", "youtube", "youtube_music"].includes(candidate?.sourceProvider)
     && typeof candidate?.sourceURL === "string";
 }
 
@@ -2949,7 +3276,7 @@ async function toggleLocalImportPreview(index) {
     localImportPreviewIndex = index;
     localImportPreviewLimitSeconds = Math.max(1, Number(response.result.durationSeconds) || 30);
     localImportPreviewAudio.src = response.result.fileURL;
-    localImportPreviewAudio.volume = normalizedVolume(state.volume);
+    localImportPreviewAudio.volume = playbackGainForVolume(state.volume);
     localImportPreviewAudio.currentTime = 0;
     await localImportPreviewAudio.play();
   } catch (error) {
@@ -2997,11 +3324,25 @@ async function uploadLocalImportTrack(track) {
   if (!track?.filePath) {
     return { ok: false, error: { stage: "syncing", code: "LOCAL_FILE_MISSING", message: "The local song file could not be found for server upload." } };
   }
+  await refreshServerCatalogAfterLocalImportUpload();
+  const existingRemoteSong = serverCatalogMatchForLocalImport(track);
+  if (existingRemoteSong) {
+    if (reconcileUploadedTrack(state, track.id, existingRemoteSong, {
+      serverURL: state.serverURL,
+      profileID: activeProfileID(),
+    })) {
+      playlistMutationGeneration += 1;
+      await persist({ refreshSidebar: false });
+      schedulePlaylistSync();
+    }
+    return { ok: true, remoteSong: existingRemoteSong, skipped: true };
+  }
   const result = await api.uploadLocalImport({
     baseURL: state.serverURL,
     adminToken: serverAdminToken,
     profileID: activeProfileID(),
     filePath: track.filePath,
+    title: track.title || "Untitled song",
   });
   if (result?.ok && result.remoteSong && reconcileUploadedTrack(state, track.id, result.remoteSong, {
     serverURL: state.serverURL,
@@ -3015,17 +3356,84 @@ async function uploadLocalImportTrack(track) {
 }
 
 async function refreshServerCatalogAfterLocalImportUpload() {
-  if (!state.serverURL || !serverToken.trim()) return;
+  if (!state.serverURL || !serverToken.trim()) return false;
   try {
     const catalog = await api.fetchCatalog({ baseURL: state.serverURL, token: serverToken, profileID: activeProfileID() });
     serverCatalog = catalog.songs || [];
     hydrateServerCatalogArtwork(serverCatalog);
     serverConnectionText = `Connected • ${catalog.count} song${catalog.count === 1 ? "" : "s"}`;
     if (section === "server") renderServer();
+    return true;
   } catch {
     // The upload already succeeded. A catalog refresh failure should not report
     // that the saved server copy was lost.
+    return false;
   }
+}
+
+function serverCatalogMatchForLocalImport(track) {
+  const remoteID = String(track?.remoteID || "").trim();
+  if (remoteID) {
+    const remoteMatch = serverCatalog.find((song) => String(song?.id || "").trim() === remoteID);
+    if (remoteMatch) return remoteMatch;
+  }
+  const contentHash = String(track?.contentSha256 || "").trim().toLocaleLowerCase();
+  const hashMatch = contentHash
+    ? serverCatalog.find((song) =>
+      String(song?.content_sha256 || song?.contentSha256 || "").trim().toLocaleLowerCase() === contentHash)
+    : null;
+  return hashMatch || serverCatalog.find((song) => serverSongMetadataMatches(track, song)) || null;
+}
+
+async function prepareLocalImportUploadBatch(tracks) {
+  const catalogRefreshed = await refreshServerCatalogAfterLocalImportUpload();
+  const pending = [];
+  let reconciled = false;
+  for (const track of tracks) {
+    const remoteSong = serverCatalogMatchForLocalImport(track);
+    if (remoteSong) {
+      reconciled = reconcileUploadedTrack(state, track.id, remoteSong, {
+        serverURL: state.serverURL,
+        profileID: activeProfileID(),
+      }) || reconciled;
+      continue;
+    }
+    if (!catalogRefreshed && track.remoteID && trackBelongsToActiveProfile(state, track)) continue;
+    pending.push(track);
+  }
+  if (reconciled) {
+    playlistMutationGeneration += 1;
+    await persist({ refreshSidebar: false });
+    schedulePlaylistSync();
+  }
+  return pending;
+}
+
+async function uploadLocalImportTracks(tracks) {
+  const result = await api.uploadServer({
+    baseURL: state.serverURL,
+    adminToken: serverAdminToken,
+    profileID: activeProfileID(),
+    files: tracks.map((track) => ({
+      trackID: track.id,
+      filePath: track.filePath,
+      title: track.title || "Untitled song",
+      artist: track.artist || "",
+    })),
+  });
+  let reconciled = false;
+  for (const uploaded of result?.results || []) {
+    reconciled = reconcileUploadedTrack(state, uploaded.trackID, uploaded.remoteSong, {
+      serverURL: state.serverURL,
+      profileID: activeProfileID(),
+    }) || reconciled;
+  }
+  if (reconciled) {
+    playlistMutationGeneration += 1;
+    await persist({ refreshSidebar: false });
+    schedulePlaylistSync();
+  }
+  return result;
 }
 
 function resetLocalImportArtwork(node, mediaKind) {
@@ -3047,13 +3455,16 @@ async function renderLocalImportArtwork(track, candidates, mediaKind) {
       resetLocalImportArtwork(node, mediaKind);
       return;
     }
+    const croppedArtwork = await squareArtworkSource(artwork);
     const image = new Image();
     image.alt = "";
     image.decoding = "async";
+    image.dataset.squareArtwork = "";
+    image.dataset.squareArtworkProcessed = "true";
     await new Promise((resolve, reject) => {
       image.onload = resolve;
       image.onerror = reject;
-      image.src = artwork;
+      image.src = croppedArtwork;
     });
     if (request !== localImportArtworkRequest) return;
     node.replaceChildren(image);
@@ -3064,29 +3475,75 @@ async function renderLocalImportArtwork(track, candidates, mediaKind) {
   }
 }
 
+async function renderLocalImportPlaylistItemArtwork(node, source, request) {
+  if (!source || request !== localImportArtworkRequest) return;
+  node.classList.add("loading");
+  try {
+    const artwork = await api.fetchLocalImportArtwork(source);
+    if (!artwork || request !== localImportArtworkRequest) return;
+    const image = new Image();
+    image.alt = "";
+    image.decoding = "async";
+    image.src = await squareArtworkSource(artwork);
+    await image.decode();
+    if (request !== localImportArtworkRequest) return;
+    node.replaceChildren(image);
+    node.classList.remove("loading");
+    node.classList.add("has-image");
+  } catch {
+    if (request === localImportArtworkRequest) node.classList.remove("loading");
+  }
+}
+
 function renderLocalImportResolution() {
   const { track, candidates } = localImportResolution;
   const mediaKind = localImportResolution.mediaKind === "video" ? "video" : "audio";
-  const playlist = localImportResolution.kind === "youtube_playlist";
-  const showPreviews = mediaKind === "audio" && candidates.length > 1;
+  const playlist = localImportResolution.kind?.endsWith("_playlist");
+  const searchResults = localImportResolution.kind === "search_results";
+  const showPreviews = mediaKind === "audio" && (searchResults || candidates.length > 1);
   const selectedKind = document.querySelector(`input[name="localImportMediaKind"][value="${mediaKind}"]`);
   if (selectedKind) selectedKind.checked = true;
   $("#localImportResolved").hidden = false;
   $("#localImportSyncRow").hidden = false;
   void renderLocalImportArtwork(track, candidates, mediaKind);
   $("#localImportTrackTitle").textContent = track.title || "Untitled";
-  $("#localImportTrackMeta").textContent = playlist
+  $("#localImportTrackMeta").textContent = searchResults
+    ? [track.artist, "Spotify • SoundCloud • YouTube"].filter(Boolean).join(" • ")
+    : playlist
     ? [track.artist, `${candidates.length} available video${candidates.length === 1 ? "" : "s"}`, localImportResolution.playlist?.unavailableCount ? `${localImportResolution.playlist.unavailableCount} unavailable` : null].filter(Boolean).join(" • ")
     : [track.artist, track.album, track.durationSeconds ? formatTime(track.durationSeconds) : null]
     .filter(Boolean).join(" • ");
-  $("#localImportCandidateLegend").textContent = playlist ? "Choose videos to download" : "Choose the source to import";
+  $("#localImportCandidateLegend").textContent = searchResults ? "Choose a result to import or preview" : playlist ? "Choose playlist songs to import" : "Choose the source to import";
   $("#localImportCandidates").classList.toggle("playlist", playlist);
-  $("#localImportCandidates").innerHTML = candidates.map((candidate, index) => `<label class="local-import-candidate${playlist ? " playlist-item" : ""}">
+  $("#localImportCandidates").classList.toggle("search-results", searchResults);
+  const candidateMarkup = (candidate, index) => `<label class="local-import-candidate${playlist ? " playlist-item" : ""}${searchResults ? " search-result" : ""}">
     <input type="${playlist ? "checkbox" : "radio"}" name="${playlist ? "localImportPlaylistItem" : "localImportCandidate"}" value="${index}" ${playlist || index === 0 ? "checked" : ""}>
-    <span><strong>${escapeHTML(candidate.title || "Untitled source")}</strong><small>${escapeHTML(localImportCandidateDetails(candidate).filter(Boolean).join(" • "))}</small></span>
-    <span class="local-import-confidence">${playlist ? candidate.playlistIndex || index + 1 : escapeHTML(candidate.quality || candidate.confidence || "file")}</span>
+    ${playlist || searchResults ? `<span class="local-import-item-art" data-local-import-item-art="${index}">♪</span>` : ""}
+    <span><strong>${escapeHTML(candidate.importMetadata?.title || candidate.title || "Untitled source")}</strong><small>${escapeHTML(localImportCandidateDetails(candidate).filter(Boolean).join(" • "))}</small></span>
+    <span class="local-import-confidence">${searchResults ? escapeHTML(localImportProviderLabel(candidate)) : playlist ? candidate.playlistIndex || index + 1 : escapeHTML(candidate.quality || candidate.confidence || "file")}</span>
     ${showPreviews ? `<button class="local-import-preview-button" type="button" data-local-import-preview="${index}" aria-label="Preview ${escapeHTML(candidate.title || "source")}" aria-pressed="false" title="${localImportCandidateCanPreview(candidate) ? "Preview source" : "Preview unavailable for this source"}" ${localImportCandidateCanPreview(candidate) ? "" : "disabled"}><svg class="preview-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg><svg class="preview-pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M16 6v12"/></svg></button>` : ""}
-  </label>`).join("");
+  </label>`;
+  if (searchResults) {
+    const providerNames = { spotify: "Spotify", soundcloud: "SoundCloud", youtube: "YouTube" };
+    $("#localImportCandidates").innerHTML = Object.entries(providerNames).map(([provider, name]) => {
+      const rows = candidates.map((candidate, index) => ({ candidate, index }))
+        .filter(({ candidate }) => candidate.searchProvider === provider);
+      return `<section class="local-import-search-provider" data-search-provider="${provider}"><h3><span>${name}</span><small>${rows.length} result${rows.length === 1 ? "" : "s"}</small></h3>${rows.length ? rows.map(({ candidate, index }) => candidateMarkup(candidate, index)).join("") : '<p>No previewable results.</p>'}</section>`;
+    }).join("");
+  } else {
+    $("#localImportCandidates").innerHTML = candidates.map(candidateMarkup).join("");
+  }
+  if (playlist || searchResults) {
+    const artworkRequest = localImportArtworkRequest;
+    document.querySelectorAll("[data-local-import-item-art]").forEach((node) => {
+      const candidate = candidates[Number(node.dataset.localImportItemArt)];
+      void renderLocalImportPlaylistItemArtwork(
+        node,
+        candidate?.importMetadata?.artworkURL || candidate?.thumbnailURL || null,
+        artworkRequest,
+      );
+    });
+  }
   document.querySelectorAll('input[name="localImportCandidate"], input[name="localImportPlaylistItem"]').forEach((input) => input.onchange = updateLocalImportSyncForSelection);
   document.querySelectorAll("[data-local-import-preview]").forEach((button) => {
     button.onclick = (event) => {
@@ -3108,10 +3565,11 @@ async function resolveLinkImport() {
   clearLocalImportAutoResolve();
   const source = $("#localImportSource").value.trim();
   if (!source) {
-    showLocalImportError({ stage: "resolving_metadata", message: "Paste a Spotify track or YouTube video URL first." });
+    showLocalImportError({ stage: "resolving_metadata", message: "Enter a song, artist, album, or supported Spotify, SoundCloud, or YouTube link first." });
     return;
   }
   await stopLocalImportPreview({ release: true, resumeMain: true });
+  normalizeLocalImportMediaKindForSource();
   localImportRunning = true;
   const mediaKind = selectedLocalImportMediaKind();
   const sourceKey = `${mediaKind}:${source}`;
@@ -3126,7 +3584,7 @@ async function resolveLinkImport() {
   $("#cancelLocalImport").hidden = false;
   $("#chooseLocalFiles").disabled = true;
   setLocalImportMediaKindDisabled(true);
-  setLocalImportStage({ stage: "resolving_metadata" });
+  setLocalImportStage({ stage: localImportInputIsLink(source) ? "resolving_metadata" : "searching_candidates" });
   try {
     const response = await api.resolveLocalImport({
       source,
@@ -3152,7 +3610,7 @@ async function resolveLinkImport() {
   }
 }
 
-async function confirmYouTubePlaylistImport() {
+async function confirmPlaylistImport() {
   const selected = [...document.querySelectorAll('input[name="localImportPlaylistItem"]:checked')]
     .map((input) => localImportResolution.candidates[Number(input.value)])
     .filter(Boolean);
@@ -3166,7 +3624,7 @@ async function confirmYouTubePlaylistImport() {
     showLocalImportError(uploadConfigurationError);
     return;
   }
-  const playlistTitle = localImportResolution.playlist?.title || localImportResolution.track.title || "YouTube Playlist";
+  const playlistTitle = localImportResolution.playlist?.title || localImportResolution.track.title || "Imported Playlist";
   const uploadRequested = $("#localImportSync").checked;
   await stopLocalImportPreview({ release: true, resumeMain: true });
   localImportRunning = true;
@@ -3187,51 +3645,80 @@ async function confirmYouTubePlaylistImport() {
     contentSha256: track.contentSha256 || null,
   }));
   const created = [];
+  const importedTrackIDs = [];
+  const uploadQueue = [];
   let duplicates = 0;
   let uploadedCount = 0;
   let cancelled = false;
+  let uploadCancelled = false;
   const failures = [];
   const uploadFailures = [];
+  let playlistSaved = false;
+  const saveImportedPlaylist = async () => {
+    if (playlistSaved || !importedTrackIDs.length) return;
+    upsertImportedPlaylist(playlistTitle, importedTrackIDs);
+    await persist();
+    schedulePlaylistSync();
+    playlistSaved = true;
+  };
+  const queueUpload = (track, result) => {
+    if (!uploadRequested || !track?.filePath || result?.serverBacked) return;
+    if (!uploadQueue.some((queued) => queued.id === track.id)) uploadQueue.push(track);
+  };
   try {
     for (let index = 0; index < selected.length; index += 1) {
       if (serverTransferCancelRequested) { cancelled = true; break; }
       const candidate = selected[index];
       localImportBatchContext = { index, total: selected.length, title: candidate.title || `Playlist item ${index + 1}` };
       updateLocalImportTransfer({ stage: "inspecting_source" });
-      const response = await api.startLocalImport({
-        sourceURL: candidate.sourceURL,
-        mediaKind,
-        metadata: {
-          title: candidate.title,
-          artist: candidate.artist || "Unknown uploader",
-          album: playlistTitle,
-          durationSeconds: candidate.durationSeconds,
-          artworkURL: candidate.thumbnailURL || localImportResolution.playlist?.artworkURL,
-          sourceURL: candidate.sourceURL,
-        },
-        existing,
-      });
+      const importMetadata = candidate.importMetadata || candidate;
+      let response = null;
+      let lastDownloadError = null;
+      const downloadCandidates = [candidate, ...(Array.isArray(candidate.fallbackCandidates) ? candidate.fallbackCandidates : [])];
+      for (const downloadCandidate of downloadCandidates) {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt === 1 ? 400 : 1200));
+          try {
+            response = await api.startLocalImport({
+              sourceURL: downloadCandidate.sourceURL,
+              mediaKind,
+              metadata: {
+                title: importMetadata.title,
+                artist: importMetadata.artist || "Unknown artist",
+                album: importMetadata.album || null,
+                durationSeconds: importMetadata.durationSeconds,
+                artworkURL: importMetadata.artworkURL || downloadCandidate.thumbnailURL,
+                sourceURL: importMetadata.sourceURL || downloadCandidate.sourceURL,
+              },
+              existing,
+            });
+          } catch (error) {
+            lastDownloadError = error;
+            response = null;
+          }
+          if (response?.ok || response?.error?.code === "CANCELLED") break;
+        }
+        if (response?.ok || response?.error?.code === "CANCELLED") break;
+      }
       if (!response?.ok) {
         if (response?.error?.code === "CANCELLED") { cancelled = true; break; }
-        failures.push({ title: candidate.title, message: response?.error?.message || "Download failed." });
+        failures.push({
+          title: `${importMetadata.title}${importMetadata.artist ? ` — ${importMetadata.artist}` : ""}`,
+          message: response?.error?.message || lastDownloadError?.message || "Download failed after three attempts.",
+        });
         continue;
       }
       if (response.result.kind === "duplicate") {
         duplicates += 1;
         const duplicate = state.tracks.find((track) => track.id === response.result.trackID) || null;
-        if (uploadRequested && duplicate?.filePath) {
-          const uploaded = await uploadLocalImportTrack(duplicate);
-          if (!uploaded?.ok) uploadFailures.push({
-            title: candidate.title,
-            message: uploaded?.error?.message || "The local file was found, but the server upload failed.",
-          });
-          else uploadedCount += 1;
-        }
+        if (duplicate) importedTrackIDs.push(duplicate.id);
+        queueUpload(duplicate, response.result);
         continue;
       }
       const importedTrack = response.result.track;
       state.tracks.push(importedTrack);
       created.push(importedTrack);
+      importedTrackIDs.push(importedTrack.id);
       existing.push({
         id: importedTrack.id,
         title: importedTrack.title,
@@ -3245,16 +3732,20 @@ async function confirmYouTubePlaylistImport() {
         setPlaybackContext(tracksForActiveProfile(state), null);
       }
       await persist();
-      if (uploadRequested && importedTrack.filePath) {
-        const uploaded = await uploadLocalImportTrack(importedTrack);
-        if (!uploaded?.ok) uploadFailures.push({
-          title: candidate.title,
-          message: uploaded?.error?.message || "Saved locally, but the server upload failed.",
-        });
-        else uploadedCount += 1;
-      }
+      queueUpload(importedTrack, response.result);
     }
-    if (uploadedCount) await refreshServerCatalogAfterLocalImportUpload();
+    await saveImportedPlaylist();
+    if (!cancelled && uploadQueue.length) {
+      localImportBatchContext = null;
+      const pendingUploads = await prepareLocalImportUploadBatch(uploadQueue);
+      if (pendingUploads.length) {
+        const uploadResult = await uploadLocalImportTracks(pendingUploads);
+        uploadedCount = Number(uploadResult?.uploaded) || 0;
+        uploadFailures.push(...(uploadResult?.failed || []));
+        uploadCancelled = Boolean(uploadResult?.cancelled || serverTransferCancelRequested);
+      }
+      if (uploadedCount) await refreshServerCatalogAfterLocalImportUpload();
+    }
     if (created.length) {
       render();
       updateChrome();
@@ -3263,17 +3754,28 @@ async function confirmYouTubePlaylistImport() {
     if (cancelled) {
       showNotice(`Playlist download cancelled after ${completed} of ${selected.length} ${mediaKind === "video" ? "videos" : "songs"}.`, "status");
       setLocalImportStage({ stage: "cancelled" });
+    } else if (uploadCancelled) {
+      showNotice(`Downloaded ${created.length} playlist ${mediaKind === "video" ? "video" : "song"}${created.length === 1 ? "" : "s"}. Server upload cancelled; every local file was kept.`, "status");
+      setLocalImportStage({ stage: "cancelled" });
     } else if (failures.length) {
-      showNotice(`Downloaded ${created.length} of ${selected.length} playlist ${mediaKind === "video" ? "videos" : "songs"}; ${failures.length} item${failures.length === 1 ? "" : "s"} could not be completed.`);
+      const uploadText = formatServerUploadFailureNotice(uploadFailures);
+      showNotice(`Downloaded ${created.length} of ${selected.length} playlist ${mediaKind === "video" ? "videos" : "songs"}; failed after retrying: ${failures.map((failure) => failure.title).join("; ")}.${uploadedCount ? ` Uploaded ${uploadedCount} successful song${uploadedCount === 1 ? "" : "s"}.` : ""}${uploadText ? ` ${uploadText}` : ""}`);
       setLocalImportStage({ stage: "failed" });
     } else {
       const duplicateText = duplicates ? ` ${duplicates} already on this device.` : "";
       const uploadedText = uploadedCount ? ` Uploaded ${uploadedCount} to ${activeProfile().name || "the active server profile"}.` : "";
-      const uploadText = uploadFailures.length ? ` ${uploadFailures.length} server upload${uploadFailures.length === 1 ? "" : "s"} failed; the local files were kept.` : "";
+      const uploadFailureNotice = formatServerUploadFailureNotice(uploadFailures);
+      const uploadText = uploadFailureNotice ? ` ${uploadFailureNotice} The local files were kept.` : "";
       showNotice(`Downloaded ${created.length} playlist ${mediaKind === "video" ? "video" : "song"}${created.length === 1 ? "" : "s"}.${duplicateText}${uploadedText}${uploadText}`, uploadFailures.length ? "error" : "status");
-      setLocalImportStage({ stage: "complete" });
+      setLocalImportStage({ stage: uploadFailures.length ? "failed" : "complete" });
     }
   } catch (error) {
+    try { await saveImportedPlaylist(); }
+    catch (saveError) { console.error("Could not preserve the partially imported playlist", saveError); }
+    if (created.length) {
+      render();
+      updateChrome();
+    }
     showLocalImportError(error);
     setLocalImportStage({ stage: "failed" });
   } finally {
@@ -3284,15 +3786,15 @@ async function confirmYouTubePlaylistImport() {
     $("#chooseLocalFiles").disabled = false;
     setLocalImportMediaKindDisabled(false);
     $("#cancelLocalImport").hidden = true;
-    hideServerTransfer("local-import");
+    hideServerTransfer();
     serverTransferCancelRequested = false;
   }
 }
 
 async function confirmLinkImport() {
   if (localImportRunning || !localImportResolution) return;
-  if (localImportResolution.kind === "youtube_playlist") {
-    await confirmYouTubePlaylistImport();
+  if (localImportResolution.kind?.endsWith("_playlist")) {
+    await confirmPlaylistImport();
     return;
   }
   const selected = document.querySelector('input[name="localImportCandidate"]:checked');
@@ -3321,13 +3823,14 @@ async function confirmLinkImport() {
   localImportKeepStateOnClose = true;
   $("#localImportDialog").close();
   try {
+    const selectedMetadata = candidate.importMetadata || localImportResolution.track;
     const metadata = {
-      title: localImportResolution.track.title,
-      artist: localImportResolution.track.artist,
-      album: localImportResolution.track.album,
-      durationSeconds: localImportResolution.track.durationSeconds,
-      artworkURL: localImportResolution.track.artworkURL || candidate.thumbnailURL,
-      sourceURL: localImportResolution.track.sourceURL,
+      title: selectedMetadata.title,
+      artist: selectedMetadata.artist,
+      album: selectedMetadata.album,
+      durationSeconds: selectedMetadata.durationSeconds,
+      artworkURL: selectedMetadata.artworkURL || candidate.thumbnailURL,
+      sourceURL: selectedMetadata.sourceURL || candidate.sourceURL,
     };
     const existing = state.tracks.map((track) => ({
       id: track.id,
@@ -3405,7 +3908,9 @@ async function confirmLinkImport() {
         return;
       }
       await refreshServerCatalogAfterLocalImportUpload();
-      showNotice(`Uploaded ${importedTrack.title} to ${activeProfile().name || "the active server profile"}.`, "status");
+      showNotice(uploaded.skipped
+        ? `${importedTrack.title} is already on ${activeProfile().name || "the active server profile"}.`
+        : `Uploaded ${importedTrack.title} to ${activeProfile().name || "the active server profile"}.`, "status");
     }
     setLocalImportStage({ stage: "complete" });
     $("#confirmLocalImport").hidden = true;
@@ -3635,6 +4140,7 @@ async function serverAction(mode) {
 }
 
 async function uploadServerSongs() {
+  if (serverTransferActive) return;
   await saveServerForm();
   const context = currentProfileContext();
   const status = $("#serverStatus");
@@ -3658,6 +4164,81 @@ async function uploadServerSongs() {
     } else {
       await serverAction("catalog");
     }
+  } catch (error) {
+    if (!profileContextIsCurrent(context)) return;
+    serverConnectionText = serverTransferCancelRequested ? "Upload cancelled" : friendlyIPCError(error, "Upload failed");
+    if (status) status.textContent = serverConnectionText;
+    if (!serverTransferCancelRequested) showNotice(serverConnectionText);
+  } finally {
+    hideServerTransfer("server");
+    serverTransferCancelRequested = false;
+  }
+}
+
+async function uploadMissingDownloadedSongs() {
+  if (serverTransferActive) return;
+  await saveServerForm();
+  const context = currentProfileContext();
+  const status = $("#serverStatus");
+  serverTransferCancelRequested = false;
+  updateServerTransfer({ direction: "upload", currentFile: "Checking downloaded songs…", completed: 0, total: 1 });
+  try {
+    const catalog = await api.fetchCatalog({ baseURL: context.serverURL, token: context.token, profileID: context.profileID });
+    if (!profileContextIsCurrent(context)) return;
+    serverCatalog = catalog.songs || [];
+    const plan = planMissingDownloadedUploads(state, serverCatalog);
+    for (const match of plan.matches) {
+      reconcileUploadedTrack(state, match.trackID, match.remoteSong, {
+        serverURL: context.serverURL,
+        profileID: context.profileID,
+      });
+    }
+    if (plan.matches.length) await persist();
+    if (!plan.uploadTracks.length) {
+      serverConnectionText = "All downloaded songs are already on the server";
+      if (status) status.textContent = serverConnectionText;
+      showNotice(serverConnectionText, "status");
+      if (section === "server") renderServer();
+      return;
+    }
+    const result = await api.uploadServer({
+      baseURL: context.serverURL,
+      adminToken: serverAdminToken,
+      profileID: context.profileID,
+      files: plan.uploadTracks.map((track) => ({
+        trackID: track.id,
+        filePath: track.filePath,
+        title: track.title,
+        artist: track.artist,
+      })),
+    });
+    if (!profileContextIsCurrent(context)) return;
+    for (const uploaded of result.results || []) {
+      reconcileUploadedTrack(state, uploaded.trackID, uploaded.remoteSong, {
+        serverURL: context.serverURL,
+        profileID: context.profileID,
+      });
+    }
+    if ((result.results || []).length) await persist();
+    const failureNotice = formatServerUploadFailureNotice(result.failed);
+    const cancelled = Boolean(result.cancelled || serverTransferCancelRequested);
+    if (cancelled) {
+      serverConnectionText = `Upload cancelled${result.uploaded ? ` • ${result.uploaded} completed` : ""}`;
+    } else if (failureNotice) {
+      serverConnectionText = `Uploaded ${result.uploaded}; ${(result.failed || []).length} failed`;
+      showNotice(failureNotice);
+    } else {
+      serverConnectionText = `Uploaded ${result.uploaded} missing song${result.uploaded === 1 ? "" : "s"}`;
+      showNotice(serverConnectionText, "status");
+    }
+    if (status) status.textContent = serverConnectionText;
+    const refreshed = await api.fetchCatalog({ baseURL: context.serverURL, token: context.token, profileID: context.profileID });
+    if (!profileContextIsCurrent(context)) return;
+    serverCatalog = refreshed.songs || [];
+    serverConnected = true;
+    hydrateServerCatalogArtwork(serverCatalog);
+    if (section === "server") renderServer();
+    if ((result.results || []).length) schedulePlaylistSync();
   } catch (error) {
     if (!profileContextIsCurrent(context)) return;
     serverConnectionText = serverTransferCancelRequested ? "Upload cancelled" : friendlyIPCError(error, "Upload failed");
@@ -3734,7 +4315,7 @@ function play(track, queue = null, options = {}) {
   state.position = range?.startSeconds ?? 0;
   pendingRestorePosition = state.position;
   audio.src = track.fileUrl;
-  audio.volume = normalizedVolume(state.volume);
+  audio.volume = playbackGainForVolume(state.volume);
   audio.playbackRate = Number($("#speed").value) || 1;
   void requestPlayback();
   persistInBackground(); updateChrome(); render();
@@ -3835,6 +4416,26 @@ function fullPlayerQueueTracks() {
 }
 
 function fullPlayerHistoryTracks() {
+  const profileID = activeProfileID();
+  const activeTracks = tracksForActiveProfile(state);
+  const syncedHistory = [...state.listeningHistory]
+    .filter((entry) => (entry.profileID || "default") === profileID && entry.id !== activeListeningEntryID)
+    .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))
+    .map((entry) => {
+      const track = activeTracks.find((item) => item.id === entry.trackID)
+        || activeTracks.find((item) => entry.remoteID && item.remoteID === entry.remoteID && (item.syncProfileID || "default") === profileID);
+      return track || {
+        id: entry.trackID,
+        remoteID: entry.remoteID,
+        title: entry.title || "Unknown song",
+        artist: entry.artist || "Unknown artist",
+        album: entry.album || "Unknown Album",
+        duration: Number(entry.duration) || 0,
+        artwork: null,
+        historyOnly: true,
+      };
+    });
+  if (syncedHistory.length) return syncedHistory;
   const tracksByID = new Map(tracksForActiveProfile(state).map((track) => [track.id, track]));
   return [...history].reverse().map((trackID) => tracksByID.get(trackID)).filter(Boolean);
 }
@@ -3850,8 +4451,8 @@ function renderFullPlayerQueue() {
     button.tabIndex = active ? 0 : -1;
   });
   $("#fullPlayerQueue").setAttribute("aria-labelledby", fullPlayerQueueTab === "history" ? "fullPlayerQueueHistoryTab" : "fullPlayerQueueUpNextTab");
-  $("#fullPlayerQueue").innerHTML = queue.length ? queue.map((track) => `<button class="full-player-queue-item" type="button" data-full-player-queue="${escapeHTML(track.id)}" aria-label="Play ${escapeHTML(track.title || "Untitled")} by ${escapeHTML(track.artist || "Unknown Artist")}">
-    ${artwork(track)}<span><strong>${escapeHTML(track.title || "Untitled")}</strong><small>${escapeHTML(track.artist || "Unknown Artist")}</small></span><time>${formatTime(track.duration)}</time>
+  $("#fullPlayerQueue").innerHTML = queue.length ? queue.map((track) => `<button class="full-player-queue-item" type="button" data-full-player-queue="${escapeHTML(track.id)}" aria-label="${track.historyOnly ? "Not downloaded: " : "Play "}${escapeHTML(track.title || "Untitled")} by ${escapeHTML(track.artist || "Unknown Artist")}" ${track.historyOnly ? "disabled" : ""}>
+    ${artwork(track)}<span><strong>${escapeHTML(track.title || "Untitled")}</strong><small>${escapeHTML(track.artist || "Unknown Artist")}</small></span><time>${track.historyOnly ? "Not downloaded" : formatTime(track.duration)}</time>
   </button>`).join("") : `<div class="full-player-queue-empty"><span>${fullPlayerQueueTab === "history" ? "Nothing played yet." : "Nothing else is queued."}</span></div>`;
   document.querySelectorAll("[data-full-player-queue]").forEach((button) => {
     button.onclick = () => play(state.tracks.find((track) => track.id === button.dataset.fullPlayerQueue && trackBelongsToActiveProfile(state, track)));
@@ -3869,6 +4470,203 @@ function updateFullPlayerProgress() {
   paintRange(seek);
 }
 
+function syncFullPlayerTitleMarquee() {
+  const viewport = $("#fullPlayerTitle");
+  const text = $("#fullPlayerTitleText");
+  if (fullPlayerTitleMarqueeFrame) cancelAnimationFrame(fullPlayerTitleMarqueeFrame);
+  viewport.classList.remove("overflowing");
+  text.style.removeProperty("--full-player-title-travel");
+  text.style.removeProperty("--full-player-title-duration");
+
+  fullPlayerTitleMarqueeFrame = requestAnimationFrame(() => {
+    fullPlayerTitleMarqueeFrame = null;
+    if (!$("#nowPlayingDialog").open) return;
+    const metrics = titleMarqueeMetrics(text.getBoundingClientRect().width, viewport.clientWidth);
+    if (metrics.travel <= 1) return;
+    text.style.setProperty("--full-player-title-travel", `${-metrics.travel}px`);
+    text.style.setProperty("--full-player-title-duration", `${metrics.durationSeconds}s`);
+    viewport.classList.add("overflowing");
+  });
+}
+
+function setFullPlayerTitle(title) {
+  const viewport = $("#fullPlayerTitle");
+  const text = $("#fullPlayerTitleText");
+  const changed = text.textContent !== title;
+  if (changed) text.textContent = title;
+  viewport.setAttribute("aria-label", title);
+  viewport.title = title;
+  if (changed && $("#nowPlayingDialog").open) syncFullPlayerTitleMarquee();
+}
+
+function installedVideoAnimationDuration(duration) {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ? 0
+    : duration;
+}
+
+function setInstalledVideoSourceGeometry(sourceRect, targetRect) {
+  const stage = $(".installed-video-stage");
+  const sourceArtwork = $("#fullPlayerArtwork");
+  const sourceStyle = getComputedStyle(sourceArtwork);
+  stage.style.setProperty("--video-source-left", `${sourceRect.left}px`);
+  stage.style.setProperty("--video-source-top", `${sourceRect.top}px`);
+  stage.style.setProperty("--video-source-width", `${Math.max(sourceRect.width, 1)}px`);
+  stage.style.setProperty("--video-source-height", `${Math.max(sourceRect.height, 1)}px`);
+  stage.style.setProperty("--video-target-left", `${targetRect.left}px`);
+  stage.style.setProperty("--video-target-top", `${targetRect.top}px`);
+  stage.style.setProperty("--video-target-width", `${Math.max(targetRect.width, 1)}px`);
+  stage.style.setProperty("--video-target-height", `${Math.max(targetRect.height, 1)}px`);
+  stage.style.setProperty("--video-source-radius", sourceStyle.borderRadius || "22px");
+  stage.style.setProperty("--video-source-border-color", sourceStyle.borderColor || "#a678ff80");
+  stage.style.setProperty("--video-source-shadow", sourceStyle.boxShadow || "none");
+
+  const transitionArtwork = $("#installedVideoArtwork");
+  transitionArtwork.style.background = sourceStyle.background;
+  transitionArtwork.style.color = sourceStyle.color;
+  transitionArtwork.style.fontSize = sourceStyle.fontSize;
+}
+
+function startInstalledVideoPlayback() {
+  if (!installedVideoSession?.metadataReady) return;
+  void installedVideoPlayer.play().catch((error) => {
+    showNotice(error?.message ? `Could not play this video: ${error.message}` : "Resonance could not play this video.");
+  });
+}
+
+function openInstalledVideo(track = currentTrack()) {
+  if (!isInstalledVideoTrack(track)) return;
+  const dialog = $("#installedVideoDialog");
+  if (dialog.open) return;
+
+  const resumeAudioOnClose = track.id === currentID && !audio.paused;
+  const startTime = track.id === currentID
+    ? Math.max(0, Number(audio.currentTime) || Number(state.position) || 0)
+    : 0;
+  if (!audio.paused) audio.pause();
+  const sourceRect = $("#fullPlayerArtwork").getBoundingClientRect();
+  $("#installedVideoArtwork").innerHTML = $("#fullPlayerArtwork").innerHTML;
+  installedVideoPlayer.src = track.fileUrl;
+  installedVideoPlayer.onloadedmetadata = () => {
+    const duration = Number(installedVideoPlayer.duration) || Number(track.duration) || 0;
+    installedVideoPlayer.currentTime = duration > 0
+      ? Math.min(startTime, Math.max(duration - 0.05, 0))
+      : startTime;
+    if (installedVideoSession?.trackID === track.id) {
+      installedVideoSession.metadataReady = true;
+    }
+    if (dialog.classList.contains("video-revealed")) startInstalledVideoPlayback();
+  };
+  installedVideoPlayer.onerror = () => {
+    showNotice("Resonance could not play this installed video.");
+  };
+  if (installedVideoTransitionTimer) {
+    clearTimeout(installedVideoTransitionTimer);
+    installedVideoTransitionTimer = null;
+  }
+  dialog.classList.remove("video-expanded", "video-revealed", "video-closing");
+  dialog.showModal();
+  const targetRect = $(".installed-video-stage").getBoundingClientRect();
+  installedVideoSession = {
+    trackID: track.id,
+    resumeAudioOnClose,
+    metadataReady: false,
+    closing: false,
+  };
+  setInstalledVideoSourceGeometry(sourceRect, targetRect);
+  dialog.classList.add("video-active", "video-from-art");
+  $("#nowPlayingDialog").classList.add("video-active");
+  void $(".installed-video-stage").offsetWidth;
+  installedVideoPlayer.load();
+  requestAnimationFrame(() => {
+    if (!installedVideoSession || installedVideoSession.closing) return;
+    dialog.classList.remove("video-from-art");
+    dialog.classList.add("video-expanded");
+    installedVideoTransitionTimer = setTimeout(() => {
+      installedVideoTransitionTimer = null;
+      if (!installedVideoSession || installedVideoSession.closing) return;
+      dialog.classList.add("video-revealed");
+      startInstalledVideoPlayback();
+      $("#closeInstalledVideo").focus();
+    }, installedVideoAnimationDuration(INSTALLED_VIDEO_TRANSITION_MS));
+  });
+}
+
+function finishInstalledVideoClose({ session, videoEnded, videoTime }) {
+  const dialog = $("#installedVideoDialog");
+  installedVideoPlayer.onloadedmetadata = null;
+  installedVideoPlayer.onerror = null;
+  installedVideoPlayer.removeAttribute("src");
+  installedVideoPlayer.load();
+  installedVideoSession = null;
+  installedVideoTransitionTimer = null;
+  if (dialog.open) dialog.close();
+  dialog.classList.remove(
+    "video-active",
+    "video-from-art",
+    "video-expanded",
+    "video-revealed",
+    "video-closing",
+  );
+  $("#nowPlayingDialog").classList.remove("video-active");
+  $("#installedVideoArtwork").replaceChildren();
+  $("#installedVideoArtwork").removeAttribute("style");
+
+  const track = session && state.tracks.find((item) => item.id === session.trackID);
+  if (track && track.id === currentID && Number.isFinite(videoTime)) {
+    const position = clippedPlaybackPosition(videoTime, track);
+    state.position = position;
+    pendingRestorePosition = position;
+    if (audio.currentSrc || audio.src) {
+      try {
+        audio.currentTime = position;
+      } catch {
+        // pendingRestorePosition applies the handoff once the audio source is seekable.
+      }
+    }
+    persistInBackground();
+  }
+  if (session?.resumeAudioOnClose && !videoEnded && track?.id === currentID) {
+    void requestPlayback();
+  }
+  updateChrome();
+}
+
+function closeInstalledVideo() {
+  const dialog = $("#installedVideoDialog");
+  const session = installedVideoSession;
+  if (!dialog.open || !session || session.closing) return;
+  session.closing = true;
+
+  const videoEnded = installedVideoPlayer.ended;
+  const videoTime = Number(installedVideoPlayer.currentTime);
+  installedVideoPlayer.pause();
+  if (installedVideoTransitionTimer) {
+    clearTimeout(installedVideoTransitionTimer);
+    installedVideoTransitionTimer = null;
+  }
+  const revealDuration = dialog.classList.contains("video-revealed")
+    ? installedVideoAnimationDuration(INSTALLED_VIDEO_REVEAL_MS)
+    : 0;
+  dialog.classList.remove("video-revealed");
+  installedVideoTransitionTimer = setTimeout(
+    () => {
+      const sourceRect = $("#fullPlayerArtwork").getBoundingClientRect();
+      setInstalledVideoSourceGeometry(
+        sourceRect,
+        $(".installed-video-stage").getBoundingClientRect(),
+      );
+      dialog.classList.remove("video-active", "video-from-art", "video-expanded");
+      dialog.classList.add("video-closing");
+      installedVideoTransitionTimer = setTimeout(
+        () => finishInstalledVideoClose({ session, videoEnded, videoTime }),
+        installedVideoAnimationDuration(INSTALLED_VIDEO_TRANSITION_MS),
+      );
+    },
+    revealDuration,
+  );
+}
+
 function renderFullPlayer() {
   const dialog = $("#nowPlayingDialog");
   const track = currentTrack();
@@ -3880,15 +4678,15 @@ function renderFullPlayer() {
   const liked = state.favorites.includes(track.id);
   $("#openNowPlaying").disabled = false;
   $("#openNowPlaying").setAttribute("aria-label", `Open Now Playing for ${track.title || "current song"}`);
-  $("#fullPlayerTitle").textContent = track.title || "Untitled";
+  setFullPlayerTitle(track.title || "Untitled");
   $("#fullPlayerArtist").textContent = track.artist || "Unknown Artist";
   const releaseYear = Number(track.year || track.releaseYear) || null;
   $("#fullPlayerAlbum").textContent = [displayAlbum(track), releaseYear].filter(Boolean).join(" • ");
   const artworkNode = $("#fullPlayerArtwork");
-  artworkNode.innerHTML = track.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : '<span aria-hidden="true">♪</span>';
+  artworkNode.innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : '<span aria-hidden="true">♪</span>';
   artworkNode.setAttribute("aria-label", `Artwork for ${track.title || "current song"}`);
   const backdropNode = $("#fullPlayerBackdrop");
-  backdropNode.innerHTML = track.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : "";
+  backdropNode.innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : "";
   const favorite = $("#fullPlayerFavorite");
   favorite.classList.toggle("active", liked);
   favorite.setAttribute("aria-pressed", String(liked));
@@ -3899,8 +4697,8 @@ function renderFullPlayer() {
   $("#fullPlayerRepeat").classList.toggle("active", repeat);
   $("#fullPlayerRepeat").setAttribute("aria-pressed", String(repeat));
   setCustomSelectValue($("#fullPlayerSpeed"), audio.playbackRate || state.playbackRate || 1);
-  $("#fullPlayerVolume").value = String(audio.volume);
-  $("#fullPlayerVolume").setAttribute("aria-valuetext", `${Math.round(audio.volume * 100)} percent`);
+  $("#fullPlayerVolume").value = String(state.volume);
+  $("#fullPlayerVolume").setAttribute("aria-valuetext", `${Math.round(state.volume * 100)} percent`);
   paintRange($("#fullPlayerVolume"));
   updateFullPlayerProgress();
   renderFullPlayerQueue();
@@ -3930,7 +4728,10 @@ function openNowPlaying() {
   dialog.classList.remove("closing");
   $(".full-player-shell").append(menu);
   if (!dialog.open) dialog.showModal();
-  requestAnimationFrame(() => $("#closeNowPlaying").focus());
+  requestAnimationFrame(() => {
+    syncFullPlayerTitleMarquee();
+    $("#closeNowPlaying").focus();
+  });
 }
 
 function finishNowPlayingClose() {
@@ -3962,7 +4763,7 @@ function updateChrome() {
   const liked = Boolean(track && state.favorites.includes(track.id));
   $("#bottomTitle").textContent = track?.title || "Nothing playing";
   $("#bottomMeta").textContent = track ? `${track.artist} / ${playing ? "Now playing" : "Paused"}` : "Local library";
-  $(".mini-art").innerHTML = track?.artwork ? `<img src="${escapeHTML(track.artwork)}" alt="">` : "♪";
+  $(".mini-art").innerHTML = track?.artwork ? squareArtworkImageMarkup(track.artwork) : "♪";
   document.querySelectorAll("[data-action=toggle]").forEach((button) => {
     button.innerHTML = playing ? playbackPauseIcon : playbackPlayIcon;
     button.setAttribute("aria-label", playing ? "Pause" : "Play");
@@ -3982,6 +4783,7 @@ function updateChrome() {
   $("#repeat").setAttribute("aria-pressed", String(repeat));
   $("#heroShuffle")?.setAttribute("aria-pressed", String(shuffle));
   renderFullPlayer();
+  bindSquareArtworkImages();
 }
 
 function setActiveNav() { document.querySelectorAll(".nav").forEach((button) => button.classList.toggle("active", button.dataset.section === section)); }
@@ -4014,6 +4816,11 @@ document.querySelectorAll("[data-action=next]").forEach((button) => button.oncli
 document.querySelectorAll("[data-action=previous]").forEach((button) => button.onclick = previous);
 $("#openNowPlaying").onclick = openNowPlaying;
 $("#closeNowPlaying").onclick = closeNowPlaying;
+$("#closeInstalledVideo").onclick = closeInstalledVideo;
+$("#installedVideoDialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeInstalledVideo();
+});
 $("#nowPlayingDialog").addEventListener("cancel", (event) => {
   event.preventDefault();
   closeNowPlaying();
@@ -4036,7 +4843,12 @@ $("#nowPlayingDialog").addEventListener("close", () => {
   $("#openNowPlaying").focus();
 });
 $("#fullPlayerFavorite").onclick = () => currentID && toggleFavorite(currentID);
-$("#fullPlayerMore").onclick = (event) => currentID && openTrackContextMenu(event, currentID, { playbackTracks: activePlaybackTracks(), playlistID: activePlaybackPlaylistID });
+$("#fullPlayerMore").onclick = (event) => currentID && openTrackContextMenu(event, currentID, {
+  playbackTracks: activePlaybackTracks(),
+  playlistID: activePlaybackPlaylistID,
+  source: "full-player",
+  alignToEnd: true,
+});
 $("#fullPlayerQueueToggle").onclick = () => setFullPlayerQueueVisible($("#fullPlayerQueuePanel").hidden);
 $("#closeFullPlayerQueue").onclick = () => setFullPlayerQueueVisible(false);
 document.querySelectorAll("[data-full-player-queue-tab]").forEach((button) => {
@@ -4099,11 +4911,38 @@ $("#clipEditorDialog").onclick = (event) => {
   }
 };
 clipEditorPreviewAudio.onplay = syncClipRangePreviewButton;
-clipEditorPreviewAudio.onpause = syncClipRangePreviewButton;
-clipEditorPreviewAudio.onended = () => { void stopClipRangePreview(); };
+clipEditorPreviewAudio.onpause = () => {
+  syncClipRangePreviewButton();
+  syncClipRangePreviewTransport();
+};
+clipEditorPreviewAudio.onloadedmetadata = syncClipRangePreviewTransport;
+clipEditorPreviewAudio.onended = () => {
+  syncClipRangePreviewButton();
+  syncClipRangePreviewTransport();
+  void resumePlaybackAfterClipRangePreview();
+};
 clipEditorPreviewAudio.ontimeupdate = () => {
+  syncClipRangePreviewTransport();
+  if (clipEditorPreviewAudio.paused) return;
   if (!clipEditorPreviewEndSeconds || clipEditorPreviewAudio.currentTime + 0.02 < clipEditorPreviewEndSeconds) return;
-  void stopClipRangePreview();
+  clipEditorPreviewAudio.currentTime = clipEditorPreviewEndSeconds;
+  clipEditorPreviewAudio.pause();
+  $("#clipEditorStatus").textContent = "Preview complete. Drag the playback bar to review any moment in the range.";
+  void resumePlaybackAfterClipRangePreview();
+};
+$("#clipEditorPreviewSeek").oninput = async (event) => {
+  const track = clipEditorTrack();
+  if (!track?.fileUrl) return;
+  try {
+    await prepareClipRangePreviewMedia(track);
+    clipEditorPreviewAudio.currentTime = Math.min(
+      Math.max(Number(event.target.value) || clipEditorStartSeconds, clipEditorStartSeconds),
+      clipEditorEndSeconds
+    );
+    syncClipRangePreviewTransport();
+  } catch {
+    $("#clipEditorStatus").textContent = "Resonance could not seek this preview.";
+  }
 };
 $("#addSongsSearch").oninput = renderAddSongsDialog;
 $("#confirmLocalImport").onclick = confirmLinkImport;
@@ -4146,10 +4985,12 @@ $("#localImportSource").oninput = () => {
     $("#localImportError").hidden = true;
     setLocalImportStage({ stage: "idle" });
   }
+  normalizeLocalImportMediaKindForSource();
   scheduleLocalImportResolution();
 };
 document.querySelectorAll('input[name="localImportMediaKind"]').forEach((input) => {
   input.onchange = () => {
+    normalizeLocalImportMediaKindForSource();
     if (localImportResolution || !$("#localImportError").hidden) {
       void stopLocalImportPreview({ release: true, resumeMain: true });
       localImportResolution = null;
@@ -4444,24 +5285,24 @@ function paintRange(input) {
   input.style.setProperty("--range-progress", `${Math.max(0, Math.min(100, progress))}%`);
 }
 $("#volume").oninput = async (event) => {
-  audio.volume = normalizedVolume(event.target.value);
-  state.volume = audio.volume;
-  const percent = Math.round(audio.volume * 100);
+  state.volume = normalizedVolume(event.target.value);
+  audio.volume = playbackGainForVolume(state.volume);
+  const percent = Math.round(state.volume * 100);
   $("#volumeText").textContent = `${percent}%`;
   event.target.setAttribute("aria-valuetext", `${percent} percent`);
   paintRange(event.target);
-  $("#fullPlayerVolume").value = String(audio.volume);
+  $("#fullPlayerVolume").value = String(state.volume);
   $("#fullPlayerVolume").setAttribute("aria-valuetext", `${percent} percent`);
   paintRange($("#fullPlayerVolume"));
   await persist();
 };
 $("#fullPlayerVolume").oninput = async (event) => {
-  audio.volume = normalizedVolume(event.target.value);
-  state.volume = audio.volume;
-  const percent = Math.round(audio.volume * 100);
+  state.volume = normalizedVolume(event.target.value);
+  audio.volume = playbackGainForVolume(state.volume);
+  const percent = Math.round(state.volume * 100);
   event.target.setAttribute("aria-valuetext", `${percent} percent`);
   paintRange(event.target);
-  $("#volume").value = String(audio.volume);
+  $("#volume").value = String(state.volume);
   $("#volumeText").textContent = `${percent}%`;
   $("#volume").setAttribute("aria-valuetext", `${percent} percent`);
   paintRange($("#volume"));
@@ -4593,7 +5434,7 @@ if (currentID) {
   pendingRestorePosition = restoredCurrentID ? Math.max(0, Number(state.position) || 0) : 0;
   if (!restoredCurrentID) state.position = 0;
   audio.src = track.fileUrl;
-  audio.volume = state.volume;
+  audio.volume = playbackGainForVolume(state.volume);
   audio.playbackRate = Number(state.playbackRate) || 1;
 }
 if (libraryLoad?.warning) showNotice(libraryLoad.warning);
@@ -4619,9 +5460,55 @@ async function checkForUpdates() {
   }
 }
 
-api.onUpdateStatus((value) => {
+function syncWindowsUpdateBadge(value = {}) {
+  const badge = $("#updateAvailableBadge");
+  const detail = $("#updateAvailableDetail");
+  const action = $("#updateAvailableAction");
+  if (!badge || !detail || !action) return;
+
+  if (value.version) availableWindowsUpdateVersion = value.version;
+  if (value.type === "current") {
+    availableWindowsUpdateVersion = null;
+    dismissedWindowsUpdateVersion = null;
+    windowsUpdateReady = false;
+    badge.hidden = true;
+    return;
+  }
+  const version = availableWindowsUpdateVersion;
+  if (!version || dismissedWindowsUpdateVersion === version) {
+    badge.hidden = true;
+    return;
+  }
+  if (!["available", "downloading", "ready", "error"].includes(value.type)) return;
+
+  badge.hidden = false;
+  if (value.type === "ready") {
+    windowsUpdateReady = true;
+    detail.textContent = `Resonance ${version} is ready to install.`;
+    action.textContent = "Restart to update";
+    action.dataset.action = "install";
+    action.disabled = false;
+  } else if (value.type === "error") {
+    windowsUpdateReady = false;
+    detail.textContent = value.message || `Resonance ${version} could not finish downloading.`;
+    action.textContent = "Try again";
+    action.dataset.action = "retry";
+    action.disabled = false;
+  } else {
+    windowsUpdateReady = false;
+    detail.textContent = value.type === "downloading"
+      ? `Downloading Resonance ${version}… ${Math.max(0, Math.min(100, Number(value.percent) || 0))}%`
+      : `Resonance ${version} is available and downloading.`;
+    action.textContent = "Downloading…";
+    action.dataset.action = "downloading";
+    action.disabled = true;
+  }
+}
+
+function handleWindowsUpdateStatus(value = {}) {
   const install = $("#installUpdate");
   if (!install) return;
+  syncWindowsUpdateBadge(value);
   if (value.type === "ready") {
     setUpdateStatus(`${value.version} downloaded`);
     install.hidden = false;
@@ -4635,23 +5522,47 @@ api.onUpdateStatus((value) => {
   else if (value.type === "downloading") setUpdateStatus(`Downloading… ${value.percent}%`);
   else if (value.type === "current") setUpdateStatus("You’re up to date");
   else if (value.type === "error") setUpdateStatus(value.message || "Update check failed");
-});
-$("#checkForUpdates").onclick = checkForUpdates;
-$("#installUpdate").onclick = async () => {
+}
+
+async function installWindowsUpdate() {
   const install = $("#installUpdate");
-  const status = $("#updateStatus");
+  const badgeAction = $("#updateAvailableAction");
   install.disabled = true;
-  status.textContent = "Restarting to finish the update…";
+  badgeAction.disabled = true;
+  setUpdateStatus("Restarting to finish the update…");
+  $("#updateAvailableDetail").textContent = "Restarting Resonance to finish the update…";
   try {
     const started = await api.installUpdate();
     if (!started) {
       install.hidden = true;
-      status.textContent = "Available in installed builds";
+      $("#updateAvailableBadge").hidden = true;
+      setUpdateStatus("Available in installed builds");
     }
   } catch (error) {
     install.disabled = false;
-    status.textContent = error.message || "Could not install the update";
+    badgeAction.disabled = false;
+    const message = error.message || "Could not install the update";
+    setUpdateStatus(message);
+    $("#updateAvailableDetail").textContent = message;
   }
+}
+
+api.onUpdateStatus(handleWindowsUpdateStatus);
+try {
+  const initialUpdateStatus = await api.getUpdateStatus();
+  if (initialUpdateStatus?.type && initialUpdateStatus.type !== "idle") handleWindowsUpdateStatus(initialUpdateStatus);
+} catch {
+  // Automatic checking still reports through update:status in installed builds.
+}
+$("#checkForUpdates").onclick = checkForUpdates;
+$("#installUpdate").onclick = installWindowsUpdate;
+$("#updateAvailableAction").onclick = () => {
+  if (windowsUpdateReady || $("#updateAvailableAction").dataset.action === "install") void installWindowsUpdate();
+  else void checkForUpdates();
+};
+$("#dismissUpdateAvailable").onclick = () => {
+  dismissedWindowsUpdateVersion = availableWindowsUpdateVersion;
+  $("#updateAvailableBadge").hidden = true;
 };
 render(); updateChrome();
 syncPlaylistsNow({ automatic: true });

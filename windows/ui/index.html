@@ -53,6 +53,11 @@
           </div>
         </div>
       </header>
+      <aside id="updateAvailableBadge" class="update-available-badge" role="status" aria-live="polite" aria-atomic="true" hidden>
+        <span class="update-available-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0 4-4m-4 4-4-4"/><path d="M5 19h14"/></svg></span>
+        <span class="update-available-copy"><strong>Update Available</strong><small id="updateAvailableDetail">A newer Resonance version is available.</small><button id="updateAvailableAction" type="button" disabled>Downloading…</button></span>
+        <button id="dismissUpdateAvailable" class="update-available-dismiss" type="button" title="Dismiss update alert" aria-label="Dismiss update alert">×</button>
+      </aside>
       <section id="content"></section>
     </main>
 
@@ -98,7 +103,7 @@
         <div id="fullPlayerArtwork" class="full-player-artwork" aria-label="Current song artwork" role="img"><span aria-hidden="true">♪</span></div>
         <div class="full-player-details">
           <div class="full-player-copy">
-            <h2 id="fullPlayerTitle">Nothing playing</h2>
+            <h2 id="fullPlayerTitle" aria-label="Nothing playing"><span id="fullPlayerTitleText">Nothing playing</span></h2>
             <p id="fullPlayerArtist">Choose a song from your library</p>
             <span id="fullPlayerAlbum">Resonance</span>
           </div>
@@ -132,6 +137,17 @@
         </div>
         <div id="fullPlayerQueue" class="full-player-queue" role="tabpanel" aria-labelledby="fullPlayerQueueUpNextTab"></div>
       </aside>
+    </section>
+  </dialog>
+  <dialog id="installedVideoDialog" class="installed-video-dialog" aria-label="Video playback">
+    <section class="installed-video-shell">
+      <button id="closeInstalledVideo" class="installed-video-return full-player-round-button" type="button" title="Return to Now Playing" aria-label="Return to Now Playing">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>
+      </button>
+      <div class="installed-video-stage">
+        <div id="installedVideoArtwork" class="installed-video-artwork" aria-hidden="true"></div>
+        <video id="installedVideoPlayer" controls preload="metadata"></video>
+      </div>
     </section>
   </dialog>
   <dialog id="playlistDialog" class="playlist-dialog">
@@ -186,6 +202,10 @@
           <span><strong id="clipEditorTrackTitle">Nothing selected</strong><small id="clipEditorTrackMeta">Choose a song above</small></span>
           <time id="clipEditorTrackDuration">0:00</time>
         </div>
+        <div id="clipEditorVideoFrame" class="clip-editor-video-frame" hidden>
+          <video id="clipEditorPreview" preload="metadata" playsinline></video>
+          <span class="clip-editor-video-label" aria-hidden="true">VIDEO PREVIEW</span>
+        </div>
         <div id="clipEditorWaveform" class="clip-editor-waveform" role="group" aria-label="Clip range">
           <div id="clipEditorWaveBars" class="clip-editor-wave-bars" aria-hidden="true"></div>
           <span class="clip-editor-selection" aria-hidden="true"></span>
@@ -197,10 +217,16 @@
           <span class="clip-editor-selection-length"><small>CLIP LENGTH</small><strong id="clipEditorLengthLabel">0:00</strong></span>
           <label for="clipEditorEndInput"><small>END</small><input id="clipEditorEndInput" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="8" value="0:00" aria-label="Clip end time"></label>
         </div>
+        <div class="clip-editor-transport" aria-label="Preview playback controls">
+          <button id="previewClipRange" class="clip-editor-preview" type="button" aria-pressed="false" aria-label="Play preview" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg><span>Preview</span></button>
+          <time id="clipEditorPreviewCurrent">0:00</time>
+          <input id="clipEditorPreviewSeek" type="range" min="0" max="1000" value="0" aria-label="Preview position" aria-valuetext="0:00 of 0:00" disabled>
+          <time id="clipEditorPreviewEnd">0:00</time>
+        </div>
       </div>
       <footer>
         <span id="clipEditorStatus" role="status">The song file is never changed.</span>
-        <div class="clip-editor-actions"><button id="previewClipRange" class="secondary clip-editor-preview" type="button" aria-pressed="false" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg><span>Preview</span></button><button id="clearClipRange" class="secondary" type="button" hidden>Use full song</button><button id="saveClipRange" class="primary" type="button" disabled>Save range</button></div>
+        <div class="clip-editor-actions"><button id="clearClipRange" class="secondary" type="button" hidden>Use full song</button><button id="saveClipRange" class="primary" type="button" disabled>Save range</button></div>
       </footer>
     </section>
   </dialog>
@@ -276,12 +302,12 @@
       </header>
       <div id="localImportStage" hidden aria-hidden="true"></div>
       <label class="local-import-source" for="localImportSource">
-        <span>Spotify or YouTube URL</span>
+        <span>Link or music search</span>
         <div>
-          <input id="localImportSource" type="url" autocomplete="url" spellcheck="false" placeholder="https://open.spotify.com/track/…" required>
+          <input id="localImportSource" type="search" autocomplete="off" spellcheck="false" placeholder="Song, artist, album, or supported link…" required>
           <span class="local-import-source-spinner" aria-hidden="true"></span>
         </div>
-        <small>Paste a link and Resonance will inspect it automatically. Press Enter to check immediately.</small>
+        <small>Supported links are inspected directly. Plain text searches Spotify, SoundCloud, and YouTube only after you press Enter.</small>
       </label>
       <div id="localImportResolved" class="local-import-resolved" hidden>
         <div class="local-import-track"><span class="local-import-art" aria-hidden="true">♪</span><span><strong id="localImportTrackTitle"></strong><small id="localImportTrackMeta"></small></span></div>
@@ -297,7 +323,6 @@
     </section>
   </dialog>
   <div id="trackContextMenu" class="track-context-menu" role="menu" hidden></div>
-  <audio id="clipEditorPreview" preload="metadata"></audio>
   <audio id="localImportPreview" preload="metadata"></audio>
   <audio id="audio"></audio>
   <script type="module" src="app.js"></script>

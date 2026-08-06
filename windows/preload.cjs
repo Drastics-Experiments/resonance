@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld("likedSongs", {
   fetchPlaylists: (settings) => ipcRenderer.invoke("server:playlists:get", settings),
   putPlaylists: (settings) => ipcRenderer.invoke("server:playlists:put", settings),
   postListeningHistory: (settings) => ipcRenderer.invoke("server:listening-history:post", settings),
+  fetchListeningHistory: (settings) => ipcRenderer.invoke("server:listening-history:get", settings),
   syncServer: (settings) => ipcRenderer.invoke("server:sync", settings),
   uploadServer: (settings) => ipcRenderer.invoke("server:upload", settings),
   cancelServerTransfer: () => ipcRenderer.invoke("server:cancel-transfer"),
@@ -34,6 +35,7 @@ contextBridge.exposeInMainWorld("likedSongs", {
   onTransferProgress: (callback) => ipcRenderer.on("server:transfer-progress", (_event, value) => callback(value)),
   openAdmin: (baseURL) => ipcRenderer.invoke("server:open-admin", baseURL),
   checkForUpdates: () => ipcRenderer.invoke("update:check"),
+  getUpdateStatus: () => ipcRenderer.invoke("update:state"),
   installUpdate: () => ipcRenderer.invoke("update:install"),
   onUpdateStatus: (callback) => ipcRenderer.on("update:status", (_event, value) => callback(value)),
 });
