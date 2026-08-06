@@ -35,6 +35,43 @@ enum MobileServerUploadNaming {
     }
 }
 
+enum MobileServerSongIdentityPolicy {
+    static func metadataMatches(
+        expectedTitle: String,
+        expectedArtist: String,
+        expectedDuration: Double?,
+        actualTitle: String,
+        actualArtist: String,
+        actualDuration: Double?
+    ) -> Bool {
+        guard normalize(expectedTitle) == normalize(actualTitle) else { return false }
+        let expectedArtists = artistTokens(expectedArtist)
+        let actualArtists = artistTokens(actualArtist)
+        guard !expectedArtists.isEmpty, expectedArtists == actualArtists else { return false }
+        if let expectedDuration, expectedDuration > 0,
+           let actualDuration, actualDuration > 0 {
+            return abs(expectedDuration - actualDuration) <= 5
+        }
+        return true
+    }
+
+    private static func artistTokens(_ value: String) -> Set<Substring> {
+        let ignored: Set<Substring> = [
+            "and", "feat", "featuring", "ft", "with",
+            "unknown", "artist", "local", "file",
+        ]
+        return Set(normalize(value).split(separator: " ")).subtracting(ignored)
+    }
+
+    private static func normalize(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .map { $0.isLetter || $0.isNumber ? String($0) : " " }
+            .joined()
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+}
+
 struct MobileTrack: Identifiable, Codable, Hashable {
     let id: UUID
     var title: String
@@ -135,6 +172,17 @@ enum MobileMissingServerUploadPolicy {
             if let hash = normalizedHash(track.contentSHA256),
                let existingRemoteID = remoteIDByHash[hash] {
                 existingRemoteIDsByTrackID[track.id] = existingRemoteID
+            } else if let existing = catalog.first(where: { song in
+                MobileServerSongIdentityPolicy.metadataMatches(
+                    expectedTitle: track.title,
+                    expectedArtist: track.artist,
+                    expectedDuration: track.duration,
+                    actualTitle: song.title,
+                    actualArtist: song.artist,
+                    actualDuration: song.duration
+                )
+            }) {
+                existingRemoteIDsByTrackID[track.id] = existing.id
             } else {
                 uploadTrackIDs.append(track.id)
             }

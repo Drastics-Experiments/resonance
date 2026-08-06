@@ -95,8 +95,9 @@ struct LikedSongsFocusTests {
         let catalogData = Data("""
         {"songs":[
           {"id":"live-id","filename":"live.m4a","title":"Live","artist":"Artist","album":"Album","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/live","stream_url":"/stream/live"},
-          {"id":"hash-id","filename":"hash.m4a","title":"Hash","artist":"Artist","album":"Album","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/hash","stream_url":"/stream/hash","content_sha256":"ABC123"}
-        ],"count":2}
+          {"id":"hash-id","filename":"hash.m4a","title":"Hash","artist":"Artist","album":"Album","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/hash","stream_url":"/stream/hash","content_sha256":"ABC123"},
+          {"id":"metadata-id","filename":"All for You - Radio Version.m4a","title":"All for You Radio Version","artist":"Ace of Base","album":"Imported","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/metadata","stream_url":"/stream/metadata","duration_seconds":217.9}
+        ],"count":3}
         """.utf8)
         let catalog = try JSONDecoder().decode(RemoteCatalog.self, from: catalogData).songs
         let fileURL = URL(fileURLWithPath: "/tmp/downloaded.m4a")
@@ -115,6 +116,11 @@ struct LikedSongsFocusTests {
             fileURL: fileURL, remoteID: "missing-id", sourceServer: "https://music.test",
             syncProfileID: "profile-a"
         )
+        let metadataMatch = Track(
+            title: "All for You - Radio Version", artist: "Ace of Base", album: "The Golden Ratio",
+            duration: 217.1, artwork: .liked, fileURL: fileURL, remoteID: "stale-metadata-id",
+            sourceServer: "https://music.test", syncProfileID: "profile-a"
+        )
         let localImport = Track(
             title: "Local", artist: "Artist", album: "Album", duration: 1, artwork: .liked,
             fileURL: fileURL, syncProfileID: "profile-a"
@@ -126,14 +132,17 @@ struct LikedSongsFocusTests {
         )
 
         let plan = MissingServerUploadPolicy.plan(
-            tracks: [present, hashMatch, missing, localImport, anotherProfile],
+            tracks: [present, hashMatch, metadataMatch, missing, localImport, anotherProfile],
             catalog: catalog,
             activeProfileID: "profile-a",
             activeServerURL: try #require(URL(string: "https://music.test"))
         )
 
         #expect(plan.uploadTrackIDs == [missing.id])
-        #expect(plan.existingRemoteIDsByTrackID == [hashMatch.id: "hash-id"])
+        #expect(plan.existingRemoteIDsByTrackID == [
+            hashMatch.id: "hash-id",
+            metadataMatch.id: "metadata-id",
+        ])
     }
 
     @Test

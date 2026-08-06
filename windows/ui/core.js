@@ -161,6 +161,35 @@ function normalizedServerOrigin(value) {
   }
 }
 
+function normalizedServerSongIdentityText(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function serverSongArtistTokens(value) {
+  const connectors = new Set(["and", "feat", "featuring", "ft", "with"]);
+  const placeholders = new Set(["unknown", "artist", "local", "file"]);
+  return new Set(normalizedServerSongIdentityText(value)
+    .split(" ")
+    .filter(Boolean)
+    .filter((token) => !connectors.has(token) && !placeholders.has(token)));
+}
+
+export function serverSongMetadataMatches(track, song) {
+  if (normalizedServerSongIdentityText(track?.title) !== normalizedServerSongIdentityText(song?.title)) return false;
+  const trackArtists = serverSongArtistTokens(track?.artist);
+  const songArtists = serverSongArtistTokens(song?.artist);
+  if (!trackArtists.size || trackArtists.size !== songArtists.size) return false;
+  if ([...trackArtists].some((token) => !songArtists.has(token))) return false;
+  const trackDuration = Number(track?.duration);
+  const songDuration = Number(song?.duration_seconds ?? song?.durationSeconds ?? song?.duration);
+  return !(trackDuration > 0 && songDuration > 0) || Math.abs(trackDuration - songDuration) <= 5;
+}
+
 function normalizedClipRanges(value = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value).flatMap(([key, range]) => {
@@ -916,7 +945,8 @@ export function planMissingDownloadedUploads(state, catalog) {
     if (track.sourceServer && (!sourceServer || sourceServer !== activeServer)) continue;
     if (track.remoteID && remoteIDs.has(String(track.remoteID))) continue;
     const hash = String(track.contentSha256 || "").trim().toLocaleLowerCase();
-    const remoteSong = hash ? remoteByHash.get(hash) : null;
+    const remoteSong = (hash ? remoteByHash.get(hash) : null)
+      || songs.find((song) => serverSongMetadataMatches(track, song));
     if (remoteSong) matches.push({ trackID: track.id, remoteSong });
     else uploadTracks.push(track);
   }

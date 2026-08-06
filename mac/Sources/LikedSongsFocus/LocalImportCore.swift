@@ -225,19 +225,14 @@ enum LocalImportExistingSongPolicy {
         actualArtist: String,
         actualDuration: Double?
     ) -> Bool {
-        guard LocalImportMatcher.normalize(expectedTitle) == LocalImportMatcher.normalize(actualTitle),
-              normalizedArtistTokens(expectedArtist) == normalizedArtistTokens(actualArtist) else { return false }
-        if let expectedDuration, expectedDuration > 0,
-           let actualDuration, actualDuration > 0 {
-            return abs(expectedDuration - actualDuration) <= 5
-        }
-        return true
-    }
-
-    private static func normalizedArtistTokens(_ value: String) -> Set<Substring> {
-        let connectors: Set<Substring> = ["and", "feat", "featuring", "with"]
-        return Set(LocalImportMatcher.normalize(value).split(separator: " "))
-            .subtracting(connectors)
+        ServerSongIdentityPolicy.metadataMatches(
+            expectedTitle: expectedTitle,
+            expectedArtist: expectedArtist,
+            expectedDuration: expectedDuration,
+            actualTitle: actualTitle,
+            actualArtist: actualArtist,
+            actualDuration: actualDuration
+        )
     }
 
     private static func spotifyTrackID(_ value: String?) -> String? {

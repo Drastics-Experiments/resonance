@@ -2,6 +2,7 @@ package mov.unblocked.resonance.playback
 
 import java.net.URI
 import mov.unblocked.resonance.data.RemoteSong
+import mov.unblocked.resonance.data.ServerSongIdentityPolicy
 import mov.unblocked.resonance.data.Track
 
 data class MissingDownloadedUploadPlan(
@@ -30,7 +31,18 @@ object UploadMissingPolicy {
             if (track.sourceServer != null && activeOrigin != null && origin(track.sourceServer) != activeOrigin) return@forEach
             if (track.remoteID in remoteIDs) return@forEach
             val hashMatch = track.contentSHA256?.trim()?.lowercase()?.let(remoteByHash::get)
+            val metadataMatch = catalog.firstOrNull { song ->
+                ServerSongIdentityPolicy.metadataMatches(
+                    expectedTitle = track.title,
+                    expectedArtist = track.artist,
+                    expectedDuration = track.durationMs.takeIf { it > 0 }?.div(1_000.0),
+                    actualTitle = song.title,
+                    actualArtist = song.artist,
+                    actualDuration = song.durationSeconds,
+                )
+            }?.id
             if (hashMatch != null) existingRemoteIDs[track.id] = hashMatch
+            else if (metadataMatch != null) existingRemoteIDs[track.id] = metadataMatch
             else uploadTrackIDs += track.id
         }
         return MissingDownloadedUploadPlan(uploadTrackIDs, existingRemoteIDs)

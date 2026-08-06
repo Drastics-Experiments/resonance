@@ -50,6 +50,7 @@ import mov.unblocked.resonance.data.RemoteClipRange
 import mov.unblocked.resonance.data.RemotePlaylistsDocument
 import mov.unblocked.resonance.data.RemoteSong
 import mov.unblocked.resonance.data.ServerClient
+import mov.unblocked.resonance.data.ServerSongIdentityPolicy
 import mov.unblocked.resonance.data.StoredLibrary
 import mov.unblocked.resonance.data.Track
 import mov.unblocked.resonance.playback.PlaybackService
@@ -704,6 +705,19 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         index: Int,
         total: Int,
     ): String {
+        mutableState.value.remoteSongs.firstOrNull { song ->
+            ServerSongIdentityPolicy.metadataMatches(
+                expectedTitle = track.title,
+                expectedArtist = track.artist,
+                expectedDuration = track.durationMs.takeIf { it > 0 }?.div(1_000.0),
+                actualTitle = song.title,
+                actualArtist = song.artist,
+                actualDuration = song.durationSeconds,
+            )
+        }?.let { existing ->
+            adoptUploadedDownload(track.id, existing.id, client.baseURL)
+            return existing.id
+        }
         var lastError: Throwable? = null
         repeat(3) { attempt ->
             try {
@@ -802,13 +816,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun uploadMissingDownloads() {
         if (mutableState.value.isUploading) return
+        mutableState.value = mutableState.value.copy(
+            isUploading = true,
+            uploadProgress = 0f,
+            uploadDetail = "Checking downloaded songs…",
+            errorMessage = null,
+        )
         viewModelScope.launch {
-            mutableState.value = mutableState.value.copy(
-                isUploading = true,
-                uploadProgress = 0f,
-                uploadDetail = "Checking downloaded songs…",
-                errorMessage = null,
-            )
             try {
                 val client = serverClient()
                 val catalog = client.fetchCatalog()
@@ -889,9 +903,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun uploadUris(uris: List<Uri>) {
-        if (uris.isEmpty()) return
+        if (uris.isEmpty() || mutableState.value.isUploading) return
+        mutableState.value = mutableState.value.copy(isUploading = true, uploadProgress = 0f, uploadDetail = "Preparing uploads…")
         viewModelScope.launch {
-            mutableState.value = mutableState.value.copy(isUploading = true, uploadProgress = 0f, uploadDetail = "Preparing uploads…")
             val temporaryFiles = uris.mapIndexedNotNull { index, uri ->
                 runCatching {
                     val requestedName = displayName(uri) ?: "Upload-${index + 1}.mp3"

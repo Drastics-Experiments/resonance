@@ -22,6 +22,7 @@ import {
   removeClipRangeForTrack,
   resolveSyncProfile,
   restoreProfileState,
+  serverSongMetadataMatches,
   storeActiveProfileState,
   setClipRangeForTrack,
   squareArtworkCropRect,
@@ -3323,6 +3324,19 @@ async function uploadLocalImportTrack(track) {
   if (!track?.filePath) {
     return { ok: false, error: { stage: "syncing", code: "LOCAL_FILE_MISSING", message: "The local song file could not be found for server upload." } };
   }
+  await refreshServerCatalogAfterLocalImportUpload();
+  const existingRemoteSong = serverCatalogMatchForLocalImport(track);
+  if (existingRemoteSong) {
+    if (reconcileUploadedTrack(state, track.id, existingRemoteSong, {
+      serverURL: state.serverURL,
+      profileID: activeProfileID(),
+    })) {
+      playlistMutationGeneration += 1;
+      await persist({ refreshSidebar: false });
+      schedulePlaylistSync();
+    }
+    return { ok: true, remoteSong: existingRemoteSong, skipped: true };
+  }
   const result = await api.uploadLocalImport({
     baseURL: state.serverURL,
     adminToken: serverAdminToken,
@@ -3364,9 +3378,11 @@ function serverCatalogMatchForLocalImport(track) {
     if (remoteMatch) return remoteMatch;
   }
   const contentHash = String(track?.contentSha256 || "").trim().toLocaleLowerCase();
-  if (!contentHash) return null;
-  return serverCatalog.find((song) =>
-    String(song?.content_sha256 || song?.contentSha256 || "").trim().toLocaleLowerCase() === contentHash) || null;
+  const hashMatch = contentHash
+    ? serverCatalog.find((song) =>
+      String(song?.content_sha256 || song?.contentSha256 || "").trim().toLocaleLowerCase() === contentHash)
+    : null;
+  return hashMatch || serverCatalog.find((song) => serverSongMetadataMatches(track, song)) || null;
 }
 
 async function prepareLocalImportUploadBatch(tracks) {
@@ -3892,7 +3908,9 @@ async function confirmLinkImport() {
         return;
       }
       await refreshServerCatalogAfterLocalImportUpload();
-      showNotice(`Uploaded ${importedTrack.title} to ${activeProfile().name || "the active server profile"}.`, "status");
+      showNotice(uploaded.skipped
+        ? `${importedTrack.title} is already on ${activeProfile().name || "the active server profile"}.`
+        : `Uploaded ${importedTrack.title} to ${activeProfile().name || "the active server profile"}.`, "status");
     }
     setLocalImportStage({ stage: "complete" });
     $("#confirmLocalImport").hidden = true;
@@ -4122,6 +4140,7 @@ async function serverAction(mode) {
 }
 
 async function uploadServerSongs() {
+  if (serverTransferActive) return;
   await saveServerForm();
   const context = currentProfileContext();
   const status = $("#serverStatus");
@@ -4157,6 +4176,7 @@ async function uploadServerSongs() {
 }
 
 async function uploadMissingDownloadedSongs() {
+  if (serverTransferActive) return;
   await saveServerForm();
   const context = currentProfileContext();
   const status = $("#serverStatus");

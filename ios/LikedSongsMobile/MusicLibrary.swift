@@ -1143,6 +1143,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func uploadFiles(_ urls: [URL]) async {
+        guard !isUploading, !isSyncing else { return }
         guard let baseURL = normalizedServer(), !serverAdminToken.isEmpty else { uploadDetail = "Enter the server admin key"; return }
         isUploading = true
         uploadProgress = 0
@@ -1209,6 +1210,23 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
            currentTrack.sourceServer
                .flatMap(URL.init(string:))
                .map({ sameOrigin($0, baseURL) }) ?? true {
+            return false
+        }
+        if let existing = remoteSongs.first(where: { song in
+            MobileServerSongIdentityPolicy.metadataMatches(
+                expectedTitle: currentTrack.title,
+                expectedArtist: currentTrack.artist,
+                expectedDuration: currentTrack.duration,
+                actualTitle: song.title,
+                actualArtist: song.artist,
+                actualDuration: song.duration
+            )
+        }) {
+            adoptUploadedDownload(
+                trackID: currentTrack.id,
+                remoteID: existing.id,
+                sourceServer: baseURL.absoluteString
+            )
             return false
         }
         let uploadedSong = try await uploadServerFile(

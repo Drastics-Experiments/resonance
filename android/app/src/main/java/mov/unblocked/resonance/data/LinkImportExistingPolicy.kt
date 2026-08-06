@@ -1,11 +1,42 @@
 package mov.unblocked.resonance.data
 
+import java.text.Normalizer
+
 data class LinkImportExistingMatch(
     val deviceTrackID: String? = null,
     val serverSongID: String? = null,
 ) {
     val isOnDevice: Boolean get() = deviceTrackID != null
     val isOnServer: Boolean get() = serverSongID != null
+}
+
+object ServerSongIdentityPolicy {
+    fun metadataMatches(
+        expectedTitle: String,
+        expectedArtist: String,
+        expectedDuration: Double?,
+        actualTitle: String,
+        actualArtist: String,
+        actualDuration: Double?,
+    ): Boolean {
+        if (normalize(expectedTitle) != normalize(actualTitle)) return false
+        val expectedArtists = artistTokens(expectedArtist)
+        val actualArtists = artistTokens(actualArtist)
+        if (expectedArtists.isEmpty() || expectedArtists != actualArtists) return false
+        return expectedDuration == null || expectedDuration <= 0 || actualDuration == null || actualDuration <= 0 ||
+            kotlin.math.abs(expectedDuration - actualDuration) <= 5
+    }
+
+    private fun artistTokens(value: String): Set<String> = normalize(value)
+        .split(' ')
+        .filter(String::isNotBlank)
+        .filterNot { it in setOf("and", "feat", "featuring", "ft", "with", "unknown", "artist", "local", "file") }
+        .toSet()
+
+    private fun normalize(value: String): String = Normalizer.normalize(value.lowercase(), Normalizer.Form.NFKD)
+        .replace(Regex("""\p{M}+"""), "")
+        .replace(Regex("""[^\p{L}\p{N}]+"""), " ")
+        .trim()
 }
 
 object LinkImportExistingPolicy {
@@ -15,7 +46,7 @@ object LinkImportExistingPolicy {
         activeServerSongs: List<RemoteSong>,
     ): LinkImportExistingMatch {
         val device = deviceTracks.firstOrNull { candidate ->
-            metadataMatches(
+            ServerSongIdentityPolicy.metadataMatches(
                 expected.title,
                 expected.artist,
                 expected.durationSeconds?.toDouble(),
@@ -27,7 +58,7 @@ object LinkImportExistingPolicy {
         val server = device?.remoteID?.let { remoteID ->
             activeServerSongs.firstOrNull { it.id == remoteID }
         } ?: activeServerSongs.firstOrNull { candidate ->
-            metadataMatches(
+            ServerSongIdentityPolicy.metadataMatches(
                 expected.title,
                 expected.artist,
                 expected.durationSeconds?.toDouble(),
@@ -39,27 +70,4 @@ object LinkImportExistingPolicy {
         return LinkImportExistingMatch(device?.id, server?.id)
     }
 
-    private fun metadataMatches(
-        expectedTitle: String,
-        expectedArtist: String,
-        expectedDuration: Double?,
-        actualTitle: String,
-        actualArtist: String,
-        actualDuration: Double?,
-    ): Boolean {
-        if (normalize(expectedTitle) != normalize(actualTitle)) return false
-        if (artistTokens(expectedArtist) != artistTokens(actualArtist)) return false
-        return expectedDuration == null || expectedDuration <= 0 || actualDuration == null || actualDuration <= 0 ||
-            kotlin.math.abs(expectedDuration - actualDuration) <= 5
-    }
-
-    private fun artistTokens(value: String): Set<String> = normalize(value)
-        .split(' ')
-        .filter(String::isNotBlank)
-        .filterNot { it in setOf("and", "feat", "featuring", "with") }
-        .toSet()
-
-    private fun normalize(value: String): String = value.lowercase()
-        .replace(Regex("[^a-z0-9]+"), " ")
-        .trim()
 }

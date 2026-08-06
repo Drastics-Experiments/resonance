@@ -1674,6 +1674,24 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                .map({ Self.sameOrigin($0, base) }) ?? true {
             return false
         }
+        if let existing = remoteSongs.first(where: { song in
+            ServerSongIdentityPolicy.metadataMatches(
+                expectedTitle: currentTrack.title,
+                expectedArtist: currentTrack.artist,
+                expectedDuration: currentTrack.duration,
+                actualTitle: song.title,
+                actualArtist: song.artist,
+                actualDuration: song.durationSeconds
+            )
+        }) {
+            reconcileUploadedLocalTrack(
+                trackID: currentTrack.id,
+                remoteID: existing.id,
+                sourceServer: base.absoluteString,
+                profileID: syncProfileID
+            )
+            return false
+        }
         let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !adminToken.isEmpty else { throw ServerSyncError.missingAdminToken }
         let values = try fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])

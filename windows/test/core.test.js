@@ -22,6 +22,7 @@ import {
   normalizeState,
   playbackRangeForTrack,
   planMissingDownloadedUploads,
+  serverSongMetadataMatches,
   reconcileServerBackedTrackDuplicates,
   reconcileUploadedTrack,
   removeClipRangeForTrack,
@@ -1425,7 +1426,8 @@ test("plans uploads only for downloaded active-profile songs missing from the li
       { id: "hash-match", filePath: "/music/hash.mp3", remoteID: "old-id", sourceServer: "https://music.example", syncProfileID: "profile-a", contentSha256: "ABC" },
       { id: "local", filePath: "/music/local.mp3", remoteID: null },
       { id: "other-profile", filePath: "/music/other.mp3", remoteID: "gone", sourceServer: "https://music.example", syncProfileID: "profile-b" },
-      { id: "source-only-current", filePath: "/music/source.mp3", sourceServer: "https://music.example", syncProfileID: "profile-a" },
+      { id: "metadata-match", title: "All for You - Radio Version", artist: "Ace of Base", duration: 217.1, filePath: "/music/metadata.mp3", remoteID: "old-metadata-id", sourceServer: "https://music.example", syncProfileID: "profile-a" },
+      { id: "source-only-current", title: "Actually Missing", artist: "Artist", duration: 180, filePath: "/music/source.mp3", sourceServer: "https://music.example", syncProfileID: "profile-a" },
       { id: "source-only-other-profile", filePath: "/music/profile.mp3", sourceServer: "https://music.example", syncProfileID: "profile-b" },
       { id: "source-only-other-server", filePath: "/music/server.mp3", sourceServer: "https://other.example", syncProfileID: "profile-a" },
     ],
@@ -1433,9 +1435,24 @@ test("plans uploads only for downloaded active-profile songs missing from the li
   const plan = planMissingDownloadedUploads(state, [
     { id: "remote-present" },
     { id: "replacement", content_sha256: "abc" },
+    { id: "metadata-replacement", title: "All for You Radio Version", artist: "Ace of Base", duration_seconds: 217.9 },
   ]);
   assert.deepEqual(plan.uploadTracks.map((track) => track.id), ["missing", "source-only-current"]);
-  assert.deepEqual(plan.matches.map((match) => [match.trackID, match.remoteSong.id]), [["hash-match", "replacement"]]);
+  assert.deepEqual(plan.matches.map((match) => [match.trackID, match.remoteSong.id]), [
+    ["hash-match", "replacement"],
+    ["metadata-match", "metadata-replacement"],
+  ]);
+});
+
+test("matches re-encoded server copies by title artist and duration", () => {
+  assert.equal(serverSongMetadataMatches(
+    { title: "Cake By The Ocean", artist: "DNCE", duration: 219.2 },
+    { title: "Cake By The Ocean", artist: "DNCE", duration_seconds: 218.9 },
+  ), true);
+  assert.equal(serverSongMetadataMatches(
+    { title: "Cake By The Ocean", artist: "DNCE", duration: 219.2 },
+    { title: "Cake By The Ocean", artist: "DNCE", duration_seconds: 260 },
+  ), false);
 });
 
 test("names every permanent upload failure after retries", () => {
