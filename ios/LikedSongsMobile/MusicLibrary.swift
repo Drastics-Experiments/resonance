@@ -4,6 +4,7 @@ import Foundation
 import MediaPlayer
 import Security
 import UIKit
+import UniformTypeIdentifiers
 
 @MainActor
 final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPlayerDelegate {
@@ -18,13 +19,20 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private struct ServerErrorPayload: Decodable { let error: String }
+    private struct DuplicateSongUploadResponse: Decodable {
+        let duplicateOf: MobileRemoteSong
+
+        enum CodingKeys: String, CodingKey {
+            case duplicateOf = "duplicate_of"
+        }
+    }
     @Published var tracks: [MobileTrack] = []
     @Published var playlists: [MobilePlaylist] = [MobilePlaylist(name: "Liked Songs", isSystem: true)]
     @Published var favorites: Set<UUID> = []
     @Published var currentTrackID: UUID?
     @Published var isPlaying = false
     @Published var position: TimeInterval = 0
-    @Published var volume: Double = 0.8 { didSet { player?.volume = Float(volume); UserDefaults.standard.set(volume, forKey: "Resonance.volume") } }
+    @Published var volume: Double = 0.8 { didSet { player?.volume = PlaybackVolumePolicy.gain(for: volume); UserDefaults.standard.set(volume, forKey: "Resonance.volume") } }
     @Published var playbackRate: Float = 1 { didSet { player?.rate = playbackRate; UserDefaults.standard.set(Double(playbackRate), forKey: "Resonance.rate") } }
     @Published var shuffleEnabled = false { didSet { UserDefaults.standard.set(shuffleEnabled, forKey: "Resonance.shuffle") } }
     @Published var repeatEnabled = false { didSet { UserDefaults.standard.set(repeatEnabled, forKey: "Resonance.repeat") } }
@@ -56,6 +64,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published var uploadProgress = 0.0
     @Published var downloadDetail = "Idle"
     @Published var uploadDetail = "Idle"
+    @Published var transferNotice: MobileTransferNotice?
     @Published var isSyncingPlaylists = false
     @Published var playlistSyncDetail = "Not synced"
     @Published var syncProfileID = "default"
@@ -160,8 +169,147 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         guard let filename = track.artworkFilename else { return nil }
         if let cached = artworkCache[filename] { return cached }
         guard let image = UIImage(contentsOfFile: artworkDirectory.appendingPathComponent(filename).path) else { return nil }
-        artworkCache[filename] = image
-        return image
+        let squareImage = centerCroppedSquare(image)
+        artworkCache[filename] = squareImage
+        return squareImage
+    }
+
+    private func centerCroppedSquare(_ image: UIImage) -> UIImage {
+        guard let cgImage = image.cgImage else { return image }
+        let width = cgImage.width
+        let height = cgImage.height
+        let contentBounds = detectedArtworkContentBounds(in: cgImage)
+        let side = min(contentBounds.width, contentBounds.height)
+        let cropRect = CGRect(
+            x: contentBounds.midX - side / 2,
+            y: contentBounds.midY - side / 2,
+            width: side,
+            height: side
+        ).integral.intersection(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        guard cropRect.width > 0, cropRect.height > 0 else { return image }
+        if cropRect.width == CGFloat(width), cropRect.height == CGFloat(height) { return image }
+        guard let croppedImage = cgImage.cropping(to: cropRect) else { return image }
+        return UIImage(cgImage: croppedImage, scale: image.scale, orientation: image.imageOrientation)
+    }
+
+    private func detectedArtworkContentBounds(in image: CGImage) -> CGRect {
+        let sourceWidth = image.width
+        let sourceHeight = image.height
+        let sampleScale = min(1, 160 / Double(max(sourceWidth, sourceHeight)))
+        let sampleWidth = max(Int((Double(sourceWidth) * sampleScale).rounded()), 1)
+        let sampleHeight = max(Int((Double(sourceHeight) * sampleScale).rounded()), 1)
+        let bytesPerPixel = 4
+        let bytesPerRow = sampleWidth * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: sampleHeight * bytesPerRow)
+
+        guard let context = CGContext(
+            data: &pixels,
+            width: sampleWidth,
+            height: sampleHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return CGRect(x: 0, y: 0, width: CGFloat(sourceWidth), height: CGFloat(sourceHeight))
+        }
+        context.interpolationQuality = .low
+        context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(sampleWidth), height: CGFloat(sampleHeight)))
+
+        struct LineStats {
+            let channels: [Double]
+            let deviation: Double
+        }
+
+        func stats(for offsets: [Int]) -> LineStats {
+            guard !offsets.isEmpty else { return LineStats(channels: [0, 0, 0, 0], deviation: 255) }
+            var totals = [Double](repeating: 0, count: bytesPerPixel)
+            for offset in offsets {
+                for channel in 0..<bytesPerPixel {
+                    totals[channel] += Double(pixels[offset + channel])
+                }
+            }
+            let means = totals.map { $0 / Double(offsets.count) }
+            var totalDeviation = 0.0
+            for offset in offsets {
+                for channel in 0..<bytesPerPixel {
+                    totalDeviation += abs(Double(pixels[offset + channel]) - means[channel])
+                }
+            }
+            return LineStats(
+                channels: means,
+                deviation: totalDeviation / Double(offsets.count * bytesPerPixel)
+            )
+        }
+
+        func rowStats(_ row: Int, xRange: Range<Int>) -> LineStats {
+            stats(for: xRange.map { row * bytesPerRow + $0 * bytesPerPixel })
+        }
+
+        func columnStats(_ column: Int, yRange: Range<Int>) -> LineStats {
+            stats(for: yRange.map { $0 * bytesPerRow + column * bytesPerPixel })
+        }
+
+        func colorDistance(_ lhs: LineStats, _ rhs: LineStats) -> Double {
+            zip(lhs.channels, rhs.channels).reduce(0) { $0 + abs($1.0 - $1.1) } / Double(bytesPerPixel)
+        }
+
+        func borderRun(lineCount: Int, statsAt: (Int) -> LineStats, fromStart: Bool) -> Int {
+            guard lineCount >= 6 else { return 0 }
+            let edgeIndex = fromStart ? 0 : lineCount - 1
+            let reference = statsAt(edgeIndex)
+            guard reference.deviation <= 10 else { return 0 }
+            var count = 0
+            for offset in 0..<(lineCount / 2) {
+                let index = fromStart ? offset : lineCount - 1 - offset
+                let candidate = statsAt(index)
+                guard candidate.deviation <= 13, colorDistance(candidate, reference) <= 18 else { break }
+                count += 1
+            }
+            return count
+        }
+
+        func symmetricInsets(_ first: Int, _ second: Int, length: Int) -> (Int, Int) {
+            guard first >= 2, second >= 2, first + second < length * 3 / 4 else { return (0, 0) }
+            let tolerance = max(2, min(first, second) / 3)
+            guard abs(first - second) <= tolerance else { return (0, 0) }
+            return (first, second)
+        }
+
+        let fullXRange = 0..<sampleWidth
+        let firstRows = borderRun(
+            lineCount: sampleHeight,
+            statsAt: { rowStats($0, xRange: fullXRange) },
+            fromStart: true
+        )
+        let lastRows = borderRun(
+            lineCount: sampleHeight,
+            statsAt: { rowStats($0, xRange: fullXRange) },
+            fromStart: false
+        )
+        let (rowInsetStart, rowInsetEnd) = symmetricInsets(firstRows, lastRows, length: sampleHeight)
+        let contentYRange = rowInsetStart..<(sampleHeight - rowInsetEnd)
+
+        let firstColumns = borderRun(
+            lineCount: sampleWidth,
+            statsAt: { columnStats($0, yRange: contentYRange) },
+            fromStart: true
+        )
+        let lastColumns = borderRun(
+            lineCount: sampleWidth,
+            statsAt: { columnStats($0, yRange: contentYRange) },
+            fromStart: false
+        )
+        let (columnInsetStart, columnInsetEnd) = symmetricInsets(firstColumns, lastColumns, length: sampleWidth)
+
+        let scaleX = CGFloat(sourceWidth) / CGFloat(sampleWidth)
+        let scaleY = CGFloat(sourceHeight) / CGFloat(sampleHeight)
+        return CGRect(
+            x: CGFloat(columnInsetStart) * scaleX,
+            y: CGFloat(rowInsetStart) * scaleY,
+            width: CGFloat(sampleWidth - columnInsetStart - columnInsetEnd) * scaleX,
+            height: CGFloat(sampleHeight - rowInsetStart - rowInsetEnd) * scaleY
+        ).integral.intersection(CGRect(x: 0, y: 0, width: CGFloat(sourceWidth), height: CGFloat(sourceHeight)))
     }
 
     func importFiles(_ urls: [URL]) async {
@@ -337,7 +485,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             let next = try AVAudioPlayer(contentsOf: fileURL(for: track))
             next.delegate = self
             next.enableRate = true
-            next.volume = Float(volume)
+            next.volume = PlaybackVolumePolicy.gain(for: volume)
             next.rate = playbackRate
             next.prepareToPlay()
             let bounds = playbackBounds(for: track, duration: next.duration)
@@ -559,6 +707,27 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 playbackQueue = playlists[index].trackIDs
             }
         }
+        save()
+        schedulePlaylistSync()
+    }
+
+    func upsertImportedPlaylist(named rawName: String, tracks importedTracks: [MobileTrack]) {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let importedIDs = importedTracks.map(\.id)
+        guard !name.isEmpty, !importedIDs.isEmpty else { return }
+        let index: Int
+        if let existing = playlists.firstIndex(where: {
+            !$0.isSystem && $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }) {
+            index = existing
+        } else {
+            playlists.append(MobilePlaylist(name: name, remoteSongIDs: []))
+            index = playlists.index(before: playlists.endIndex)
+        }
+        var seen = Set(playlists[index].trackIDs)
+        playlists[index].trackIDs.append(contentsOf: importedIDs.filter { seen.insert($0).inserted })
+        updateRemoteSongIDs(forPlaylistAt: index)
+        dirtyPlaylistIDs.insert(playlists[index].id)
         save()
         schedulePlaylistSync()
     }
@@ -983,9 +1152,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             let access = source.startAccessingSecurityScopedResource()
             defer { if access { source.stopAccessingSecurityScopedResource() } }
             do {
-                uploadDetail = "Uploading \(completed + 1) of \(urls.count) • \(source.lastPathComponent)"
+                let uploadFilename = MobileServerUploadNaming.filename(for: source)
+                uploadDetail = "Uploading \(completed + 1) of \(urls.count) • \(uploadFilename)"
                 var components = URLComponents(url: baseURL.appendingPathComponent("api/v1/admin/songs"), resolvingAgainstBaseURL: false)
-                components?.queryItems = [URLQueryItem(name: "filename", value: source.lastPathComponent)]
+                components?.queryItems = [URLQueryItem(name: "filename", value: uploadFilename)]
                 guard let url = components?.url else { continue }
                 var request = URLRequest(url: url)
                 request.httpMethod = "PUT"
@@ -1000,6 +1170,305 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         Self.saveToken(serverAdminToken, account: "admin")
         uploadDetail = "Uploaded \(completed) song\(completed == 1 ? "" : "s")"
         await refreshCatalog()
+    }
+
+    var canUploadLocalImports: Bool {
+        normalizedServer() != nil
+            && !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func refreshRemoteCatalogForImport() async throws {
+        guard let baseURL = normalizedServer() else { throw URLError(.badURL) }
+        let catalog = try await fetchCatalogForUpload(from: baseURL)
+        remoteSongs = catalog
+        selectedRemoteSongIDs.formIntersection(Set(catalog.map(\.id)))
+        isServerConnected = true
+        serverMessage = "Connected • \(catalog.count) song\(catalog.count == 1 ? "" : "s")"
+    }
+
+    @discardableResult
+    func reconcileLocalImportWithServer(trackID: UUID, remoteID: String) -> Bool {
+        guard let baseURL = normalizedServer() else { return false }
+        adoptUploadedDownload(trackID: trackID, remoteID: remoteID, sourceServer: baseURL.absoluteString)
+        return true
+    }
+
+    @discardableResult
+    func uploadLocalImportToActiveProfile(_ track: MobileTrack) async throws -> Bool {
+        guard let currentTrack = tracks.first(where: { $0.id == track.id }) else {
+            throw URLError(.fileDoesNotExist)
+        }
+        guard let baseURL = normalizedServer() else { throw URLError(.badURL) }
+        guard !serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw URLError(.userAuthenticationRequired)
+        }
+        if let remoteID = currentTrack.remoteID,
+           remoteSongs.contains(where: { $0.id == remoteID }),
+           (currentTrack.syncProfileID ?? syncProfileID) == syncProfileID,
+           currentTrack.sourceServer
+               .flatMap(URL.init(string:))
+               .map({ sameOrigin($0, baseURL) }) ?? true {
+            return false
+        }
+        let uploadedSong = try await uploadServerFile(
+            fileURL(for: currentTrack),
+            to: baseURL,
+            title: currentTrack.title
+        )
+        remoteSongs = [uploadedSong] + remoteSongs.filter { $0.id != uploadedSong.id }
+        adoptUploadedDownload(
+            trackID: currentTrack.id,
+            remoteID: uploadedSong.id,
+            sourceServer: baseURL.absoluteString
+        )
+        isServerConnected = true
+        serverMessage = "Connected • \(remoteSongs.count) song\(remoteSongs.count == 1 ? "" : "s")"
+        return true
+    }
+
+    func showTransferNotice(title: String, detail: String, isError: Bool) {
+        transferNotice = MobileTransferNotice(title: title, detail: detail, isError: isError)
+    }
+
+    func dismissTransferNotice() {
+        transferNotice = nil
+    }
+
+    func uploadDownloadedSongsMissingFromServer() async {
+        guard !isUploading, !isSyncing else { return }
+        guard let baseURL = normalizedServer() else {
+            uploadDetail = "Enter a valid server URL"
+            serverMessage = uploadDetail
+            return
+        }
+        guard !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            uploadDetail = "Enter the access token"
+            serverMessage = uploadDetail
+            return
+        }
+        guard !serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            uploadDetail = "Enter the server admin key"
+            serverMessage = uploadDetail
+            return
+        }
+
+        isUploading = true
+        uploadProgress = 0
+        uploadDetail = "Checking downloaded songs…"
+        defer { isUploading = false }
+
+        do {
+            let catalog = try await fetchCatalogForUpload(from: baseURL)
+            isServerConnected = true
+            remoteSongs = catalog
+            selectedRemoteSongIDs.formIntersection(Set(catalog.map(\.id)))
+            let plan = MobileMissingServerUploadPolicy.plan(
+                tracks: tracks,
+                catalog: catalog,
+                activeProfileID: syncProfileID,
+                activeServerURL: baseURL
+            )
+            for (trackID, remoteID) in plan.existingRemoteIDsByTrackID {
+                adoptUploadedDownload(
+                    trackID: trackID,
+                    remoteID: remoteID,
+                    sourceServer: baseURL.absoluteString
+                )
+            }
+            let candidates = plan.uploadTrackIDs.compactMap { trackID in
+                tracks.first(where: { $0.id == trackID })
+            }
+            guard !candidates.isEmpty else {
+                uploadProgress = 1
+                uploadDetail = "All downloaded songs are already on the server"
+                serverMessage = uploadDetail
+                return
+            }
+
+            var uploadedCount = 0
+            var failures: [String] = []
+            for (index, track) in candidates.enumerated() {
+                try Task.checkCancellation()
+                let source = fileURL(for: track)
+                uploadDetail = "Uploading \(index + 1) of \(candidates.count) • \(MobileServerUploadNaming.filename(for: source, title: track.title))"
+                var uploadedSong: MobileRemoteSong?
+                var lastError: Error?
+                for attempt in 1...3 {
+                    do {
+                        if attempt > 1 {
+                            try await Task.sleep(for: .milliseconds(attempt == 2 ? 400 : 1_200))
+                        }
+                        uploadedSong = try await uploadServerFile(source, to: baseURL, title: track.title)
+                        break
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        lastError = error
+                    }
+                }
+
+                if let uploadedSong {
+                    uploadedCount += 1
+                    remoteSongs = [uploadedSong] + remoteSongs.filter { $0.id != uploadedSong.id }
+                    adoptUploadedDownload(
+                        trackID: track.id,
+                        remoteID: uploadedSong.id,
+                        sourceServer: baseURL.absoluteString
+                    )
+                } else {
+                    let name = track.artist.isEmpty ? track.title : "\(track.title) — \(track.artist)"
+                    failures.append("\(name) (\(lastError?.localizedDescription ?? "upload failed"))")
+                }
+                uploadProgress = Double(index + 1) / Double(candidates.count)
+            }
+
+            remoteSongs = (try? await fetchCatalogForUpload(from: baseURL)) ?? remoteSongs
+            Self.saveToken(serverAdminToken, account: "admin")
+            let matchedCount = plan.existingRemoteIDsByTrackID.count
+            if failures.isEmpty {
+                uploadDetail = "Uploaded \(uploadedCount); matched \(matchedCount) already on the server"
+            } else {
+                uploadDetail = "Uploaded \(uploadedCount); failed: \(failures.joined(separator: ", "))"
+            }
+            serverMessage = uploadDetail
+            await syncPlaylistsNow()
+        } catch is CancellationError {
+            uploadDetail = "Upload cancelled"
+            serverMessage = uploadDetail
+        } catch {
+            isServerConnected = false
+            uploadDetail = "Upload failed: \(error.localizedDescription)"
+            serverMessage = uploadDetail
+        }
+    }
+
+    private func fetchCatalogForUpload(from baseURL: URL) async throws -> [MobileRemoteSong] {
+        var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/songs"))
+        request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
+        setProfileHeader(on: &request)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+        return try JSONDecoder().decode(MobileRemoteCatalog.self, from: data).songs
+    }
+
+    private func uploadServerFile(
+        _ source: URL,
+        to baseURL: URL,
+        title: String? = nil
+    ) async throws -> MobileRemoteSong {
+        let values = try source.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values.isRegularFile == true, (values.fileSize ?? 0) > 0 else {
+            throw URLError(.fileDoesNotExist)
+        }
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("api/v1/admin/songs"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "filename", value: MobileServerUploadNaming.filename(for: source, title: title))
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 600
+        request.setValue("Bearer \(serverAdminToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(
+            UTType(filenameExtension: source.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
+            forHTTPHeaderField: "Content-Type"
+        )
+        setProfileHeader(on: &request)
+        let (data, response) = try await URLSession.shared.upload(for: request, fromFile: source)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        if (200..<300).contains(http.statusCode),
+           let song = try? JSONDecoder().decode(MobileRemoteSong.self, from: data) {
+            return song
+        }
+        if http.statusCode == 409,
+           let duplicate = try? JSONDecoder().decode(DuplicateSongUploadResponse.self, from: data) {
+            return duplicate.duplicateOf
+        }
+        throw playlistServerError(status: http.statusCode, data: data)
+    }
+
+    private func adoptUploadedDownload(trackID: UUID, remoteID: String, sourceServer: String) {
+        guard let targetIndex = tracks.firstIndex(where: { $0.id == trackID }) else { return }
+        let oldTrack = tracks[targetIndex]
+        let oldRemoteID = oldTrack.remoteID
+        let oldClipKey = clipRangeKey(for: oldTrack)
+        let newClipKey = clipRangeKey(remoteID: remoteID)
+        let duplicateIDs = Set(tracks.compactMap { candidate -> UUID? in
+            guard candidate.id != trackID,
+                  candidate.remoteID == remoteID,
+                  (candidate.syncProfileID ?? "default") == syncProfileID else { return nil }
+            if let candidateSource = candidate.sourceServer.flatMap(URL.init(string:)),
+               let activeSource = URL(string: sourceServer),
+               !sameOrigin(candidateSource, activeSource) {
+                return nil
+            }
+            return candidate.id
+        })
+        tracks[targetIndex].remoteID = remoteID
+        tracks[targetIndex].sourceServer = sourceServer
+        tracks[targetIndex].syncProfileID = syncProfileID
+
+        let remapTrackIDs: ([UUID]) -> [UUID] = { values in
+            var seen = Set<UUID>()
+            return values.compactMap { value in
+                let mapped = duplicateIDs.contains(value) ? trackID : value
+                return seen.insert(mapped).inserted ? mapped : nil
+            }
+        }
+        let wasFavorite = favorites.contains(trackID) || !favorites.isDisjoint(with: duplicateIDs)
+        favorites.subtract(duplicateIDs)
+        if wasFavorite { favorites.insert(trackID) }
+
+        for index in playlists.indices where !playlists[index].isSystem {
+            let referencedTrack = playlists[index].trackIDs.contains(trackID)
+                || playlists[index].trackIDs.contains(where: duplicateIDs.contains)
+            let referencedRemote = oldRemoteID.map { playlists[index].remoteSongIDs?.contains($0) == true } ?? false
+            playlists[index].trackIDs = remapTrackIDs(playlists[index].trackIDs)
+            guard referencedTrack || referencedRemote else { continue }
+            var remoteIDs = playlists[index].remoteSongIDs ?? []
+            if let oldRemoteID {
+                remoteIDs = remoteIDs.map { $0 == oldRemoteID ? remoteID : $0 }
+            }
+            if !remoteIDs.contains(remoteID) { remoteIDs.append(remoteID) }
+            playlists[index].remoteSongIDs = Array(remoteIDs.reduce(into: [String]()) { result, value in
+                if !result.contains(value) { result.append(value) }
+            })
+            updateRemoteSongIDs(forPlaylistAt: index)
+            dirtyPlaylistIDs.insert(playlists[index].id)
+        }
+
+        history = history.map { duplicateIDs.contains($0) ? trackID : $0 }
+        playbackQueue = remapTrackIDs(playbackQueue)
+        if let currentTrackID, duplicateIDs.contains(currentTrackID) { self.currentTrackID = trackID }
+        tracks.removeAll { duplicateIDs.contains($0.id) }
+
+        if oldClipKey != newClipKey, let range = clipRanges.removeValue(forKey: oldClipKey) {
+            clipRanges[newClipKey] = range
+            dirtyClipRangeKeys.insert(newClipKey)
+            if oldRemoteID != nil {
+                dirtyClipRangeKeys.insert(oldClipKey)
+                deletedClipRangeKeys.insert(oldClipKey)
+            }
+        }
+        if wasFavorite {
+            likesMutationGeneration &+= 1
+            if let oldRemoteID, oldRemoteID != remoteID {
+                remoteLikedSongIDs.remove(oldRemoteID)
+                dirtyRemoteLikeSongIDs.insert(oldRemoteID)
+            }
+            remoteLikedSongIDs.insert(remoteID)
+            dirtyRemoteLikeSongIDs.insert(remoteID)
+            likesDirty = true
+        }
+        normalizeSystemPlaylist()
+        save()
+        schedulePlaylistSync()
     }
 
     func deleteRemoteSong(_ song: MobileRemoteSong) async {

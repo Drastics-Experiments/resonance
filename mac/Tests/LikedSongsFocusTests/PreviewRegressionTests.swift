@@ -1,9 +1,24 @@
+import AppKit
 import Foundation
 import Testing
 @testable import LikedSongsFocus
 
 @Suite("Resonance Preview regressions")
 struct PreviewRegressionTests {
+    @Test
+    func nativeMenuKeepsTextEditingCommandsForPasteableFields() {
+        let applicationItem = NSMenuItem(title: "Resonance", action: nil, keyEquivalent: "")
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(NSMenuItem(title: "Paste", action: NSSelectorFromString("paste:"), keyEquivalent: "v"))
+        editItem.submenu = editMenu
+        let viewItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+
+        #expect(MacMenuPolicy.keepsMainMenuItem(applicationItem, at: 0))
+        #expect(MacMenuPolicy.keepsMainMenuItem(editItem, at: 1))
+        #expect(!MacMenuPolicy.keepsMainMenuItem(viewItem, at: 2))
+    }
+
     @MainActor
     @Test
     func previewUpdaterNeverChecksProductionReleases() async {
@@ -21,6 +36,100 @@ struct PreviewRegressionTests {
         #expect(MediaKindClassifier.kind(contentType: "video/mp4", filename: "untitled.bin") == .video)
         #expect(MediaKindClassifier.kind(contentType: "application/octet-stream", filename: "movie.MOV") == .video)
         #expect(MediaKindClassifier.kind(contentType: "audio/mpeg", filename: "song.mp3") == .audio)
+    }
+
+    @Test
+    func fullscreenVideoActionRequiresAnInstalledLocalVideo() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ResonanceVideoPolicyTests-\(UUID().uuidString)", isDirectory: true)
+        let videoURL = directory.appendingPathComponent("installed-video.mp4")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data([0]).write(to: videoURL)
+
+        let installedVideo = Track(
+            title: "Installed video",
+            artist: "Artist",
+            album: "Album",
+            duration: 60,
+            kind: .video,
+            artwork: .midnight,
+            fileURL: videoURL
+        )
+        let audioFile = Track(
+            title: "Audio",
+            artist: "Artist",
+            album: "Album",
+            duration: 60,
+            kind: .audio,
+            artwork: .midnight,
+            fileURL: videoURL
+        )
+        let missingVideo = Track(
+            title: "Missing video",
+            artist: "Artist",
+            album: "Album",
+            duration: 60,
+            kind: .video,
+            artwork: .midnight,
+            fileURL: directory.appendingPathComponent("missing.mp4")
+        )
+
+        #expect(installedVideo.installedVideoURL == videoURL)
+        #expect(audioFile.installedVideoURL == nil)
+        #expect(missingVideo.installedVideoURL == nil)
+    }
+
+    @Test
+    func fullScreenNowPlayingColumnsAreDerivedOnlyFromTheViewport() {
+        let standard = NowPlayingLayoutPolicy.metrics(in: CGSize(width: 1_200, height: 750))
+        let compact = NowPlayingLayoutPolicy.metrics(in: CGSize(width: 860, height: 620))
+
+        #expect(!standard.isCompact)
+        #expect(abs(standard.artworkSize - 486) < 0.001)
+        #expect(abs(standard.detailsWidth - 534) < 0.001)
+        #expect(standard.contentHeight == 520)
+
+        #expect(compact.isCompact)
+        #expect(abs(compact.artworkSize - 326.8) < 0.001)
+        #expect(abs(compact.detailsWidth - 411.2) < 0.001)
+        #expect(compact.contentHeight == 400)
+    }
+
+    @Test
+    func fullscreenVideoExpandsIntoAnEdgeInsetPlaybackSurface() {
+        let standardArtwork = InstalledVideoLayoutPolicy.artworkFrame(
+            in: CGSize(width: 1_200, height: 750)
+        )
+        let standardVideo = InstalledVideoLayoutPolicy.videoFrame(
+            in: CGSize(width: 1_200, height: 750)
+        )
+        let tinyVideo = InstalledVideoLayoutPolicy.videoFrame(
+            in: CGSize(width: 42, height: 50)
+        )
+
+        #expect(InstalledVideoLayoutPolicy.edgeInset == 38)
+        #expect(InstalledVideoLayoutPolicy.artworkCornerRadius == 22)
+        #expect(InstalledVideoLayoutPolicy.videoCornerRadius == 18)
+        #expect(InstalledVideoLayoutPolicy.geometryDuration == 0.52)
+        #expect(InstalledVideoLayoutPolicy.revealDuration == 0.20)
+        #expect(abs(standardArtwork.minX - 70) < 0.001)
+        #expect(abs(standardArtwork.minY - 138) < 0.001)
+        #expect(abs(standardArtwork.width - 486) < 0.001)
+        #expect(abs(standardArtwork.height - 486) < 0.001)
+        #expect(standardVideo == CGRect(x: 38, y: 38, width: 1_124, height: 674))
+        #expect(tinyVideo == CGRect(x: 38, y: 38, width: 1, height: 1))
+    }
+
+    @Test
+    func fullScreenTitleMarqueeOnlyMovesByTheRenderedOverflow() {
+        #expect(NowPlayingMarqueePolicy.travel(contentWidth: 420, availableWidth: 500) == 0)
+        #expect(NowPlayingMarqueePolicy.duration(for: 0) == 0)
+
+        let travel = NowPlayingMarqueePolicy.travel(contentWidth: 820, availableWidth: 540)
+        #expect(travel == 280)
+        #expect(abs(NowPlayingMarqueePolicy.duration(for: travel) - 10) < 0.001)
+        #expect(NowPlayingMarqueePolicy.duration(for: 28) == 8)
     }
 
     @Test
@@ -122,6 +231,13 @@ struct PreviewRegressionTests {
             )
         )
         #expect(
+            LocalImportCandidatePreviewPolicy.showsPreviewButtons(
+                candidateCount: 1,
+                mediaMode: .audio,
+                isPlaylist: true
+            )
+        )
+        #expect(
             !LocalImportCandidatePreviewPolicy.showsPreviewButtons(
                 candidateCount: 2,
                 mediaMode: .video
@@ -158,6 +274,142 @@ struct PreviewRegressionTests {
             hasCompletedTrack: false,
             failedStage: .syncing
         ))
+    }
+
+    @MainActor
+    @Test
+    func playlistImportDownloadsEveryItemBeforeStartingUploads() async throws {
+        var events: [String] = []
+        let downloaded = try await LocalImportPlaylistBatchPipeline.run(
+            items: ["first", "skipped", "last"],
+            download: { _, _, item in
+                events.append("download:\(item)")
+                return item == "skipped" ? nil : item
+            },
+            beforeUpload: { items in
+                events.append("save:\(items.joined(separator: ","))")
+            },
+            upload: { _, _, item in
+                events.append("upload:\(item)")
+            }
+        )
+
+        #expect(downloaded == ["first", "last"])
+        #expect(events == [
+            "download:first",
+            "download:skipped",
+            "download:last",
+            "save:first,last",
+            "upload:first",
+            "upload:last",
+        ])
+        #expect(LocalImportBatchProgressPolicy.overallProgress(
+            completedItems: 1,
+            totalItems: 4,
+            currentItemProgress: 0.5
+        ) == 0.375)
+        #expect(LocalImportBatchProgressPolicy.overallProgress(
+            completedItems: 2,
+            totalItems: 4,
+            currentItemProgress: nil
+        ) == 0.5)
+        let transferMatches = [
+            LocalImportExistingSongMatch(deviceTrackID: UUID(), serverSongID: "remote-1"),
+            LocalImportExistingSongMatch(deviceTrackID: UUID(), serverSongID: "remote-2"),
+            LocalImportExistingSongMatch(deviceTrackID: UUID(), serverSongID: nil),
+        ]
+        #expect(LocalImportBatchProgressPolicy.plannedTransferCount(
+            matches: transferMatches,
+            requiresTransfer: { !$0.isOnDevice }
+        ) == 0)
+        #expect(LocalImportBatchProgressPolicy.plannedTransferCount(
+            matches: transferMatches,
+            requiresTransfer: { !$0.isOnServer }
+        ) == 1)
+
+        var candidateAttempts: [String] = []
+        let selected = try await LocalImportCandidateFallbackPolicy.firstSuccessful(
+            candidates: ["broken-primary", "working-fallback", "unused"]
+        ) { candidate in
+            candidateAttempts.append(candidate)
+            if candidate == "broken-primary" { throw URLError(.cannotDecodeContentData) }
+            return candidate
+        }
+        #expect(selected == "working-fallback")
+        #expect(candidateAttempts == ["broken-primary", "working-fallback"])
+    }
+
+    @Test
+    func playlistImportRecognizesExistingDeviceAndActiveServerSongs() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalImportExistingSongPolicy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let localFile = root.appendingPathComponent("existing.m4a")
+        try Data("existing".utf8).write(to: localFile)
+
+        let spotify = LocalImportSpotifyTrack(
+            provider: "spotify",
+            type: "track",
+            trackID: "4PTG3Z6ehGkBFwjybzWkR8",
+            title: "Existing Song",
+            artist: "First Artist & Second Artist",
+            album: "Album",
+            trackNumber: 1,
+            durationSeconds: 213,
+            artworkURL: nil,
+            embedURL: "https://open.spotify.com/embed/track/4PTG3Z6ehGkBFwjybzWkR8",
+            sourceURL: "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8"
+        )
+        let local = Track(
+            title: "Old Local Metadata",
+            artist: "Unknown Artist",
+            album: "Imported",
+            duration: 999,
+            artwork: .midnight,
+            fileURL: localFile,
+            sourceURL: spotify.sourceURL
+        )
+        let server = try JSONDecoder().decode(RemoteSong.self, from: Data(
+            """
+            {
+              "id": "existing-server-song",
+              "filename": "existing.m4a",
+              "title": "Existing Song",
+              "artist": "Second Artist / First Artist",
+              "album": "Album",
+              "size": 8,
+              "modified_at": "2026-08-05T00:00:00Z",
+              "content_type": "audio/mp4",
+              "duration_seconds": 214,
+              "download_url": "/api/v1/songs/existing-server-song/file",
+              "stream_url": "/api/v1/songs/existing-server-song/stream"
+            }
+            """.utf8
+        ))
+
+        let match = LocalImportExistingSongPolicy.match(
+            spotifyTrack: spotify,
+            deviceTracks: [local],
+            activeServerSongs: [server]
+        )
+        #expect(match.deviceTrackID == local.id)
+        #expect(match.serverSongID == server.id)
+
+        let wrongDuration = Track(
+            title: spotify.title,
+            artist: spotify.artist,
+            album: "Album",
+            duration: 240,
+            artwork: .echoes,
+            fileURL: localFile
+        )
+        let durationMismatch = LocalImportExistingSongPolicy.match(
+            spotifyTrack: spotify,
+            deviceTracks: [wrongDuration],
+            activeServerSongs: []
+        )
+        #expect(durationMismatch.deviceTrackID == nil)
     }
 
     @Test
@@ -320,6 +572,56 @@ struct PreviewRegressionTests {
         #expect(allTime.topArtist == "Artist")
         #expect(allTime.songRanking.map(\.track.id) == [first.id, second.id])
         #expect(allTime.songRanking.map(\.seconds) == [780, 180])
+
+        let serverOnlyID = UUID()
+        let duplicateServerOnlyID = UUID()
+        let serverOnlyEntries = [
+            ListeningHistoryEntry(
+                trackID: serverOnlyID,
+                startedAt: now,
+                listenedSeconds: 90,
+                syncProfileID: "default",
+                remoteSongID: "server-only-song",
+                title: "Server Only",
+                artist: "Remote Artist",
+                album: "Remote Album",
+                duration: 240,
+                originatedOnThisDevice: false
+            ),
+            ListeningHistoryEntry(
+                trackID: duplicateServerOnlyID,
+                startedAt: now,
+                listenedSeconds: 30,
+                syncProfileID: "default",
+                remoteSongID: "server-only-song",
+                title: "Server Only",
+                artist: "Remote Artist",
+                album: "Remote Album",
+                duration: 240,
+                originatedOnThisDevice: false
+            ),
+        ]
+        let serverOnlySummary = ListeningHistoryCalendarSummary(
+            entries: serverOnlyEntries,
+            tracks: [],
+            dayCount: 7,
+            now: now,
+            calendar: calendar
+        )
+        #expect(serverOnlySummary.songs == 1)
+        #expect(serverOnlySummary.songSeries.count == 1)
+        #expect(serverOnlySummary.songSeries[0].track.title == "Server Only")
+        #expect(serverOnlySummary.songSeries[0].track.fileURL == nil)
+        #expect(serverOnlySummary.songSeries[0].seconds == 120)
+
+        let serverOnlyStats = ListeningHistoryStatsSummary(
+            entries: serverOnlyEntries,
+            tracks: []
+        )
+        #expect(serverOnlyStats.songs == 1)
+        #expect(serverOnlyStats.topArtist == "Remote Artist")
+        #expect(serverOnlyStats.songRanking.first?.track.album == "Remote Album")
+        #expect(serverOnlyStats.songRanking.first?.seconds == 120)
     }
 
     @Test

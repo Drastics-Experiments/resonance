@@ -306,8 +306,15 @@ private struct ServerLibraryView: View {
     private var serverActions: some View {
         HStack(spacing: 10) {
             MacServerCircleActionButton(
+                symbol: "icloud.and.arrow.up",
+                label: "Upload downloaded songs missing from the server",
+                isDisabled: model.isUploadingServer || model.isSyncingServer,
+                action: model.uploadMissingDownloadedSongs
+            )
+
+            MacServerCircleActionButton(
                 symbol: "square.and.arrow.up",
-                label: "Upload songs",
+                label: "Upload files",
                 isDisabled: model.isUploadingServer || model.isSyncingServer,
                 action: model.chooseSongsToUpload
             )
@@ -673,24 +680,15 @@ private struct MacServerArtwork: View {
         Group {
             if let rawArtworkURL = song.artworkURL,
                let artworkURL = URL(string: rawArtworkURL) {
-                AsyncImage(url: artworkURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    case .empty:
-                        fallbackArtwork
-                            .overlay {
+                CroppedRemoteArtwork(url: artworkURL) { isLoading in
+                    fallbackArtwork
+                        .overlay {
+                            if isLoading {
                                 ProgressView()
                                     .controlSize(.mini)
                                     .tint(Color.white.opacity(0.65))
                             }
-                    case .failure:
-                        fallbackArtwork
-                    @unknown default:
-                        fallbackArtwork
-                    }
+                        }
                 }
             } else {
                 fallbackArtwork
@@ -4201,7 +4199,7 @@ private struct MacImportChooser: View {
                         MacImportChoiceRow(
                             symbol: "link.badge.plus",
                             title: "Import from Link",
-                            detail: "Paste a Spotify track or YouTube video URL"
+                            detail: "Paste a supported link, or search Spotify, SoundCloud, and YouTube"
                         )
                     }
                     .buttonStyle(.plain)

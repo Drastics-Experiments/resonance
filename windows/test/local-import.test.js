@@ -17,13 +17,17 @@ const {
   isSpotifyURL,
   parseSpotifyEmbedEntity,
   parseSpotifyOEmbed,
+  parseSpotifyPlaylistEmbed,
+  parseSpotifyPlaylistOEmbed,
   parseYouTubeMusicSearch,
   parseYouTubePlaylistData,
   parseYouTubeWebSearch,
+  resolveSpotifyPlaylist,
   resolveYouTubePlaylist,
   scoreAudioSource,
   youtubePlaylistID,
   youtubeVideoID,
+  spotifyPlaylistURL,
 } = core;
 const {
   duplicateTrack,
@@ -35,6 +39,7 @@ const { chooseMP4VideoFormat, chooseMP4VideoOnlyFormat, downloadResolvedAudio, d
 const { importFileBackedSource, searchFileBackedSources } = debrid;
 
 const spotifyTrackID = "4PTG3Z6ehGkBFwjybzWkR8";
+const spotifyPlaylistID = "37i9dQZF1DXcBWIGoYBM5M";
 
 function spotifyEmbedFixture(overrides = {}) {
   const entity = {
@@ -55,6 +60,7 @@ function spotifyEmbedFixture(overrides = {}) {
 
 test("accepts supported Spotify tracks and YouTube video or playlist URL shapes", () => {
   assert.equal(isSpotifyURL(`https://open.spotify.com/track/${spotifyTrackID}`), true);
+  assert.equal(spotifyPlaylistURL(`https://open.spotify.com/intl-en/playlist/${spotifyPlaylistID}?si=test`).playlistID, spotifyPlaylistID);
   assert.equal(isSpotifyURL("https://open.spotify.example/track/example"), false);
   assert.equal(youtubeVideoID("https://www.youtube.com/watch?v=jNQXAC9IVRw"), "jNQXAC9IVRw");
   assert.equal(youtubeVideoID("https://youtu.be/jNQXAC9IVRw?t=3"), "jNQXAC9IVRw");
@@ -65,6 +71,98 @@ test("accepts supported Spotify tracks and YouTube video or playlist URL shapes"
   assert.equal(youtubePlaylistID("https://youtu.be/jNQXAC9IVRw"), null);
   assert.throws(() => youtubePlaylistID("https://www.youtube.com/playlist?list=short"), /playlist URL is invalid/);
   assert.throws(() => youtubeVideoID("https://user:secret@youtube.com/watch?v=jNQXAC9IVRw"), /credentials/);
+});
+
+test("parses ordered public Spotify playlist embed tracks", () => {
+  const artworkURL = "https://i.scdn.co/image/playlist-cover";
+  const html = spotifyEmbedFixture({
+    type: "playlist",
+    id: spotifyPlaylistID,
+    title: "Road Trip",
+    subtitle: "Lily",
+    coverArt: { sources: [{ url: artworkURL, width: 640 }] },
+    trackList: [
+      { uri: `spotify:track:${spotifyTrackID}`, title: "First Song", subtitle: "First Artist", duration: 123000, entityType: "track", isPlayable: true },
+      { uri: "spotify:episode:ignored", title: "Podcast", subtitle: "Host", duration: 1000, entityType: "episode", isPlayable: true },
+      { uri: "spotify:track:11dFghVXANMlKmJXsNCbNl", title: "Second Song", subtitle: "Second Artist", duration: 245000, entityType: "track", isPlayable: true },
+    ],
+  });
+  const parsed = parseSpotifyPlaylistEmbed(html, spotifyPlaylistID);
+  assert.equal(parsed.title, "Road Trip");
+  assert.equal(parsed.author, "Lily");
+  assert.equal(parsed.items.length, 2);
+  assert.equal(parsed.items[0].trackNumber, 1);
+  assert.equal(parsed.items[1].trackNumber, 3);
+  assert.equal(parsed.items[1].durationSeconds, 245);
+  assert.equal(parsed.unavailableCount, 1);
+  assert.equal(parsed.artworkURL, artworkURL);
+  assert.equal(parsed.items[0].artworkURL, null);
+  assert.deepEqual(parseSpotifyPlaylistOEmbed({
+    provider_name: "Spotify",
+    type: "rich",
+    title: "Road Trip",
+    thumbnail_url: artworkURL,
+    html: `<iframe src="https://open.spotify.com/embed/playlist/${spotifyPlaylistID}?utm_source=oembed"></iframe>`,
+  }, spotifyPlaylistID), {
+    title: "Road Trip",
+    artworkURL,
+    embedURL: `https://open.spotify.com/embed/playlist/${spotifyPlaylistID}`,
+  });
+});
+
+test("hydrates Spotify playlist songs with their individual album artwork", async () => {
+  const secondTrackID = "11dFghVXANMlKmJXsNCbNl";
+  const playlistArtworkURL = "https://i.scdn.co/image/playlist-cover";
+  const trackArtwork = new Map([
+    [spotifyTrackID, "https://image-cdn-fa.spotifycdn.com/image/first-cover"],
+    [secondTrackID, "https://image-cdn-ak.spotifycdn.com/image/second-cover"],
+  ]);
+  const playlistHTML = spotifyEmbedFixture({
+    type: "playlist",
+    id: spotifyPlaylistID,
+    title: "Road Trip",
+    subtitle: "Lily",
+    coverArt: { sources: [{ url: playlistArtworkURL, width: 640 }] },
+    trackList: [
+      { uri: `spotify:track:${spotifyTrackID}`, title: "First Song", subtitle: "First Artist", duration: 123000, entityType: "track", isPlayable: true },
+      { uri: `spotify:track:${secondTrackID}`, title: "Second Song", subtitle: "Second Artist", duration: 245000, entityType: "track", isPlayable: true },
+    ],
+  });
+  const fetchImpl = async (input) => {
+    const url = new URL(input);
+    if (url.pathname === "/oembed") {
+      const target = new URL(url.searchParams.get("url"));
+      const trackID = target.pathname.split("/").filter(Boolean)[1];
+      if (target.pathname.startsWith("/track/")) {
+        return new Response(JSON.stringify({
+          provider_name: "Spotify",
+          type: "rich",
+          title: trackID === spotifyTrackID ? "First Song" : "Second Song",
+          thumbnail_url: trackArtwork.get(trackID),
+          html: `<iframe src="https://open.spotify.com/embed/track/${trackID}"></iframe>`,
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({
+        provider_name: "Spotify",
+        type: "rich",
+        title: "Road Trip",
+        thumbnail_url: playlistArtworkURL,
+        html: `<iframe src="https://open.spotify.com/embed/playlist/${spotifyPlaylistID}"></iframe>`,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.pathname === `/embed/playlist/${spotifyPlaylistID}`) {
+      return new Response(playlistHTML, { status: 200, headers: { "content-type": "text/html" } });
+    }
+    throw new Error(`Unexpected URL ${url}`);
+  };
+
+  const playlist = await resolveSpotifyPlaylist(
+    `https://open.spotify.com/playlist/${spotifyPlaylistID}`,
+    new AbortController().signal,
+    fetchImpl,
+  );
+  assert.equal(playlist.artworkURL, playlistArtworkURL);
+  assert.deepEqual(playlist.items.map((item) => item.artworkURL), [...trackArtwork.values()]);
 });
 
 test("resolves YouTube playlist metadata and continuation items without inspecting every stream", async () => {
@@ -316,6 +414,45 @@ test("keeps the local coordinator observable and cancellable without a Resonance
     resolveLocalImportSource("https://youtu.be/jNQXAC9IVRw", controller.signal, () => {}, {}),
     (error) => error?.name === "AbortError",
   );
+});
+
+test("returns an ordered selectable batch for Spotify playlists", async () => {
+  const tracks = [
+    { provider: "spotify", type: "track", trackID: spotifyTrackID, title: "First Song", artist: "First Artist", album: null, trackNumber: 1, durationSeconds: 123, artworkURL: null, embedURL: "", sourceURL: `https://open.spotify.com/track/${spotifyTrackID}` },
+    { provider: "spotify", type: "track", trackID: "11dFghVXANMlKmJXsNCbNl", title: "Second Song", artist: "Second Artist", album: null, trackNumber: 2, durationSeconds: 245, artworkURL: null, embedURL: "", sourceURL: "https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl" },
+  ];
+  const result = await resolveLocalImportSource(
+    `https://open.spotify.com/playlist/${spotifyPlaylistID}`,
+    new AbortController().signal,
+    () => {},
+    {
+      resolveSpotifyPlaylist: async () => ({
+        playlistID: spotifyPlaylistID,
+        title: "Road Trip",
+        author: "Lily",
+        artworkURL: null,
+        sourceURL: `https://open.spotify.com/playlist/${spotifyPlaylistID}`,
+        items: tracks,
+        unavailableCount: 0,
+        truncated: false,
+      }),
+      searchYouTubeAudioSources: async (track) => [{
+        videoID: track.trackNumber === 1 ? "jNQXAC9IVRw" : "dQw4w9WgXcQ",
+        title: track.title,
+        artist: track.artist,
+        durationSeconds: track.durationSeconds,
+        thumbnailURL: null,
+        sourceProvider: "youtube",
+        sourceURL: `https://www.youtube.com/watch?v=${track.trackNumber === 1 ? "jNQXAC9IVRw" : "dQw4w9WgXcQ"}`,
+        score: 1,
+        confidence: "high",
+      }],
+    },
+  );
+  assert.equal(result.kind, "spotify_playlist");
+  assert.equal(result.track.title, "Road Trip");
+  assert.deepEqual(result.candidates.map((candidate) => candidate.importMetadata.title), ["First Song", "Second Song"]);
+  assert.deepEqual(result.candidates.map((candidate) => candidate.playlistIndex), [1, 2]);
 });
 
 test("resolves direct YouTube video mode without offering it for Spotify metadata", async () => {
@@ -721,6 +858,7 @@ test("tags a downloaded M4A locally, saves it outside profile ownership, and det
 
 test("permits only known provider artwork hosts", () => {
   assert.equal(safeArtworkURL("https://i.scdn.co/image/example")?.hostname, "i.scdn.co");
+  assert.equal(safeArtworkURL("https://i1.sndcdn.com/artworks-example-large.jpg")?.hostname, "i1.sndcdn.com");
   assert.equal(safeArtworkURL("https://i.ytimg.com/vi/example/hqdefault.jpg")?.hostname, "i.ytimg.com");
   assert.equal(safeArtworkURL("https://attacker.example/cover.jpg"), null);
   assert.equal(safeArtworkURL("http://i.ytimg.com/cover.jpg"), null);

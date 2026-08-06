@@ -6,17 +6,26 @@ import mov.unblocked.resonance.data.Track
 import mov.unblocked.resonance.data.SyncProfile
 import mov.unblocked.resonance.data.ClipRange
 import mov.unblocked.resonance.data.LinkImportResolution
+import mov.unblocked.resonance.data.LinkImportSearchResponse
 import mov.unblocked.resonance.data.LinkImportStage
 
 data class LinkImportUiState(
     val stage: LinkImportStage = LinkImportStage.Idle,
     val resolution: LinkImportResolution? = null,
+    val searchResponse: LinkImportSearchResponse? = null,
+    val selectedSearchResultId: String? = null,
     val selectedVideoId: String? = null,
+    val selectedVideoIds: Set<String> = emptySet(),
     val completedBytes: Long = 0L,
     val totalBytes: Long = 0L,
     val errorCode: String? = null,
     val errorMessage: String? = null,
     val completedTrackTitle: String? = null,
+    val batchCurrentTitle: String? = null,
+    val completedSummary: String? = null,
+    val previewingVideoId: String? = null,
+    val previewLoadingVideoId: String? = null,
+    val previewError: String? = null,
 ) {
     val isRunning: Boolean
         get() = stage in setOf(
@@ -25,6 +34,7 @@ data class LinkImportUiState(
             LinkImportStage.InspectingSource,
             LinkImportStage.Downloading,
             LinkImportStage.SavingLocal,
+            LinkImportStage.Syncing,
         )
 }
 

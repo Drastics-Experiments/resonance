@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import {
   applyRemotePlaylistDocument,
@@ -7,15 +8,20 @@ import {
   filterPlaylists,
   filterTracks,
   formatServerDownloadFailureNotice,
+  formatServerUploadFailureNotice,
   formatHistoryWindowLabel,
   formatTime,
+  isInstalledVideoTrack,
+  mergeListeningHistoryDocument,
   mergePlaylistDocument,
   mergeSyncedTracks,
   nextIndex,
   niceChartMaximum,
   normalizedVolume,
+  playbackGainForVolume,
   normalizeState,
   playbackRangeForTrack,
+  planMissingDownloadedUploads,
   reconcileServerBackedTrackDuplicates,
   reconcileUploadedTrack,
   removeClipRangeForTrack,
@@ -23,18 +29,104 @@ import {
   resolveSyncProfile,
   storeActiveProfileState,
   setClipRangeForTrack,
+  squareArtworkCropRect,
   summarizeListeningHistory,
   summarizeListeningStats,
+  titleMarqueeMetrics,
   tracksForActiveProfile,
   tracksForPlaylist,
   updatePlaylistRemoteSongIDs,
 } from "../ui/core.js";
 import metadata from "../metadata.cjs";
+import libraryPaths from "../library-paths.cjs";
 import serverDownload from "../server-download.cjs";
 import updaterFeed from "../updater-feed.cjs";
 
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = updaterFeed;
+const { isManagedLibraryFile } = libraryPaths;
 const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload } = serverDownload;
+
+test("offers the fullscreen video action only for installed local video files", () => {
+  assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.mp4", fileUrl: "file:///C:/Music/clip.mp4" }), true);
+  assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.MOV", fileUrl: "file:///C:/Music/clip.MOV" }), true);
+  assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\song.m4a", fileUrl: "file:///C:/Music/song.m4a" }), false);
+  assert.equal(isInstalledVideoTrack({ filePath: null, fileUrl: "https://music.example.com/clip.mp4" }), false);
+  assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.mp4", fileUrl: null }), false);
+
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
+  assert.doesNotMatch(appSource, /ON DEVICE|fullPlayerMediaBadge/);
+  assert.doesNotMatch(htmlSource, /VIDEO • ON DEVICE|fullPlayerMediaBadge/);
+  assert.match(htmlSource, /id="fullPlayerArtwork"[\s\S]+id="installedVideoArtwork"[\s\S]+id="installedVideoPlayer"/);
+  assert.match(appSource, /function setInstalledVideoSourceGeometry\(sourceRect, targetRect\)[\s\S]+--video-source-left[\s\S]+--video-source-width[\s\S]+--video-target-width[\s\S]+--video-source-border-color[\s\S]+--video-source-shadow/);
+  assert.match(appSource, /INSTALLED_VIDEO_TRANSITION_MS = 520[\s\S]+INSTALLED_VIDEO_REVEAL_MS = 220/);
+  assert.match(appSource, /function openInstalledVideo\([\s\S]+video-from-art[\s\S]+video-expanded[\s\S]+video-revealed/);
+  assert.match(appSource, /function closeInstalledVideo\(\)[\s\S]+classList\.remove\("video-revealed"\)[\s\S]+video-closing[\s\S]+finishInstalledVideoClose/);
+  assert.match(styleSource, /\.full-player-dialog\.video-active \.full-player-details[\s\S]+opacity: 0/);
+  assert.match(styleSource, /\.installed-video-dialog\.video-from-art \.installed-video-stage[\s\S]+--video-source-left[\s\S]+--video-source-width[\s\S]+--video-source-border-color[\s\S]+--video-source-shadow/);
+  assert.match(styleSource, /\.installed-video-dialog\.video-revealed \.installed-video-stage video[\s\S]+opacity: 1/);
+  assert.match(styleSource, /\.installed-video-stage video\s*\{[\s\S]*?object-fit: contain;[\s\S]*?object-position: center;/);
+});
+
+test("accepts both managed library folders for batch uploads", () => {
+  const root = path.resolve("managed-library-test");
+  const local = path.join(root, "LocalMusic");
+  const remote = path.join(root, "ServerCache");
+
+  assert.equal(isManagedLibraryFile(path.join(local, "local.m4a"), [local, remote]), true);
+  assert.equal(isManagedLibraryFile(path.join(remote, "downloaded.m4a"), [local, remote]), true);
+  assert.equal(isManagedLibraryFile(path.join(remote, "nested", "downloaded.m4a"), [local, remote]), true);
+  assert.equal(isManagedLibraryFile(remote, [local, remote]), false);
+  assert.equal(isManagedLibraryFile(path.join(root, "outside.m4a"), [local, remote]), false);
+  assert.equal(isManagedLibraryFile(path.join(root, "ServerCache-backup", "outside.m4a"), [local, remote]), false);
+});
+
+test("moves fullscreen titles only by their rendered overflow", () => {
+  assert.deepEqual(titleMarqueeMetrics(420, 500), { travel: 0, durationSeconds: 0 });
+  assert.deepEqual(titleMarqueeMetrics(820, 540), { travel: 280, durationSeconds: 10 });
+  assert.deepEqual(titleMarqueeMetrics(568, 540), { travel: 28, durationSeconds: 8 });
+});
+
+test("maps the volume slider to a clamped perceptual playback curve", () => {
+  assert.equal(playbackGainForVolume(-.5), 0);
+  assert.equal(playbackGainForVolume(.25), .0625);
+  assert.equal(playbackGainForVolume(.5), .25);
+  assert.equal(playbackGainForVolume(.75), .5625);
+  assert.equal(playbackGainForVolume(1), 1);
+  assert.equal(playbackGainForVolume(2), 1);
+  assert.equal(playbackGainForVolume(Number.NaN), 0);
+});
+
+test("matches mobile square artwork cropping and removes symmetric borders", () => {
+  const pixels = (width, height, horizontalBorder = 0, verticalBorder = 0) => {
+    const result = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const offset = (y * width + x) * 4;
+        const isBorder = x < horizontalBorder || x >= width - horizontalBorder
+          || y < verticalBorder || y >= height - verticalBorder;
+        result[offset] = isBorder ? 8 : 32 + (x * 17 + y * 3) % 190;
+        result[offset + 1] = isBorder ? 8 : 32 + (x * 5 + y * 19) % 190;
+        result[offset + 2] = isBorder ? 8 : 32 + (x * 11 + y * 7) % 190;
+        result[offset + 3] = 255;
+      }
+    }
+    return result;
+  };
+
+  assert.deepEqual(squareArtworkCropRect(pixels(12, 12), 12, 12), { x: 0, y: 0, width: 12, height: 12 });
+  assert.deepEqual(squareArtworkCropRect(pixels(16, 12), 16, 12), { x: 2, y: 0, width: 12, height: 12 });
+  assert.deepEqual(squareArtworkCropRect(pixels(16, 12, 2), 16, 12), { x: 2, y: 0, width: 12, height: 12 });
+  assert.deepEqual(squareArtworkCropRect(pixels(12, 16, 0, 2), 12, 16), { x: 0, y: 2, width: 12, height: 12 });
+  assert.deepEqual(squareArtworkCropRect(pixels(16, 12, 0, 2), 16, 12), { x: 4, y: 2, width: 8, height: 8 });
+});
+
+test("quits the Windows client when its only preview window closes", () => {
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  assert.match(mainSource, /app\.on\("window-all-closed", \(\) => app\.quit\(\)\)/);
+  assert.doesNotMatch(mainSource, /window-all-closed[\s\S]{0,100}process\.platform !== "darwin"/);
+});
 
 test("keeps contextual search and sorting in the persistent top bar", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
@@ -116,7 +208,7 @@ test("avoids macOS Keychain access while persisting source Preview credentials l
 test("uploads link imports even when the selected source is already saved locally", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   assert.match(appSource, /function localImportUploadConfigurationError/);
-  assert.match(appSource, /response\.result\.kind === "duplicate"[\s\S]+uploadLocalImportTrack\(duplicate\)/);
+  assert.match(appSource, /response\.result\.kind === "duplicate"[\s\S]+importedTrack = state\.tracks\.find[\s\S]+uploadLocalImportTrack\(importedTrack\)/);
   assert.match(appSource, /!response\.result\.serverBacked && \$\("#localImportSync"\)\.checked && importedTrack\?\.filePath\)/);
   assert.match(appSource, /refreshServerCatalogAfterLocalImportUpload/);
   assert.match(appSource, /Uploaded \$\{importedTrack\.title\}/);
@@ -159,7 +251,9 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   assert.doesNotMatch(htmlSource, /id="clipEditor(?:Start|End)" type="range"/);
   assert.match(htmlSource, /id="saveClipRange"[^>]+disabled/);
   assert.match(htmlSource, /id="previewClipRange"[^>]+aria-pressed="false"[^>]+disabled[\s\S]+>Preview</);
-  assert.match(htmlSource, /id="clipEditorPreview"[^>]+preload="metadata"/);
+  assert.match(htmlSource, /<video id="clipEditorPreview"[^>]+preload="metadata"[^>]+playsinline/);
+  assert.match(htmlSource, /id="clipEditorVideoFrame"[^>]+hidden[\s\S]+VIDEO PREVIEW/);
+  assert.match(htmlSource, /id="clipEditorPreviewCurrent"[\s\S]+id="clipEditorPreviewSeek"[^>]+type="range"[\s\S]+id="clipEditorPreviewEnd"/);
   assert.match(htmlSource, /id="clearClipRange"[^>]*>Use full song/);
   assert.match(htmlSource, /id="clipEditorStatus"[^>]+role="status"/);
   assert.match(appSource, /function openClipEditor\(\)[\s\S]+clipEditorDialog[\s\S]+showModal\(\)/);
@@ -167,10 +261,12 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   assert.match(appSource, /#saveClipRange"\)\.onclick = saveClipRange/);
   assert.match(appSource, /function finishClipPlaybackIfNeeded\(\)/);
   assert.match(appSource, /clippedPlaybackPosition\(audio\.duration/);
-  assert.match(appSource, /async function toggleClipRangePreview\(\)[\s\S]+clipEditorPreviewAudio\.currentTime = clipEditorStartSeconds[\s\S]+clipEditorPreviewAudio\.play\(\)/);
+  assert.match(appSource, /async function toggleClipRangePreview\(\)[\s\S]+prepareClipRangePreviewMedia\(track\)[\s\S]+clipEditorPreviewAudio\.play\(\)/);
   assert.match(appSource, /function waitForClipRangePreviewMetadata\(\)[\s\S]+loadedmetadata/);
+  assert.match(appSource, /function syncClipRangePreviewTransport\(\)[\s\S]+clipEditorPreviewSeek[\s\S]+aria-valuetext/);
+  assert.match(appSource, /function clipEditorTrackIsVideo\([\s\S]+mp4\|mov\|m4v\|webm/);
   assert.match(appSource, /async function stopClipRangePreview\([\s\S]+resumePlaybackAfterClipRangePreview/);
-  assert.match(appSource, /clipEditorPreviewAudio\.ontimeupdate = \(\) =>[\s\S]+clipEditorPreviewEndSeconds[\s\S]+stopClipRangePreview/);
+  assert.match(appSource, /clipEditorPreviewAudio\.ontimeupdate = \(\) =>[\s\S]+clipEditorPreviewEndSeconds[\s\S]+clipEditorPreviewAudio\.pause\(\)[\s\S]+resumePlaybackAfterClipRangePreview/);
   assert.match(appSource, /#previewClipRange"\)\.onclick = toggleClipRangePreview/);
   assert.doesNotMatch(preloadSource, /exportClip|clip:export/);
   assert.doesNotMatch(mainSource, /clip:export|Export Resonance clip/);
@@ -191,6 +287,8 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   assert.match(styleSource, /\.clip-editor-dialog\s*\{/);
   assert.match(styleSource, /\.clip-editor-waveform\s*\{/);
   assert.match(styleSource, /\.clip-editor-wave-bars i\.selected\s*\{/);
+  assert.match(styleSource, /\.clip-editor-video-frame\s*\{[\s\S]+object-fit: contain/);
+  assert.match(styleSource, /\.clip-editor-transport\s*\{[\s\S]+grid-template-columns: auto 42px minmax\(0, 1fr\) 42px/);
   assert.match(styleSource, /\.clip-editor-preview\.playing\s*\{/);
 });
 
@@ -205,7 +303,7 @@ test("keeps reviewed Windows empty, selection, filter, and metadata states truth
   assert.match(appSource, /id="syncAll"[\s\S]+serverSelecting && !selectedRemoteIDs\.size \? "disabled"/);
   assert.match(appSource, /event\.key === "Escape"[\s\S]+serverSelecting = false;[\s\S]+selectedRemoteIDs\.clear\(\)/);
   assert.match(appSource, /const resultSummary = filtered \? `Showing \$\{filteredCount\} of \$\{serverCatalog\.length\} tracks` : "All tracks"/);
-  assert.match(appSource, /const showConnectionDetail = !connected \|\| !serverConnectionText\.startsWith\("Connected •"\)/);
+  assert.match(appSource, /const showConnectionDetail = !connected;/);
 
   assert.match(appSource, /const emptyLibraryTitle = hasLibraryFilter \? "No matching songs"[\s\S]+"This playlist is empty"/);
   assert.match(appSource, /id="playCollection" \$\{tracks\.length \? "" : "disabled"\}/);
@@ -307,6 +405,8 @@ test("opens a synchronized full-screen Now Playing viewer from the mini-player",
   assert.match(appSource, /function updateFullPlayerProgress\(\)/);
   assert.match(appSource, /function fullPlayerQueueTracks\(\)/);
   assert.match(appSource, /function fullPlayerHistoryTracks\(\)[\s\S]+\[\.\.\.history\]\.reverse\(\)/);
+  assert.match(appSource, /function fullPlayerHistoryTracks\(\)[\s\S]+state\.listeningHistory[\s\S]+historyOnly: true/);
+  assert.match(appSource, /track\.historyOnly \? "Not downloaded"/);
   assert.match(appSource, /fullPlayerQueueTab === "history" \? fullPlayerHistoryTracks\(\) : fullPlayerQueueTracks\(\)/);
   assert.match(appSource, /data-full-player-queue/);
   assert.match(appSource, /#fullPlayerSeek"\)\.oninput[\s\S]+audio\.currentTime/);
@@ -330,6 +430,14 @@ test("opens a synchronized full-screen Now Playing viewer from the mini-player",
   assert.match(styleSource, /\.full-player-layout\s*\{[\s\S]*?z-index: 2/);
   assert.match(styleSource, /\.full-player-layout\s*\{[\s\S]+grid-template-columns/);
   assert.match(styleSource, /\.full-player-artwork\s*\{[\s\S]+aspect-ratio: 1/);
+  assert.match(styleSource, /\.full-player-details\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\);[\s\S]*?width: 100%;[\s\S]*?max-width: 100%;[\s\S]*?min-width: 0;/);
+  assert.match(styleSource, /\.full-player-copy\s*\{[\s\S]*?min-width: 0;/);
+  assert.match(htmlSource, /id="fullPlayerTitle"[\s\S]+id="fullPlayerTitleText"/);
+  assert.match(appSource, /function syncFullPlayerTitleMarquee\(\)[\s\S]+titleMarqueeMetrics\(text\.getBoundingClientRect\(\)\.width, viewport\.clientWidth\)/);
+  assert.match(appSource, /function setFullPlayerTitle\(title\)[\s\S]+aria-label[\s\S]+syncFullPlayerTitleMarquee/);
+  assert.match(styleSource, /#fullPlayerTitle\.overflowing #fullPlayerTitleText\s*\{[\s\S]+full-player-title-marquee/);
+  assert.match(styleSource, /@keyframes full-player-title-marquee\s*\{[\s\S]+var\(--full-player-title-travel\)/);
+  assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]+#fullPlayerTitle\.overflowing #fullPlayerTitleText/);
   assert.match(styleSource, /\.full-player-transport \.full-player-play\s*\{/);
   assert.match(styleSource, /\.full-player-queue-panel\s*\{/);
   assert.match(styleSource, /\.full-player-queue-tabs\s*\{[\s\S]+grid-template-columns: 1fr 1fr/);
@@ -398,7 +506,7 @@ test("ports playback reliability, recovery notices, and keyboard operation into 
   assert.match(appSource, /state\.playbackQueueIDs = \[\.\.\.activePlaybackQueueIDs\]/);
   assert.match(appSource, /function previous\(\)[\s\S]+audio\.currentTime > start \+ 3[\s\S]+recordHistory: false/);
   assert.match(appSource, /pendingRestorePosition[\s\S]+audio\.currentTime = clippedPlaybackPosition\(Math\.min/);
-  assert.match(appSource, /audio\.volume = normalizedVolume\(state\.volume\)/);
+  assert.match(appSource, /audio\.volume = playbackGainForVolume\(state\.volume\)/);
   assert.match(appSource, /function showNotice\(message, kind = "error"\)/);
   assert.match(appSource, /const APP_NOTICE_LIFETIME_MS = 5000/);
   assert.match(appSource, /function showNotice\(message, kind = "error"\)[\s\S]+clearTimeout\(appNoticeDismissTimer\)[\s\S]+setTimeout\([\s\S]+APP_NOTICE_LIFETIME_MS/);
@@ -443,6 +551,10 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   const preloadSource = readFileSync(new URL("../preload.cjs", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   const packageSource = readFileSync(new URL("../package.json", import.meta.url), "utf8");
+  const localImportUploadSource = mainSource.slice(
+    mainSource.indexOf('ipcMain.handle("local-import:upload"'),
+    mainSource.indexOf('ipcMain.handle("library:delete"'),
+  );
 
   assert.match(mainSource, /function localImportEnabled\(\) \{\s+return process\.env\.RESONANCE_LOCAL_DEVICE_IMPORT !== "0";\s+\}/);
   assert.match(mainSource, /ipcMain\.handle\("local-import:resolve"/);
@@ -452,7 +564,9 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(mainSource, /ipcMain\.handle\("local-import:cancel"/);
   assert.match(mainSource, /ipcMain\.handle\("local-import:upload"/);
   assert.match(mainSource, /destinationDirectory: paths\.local/);
-  assert.match(mainSource, /Only a song already saved in the local Resonance library can be uploaded/);
+  assert.match(mainSource, /Only a song already saved in the managed Resonance library can be uploaded/);
+  assert.match(localImportUploadSource, /managedRoots = \[paths\.local, paths\.remote\]/);
+  assert.match(localImportUploadSource, /isManagedLibraryFile\(absolute, managedRoots\)/);
   assert.match(mainSource, /profileHeaders\(String\(adminToken\), profileID\)/);
   assert.match(mainSource, /cleanupLocalImportTemporaryFiles[\s\S]+startsWith\("resonance-local-import-"\)/);
   assert.match(preloadSource, /resolveLocalImport:[\s\S]+local-import:resolve/);
@@ -481,7 +595,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /sync\.disabled = serverBacked/);
   assert.doesNotMatch(appSource, /sync\.disabled = serverBacked \|\| !canSync/);
   assert.doesNotMatch(htmlSource, /localImportSyncTitle|localImportSyncHelp|Upload after saving locally/);
-  assert.match(htmlSource, /Paste a link and Resonance will inspect it automatically/);
+  assert.match(htmlSource, /Supported links are inspected directly\. Plain text searches Spotify, SoundCloud, and YouTube only after you press Enter/);
   assert.match(htmlSource, /id="chooseLocalFiles"[\s\S]+Choose files instead/);
   assert.match(htmlSource, /id="confirmLocalImport"[\s\S]+Import selected/);
   assert.match(htmlSource, /connect-src 'none'/);
@@ -489,6 +603,9 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /const LOCAL_IMPORT_AUTO_RESOLVE_DELAY = 450/);
   assert.match(appSource, /function localImportSourceIsReady\(value\)/);
   assert.match(appSource, /function scheduleLocalImportResolution/);
+  assert.match(appSource, /function localImportInputIsLink\(value\)/);
+  assert.match(mainSource, /!looksLikeLink\(input\)[\s\S]+searchAllPlatforms\(input, controller\.signal\)/);
+  assert.match(packageSource, /"local-search\.cjs"/);
   assert.match(appSource, /\$\("#localImportSource"\)\.oninput = \(\) => \{[\s\S]+scheduleLocalImportResolution\(\)/);
   assert.doesNotMatch(appSource, /\$\("#resolveLocalImport"\)/);
   assert.match(styleSource, /\.local-import-source\.searching \.local-import-source-spinner/);
@@ -521,11 +638,28 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.doesNotMatch(appSource, /A failed upload will not remove or alter the local media file/);
   assert.match(appSource, /mediaKind: localImportResolution\.mediaKind|mediaKind,/);
   assert.match(mainSource, /outputFormats: \{ audio: "m4a", video: "mp4" \}/);
-  assert.match(mainSource, /sources: \["spotify", "youtube", "youtube_playlists"/);
-  assert.match(appSource, /localImportResolution\.kind === "youtube_playlist"/);
+  assert.match(mainSource, /sources: \["spotify", "spotify_playlists", "soundcloud", "soundcloud_playlists", "youtube", "youtube_playlists"/);
+  assert.match(mainSource, /resolveSoundCloudAudio\(source, controller\.signal\)/);
+  assert.match(mainSource, /downloadResolvedSoundCloudAudio\(resolved, filePath, controller\.signal\)/);
+  assert.match(appSource, /candidate\.sourceProvider === "soundcloud"[\s\S]+return "SoundCloud"/);
+  assert.match(appSource, /"soundcloud\.com", "www\.soundcloud\.com", "m\.soundcloud\.com", "on\.soundcloud\.com"/);
+  assert.match(appSource, /localImportResolution\?\.kind\?\.endsWith\("_playlist"\)/);
   assert.match(appSource, /input\[name="localImportPlaylistItem"\]:checked/);
-  assert.match(appSource, /async function confirmYouTubePlaylistImport\(\)/);
+  assert.match(appSource, /async function confirmPlaylistImport\(\)/);
   assert.match(appSource, /for \(let index = 0; index < selected\.length; index \+= 1\)/);
+  const playlistImportSource = appSource.slice(
+    appSource.indexOf("async function confirmPlaylistImport()"),
+    appSource.indexOf("async function confirmLinkImport()"),
+  );
+  const downloadPhase = playlistImportSource.slice(
+    playlistImportSource.indexOf("for (let index = 0; index < selected.length; index += 1)"),
+    playlistImportSource.indexOf("await saveImportedPlaylist();"),
+  );
+  assert.doesNotMatch(downloadPhase, /uploadLocalImportTrack|uploadLocalImportTracks|api\.uploadServer/);
+  assert.match(playlistImportSource, /await saveImportedPlaylist\(\);[\s\S]+prepareLocalImportUploadBatch\(uploadQueue\)[\s\S]+uploadLocalImportTracks\(pendingUploads\)/);
+  assert.match(appSource, /async function uploadLocalImportTracks\(tracks\)[\s\S]+api\.uploadServer\([\s\S]+result\?\.results/);
+  assert.match(playlistImportSource, /uploadFailures\.push\(\.\.\.\(uploadResult\?\.failed \|\| \[\]\)\)/);
+  assert.match(playlistImportSource, /formatServerUploadFailureNotice\(uploadFailures\)/);
   assert.match(mainSource, /mediaKind: value\.mediaKind/);
   assert.match(mainSource, /body\.on\("data", \(chunk\) => \{[\s\S]+publishUploadProgress\(\)/);
   assert.match(mainSource, /currentFile: filename,[\s\S]+completed,[\s\S]+total: information\.size/);
@@ -559,6 +693,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(styleSource, /\.local-import-resolved\[hidden\],[\s\S]*?display: none/);
   assert.match(packageSource, /"ffmpeg-static": "\^5\.3\.0"/);
   assert.match(packageSource, /"local-debrid\.cjs"/);
+  assert.match(packageSource, /"local-soundcloud\.cjs"/);
   assert.match(packageSource, /"node_modules\/ffmpeg-static\/\*\*"/);
 });
 
@@ -598,9 +733,13 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(preloadSource, /onPrepareToClose:[\s\S]+app:prepare-close/);
   assert.match(preloadSource, /readyToClose:[\s\S]+app:close-ready/);
   assert.match(preloadSource, /postListeningHistory:[\s\S]+server:listening-history:post/);
+  assert.match(preloadSource, /fetchListeningHistory:[\s\S]+server:listening-history:get/);
   assert.match(mainSource, /function safeListeningHistory\(value\)/);
+  assert.match(mainSource, /remoteID: optionalText\(entry\.remoteID, 128\)[\s\S]+originatedOnThisDevice/);
+  assert.match(mainSource, /duration: entry\.duration !== null[\s\S]+\? Math\.min\(Number\(entry\.duration\)/);
   assert.match(mainSource, /listeningHistory: safeListeningHistory\(state\.listeningHistory\)/);
   assert.match(mainSource, /ipcMain\.handle\("server:listening-history:post"/);
+  assert.match(mainSource, /ipcMain\.handle\("server:listening-history:get"[\s\S]+url\.searchParams\.set\("limit"[\s\S]+Accept: "application\/json"/);
   assert.match(mainSource, /api\/v1\/listening-history/);
   assert.match(mainSource, /JSON\.stringify\(\{ client: "windows", entries \}\)/);
   assert.match(mainSource, /response\.status === 404[\s\S]+supported: false/);
@@ -608,13 +747,15 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /profileID: activeProfileID\(\)/);
   assert.match(appSource, /function pendingListeningHistoryBatches\(\)/);
   assert.match(appSource, /api\.postListeningHistory\(\{/);
+  assert.match(appSource, /api\.fetchListeningHistory\(\{[\s\S]+mergeListeningHistoryDocument\(state, remoteDocument, requestedProfileID\)/);
   assert.match(appSource, /result\?\.supported === false/);
   assert.match(appSource, /scheduleListeningHistorySync\(\)/);
   assert.match(appSource, /syncListeningHistoryNow\(\{ force: true \}\)/);
   assert.match(mainSource, /librarySaveQueue[\s\S]+\.catch\(\(\) => \{\}\)[\s\S]+atomicWriteFile/);
   assert.match(mainSource, /window\.webContents\.send\("app:prepare-close"\)/);
   assert.match(mainSource, /ipcMain\.on\("app:close-ready"/);
-  assert.match(mainSource, /app\.on\("before-quit", \(\) => \{ applicationQuitRequested = true; \}\)/);
+  assert.match(mainSource, /app\.on\("before-quit", \(\) => \{[\s\S]+applicationQuitRequested = true;/);
+  assert.match(mainSource, /clearTimeout\(automaticUpdateCheckTimer\)[\s\S]+clearInterval\(automaticUpdateCheckInterval\)/);
   assert.match(mainSource, /if \(applicationQuitRequested\) app\.quit\(\);/);
   assert.match(appSource, /const allTimeStats = summarizeListeningStats\(state, new Date\(\)\)/);
   assert.match(appSource, /toolbar\.hidden = statsMode/);
@@ -767,6 +908,63 @@ test("summarizes persisted listening history by local day", () => {
   assert.equal(previousWindow.totalSeconds, 0);
 });
 
+test("merges and displays server-only listening history snapshots", () => {
+  const now = new Date(2026, 6, 30, 12, 0, 0);
+  const state = normalizeState({
+    syncProfileID: "default",
+    tracks: [],
+    listeningHistory: [],
+  });
+  const merged = mergeListeningHistoryDocument(state, {
+    profile_id: "default",
+    entries: [
+      {
+        id: "remote-play-one",
+        track_id: "windows-track-id",
+        song_id: "server-song-id",
+        started_at: new Date(2026, 6, 30, 8, 0, 0).toISOString(),
+        listened_seconds: 90,
+        title: "Server Only",
+        artist: "Remote Artist",
+        album: "Remote Album",
+        duration_seconds: 240,
+      },
+      {
+        id: "remote-play-two",
+        track_id: "mac-track-id",
+        song_id: "server-song-id",
+        started_at: new Date(2026, 6, 30, 9, 0, 0).toISOString(),
+        listened_seconds: 30,
+        title: "Server Only",
+        artist: "Remote Artist",
+        album: "Remote Album",
+        duration_seconds: 240,
+      },
+    ],
+  }, "default");
+
+  assert.equal(merged, true);
+  assert.equal(state.listeningHistory.length, 2);
+  assert.equal(state.listeningHistory[0].originatedOnThisDevice, false);
+  assert.equal(state.listeningHistory[0].title, "Server Only");
+  const summary = summarizeListeningHistory(state, 7, now);
+  assert.equal(summary.songs, 1);
+  assert.equal(summary.songSeries.length, 1);
+  assert.equal(summary.songSeries[0].remoteID, "server-song-id");
+  assert.equal(summary.songSeries[0].title, "Server Only");
+  assert.equal(summary.songSeries[0].seconds, 120);
+  assert.equal(summary.songSeries[0].fileUrl, null);
+  const stats = summarizeListeningStats(state, now);
+  assert.equal(stats.songs, 1);
+  assert.equal(stats.topArtist, "Remote Artist");
+  assert.equal(stats.songRanking[0].album, "Remote Album");
+  assert.equal(stats.songRanking[0].seconds, 120);
+
+  const restored = normalizeState(JSON.parse(JSON.stringify(state)));
+  assert.equal(restored.listeningHistory[0].title, "Server Only");
+  assert.equal(restored.listeningHistory[0].originatedOnThisDevice, false);
+});
+
 test("summarizes all-time listening stats independently of the graph window", () => {
   const now = new Date(2026, 6, 30, 12, 0, 0);
   const result = summarizeListeningStats({
@@ -903,6 +1101,25 @@ test("installs downloaded Windows updates silently in place", () => {
   assert.match(readmeSource, /does not show the setup wizard/);
 });
 
+test("checks automatically and shows a dismissible top-right Windows update badge", () => {
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const preloadSource = readFileSync(new URL("../preload.cjs", import.meta.url), "utf8");
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
+
+  assert.match(mainSource, /AUTOMATIC_UPDATE_CHECK_INTERVAL_MS = 5 \* 60 \* 1000/);
+  assert.match(mainSource, /function startAutomaticUpdateChecks\(\)[\s\S]+setInterval\(runAutomaticUpdateCheck, AUTOMATIC_UPDATE_CHECK_INTERVAL_MS\)/);
+  assert.match(mainSource, /\["available", "downloading", "ready"\]\.includes\(currentWindowsUpdateStatus\.type\)/);
+  assert.match(mainSource, /ipcMain\.handle\("update:state", \(\) => currentWindowsUpdateStatus\)/);
+  assert.match(preloadSource, /getUpdateStatus: \(\) => ipcRenderer\.invoke\("update:state"\)/);
+  assert.match(htmlSource, /id="updateAvailableBadge"[\s\S]+Update Available[\s\S]+id="updateAvailableAction"[\s\S]+id="dismissUpdateAvailable"/);
+  assert.match(styleSource, /\.update-available-badge\s*\{[\s\S]+top: 94px;[\s\S]+right: 18px;/);
+  assert.match(appSource, /function syncWindowsUpdateBadge\(value = \{\}\)[\s\S]+value\.type === "ready"[\s\S]+Restart to update/);
+  assert.match(appSource, /dismissedWindowsUpdateVersion = availableWindowsUpdateVersion;[\s\S]+updateAvailableBadge"\)\.hidden = true/);
+  assert.match(appSource, /api\.onUpdateStatus\(handleWindowsUpdateStatus\)[\s\S]+await api\.getUpdateStatus\(\)/);
+});
+
 test("converts embedded cover art into a renderable data URL", () => {
   assert.equal(metadata.pictureDataURL({ format: "image/png", data: Buffer.from([1, 2, 3]) }), "data:image/png;base64,AQID");
   assert.equal(metadata.pictureDataURL(null), null);
@@ -1033,10 +1250,16 @@ test("guards profile transitions, authenticated downloads, persistence, and tran
   assert.match(mainSource, /function atomicWriteFile\([\s\S]+fs\.rename\(temporary, destination\)/);
   assert.match(syncSource, /fileURL\.origin !== base\.origin/);
   assert.match(syncSource, /syncProfileID \|\| "default"\) === \(profileID \|\| "default"\)/);
+  const alreadyDownloadedBranch = syncSource.match(/if \(alreadyDownloaded\) \{([\s\S]*?)\n    \}/)?.[1] || "";
+  assert.match(alreadyDownloadedBranch, /continue;/);
+  assert.doesNotMatch(alreadyDownloadedBranch, /return/);
   assert.match(syncSource, /writeResponseToFile\(response, temporary/);
   assert.doesNotMatch(syncSource, /response\.arrayBuffer\(\)/);
   assert.match(uploadSource, /createReadStream\(filePath\)/);
   assert.doesNotMatch(uploadSource, /fs\.readFile\(filePath\)/);
+  assert.match(uploadSource, /managedRoots = \[paths\.local, paths\.remote\]/);
+  assert.match(uploadSource, /isManagedLibraryFile\(item\.filePath, managedRoots\)/);
+  assert.ok(packageJSON.build.files.includes("library-paths.cjs"));
   assert.match(packageJSON.scripts["package:win"], /electron-builder --dir --win --x64/);
 });
 
@@ -1156,6 +1379,70 @@ test("uploaded local tracks adopt server identity and preserve every client refe
   assert.deepEqual(state.playbackQueueIDs, ["local"]);
   assert.equal(state.listeningHistory[0].trackID, "local");
   assert.deepEqual(state.dirtyRemoteLikeSongIDs, ["remote-song"]);
+});
+
+test("reconciling a stale downloaded identity removes its old playlist, like, and clip references", () => {
+  const state = createEmptyState();
+  state.tracks = [{
+    id: "downloaded",
+    title: "Downloaded",
+    remoteID: "old-song",
+    sourceServer: "https://music.example",
+    syncProfileID: "default",
+  }];
+  state.playlists.push({
+    id: "12345678-1234-abcd-9876-abcdef123456",
+    name: "Mix",
+    trackIDs: ["downloaded"],
+    remoteSongIDs: ["old-song"],
+    isSystem: false,
+  });
+  state.favorites = ["downloaded"];
+  state.remoteLikedSongIDs = ["old-song"];
+  state.clipRanges = { "remote:old-song": { startSeconds: 2, endSeconds: 8 } };
+
+  reconcileUploadedTrack(state, "downloaded", { id: "new-song" }, {
+    serverURL: "https://music.example",
+    profileID: "default",
+  });
+
+  assert.deepEqual(state.playlists[1].remoteSongIDs, ["new-song"]);
+  assert.deepEqual(state.remoteLikedSongIDs, ["new-song"]);
+  assert.deepEqual(state.dirtyRemoteLikeSongIDs, ["old-song", "new-song"]);
+  assert.deepEqual(state.clipRanges, { "remote:new-song": { startSeconds: 2, endSeconds: 8 } });
+  assert.deepEqual(state.dirtyClipRangeKeys, ["remote:old-song", "remote:new-song"]);
+  assert.deepEqual(state.deletedClipRangeKeys, ["remote:old-song"]);
+});
+
+test("plans uploads only for downloaded active-profile songs missing from the live catalog", () => {
+  const state = normalizeState({
+    ...createEmptyState(),
+    serverURL: "https://music.example",
+    syncProfileID: "profile-a",
+    tracks: [
+      { id: "present", filePath: "/music/present.mp3", remoteID: "remote-present", sourceServer: "https://music.example", syncProfileID: "profile-a" },
+      { id: "missing", filePath: "/music/missing.mp3", remoteID: "remote-gone", sourceServer: "https://music.example", syncProfileID: "profile-a" },
+      { id: "hash-match", filePath: "/music/hash.mp3", remoteID: "old-id", sourceServer: "https://music.example", syncProfileID: "profile-a", contentSha256: "ABC" },
+      { id: "local", filePath: "/music/local.mp3", remoteID: null },
+      { id: "other-profile", filePath: "/music/other.mp3", remoteID: "gone", sourceServer: "https://music.example", syncProfileID: "profile-b" },
+      { id: "source-only-current", filePath: "/music/source.mp3", sourceServer: "https://music.example", syncProfileID: "profile-a" },
+      { id: "source-only-other-profile", filePath: "/music/profile.mp3", sourceServer: "https://music.example", syncProfileID: "profile-b" },
+      { id: "source-only-other-server", filePath: "/music/server.mp3", sourceServer: "https://other.example", syncProfileID: "profile-a" },
+    ],
+  });
+  const plan = planMissingDownloadedUploads(state, [
+    { id: "remote-present" },
+    { id: "replacement", content_sha256: "abc" },
+  ]);
+  assert.deepEqual(plan.uploadTracks.map((track) => track.id), ["missing", "source-only-current"]);
+  assert.deepEqual(plan.matches.map((match) => [match.trackID, match.remoteSong.id]), [["hash-match", "replacement"]]);
+});
+
+test("names every permanent upload failure after retries", () => {
+  assert.equal(formatServerUploadFailureNotice([
+    { title: "First", artist: "Artist" },
+    { filename: "Second.mp3" },
+  ]), "2 songs failed to upload after retrying: “First” — Artist; “Second.mp3”.");
 });
 
 test("matching cached server hashes reconcile old uploads during state normalization", () => {

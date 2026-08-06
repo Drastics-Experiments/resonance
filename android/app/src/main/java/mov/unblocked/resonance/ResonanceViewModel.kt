@@ -3,6 +3,7 @@ package mov.unblocked.resonance
 import android.app.Application
 import android.content.ComponentName
 import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -19,6 +20,7 @@ import java.io.File
 import java.util.UUID
 import java.util.concurrent.Future
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,10 +33,15 @@ import kotlinx.coroutines.launch
 import mov.unblocked.resonance.data.CredentialStore
 import mov.unblocked.resonance.data.ClipRange
 import mov.unblocked.resonance.data.LinkImportException
+import mov.unblocked.resonance.data.LinkImportCandidate
+import mov.unblocked.resonance.data.LinkImportExistingPolicy
 import mov.unblocked.resonance.data.LinkImportProgress
 import mov.unblocked.resonance.data.LinkImportService
 import mov.unblocked.resonance.data.LinkImportStage
 import mov.unblocked.resonance.data.LinkImportTrack
+import mov.unblocked.resonance.data.LinkImportKind
+import mov.unblocked.resonance.data.LinkImportInput
+import mov.unblocked.resonance.data.LinkImportResolution
 import mov.unblocked.resonance.data.LibraryRepository
 import mov.unblocked.resonance.data.Playlist
 import mov.unblocked.resonance.data.PlaylistPutResult
@@ -47,6 +54,8 @@ import mov.unblocked.resonance.data.StoredLibrary
 import mov.unblocked.resonance.data.Track
 import mov.unblocked.resonance.playback.PlaybackService
 import mov.unblocked.resonance.playback.DownloadPolicy
+import mov.unblocked.resonance.playback.PlaybackVolumePolicy
+import mov.unblocked.resonance.playback.UploadMissingPolicy
 import mov.unblocked.resonance.ui.ResonanceActions
 import mov.unblocked.resonance.ui.ResonanceUiState
 import mov.unblocked.resonance.ui.LinkImportUiState
@@ -84,6 +93,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private var likesMutationGeneration = 0L
     private var clipRangeMutationGeneration = 0L
     private var linkImportJob: Job? = null
+    private var linkPreviewJob: Job? = null
+    private var linkPreviewStopJob: Job? = null
+    private var linkPreviewPlayer: MediaPlayer? = null
 
     override fun dismissError() {
         mutableState.value = mutableState.value.copy(errorMessage = null)
@@ -121,7 +133,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 mediaController.repeatMode = repeatModeFor(mutableState.value.repeatEnabled)
                 mediaController.shuffleModeEnabled = mutableState.value.shuffleEnabled
                 mediaController.setPlaybackSpeed(mutableState.value.playbackSpeed)
-                mediaController.volume = mutableState.value.volume
+                mediaController.volume = PlaybackVolumePolicy.gainForSlider(mutableState.value.volume)
                 mediaController.addListener(object : Player.Listener {
                     override fun onEvents(player: Player, events: Player.Events) = refreshPlaybackState()
                 })
@@ -131,6 +143,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun onCleared() {
+        stopLinkImportPreview()
         controller?.release()
         controller = null
         controllerFuture?.cancel(true)
@@ -151,50 +164,118 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun resolveLinkImport(source: String) {
+        stopLinkImportPreview()
         val value = source.trim()
         if (value.isEmpty()) {
             mutableState.value = mutableState.value.copy(
                 linkImport = LinkImportUiState(
                     stage = LinkImportStage.Failed,
                     errorCode = "MISSING_SOURCE",
-                    errorMessage = "Paste a Spotify track or YouTube video URL first.",
+                    errorMessage = "Enter a song, artist, album, or supported Spotify, SoundCloud, or YouTube link first.",
                 ),
             )
             return
         }
         linkImportJob?.cancel()
+        val searchesProviders = !LinkImportInput.looksLikeLink(value)
         mutableState.value = mutableState.value.copy(
-            linkImport = LinkImportUiState(stage = LinkImportStage.ResolvingMetadata),
+            linkImport = LinkImportUiState(
+                stage = if (searchesProviders) LinkImportStage.SearchingCandidates else LinkImportStage.ResolvingMetadata,
+            ),
         )
         linkImportJob = viewModelScope.launch {
-            runCatching {
-                linkImportService.resolve(value, ::applyLinkImportProgress)
-            }.onSuccess { resolution ->
-                mutableState.value = mutableState.value.copy(
-                    linkImport = mutableState.value.linkImport.copy(
-                        stage = LinkImportStage.AwaitingSelection,
-                        resolution = resolution,
-                        selectedVideoId = resolution.candidates.firstOrNull()?.videoID,
-                        errorCode = null,
-                        errorMessage = null,
-                    ),
-                )
-            }.onFailure(::applyLinkImportFailure)
+            if (searchesProviders) {
+                runCatching { linkImportService.search(value) }
+                    .onSuccess { response ->
+                        val first = response.results.first()
+                        mutableState.value = mutableState.value.copy(
+                            linkImport = mutableState.value.linkImport.copy(
+                                stage = LinkImportStage.AwaitingSelection,
+                                searchResponse = response,
+                                selectedSearchResultId = first.id,
+                                resolution = first.resolution,
+                                selectedVideoId = first.candidates.firstOrNull()?.videoID,
+                                selectedVideoIds = first.candidates.firstOrNull()?.videoID?.let(::setOf).orEmpty(),
+                                errorCode = null,
+                                errorMessage = null,
+                            ),
+                        )
+                    }.onFailure(::applyLinkImportFailure)
+            } else {
+                runCatching { linkImportService.resolve(value, ::applyLinkImportProgress) }
+                    .onSuccess { resolution ->
+                        mutableState.value = mutableState.value.copy(
+                            linkImport = mutableState.value.linkImport.copy(
+                                stage = LinkImportStage.AwaitingSelection,
+                                resolution = resolution,
+                                selectedVideoId = resolution.candidates.firstOrNull()?.videoID,
+                                selectedVideoIds = if (resolution.kind.isPlaylist) {
+                                    resolution.candidates.mapTo(mutableSetOf(), mov.unblocked.resonance.data.LinkImportCandidate::videoID)
+                                } else {
+                                    resolution.candidates.firstOrNull()?.videoID?.let(::setOf).orEmpty()
+                                },
+                                errorCode = null,
+                                errorMessage = null,
+                            ),
+                        )
+                    }.onFailure(::applyLinkImportFailure)
+            }
         }
+    }
+
+    override fun selectLinkImportSearchResult(resultId: String) {
+        val current = mutableState.value.linkImport
+        val result = current.searchResponse?.results?.firstOrNull { it.id == resultId } ?: return
+        val candidate = result.candidates.firstOrNull()
+        if (current.previewingVideoId != null && current.previewingVideoId != candidate?.videoID) {
+            stopLinkImportPreview()
+        }
+        val refreshed = mutableState.value.linkImport
+        mutableState.value = mutableState.value.copy(
+            linkImport = refreshed.copy(
+                selectedSearchResultId = result.id,
+                resolution = result.resolution,
+                selectedVideoId = candidate?.videoID,
+                selectedVideoIds = candidate?.videoID?.let(::setOf).orEmpty(),
+                previewError = null,
+            ),
+        )
     }
 
     override fun selectLinkImportCandidate(videoId: String) {
         val current = mutableState.value.linkImport
         if (current.resolution?.candidates?.any { it.videoID == videoId } != true) return
+        val playlist = current.resolution.kind.isPlaylist
+        val selection = if (playlist) {
+            current.selectedVideoIds.toMutableSet().apply {
+                if (!add(videoId)) remove(videoId)
+            }
+        } else {
+            setOf(videoId)
+        }
         mutableState.value = mutableState.value.copy(
-            linkImport = current.copy(selectedVideoId = videoId),
+            linkImport = current.copy(selectedVideoId = if (playlist) current.selectedVideoId else videoId, selectedVideoIds = selection),
         )
     }
 
-    override fun confirmLinkImport() {
+    override fun confirmLinkImport(uploadAfterImport: Boolean): Boolean {
         val current = mutableState.value.linkImport
-        val resolution = current.resolution ?: return
-        val candidate = resolution.candidates.firstOrNull { it.videoID == current.selectedVideoId } ?: return
+        val resolution = current.resolution ?: return false
+        if (uploadAfterImport && !hasLinkImportServerConfiguration()) {
+            mutableState.value = mutableState.value.copy(
+                linkImport = current.copy(
+                    stage = LinkImportStage.Failed,
+                    errorCode = "SERVER_UPLOAD_NOT_CONFIGURED",
+                    errorMessage = "Connect the music server and save both the access token and admin key, or turn off server upload.",
+                ),
+            )
+            return false
+        }
+        stopLinkImportPreview()
+        if (resolution.kind.isPlaylist) {
+            return confirmSpotifyPlaylistImport(current, resolution, uploadAfterImport)
+        }
+        val candidate = resolution.candidates.firstOrNull { it.videoID == current.selectedVideoId } ?: return false
         linkImportJob?.cancel()
         mutableState.value = mutableState.value.copy(
             linkImport = current.copy(
@@ -204,46 +285,490 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 errorCode = null,
                 errorMessage = null,
             ),
+            errorMessage = null,
         )
         linkImportJob = viewModelScope.launch {
-            runCatching {
-                val metadata = LinkImportTrack(
-                    title = resolution.track.title,
-                    artist = resolution.track.artist,
-                    album = resolution.track.album,
-                    durationSeconds = resolution.track.durationSeconds,
-                    artworkURL = resolution.track.artworkURL ?: candidate.thumbnailURL,
-                    sourceURL = resolution.track.sourceURL,
+            runSingleLinkImport(resolution, candidate, uploadAfterImport)
+        }
+        return true
+    }
+
+    private fun confirmSpotifyPlaylistImport(
+        current: LinkImportUiState,
+        resolution: LinkImportResolution,
+        uploadAfterImport: Boolean,
+    ): Boolean {
+        val playlist = resolution.playlist ?: return false
+        val selected = resolution.candidates
+            .filter { it.videoID in current.selectedVideoIds }
+            .sortedBy { it.playlistIndex }
+        if (selected.isEmpty()) return false
+        linkImportJob?.cancel()
+        mutableState.value = mutableState.value.copy(
+            linkImport = current.copy(
+                stage = LinkImportStage.InspectingSource,
+                completedBytes = 0,
+                totalBytes = 0,
+                errorCode = null,
+                errorMessage = null,
+                completedSummary = null,
+            ),
+            errorMessage = null,
+        )
+        linkImportJob = viewModelScope.launch {
+            runSpotifyPlaylistImport(resolution, selected, uploadAfterImport)
+        }
+        return true
+    }
+
+    override fun toggleLinkImportPreview(videoId: String) {
+        val linkState = mutableState.value.linkImport
+        if (linkState.previewingVideoId == videoId || linkState.previewLoadingVideoId == videoId) {
+            stopLinkImportPreview()
+            return
+        }
+        val candidate = linkState.resolution?.candidates?.firstOrNull { it.videoID == videoId } ?: return
+        stopLinkImportPreview()
+        mutableState.value = mutableState.value.copy(
+            linkImport = mutableState.value.linkImport.copy(
+                previewLoadingVideoId = videoId,
+                previewError = null,
+            ),
+        )
+        linkPreviewJob = viewModelScope.launch {
+            runCatching { linkImportService.preview(candidate) }
+                .onSuccess { preview ->
+                    val player = MediaPlayer()
+                    linkPreviewPlayer = player
+                    player.setOnPreparedListener {
+                        it.start()
+                        mutableState.value = mutableState.value.copy(
+                            linkImport = mutableState.value.linkImport.copy(
+                                previewLoadingVideoId = null,
+                                previewingVideoId = videoId,
+                            ),
+                        )
+                        linkPreviewStopJob?.cancel()
+                        linkPreviewStopJob = viewModelScope.launch {
+                            delay(30_000)
+                            stopLinkImportPreview()
+                        }
+                    }
+                    player.setOnErrorListener { _, _, _ ->
+                        stopLinkImportPreview()
+                        mutableState.value = mutableState.value.copy(
+                            linkImport = mutableState.value.linkImport.copy(previewError = "Preview unavailable."),
+                        )
+                        true
+                    }
+                    player.setDataSource(context, Uri.parse(preview.url), preview.headers)
+                    player.prepareAsync()
+                }
+                .onFailure { error ->
+                    if (error !is CancellationException) {
+                        mutableState.value = mutableState.value.copy(
+                            linkImport = mutableState.value.linkImport.copy(
+                                previewLoadingVideoId = null,
+                                previewError = "Preview unavailable: ${error.message ?: "unknown error"}",
+                            ),
+                        )
+                    }
+                }
+            linkPreviewJob = null
+        }
+    }
+
+    override fun stopLinkImportPreview() {
+        linkPreviewJob?.cancel()
+        linkPreviewStopJob?.cancel()
+        linkPreviewJob = null
+        linkPreviewStopJob = null
+        linkPreviewPlayer?.runCatching { stop() }
+        linkPreviewPlayer?.release()
+        linkPreviewPlayer = null
+        mutableState.value = mutableState.value.copy(
+            linkImport = mutableState.value.linkImport.copy(
+                previewLoadingVideoId = null,
+                previewingVideoId = null,
+            ),
+        )
+    }
+
+    private suspend fun runSingleLinkImport(
+        resolution: LinkImportResolution,
+        selectedCandidate: LinkImportCandidate,
+        uploadAfterImport: Boolean,
+    ) {
+        var catalogWarning: String? = null
+        val client = if (uploadAfterImport) serverClient() else null
+        if (client != null) {
+            runCatching { client.fetchCatalog() }
+                .onSuccess { mutableState.value = mutableState.value.copy(remoteSongs = it.songs) }
+                .onFailure { catalogWarning = it.message }
+        }
+        try {
+            val metadata = resolution.track.copy(
+                artworkURL = resolution.track.artworkURL ?: selectedCandidate.thumbnailURL,
+            )
+            var match = LinkImportExistingPolicy.match(metadata, library.tracks, mutableState.value.remoteSongs)
+            var track = match.deviceTrackID?.let { id -> library.tracks.firstOrNull { it.id == id } }
+            val plannedDownloads = if (track == null) 1 else 0
+            if (track == null) {
+                beginLinkDownloads(1)
+                val candidates = listOf(selectedCandidate) + selectedCandidate.fallbackCandidates +
+                    resolution.candidates.filter { it.videoID != selectedCandidate.videoID }
+                track = downloadLinkTrack(metadata, candidates.distinctBy(LinkImportCandidate::videoID), 0, 1)
+                mutableState.value = mutableState.value.copy(downloadProgress = 1f)
+            }
+            mutableState.value = mutableState.value.copy(isDownloading = false)
+            requireNotNull(track) { "The imported song could not be found on this device." }
+            match = LinkImportExistingPolicy.match(metadata, library.tracks, mutableState.value.remoteSongs)
+            match.serverSongID?.let { adoptUploadedDownload(track.id, it, client?.baseURL ?: mutableState.value.serverUrl) }
+
+            var uploadFailure: Throwable? = null
+            if (client != null && match.serverSongID == null) {
+                beginLinkUploads(1)
+                runCatching { uploadLinkTrackWithRetry(track, client, 0, 1) }
+                    .onFailure { uploadFailure = it }
+                mutableState.value = mutableState.value.copy(uploadProgress = 1f)
+            }
+            persistLibrary()
+            if (client != null && uploadFailure == null) {
+                runCatching { client.fetchCatalog() }
+                    .onSuccess { mutableState.value = mutableState.value.copy(remoteSongs = it.songs) }
+            }
+            finishLinkTransfers()
+            if (uploadFailure != null) {
+                val detail = "Saved locally; upload failed after retrying: ${track.title} — ${track.artist} (${uploadFailure.message ?: "upload failed"})"
+                mutableState.value = mutableState.value.copy(
+                    errorMessage = detail,
+                    linkImport = mutableState.value.linkImport.copy(
+                        stage = LinkImportStage.Failed,
+                        completedTrackTitle = track.title,
+                        errorCode = "SERVER_UPLOAD_FAILED",
+                        errorMessage = detail,
+                    ),
                 )
-                val download = linkImportService.download(candidate, metadata, ::applyLinkImportProgress)
-                val duplicate = library.tracks.firstOrNull {
-                    it.sourceSHA256 == download.sourceSHA256
-                        || it.contentSHA256 == download.sourceSHA256
-                        || it.contentSHA256 == download.contentSHA256
-                }
-                if (duplicate != null) {
-                    download.file.parentFile?.deleteRecursively()
-                    duplicate
-                } else {
-                    applyLinkImportProgress(LinkImportProgress(LinkImportStage.SavingLocal))
-                    repository.registerLocalImport(download)
-                }
-            }.onSuccess { track ->
-                if (library.tracks.none { it.id == track.id }) {
-                    library = normalizeLiked(library.copy(tracks = library.tracks + track))
-                    persistLibrary()
-                }
+            } else {
+                val localDetail = if (plannedDownloads == 0) "Already on this device." else "Downloaded to this device."
+                val serverDetail = if (!uploadAfterImport) "" else if (match.serverSongID != null) " Already on the server." else " Uploaded to the server."
+                val warning = catalogWarning?.let { " Server refresh warning: $it" }.orEmpty()
                 mutableState.value = mutableState.value.copy(
                     linkImport = mutableState.value.linkImport.copy(
                         stage = LinkImportStage.Complete,
                         completedTrackTitle = track.title,
+                        completedSummary = localDetail + serverDetail + warning,
+                        batchCurrentTitle = null,
                     ),
                 )
-            }.onFailure(::applyLinkImportFailure)
+            }
+        } catch (_: CancellationException) {
+            finishLinkTransfers()
+            mutableState.value = mutableState.value.copy(
+                linkImport = mutableState.value.linkImport.copy(stage = LinkImportStage.Cancelled, batchCurrentTitle = null),
+            )
+        } catch (error: Throwable) {
+            finishLinkTransfers()
+            val detail = "${resolution.track.title} — ${resolution.track.artist}: ${error.message ?: "download failed"}"
+            mutableState.value = mutableState.value.copy(
+                errorMessage = detail,
+                linkImport = mutableState.value.linkImport.copy(
+                    stage = LinkImportStage.Failed,
+                    errorCode = (error as? LinkImportException)?.code ?: "LOCAL_IMPORT_FAILED",
+                    errorMessage = detail,
+                    batchCurrentTitle = null,
+                ),
+            )
         }
     }
 
+    private suspend fun runSpotifyPlaylistImport(
+        resolution: LinkImportResolution,
+        selected: List<LinkImportCandidate>,
+        uploadAfterImport: Boolean,
+    ) {
+        val playlist = requireNotNull(resolution.playlist)
+        val imported = mutableListOf<Pair<LinkImportCandidate, Track>>()
+        val downloadFailures = mutableListOf<String>()
+        val uploadFailures = mutableListOf<String>()
+        var catalogWarning: String? = null
+        val client = if (uploadAfterImport) serverClient() else null
+        if (client != null) {
+            runCatching { client.fetchCatalog() }
+                .onSuccess { mutableState.value = mutableState.value.copy(remoteSongs = it.songs) }
+                .onFailure { catalogWarning = it.message }
+        }
+        try {
+            val initialMatches = selected.associateWith { candidate ->
+                LinkImportExistingPolicy.match(
+                    requireNotNull(candidate.importTrack),
+                    library.tracks,
+                    mutableState.value.remoteSongs,
+                )
+            }
+            val downloadItems = selected.filter { initialMatches[it]?.deviceTrackID == null }
+            if (downloadItems.isNotEmpty()) beginLinkDownloads(downloadItems.size)
+            var completedDownloads = 0
+            selected.forEach { candidate ->
+                val metadata = requireNotNull(candidate.importTrack).copy(
+                    artworkURL = candidate.importTrack.artworkURL ?: candidate.thumbnailURL,
+                )
+                val initial = initialMatches[candidate]
+                var track = initial?.deviceTrackID?.let { id -> library.tracks.firstOrNull { it.id == id } }
+                if (track == null) {
+                    mutableState.value = mutableState.value.copy(
+                        linkImport = mutableState.value.linkImport.copy(
+                            batchCurrentTitle = "${completedDownloads + 1} of ${downloadItems.size} • ${metadata.title}",
+                        ),
+                    )
+                    try {
+                        track = downloadLinkTrack(
+                            metadata,
+                            (listOf(candidate) + candidate.fallbackCandidates).distinctBy(LinkImportCandidate::videoID),
+                            completedDownloads,
+                            downloadItems.size,
+                        )
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        downloadFailures += "${metadata.title} — ${metadata.artist} (${error.message ?: "download failed"})"
+                    }
+                    completedDownloads += 1
+                    mutableState.value = mutableState.value.copy(
+                        downloadProgress = completedDownloads.toFloat() / downloadItems.size.coerceAtLeast(1),
+                    )
+                }
+                if (track != null) {
+                    initial?.serverSongID?.let { remoteID ->
+                        adoptUploadedDownload(track.id, remoteID, client?.baseURL ?: mutableState.value.serverUrl)
+                    }
+                    if (imported.none { it.second.id == track.id }) imported += candidate to track
+                }
+            }
+            mutableState.value = mutableState.value.copy(isDownloading = false)
+            upsertImportedPlaylist(playlist.title, imported.map { it.second })
+            persistLibrary()
+
+            val uploadQueue = if (client == null) emptyList() else imported.filter { (candidate, _) ->
+                LinkImportExistingPolicy.match(
+                    requireNotNull(candidate.importTrack),
+                    library.tracks,
+                    mutableState.value.remoteSongs,
+                ).serverSongID == null
+            }
+            if (client != null && uploadQueue.isNotEmpty()) {
+                beginLinkUploads(uploadQueue.size)
+                uploadQueue.forEachIndexed { index, (_, track) ->
+                    try {
+                        uploadLinkTrackWithRetry(track, client, index, uploadQueue.size)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        uploadFailures += "${track.title} — ${track.artist} (${error.message ?: "upload failed"})"
+                    }
+                    mutableState.value = mutableState.value.copy(
+                        uploadProgress = (index + 1).toFloat() / uploadQueue.size,
+                    )
+                }
+            }
+            persistLibrary()
+            if (client != null) {
+                runCatching { client.fetchCatalog() }
+                    .onSuccess { mutableState.value = mutableState.value.copy(remoteSongs = it.songs) }
+            }
+            finishLinkTransfers()
+            val summary = "Kept ${imported.size} of ${selected.size} selected songs in ${playlist.title}."
+            val deviceSkips = initialMatches.values.count { it.isOnDevice }
+            val serverSkips = if (uploadAfterImport) initialMatches.values.count { it.isOnServer } else 0
+            when {
+                downloadFailures.isNotEmpty() -> {
+                    val detail = "Playlist import incomplete. Kept ${imported.size} song${if (imported.size == 1) "" else "s"}. Downloads failed after retrying: ${downloadFailures.joinToString("; ")}"
+                    mutableState.value = mutableState.value.copy(
+                        errorMessage = detail,
+                        linkImport = mutableState.value.linkImport.copy(
+                            stage = LinkImportStage.Failed,
+                            completedTrackTitle = imported.firstOrNull()?.second?.title,
+                            completedSummary = summary,
+                            batchCurrentTitle = null,
+                            errorCode = "PLAYLIST_DOWNLOAD_PARTIAL_FAILURE",
+                            errorMessage = detail,
+                        ),
+                    )
+                }
+                uploadFailures.isNotEmpty() -> {
+                    val detail = "Saved every downloaded song locally. Server uploads failed after retrying: ${uploadFailures.joinToString("; ")}"
+                    mutableState.value = mutableState.value.copy(
+                        errorMessage = detail,
+                        linkImport = mutableState.value.linkImport.copy(
+                            stage = LinkImportStage.Failed,
+                            completedTrackTitle = imported.firstOrNull()?.second?.title,
+                            completedSummary = summary,
+                            batchCurrentTitle = null,
+                            errorCode = "PLAYLIST_UPLOAD_PARTIAL_FAILURE",
+                            errorMessage = detail,
+                        ),
+                    )
+                }
+                else -> {
+                    val warning = catalogWarning?.let { " Server refresh warning: $it" }.orEmpty()
+                    mutableState.value = mutableState.value.copy(
+                        linkImport = mutableState.value.linkImport.copy(
+                            stage = LinkImportStage.Complete,
+                            completedTrackTitle = imported.firstOrNull()?.second?.title,
+                            completedSummary = "$summary Skipped $deviceSkips device downloads and $serverSkips server uploads.$warning",
+                            batchCurrentTitle = null,
+                        ),
+                    )
+                }
+            }
+        } catch (_: CancellationException) {
+            upsertImportedPlaylist(playlist.title, imported.map { it.second })
+            persistLibrary()
+            finishLinkTransfers()
+            mutableState.value = mutableState.value.copy(
+                linkImport = mutableState.value.linkImport.copy(
+                    stage = LinkImportStage.Cancelled,
+                    batchCurrentTitle = null,
+                    completedSummary = "Cancelled after keeping ${imported.size} of ${selected.size} songs.",
+                ),
+            )
+        } catch (error: Throwable) {
+            upsertImportedPlaylist(playlist.title, imported.map(Pair<LinkImportCandidate, Track>::second))
+            persistLibrary()
+            finishLinkTransfers()
+            val detail = error.message ?: "The playlist import failed."
+            mutableState.value = mutableState.value.copy(
+                errorMessage = detail,
+                linkImport = mutableState.value.linkImport.copy(
+                    stage = LinkImportStage.Failed,
+                    batchCurrentTitle = null,
+                    errorCode = "LOCAL_IMPORT_FAILED",
+                    errorMessage = detail,
+                ),
+            )
+        }
+    }
+
+    private suspend fun downloadLinkTrack(
+        metadata: LinkImportTrack,
+        candidates: List<LinkImportCandidate>,
+        completedBefore: Int,
+        total: Int,
+    ): Track {
+        var lastError: Throwable? = null
+        candidates.forEachIndexed { candidateIndex, candidate ->
+            try {
+                if (candidateIndex > 0) delay(400)
+                val download = linkImportService.download(candidate, metadata) { progress ->
+                    applyLinkImportProgress(progress)
+                    val byteFraction = if (progress.totalBytes > 0) {
+                        (progress.completedBytes.toFloat() / progress.totalBytes).coerceIn(0f, 1f)
+                    } else 0f
+                    mutableState.value = mutableState.value.copy(
+                        downloadProgress = (completedBefore + byteFraction) / total.coerceAtLeast(1),
+                        downloadDetail = "Downloading ${completedBefore + 1} of $total • ${metadata.title}",
+                    )
+                }
+                val duplicate = library.tracks.firstOrNull {
+                    it.sourceSHA256 == download.sourceSHA256 ||
+                        it.contentSHA256 == download.sourceSHA256 ||
+                        it.contentSHA256 == download.contentSHA256
+                }
+                val track = if (duplicate != null) {
+                    download.file.parentFile?.deleteRecursively()
+                    duplicate
+                } else {
+                    applyLinkImportProgress(LinkImportProgress(LinkImportStage.SavingLocal))
+                    repository.registerLocalImport(download).also { imported ->
+                        library = normalizeLiked(library.copy(tracks = library.tracks + imported))
+                        persistLibrary()
+                    }
+                }
+                return track
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                lastError = error
+            }
+        }
+        throw lastError ?: LinkImportException(
+            LinkImportStage.Downloading,
+            "ALL_SOURCES_FAILED",
+            "Every matched audio source failed.",
+        )
+    }
+
+    private suspend fun uploadLinkTrackWithRetry(
+        track: Track,
+        client: ServerClient,
+        index: Int,
+        total: Int,
+    ): String {
+        var lastError: Throwable? = null
+        repeat(3) { attempt ->
+            try {
+                if (attempt > 0) delay(if (attempt == 1) 500 else 1_500)
+                mutableState.value = mutableState.value.copy(
+                    linkImport = mutableState.value.linkImport.copy(stage = LinkImportStage.Syncing),
+                    uploadDetail = "Uploading ${index + 1} of $total • ${track.title}",
+                )
+                val uploaded = client.upload(repository.fileForTrack(track), track.title)
+                adoptUploadedDownload(track.id, uploaded.id, client.baseURL)
+                return uploaded.id
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                lastError = error
+            }
+        }
+        throw lastError ?: IllegalStateException("Upload failed")
+    }
+
+    private fun beginLinkDownloads(total: Int) {
+        mutableState.value = mutableState.value.copy(
+            isUploading = false,
+            isDownloading = true,
+            downloadProgress = 0f,
+            downloadDetail = "Preparing 1 of $total",
+        )
+    }
+
+    private fun beginLinkUploads(total: Int) {
+        mutableState.value = mutableState.value.copy(
+            isDownloading = false,
+            isUploading = true,
+            uploadProgress = 0f,
+            uploadDetail = "Preparing 1 of $total",
+            linkImport = mutableState.value.linkImport.copy(stage = LinkImportStage.Syncing),
+        )
+    }
+
+    private fun finishLinkTransfers() {
+        mutableState.value = mutableState.value.copy(isDownloading = false, isUploading = false)
+    }
+
+    private fun hasLinkImportServerConfiguration(): Boolean {
+        val state = mutableState.value
+        return state.serverUrl.isNotBlank() && state.serverToken.isNotBlank() && state.serverAdminKey.isNotBlank()
+    }
+
+    private fun upsertImportedPlaylist(name: String, tracks: List<Track>) {
+        if (tracks.isEmpty()) return
+        val index = library.playlists.indexOfFirst { !it.isSystem && it.name.equals(name, ignoreCase = true) }
+        val playlists = library.playlists.toMutableList()
+        val playlist = if (index >= 0) playlists[index] else Playlist(name = name, remoteSongIDs = emptyList()).also(playlists::add)
+        val updated = updateRemoteSongIds(playlist.copy(trackIDs = (playlist.trackIDs + tracks.map(Track::id)).distinct()))
+        val updatedIndex = if (index >= 0) index else playlists.lastIndex
+        playlists[updatedIndex] = updated
+        library = library.copy(
+            playlists = playlists,
+            dirtyPlaylistIDs = library.dirtyPlaylistIDs.orEmpty() + updated.id,
+        )
+        saveAndScheduleSync()
+    }
+
     override fun cancelLinkImport() {
+        stopLinkImportPreview()
         linkImportJob?.cancel()
         linkImportJob = null
         mutableState.value = mutableState.value.copy(
@@ -274,6 +799,94 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun uploadAudio() { mutableUploadRequests.tryEmit(Unit) }
+
+    override fun uploadMissingDownloads() {
+        if (mutableState.value.isUploading) return
+        viewModelScope.launch {
+            mutableState.value = mutableState.value.copy(
+                isUploading = true,
+                uploadProgress = 0f,
+                uploadDetail = "Checking downloaded songs…",
+                errorMessage = null,
+            )
+            try {
+                val client = serverClient()
+                val catalog = client.fetchCatalog()
+                mutableState.value = mutableState.value.copy(remoteSongs = catalog.songs)
+                val plan = UploadMissingPolicy.plan(
+                    tracks = library.tracks,
+                    catalog = catalog.songs,
+                    activeProfileID = library.syncProfileID,
+                    activeServerURL = client.baseURL,
+                )
+                plan.existingRemoteIDsByTrackID.forEach { (trackID, remoteID) ->
+                    adoptUploadedDownload(trackID, remoteID, client.baseURL)
+                }
+                val tracksToUpload = plan.uploadTrackIDs.mapNotNull { id ->
+                    library.tracks.firstOrNull { it.id == id }?.let { track -> track to repository.fileForTrack(track) }
+                }
+                if (tracksToUpload.isEmpty()) {
+                    persistLibrary()
+                    mutableState.value = mutableState.value.copy(
+                        serverMessage = "All downloaded songs are already on the server",
+                        uploadDetail = "Nothing to upload",
+                        uploadProgress = 1f,
+                    )
+                    return@launch
+                }
+
+                val failures = mutableListOf<String>()
+                var uploadedCount = 0
+                tracksToUpload.forEachIndexed { index, (track, file) ->
+                    mutableState.value = mutableState.value.copy(
+                        uploadProgress = index.toFloat() / tracksToUpload.size,
+                        uploadDetail = "Uploading ${index + 1} of ${tracksToUpload.size} • ${track.title}",
+                    )
+                    var uploadedID: String? = null
+                    var lastError: Throwable? = null
+                    repeat(3) { attempt ->
+                        if (uploadedID == null) {
+                            runCatching { client.upload(file, track.title) }
+                                .onSuccess { uploadedID = it.id }
+                                .onFailure { error ->
+                                    if (error is CancellationException) throw error
+                                    lastError = error
+                                    if (attempt < 2) delay(if (attempt == 0) 400 else 1_200)
+                                }
+                        }
+                    }
+                    val resolvedUploadedID = uploadedID
+                    if (resolvedUploadedID != null) {
+                        uploadedCount += 1
+                        adoptUploadedDownload(track.id, resolvedUploadedID, client.baseURL)
+                    } else {
+                        val artist = track.artist.takeIf { it.isNotBlank() }?.let { " — $it" }.orEmpty()
+                        failures += "“${track.title}”$artist (${lastError?.message ?: "upload failed"})"
+                    }
+                    mutableState.value = mutableState.value.copy(
+                        uploadProgress = (index + 1).toFloat() / tracksToUpload.size,
+                    )
+                }
+                persistLibrary()
+                val refreshed = client.fetchCatalog()
+                val failureNotice = failures.takeIf { it.isNotEmpty() }?.let {
+                    "${it.size} song${if (it.size == 1) "" else "s"} failed to upload after retrying: ${it.joinToString("; ")}"
+                }
+                mutableState.value = mutableState.value.copy(
+                    remoteSongs = refreshed.songs,
+                    serverMessage = if (failureNotice == null) "Uploaded $uploadedCount missing song${if (uploadedCount == 1) "" else "s"}" else "Uploaded $uploadedCount; ${failures.size} failed",
+                    uploadDetail = if (failureNotice == null) "Upload complete" else "Upload completed with failures",
+                    errorMessage = failureNotice,
+                )
+                syncPlaylistsNow()
+            } catch (error: Throwable) {
+                showError(error)
+                mutableState.value = mutableState.value.copy(uploadDetail = "Upload failed: ${error.message ?: "Unknown error"}")
+            } finally {
+                mutableState.value = mutableState.value.copy(isUploading = false)
+            }
+        }
+    }
 
     fun uploadUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
@@ -308,6 +921,57 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             }
             mutableState.value = mutableState.value.copy(isUploading = false)
         }
+    }
+
+    private fun adoptUploadedDownload(trackID: String, remoteID: String, serverURL: String) {
+        val oldTrack = library.tracks.firstOrNull { it.id == trackID } ?: return
+        val oldRemoteID = oldTrack.remoteID
+        val oldClipKey = clipRangeKey(oldTrack)
+        val updatedTrack = oldTrack.copy(
+            remoteID = remoteID,
+            sourceServer = serverURL,
+            syncProfileID = library.syncProfileID,
+        )
+        library = library.copy(tracks = library.tracks.map { if (it.id == trackID) updatedTrack else it })
+        val changedPlaylists = library.playlists.filter {
+            !it.isSystem && (trackID in it.trackIDs || oldRemoteID in it.remoteSongIDs.orEmpty())
+        }.mapTo(mutableSetOf(), Playlist::id)
+        val playlists = library.playlists.map { playlist ->
+            if (playlist.id !in changedPlaylists) playlist else updateRemoteSongIds(playlist.copy(
+                remoteSongIDs = playlist.remoteSongIDs.orEmpty().map { if (it == oldRemoteID) remoteID else it }.distinct(),
+            ))
+        }
+        val remoteLikes = library.remoteLikedSongIDs.orEmpty().toMutableSet()
+        val dirtyLikes = library.dirtyRemoteLikeSongIDs.orEmpty().toMutableSet()
+        if (trackID in library.favorites) {
+            oldRemoteID?.let { remoteLikes.remove(it); dirtyLikes.add(it) }
+            remoteLikes.add(remoteID)
+            dirtyLikes.add(remoteID)
+        }
+        val newClipKey = "${library.syncProfileID}|remote:$remoteID"
+        val clipRanges = library.clipRanges.toMutableMap()
+        val dirtyClipKeys = library.dirtyClipRangeKeys.toMutableSet()
+        val deletedClipKeys = library.deletedClipRangeKeys.toMutableSet()
+        if (oldClipKey != newClipKey) {
+            clipRanges.remove(oldClipKey)?.let { clipRanges[newClipKey] = it }
+            if (newClipKey in clipRanges) {
+                dirtyClipKeys.add(newClipKey)
+                if (oldRemoteID != null) {
+                    dirtyClipKeys.add(oldClipKey)
+                    deletedClipKeys.add(oldClipKey)
+                }
+            }
+        }
+        library = library.copy(
+            playlists = playlists,
+            dirtyPlaylistIDs = library.dirtyPlaylistIDs.orEmpty() + changedPlaylists,
+            remoteLikedSongIDs = remoteLikes,
+            dirtyRemoteLikeSongIDs = dirtyLikes,
+            likesDirty = dirtyLikes.isNotEmpty(),
+            clipRanges = clipRanges,
+            dirtyClipRangeKeys = dirtyClipKeys,
+            deletedClipRangeKeys = deletedClipKeys,
+        )
     }
 
     override fun setLibrarySearch(query: String) {
@@ -384,7 +1048,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun setVolume(volume: Float) {
         val clamped = volume.coerceIn(0f, 1f)
-        controller?.volume = clamped
+        controller?.volume = PlaybackVolumePolicy.gainForSlider(clamped)
         mutableState.value = mutableState.value.copy(volume = clamped)
         preferences.edit().putFloat("volume", clamped).apply()
     }
@@ -1027,7 +1691,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             isPlaying = player.isPlaying,
             positionMs = player.currentPosition.coerceAtLeast(0L),
             playbackSpeed = player.playbackParameters.speed,
-            volume = player.volume.coerceIn(0f, 1f),
         )
     }
 

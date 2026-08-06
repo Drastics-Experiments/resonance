@@ -84,10 +84,17 @@ private struct PlayerAwareTab<Content: View>: View {
                     .padding(.bottom, library.currentTrack == nil ? 12 : 82)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                     .zIndex(2)
+            } else if let notice = library.transferNotice {
+                MobileTransferNoticePopup(notice: notice)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, library.currentTrack == nil ? 12 : 82)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .zIndex(2)
             }
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .animation(.easeInOut(duration: 0.22), value: library.isDownloading || library.isUploading)
+        .animation(.easeInOut(duration: 0.22), value: library.transferNotice)
     }
 }
 
@@ -1403,7 +1410,17 @@ private struct ServerView: View {
 
             ServerActionDivider()
 
-            ServerTextActionButton(symbol: "square.and.arrow.up", label: "Upload", isDisabled: library.isSyncing || library.isUploading) {
+            ServerIconActionButton(
+                symbol: "icloud.and.arrow.up",
+                label: "Upload downloaded songs missing from the server",
+                isDisabled: library.isSyncing || library.isUploading
+            ) {
+                Task { await library.uploadDownloadedSongsMissingFromServer() }
+            }
+
+            ServerActionDivider()
+
+            ServerTextActionButton(symbol: "square.and.arrow.up", label: "Files", isDisabled: library.isSyncing || library.isUploading) {
                 choosingUploads = true
             }
 
@@ -1660,6 +1677,49 @@ private struct ServerTransferPopup: View {
     private var activeDetail: String {
         if library.isUploading { return library.uploadDetail }
         return library.downloadDetail
+    }
+}
+
+private struct MobileTransferNoticePopup: View {
+    @EnvironmentObject private var library: MusicLibrary
+    let notice: MobileTransferNotice
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: notice.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(notice.isError ? Color.orange : Color.green)
+                .frame(width: 36, height: 36)
+                .background((notice.isError ? Color.orange : Color.green).opacity(0.13), in: Circle())
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(notice.title)
+                    .font(.caption.weight(.semibold))
+                Text(notice.detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+
+            Spacer(minLength: 4)
+
+            Button { library.dismissTransferNotice() } label: {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.bold))
+                    .frame(width: 30, height: 30)
+                    .background(.white.opacity(0.07), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss transfer message")
+        }
+        .padding(13)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.white.opacity(0.18), lineWidth: 1)
+                .allowsHitTesting(false)
+        }
+        .shadow(color: .black.opacity(0.28), radius: 18, y: 8)
     }
 }
 
@@ -2305,17 +2365,37 @@ private struct AppBackground: View {
     }
 }
 
+private struct SquareArtworkContainer<Content: View>: View {
+    let content: (CGSize) -> Content
+
+    init(@ViewBuilder content: @escaping (CGSize) -> Content) {
+        self.content = content
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            content(geometry.size)
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .clipped()
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+    }
+}
+
 private struct ArtworkTile: View {
     let symbol: String
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [.violet, Color(hex: 0x874BFF), Color(hex: 0xB079FF)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            Image(systemName: symbol).font(.title2.weight(.semibold)).foregroundStyle(.white.opacity(0.9))
-        }.clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        SquareArtworkContainer { _ in
+            ZStack {
+                LinearGradient(
+                    colors: [.violet, Color(hex: 0x874BFF), Color(hex: 0xB079FF)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                Image(systemName: symbol).font(.title2.weight(.semibold)).foregroundStyle(.white.opacity(0.9))
+            }
+        }
     }
 }
 
@@ -2325,17 +2405,16 @@ struct TrackArtwork: View {
     var fallbackSymbol = "music.note"
 
     var body: some View {
-        Group {
+        SquareArtworkContainer { size in
             if let artwork = library.artwork(for: track) {
                 Image(uiImage: artwork)
                     .resizable()
-                    .scaledToFill()
+                    .scaledToFit()
+                    .frame(width: size.width, height: size.height)
             } else {
                 ArtworkTile(symbol: fallbackSymbol)
             }
         }
-        .clipped()
-        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
     }
 }
 
@@ -2343,7 +2422,7 @@ private struct ServerArtwork: View {
     let song: MobileRemoteSong
 
     var body: some View {
-        Group {
+        SquareArtworkContainer { size in
             if let artworkURL = song.artworkURL {
                 AsyncImage(url: artworkURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
                     switch phase {
@@ -2351,6 +2430,8 @@ private struct ServerArtwork: View {
                         image
                             .resizable()
                             .scaledToFill()
+                            .frame(width: size.width, height: size.height)
+                            .clipped()
                     case .empty:
                         ZStack {
                             ArtworkTile(symbol: "music.note")
@@ -2368,8 +2449,6 @@ private struct ServerArtwork: View {
                 ArtworkTile(symbol: "music.note")
             }
         }
-        .clipped()
-        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         .accessibilityHidden(true)
     }
 }

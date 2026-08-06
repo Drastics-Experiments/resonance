@@ -18,6 +18,7 @@ struct LocalImportAudioSourceMatch: Codable, Hashable, Identifiable, Sendable {
     enum Provider: String, Codable, Hashable, Sendable {
         case youtubeMusic = "youtube_music"
         case youtube
+        case soundcloud
     }
 
     struct MatchDetails: Codable, Hashable, Sendable {
@@ -64,11 +65,135 @@ struct LocalImportMetadata: Codable, Hashable, Sendable {
 }
 
 struct LocalImportResolution: Hashable, Sendable {
-    enum Kind: Hashable, Sendable { case spotify, youtube }
+    enum Kind: Hashable, Sendable {
+        case spotify
+        case spotifyPlaylist
+        case soundCloud
+        case soundCloudPlaylist
+        case youtube
+    }
 
     let kind: Kind
     let track: LocalImportSpotifyTrack
     let candidates: [LocalImportAudioSourceMatch]
+    let playlist: LocalImportPlaylist?
+
+    init(kind: Kind, track: LocalImportSpotifyTrack, candidates: [LocalImportAudioSourceMatch], playlist: LocalImportPlaylist? = nil) {
+        self.kind = kind
+        self.track = track
+        self.candidates = candidates
+        self.playlist = playlist
+    }
+}
+
+struct LocalImportPlaylistItem: Hashable, Identifiable, Sendable {
+    var id: String { track.trackID }
+    let position: Int
+    let track: LocalImportSpotifyTrack
+    let candidate: LocalImportAudioSourceMatch
+    let fallbackCandidates: [LocalImportAudioSourceMatch]
+
+    init(
+        position: Int,
+        track: LocalImportSpotifyTrack,
+        candidate: LocalImportAudioSourceMatch,
+        fallbackCandidates: [LocalImportAudioSourceMatch] = []
+    ) {
+        self.position = position
+        self.track = track
+        self.candidate = candidate
+        self.fallbackCandidates = fallbackCandidates.filter { $0.videoID != candidate.videoID }
+    }
+
+    var downloadCandidates: [LocalImportAudioSourceMatch] {
+        [candidate] + fallbackCandidates
+    }
+}
+
+struct LocalImportPlaylistSkippedItem: Hashable, Identifiable, Sendable {
+    var id: Int { position }
+    let position: Int
+    let title: String
+    let artist: String?
+    let reason: String
+}
+
+struct LocalImportPlaylist: Hashable, Sendable {
+    let playlistID: String
+    let title: String
+    let author: String
+    let artworkURL: String?
+    let sourceURL: String
+    let items: [LocalImportPlaylistItem]
+    let skippedItems: [LocalImportPlaylistSkippedItem]
+
+    var unavailableCount: Int { skippedItems.count }
+}
+
+struct LocalImportExistingSongMatch: Equatable {
+    let deviceTrackID: UUID?
+    let serverSongID: String?
+
+    var isOnDevice: Bool { deviceTrackID != nil }
+    var isOnServer: Bool { serverSongID != nil }
+}
+
+enum LocalImportExistingSongPolicy {
+    static func match(
+        spotifyTrack: LocalImportSpotifyTrack,
+        deviceTracks: [MobileTrack],
+        activeServerSongs: [MobileRemoteSong]
+    ) -> LocalImportExistingSongMatch {
+        let deviceTrack = deviceTracks.first { candidate in
+            metadataMatches(
+                expectedTitle: spotifyTrack.title,
+                expectedArtist: spotifyTrack.artist,
+                expectedDuration: spotifyTrack.durationSeconds.map(Double.init),
+                actualTitle: candidate.title,
+                actualArtist: candidate.artist,
+                actualDuration: candidate.duration
+            )
+        }
+        let serverSong = deviceTrack?.remoteID.flatMap { remoteID in
+            activeServerSongs.first { $0.id == remoteID }
+        } ?? activeServerSongs.first { candidate in
+            metadataMatches(
+                expectedTitle: spotifyTrack.title,
+                expectedArtist: spotifyTrack.artist,
+                expectedDuration: spotifyTrack.durationSeconds.map(Double.init),
+                actualTitle: candidate.title,
+                actualArtist: candidate.artist,
+                actualDuration: candidate.duration
+            )
+        }
+        return LocalImportExistingSongMatch(
+            deviceTrackID: deviceTrack?.id,
+            serverSongID: serverSong?.id
+        )
+    }
+
+    private static func metadataMatches(
+        expectedTitle: String,
+        expectedArtist: String,
+        expectedDuration: Double?,
+        actualTitle: String,
+        actualArtist: String,
+        actualDuration: Double?
+    ) -> Bool {
+        guard LocalImportMatcher.normalize(expectedTitle) == LocalImportMatcher.normalize(actualTitle),
+              normalizedArtistTokens(expectedArtist) == normalizedArtistTokens(actualArtist) else { return false }
+        if let expectedDuration, expectedDuration > 0,
+           let actualDuration, actualDuration > 0 {
+            return abs(expectedDuration - actualDuration) <= 5
+        }
+        return true
+    }
+
+    private static func normalizedArtistTokens(_ value: String) -> Set<Substring> {
+        let connectors: Set<Substring> = ["and", "feat", "featuring", "with"]
+        return Set(LocalImportMatcher.normalize(value).split(separator: " "))
+            .subtracting(connectors)
+    }
 }
 
 struct LocalImportedAudio: Hashable, Sendable {
@@ -107,6 +232,11 @@ struct LocalImportProgress: Hashable, Sendable {
     var total: Int64 = 0
 }
 
+struct LocalImportPreviewStream: Hashable, Sendable {
+    let url: URL
+    let httpHeaders: [String: String]
+}
+
 struct LocalImportError: LocalizedError, Hashable, Sendable {
     let stage: LocalImportStage
     let code: String
@@ -122,6 +252,7 @@ enum LocalImportURL {
     private static let spotifyHosts = Set(["open.spotify.com", "www.open.spotify.com", "spotify.link", "www.spotify.link"])
     private static let youtubeHosts = Set(["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"])
     private static let youtubeEmbedHosts = Set(["youtube-nocookie.com", "www.youtube-nocookie.com"])
+    private static let debridVaultHost = "debridvault.elfhosted.com"
 
     static func isSpotify(_ value: String) -> Bool {
         guard let url = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -139,7 +270,7 @@ enum LocalImportURL {
               let host = components.host?.lowercased(),
               spotifyHosts.contains(host),
               let url = components.url else {
-            throw LocalImportError(stage: .resolvingMetadata, code: "INVALID_SPOTIFY_URL", message: "Source must be a Spotify track URL.")
+            throw LocalImportError(stage: .resolvingMetadata, code: "INVALID_SPOTIFY_URL", message: "Source must be a Spotify track or playlist URL.")
         }
         return url
     }
@@ -149,11 +280,12 @@ enum LocalImportURL {
         guard ["open.spotify.com", "www.open.spotify.com"].contains(source.host?.lowercased() ?? "") else { return nil }
         var segments = source.pathComponents.filter { $0 != "/" }
         if segments.first?.hasPrefix("intl-") == true { segments.removeFirst() }
+        if segments.first == "playlist" { return nil }
         guard segments.count == 2, segments[0] == "track", matches(spotifyID, segments[1]) else {
             throw LocalImportError(
                 stage: .resolvingMetadata,
                 code: "UNSUPPORTED_SPOTIFY_RESOURCE",
-                message: "Only individual Spotify track links are supported; albums and playlists are not."
+                message: "Only Spotify track and playlist links are supported."
             )
         }
         var components = URLComponents()
@@ -161,9 +293,35 @@ enum LocalImportURL {
         components.host = "open.spotify.com"
         components.path = "/track/\(segments[1])"
         guard let canonical = components.url else {
-            throw LocalImportError(stage: .resolvingMetadata, code: "INVALID_SPOTIFY_URL", message: "Source must be a Spotify track URL.")
+            throw LocalImportError(stage: .resolvingMetadata, code: "INVALID_SPOTIFY_URL", message: "Source must be a Spotify track or playlist URL.")
         }
         return (canonical, segments[1])
+    }
+
+    static func spotifyPlaylist(_ value: String) throws -> (url: URL, playlistID: String)? {
+        let source = try spotifySource(value)
+        guard ["open.spotify.com", "www.open.spotify.com"].contains(source.host?.lowercased() ?? "") else { return nil }
+        var segments = source.pathComponents.filter { $0 != "/" }
+        if segments.first?.hasPrefix("intl-") == true { segments.removeFirst() }
+        if segments.first == "track" { return nil }
+        guard segments.count == 2, segments[0] == "playlist", matches(spotifyID, segments[1]) else {
+            throw LocalImportError(stage: .resolvingMetadata, code: "UNSUPPORTED_SPOTIFY_RESOURCE", message: "Only Spotify track and playlist links are supported.")
+        }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "open.spotify.com"
+        components.path = "/playlist/\(segments[1])"
+        guard let canonical = components.url else {
+            throw LocalImportError(stage: .resolvingMetadata, code: "INVALID_SPOTIFY_URL", message: "Source must be a Spotify track or playlist URL.")
+        }
+        return (canonical, segments[1])
+    }
+
+    static func spotifyTrackID(fromURI value: String) -> String? {
+        let prefix = "spotify:track:"
+        guard value.hasPrefix(prefix) else { return nil }
+        let id = String(value.dropFirst(prefix.count))
+        return matches(spotifyID, id) ? id : nil
     }
 
     static func youtubeVideoID(_ value: String) throws -> String? {
@@ -250,6 +408,15 @@ enum LocalImportURL {
         return host == "googlevideo.com" || host.hasSuffix(".googlevideo.com")
     }
 
+    static func isDebridVaultDocument(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https",
+              components.user == nil,
+              components.password == nil,
+              components.host?.lowercased() == debridVaultHost else { return false }
+        return true
+    }
+
     private static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
         let range = NSRange(value.startIndex..<value.endIndex, in: value)
         return expression.firstMatch(in: value, range: range)?.range == range
@@ -293,6 +460,38 @@ enum LocalImportParser {
         return (title, LocalImportURL.spotifyArtwork(object["thumbnail_url"] as? String)?.absoluteString, embedURL)
     }
 
+    static func spotifyPlaylistOEmbed(_ data: Data, expectedPlaylistID: String) throws -> (title: String, artworkURL: String?, embedURL: String) {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["provider_name"] as? String == "Spotify",
+              object["type"] as? String == "rich",
+              let title = clean(object["title"] as? String),
+              let html = object["html"] as? String,
+              html.count <= 8_192,
+              let srcRange = html.range(of: #"src="([^"]+)""#, options: .regularExpression) else {
+            throw LocalImportError(stage: .resolvingMetadata, code: "SPOTIFY_INVALID_PREVIEW", message: "Spotify returned an invalid playlist preview.")
+        }
+        let sourceFragment = String(html[srcRange])
+        guard let firstQuote = sourceFragment.firstIndex(of: "\""),
+              let lastQuote = sourceFragment.lastIndex(of: "\""), firstQuote < lastQuote else {
+            throw LocalImportError(stage: .resolvingMetadata, code: "SPOTIFY_INVALID_PREVIEW", message: "Spotify returned an invalid playlist preview.")
+        }
+        let raw = String(sourceFragment[sourceFragment.index(after: firstQuote)..<lastQuote]).replacingOccurrences(of: "&amp;", with: "&")
+        guard var components = URLComponents(string: raw), components.scheme == "https", components.host == "open.spotify.com" else {
+            throw LocalImportError(stage: .resolvingMetadata, code: "SPOTIFY_MISMATCH", message: "Spotify returned a mismatched playlist preview.")
+        }
+        let segments = components.path.split(separator: "/").map(String.init)
+        guard let embedIndex = segments.firstIndex(of: "embed"), segments.indices.contains(embedIndex + 2),
+              segments[embedIndex + 1] == "playlist", segments[embedIndex + 2] == expectedPlaylistID else {
+            throw LocalImportError(stage: .resolvingMetadata, code: "SPOTIFY_MISMATCH", message: "Spotify returned a mismatched playlist preview.")
+        }
+        components.query = nil
+        components.fragment = nil
+        guard let embedURL = components.url?.absoluteString else {
+            throw LocalImportError(stage: .resolvingMetadata, code: "SPOTIFY_INVALID_PREVIEW", message: "Spotify returned an invalid playlist preview.")
+        }
+        return (title, LocalImportURL.spotifyArtwork(object["thumbnail_url"] as? String)?.absoluteString, embedURL)
+    }
+
     static func spotifyEmbed(_ html: String, expectedTrackID: String) throws -> (title: String, artist: String, durationSeconds: Int?, artworkURL: String?) {
         guard let script = scriptContents(id: "__NEXT_DATA__", html: html),
               let root = try? JSONSerialization.jsonObject(with: Data(script.utf8)) as? [String: Any],
@@ -314,6 +513,70 @@ enum LocalImportParser {
             .first
         let milliseconds = number(entity["duration"])
         return (title, artists.joined(separator: ", "), milliseconds > 0 ? Int((milliseconds / 1_000).rounded()) : nil, artwork)
+    }
+
+    static func spotifyPlaylistEmbed(_ html: String, expectedPlaylistID: String) throws -> (title: String, author: String, artworkURL: String?, tracks: [LocalImportSpotifyTrack], skippedItems: [LocalImportPlaylistSkippedItem]) {
+        guard let script = scriptContents(id: "__NEXT_DATA__", html: html),
+              let root = try? JSONSerialization.jsonObject(with: Data(script.utf8)) as? [String: Any],
+              let entity = nested(root, ["props", "pageProps", "state", "data", "entity"]) as? [String: Any],
+              entity["type"] as? String == "playlist", entity["id"] as? String == expectedPlaylistID,
+              let title = clean(entity["title"] as? String) ?? clean(entity["name"] as? String),
+              let trackList = entity["trackList"] as? [[String: Any]] else {
+            throw LocalImportError(stage: .resolvingMetadata, code: "SPOTIFY_MISMATCH", message: "Spotify returned mismatched playlist metadata.")
+        }
+        let author = clean(entity["subtitle"] as? String) ?? "Spotify"
+        let coverSources = nested(entity, ["coverArt", "sources"]) as? [[String: Any]]
+        let visualSources = nested(entity, ["visualIdentity", "image"]) as? [[String: Any]]
+        let artwork = (coverSources ?? visualSources)?
+            .sorted { max(number($0["width"]), number($0["maxWidth"])) > max(number($1["width"]), number($1["maxWidth"])) }
+            .compactMap { LocalImportURL.spotifyArtwork($0["url"] as? String)?.absoluteString }.first
+        var tracks: [LocalImportSpotifyTrack] = []
+        var skippedItems: [LocalImportPlaylistSkippedItem] = []
+        for (index, item) in trackList.enumerated() {
+            let position = index + 1
+            let itemTitle = clean(item["title"] as? String)
+            let artist = clean(item["subtitle"] as? String)
+            let appendSkipped: (String) -> Void = { reason in
+                skippedItems.append(.init(
+                    position: position,
+                    title: itemTitle ?? "Unavailable item",
+                    artist: artist,
+                    reason: reason
+                ))
+            }
+            guard item["entityType"] as? String == "track" else {
+                appendSkipped("Not a Spotify song")
+                continue
+            }
+            guard item["isPlayable"] as? Bool != false else {
+                appendSkipped("Unavailable on Spotify")
+                continue
+            }
+            guard let trackID = (item["uri"] as? String).flatMap({ LocalImportURL.spotifyTrackID(fromURI: $0) }) else {
+                appendSkipped("Missing a public Spotify track link")
+                continue
+            }
+            guard let itemTitle else {
+                appendSkipped("Missing title metadata")
+                continue
+            }
+            guard let artist else {
+                appendSkipped("Missing artist metadata")
+                continue
+            }
+            let milliseconds = number(item["duration"])
+            tracks.append(LocalImportSpotifyTrack(
+                provider: "spotify", type: "track", trackID: trackID, title: itemTitle, artist: artist,
+                album: nil, trackNumber: index + 1,
+                durationSeconds: milliseconds > 0 ? Int((milliseconds / 1_000).rounded()) : nil,
+                artworkURL: nil, embedURL: "https://open.spotify.com/embed/track/\(trackID)",
+                sourceURL: "https://open.spotify.com/track/\(trackID)"
+            ))
+        }
+        guard !tracks.isEmpty else {
+            throw LocalImportError(stage: .resolvingMetadata, code: "SPOTIFY_PLAYLIST_EMPTY", message: "This Spotify playlist has no public, playable tracks.")
+        }
+        return (title, author, artwork, tracks, skippedItems)
     }
 
     static func youtubeMusicSearch(_ html: String) -> [LocalImportSearchCandidate] {

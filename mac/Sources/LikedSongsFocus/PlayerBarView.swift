@@ -4,11 +4,7 @@ struct PlayerBarView: View {
     @EnvironmentObject private var model: PlayerModel
     @State private var isSpeedPickerPresented = false
     let compact: Bool
-
-    private var progress: Double {
-        guard let track = model.currentTrack, track.duration > 0 else { return 0 }
-        return model.position / track.duration
-    }
+    let onOpenNowPlaying: () -> Void
 
     var body: some View {
         HStack(spacing: 18) {
@@ -65,16 +61,10 @@ struct PlayerBarView: View {
                     )
                 }
 
-                HStack(spacing: 7) {
-                    Text(Track.timeText(model.position))
-                        .frame(width: 28, alignment: .trailing)
-                    ClickableProgress(progress: progress, onSeek: model.seek)
-                        .frame(maxWidth: 520)
-                    Text(model.currentTrack?.durationText ?? "0:00")
-                        .frame(width: 28, alignment: .leading)
-                }
-                .font(.system(size: 9))
-                .foregroundStyle(Color(hex: 0x969DAC))
+                PlayerBarProgressView(
+                    duration: model.currentTrack?.duration ?? 0,
+                    onSeek: model.seek
+                )
             }
             .frame(maxWidth: 580)
             .disabled(model.tracks.isEmpty)
@@ -150,18 +140,29 @@ struct PlayerBarView: View {
     private var currentTrackSummary: some View {
         if let track = model.currentTrack {
             HStack(spacing: 11) {
-                TrackArtworkView(track: track, symbol: "music.note", symbolSize: 16, cornerRadius: 7)
-                    .frame(width: 52, height: 52)
+                Button(action: onOpenNowPlaying) {
+                    HStack(spacing: 11) {
+                        TrackArtworkView(track: track, symbol: "music.note", symbolSize: 16, cornerRadius: 7)
+                            .frame(width: 52, height: 52)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(track.title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-                    Text("\(track.artist) / \(model.isPlaying ? "Now playing" : "Paused")")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color(hex: 0x969DAC))
-                        .lineLimit(1)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(track.title)
+                                .font(.system(size: 12, weight: .semibold))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Text("\(track.artist) / \(model.isPlaying ? "Now playing" : "Paused")")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color(hex: 0x969DAC))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help("Open Now Playing")
 
                 Button {
                     model.toggleFavorite(track)
@@ -185,6 +186,30 @@ struct PlayerBarView: View {
                 }
             }
         }
+    }
+}
+
+private struct PlayerBarProgressView: View {
+    @EnvironmentObject private var playbackPosition: PlaybackPositionState
+    let duration: TimeInterval
+    let onSeek: (Double) -> Void
+
+    private var progress: Double {
+        guard duration > 0 else { return 0 }
+        return playbackPosition.position / duration
+    }
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Text(Track.timeText(playbackPosition.position))
+                .frame(width: 28, alignment: .trailing)
+            ClickableProgress(progress: progress, onSeek: onSeek)
+                .frame(maxWidth: 520)
+            Text(Track.timeText(duration))
+                .frame(width: 28, alignment: .leading)
+        }
+        .font(.system(size: 9))
+        .foregroundStyle(Color(hex: 0x969DAC))
     }
 }
 

@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.ByteArrayOutputStream
@@ -15,6 +16,28 @@ import java.net.URL
 import java.net.URLEncoder
 import java.net.URLConnection
 import kotlin.coroutines.coroutineContext
+
+internal object ServerUploadNaming {
+    fun filename(sourceFilename: String, title: String? = null): String {
+        val sourceName = File(sourceFilename).name
+        val rawExtension = sourceName.substringAfterLast('.', "")
+        val extension = rawExtension.filter(Char::isLetterOrDigit).take(16)
+        val sourceStem = if (rawExtension.isEmpty()) sourceName else sourceName.dropLast(rawExtension.length + 1)
+        var preferredStem = title.orEmpty().trim()
+        if (extension.isNotEmpty() && preferredStem.endsWith(".$extension", ignoreCase = true)) {
+            preferredStem = preferredStem.dropLast(extension.length + 1)
+        }
+        val stem = cleanStem(preferredStem).ifEmpty { cleanStem(sourceStem) }.ifEmpty { "Untitled song" }
+        return if (extension.isEmpty()) stem else "$stem.$extension"
+    }
+
+    private fun cleanStem(value: String): String = value
+        .replace(Regex("""[<>:"/\\|?*\p{Cntrl}]"""), "-")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+        .trimEnd('.', ' ')
+        .take(180)
+}
 
 class ServerClient(
     serverURL: String,
@@ -133,9 +156,10 @@ class ServerClient(
         onProgress = onProgress,
     )
 
-    suspend fun upload(file: File): RemoteUpload = withContext(Dispatchers.IO) {
+    suspend fun upload(file: File, title: String? = null): RemoteUpload = withContext(Dispatchers.IO) {
         require(file.isFile) { "Upload file does not exist: ${file.name}" }
-        val encodedFilename = URLEncoder.encode(file.name, Charsets.UTF_8.name())
+        val uploadFilename = ServerUploadNaming.filename(file.name, title)
+        val encodedFilename = URLEncoder.encode(uploadFilename, Charsets.UTF_8.name())
             .replace("+", "%20")
         val connection = open(
             url = endpoint("/api/v1/admin/songs?filename=$encodedFilename"),
@@ -156,8 +180,12 @@ class ServerClient(
                 connection.outputStream.use { output -> input.copyTo(output, BUFFER_SIZE) }
             }
             val response = connection.response()
-            requireStatus(response, setOf(HttpURLConnection.HTTP_CREATED))
-            json.decodeFromString<RemoteUpload>(response.body.toString(Charsets.UTF_8))
+            requireStatus(response, setOf(HttpURLConnection.HTTP_CREATED, HttpURLConnection.HTTP_CONFLICT))
+            if (response.status == HttpURLConnection.HTTP_CONFLICT) {
+                json.decodeFromString<DuplicateRemoteUpload>(response.body.toString(Charsets.UTF_8)).duplicateOf
+            } else {
+                json.decodeFromString<RemoteUpload>(response.body.toString(Charsets.UTF_8))
+            }
         } finally {
             connection.disconnect()
         }
@@ -489,6 +517,11 @@ data class RemoteUpload(
     val id: String,
     val filename: String = "",
     val size: Long,
+)
+
+@Serializable
+private data class DuplicateRemoteUpload(
+    @SerialName("duplicate_of") val duplicateOf: RemoteUpload,
 )
 
 class ServerException(

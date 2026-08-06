@@ -1,5 +1,40 @@
 import Foundation
 
+enum PlaybackVolumePolicy {
+    static func gain(for sliderValue: Double) -> Float {
+        guard sliderValue.isFinite else { return 0 }
+        let normalized = min(max(sliderValue, 0), 1)
+        return Float(normalized * normalized)
+    }
+}
+
+enum MobileServerUploadNaming {
+    static func filename(for sourceURL: URL, title: String? = nil) -> String {
+        let fileExtension = sourceURL.pathExtension.filter { $0.isLetter || $0.isNumber }
+        var preferredStem = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let extensionSuffix = fileExtension.isEmpty ? "" : ".\(fileExtension)"
+        if !extensionSuffix.isEmpty,
+           preferredStem.lowercased().hasSuffix(extensionSuffix.lowercased()) {
+            preferredStem.removeLast(extensionSuffix.count)
+        }
+        let sourceStem = sourceURL.deletingPathExtension().lastPathComponent
+        let stem = cleanStem(preferredStem).isEmpty ? cleanStem(sourceStem) : cleanStem(preferredStem)
+        let resolvedStem = stem.isEmpty ? "Untitled song" : stem
+        return fileExtension.isEmpty ? resolvedStem : "\(resolvedStem).\(fileExtension)"
+    }
+
+    private static func cleanStem(_ value: String) -> String {
+        let invalid = CharacterSet(charactersIn: "<>:\"/\\|?*").union(.controlCharacters)
+        let sanitized = value.unicodeScalars.map { invalid.contains($0) ? "-" : String($0) }.joined()
+        let collapsed = sanitized
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+        return String(collapsed.prefix(180))
+    }
+}
+
 struct MobileTrack: Identifiable, Codable, Hashable {
     let id: UUID
     var title: String
@@ -52,6 +87,76 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         guard duration.isFinite, duration >= 0 else { return "0:00" }
         let seconds = Int(duration)
         return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
+    }
+}
+
+struct MobileMissingServerUploadPlan: Equatable {
+    let uploadTrackIDs: [UUID]
+    let existingRemoteIDsByTrackID: [UUID: String]
+}
+
+struct MobileTransferNotice: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+    let detail: String
+    let isError: Bool
+}
+
+enum MobileMissingServerUploadPolicy {
+    static func plan(
+        tracks: [MobileTrack],
+        catalog: [MobileRemoteSong],
+        activeProfileID: String,
+        activeServerURL: URL
+    ) -> MobileMissingServerUploadPlan {
+        let liveRemoteIDs = Set(catalog.map(\.id))
+        let remoteIDByHash = Dictionary(
+            catalog.compactMap { song -> (String, String)? in
+                guard let hash = normalizedHash(song.contentSHA256) else { return nil }
+                return (hash, song.id)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let serverOrigin = origin(of: activeServerURL)
+        var uploadTrackIDs: [UUID] = []
+        var existingRemoteIDsByTrackID: [UUID: String] = [:]
+
+        for track in tracks {
+            guard !track.relativePath.isEmpty,
+                  track.remoteID != nil || track.sourceServer != nil,
+                  (track.syncProfileID ?? "default") == activeProfileID else { continue }
+            if let sourceServer = track.sourceServer {
+                guard let sourceURL = URL(string: sourceServer),
+                      origin(of: sourceURL) == serverOrigin else { continue }
+            }
+            if let remoteID = track.remoteID, liveRemoteIDs.contains(remoteID) {
+                continue
+            }
+            if let hash = normalizedHash(track.contentSHA256),
+               let existingRemoteID = remoteIDByHash[hash] {
+                existingRemoteIDsByTrackID[track.id] = existingRemoteID
+            } else {
+                uploadTrackIDs.append(track.id)
+            }
+        }
+
+        return MobileMissingServerUploadPlan(
+            uploadTrackIDs: uploadTrackIDs,
+            existingRemoteIDsByTrackID: existingRemoteIDsByTrackID
+        )
+    }
+
+    private static func normalizedHash(_ value: String?) -> String? {
+        guard let hash = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !hash.isEmpty else { return nil }
+        return hash
+    }
+
+    private static func origin(of url: URL) -> String {
+        let scheme = url.scheme?.lowercased() ?? ""
+        let host = url.host?.lowercased() ?? ""
+        let port = url.port ?? (scheme == "https" ? 443 : 80)
+        return "\(scheme)://\(host):\(port)"
     }
 }
 
@@ -229,6 +334,7 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
     let streamURL: String
     let duration: TimeInterval?
     let artworkURL: URL?
+    let contentSHA256: String?
 
     enum CodingKeys: String, CodingKey {
         case id, filename, name, title, artist, album, size
@@ -241,6 +347,7 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
         case duration
         case artworkURL = "artwork_url"
         case artwork
+        case contentSHA256 = "content_sha256"
     }
 
     init(from decoder: Decoder) throws {
@@ -267,6 +374,7 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : URL(string: trimmed)
         }
+        contentSHA256 = try values.decodeIfPresent(String.self, forKey: .contentSHA256)
     }
 
     var durationText: String? {

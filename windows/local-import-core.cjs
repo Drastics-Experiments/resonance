@@ -99,11 +99,12 @@ function spotifyTrackURL(value) {
   if (!["open.spotify.com", "www.open.spotify.com"].includes(url.hostname.toLowerCase())) return null;
   const segments = url.pathname.split("/").filter(Boolean);
   if (segments[0]?.startsWith("intl-")) segments.shift();
+  if (segments[0] === "playlist") return null;
   if (segments[0] !== "track" || !segments[1] || !SPOTIFY_ID.test(segments[1])) {
     throw importError(
       "resolving_metadata",
       "UNSUPPORTED_SPOTIFY_RESOURCE",
-      "Only individual Spotify track links are supported; albums and playlists are not.",
+      "Only Spotify track and playlist links are supported.",
     );
   }
   url.protocol = "https:";
@@ -112,6 +113,27 @@ function spotifyTrackURL(value) {
   url.search = "";
   url.hash = "";
   return { url, trackID: segments[1] };
+}
+
+function spotifyPlaylistURL(value) {
+  const url = spotifySourceURL(value);
+  if (!["open.spotify.com", "www.open.spotify.com"].includes(url.hostname.toLowerCase())) return null;
+  const segments = url.pathname.split("/").filter(Boolean);
+  if (segments[0]?.startsWith("intl-")) segments.shift();
+  if (segments[0] === "track") return null;
+  if (segments[0] !== "playlist" || !segments[1] || !SPOTIFY_ID.test(segments[1])) {
+    throw importError(
+      "resolving_metadata",
+      "UNSUPPORTED_SPOTIFY_RESOURCE",
+      "Only Spotify track and playlist links are supported.",
+    );
+  }
+  url.protocol = "https:";
+  url.hostname = "open.spotify.com";
+  url.pathname = `/playlist/${segments[1]}`;
+  url.search = "";
+  url.hash = "";
+  return { url, playlistID: segments[1] };
 }
 
 function isSpotifyURL(value) {
@@ -214,6 +236,35 @@ function parseSpotifyOEmbed(value, expectedTrackID) {
   };
 }
 
+function parseSpotifyPlaylistOEmbed(value, expectedPlaylistID) {
+  if (!isRecord(value) || value.provider_name !== "Spotify" || value.type !== "rich") {
+    throw importError("resolving_metadata", "SPOTIFY_INVALID_PREVIEW", "Spotify returned an invalid playlist preview.");
+  }
+  const title = cleanText(value.title);
+  const html = typeof value.html === "string" ? value.html : "";
+  const match = /\bsrc="([^"]+)"/i.exec(html);
+  let embedURL;
+  try { embedURL = new URL(match?.[1]?.replaceAll("&amp;", "&") || ""); }
+  catch {
+    throw importError("resolving_metadata", "SPOTIFY_INVALID_PREVIEW", "Spotify returned an invalid playlist preview.");
+  }
+  const segments = embedURL.pathname.split("/").filter(Boolean);
+  const embedIndex = segments.indexOf("embed");
+  if (
+    !title || embedURL.protocol !== "https:" || embedURL.hostname !== "open.spotify.com"
+    || segments[embedIndex + 1] !== "playlist" || segments[embedIndex + 2] !== expectedPlaylistID
+  ) {
+    throw importError("resolving_metadata", "SPOTIFY_MISMATCH", "Spotify returned a mismatched playlist preview.");
+  }
+  embedURL.search = "";
+  embedURL.hash = "";
+  return {
+    title,
+    artworkURL: spotifyArtworkURL(value.thumbnail_url),
+    embedURL: embedURL.toString(),
+  };
+}
+
 function balancedJSONObject(source, start) {
   let depth = 0;
   let quoted = false;
@@ -286,6 +337,61 @@ function parseSpotifyEmbedEntity(html, expectedTrackID) {
   };
 }
 
+function spotifyEntityArtwork(entity) {
+  const images = nestedValue(entity.coverArt, ["sources"])
+    || nestedValue(entity.visualIdentity, ["image"]);
+  return Array.isArray(images)
+    ? images.slice().sort((left, right) =>
+      (safeNumber(right?.width) || safeNumber(right?.maxWidth) || 0)
+      - (safeNumber(left?.width) || safeNumber(left?.maxWidth) || 0))
+      .map((image) => isRecord(image) ? spotifyArtworkURL(image.url) : null)
+      .find(Boolean) || null
+    : null;
+}
+
+function parseSpotifyPlaylistEmbed(html, expectedPlaylistID) {
+  const entity = nestedValue(nextData(html), ["props", "pageProps", "state", "data", "entity"]);
+  if (!isRecord(entity) || entity.type !== "playlist" || entity.id !== expectedPlaylistID || !SPOTIFY_ID.test(expectedPlaylistID)) {
+    throw importError("resolving_metadata", "SPOTIFY_MISMATCH", "Spotify returned mismatched playlist metadata.");
+  }
+  const title = cleanText(entity.title) || cleanText(entity.name);
+  const author = cleanText(entity.subtitle) || "Spotify";
+  if (!title || !Array.isArray(entity.trackList)) {
+    throw importError("resolving_metadata", "SPOTIFY_INCOMPLETE_METADATA", "Spotify returned incomplete playlist metadata.");
+  }
+  const artworkURL = spotifyEntityArtwork(entity);
+  const items = [];
+  let unavailableCount = 0;
+  for (const [index, item] of entity.trackList.entries()) {
+    const uriMatch = /^spotify:track:([A-Za-z0-9]{22})$/.exec(cleanText(item?.uri, 128) || "");
+    const itemTitle = cleanText(item?.title);
+    const artist = cleanText(item?.subtitle);
+    if (!isRecord(item) || item.entityType !== "track" || item.isPlayable === false || !uriMatch || !itemTitle || !artist) {
+      unavailableCount += 1;
+      continue;
+    }
+    const trackID = uriMatch[1];
+    const durationMilliseconds = safeNumber(item.duration);
+    items.push({
+      provider: "spotify",
+      type: "track",
+      trackID,
+      title: itemTitle,
+      artist,
+      album: null,
+      trackNumber: index + 1,
+      durationSeconds: durationMilliseconds === null ? null : Math.round(durationMilliseconds / 1000),
+      artworkURL: null,
+      embedURL: `https://open.spotify.com/embed/track/${trackID}`,
+      sourceURL: `https://open.spotify.com/track/${trackID}`,
+    });
+  }
+  if (!items.length) {
+    throw importError("resolving_metadata", "SPOTIFY_PLAYLIST_EMPTY", "This Spotify playlist has no public, playable tracks.");
+  }
+  return { title, author, artworkURL, items, unavailableCount };
+}
+
 async function responseTextWithLimit(response, limit, error) {
   const declared = Number(response.headers.get("content-length") || 0);
   if (declared > limit) {
@@ -352,6 +458,34 @@ async function canonicalSpotifyTrack(value, signal, fetchImpl) {
   throw importError("resolving_metadata", "SPOTIFY_TOO_MANY_REDIRECTS", "Spotify redirected the track link too many times.");
 }
 
+async function canonicalSpotifyPlaylist(value, signal, fetchImpl) {
+  const direct = spotifyPlaylistURL(value);
+  if (direct) return direct;
+  let current = spotifySourceURL(value);
+  for (let redirects = 0; redirects <= 5; redirects += 1) {
+    let response;
+    try {
+      response = await fetchImpl(current, { method: "HEAD", redirect: "manual", signal });
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      throw importError("resolving_metadata", "SPOTIFY_UNREACHABLE", "Spotify could not resolve that short link.");
+    }
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      await response.body?.cancel().catch(() => undefined);
+      if (!location) throw importError("resolving_metadata", "SPOTIFY_INVALID_REDIRECT", "Spotify returned an invalid playlist link.");
+      try { current = spotifySourceURL(new URL(location, current).toString()); }
+      catch { throw importError("resolving_metadata", "SPOTIFY_INVALID_REDIRECT", "Spotify returned an unsafe playlist redirect."); }
+      continue;
+    }
+    if (!response.ok) throw spotifyProviderFailure(response);
+    const resolved = spotifyPlaylistURL(response.url || current.toString());
+    if (!resolved) throw importError("resolving_metadata", "SPOTIFY_INVALID_REDIRECT", "Spotify returned an invalid playlist link.");
+    return resolved;
+  }
+  throw importError("resolving_metadata", "SPOTIFY_TOO_MANY_REDIRECTS", "Spotify redirected the playlist link too many times.");
+}
+
 async function resolveSpotifyTrack(value, signal, fetchImpl = fetch) {
   const canonical = await canonicalSpotifyTrack(value, signal, fetchImpl);
   const oEmbedURL = new URL("/oembed", canonical.url.origin);
@@ -409,6 +543,99 @@ async function resolveSpotifyTrack(value, signal, fetchImpl = fetch) {
     artworkURL: embedded.artworkURL || oEmbed.artworkURL,
     embedURL: oEmbed.embedURL,
     sourceURL: canonical.url.toString(),
+  };
+}
+
+async function resolveSpotifyPlaylistItemArtwork(item, signal, fetchImpl) {
+  const canonical = spotifyTrackURL(item.sourceURL);
+  const oEmbedURL = new URL("/oembed", canonical.url.origin);
+  oEmbedURL.searchParams.set("url", canonical.url.toString());
+  const response = await fetchImpl(oEmbedURL, {
+    headers: { Accept: "application/json" },
+    redirect: "error",
+    signal,
+  });
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  const payload = JSON.parse(await responseTextWithLimit(
+    response,
+    256 * 1024,
+    importError("resolving_metadata", "SPOTIFY_INVALID_PREVIEW", "Spotify returned an invalid track preview."),
+  ));
+  return parseSpotifyOEmbed(payload, canonical.trackID).artworkURL;
+}
+
+async function resolveSpotifyPlaylist(value, signal, fetchImpl = fetch) {
+  const canonical = await canonicalSpotifyPlaylist(value, signal, fetchImpl);
+  const oEmbedURL = new URL("/oembed", canonical.url.origin);
+  oEmbedURL.searchParams.set("url", canonical.url.toString());
+  let response;
+  try {
+    response = await fetchImpl(oEmbedURL, { headers: { Accept: "application/json" }, redirect: "error", signal });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    throw importError("resolving_metadata", "SPOTIFY_UNREACHABLE", "Spotify could not be reached.");
+  }
+  if (!response.ok) throw spotifyProviderFailure(response);
+  let payload;
+  try {
+    payload = JSON.parse(await responseTextWithLimit(
+      response,
+      256 * 1024,
+      importError("resolving_metadata", "SPOTIFY_INVALID_PREVIEW", "Spotify returned an invalid playlist preview."),
+    ));
+  } catch (error) {
+    if (error instanceof LocalImportError || error?.name === "AbortError") throw error;
+    throw importError("resolving_metadata", "SPOTIFY_INVALID_PREVIEW", "Spotify returned an invalid playlist preview.");
+  }
+  const oEmbed = parseSpotifyPlaylistOEmbed(payload, canonical.playlistID);
+  let embedResponse;
+  try {
+    embedResponse = await fetchImpl(oEmbed.embedURL, {
+      headers: { Accept: "text/html", "User-Agent": "Resonance/1.0" },
+      redirect: "error",
+      signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    throw importError("resolving_metadata", "SPOTIFY_UNREACHABLE", "Spotify could not load the playlist metadata.");
+  }
+  if (!embedResponse.ok) throw spotifyProviderFailure(embedResponse);
+  const embedded = parseSpotifyPlaylistEmbed(
+    await responseTextWithLimit(
+      embedResponse,
+      MAX_SPOTIFY_RESPONSE_BYTES,
+      importError("resolving_metadata", "SPOTIFY_INVALID_METADATA", "Spotify returned invalid playlist metadata."),
+    ),
+    canonical.playlistID,
+  );
+  const items = [];
+  for (let offset = 0; offset < embedded.items.length; offset += 4) {
+    const chunk = embedded.items.slice(offset, offset + 4);
+    const hydrated = await Promise.all(chunk.map(async (item) => {
+      try {
+        return {
+          ...item,
+          artworkURL: await resolveSpotifyPlaylistItemArtwork(item, signal, fetchImpl),
+        };
+      } catch (error) {
+        if (error?.name === "AbortError") throw error;
+        return { ...item, artworkURL: null };
+      }
+    }));
+    items.push(...hydrated);
+  }
+  return {
+    playlistID: canonical.playlistID,
+    title: embedded.title || oEmbed.title,
+    author: embedded.author,
+    artworkURL: embedded.artworkURL || oEmbed.artworkURL,
+    sourceURL: canonical.url.toString(),
+    items,
+    unavailableCount: embedded.unavailableCount,
+    truncated: false,
   };
 }
 
@@ -949,7 +1176,9 @@ async function enrichCandidate(track, candidate, signal, fetchImpl) {
   };
 }
 
-async function searchYouTubeAudioSources(track, signal, fetchImpl = fetch) {
+async function searchYouTubeAudioSources(track, signal, fetchImpl = fetch, options = {}) {
+  const maximumResults = Math.max(1, Math.min(MAX_RESULTS, Number(options.maxResults) || MAX_RESULTS));
+  const shouldEnrich = options.enrich !== false;
   const query = [track.artist, track.title, track.album].filter(Boolean).join(" ");
   const musicURL = new URL("/search", "https://music.youtube.com");
   musicURL.searchParams.set("q", query);
@@ -969,10 +1198,11 @@ async function searchYouTubeAudioSources(track, signal, fetchImpl = fetch) {
     if (!existing || candidate.sourceProvider === "youtube_music") unique.set(candidate.videoID, candidate);
   }
   const preliminary = [...unique.values()].map((candidate) => scoreAudioSource(track, candidate))
-    .filter(Boolean).sort((left, right) => right.score - left.score).slice(0, MAX_RESULTS);
+    .filter(Boolean).sort((left, right) => right.score - left.score).slice(0, maximumResults);
+  if (!shouldEnrich) return preliminary;
   const enriched = await Promise.all(preliminary.map((candidate) => enrichCandidate(track, candidate, signal, fetchImpl)));
   return enriched.map((candidate) => scoreAudioSource(track, candidate)).filter(Boolean)
-    .sort((left, right) => right.score - left.score).slice(0, MAX_RESULTS);
+    .sort((left, right) => right.score - left.score).slice(0, maximumResults);
 }
 
 module.exports = {
@@ -983,14 +1213,18 @@ module.exports = {
   normalizeMatchText,
   parseSpotifyEmbedEntity,
   parseSpotifyOEmbed,
+  parseSpotifyPlaylistEmbed,
+  parseSpotifyPlaylistOEmbed,
   parseYouTubeMusicSearch,
   parseYouTubePlaylistData,
   parseYouTubeWebSearch,
   resolveYouTubePlaylist,
   resolveSpotifyTrack,
+  resolveSpotifyPlaylist,
   scoreAudioSource,
   searchYouTubeAudioSources,
   spotifyArtworkURL,
+  spotifyPlaylistURL,
   youtubePlaylistID,
   youtubeVideoID,
 };

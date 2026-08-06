@@ -22,8 +22,11 @@ interface ResonanceActions {
     fun saveClipRange(trackId: String, startMs: Long, endMs: Long)
     fun clearClipRange(trackId: String)
     fun resolveLinkImport(source: String)
+    fun selectLinkImportSearchResult(resultId: String)
     fun selectLinkImportCandidate(videoId: String)
-    fun confirmLinkImport()
+    fun confirmLinkImport(uploadAfterImport: Boolean): Boolean
+    fun toggleLinkImportPreview(videoId: String)
+    fun stopLinkImportPreview()
     fun cancelLinkImport()
 
     fun createPlaylist(name: String)
@@ -37,6 +40,7 @@ interface ResonanceActions {
     fun refreshServer()
     fun saveServerConnection(url: String, accessToken: String, adminKey: String, profileName: String)
     fun uploadAudio()
+    fun uploadMissingDownloads()
     fun downloadRemoteSong(songId: String)
     fun downloadSelectedRemoteSongs()
     fun toggleRemoteSelection(songId: String)
