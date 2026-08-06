@@ -182,6 +182,13 @@ export function selectLatestRun(runs, headSha) {
     .sort((left, right) => right.databaseId - left.databaseId)[0];
 }
 
+export function porcelainChangedPaths(status) {
+  return String(status || "")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.replace(/^[ MADRCU?!]{1,2} /, ""));
+}
+
 function usage() {
   console.log(`Usage: /path/to/Resonance/app/scripts/release-now.mjs [options]
 
@@ -293,11 +300,7 @@ function ensureNewReleaseTarget(repository, version, branch) {
 function validateVersionChanges() {
   run("node", ["scripts/release-version.mjs", "--check"], { capture: false });
   run("git", ["diff", "--check"], { capture: false });
-  const changed = git(["status", "--porcelain=v1"])
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => line.slice(3))
-    .sort();
+  const changed = porcelainChangedPaths(git(["status", "--porcelain=v1"])).sort();
   const expected = [...versionFiles].sort();
   if (JSON.stringify(changed) !== JSON.stringify(expected)) {
     fail(

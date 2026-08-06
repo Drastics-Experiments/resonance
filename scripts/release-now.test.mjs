@@ -6,6 +6,7 @@ import {
   expectedAssetNames,
   nextPatchVersion,
   parseArguments,
+  porcelainChangedPaths,
   selectLatestRun,
 } from "./release-now.mjs";
 
@@ -66,4 +67,11 @@ test("workflow discovery selects the newest exact-SHA run", () => {
   );
   assert.equal(selected.databaseId, 9);
   assert.equal(selectLatestRun([], "wanted"), undefined);
+});
+
+test("porcelain paths survive trimming of the first status line", () => {
+  assert.deepEqual(
+    porcelainChangedPaths("M android/app/build.gradle.kts\n M ios/LikedSongsMobile/Info.plist"),
+    ["android/app/build.gradle.kts", "ios/LikedSongsMobile/Info.plist"],
+  );
 });
