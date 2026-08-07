@@ -7,7 +7,9 @@ async function replaceBackupFromPrimary(destination, backup, mode) {
   try {
     await fs.copyFile(destination, temporary);
     await fs.chmod(temporary, mode);
-    handle = await fs.open(temporary, "r");
+    // Windows rejects fsync on a read-only handle with EPERM. The backup is a
+    // private temporary file, so open it read/write before the durability flush.
+    handle = await fs.open(temporary, "r+");
     await handle.sync();
     await handle.close();
     handle = null;
