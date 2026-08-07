@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "version": "1.1.4",
-  "build": 15,
-  "desktopSigning": "production"
+  "version": "1.1.5",
+  "build": 16,
+  "desktopSigning": "unsigned"
 }
