@@ -508,7 +508,11 @@ private func isVideoClipTrack(_ track: MobileTrack) -> Bool {
 
 @MainActor
 private final class MobileLocalImportViewModel: ObservableObject {
-    @Published var source = ""
+    @Published var source = "" {
+        didSet {
+            if source != oldValue { invalidateResolvedSource() }
+        }
+    }
     @Published var syncAfterImport = true
     @Published private(set) var stage: LocalImportStage = .idle
     @Published private(set) var completedBytes: Int64 = 0
@@ -516,7 +520,8 @@ private final class MobileLocalImportViewModel: ObservableObject {
     @Published private(set) var resolution: LocalImportResolution?
     @Published private(set) var searchResponse: LocalImportSearchResponse?
     @Published private(set) var selectedSearchResultID: String?
-    @Published var selectedVideoID: String?
+    @Published private(set) var selectedVideoID: String?
+    @Published private(set) var hasExplicitCandidateSelection = false
     @Published var selectedPlaylistTrackIDs: Set<String> = []
     @Published private(set) var error: LocalImportError?
     @Published private(set) var completedTrack: MobileTrack?
@@ -531,6 +536,9 @@ private final class MobileLocalImportViewModel: ObservableObject {
     private var previewTask: Task<Void, Never>?
     private var previewStopTask: Task<Void, Never>?
     private var previewPlayer: AVPlayer?
+    private var reviewedMatchLease: MobileReviewedMatchLease?
+    private var resolvedSourceIdentity: String?
+    private var sourceGeneration: UInt64 = 0
 
     var isRunning: Bool {
         switch stage {
@@ -542,7 +550,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
     }
 
     var selectedCandidate: LocalImportAudioSourceMatch? {
-        guard let selectedVideoID else { return resolution?.candidates.first }
+        guard let selectedVideoID else { return nil }
         return resolution?.candidates.first { $0.videoID == selectedVideoID }
     }
 
@@ -571,8 +579,9 @@ private final class MobileLocalImportViewModel: ObservableObject {
         }
     }
 
-    func resolve() {
+    func resolve(using library: MusicLibrary, reviewedServerMatch: Bool) {
         guard !isRunning else { return }
+        let rawInput = source
         let value = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else {
             error = LocalImportError(stage: .resolvingMetadata, code: "MISSING_SOURCE", message: "Enter a song, artist, album, or supported Spotify, SoundCloud, or YouTube link first.")
@@ -586,18 +595,64 @@ private final class MobileLocalImportViewModel: ObservableObject {
         searchResponse = nil
         selectedSearchResultID = nil
         selectedVideoID = nil
+        hasExplicitCandidateSelection = false
         selectedPlaylistTrackIDs = []
+        reviewedMatchLease = nil
+        resolvedSourceIdentity = nil
         completedTrack = nil
         completedSummary = nil
         batchCurrentTitle = nil
+        let usesReviewedServerMatch = reviewedServerMatch
+            || (syncAfterImport && library.activeUploadMode == .reviewedMatch)
         let searchesProviders = !LocalImportInput.looksLikeLink(value)
+        if usesReviewedServerMatch, searchesProviders {
+            error = LocalImportError(
+                stage: .resolvingMetadata,
+                code: "REVIEW_LINK_REQUIRED",
+                message: "Reviewed Match requires one supported Spotify track or YouTube video link."
+            )
+            stage = .failed
+            return
+        }
         stage = searchesProviders ? .searchingCandidates : .resolvingMetadata
-        task = Task { [weak self] in
+        let generation = sourceGeneration
+        task = Task { [weak self, library] in
             guard let self else { return }
             do {
+                if usesReviewedServerMatch {
+                    guard let lease = library.captureReviewedMatchLease() else {
+                        throw LocalImportError(
+                            stage: .resolvingMetadata,
+                            code: "REVIEW_POLICY_UNAVAILABLE",
+                            message: "Reviewed Match is no longer enabled by the current signed server policy."
+                        )
+                    }
+                    let result = try await library.resolveReviewedMatch(source: value, lease: lease)
+                    try Task.checkCancellation()
+                    guard generation == sourceGeneration,
+                          source == rawInput,
+                          library.isReviewedMatchLeaseCurrent(lease) else {
+                        throw LocalImportError(
+                            stage: .resolvingMetadata,
+                            code: "REVIEW_POLICY_CHANGED",
+                            message: "The signed transfer policy changed. Resolve the link again before importing."
+                        )
+                    }
+                    resolution = result
+                    reviewedMatchLease = lease
+                    resolvedSourceIdentity = rawInput
+                    selectedVideoID = nil
+                    selectedPlaylistTrackIDs = []
+                    stage = .awaitingSelection
+                    task = nil
+                    return
+                }
                 if searchesProviders {
                     let response = try await service.search(query: value)
                     try Task.checkCancellation()
+                    guard generation == sourceGeneration, source == rawInput else {
+                        throw CancellationError()
+                    }
                     searchResponse = response
                     guard let first = response.results.first else {
                         throw LocalImportError(
@@ -607,6 +662,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
                         )
                     }
                     selectSearchResult(first)
+                    resolvedSourceIdentity = rawInput
                     stage = .awaitingSelection
                     task = nil
                     return
@@ -615,20 +671,26 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     self?.apply(progress)
                 }
                 try Task.checkCancellation()
+                guard generation == sourceGeneration, source == rawInput else {
+                    throw CancellationError()
+                }
                 resolution = result
+                resolvedSourceIdentity = rawInput
                 selectedVideoID = result.candidates.first?.videoID
                 selectedPlaylistTrackIDs = Set(result.playlist?.items.map { $0.track.trackID } ?? [])
                 stage = .awaitingSelection
             } catch is CancellationError {
-                stage = .cancelled
+                if generation == sourceGeneration { stage = .cancelled }
             } catch let failure as LocalImportError {
+                guard generation == sourceGeneration, source == rawInput else { return }
                 error = failure
                 stage = .failed
             } catch {
+                guard generation == sourceGeneration, source == rawInput else { return }
                 self.error = LocalImportError(stage: stage, code: "LOCAL_IMPORT_FAILED", message: error.localizedDescription)
                 stage = .failed
             }
-            task = nil
+            if generation == sourceGeneration { task = nil }
         }
     }
 
@@ -639,8 +701,14 @@ private final class MobileLocalImportViewModel: ObservableObject {
         resolution = result.resolution
         selectedSearchResultID = result.id
         selectedVideoID = result.candidates.first?.videoID
+        hasExplicitCandidateSelection = selectedVideoID != nil
         selectedPlaylistTrackIDs = []
         previewError = nil
+    }
+
+    func selectCandidate(_ candidate: LocalImportAudioSourceMatch) {
+        selectedVideoID = candidate.videoID
+        hasExplicitCandidateSelection = true
     }
 
     func toggleSearchPreview(_ result: LocalImportSearchResult) {
@@ -650,16 +718,69 @@ private final class MobileLocalImportViewModel: ObservableObject {
     }
 
     @discardableResult
-    func importSelected(into library: MusicLibrary) -> Bool {
+    func importSelected(into library: MusicLibrary, reviewedServerMatch: Bool) -> Bool {
         guard !isRunning, let resolution else { return false }
+        guard LocalImportSourceIdentityPolicy.isCurrent(
+            resolvedInput: resolvedSourceIdentity,
+            displayedInput: source
+        ) else {
+            error = LocalImportError(
+                stage: .resolvingMetadata,
+                code: "SOURCE_CHANGED",
+                message: "The source changed after it was resolved. Find audio again before importing."
+            )
+            stage = .failed
+            return false
+        }
+        guard !library.isUploadTransferBusy else {
+            error = LocalImportError(
+                stage: .inspectingSource,
+                code: "TRANSFER_BUSY",
+                message: "Wait for the current upload or download to finish before starting an import."
+            )
+            stage = .failed
+            return false
+        }
         if syncAfterImport, !library.canUploadLocalImports {
             error = LocalImportError(
                 stage: .syncing,
                 code: "SERVER_UPLOAD_NOT_CONFIGURED",
-                message: "Connect the music server and save both the access token and admin key, or turn off server upload."
+                message: "Save a valid server URL and admin key, or turn off server upload."
             )
             stage = .failed
             return false
+        }
+        let usesReviewedUpload = syncAfterImport && library.activeUploadMode == .reviewedMatch
+        if reviewedServerMatch, !usesReviewedUpload {
+            error = LocalImportError(
+                stage: .syncing,
+                code: "REVIEW_POLICY_CHANGED",
+                message: "Reviewed Match is no longer enabled. Close this sheet and choose an available upload mode."
+            )
+            stage = .failed
+            return false
+        }
+        if usesReviewedUpload, isPlaylist {
+            error = LocalImportError(
+                stage: .syncing,
+                code: "REVIEW_PLAYLIST_UNSUPPORTED",
+                message: "Reviewed Match imports one explicitly reviewed song at a time."
+            )
+            stage = .failed
+            return false
+        }
+        if usesReviewedUpload {
+            guard hasExplicitCandidateSelection,
+                  let reviewedMatchLease,
+                  library.isReviewedMatchLeaseCurrent(reviewedMatchLease) else {
+                error = LocalImportError(
+                    stage: .syncing,
+                    code: "REVIEW_SELECTION_REQUIRED",
+                    message: "Select one reviewed audio candidate. If the signed policy changed, resolve the link again."
+                )
+                stage = .failed
+                return false
+            }
         }
         stopPreview()
         library.dismissTransferNotice()
@@ -680,14 +801,19 @@ private final class MobileLocalImportViewModel: ObservableObject {
             artworkURL: resolution.track.artworkURL ?? candidate.thumbnailURL,
             sourceURL: resolution.track.sourceURL
         )
-        let candidates = [candidate] + resolution.candidates.filter { $0.videoID != candidate.videoID }
+        let candidates = usesReviewedUpload
+            ? [candidate]
+            : [candidate] + resolution.candidates.filter { $0.videoID != candidate.videoID }
         let shouldSync = syncAfterImport
+        let reviewLease = usesReviewedUpload ? reviewedMatchLease : nil
+        reserveTransfer(library)
         task = Task { [self, library] in
             await runSingleImport(
                 spotifyTrack: resolution.track,
                 metadata: metadata,
                 candidates: candidates,
                 shouldSync: shouldSync,
+                reviewedMatchLease: reviewLease,
                 library: library
             )
             task = nil
@@ -713,6 +839,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
         completedSummary = nil
         stage = .inspectingSource
         let shouldSync = syncAfterImport
+        reserveTransfer(library)
         task = Task { [self, library] in
             await runPlaylistImport(items: items, playlist: playlist, shouldSync: shouldSync, library: library)
             task = nil
@@ -726,6 +853,26 @@ private final class MobileLocalImportViewModel: ObservableObject {
         if isRunning { stage = .cancelled }
     }
 
+    private func invalidateResolvedSource() {
+        sourceGeneration &+= 1
+        task?.cancel()
+        task = nil
+        stopPreview()
+        resolution = nil
+        searchResponse = nil
+        selectedSearchResultID = nil
+        selectedVideoID = nil
+        hasExplicitCandidateSelection = false
+        selectedPlaylistTrackIDs = []
+        reviewedMatchLease = nil
+        resolvedSourceIdentity = nil
+        completedTrack = nil
+        completedSummary = nil
+        batchCurrentTitle = nil
+        error = nil
+        if !continuesAfterSheetDismissal { stage = .idle }
+    }
+
     private func apply(_ progress: LocalImportProgress) {
         stage = progress.stage
         completedBytes = progress.completed
@@ -736,7 +883,9 @@ private final class MobileLocalImportViewModel: ObservableObject {
         let match = LocalImportExistingSongPolicy.match(
             spotifyTrack: track,
             deviceTracks: library.tracks,
-            activeServerSongs: library.remoteSongs
+            activeServerSongs: library.cachedRemoteSongsForUploadPlanning,
+            activeServerURL: library.activeServerURLForUploadPlanning,
+            activeProfileID: library.syncProfileID
         )
         switch (match.isOnDevice, match.isOnServer) {
         case (true, true): return "On device and server — both transfers will be skipped"
@@ -798,20 +947,21 @@ private final class MobileLocalImportViewModel: ObservableObject {
         metadata: LocalImportMetadata,
         candidates: [LocalImportAudioSourceMatch],
         shouldSync: Bool,
+        reviewedMatchLease: MobileReviewedMatchLease?,
         library: MusicLibrary
     ) async {
-        var catalogWarning: String?
-        if shouldSync {
-            do { try await library.refreshRemoteCatalogForImport() }
-            catch { catalogWarning = error.localizedDescription }
-        }
         do {
             try Task.checkCancellation()
-            var match = LocalImportExistingSongPolicy.match(
-                spotifyTrack: spotifyTrack,
-                deviceTracks: library.tracks,
-                activeServerSongs: library.remoteSongs
-            )
+            let isReviewedUpload = reviewedMatchLease != nil
+            var match = isReviewedUpload
+                ? LocalImportExistingSongMatch(deviceTrackID: nil, serverSongID: nil)
+                : LocalImportExistingSongPolicy.match(
+                    spotifyTrack: spotifyTrack,
+                    deviceTracks: library.tracks,
+                    activeServerSongs: library.cachedRemoteSongsForUploadPlanning,
+                    activeServerURL: library.activeServerURLForUploadPlanning,
+                    activeProfileID: library.syncProfileID
+                )
             var track = match.deviceTrackID.flatMap { id in library.tracks.first { $0.id == id } }
             let plannedDownloads = track == nil ? 1 : 0
             if plannedDownloads > 0 {
@@ -832,20 +982,46 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 throw LocalImportError(stage: .savingLocal, code: "LOCAL_IMPORT_MISSING", message: "The imported song could not be found on this device.")
             }
             completedTrack = track
-            match = LocalImportExistingSongPolicy.match(
-                spotifyTrack: spotifyTrack,
-                deviceTracks: library.tracks,
-                activeServerSongs: library.remoteSongs
-            )
+            match = isReviewedUpload
+                ? LocalImportExistingSongMatch(deviceTrackID: track.id, serverSongID: nil)
+                : LocalImportExistingSongPolicy.match(
+                    spotifyTrack: spotifyTrack,
+                    deviceTracks: library.tracks,
+                    activeServerSongs: library.cachedRemoteSongsForUploadPlanning,
+                    activeServerURL: library.activeServerURLForUploadPlanning,
+                    activeProfileID: library.syncProfileID
+                )
             if let serverID = match.serverSongID {
-                _ = library.reconcileLocalImportWithServer(trackID: track.id, remoteID: serverID)
+                guard library.reconcileLocalImportWithServer(trackID: track.id, remoteID: serverID) else {
+                    finishTransfers(library)
+                    batchCurrentTitle = nil
+                    let detail = "\(track.title) — \(track.artist) (\(library.serverMessage))"
+                    self.error = LocalImportError(
+                        stage: .syncing,
+                        code: "REMOTE_ASSOCIATION_CONFLICT",
+                        message: detail
+                    )
+                    stage = .failed
+                    library.showTransferNotice(
+                        title: "Saved locally; server link kept",
+                        detail: detail,
+                        isError: true
+                    )
+                    return
+                }
             }
             var uploadFailure: String?
             if shouldSync, match.serverSongID == nil {
                 stage = .syncing
                 beginUploads(total: 1, library: library)
                 do {
-                    _ = try await uploadWithRetry(track, index: 0, total: 1, library: library)
+                    _ = try await uploadWithRetry(
+                        track,
+                        index: 0,
+                        total: 1,
+                        reviewedMatchLease: reviewedMatchLease,
+                        library: library
+                    )
                     library.uploadProgress = 1
                 } catch {
                     uploadFailure = error.localizedDescription
@@ -862,9 +1038,8 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 stage = .complete
                 let localDetail = plannedDownloads == 0 ? "Already on this device." : "Downloaded to this device."
                 let serverDetail = shouldSync ? (match.serverSongID == nil ? " Uploaded to the server." : " Already on the server.") : ""
-                let warning = catalogWarning.map { " Server refresh warning: \($0)" } ?? ""
                 completedSummary = localDetail + serverDetail
-                library.showTransferNotice(title: "Import complete", detail: localDetail + serverDetail + warning, isError: false)
+                library.showTransferNotice(title: "Import complete", detail: localDetail + serverDetail, isError: false)
             }
         } catch is CancellationError {
             finishTransfers(library)
@@ -884,22 +1059,22 @@ private final class MobileLocalImportViewModel: ObservableObject {
         shouldSync: Bool,
         library: MusicLibrary
     ) async {
-        var catalogWarning: String?
-        if shouldSync {
-            do { try await library.refreshRemoteCatalogForImport() }
-            catch { catalogWarning = error.localizedDescription }
-        }
         var importedTracks: [(item: LocalImportPlaylistItem, track: MobileTrack)] = []
         var downloadFailures: [String] = []
+        var associationFailures: [String] = []
+        var associationFailedTrackIDs = Set<UUID>()
         var uploadFailures: [String] = []
         do {
-            let initialMatches = Dictionary(uniqueKeysWithValues: items.map { item in
-                (item.track.trackID, LocalImportExistingSongPolicy.match(
+            let initialMatches = items.reduce(into: [String: LocalImportExistingSongMatch]()) { result, item in
+                guard result[item.track.trackID] == nil else { return }
+                result[item.track.trackID] = LocalImportExistingSongPolicy.match(
                     spotifyTrack: item.track,
                     deviceTracks: library.tracks,
-                    activeServerSongs: library.remoteSongs
-                ))
-            })
+                    activeServerSongs: library.cachedRemoteSongsForUploadPlanning,
+                    activeServerURL: library.activeServerURLForUploadPlanning,
+                    activeProfileID: library.syncProfileID
+                )
+            }
             let downloadItems = items.filter { initialMatches[$0.track.trackID]?.deviceTrackID == nil }
             if !downloadItems.isEmpty { beginDownloads(total: downloadItems.count, library: library) }
             var completedDownloads = 0
@@ -934,8 +1109,12 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     library.downloadProgress = Double(completedDownloads) / Double(max(downloadItems.count, 1))
                 }
                 if let track {
-                    if let serverID = initialMatch?.serverSongID {
-                        _ = library.reconcileLocalImportWithServer(trackID: track.id, remoteID: serverID)
+                    if let serverID = initialMatch?.serverSongID,
+                       !library.reconcileLocalImportWithServer(trackID: track.id, remoteID: serverID) {
+                        associationFailures.append(
+                            "\(track.title) — \(track.artist) (\(library.serverMessage))"
+                        )
+                        associationFailedTrackIDs.insert(track.id)
                     }
                     if !importedTracks.contains(where: { $0.track.id == track.id }) {
                         importedTracks.append((item, track))
@@ -947,10 +1126,13 @@ private final class MobileLocalImportViewModel: ObservableObject {
             library.upsertImportedPlaylist(named: playlist.title, tracks: importedTracks.map(\.track))
 
             let uploadQueue = shouldSync ? importedTracks.filter { pair in
-                LocalImportExistingSongPolicy.match(
+                guard !associationFailedTrackIDs.contains(pair.track.id) else { return false }
+                return LocalImportExistingSongPolicy.match(
                     spotifyTrack: pair.item.track,
                     deviceTracks: library.tracks,
-                    activeServerSongs: library.remoteSongs
+                    activeServerSongs: library.cachedRemoteSongsForUploadPlanning,
+                    activeServerURL: library.activeServerURLForUploadPlanning,
+                    activeProfileID: library.syncProfileID
                 ).serverSongID == nil
             } : []
             if !uploadQueue.isEmpty {
@@ -959,7 +1141,13 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 for (index, pair) in uploadQueue.enumerated() {
                     try Task.checkCancellation()
                     do {
-                        _ = try await uploadWithRetry(pair.track, index: index, total: uploadQueue.count, library: library)
+                        _ = try await uploadWithRetry(
+                            pair.track,
+                            index: index,
+                            total: uploadQueue.count,
+                            reviewedMatchLease: nil,
+                            library: library
+                        )
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
@@ -976,17 +1164,23 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 error = LocalImportError(stage: .downloading, code: "PLAYLIST_DOWNLOAD_PARTIAL_FAILURE", message: detail)
                 stage = .failed
                 library.showTransferNotice(title: "Playlist import incomplete", detail: detail, isError: true)
-            } else if !uploadFailures.isEmpty {
-                let detail = "Saved every downloaded song locally. Server uploads failed after retrying: \(uploadFailures.joined(separator: "; "))"
-                error = LocalImportError(stage: .syncing, code: "PLAYLIST_UPLOAD_PARTIAL_FAILURE", message: detail)
+            } else if !associationFailures.isEmpty || !uploadFailures.isEmpty {
+                var issues: [String] = []
+                if !associationFailures.isEmpty {
+                    issues.append("Existing server links were kept: \(associationFailures.joined(separator: "; "))")
+                }
+                if !uploadFailures.isEmpty {
+                    issues.append("Server uploads failed after retrying: \(uploadFailures.joined(separator: "; "))")
+                }
+                let detail = "Saved every downloaded song locally. \(issues.joined(separator: " "))"
+                error = LocalImportError(stage: .syncing, code: "PLAYLIST_SERVER_SYNC_PARTIAL_FAILURE", message: detail)
                 stage = .failed
-                library.showTransferNotice(title: "Saved locally; upload failed", detail: detail, isError: true)
+                library.showTransferNotice(title: "Saved locally; server sync incomplete", detail: detail, isError: true)
             } else {
                 stage = .complete
                 let deviceSkips = initialMatches.values.filter(\.isOnDevice).count
                 let serverSkips = shouldSync ? initialMatches.values.filter(\.isOnServer).count : 0
-                let refreshWarning = catalogWarning.map { " Server refresh warning: \($0)" } ?? ""
-                let detail = "Imported \(importedTracks.count) song\(importedTracks.count == 1 ? "" : "s"). Skipped \(deviceSkips) device download\(deviceSkips == 1 ? "" : "s") and \(serverSkips) server upload\(serverSkips == 1 ? "" : "s")." + refreshWarning
+                let detail = "Imported \(importedTracks.count) song\(importedTracks.count == 1 ? "" : "s"). Skipped \(deviceSkips) device download\(deviceSkips == 1 ? "" : "s") and \(serverSkips) server upload\(serverSkips == 1 ? "" : "s")."
                 library.showTransferNotice(title: "Playlist import complete", detail: detail, isError: false)
             }
         } catch is CancellationError {
@@ -1043,13 +1237,30 @@ private final class MobileLocalImportViewModel: ObservableObject {
         throw lastError ?? LocalImportError(stage: .downloading, code: "ALL_SOURCES_FAILED", message: "Every matched audio source failed.")
     }
 
-    private func uploadWithRetry(_ track: MobileTrack, index: Int, total: Int, library: MusicLibrary) async throws -> Bool {
+    private func uploadWithRetry(
+        _ track: MobileTrack,
+        index: Int,
+        total: Int,
+        reviewedMatchLease: MobileReviewedMatchLease?,
+        library: MusicLibrary
+    ) async throws -> Bool {
         var lastError: Error?
         for attempt in 1...3 {
             do {
+                if let reviewedMatchLease,
+                   !library.isReviewedMatchLeaseCurrent(reviewedMatchLease) {
+                    throw LocalImportError(
+                        stage: .syncing,
+                        code: "REVIEW_POLICY_CHANGED",
+                        message: "The signed Reviewed Match policy expired or changed before upload."
+                    )
+                }
                 if attempt > 1 { try await Task.sleep(for: .milliseconds(attempt == 2 ? 500 : 1_500)) }
                 library.uploadDetail = "Uploading \(index + 1) of \(total) • \(track.title)"
-                return try await library.uploadLocalImportToActiveProfile(track)
+                return try await library.uploadLocalImportToActiveProfile(
+                    track,
+                    reviewedMatchLease: reviewedMatchLease
+                )
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -1064,6 +1275,13 @@ private final class MobileLocalImportViewModel: ObservableObject {
         library.isDownloading = true
         library.downloadProgress = 0
         library.downloadDetail = "Preparing 1 of \(total)"
+    }
+
+    private func reserveTransfer(_ library: MusicLibrary) {
+        library.isUploading = false
+        library.isDownloading = true
+        library.downloadProgress = 0
+        library.downloadDetail = "Preparing import…"
     }
 
     private func beginUploads(total: Int, library: MusicLibrary) {
@@ -1084,6 +1302,7 @@ struct MobileLocalImportSheet: View {
     @EnvironmentObject private var library: MusicLibrary
     @StateObject private var viewModel = MobileLocalImportViewModel()
     @FocusState private var sourceFocused: Bool
+    var reviewedServerMatch = false
 
     var body: some View {
         NavigationStack {
@@ -1097,33 +1316,53 @@ struct MobileLocalImportSheet: View {
                                 TextField("Song, artist, album, or link", text: $viewModel.source)
                                     .focused($sourceFocused)
                                     .submitLabel(.search)
-                                    .onSubmit(viewModel.resolve)
+                                    .onSubmit {
+                                        viewModel.resolve(
+                                            using: library,
+                                            reviewedServerMatch: reviewedServerMatch
+                                        )
+                                    }
                                     .keyboardType(.default)
                                     .textInputAutocapitalization(.never)
                                     .autocorrectionDisabled()
                                     .padding(13)
                                     .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+                                    .disabled(viewModel.isRunning)
                                 Button("Paste") {
                                     if let pasted = UIPasteboard.general.string, !pasted.isEmpty {
                                         viewModel.source = pasted
                                     }
                                 }
                                 .buttonStyle(.bordered)
+                                .disabled(viewModel.isRunning)
                             }
                         }
 
-                        Toggle(isOn: $viewModel.syncAfterImport) {
+                        if reviewedServerMatch {
                             VStack(alignment: .leading, spacing: 3) {
-                                Text("Upload after downloading")
+                                Text("Reviewed server upload")
                                     .font(.subheadline.weight(.semibold))
-                                Text(library.canUploadLocalImports
-                                     ? "Downloads every selected song first, then uploads missing songs to \(library.syncProfileName)."
-                                     : "Configure the server access token and admin key, or turn this off for a local-only import.")
+                                Text("Select exactly one server-reviewed audio candidate. Resonance downloads and verifies that candidate locally before uploading its bytes.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
+                            .padding(14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 13))
+                        } else {
+                            Toggle(isOn: $viewModel.syncAfterImport) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Upload after downloading")
+                                        .font(.subheadline.weight(.semibold))
+                                    Text(library.canUploadLocalImports
+                                         ? "Downloads every selected song first, then uploads missing songs to \(library.syncProfileName)."
+                                         : "Configure a valid server URL and admin key, or turn this off for a local-only import.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .tint(.violet)
                         }
-                        .tint(.violet)
 
                         stageCard
 
@@ -1159,7 +1398,7 @@ struct MobileLocalImportSheet: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
             }
-            .navigationTitle("Import from Link")
+            .navigationTitle(reviewedServerMatch ? "Reviewed Match" : "Import from Link")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1170,11 +1409,19 @@ struct MobileLocalImportSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     if viewModel.resolution == nil {
-                        Button("Find Audio", action: viewModel.resolve)
+                        Button("Find Audio") {
+                            viewModel.resolve(
+                                using: library,
+                                reviewedServerMatch: reviewedServerMatch
+                            )
+                        }
                             .disabled(viewModel.isRunning)
                     } else {
                         Button("Import") {
-                            if viewModel.importSelected(into: library) { dismiss() }
+                            if viewModel.importSelected(
+                                into: library,
+                                reviewedServerMatch: reviewedServerMatch
+                            ) { dismiss() }
                         }
                             .disabled(viewModel.isRunning || (viewModel.isPlaylist ? viewModel.selectedPlaylistItems.isEmpty : viewModel.selectedCandidate == nil))
                     }
@@ -1185,7 +1432,10 @@ struct MobileLocalImportSheet: View {
                 }
             }
         }
-        .onAppear { sourceFocused = true }
+        .onAppear {
+            if reviewedServerMatch { viewModel.syncAfterImport = true }
+            sourceFocused = true
+        }
         .onDisappear {
             viewModel.stopPreview()
             if !viewModel.continuesAfterSheetDismissal { viewModel.cancel() }
@@ -1378,7 +1628,7 @@ struct MobileLocalImportSheet: View {
             ForEach(candidates) { candidate in
                 HStack(spacing: 8) {
                     Button {
-                        viewModel.selectedVideoID = candidate.videoID
+                        viewModel.selectCandidate(candidate)
                     } label: {
                         HStack(spacing: 11) {
                             Image(systemName: viewModel.selectedVideoID == candidate.videoID ? "checkmark.circle.fill" : "circle")

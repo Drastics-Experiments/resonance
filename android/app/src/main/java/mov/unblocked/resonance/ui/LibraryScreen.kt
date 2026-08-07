@@ -108,11 +108,15 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                     Text(if (state.isPlaying) "Pause" else "Play", fontWeight = FontWeight.Bold)
                 }
                 IconButton(
-                    enabled = state.tracks.isNotEmpty(),
+                    enabled = state.tracks.isNotEmpty() && !state.isTransientPlayback,
                     onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) },
                     modifier = Modifier
                         .size(46.dp)
-                        .background(if (state.shuffleEnabled) Violet else Color.White.copy(alpha = .08f), CircleShape),
+                        .background(
+                            if (state.shuffleEnabled && !state.isTransientPlayback) Violet
+                            else Color.White.copy(alpha = .08f),
+                            CircleShape,
+                        ),
                 ) { Icon(Icons.Default.Shuffle, "Shuffle") }
                 Spacer(Modifier.weight(1f))
             }

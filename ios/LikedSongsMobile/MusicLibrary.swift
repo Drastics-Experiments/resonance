@@ -1,10 +1,402 @@
 import AVFoundation
 import Combine
+import CryptoKit
 import Foundation
 import MediaPlayer
 import Security
 import UIKit
 import UniformTypeIdentifiers
+
+actor MobileAsyncSerialGate {
+    private var isHeld = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        if !isHeld {
+            isHeld = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        guard !waiters.isEmpty else {
+            isHeld = false
+            return
+        }
+        waiters.removeFirst().resume()
+    }
+}
+
+struct MobileBoundedDownloadResult: Sendable {
+    let temporaryURL: URL
+    let byteCount: Int64
+    let sha256: String
+}
+
+private enum MobileBoundedDownloadError: LocalizedError {
+    case unexpectedStatus(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .unexpectedStatus(let status):
+            "Server returned HTTP \(status)."
+        }
+    }
+}
+
+private enum MobileBoundedResponseError: LocalizedError {
+    case tooLarge(limit: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .tooLarge(let limit):
+            "The server response exceeded the \(limit)-byte safety limit."
+        }
+    }
+}
+
+enum MobileTransferPolicyChangedError: LocalizedError {
+    case changed
+
+    var errorDescription: String? {
+        "The signed transfer policy expired or changed."
+    }
+}
+
+struct MobileReviewedMatchLease: Equatable, Sendable {
+    let transferPolicy: MobileTransferPolicyLease
+    let origin: String
+    let profileID: String
+    let adminTokenFingerprint: String
+    let requestContext: MobileClientRequestContext
+}
+
+struct MobileRawUploadLease: Equatable, Sendable {
+    let transferPolicy: MobileTransferPolicyLease
+    let mode: MobileUploadMode
+    let origin: String
+    let profileID: String
+    let adminTokenFingerprint: String
+    let requestContext: MobileClientRequestContext
+}
+
+private final class MobileSameOriginRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    let origin: URL
+
+    init(origin: URL) {
+        self.origin = origin
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(MobileSameOriginPolicy.matches(request.url, origin) ? request : nil)
+    }
+}
+
+final class MobileBoundedDownloadOperation: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let maximumSize: Int64
+    private let fileManager: FileManager
+    let temporaryURL: URL
+    private let authorization: MobileTransferAuthorization
+    private let sessionConfiguration: URLSessionConfiguration
+    private let delegateQueue: OperationQueue
+    private let lock = NSLock()
+    private var fileHandle: FileHandle?
+    private var hasher = SHA256()
+    private var byteCount: Int64 = 0
+    private var receivedResponse = false
+    private var continuation: CheckedContinuation<MobileBoundedDownloadResult, Error>?
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var isFinished = false
+    private var allowedOrigin: URL?
+    private var authorizationRegistration: UUID?
+
+    init(
+        maximumSize: Int64,
+        authorization: MobileTransferAuthorization,
+        fileManager: FileManager = .default,
+        sessionConfiguration: URLSessionConfiguration = .ephemeral
+    ) throws {
+        self.maximumSize = maximumSize
+        self.authorization = authorization
+        self.fileManager = fileManager
+        self.sessionConfiguration = sessionConfiguration
+        temporaryURL = fileManager.temporaryDirectory
+            .appendingPathComponent("\(MobileTransientDownloadPolicy.filenamePrefix)\(UUID().uuidString)")
+        delegateQueue = OperationQueue()
+        delegateQueue.maxConcurrentOperationCount = 1
+        delegateQueue.qualityOfService = .utility
+        guard fileManager.createFile(atPath: temporaryURL.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        do {
+            fileHandle = try FileHandle(forWritingTo: temporaryURL)
+        } catch {
+            try? fileManager.removeItem(at: temporaryURL)
+            throw error
+        }
+        super.init()
+    }
+
+    func run(request: URLRequest) async throws -> MobileBoundedDownloadResult {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let configuration = sessionConfiguration
+                configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+                configuration.urlCache = nil
+                let session = URLSession(
+                    configuration: configuration,
+                    delegate: self,
+                    delegateQueue: delegateQueue
+                )
+                let task = session.dataTask(with: request)
+
+                lock.lock()
+                let alreadyFinished = isFinished
+                if !alreadyFinished {
+                    self.continuation = continuation
+                    self.session = session
+                    self.task = task
+                    self.allowedOrigin = request.url
+                }
+                lock.unlock()
+
+                if alreadyFinished {
+                    session.invalidateAndCancel()
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+
+                guard let registration = authorization.register({ [weak self] in
+                    self?.cancelBecauseUnauthorized()
+                }) else {
+                    complete(with: .failure(MobileTransferPolicyChangedError.changed))
+                    return
+                }
+                lock.lock()
+                let finishedBeforeRegistration = isFinished
+                if !finishedBeforeRegistration {
+                    authorizationRegistration = registration
+                }
+                lock.unlock()
+                if finishedBeforeRegistration {
+                    authorization.unregister(registration)
+                } else if Task.isCancelled {
+                    cancel()
+                } else if !authorization.isAuthorized() {
+                    cancelBecauseUnauthorized()
+                } else {
+                    lock.lock()
+                    let shouldResume = !isFinished
+                    lock.unlock()
+                    guard shouldResume else { return }
+                    task.resume()
+                }
+            }
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard authorization.isAuthorized() else {
+            completionHandler(nil)
+            cancelBecauseUnauthorized()
+            return
+        }
+        completionHandler(MobileSameOriginPolicy.matches(request.url, allowedOrigin) ? request : nil)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard authorization.isAuthorized() else {
+            completionHandler(.cancel)
+            cancelBecauseUnauthorized()
+            return
+        }
+        guard let response = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            complete(with: .failure(URLError(.badServerResponse)))
+            return
+        }
+        guard response.statusCode == 200 else {
+            completionHandler(.cancel)
+            complete(with: .failure(MobileBoundedDownloadError.unexpectedStatus(response.statusCode)))
+            return
+        }
+        if let oversized = MobileDownloadByteLimitPolicy.oversizedByteCount(
+            totalBytesWritten: 0,
+            totalBytesExpected: response.expectedContentLength,
+            maximumSize: maximumSize
+        ) {
+            completionHandler(.cancel)
+            complete(with: .failure(MobileDownloadIntegrityError.tooLarge(
+                actual: oversized,
+                limit: maximumSize
+            )))
+            return
+        }
+
+        lock.lock()
+        if !isFinished {
+            receivedResponse = true
+        }
+        lock.unlock()
+        completionHandler(.allow)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive data: Data
+    ) {
+        guard authorization.isAuthorized() else {
+            dataTask.cancel()
+            cancelBecauseUnauthorized()
+            return
+        }
+        lock.lock()
+        guard !isFinished, let fileHandle else {
+            lock.unlock()
+            return
+        }
+
+        let addition = byteCount.addingReportingOverflow(Int64(data.count))
+        let nextByteCount = addition.overflow ? Int64.max : addition.partialValue
+        if addition.overflow || nextByteCount > maximumSize {
+            lock.unlock()
+            dataTask.cancel()
+            complete(with: .failure(MobileDownloadIntegrityError.tooLarge(
+                actual: nextByteCount,
+                limit: maximumSize
+            )))
+            return
+        }
+
+        do {
+            try fileHandle.write(contentsOf: data)
+            hasher.update(data: data)
+            byteCount = nextByteCount
+            lock.unlock()
+        } catch {
+            lock.unlock()
+            dataTask.cancel()
+            complete(with: .failure(error))
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        guard authorization.isAuthorized() else {
+            cancelBecauseUnauthorized()
+            return
+        }
+        if let error {
+            complete(with: .failure(error))
+            return
+        }
+
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        guard receivedResponse, let fileHandle else {
+            lock.unlock()
+            complete(with: .failure(URLError(.badServerResponse)))
+            return
+        }
+
+        do {
+            try fileHandle.close()
+            self.fileHandle = nil
+            let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+            let result = MobileBoundedDownloadResult(
+                temporaryURL: temporaryURL,
+                byteCount: byteCount,
+                sha256: digest
+            )
+            isFinished = true
+            let continuation = self.continuation
+            self.continuation = nil
+            let session = self.session
+            self.session = nil
+            self.task = nil
+            let authorizationRegistration = self.authorizationRegistration
+            self.authorizationRegistration = nil
+            lock.unlock()
+            if let authorizationRegistration {
+                authorization.unregister(authorizationRegistration)
+            }
+            session?.finishTasksAndInvalidate()
+            continuation?.resume(returning: result)
+        } catch {
+            lock.unlock()
+            complete(with: .failure(error))
+        }
+    }
+
+    private func cancel() {
+        complete(with: .failure(CancellationError()))
+    }
+
+    private func cancelBecauseUnauthorized() {
+        complete(with: .failure(MobileTransferPolicyChangedError.changed))
+    }
+
+    private func complete(with result: Result<MobileBoundedDownloadResult, Error>) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        let fileHandle = self.fileHandle
+        self.fileHandle = nil
+        let continuation = self.continuation
+        self.continuation = nil
+        let session = self.session
+        self.session = nil
+        let task = self.task
+        self.task = nil
+        let authorizationRegistration = self.authorizationRegistration
+        self.authorizationRegistration = nil
+        lock.unlock()
+
+        if let authorizationRegistration {
+            authorization.unregister(authorizationRegistration)
+        }
+        task?.cancel()
+        session?.invalidateAndCancel()
+        try? fileHandle?.close()
+        if case .failure = result {
+            try? fileManager.removeItem(at: temporaryURL)
+        }
+        continuation?.resume(with: result)
+    }
+}
 
 @MainActor
 final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPlayerDelegate {
@@ -26,32 +418,67 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             case duplicateOf = "duplicate_of"
         }
     }
+    private struct SourceImportResponse: Decodable {
+        let schemaVersion: Int
+        let status: String
+        let song: MobileRemoteSong
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case status, song
+        }
+    }
+
+    private struct SourceImportDuplicateResponse: Decodable {
+        let schemaVersion: Int
+        let status: String
+        let duplicateOf: MobileRemoteSong
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case status
+            case duplicateOf = "duplicate_of"
+        }
+    }
+    private struct SourceImportRequest: Encodable {
+        let schemaVersion = 1
+        let sourcePageURL: String
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case sourcePageURL = "source_page_url"
+        }
+    }
     @Published var tracks: [MobileTrack] = []
     @Published var playlists: [MobilePlaylist] = [MobilePlaylist(name: "Liked Songs", isSystem: true)]
     @Published var favorites: Set<UUID> = []
     @Published var currentTrackID: UUID?
     @Published var isPlaying = false
     @Published var position: TimeInterval = 0
-    @Published var volume: Double = 0.8 { didSet { player?.volume = PlaybackVolumePolicy.gain(for: volume); UserDefaults.standard.set(volume, forKey: "Resonance.volume") } }
-    @Published var playbackRate: Float = 1 { didSet { player?.rate = playbackRate; UserDefaults.standard.set(Double(playbackRate), forKey: "Resonance.rate") } }
+    @Published var volume: Double = 0.8 {
+        didSet {
+            let gain = PlaybackVolumePolicy.gain(for: volume)
+            player?.volume = gain
+            streamingPlayer?.volume = gain
+            UserDefaults.standard.set(volume, forKey: "Resonance.volume")
+        }
+    }
+    @Published var playbackRate: Float = 1 {
+        didSet {
+            player?.rate = playbackRate
+            streamingPlayer?.defaultRate = playbackRate
+            if streamingPlayer?.timeControlStatus == .playing {
+                streamingPlayer?.rate = playbackRate
+            }
+            UserDefaults.standard.set(Double(playbackRate), forKey: "Resonance.rate")
+        }
+    }
     @Published var shuffleEnabled = false { didSet { UserDefaults.standard.set(shuffleEnabled, forKey: "Resonance.shuffle") } }
     @Published var repeatEnabled = false { didSet { UserDefaults.standard.set(repeatEnabled, forKey: "Resonance.repeat") } }
     @Published var searchText = ""
-    @Published var serverURL = "https://music.unblocked.mov" {
-        didSet {
-            if serverURL != oldValue { isServerConnected = false }
-        }
-    }
-    @Published var serverToken = "" {
-        didSet {
-            if serverToken.isEmpty {
-                isServerConnected = false
-            } else {
-                Self.saveToken(serverToken, account: "client")
-            }
-        }
-    }
-    @Published var serverAdminToken = "" { didSet { if !serverAdminToken.isEmpty { Self.saveToken(serverAdminToken, account: "admin") } } }
+    @Published private(set) var serverURL = "https://music.unblocked.mov"
+    @Published private(set) var serverToken = ""
+    @Published private(set) var serverAdminToken = ""
     @Published var remoteSongs: [MobileRemoteSong] = []
     @Published var selectedRemoteSongIDs: Set<String> = []
     @Published var serverMessage = "Not connected"
@@ -65,16 +492,79 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published var downloadDetail = "Idle"
     @Published var uploadDetail = "Idle"
     @Published var transferNotice: MobileTransferNotice?
+    @Published var transferFailures: [MobileTransferFailure] = []
+    @Published var libraryRecoveryNotice: MobileLibraryRecoveryNotice?
+    @Published private(set) var serverConfigurationMessage: String?
     @Published var isSyncingPlaylists = false
     @Published var playlistSyncDetail = "Not synced"
     @Published var syncProfileID = "default"
     @Published var syncProfileName = "Default"
+    @Published private(set) var isActivatingSyncProfile = false
+    @Published private(set) var clientFeatureConfiguration = MobileClientFeatureConfiguration.safeDefaults
+    @Published private(set) var clientConfigurationStatus = "Using safe transfer defaults"
+    @Published private(set) var selectedUploadMode = MobileUploadMode.localFile
+    @Published private(set) var selectedDownloadMode = MobileDownloadMode.verifiedFileCache
+    @Published private(set) var isTransientStreamActive = false
+
+    var isUploadTransferBusy: Bool {
+        isActivatingSyncProfile || MobileUploadBlockingPolicy.blocksUpload(
+            isUploading: isUploading,
+            isDownloading: isDownloading,
+            isSyncing: isSyncing,
+            isRefreshingCatalog: isRefreshingCatalog,
+            isSyncingPlaylists: isSyncingPlaylists
+        )
+    }
+
+    var isProfileTransitionBusy: Bool {
+        isActivatingSyncProfile || isUploading || isDownloading || isSyncing || isSyncingPlaylists
+    }
+
+    var cachedRemoteSongsForUploadPlanning: [MobileRemoteSong] {
+        isServerConnected ? remoteSongs : []
+    }
+
+    var activeServerURLForUploadPlanning: URL? {
+        normalizedServer()
+    }
+
+    var availableUploadModes: [MobileUploadMode] {
+        MobileTransferModePolicy.availableUploadModes(configuration: clientFeatureConfiguration)
+    }
+
+    var availableDownloadModes: [MobileDownloadMode] {
+        MobileTransferModePolicy.availableDownloadModes(configuration: clientFeatureConfiguration)
+    }
+
+    var activeUploadMode: MobileUploadMode? {
+        MobileTransferModePolicy.effectiveUploadMode(
+            preferred: selectedUploadMode,
+            configuration: clientFeatureConfiguration
+        )
+    }
+
+    var activeDownloadMode: MobileDownloadMode? {
+        MobileTransferModePolicy.effectiveDownloadMode(
+            preferred: selectedDownloadMode,
+            configuration: clientFeatureConfiguration
+        )
+    }
+
+    var clientConfigurationDisplayStatus: String {
+        guard clientFeatureConfiguration.current() == clientFeatureConfiguration else {
+            return "Feature policy expired; using safe transfer defaults"
+        }
+        return clientConfigurationStatus
+    }
 
     private let fileManager = FileManager.default
+    private let uploadSerialGate = MobileAsyncSerialGate()
+    private let downloadSerialGate = MobileAsyncSerialGate()
     private let root: URL
     private let musicDirectory: URL
     private let artworkDirectory: URL
     private let stateURL: URL
+    private let backupStateURL: URL
     private var player: AVAudioPlayer?
     private var timer: Timer?
     private var history: [UUID] = []
@@ -86,11 +576,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var audioSessionObservers: [NSObjectProtocol] = []
     private var wasPlayingBeforeInterruption = false
     private var playlistRevision = 0
+    private var playlistMutationGeneration: UInt64 = 0
+    private var catalogRequestGeneration: UInt64 = 0
+    private var uploadCatalogMutationGeneration: UInt64 = 0
+    private var uploadedSongsAwaitingCatalog: [String: MobileRemoteSong] = [:]
     private var knownRemotePlaylistIDs: Set<UUID> = []
     private var dirtyPlaylistIDs: Set<UUID> = []
     private var deletedPlaylistIDs: Set<UUID> = []
     private var playlistSyncServerURL: String?
     private var playlistSyncTask: Task<Void, Never>?
+    private var clientConfigRefreshTask: Task<Void, Never>?
+    private var activeDownloadAuthorizations: [UUID: MobileTransferAuthorization] = [:]
     private var remoteLikedSongIDs: Set<String> = []
     private var dirtyRemoteLikeSongIDs: Set<String> = []
     private var likesMutationGeneration: UInt64 = 0
@@ -99,6 +595,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var dirtyClipRangeKeys: Set<String> = []
     private var deletedClipRangeKeys: Set<String> = []
     private var clipRangeMutationGeneration: UInt64 = 0
+    private var profileSyncStates: [MobileServerContext: MobileProfileSyncState] = [:]
+    private var clientConfigRequestGeneration: UInt64 = 0
+    private var streamingTrack: MobileTrack?
+    private var streamingPlayer: AVPlayer?
+    private var streamingResourceLoader: MobileAuthenticatedStreamResourceLoader?
+    private var streamingAuthorizationLease: MobileAuthenticatedStreamAuthorizationLease?
+    private var streamingEndObserver: NSObjectProtocol?
+    private var streamingFailureObserver: NSObjectProtocol?
+    private var streamingStatusObservation: NSKeyValueObservation?
+    private var streamingGeneration: UInt64 = 0
 
     private struct EmbeddedMetadata {
         var title: String?
@@ -114,7 +620,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         musicDirectory = root.appendingPathComponent("Music", isDirectory: true)
         artworkDirectory = root.appendingPathComponent("Artwork", isDirectory: true)
         stateURL = root.appendingPathComponent("library.json")
+        backupStateURL = root.appendingPathComponent("library.backup.json")
         super.init()
+        removeOrphanedTransferArtifacts()
         try? fileManager.createDirectory(at: musicDirectory, withIntermediateDirectories: true)
         try? fileManager.createDirectory(at: artworkDirectory, withIntermediateDirectories: true)
         load()
@@ -123,7 +631,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         shuffleEnabled = UserDefaults.standard.bool(forKey: "Resonance.shuffle")
         repeatEnabled = UserDefaults.standard.bool(forKey: "Resonance.repeat")
         serverToken = Self.readToken(account: "client")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         serverAdminToken = Self.readToken(account: "admin")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         configureAudioSession()
         observeAudioSession()
         configureRemoteCommands()
@@ -135,6 +645,14 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     deinit {
         timer?.invalidate()
         playlistSyncTask?.cancel()
+        clientConfigRefreshTask?.cancel()
+        activeDownloadAuthorizations.values.forEach { $0.revoke() }
+        if let streamingEndObserver { NotificationCenter.default.removeObserver(streamingEndObserver) }
+        if let streamingFailureObserver { NotificationCenter.default.removeObserver(streamingFailureObserver) }
+        streamingStatusObservation?.invalidate()
+        streamingPlayer?.pause()
+        streamingResourceLoader?.invalidate()
+        streamingAuthorizationLease?.invalidate()
         for observer in audioSessionObservers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -143,12 +661,680 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     var currentTrack: MobileTrack? {
         guard let currentTrackID else { return nil }
         return tracks.first { $0.id == currentTrackID }
+            ?? streamingTrack.flatMap { $0.id == currentTrackID ? $0 : nil }
+    }
+
+    private func removeOrphanedTransferArtifacts() {
+        MobileOwnedTransferArtifactCleaner.removeOrphans(
+            temporaryDirectory: fileManager.temporaryDirectory,
+            stagingDirectory: root.appendingPathComponent("LocalImports", isDirectory: true),
+            fileManager: fileManager
+        )
+    }
+
+    var activeServerContext: MobileServerContext? {
+        guard let server = URL(string: serverURL) else { return nil }
+        return MobileServerEndpointPolicy.context(serverURL: server, profileID: syncProfileID)
+    }
+
+    func belongsToActiveServerContext(_ track: MobileTrack) -> Bool {
+        guard track.remoteID != nil else { return true }
+        guard let activeServerContext else { return false }
+        return track.remoteIdentity()?.context == activeServerContext
+    }
+
+    func selectUploadMode(_ mode: MobileUploadMode) {
+        guard availableUploadModes.contains(mode), let scope = transferPreferenceScope else { return }
+        selectedUploadMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: scope.uploadKey)
+    }
+
+    func selectDownloadMode(_ mode: MobileDownloadMode) {
+        guard availableDownloadModes.contains(mode), let scope = transferPreferenceScope else { return }
+        if selectedDownloadMode != mode {
+            revokeActiveDownloadAuthorizations()
+            if isTransientStreamActive {
+                discardStreamingPlayback()
+                showTransferNotice(
+                    title: "Stream stopped",
+                    detail: "The selected download mode changed.",
+                    isError: false
+                )
+            }
+        }
+        selectedDownloadMode = mode
+        if mode == .streamOnly { selectedRemoteSongIDs.removeAll() }
+        UserDefaults.standard.set(mode.rawValue, forKey: scope.downloadKey)
+    }
+
+    func refreshClientConfiguration() async {
+        clientConfigRequestGeneration &+= 1
+        let requestGeneration = clientConfigRequestGeneration
+        let accessToken = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bearerToken = accessToken.isEmpty ? adminToken : accessToken
+        guard let baseURL = normalizedServer(),
+              let origin = MobileClientConfigOrigin.normalized(baseURL),
+              !bearerToken.isEmpty else {
+            useSafeClientConfiguration(status: "Using safe transfer defaults")
+            return
+        }
+        let requestProfileID = syncProfileID
+        let tokenFingerprint = MobileClientConfigCacheScope.tokenFingerprint(bearerToken)
+        let appVersion = clientAppVersion
+        let appBuild = clientAppBuild
+        let cohortKey = clientCohortKey
+        let requestContext = MobileClientRequestContext(
+            profileID: requestProfileID,
+            platform: "ios",
+            appVersion: appVersion,
+            appBuild: appBuild,
+            cohortKey: cohortKey
+        )
+        guard requestContext.isComplete else {
+            useSafeClientConfiguration(status: "Invalid client build context; using safe defaults")
+            return
+        }
+        let expected = MobileClientConfigExpectedAudience(
+            origin: origin,
+            profileID: requestProfileID,
+            appVersion: appVersion,
+            appBuild: appBuild,
+            cohortKey: cohortKey
+        )
+        let cacheScope = MobileClientConfigCacheScope(
+            origin: origin,
+            profileID: requestProfileID,
+            platform: "ios",
+            appVersion: appVersion,
+            appBuild: String(appBuild),
+            tokenFingerprint: tokenFingerprint
+        )
+        var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/client-config"))
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        requestContext.apply(to: &request)
+
+        do {
+            let (body, response) = try await sameOriginData(for: request, origin: baseURL)
+            guard let response = response as? HTTPURLResponse else {
+                throw URLError(.badServerResponse)
+            }
+            guard isCurrentClientConfigRequest(
+                generation: requestGeneration,
+                origin: origin,
+                profileID: requestProfileID,
+                tokenFingerprint: tokenFingerprint
+            ) else { return }
+            guard MobileSameOriginPolicy.matches(response.url, baseURL) else {
+                UserDefaults.standard.removeObject(forKey: cacheScope.storageKey)
+                useSafeClientConfiguration(status: "Invalid feature response; using safe defaults")
+                return
+            }
+            switch MobileClientConfigHTTPPolicy.disposition(
+                status: response.statusCode,
+                contentType: response.value(forHTTPHeaderField: "Content-Type")
+            ) {
+            case .evictAndUseSafeDefaults:
+                UserDefaults.standard.removeObject(forKey: cacheScope.storageKey)
+                useSafeClientConfiguration(
+                    status: response.statusCode == 404 || response.statusCode == 405
+                        ? "Server uses safe legacy transfer defaults"
+                        : "Invalid feature response; using safe defaults"
+                )
+                return
+            case .useFreshCache:
+                if let verified = cachedClientConfiguration(
+                    scope: cacheScope,
+                    expected: expected,
+                    token: bearerToken
+                ) {
+                    adoptClientConfiguration(verified, status: "Using verified cached feature policy")
+                } else {
+                    useSafeClientConfiguration(status: "Feature policy unavailable; using safe defaults")
+                }
+                return
+            case .verify:
+                break
+            }
+            let digest = response.value(forHTTPHeaderField: "Content-Digest")
+            let signature = response.value(forHTTPHeaderField: "X-Resonance-Config-Signature")
+            let verified: MobileVerifiedClientConfiguration
+            do {
+                verified = try MobileClientConfigVerifier.verify(
+                    body: body,
+                    contentDigest: digest,
+                    signature: signature,
+                    accessToken: bearerToken,
+                    expected: expected
+                )
+            } catch {
+                UserDefaults.standard.removeObject(forKey: cacheScope.storageKey)
+                useSafeClientConfiguration(status: "Invalid feature policy; using safe defaults")
+                return
+            }
+            guard recordVerifiedRevision(verified.payload.revision, scope: cacheScope) else {
+                UserDefaults.standard.removeObject(forKey: cacheScope.storageKey)
+                useSafeClientConfiguration(status: "Rejected stale feature revision; using safe defaults")
+                return
+            }
+            guard let digest, let signature else {
+                throw MobileClientConfigVerificationError.missingSignature
+            }
+            let record = MobileClientConfigCacheRecord(
+                body: body,
+                contentDigest: digest,
+                signature: signature,
+                cachedAt: .now
+            )
+            if let encoded = try? JSONEncoder().encode(record) {
+                UserDefaults.standard.set(encoded, forKey: cacheScope.storageKey)
+            }
+            adoptClientConfiguration(verified, status: "Feature policy revision \(verified.payload.revision)")
+        } catch is MobileBoundedResponseError {
+            guard isCurrentClientConfigRequest(
+                generation: requestGeneration,
+                origin: origin,
+                profileID: requestProfileID,
+                tokenFingerprint: tokenFingerprint
+            ) else { return }
+            UserDefaults.standard.removeObject(forKey: cacheScope.storageKey)
+            useSafeClientConfiguration(status: "Oversized feature response; using safe defaults")
+        } catch let error as URLError where error.code == .dataNotAllowed {
+            guard isCurrentClientConfigRequest(
+                generation: requestGeneration,
+                origin: origin,
+                profileID: requestProfileID,
+                tokenFingerprint: tokenFingerprint
+            ) else { return }
+            UserDefaults.standard.removeObject(forKey: cacheScope.storageKey)
+            useSafeClientConfiguration(status: "Cross-origin feature response blocked; using safe defaults")
+        } catch {
+            guard isCurrentClientConfigRequest(
+                generation: requestGeneration,
+                origin: origin,
+                profileID: requestProfileID,
+                tokenFingerprint: tokenFingerprint
+            ) else { return }
+            guard MobileClientConfigTransportPolicy.mayUseFreshCache(for: error) else {
+                UserDefaults.standard.removeObject(forKey: cacheScope.storageKey)
+                useSafeClientConfiguration(status: "Invalid feature response; using safe defaults")
+                return
+            }
+            guard let verified = cachedClientConfiguration(
+                scope: cacheScope,
+                expected: expected,
+                token: bearerToken
+            ) else {
+                useSafeClientConfiguration(status: "Feature policy unavailable; using safe defaults")
+                return
+            }
+            adoptClientConfiguration(verified, status: "Using verified cached feature policy")
+        }
+    }
+
+    private var clientAppVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+    }
+
+    private var clientAppBuild: Int {
+        let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+        return Int(value) ?? 0
+    }
+
+    private var clientCohortKey: String {
+        let key = "Resonance.clientConfig.cohortKey.v1"
+        if let existing = UserDefaults.standard.string(forKey: key),
+           MobileClientConfigCohort.isValidKey(existing) {
+            return existing
+        }
+        var bytes = [UInt8](repeating: 0, count: 16)
+        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
+            bytes = Array(SHA256.hash(data: Data(UUID().uuidString.utf8)).prefix(16))
+        }
+        let generated = Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        UserDefaults.standard.set(generated, forKey: key)
+        return generated
+    }
+
+    private var transferPreferenceScope: MobileTransferPreferenceScope? {
+        guard let baseURL = normalizedServer(),
+              let origin = MobileClientConfigOrigin.normalized(baseURL) else { return nil }
+        return MobileTransferPreferenceScope(origin: origin, profileID: syncProfileID)
+    }
+
+    private func setClientConfigContextHeaders(
+        on request: inout URLRequest,
+        profileID: String? = nil
+    ) {
+        clientRequestContext(profileID: profileID).apply(to: &request)
+    }
+
+    private func clientRequestContext(profileID: String? = nil) -> MobileClientRequestContext {
+        MobileClientRequestContext(
+            profileID: profileID ?? syncProfileID,
+            platform: "ios",
+            appVersion: clientAppVersion,
+            appBuild: clientAppBuild,
+            cohortKey: clientCohortKey
+        )
+    }
+
+    private func sameOriginData(
+        for request: URLRequest,
+        origin: URL,
+        maximumBytes: Int = MobileBoundedResponsePolicy.clientConfigMaximumBytes
+    ) async throws -> (Data, URLResponse) {
+        guard MobileSameOriginPolicy.matches(request.url, origin) else {
+            throw URLError(.dataNotAllowed)
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        configuration.urlCache = nil
+        let delegate = MobileSameOriginRedirectDelegate(origin: origin)
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let (bytes, response) = try await session.bytes(for: request)
+        guard MobileSameOriginPolicy.matches(response.url, origin) else {
+            throw URLError(.dataNotAllowed)
+        }
+        if response.expectedContentLength > 0,
+           response.expectedContentLength > Int64(maximumBytes) {
+            throw MobileBoundedResponseError.tooLarge(limit: maximumBytes)
+        }
+        var data = Data()
+        if response.expectedContentLength > 0 {
+            data.reserveCapacity(min(Int(response.expectedContentLength), maximumBytes))
+        }
+        for try await byte in bytes {
+            guard MobileBoundedResponsePolicy.accepts(
+                currentCount: data.count,
+                adding: 1,
+                maximum: maximumBytes
+            ) else {
+                throw MobileBoundedResponseError.tooLarge(limit: maximumBytes)
+            }
+            data.append(byte)
+        }
+        return (data, response)
+    }
+
+    private func sameOriginUpload(
+        for request: URLRequest,
+        fromFile source: URL,
+        origin: URL
+    ) async throws -> (Data, URLResponse) {
+        guard MobileSameOriginPolicy.matches(request.url, origin) else {
+            throw URLError(.dataNotAllowed)
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        configuration.urlCache = nil
+        let delegate = MobileSameOriginRedirectDelegate(origin: origin)
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let result = try await session.upload(for: request, fromFile: source)
+        guard MobileSameOriginPolicy.matches(result.1.url, origin) else {
+            throw URLError(.dataNotAllowed)
+        }
+        return result
+    }
+
+    private func isCurrentClientConfigRequest(
+        generation: UInt64,
+        origin: String,
+        profileID: String,
+        tokenFingerprint: String
+    ) -> Bool {
+        let accessToken = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentToken = accessToken.isEmpty ? adminToken : accessToken
+        guard generation == clientConfigRequestGeneration,
+              profileID == syncProfileID,
+              tokenFingerprint == MobileClientConfigCacheScope.tokenFingerprint(currentToken),
+              let baseURL = normalizedServer(),
+              MobileClientConfigOrigin.normalized(baseURL) == origin else { return false }
+        return true
+    }
+
+    private func cachedClientConfiguration(
+        scope: MobileClientConfigCacheScope,
+        expected: MobileClientConfigExpectedAudience,
+        token: String,
+        now: Date = .now
+    ) -> MobileVerifiedClientConfiguration? {
+        guard let data = UserDefaults.standard.data(forKey: scope.storageKey),
+              let record = try? JSONDecoder().decode(MobileClientConfigCacheRecord.self, from: data),
+              MobileClientConfigCachePolicy.isFresh(record, now: now),
+              let verified = try? MobileClientConfigVerifier.verify(
+                body: record.body,
+                contentDigest: record.contentDigest,
+                signature: record.signature,
+                accessToken: token,
+                expected: expected,
+                now: now
+              ),
+              recordVerifiedRevision(verified.payload.revision, scope: scope) else {
+            UserDefaults.standard.removeObject(forKey: scope.storageKey)
+            return nil
+        }
+        return verified
+    }
+
+    private func recordVerifiedRevision(
+        _ revision: Int,
+        scope: MobileClientConfigCacheScope
+    ) -> Bool {
+        let defaults = UserDefaults.standard
+        let highest = (defaults.object(forKey: scope.highestRevisionKey) as? NSNumber)?.intValue
+        guard MobileClientConfigRevisionPolicy.accepts(
+            candidate: revision,
+            highestVerified: highest
+        ) else { return false }
+        if highest.map({ revision > $0 }) ?? true {
+            defaults.set(revision, forKey: scope.highestRevisionKey)
+        }
+        return true
+    }
+
+    private func adoptClientConfiguration(
+        _ verified: MobileVerifiedClientConfiguration,
+        status: String
+    ) {
+        let nextConfiguration = MobileClientFeatureConfiguration(verified: verified)
+        let samePolicy = nextConfiguration.hasSamePolicy(as: clientFeatureConfiguration)
+        if !samePolicy {
+            revokeActiveDownloadAuthorizations()
+        }
+        if let streamingAuthorizationLease {
+            let accessToken = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            let renewed = MobileTransferModePolicy.effectiveDownloadMode(
+                    preferred: selectedDownloadMode,
+                    configuration: nextConfiguration
+                ) == .streamOnly
+                && !accessToken.isEmpty
+                && authenticatedStreamLeaseContext(
+                    baseURL: normalizedServer(),
+                    profileID: syncProfileID,
+                    accessToken: accessToken
+                ).map {
+                    streamingAuthorizationLease.renew(
+                        context: $0,
+                        expiresAt: verified.expiresAt
+                    )
+                } == true
+            if !renewed {
+                discardStreamingPlayback()
+                showTransferNotice(
+                    title: "Stream stopped",
+                    detail: "The signed stream policy changed.",
+                    isError: true
+                )
+            }
+        }
+        clientFeatureConfiguration = nextConfiguration
+        clientConfigurationStatus = status
+        reconcileTransferModePreferences()
+        // Use the latest signed expiration for both the active stream lease and
+        // the proactive configuration refresh. A shortened authoritative lease
+        // therefore refreshes sooner without being treated as a revocation.
+        scheduleClientConfigurationRefresh(expiresAt: verified.expiresAt)
+    }
+
+    private func useSafeClientConfiguration(status: String) {
+        clientConfigRefreshTask?.cancel()
+        clientConfigRefreshTask = nil
+        revokeActiveDownloadAuthorizations()
+        if isTransientStreamActive {
+            discardStreamingPlayback()
+            showTransferNotice(
+                title: "Stream stopped",
+                detail: "The signed stream policy is unavailable or expired.",
+                isError: true
+            )
+        }
+        clientFeatureConfiguration = .safeDefaults
+        clientConfigurationStatus = status
+        reconcileTransferModePreferences()
+    }
+
+    private func scheduleClientConfigurationRefresh(expiresAt: Date) {
+        clientConfigRefreshTask?.cancel()
+        guard let delay = MobileClientConfigRefreshPolicy.delay(until: expiresAt) else {
+            useSafeClientConfiguration(status: "Feature policy expired; using safe transfer defaults")
+            return
+        }
+        clientConfigRefreshTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+                try Task.checkCancellation()
+                await self?.refreshClientConfiguration()
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func reconcileTransferModePreferences() {
+        let defaults = UserDefaults.standard
+        let storedUpload = transferPreferenceScope
+            .flatMap { defaults.string(forKey: $0.uploadKey) }
+            .flatMap(MobileUploadMode.init(rawValue:))
+        let storedDownload = transferPreferenceScope
+            .flatMap { defaults.string(forKey: $0.downloadKey) }
+            .flatMap(MobileDownloadMode.init(rawValue:))
+        selectedUploadMode = MobileTransferModePolicy.effectiveUploadMode(
+            preferred: storedUpload,
+            configuration: clientFeatureConfiguration
+        ) ?? .localFile
+        selectedDownloadMode = MobileTransferModePolicy.effectiveDownloadMode(
+            preferred: storedDownload,
+            configuration: clientFeatureConfiguration
+        ) ?? .verifiedFileCache
+        if activeDownloadMode == .streamOnly { selectedRemoteSongIDs.removeAll() }
+    }
+
+    func captureReviewedMatchLease() -> MobileReviewedMatchLease? {
+        guard let transferPolicy = MobileTransferPolicyLeasePolicy.captureUpload(
+            .reviewedMatch,
+            configuration: clientFeatureConfiguration,
+            preferredMode: selectedUploadMode
+        ),
+        let baseURL = normalizedServer(),
+        let origin = MobileClientConfigOrigin.normalized(baseURL) else { return nil }
+        let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestContext = clientRequestContext(profileID: syncProfileID)
+        guard !adminToken.isEmpty, requestContext.isComplete else { return nil }
+        return MobileReviewedMatchLease(
+            transferPolicy: transferPolicy,
+            origin: origin,
+            profileID: syncProfileID,
+            adminTokenFingerprint: MobileClientConfigCacheScope.tokenFingerprint(adminToken),
+            requestContext: requestContext
+        )
+    }
+
+    func isReviewedMatchLeaseCurrent(_ lease: MobileReviewedMatchLease) -> Bool {
+        guard isReviewedMatchRequestContextCurrent(lease) else { return false }
+        return MobileTransferPolicyLeasePolicy.isCurrent(
+            lease.transferPolicy,
+            configuration: clientFeatureConfiguration,
+            preferredUploadMode: selectedUploadMode,
+            preferredDownloadMode: selectedDownloadMode
+        )
+    }
+
+    func isReviewedMatchRequestContextCurrent(_ lease: MobileReviewedMatchLease) -> Bool {
+        let currentAdminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard lease.profileID == syncProfileID,
+              lease.requestContext == clientRequestContext(profileID: syncProfileID),
+              lease.adminTokenFingerprint == MobileClientConfigCacheScope.tokenFingerprint(currentAdminToken),
+              let baseURL = normalizedServer(),
+              MobileClientConfigOrigin.normalized(baseURL) == lease.origin else { return false }
+        return true
+    }
+
+    private func captureRawUploadLease(
+        mode: MobileUploadMode,
+        baseURL: URL,
+        profileID: String
+    ) -> MobileRawUploadLease? {
+        guard let transferPolicy = MobileTransferPolicyLeasePolicy.captureUpload(
+            mode,
+            configuration: clientFeatureConfiguration,
+            preferredMode: selectedUploadMode
+        ),
+        let origin = MobileClientConfigOrigin.normalized(baseURL) else { return nil }
+        let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestContext = clientRequestContext(profileID: profileID)
+        guard !adminToken.isEmpty, requestContext.isComplete else { return nil }
+        return MobileRawUploadLease(
+            transferPolicy: transferPolicy,
+            mode: mode,
+            origin: origin,
+            profileID: profileID,
+            adminTokenFingerprint: MobileClientConfigCacheScope.tokenFingerprint(adminToken),
+            requestContext: requestContext
+        )
+    }
+
+    private func isRawUploadLeaseCurrent(_ lease: MobileRawUploadLease) -> Bool {
+        guard isRawUploadRequestContextCurrent(lease) else { return false }
+        return MobileTransferPolicyLeasePolicy.isCurrent(
+            lease.transferPolicy,
+            configuration: clientFeatureConfiguration,
+            preferredUploadMode: selectedUploadMode,
+            preferredDownloadMode: selectedDownloadMode
+        )
+    }
+
+    private func isRawUploadRequestContextCurrent(_ lease: MobileRawUploadLease) -> Bool {
+        let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard lease.profileID == syncProfileID,
+              lease.requestContext == clientRequestContext(profileID: syncProfileID),
+              lease.adminTokenFingerprint == MobileClientConfigCacheScope.tokenFingerprint(adminToken),
+              let baseURL = normalizedServer(),
+              MobileClientConfigOrigin.normalized(baseURL) == lease.origin else { return false }
+        return true
+    }
+
+    private func authenticatedStreamLeaseContext(
+        baseURL: URL?,
+        profileID: String,
+        accessToken: String
+    ) -> MobileAuthenticatedStreamLeaseContext? {
+        guard let baseURL,
+              let origin = MobileClientConfigOrigin.normalized(baseURL),
+              !accessToken.isEmpty else { return nil }
+        let requestContext = clientRequestContext(profileID: profileID)
+        guard requestContext.isComplete else { return nil }
+        return MobileAuthenticatedStreamLeaseContext(
+            origin: origin,
+            requestContext: requestContext,
+            tokenFingerprint: MobileClientConfigCacheScope.tokenFingerprint(accessToken)
+        )
+    }
+
+    private func captureDownloadPolicyLease(
+        _ mode: MobileDownloadMode
+    ) -> MobileTransferPolicyLease? {
+        MobileTransferPolicyLeasePolicy.captureDownload(
+            mode,
+            configuration: clientFeatureConfiguration,
+            preferredMode: selectedDownloadMode
+        )
+    }
+
+    private func isDownloadPolicyLeaseCurrent(_ lease: MobileTransferPolicyLease) -> Bool {
+        MobileTransferPolicyLeasePolicy.isCurrent(
+            lease,
+            configuration: clientFeatureConfiguration,
+            preferredUploadMode: selectedUploadMode,
+            preferredDownloadMode: selectedDownloadMode
+        )
+    }
+
+    private func registerDownloadAuthorization(
+        for lease: MobileTransferPolicyLease
+    ) -> (id: UUID, authorization: MobileTransferAuthorization)? {
+        guard isDownloadPolicyLeaseCurrent(lease) else { return nil }
+        let authorization = MobileTransferAuthorization(
+            expiresAt: lease.configuration.expiresAt
+        )
+        guard authorization.isAuthorized() else { return nil }
+        let id = UUID()
+        activeDownloadAuthorizations[id] = authorization
+        return (id, authorization)
+    }
+
+    private func releaseDownloadAuthorization(_ id: UUID) {
+        activeDownloadAuthorizations.removeValue(forKey: id)
+    }
+
+    private func revokeActiveDownloadAuthorizations() {
+        let authorizations = Array(activeDownloadAuthorizations.values)
+        activeDownloadAuthorizations.removeAll()
+        authorizations.forEach { $0.revoke() }
+    }
+
+    func resolveReviewedMatch(
+        source rawSource: String,
+        lease: MobileReviewedMatchLease
+    ) async throws -> LocalImportResolution {
+        guard isReviewedMatchLeaseCurrent(lease),
+              let baseURL = normalizedServer() else {
+            throw MobileTransferPolicyChangedError.changed
+        }
+        let source = rawSource.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty, source.utf8.count <= 8_192 else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "INVALID_REVIEW_SOURCE",
+                message: "Enter one Spotify track or YouTube video link to review."
+            )
+        }
+        let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let endpoint = baseURL.appendingPathComponent("api/v1/admin/debrid/resolve")
+        guard MobileSameOriginPolicy.matches(endpoint, baseURL) else {
+            throw URLError(.dataNotAllowed)
+        }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
+        lease.requestContext.apply(to: &request)
+        request.httpBody = try JSONEncoder().encode(["source": source])
+
+        let (data, response) = try await sameOriginData(
+            for: request,
+            origin: baseURL,
+            maximumBytes: MobileBoundedResponsePolicy.sourceImportMaximumBytes
+        )
+        guard isReviewedMatchLeaseCurrent(lease) else {
+            throw MobileTransferPolicyChangedError.changed
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        guard http.statusCode == 200 else {
+            throw playlistServerError(status: http.statusCode, data: data)
+        }
+        guard MobileClientConfigHTTPPolicy.disposition(
+            status: http.statusCode,
+            contentType: http.value(forHTTPHeaderField: "Content-Type")
+        ) == .verify else {
+            throw URLError(.cannotParseResponse)
+        }
+        return try JSONDecoder().decode(MobileReviewedMatchResponse.self, from: data)
+            .reviewedResolution()
     }
 
     var tracksForActiveProfile: [MobileTrack] {
-        tracks.filter {
-            $0.remoteID == nil || ($0.syncProfileID ?? "default") == syncProfileID
-        }
+        tracks.filter(belongsToActiveServerContext)
     }
 
     var filteredTracks: [MobileTrack] {
@@ -162,7 +1348,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func fileURL(for track: MobileTrack) -> URL {
-        musicDirectory.appendingPathComponent(track.relativePath)
+        return musicDirectory.appendingPathComponent(track.relativePath)
     }
 
     func artwork(for track: MobileTrack) -> UIImage? {
@@ -477,6 +1663,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         startingAt requestedPosition: TimeInterval = 0
     ) {
         stopTimer()
+        if streamingTrack != nil {
+            discardStreamingPlayback()
+        }
         if recordHistory, currentTrackID != track.id, let currentTrackID {
             history.append(currentTrackID)
         }
@@ -498,12 +1687,18 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             }
             player = next
             currentTrackID = track.id
-            UserDefaults.standard.set(track.id.uuidString, forKey: "Resonance.currentTrack")
+            let isTransientStream = streamingTrack?.id == track.id
+            if isTransientStream {
+                UserDefaults.standard.removeObject(forKey: "Resonance.currentTrack")
+            } else {
+                UserDefaults.standard.set(track.id.uuidString, forKey: "Resonance.currentTrack")
+            }
             isPlaying = true
             position = resumePosition
             UserDefaults.standard.set(position, forKey: "Resonance.position")
             startTimer()
             updateNowPlaying()
+            if !isTransientStream { save() }
         } catch {
             stopTimer()
             isPlaying = false
@@ -511,7 +1706,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func togglePlay() {
-        if player?.isPlaying == true || isPlaying {
+        if player?.isPlaying == true
+            || streamingPlayer?.timeControlStatus == .playing
+            || isPlaying {
             pausePlayback()
         } else {
             resumePlayback()
@@ -519,6 +1716,18 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func resumePlayback() {
+        if isTransientStreamActive, let streamingPlayer {
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+                streamingPlayer.playImmediately(atRate: playbackRate)
+                isPlaying = true
+                startTimer()
+            } catch {
+                isPlaying = false
+            }
+            updateNowPlaying()
+            return
+        }
         guard let player else {
             guard let track = currentTrack ?? tracksForActiveProfile.first else { return }
             if playbackQueue.isEmpty {
@@ -548,6 +1757,15 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func pausePlayback() {
+        if isTransientStreamActive, let streamingPlayer {
+            streamingPlayer.pause()
+            let currentTime = streamingPlayer.currentTime().seconds
+            if currentTime.isFinite { position = max(currentTime, 0) }
+            stopTimer()
+            isPlaying = false
+            updateNowPlaying()
+            return
+        }
         if let player {
             player.pause()
             position = player.currentTime
@@ -559,6 +1777,23 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func seek(to fraction: Double) {
+        if isTransientStreamActive,
+           let streamingPlayer,
+           let track = streamingTrack {
+            let bounds = playbackBounds(for: track)
+            let target = MobileClipPlaybackPolicy.position(
+                fraction: fraction,
+                within: .init(start: bounds.start, end: bounds.end)
+            )
+            position = target
+            streamingPlayer.seek(
+                to: CMTime(seconds: target, preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+            updateNowPlaying()
+            return
+        }
         guard let player, let track = currentTrack else { return }
         let bounds = playbackBounds(for: track, duration: player.duration)
         player.currentTime = bounds.start + (bounds.end - bounds.start) * min(max(fraction, 0), 1)
@@ -568,6 +1803,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func next() {
+        guard !isTransientStreamActive else { return }
         let queue = activeQueue
         guard !queue.isEmpty else { return }
         if shuffleEnabled, let next = queue.filter({ $0.id != currentTrackID }).randomElement() ?? queue.first {
@@ -579,6 +1815,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func previous() {
+        guard !isTransientStreamActive else { return }
         if let player, let track = currentTrack {
             let bounds = playbackBounds(for: track, duration: player.duration)
             if player.currentTime > bounds.start + 3 {
@@ -647,16 +1884,26 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private var activeQueue: [MobileTrack] {
-        let activeTrackIDs = Set(tracksForActiveProfile.map(\.id))
+        var playableTracks = tracksForActiveProfile
+        if let streamingTrack { playableTracks.append(streamingTrack) }
+        let activeTrackIDs = Set(playableTracks.map(\.id))
         let queuedTracks: [MobileTrack] = playbackQueue.compactMap { id in
             guard activeTrackIDs.contains(id) else { return nil }
-            return tracks.first { $0.id == id }
+            return playableTracks.first { $0.id == id }
         }
         if playbackPlaylistID != nil { return queuedTracks }
-        return queuedTracks.isEmpty ? tracksForActiveProfile : queuedTracks
+        return queuedTracks.isEmpty ? playableTracks : queuedTracks
     }
 
     func toggleFavorite(_ track: MobileTrack) {
+        guard streamingTrack?.id != track.id else {
+            showTransferNotice(
+                title: "Stream is temporary",
+                detail: "Download the song before adding it to Liked Songs.",
+                isError: false
+            )
+            return
+        }
         let willLike = !favorites.contains(track.id)
         if willLike { favorites.insert(track.id) } else { favorites.remove(track.id) }
         if let remoteID = track.remoteID {
@@ -675,6 +1922,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         guard !trimmed.isEmpty else { return }
         let playlist = MobilePlaylist(name: trimmed, remoteSongIDs: [])
         playlists.append(playlist)
+        playlistMutationGeneration &+= 1
         dirtyPlaylistIDs.insert(playlist.id)
         save()
         schedulePlaylistSync()
@@ -685,6 +1933,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
               playlists.contains(where: { $0.id == playlist.id }) else { return }
 
         playlists.removeAll { $0.id == playlist.id }
+        playlistMutationGeneration &+= 1
         dirtyPlaylistIDs.remove(playlist.id)
         deletedPlaylistIDs.insert(playlist.id)
 
@@ -698,10 +1947,19 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func add(_ track: MobileTrack, to playlist: MobilePlaylist) {
+        guard streamingTrack?.id != track.id else {
+            showTransferNotice(
+                title: "Stream is temporary",
+                detail: "Download the song before adding it to a playlist.",
+                isError: false
+            )
+            return
+        }
         guard let index = playlists.firstIndex(where: { $0.id == playlist.id }), !playlists[index].isSystem else { return }
         if !playlists[index].trackIDs.contains(track.id) {
             playlists[index].trackIDs.append(track.id)
             updateRemoteSongIDs(forPlaylistAt: index)
+            playlistMutationGeneration &+= 1
             dirtyPlaylistIDs.insert(playlist.id)
             if playbackPlaylistID == playlist.id {
                 playbackQueue = playlists[index].trackIDs
@@ -727,6 +1985,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         var seen = Set(playlists[index].trackIDs)
         playlists[index].trackIDs.append(contentsOf: importedIDs.filter { seen.insert($0).inserted })
         updateRemoteSongIDs(forPlaylistAt: index)
+        playlistMutationGeneration &+= 1
         dirtyPlaylistIDs.insert(playlists[index].id)
         save()
         schedulePlaylistSync()
@@ -746,6 +2005,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         guard playlists[index].trackIDs.contains(track.id) else { return }
         playlists[index].trackIDs.removeAll { $0 == track.id }
         updateRemoteSongIDs(forPlaylistAt: index)
+        playlistMutationGeneration &+= 1
         dirtyPlaylistIDs.insert(playlistID)
         if playbackPlaylistID == playlistID {
             playbackQueue = playlists[index].trackIDs
@@ -772,6 +2032,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         orderedIDs.insert(contentsOf: movingIDs, at: insertionIndex)
         playlists[playlistIndex].trackIDs = orderedIDs
         updateRemoteSongIDs(forPlaylistAt: playlistIndex)
+        playlistMutationGeneration &+= 1
         dirtyPlaylistIDs.insert(playlistID)
 
         if playbackPlaylistID == playlistID {
@@ -786,6 +2047,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func remove(_ track: MobileTrack) {
+        let removedClipKey = clipRangeKey(for: track)
         let removedCurrentTrack = currentTrackID == track.id
         if removedCurrentTrack {
             stopTimer()
@@ -802,11 +2064,24 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         playbackQueue.removeAll { $0 == track.id }
         history.removeAll { $0 == track.id }
         favorites.remove(track.id)
-        for index in playlists.indices { playlists[index].trackIDs.removeAll { $0 == track.id } }
-        let suffixes = ["|local:\(track.id.uuidString.lowercased())"] + (track.remoteID.map { ["|remote:\($0)"] } ?? [])
-        clipRanges = clipRanges.filter { key, _ in !suffixes.contains(where: key.hasSuffix) }
-        dirtyClipRangeKeys = dirtyClipRangeKeys.filter { key in !suffixes.contains(where: key.hasSuffix) }
-        deletedClipRangeKeys = deletedClipRangeKeys.filter { key in !suffixes.contains(where: key.hasSuffix) }
+        var removedFromCustomPlaylist = false
+        for index in playlists.indices {
+            guard playlists[index].trackIDs.contains(track.id) else { continue }
+            playlists[index].trackIDs.removeAll { $0 == track.id }
+            guard !playlists[index].isSystem else { continue }
+            if let remoteID = track.remoteID {
+                playlists[index].remoteSongIDs?.removeAll { $0 == remoteID }
+            }
+            dirtyPlaylistIDs.insert(playlists[index].id)
+            removedFromCustomPlaylist = true
+        }
+        if removedFromCustomPlaylist {
+            playlistMutationGeneration &+= 1
+            schedulePlaylistSync()
+        }
+        clipRanges.removeValue(forKey: removedClipKey)
+        dirtyClipRangeKeys.remove(removedClipKey)
+        deletedClipRangeKeys.remove(removedClipKey)
         if removedCurrentTrack {
             currentTrackID = tracksForActiveProfile.first?.id
             position = 0
@@ -826,19 +2101,42 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         guard !isRefreshingCatalog else { return }
         isRefreshingCatalog = true
         defer { isRefreshingCatalog = false }
+        await refreshClientConfiguration()
         await sync(songIDs: [])
         await syncPlaylistsNow()
     }
     func downloadSelected() async {
         guard !selectedRemoteSongIDs.isEmpty else { downloadDetail = "Select one or more songs first"; return }
+        guard activeDownloadMode != .streamOnly else {
+            downloadDetail = "Stream-only mode plays one song at a time. Tap a song to stream it."
+            showTransferNotice(title: "Offline download is off", detail: downloadDetail, isError: false)
+            return
+        }
         await sync(songIDs: selectedRemoteSongIDs)
         await syncPlaylistsNow()
     }
     func download(_ song: MobileRemoteSong) async {
+        if activeDownloadMode == .streamOnly {
+            await streamRemoteSong(song)
+            return
+        }
+        guard activeDownloadMode == .verifiedFileCache else {
+            showTransferNotice(
+                title: "Download unavailable",
+                detail: "The active server policy does not allow an offline or streaming transfer.",
+                isError: true
+            )
+            return
+        }
         await sync(songIDs: [song.id])
         await syncPlaylistsNow()
     }
     func downloadAll() async {
+        guard activeDownloadMode != .streamOnly else {
+            downloadDetail = "Stream-only mode does not save the server library. Tap a song to stream it."
+            showTransferNotice(title: "Offline download is off", detail: downloadDetail, isError: false)
+            return
+        }
         await sync(songIDs: nil)
         await syncPlaylistsNow()
     }
@@ -849,24 +2147,62 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func isSynced(_ song: MobileRemoteSong) -> Bool {
-        tracks.contains {
-            $0.remoteID == song.id && ($0.syncProfileID ?? "default") == syncProfileID
-        }
+        guard let activeServerContext else { return false }
+        let expected = MobileRemoteIdentity(context: activeServerContext, remoteID: song.id)
+        return tracks.contains { $0.remoteIdentity() == expected }
     }
 
     private func sync(songIDs: Set<String>?) async {
+        guard !isActivatingSyncProfile else { return }
+        let submittedContext = activeServerContext
+        await downloadSerialGate.acquire()
+        guard !isActivatingSyncProfile, submittedContext == activeServerContext else {
+            await downloadSerialGate.release()
+            return
+        }
+        await performSync(songIDs: songIDs)
+        await downloadSerialGate.release()
+    }
+
+    private func performSync(songIDs: Set<String>?) async {
         guard let baseURL = normalizedServer() else {
             isServerConnected = false
-            remoteSongs.removeAll()
+            remoteSongs = MobileCatalogRefreshMergePolicy.merge(
+                catalog: [],
+                uploadedSongsAwaitingCatalog: uploadedSongsAwaitingCatalog
+            )
             serverMessage = "Enter a valid server URL."
             return
         }
         guard !serverToken.isEmpty else {
             isServerConnected = false
-            remoteSongs.removeAll()
+            remoteSongs = MobileCatalogRefreshMergePolicy.merge(
+                catalog: [],
+                uploadedSongsAwaitingCatalog: uploadedSongsAwaitingCatalog
+            )
             serverMessage = "Enter the access token."
             return
         }
+        let requestsDownloads = songIDs.map { !$0.isEmpty } ?? true
+        let downloadPolicyLease: MobileTransferPolicyLease?
+        if requestsDownloads {
+            guard let captured = captureDownloadPolicyLease(.verifiedFileCache) else {
+                downloadDetail = "Verified offline downloads are no longer enabled by the signed server policy"
+                showTransferNotice(
+                    title: "Download policy changed",
+                    detail: downloadDetail,
+                    isError: true
+                )
+                return
+            }
+            downloadPolicyLease = captured
+        } else {
+            downloadPolicyLease = nil
+        }
+        catalogRequestGeneration &+= 1
+        let requestGeneration = catalogRequestGeneration
+        let submittedUploadMutationGeneration = uploadCatalogMutationGeneration
+        let requestProfileID = syncProfileID
         isSyncing = true
         defer { isSyncing = false }
         var reachedCatalog = false
@@ -877,13 +2213,30 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             let (catalogData, response) = try await URLSession.shared.data(for: catalogRequest)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
             let catalog = try JSONDecoder().decode(MobileRemoteCatalog.self, from: catalogData)
+            let catalogSongs = MobileCollectionNormalization.uniqueRemoteSongs(catalog.songs)
+            guard requestGeneration == catalogRequestGeneration,
+                  isCurrentServerContext(baseURL: baseURL, profileID: requestProfileID) else { return }
             reachedCatalog = true
             isServerConnected = true
-            remoteSongs = catalog.songs
-            selectedRemoteSongIDs.formIntersection(Set(catalog.songs.map(\.id)))
-            await backfillDownloadedArtwork(from: catalog.songs, baseURL: baseURL)
-            if songIDs == nil || !(songIDs?.isEmpty ?? true) {
-                let requestedSongs = songIDs.map { ids in catalog.songs.filter { ids.contains($0.id) } } ?? catalog.songs
+            let uploadMutatedWhileRefreshing = submittedUploadMutationGeneration != uploadCatalogMutationGeneration
+            remoteSongs = uploadMutatedWhileRefreshing || !uploadedSongsAwaitingCatalog.isEmpty
+                ? MobileCatalogRefreshMergePolicy.merge(
+                    catalog: catalogSongs,
+                    uploadedSongsAwaitingCatalog: uploadedSongsAwaitingCatalog
+                )
+                : catalogSongs
+            remoteSongs = MobileCollectionNormalization.uniqueRemoteSongs(remoteSongs)
+            for song in catalogSongs {
+                uploadedSongsAwaitingCatalog.removeValue(forKey: song.id)
+            }
+            selectedRemoteSongIDs.formIntersection(Set(remoteSongs.map(\.id)))
+            await backfillDownloadedArtwork(from: catalogSongs, baseURL: baseURL)
+            if let downloadPolicyLease,
+               !isDownloadPolicyLeaseCurrent(downloadPolicyLease) {
+                throw MobileTransferPolicyChangedError.changed
+            }
+            if requestsDownloads {
+                let requestedSongs = songIDs.map { ids in catalogSongs.filter { ids.contains($0.id) } } ?? catalogSongs
                 let songs = requestedSongs.filter { !isSynced($0) }
                 guard !songs.isEmpty else {
                     downloadProgress = 1
@@ -900,27 +2253,82 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 var processed = 0
                 var downloadedSongIDs = Set<String>()
                 for song in songs {
+                    guard let downloadPolicyLease,
+                          isDownloadPolicyLeaseCurrent(downloadPolicyLease) else {
+                        commitDownloadCheckpoint(downloadedSongIDs)
+                        throw MobileTransferPolicyChangedError.changed
+                    }
                     defer {
                         processed += 1
                         downloadProgress = Double(processed) / Double(max(songs.count, 1))
                     }
                     downloadDetail = "Downloading \(completed + 1) of \(songs.count) • \(song.filename)"
+                    guard song.size <= MobileDownloadIntegrityPolicy.maximumFileSize else {
+                        failed += 1
+                        let error = MobileDownloadIntegrityError.tooLarge(
+                            actual: song.size,
+                            limit: MobileDownloadIntegrityPolicy.maximumFileSize
+                        )
+                        recordTransferFailure(
+                            .download,
+                            item: song.title,
+                            reason: error.localizedDescription,
+                            retryTarget: .download(remoteSongID: song.id)
+                        )
+                        continue
+                    }
                     guard let remoteURL = URL(string: song.downloadURL, relativeTo: baseURL)?.absoluteURL else {
                         failed += 1
+                        recordTransferFailure(
+                            .download,
+                            item: song.title,
+                            reason: "The server returned an invalid download URL.",
+                            retryTarget: .download(remoteSongID: song.id)
+                        )
+                        continue
+                    }
+                    guard sameOrigin(remoteURL, baseURL) else {
+                        failed += 1
+                        recordTransferFailure(
+                            .download,
+                            item: song.title,
+                            reason: "The server returned a cross-origin file URL. Resonance only accepts the same-origin resolver.",
+                            retryTarget: .download(remoteSongID: song.id)
+                        )
                         continue
                     }
                     var request = URLRequest(url: remoteURL)
-                    if sameOrigin(remoteURL, baseURL) {
-                        request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
-                        setProfileHeader(on: &request)
-                    }
+                    request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+                    request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
+                    setClientConfigContextHeaders(on: &request, profileID: requestProfileID)
                     do {
-                        let (temporaryURL, downloadResponse) = try await URLSession.shared.download(for: request)
-                        defer { try? fileManager.removeItem(at: temporaryURL) }
-                        guard (downloadResponse as? HTTPURLResponse)?.statusCode == 200 else {
-                            failed += 1
-                            continue
+                        guard let authorization = registerDownloadAuthorization(
+                            for: downloadPolicyLease
+                        ) else {
+                            throw MobileTransferPolicyChangedError.changed
                         }
+                        defer { releaseDownloadAuthorization(authorization.id) }
+                        let boundedDownload = try MobileBoundedDownloadOperation(
+                            maximumSize: MobileDownloadIntegrityPolicy.maximumFileSize,
+                            authorization: authorization.authorization
+                        )
+                        let downloaded = try await boundedDownload.run(request: request)
+                        let temporaryURL = downloaded.temporaryURL
+                        defer { try? fileManager.removeItem(at: temporaryURL) }
+                        try Task.checkCancellation()
+                        guard isCurrentServerContext(baseURL: baseURL, profileID: requestProfileID),
+                              isDownloadPolicyLeaseCurrent(downloadPolicyLease) else {
+                            if !isDownloadPolicyLeaseCurrent(downloadPolicyLease) {
+                                throw MobileTransferPolicyChangedError.changed
+                            }
+                            throw CancellationError()
+                        }
+                        try MobileDownloadIntegrityPolicy.validate(
+                            expectedSize: song.size,
+                            expectedSHA256: song.contentSHA256,
+                            actualSize: downloaded.byteCount,
+                            actualSHA256: downloaded.sha256
+                        )
 
                         let audio = try AVAudioPlayer(contentsOf: temporaryURL)
                         let metadata = await embeddedMetadata(at: temporaryURL)
@@ -930,9 +2338,23 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                         } else {
                             artworkData = await remoteArtworkData(for: song, baseURL: baseURL)
                         }
+                        try Task.checkCancellation()
+                        guard isCurrentServerContext(baseURL: baseURL, profileID: requestProfileID),
+                              isDownloadPolicyLeaseCurrent(downloadPolicyLease) else {
+                            if !isDownloadPolicyLeaseCurrent(downloadPolicyLease) {
+                                throw MobileTransferPolicyChangedError.changed
+                            }
+                            throw CancellationError()
+                        }
                         let filename = uniqueFilename(song.filename)
                         let destination = musicDirectory.appendingPathComponent(filename)
                         try fileManager.moveItem(at: temporaryURL, to: destination)
+                        do {
+                            try markServerDownloadExcludedFromBackup(at: destination)
+                        } catch {
+                            try? fileManager.removeItem(at: destination)
+                            throw error
+                        }
                         let trackID = UUID()
                         tracks.append(MobileTrack(
                             id: trackID,
@@ -945,16 +2367,40 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                             sourceServer: baseURL.absoluteString,
                             syncProfileID: syncProfileID,
                             artworkFilename: saveArtwork(artworkData, for: trackID),
-                            artworkScanComplete: true
+                            artworkScanComplete: true,
+                            contentSHA256: downloaded.sha256
                         ))
                         downloadedSongIDs.insert(song.id)
                         completed += 1
+                        save()
+                    } catch is MobileTransferPolicyChangedError {
+                        commitDownloadCheckpoint(downloadedSongIDs)
+                        downloadDetail = "Download stopped because the signed policy changed after \(completed) completed"
+                        serverMessage = downloadDetail
+                        showTransferNotice(
+                            title: "Download policy changed",
+                            detail: downloadDetail,
+                            isError: true
+                        )
+                        return
                     } catch is CancellationError {
+                        commitDownloadCheckpoint(downloadedSongIDs)
+                        downloadDetail = "Download cancelled after \(completed) completed"
+                        serverMessage = downloadDetail
                         return
                     } catch let error as URLError where error.code == .cancelled {
+                        commitDownloadCheckpoint(downloadedSongIDs)
+                        downloadDetail = "Download cancelled after \(completed) completed"
+                        serverMessage = downloadDetail
                         return
                     } catch {
                         failed += 1
+                        recordTransferFailure(
+                            .download,
+                            item: song.title,
+                            reason: error.localizedDescription,
+                            retryTarget: .download(remoteSongID: song.id)
+                        )
                     }
                 }
                 normalizeSystemPlaylist()
@@ -972,17 +2418,30 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                         : "Synced \(completed) song\(completed == 1 ? "" : "s"); \(failed) failed"
                 }
             } else {
-                serverMessage = "Connected • \(catalog.count) song\(catalog.count == 1 ? "" : "s")"
+                if submittedUploadMutationGeneration == uploadCatalogMutationGeneration {
+                    serverMessage = "Connected • \(catalogSongs.count) song\(catalogSongs.count == 1 ? "" : "s")"
+                }
             }
-            Self.saveToken(serverToken, account: "client")
-            if !serverAdminToken.isEmpty { Self.saveToken(serverAdminToken, account: "admin") }
+        } catch is MobileTransferPolicyChangedError {
+            downloadDetail = "Download stopped because the signed policy expired or changed"
+            serverMessage = downloadDetail
+            showTransferNotice(
+                title: "Download policy changed",
+                detail: downloadDetail,
+                isError: true
+            )
         } catch {
             if !reachedCatalog {
                 isServerConnected = false
-                remoteSongs.removeAll()
+                remoteSongs = MobileCatalogRefreshMergePolicy.merge(
+                    catalog: [],
+                    uploadedSongsAwaitingCatalog: uploadedSongsAwaitingCatalog
+                )
                 selectedRemoteSongIDs.removeAll()
             }
-            serverMessage = "Connection failed: \(error.localizedDescription)"
+            if submittedUploadMutationGeneration == uploadCatalogMutationGeneration {
+                serverMessage = "Connection failed: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -1070,13 +2529,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         from songs: [MobileRemoteSong],
         baseURL: URL
     ) async {
-        let songsByID = Dictionary(uniqueKeysWithValues: songs.map { ($0.id, $0) })
+        let songsByID = songs.reduce(into: [String: MobileRemoteSong]()) { result, song in
+            if result[song.id] == nil { result[song.id] = song }
+        }
         var changed = false
+        let context = MobileServerEndpointPolicy.context(serverURL: baseURL, profileID: syncProfileID)
 
         for index in tracks.indices {
             let track = tracks[index]
-            guard (track.syncProfileID ?? "default") == syncProfileID,
-                  let remoteID = track.remoteID,
+            guard let remoteID = track.remoteID,
+                  let context,
+                  track.remoteIdentity() == MobileRemoteIdentity(context: context, remoteID: remoteID),
                   let song = songsByID[remoteID],
                   artwork(for: track) == nil,
                   let data = await remoteArtworkData(for: song, baseURL: baseURL),
@@ -1142,103 +2605,812 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         return trimmed.isEmpty || placeholders.contains(trimmed.lowercased()) ? defaultValue : trimmed
     }
 
+    private func markServerDownloadExcludedFromBackup(at url: URL) throws {
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableURL = url
+        try mutableURL.setResourceValues(values)
+    }
+
+    private func commitDownloadCheckpoint(_ downloadedSongIDs: Set<String>) {
+        normalizeSystemPlaylist()
+        hydrateRemotePlaylistTracks()
+        hydrateRemoteLikedTracks()
+        selectedRemoteSongIDs.subtract(downloadedSongIDs)
+        save()
+    }
+
+    private func recordTransferFailure(
+        _ operation: MobileTransferFailure.Operation,
+        item: String,
+        reason: String,
+        retryTarget: MobileTransferRetryTarget? = nil
+    ) {
+        transferFailures.insert(
+            MobileTransferFailure(
+                operation: operation,
+                item: item,
+                reason: reason,
+                retryTarget: retryTarget
+            ),
+            at: 0
+        )
+        save()
+    }
+
+    func clearTransferFailures() {
+        transferFailures.removeAll()
+        save()
+    }
+
+    func retryTransferFailure(_ failure: MobileTransferFailure) async {
+        guard let target = failure.retryTarget else { return }
+        transferFailures.removeAll { $0.id == failure.id }
+        save()
+        switch target {
+        case .download(let remoteSongID):
+            if let song = remoteSongs.first(where: { $0.id == remoteSongID }) {
+                await download(song)
+            } else {
+                await refreshCatalog()
+            }
+        case .uploadTrack(let trackID):
+            await uploadDownloadedSongsMissingFromServer(trackIDs: [trackID])
+        case .uploadFile(let source):
+            await uploadFiles([source])
+        case .delete(let remoteSongID):
+            if let song = remoteSongs.first(where: { $0.id == remoteSongID }) {
+                await deleteRemoteSong(song)
+            } else {
+                await sync(songIDs: [])
+                if let song = remoteSongs.first(where: { $0.id == remoteSongID }) {
+                    await deleteRemoteSong(song)
+                }
+            }
+        }
+    }
+
+    func importServerSourceLink(_ rawValue: String) async -> Bool {
+        guard activeUploadMode == .serverSourceLink else {
+            serverMessage = "Source-link upload is not enabled by the active server policy."
+            return false
+        }
+        guard !isUploadTransferBusy else {
+            serverMessage = "Wait for the active upload or download to finish."
+            return false
+        }
+        guard let baseURL = normalizedServer(), !serverAdminToken.isEmpty else {
+            serverMessage = "Save a valid server URL and admin key first."
+            return false
+        }
+
+        guard let sourcePageURL = MobileSourcePagePolicy.validatedOriginalYouTubePage(rawValue) else {
+            serverMessage = "Protocol 1 source upload supports canonical HTTPS YouTube video pages."
+            return false
+        }
+
+        let endpoint = baseURL.appendingPathComponent("api/v1/admin/source-imports")
+        guard sameOrigin(endpoint, baseURL) else {
+            serverMessage = "Source-link upload was blocked because the endpoint was not same-origin."
+            return false
+        }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(serverAdminToken)", forHTTPHeaderField: "Authorization")
+        setClientConfigContextHeaders(on: &request)
+        do {
+            request.httpBody = try JSONEncoder().encode(SourceImportRequest(
+                sourcePageURL: sourcePageURL
+            ))
+        } catch {
+            serverMessage = "Could not prepare source upload: \(error.localizedDescription)"
+            return false
+        }
+
+        isUploading = true
+        uploadProgress = 0
+        uploadDetail = "Sending source page to \(baseURL.host ?? "server")"
+        defer { isUploading = false }
+        do {
+            let (data, response) = try await sameOriginData(
+                for: request,
+                origin: baseURL,
+                maximumBytes: MobileBoundedResponsePolicy.sourceImportMaximumBytes
+            )
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 409 {
+                let duplicate = try JSONDecoder().decode(SourceImportDuplicateResponse.self, from: data)
+                guard duplicate.schemaVersion == 1, duplicate.status == "duplicate" else {
+                    throw URLError(.cannotParseResponse)
+                }
+                recordUploadedSong(duplicate.duplicateOf)
+                uploadProgress = 1
+                uploadDetail = "This source is already in the server library"
+                serverMessage = uploadDetail
+                return true
+            }
+            guard status == 201 else {
+                let detail = (try? JSONDecoder().decode(ServerErrorPayload.self, from: data).error)
+                serverMessage = detail ?? "Source upload failed with HTTP \(status)."
+                return false
+            }
+            let imported = try JSONDecoder().decode(SourceImportResponse.self, from: data)
+            guard imported.schemaVersion == 1,
+                  imported.status == "imported" || imported.status == "restored" else {
+                throw URLError(.cannotParseResponse)
+            }
+            recordUploadedSong(imported.song)
+            uploadProgress = 1
+            uploadDetail = imported.status == "restored"
+                ? "Restored \(imported.song.title) from its source page"
+                : "Imported \(imported.song.title) from its source page"
+            serverMessage = uploadDetail
+            showTransferNotice(title: "Server import complete", detail: uploadDetail, isError: false)
+            return true
+        } catch {
+            uploadDetail = "Source upload failed"
+            serverMessage = "Source upload failed: \(error.localizedDescription)"
+            showTransferNotice(title: uploadDetail, detail: serverMessage, isError: true)
+            return false
+        }
+    }
+
+    private func streamRemoteSong(_ song: MobileRemoteSong) async {
+        guard !isDownloading else { return }
+        let accessToken = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let baseURL = normalizedServer(), !accessToken.isEmpty else {
+            showTransferNotice(
+                title: "Stream unavailable",
+                detail: "Save a valid server URL and access token first.",
+                isError: true
+            )
+            return
+        }
+        guard MobileAuthenticatedStreamPolicy.normalizedAudioMIMEType(song.contentType) != nil else {
+            let detail = song.contentType.lowercased().hasPrefix("video/")
+                ? "Video stream-only playback is not available on iPhone or iPad. Change the server policy to Verified offline file, then download the video."
+                : "The catalog did not publish a supported audio content type for this song."
+            downloadDetail = detail
+            showTransferNotice(title: "Download required", detail: detail, isError: false)
+            return
+        }
+        guard song.size > 0 else {
+            showTransferNotice(
+                title: "Stream unavailable",
+                detail: "The server did not publish a verified media size for this song.",
+                isError: true
+            )
+            return
+        }
+        guard let downloadPolicyLease = captureDownloadPolicyLease(.streamOnly) else {
+            showTransferNotice(
+                title: "Stream policy changed",
+                detail: "Stream-only playback is no longer enabled by the signed server policy.",
+                isError: true
+            )
+            return
+        }
+        let profileID = syncProfileID
+        guard let leaseContext = authenticatedStreamLeaseContext(
+            baseURL: baseURL,
+            profileID: profileID,
+            accessToken: accessToken
+        ), let policyExpiration = downloadPolicyLease.configuration.expiresAt else {
+            showTransferNotice(
+                title: "Stream unavailable",
+                detail: "The signed stream authorization is incomplete.",
+                isError: true
+            )
+            return
+        }
+        isDownloading = true
+        downloadProgress = 0
+        downloadDetail = "Resolving \(song.title)"
+        defer { isDownloading = false }
+        do {
+            let mediaEndpoint = baseURL
+                .appendingPathComponent("api/v1/songs")
+                .appendingPathComponent(song.id)
+                .appendingPathComponent("media-location")
+            guard sameOrigin(mediaEndpoint, baseURL) else { throw URLError(.unsupportedURL) }
+            var locationRequest = URLRequest(url: mediaEndpoint)
+            locationRequest.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            leaseContext.requestContext.apply(to: &locationRequest)
+            let (locationData, locationResponse) = try await sameOriginData(
+                for: locationRequest,
+                origin: baseURL,
+                maximumBytes: MobileBoundedResponsePolicy.mediaLocationMaximumBytes
+            )
+            guard isDownloadPolicyLeaseCurrent(downloadPolicyLease) else {
+                throw MobileTransferPolicyChangedError.changed
+            }
+            guard serverToken.trimmingCharacters(in: .whitespacesAndNewlines) == accessToken,
+                  isCurrentServerContext(baseURL: baseURL, profileID: profileID) else {
+                throw CancellationError()
+            }
+            guard (locationResponse as? HTTPURLResponse)?.statusCode == 200 else {
+                throw URLError(.badServerResponse)
+            }
+            let location = try JSONDecoder().decode(
+                MobileRemoteMediaLocationResponse.self,
+                from: locationData
+            ).mediaLocation
+            let expectedContentType = try MobileAuthenticatedStreamPolicy.validateDescriptor(
+                catalogLength: song.size,
+                catalogSHA256: song.contentSHA256,
+                catalogContentType: song.contentType,
+                locationLength: location.byteLength,
+                locationSHA256: location.contentSHA256,
+                locationContentType: location.contentType,
+                supportsRanges: location.supportsRanges,
+                state: location.state
+            )
+            guard let streamURL = URL(string: location.streamURL, relativeTo: baseURL)?.absoluteURL,
+                  sameOrigin(streamURL, baseURL) else {
+                throw URLError(.dataNotAllowed)
+            }
+
+            var streamRequest = URLRequest(url: streamURL)
+            streamRequest.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+            streamRequest.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            streamRequest.setValue("audio/*", forHTTPHeaderField: "Accept")
+            leaseContext.requestContext.apply(to: &streamRequest)
+
+            let authorizationLease = try MobileAuthenticatedStreamAuthorizationLease(
+                context: leaseContext,
+                expiresAt: policyExpiration
+            )
+            let departingLocalID = streamingTrack == nil ? currentTrackID : nil
+            discardStreamingPlayback()
+            if let departingLocalID,
+               tracks.contains(where: { $0.id == departingLocalID }) {
+                history.append(departingLocalID)
+            }
+            stopTimer()
+            player?.stop()
+            player = nil
+
+            streamingGeneration &+= 1
+            let generation = streamingGeneration
+            let transientTrack = MobileTrack(
+                title: song.title,
+                artist: usefulFallback(song.artist, default: "Unknown Artist"),
+                album: usefulFallback(song.album, default: "Server Library"),
+                duration: song.duration ?? 0,
+                relativePath: "",
+                remoteID: song.id,
+                sourceServer: baseURL.absoluteString,
+                syncProfileID: profileID,
+                artworkScanComplete: true,
+                contentSHA256: MobileContentHashPolicy.normalizedSHA256(song.contentSHA256)
+            )
+            streamingTrack = transientTrack
+            isTransientStreamActive = true
+            currentTrackID = transientTrack.id
+            playbackQueue = [transientTrack.id]
+            playbackPlaylistID = nil
+            position = 0
+            UserDefaults.standard.removeObject(forKey: "Resonance.currentTrack")
+
+            let loader = MobileAuthenticatedStreamResourceLoader(
+                sourceURL: streamURL,
+                headers: streamRequest.allHTTPHeaderFields ?? [:],
+                expectedContentLength: song.size,
+                expectedContentType: expectedContentType,
+                authorizationLease: authorizationLease,
+                onAuthorizationInvalidated: { [weak self, weak authorizationLease] in
+                    Task { @MainActor [weak self, weak authorizationLease] in
+                        guard let self, let authorizationLease else { return }
+                        self.authenticatedStreamAuthorizationDidExpire(
+                            lease: authorizationLease,
+                            generation: generation
+                        )
+                    }
+                }
+            )
+            let assetURL = try MobileAuthenticatedStreamPolicy.assetURL(for: streamURL)
+            let asset = AVURLAsset(url: assetURL)
+            asset.resourceLoader.setDelegate(loader, queue: loader.delegateQueue)
+            streamingResourceLoader = loader
+            streamingAuthorizationLease = authorizationLease
+            downloadDetail = "Preparing authenticated stream • \(song.title)"
+
+            guard try await asset.load(.isPlayable) else {
+                throw MobileAuthenticatedStreamError.invalidResponse
+            }
+            let measuredDuration = try? await asset.load(.duration).seconds
+            try Task.checkCancellation()
+            try authorizationLease.authorize()
+            guard generation == streamingGeneration,
+                  streamingTrack?.id == transientTrack.id,
+                  streamingAuthorizationLease === authorizationLease,
+                  serverToken.trimmingCharacters(in: .whitespacesAndNewlines) == accessToken,
+                  isCurrentServerContext(baseURL: baseURL, profileID: profileID),
+                  activeDownloadMode == .streamOnly else {
+                throw CancellationError()
+            }
+
+            let item = AVPlayerItem(asset: asset)
+            let streamPlayer = AVPlayer(playerItem: item)
+            streamPlayer.volume = PlaybackVolumePolicy.gain(for: volume)
+            streamPlayer.defaultRate = playbackRate
+            streamPlayer.automaticallyWaitsToMinimizeStalling = true
+            streamingPlayer = streamPlayer
+            if let measuredDuration,
+               measuredDuration.isFinite,
+               measuredDuration > 0 {
+                streamingTrack?.duration = measuredDuration
+            }
+            let streamBounds = playbackBounds(for: streamingTrack ?? transientTrack)
+            streamingEndObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self, weak item] _ in
+                Task { @MainActor [weak self, weak item] in
+                    guard let self, let item else { return }
+                    self.authenticatedStreamDidFinish(item: item, generation: generation)
+                }
+            }
+            streamingFailureObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemFailedToPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self, weak item] notification in
+                let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+                Task { @MainActor [weak self, weak item] in
+                    guard let self, let item else { return }
+                    self.authenticatedStreamDidFail(
+                        item: item,
+                        generation: generation,
+                        error: error
+                    )
+                }
+            }
+            streamingStatusObservation = item.observe(\.status, options: [.new]) { [weak self, weak item] _, _ in
+                Task { @MainActor [weak self, weak item] in
+                    guard let self, let item, item.status == .failed else { return }
+                    self.authenticatedStreamDidFail(
+                        item: item,
+                        generation: generation,
+                        error: item.error
+                    )
+                }
+            }
+            position = streamBounds.start
+            if streamBounds.start > 0 {
+                await seekAuthenticatedStream(streamPlayer, to: streamBounds.start)
+                try Task.checkCancellation()
+                try authorizationLease.authorize()
+                guard generation == streamingGeneration,
+                      streamingPlayer === streamPlayer,
+                      streamingAuthorizationLease === authorizationLease,
+                      serverToken.trimmingCharacters(in: .whitespacesAndNewlines) == accessToken,
+                      isCurrentServerContext(baseURL: baseURL, profileID: profileID),
+                      activeDownloadMode == .streamOnly else {
+                    throw CancellationError()
+                }
+            }
+            try AVAudioSession.sharedInstance().setActive(true)
+            streamPlayer.playImmediately(atRate: playbackRate)
+            isPlaying = true
+            downloadProgress = 1
+            downloadDetail = "Streaming \(song.title) • no offline file saved"
+            startTimer()
+            updateNowPlaying()
+        } catch is MobileTransferPolicyChangedError {
+            discardStreamingPlayback()
+            downloadDetail = "Stream stopped because the signed policy expired or changed"
+            showTransferNotice(
+                title: "Stream policy changed",
+                detail: downloadDetail,
+                isError: true
+            )
+        } catch is CancellationError {
+            discardStreamingPlayback()
+            downloadDetail = "Stream cancelled"
+        } catch {
+            discardStreamingPlayback()
+            downloadDetail = "Could not stream \(song.title)"
+            recordTransferFailure(
+                .download,
+                item: song.title,
+                reason: error.localizedDescription,
+                retryTarget: .download(remoteSongID: song.id)
+            )
+            showTransferNotice(title: "Stream failed", detail: error.localizedDescription, isError: true)
+        }
+    }
+
+    private func authenticatedStreamDidFinish(item: AVPlayerItem, generation: UInt64) {
+        guard generation == streamingGeneration,
+              streamingPlayer?.currentItem === item else { return }
+        completeAuthenticatedStreamPlayback(generation: generation)
+    }
+
+    private func completeAuthenticatedStreamPlayback(generation: UInt64) {
+        guard generation == streamingGeneration,
+              isTransientStreamActive,
+              let streamingPlayer,
+              let streamingTrack else { return }
+        let bounds = playbackBounds(for: streamingTrack)
+        stopTimer()
+        streamingPlayer.pause()
+        streamingPlayer.seek(
+            to: CMTime(seconds: bounds.start, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+        position = bounds.start
+        if repeatEnabled {
+            streamingPlayer.playImmediately(atRate: playbackRate)
+            isPlaying = true
+            startTimer()
+        } else {
+            isPlaying = false
+        }
+        updateNowPlaying()
+    }
+
+    private func seekAuthenticatedStream(_ player: AVPlayer, to seconds: TimeInterval) async {
+        await withCheckedContinuation { continuation in
+            player.seek(
+                to: CMTime(seconds: seconds, preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            ) { _ in
+                continuation.resume()
+            }
+        }
+    }
+
+    private func authenticatedStreamDidFail(
+        item: AVPlayerItem,
+        generation: UInt64,
+        error: Error?
+    ) {
+        guard generation == streamingGeneration,
+              streamingPlayer?.currentItem === item else { return }
+        failAuthenticatedStream(
+            generation: generation,
+            error: error ?? MobileAuthenticatedStreamError.invalidResponse
+        )
+    }
+
+    private func authenticatedStreamAuthorizationDidExpire(
+        lease: MobileAuthenticatedStreamAuthorizationLease,
+        generation: UInt64
+    ) {
+        guard streamingAuthorizationLease === lease else { return }
+        failAuthenticatedStream(
+            generation: generation,
+            error: MobileAuthenticatedStreamError.authorizationExpired
+        )
+    }
+
+    private func failAuthenticatedStream(generation: UInt64, error: Error) {
+        guard generation == streamingGeneration, isTransientStreamActive else { return }
+        let detail = error.localizedDescription
+        let title = streamingTrack?.title ?? "Stream"
+        discardStreamingPlayback()
+        downloadDetail = "Stream stopped: \(detail)"
+        recordTransferFailure(
+            .download,
+            item: title,
+            reason: detail,
+            retryTarget: nil
+        )
+        showTransferNotice(title: "Stream stopped", detail: detail, isError: true)
+    }
+
+    private func discardStreamingPlayback() {
+        let hadStreamingState = isTransientStreamActive
+            || streamingTrack != nil
+            || streamingPlayer != nil
+            || streamingResourceLoader != nil
+            || streamingAuthorizationLease != nil
+        let streamingID = streamingTrack?.id
+        streamingGeneration &+= 1
+        if let streamingEndObserver {
+            NotificationCenter.default.removeObserver(streamingEndObserver)
+            self.streamingEndObserver = nil
+        }
+        if let streamingFailureObserver {
+            NotificationCenter.default.removeObserver(streamingFailureObserver)
+            self.streamingFailureObserver = nil
+        }
+        streamingStatusObservation?.invalidate()
+        streamingStatusObservation = nil
+        streamingPlayer?.pause()
+        streamingPlayer = nil
+        let loader = streamingResourceLoader
+        streamingResourceLoader = nil
+        let authorizationLease = streamingAuthorizationLease
+        streamingAuthorizationLease = nil
+        loader?.invalidate()
+        authorizationLease?.setInvalidationHandler(nil)
+        authorizationLease?.invalidate()
+        streamingTrack = nil
+        isTransientStreamActive = false
+        if hadStreamingState {
+            stopTimer()
+            isPlaying = false
+        }
+        if currentTrackID == streamingID {
+            currentTrackID = nil
+            position = 0
+            UserDefaults.standard.removeObject(forKey: "Resonance.currentTrack")
+            UserDefaults.standard.set(position, forKey: "Resonance.position")
+        }
+        if let streamingID {
+            playbackQueue.removeAll { $0 == streamingID }
+            history.removeAll { $0 == streamingID }
+        }
+        updateNowPlaying()
+    }
+
     func uploadFiles(_ urls: [URL]) async {
-        guard !isUploading, !isSyncing else { return }
-        guard let baseURL = normalizedServer(), !serverAdminToken.isEmpty else { uploadDetail = "Enter the server admin key"; return }
+        guard activeUploadMode == .localFile else {
+            uploadDetail = "Choose Local file upload mode first"
+            return
+        }
+        guard !isUploadTransferBusy else { return }
+        guard let baseURL = normalizedServer(),
+              MobileUploadCredentialPolicy.canUpload(serverURL: baseURL, adminKey: serverAdminToken) else {
+            uploadDetail = "Enter a valid server URL and server admin key"
+            return
+        }
+        let uploadProfileID = syncProfileID
+        guard let uploadContext = MobileServerEndpointPolicy.context(
+            serverURL: baseURL,
+            profileID: uploadProfileID
+        ) else {
+            uploadDetail = "Enter a valid server URL and profile"
+            return
+        }
         isUploading = true
         uploadProgress = 0
         defer { isUploading = false }
         var completed = 0
+        var failed = 0
         for source in urls {
             let access = source.startAccessingSecurityScopedResource()
             defer { if access { source.stopAccessingSecurityScopedResource() } }
             do {
                 let uploadFilename = MobileServerUploadNaming.filename(for: source)
                 uploadDetail = "Uploading \(completed + 1) of \(urls.count) • \(uploadFilename)"
-                var components = URLComponents(url: baseURL.appendingPathComponent("api/v1/admin/songs"), resolvingAgainstBaseURL: false)
-                components?.queryItems = [URLQueryItem(name: "filename", value: uploadFilename)]
-                guard let url = components?.url else { continue }
-                var request = URLRequest(url: url)
-                request.httpMethod = "PUT"
-                request.setValue("Bearer \(serverAdminToken)", forHTTPHeaderField: "Authorization")
-                setProfileHeader(on: &request)
-                let (_, response) = try await URLSession.shared.upload(for: request, fromFile: source)
-                guard (response as? HTTPURLResponse)?.statusCode == 201 else { continue }
+                if let managedTrack = MobileManagedTrackUploadPolicy.managedTrack(
+                    matching: source,
+                    tracks: tracks,
+                    musicDirectory: musicDirectory
+                ) {
+                    try MobileRemoteAssociationPolicy.validateAdoption(
+                        track: managedTrack,
+                        targetContext: uploadContext
+                    )
+                }
+                let uploadedSong = try await uploadServerFile(
+                    source,
+                    to: baseURL,
+                    profileID: uploadProfileID
+                )
+                guard isCurrentServerContext(baseURL: baseURL, profileID: uploadProfileID) else { continue }
+                recordUploadedSong(uploadedSong)
                 completed += 1
                 uploadProgress = Double(completed) / Double(max(urls.count, 1))
-            } catch { continue }
+            } catch {
+                failed += 1
+                if error is MobileRemoteAssociationError {
+                    showTransferNotice(
+                        title: "Upload blocked; server link kept",
+                        detail: error.localizedDescription,
+                        isError: true
+                    )
+                }
+                recordTransferFailure(
+                    .upload,
+                    item: source.lastPathComponent,
+                    reason: error.localizedDescription,
+                    retryTarget: .uploadFile(source)
+                )
+            }
         }
-        Self.saveToken(serverAdminToken, account: "admin")
-        uploadDetail = "Uploaded \(completed) song\(completed == 1 ? "" : "s")"
-        await refreshCatalog()
+        uploadDetail = failed == 0
+            ? "Uploaded \(completed) song\(completed == 1 ? "" : "s")"
+            : "Uploaded \(completed) of \(urls.count) • \(failed) failed"
+        serverMessage = uploadDetail
+
+        // The admin upload response (including HTTP 409 duplicate details)
+        // reconciles the catalog without requiring an access-token refresh.
     }
 
     var canUploadLocalImports: Bool {
-        normalizedServer() != nil
-            && !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        (activeUploadMode == .localFile || activeUploadMode == .reviewedMatch)
+        && MobileUploadCredentialPolicy.canUpload(
+            serverURL: normalizedServer(),
+            adminKey: serverAdminToken
+        )
     }
 
-    func refreshRemoteCatalogForImport() async throws {
-        guard let baseURL = normalizedServer() else { throw URLError(.badURL) }
-        let catalog = try await fetchCatalogForUpload(from: baseURL)
-        remoteSongs = catalog
-        selectedRemoteSongIDs.formIntersection(Set(catalog.map(\.id)))
-        isServerConnected = true
-        serverMessage = "Connected • \(catalog.count) song\(catalog.count == 1 ? "" : "s")"
+    @discardableResult
+    func applyServerConfiguration(
+        serverURL rawServerURL: String,
+        accessToken rawAccessToken: String,
+        adminToken rawAdminToken: String
+    ) -> Bool {
+        guard !isProfileTransitionBusy else {
+            serverConfigurationMessage = "Wait for active transfers and playlist sync to finish."
+            return false
+        }
+        let resolution: MobileServerEndpointResolution
+        do {
+            resolution = try MobileServerEndpointPolicy.resolve(rawServerURL)
+        } catch {
+            serverConfigurationMessage = error.localizedDescription
+            return false
+        }
+
+        let accessToken = rawAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let adminToken = rawAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previousAccessToken = Self.readToken(account: "client")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let previousAdminToken = Self.readToken(account: "admin")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            try Self.storeToken(accessToken, account: "client")
+            try Self.storeToken(adminToken, account: "admin")
+        } catch {
+            try? Self.storeToken(previousAccessToken, account: "client")
+            try? Self.storeToken(previousAdminToken, account: "admin")
+            serverToken = previousAccessToken
+            serverAdminToken = previousAdminToken
+            serverConfigurationMessage = "Could not save credentials securely: \(error.localizedDescription)"
+            return false
+        }
+
+        let previousContext = activeServerContext
+        let previousServerURL = normalizedServer()?.absoluteString
+        clientConfigRequestGeneration &+= 1
+        captureActiveProfileState()
+        serverURL = resolution.url.absoluteString
+        serverToken = accessToken
+        serverAdminToken = adminToken
+        let nextContext = activeServerContext
+        if previousContext != nextContext {
+            restoreActiveProfileState()
+            if let currentTrack,
+               currentTrack.remoteID != nil,
+               !belongsToActiveServerContext(currentTrack) {
+                stopTimer()
+                player?.stop()
+                player = nil
+                isPlaying = false
+                discardStreamingPlayback()
+                currentTrackID = nil
+                position = 0
+                UserDefaults.standard.removeObject(forKey: "Resonance.currentTrack")
+                UserDefaults.standard.set(position, forKey: "Resonance.position")
+            }
+            playbackPlaylistID = nil
+            playbackQueue = tracksForActiveProfile.map(\.id)
+            history.removeAll { !playbackQueue.contains($0) }
+        }
+        if previousContext != nextContext || previousServerURL != resolution.url.absoluteString {
+            transferFailures.removeAll()
+            transferNotice = nil
+        }
+        isServerConnected = false
+        catalogRequestGeneration &+= 1
+        uploadedSongsAwaitingCatalog.removeAll()
+        remoteSongs.removeAll()
+        selectedRemoteSongIDs.removeAll()
+        useSafeClientConfiguration(status: "Using safe defaults until the server policy refreshes")
+        serverConfigurationMessage = resolution.usesInsecureLocalHTTP
+            ? "Local development mode uses unencrypted HTTP. Credentials will only be sent to this loopback host."
+            : "Server settings saved securely."
+        serverMessage = serverConfigurationMessage ?? "Server settings saved"
+        save()
+        return true
     }
 
     @discardableResult
     func reconcileLocalImportWithServer(trackID: UUID, remoteID: String) -> Bool {
         guard let baseURL = normalizedServer() else { return false }
-        adoptUploadedDownload(trackID: trackID, remoteID: remoteID, sourceServer: baseURL.absoluteString)
-        return true
+        do {
+            try adoptUploadedDownload(
+                trackID: trackID,
+                remoteID: remoteID,
+                sourceServer: baseURL.absoluteString,
+                profileID: syncProfileID
+            )
+            return true
+        } catch {
+            let detail = error.localizedDescription
+            serverMessage = detail
+            showTransferNotice(title: "Server link kept", detail: detail, isError: true)
+            return false
+        }
     }
 
     @discardableResult
-    func uploadLocalImportToActiveProfile(_ track: MobileTrack) async throws -> Bool {
+    func uploadLocalImportToActiveProfile(
+        _ track: MobileTrack,
+        reviewedMatchLease: MobileReviewedMatchLease? = nil
+    ) async throws -> Bool {
+        let uploadMode = activeUploadMode
+        guard uploadMode == .localFile || uploadMode == .reviewedMatch else {
+            throw URLError(.dataNotAllowed)
+        }
+        if uploadMode == .reviewedMatch {
+            guard let reviewedMatchLease,
+                  isReviewedMatchLeaseCurrent(reviewedMatchLease) else {
+                throw MobileTransferPolicyChangedError.changed
+            }
+        } else if reviewedMatchLease != nil {
+            throw MobileTransferPolicyChangedError.changed
+        }
+        let requiresAuthoritativeRawUpload = reviewedMatchLease != nil
         guard let currentTrack = tracks.first(where: { $0.id == track.id }) else {
             throw URLError(.fileDoesNotExist)
         }
         guard let baseURL = normalizedServer() else { throw URLError(.badURL) }
+        let uploadProfileID = syncProfileID
         guard !serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw URLError(.userAuthenticationRequired)
         }
-        if let remoteID = currentTrack.remoteID,
-           remoteSongs.contains(where: { $0.id == remoteID }),
-           (currentTrack.syncProfileID ?? syncProfileID) == syncProfileID,
-           currentTrack.sourceServer
-               .flatMap(URL.init(string:))
-               .map({ sameOrigin($0, baseURL) }) ?? true {
+        let activeCachedSongs = cachedRemoteSongsForUploadPlanning
+        guard let expectedContext = MobileServerEndpointPolicy.context(
+            serverURL: baseURL,
+            profileID: uploadProfileID
+        ) else { throw URLError(.badURL) }
+        try MobileRemoteAssociationPolicy.validateAdoption(
+            track: currentTrack,
+            targetContext: expectedContext
+        )
+        if !requiresAuthoritativeRawUpload,
+           let remoteID = currentTrack.remoteID,
+           currentTrack.remoteIdentity() == MobileRemoteIdentity(context: expectedContext, remoteID: remoteID),
+           activeCachedSongs.contains(where: { $0.id == remoteID }) {
             return false
         }
-        if let existing = remoteSongs.first(where: { song in
-            MobileServerSongIdentityPolicy.metadataMatches(
-                expectedTitle: currentTrack.title,
-                expectedArtist: currentTrack.artist,
-                expectedDuration: currentTrack.duration,
-                actualTitle: song.title,
-                actualArtist: song.artist,
-                actualDuration: song.duration
-            )
-        }) {
-            adoptUploadedDownload(
+        if !requiresAuthoritativeRawUpload,
+           let hash = MobileContentHashPolicy.normalizedSHA256(currentTrack.contentSHA256),
+           let existing = activeCachedSongs.first(where: {
+               MobileContentHashPolicy.normalizedSHA256($0.contentSHA256) == hash
+           }) {
+            try adoptUploadedDownload(
                 trackID: currentTrack.id,
                 remoteID: existing.id,
-                sourceServer: baseURL.absoluteString
+                sourceServer: baseURL.absoluteString,
+                profileID: uploadProfileID
             )
             return false
         }
         let uploadedSong = try await uploadServerFile(
             fileURL(for: currentTrack),
             to: baseURL,
-            title: currentTrack.title
+            title: currentTrack.title,
+            profileID: uploadProfileID,
+            reviewedMatchLease: reviewedMatchLease
         )
-        remoteSongs = [uploadedSong] + remoteSongs.filter { $0.id != uploadedSong.id }
-        adoptUploadedDownload(
+        if let reviewedMatchLease {
+            guard MobileReviewedUploadCompletionPolicy.shouldReconcileCommittedResponse(
+                requestContextCurrent: isReviewedMatchRequestContextCurrent(reviewedMatchLease),
+                leaseStillCurrent: isReviewedMatchLeaseCurrent(reviewedMatchLease)
+            ) else {
+                throw URLError(.cancelled)
+            }
+        }
+        guard isCurrentServerContext(baseURL: baseURL, profileID: uploadProfileID) else {
+            throw URLError(.cancelled)
+        }
+        recordUploadedSong(uploadedSong)
+        try adoptUploadedDownload(
             trackID: currentTrack.id,
             remoteID: uploadedSong.id,
-            sourceServer: baseURL.absoluteString
+            sourceServer: baseURL.absoluteString,
+            profileID: uploadProfileID
         )
         isServerConnected = true
         serverMessage = "Connected • \(remoteSongs.count) song\(remoteSongs.count == 1 ? "" : "s")"
@@ -1254,14 +3426,18 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func uploadDownloadedSongsMissingFromServer() async {
-        guard !isUploading, !isSyncing else { return }
-        guard let baseURL = normalizedServer() else {
-            uploadDetail = "Enter a valid server URL"
+        await uploadDownloadedSongsMissingFromServer(trackIDs: nil)
+    }
+
+    private func uploadDownloadedSongsMissingFromServer(trackIDs: Set<UUID>?) async {
+        guard activeUploadMode == .localFile else {
+            uploadDetail = "Choose Local file upload mode first"
             serverMessage = uploadDetail
             return
         }
-        guard !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            uploadDetail = "Enter the access token"
+        guard !isUploadTransferBusy else { return }
+        guard let baseURL = normalizedServer() else {
+            uploadDetail = "Enter a valid server URL"
             serverMessage = uploadDetail
             return
         }
@@ -1270,37 +3446,44 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             serverMessage = uploadDetail
             return
         }
+        let uploadProfileID = syncProfileID
 
         isUploading = true
         uploadProgress = 0
         uploadDetail = "Checking downloaded songs…"
-        defer { isUploading = false }
+        var shouldSyncPlaylists = false
 
         do {
-            let catalog = try await fetchCatalogForUpload(from: baseURL)
-            isServerConnected = true
-            remoteSongs = catalog
-            selectedRemoteSongIDs.formIntersection(Set(catalog.map(\.id)))
+            // Use only the active cached catalog for duplicate planning.
+            // The PUT endpoint's HTTP 409 response is authoritative when
+            // no access-token catalog is available.
+            let catalog = isServerConnected ? remoteSongs : []
             let plan = MobileMissingServerUploadPolicy.plan(
                 tracks: tracks,
                 catalog: catalog,
-                activeProfileID: syncProfileID,
+                activeProfileID: uploadProfileID,
                 activeServerURL: baseURL
             )
-            for (trackID, remoteID) in plan.existingRemoteIDsByTrackID {
-                adoptUploadedDownload(
+            for (trackID, remoteID) in plan.existingRemoteIDsByTrackID
+                where trackIDs == nil || trackIDs?.contains(trackID) == true {
+                try adoptUploadedDownload(
                     trackID: trackID,
                     remoteID: remoteID,
-                    sourceServer: baseURL.absoluteString
+                    sourceServer: baseURL.absoluteString,
+                    profileID: uploadProfileID
                 )
             }
-            let candidates = plan.uploadTrackIDs.compactMap { trackID in
+            let candidateIDs = plan.uploadTrackIDs.filter {
+                trackIDs == nil || trackIDs?.contains($0) == true
+            }
+            let candidates = candidateIDs.compactMap { trackID in
                 tracks.first(where: { $0.id == trackID })
             }
             guard !candidates.isEmpty else {
                 uploadProgress = 1
                 uploadDetail = "All downloaded songs are already on the server"
                 serverMessage = uploadDetail
+                isUploading = false
                 return
             }
 
@@ -1317,7 +3500,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                         if attempt > 1 {
                             try await Task.sleep(for: .milliseconds(attempt == 2 ? 400 : 1_200))
                         }
-                        uploadedSong = try await uploadServerFile(source, to: baseURL, title: track.title)
+                        uploadedSong = try await uploadServerFile(
+                            source,
+                            to: baseURL,
+                            title: track.title,
+                            profileID: uploadProfileID
+                        )
                         break
                     } catch is CancellationError {
                         throw CancellationError()
@@ -1327,22 +3515,31 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 }
 
                 if let uploadedSong {
+                    guard isCurrentServerContext(baseURL: baseURL, profileID: uploadProfileID) else {
+                        throw CancellationError()
+                    }
                     uploadedCount += 1
-                    remoteSongs = [uploadedSong] + remoteSongs.filter { $0.id != uploadedSong.id }
-                    adoptUploadedDownload(
+                    recordUploadedSong(uploadedSong)
+                    try adoptUploadedDownload(
                         trackID: track.id,
                         remoteID: uploadedSong.id,
-                        sourceServer: baseURL.absoluteString
+                        sourceServer: baseURL.absoluteString,
+                        profileID: uploadProfileID
                     )
                 } else {
                     let name = track.artist.isEmpty ? track.title : "\(track.title) — \(track.artist)"
-                    failures.append("\(name) (\(lastError?.localizedDescription ?? "upload failed"))")
+                    let reason = lastError?.localizedDescription ?? "Upload failed."
+                    failures.append("\(name) (\(reason))")
+                    recordTransferFailure(
+                        .upload,
+                        item: name,
+                        reason: reason,
+                        retryTarget: .uploadTrack(trackID: track.id)
+                    )
                 }
                 uploadProgress = Double(index + 1) / Double(candidates.count)
             }
 
-            remoteSongs = (try? await fetchCatalogForUpload(from: baseURL)) ?? remoteSongs
-            Self.saveToken(serverAdminToken, account: "admin")
             let matchedCount = plan.existingRemoteIDsByTrackID.count
             if failures.isEmpty {
                 uploadDetail = "Uploaded \(uploadedCount); matched \(matchedCount) already on the server"
@@ -1350,7 +3547,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 uploadDetail = "Uploaded \(uploadedCount); failed: \(failures.joined(separator: ", "))"
             }
             serverMessage = uploadDetail
-            await syncPlaylistsNow()
+            shouldSyncPlaylists = !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         } catch is CancellationError {
             uploadDetail = "Upload cancelled"
             serverMessage = uploadDetail
@@ -1359,24 +3556,41 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             uploadDetail = "Upload failed: \(error.localizedDescription)"
             serverMessage = uploadDetail
         }
-    }
+        isUploading = false
 
-    private func fetchCatalogForUpload(from baseURL: URL) async throws -> [MobileRemoteSong] {
-        var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/songs"))
-        request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
-        setProfileHeader(on: &request)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw URLError(.badServerResponse)
+        // Playlist/like/clip synchronization must not extend the upload busy
+        // state or keep the transfer overlay visible after uploads finish.
+        if shouldSyncPlaylists {
+            await syncPlaylistsNow()
         }
-        return try JSONDecoder().decode(MobileRemoteCatalog.self, from: data).songs
     }
 
     private func uploadServerFile(
         _ source: URL,
         to baseURL: URL,
-        title: String? = nil
+        title: String? = nil,
+        profileID: String,
+        reviewedMatchLease: MobileReviewedMatchLease? = nil
     ) async throws -> MobileRemoteSong {
+        let requiredMode: MobileUploadMode = reviewedMatchLease == nil ? .localFile : .reviewedMatch
+        guard let uploadLease = captureRawUploadLease(
+            mode: requiredMode,
+            baseURL: baseURL,
+            profileID: profileID
+        ) else {
+            throw MobileTransferPolicyChangedError.changed
+        }
+        await uploadSerialGate.acquire()
+        defer { Task { await uploadSerialGate.release() } }
+        try Task.checkCancellation()
+        guard isRawUploadLeaseCurrent(uploadLease) else {
+            throw MobileTransferPolicyChangedError.changed
+        }
+        if let reviewedMatchLease,
+           !isReviewedMatchLeaseCurrent(reviewedMatchLease) {
+            throw MobileTransferPolicyChangedError.changed
+        }
+
         let values = try source.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
         guard values.isRegularFile == true, (values.fileSize ?? 0) > 0 else {
             throw URLError(.fileDoesNotExist)
@@ -1397,40 +3611,82 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             UTType(filenameExtension: source.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
             forHTTPHeaderField: "Content-Type"
         )
-        setProfileHeader(on: &request)
-        let (data, response) = try await URLSession.shared.upload(for: request, fromFile: source)
+        if let reviewedMatchLease {
+            guard reviewedMatchLease.profileID == profileID,
+                  MobileClientConfigOrigin.normalized(baseURL) == reviewedMatchLease.origin,
+                  reviewedMatchLease.requestContext == uploadLease.requestContext else {
+                throw MobileTransferPolicyChangedError.changed
+            }
+            reviewedMatchLease.requestContext.apply(to: &request)
+        } else {
+            uploadLease.requestContext.apply(to: &request)
+        }
+        guard isRawUploadLeaseCurrent(uploadLease) else {
+            throw MobileTransferPolicyChangedError.changed
+        }
+        if let reviewedMatchLease, !isReviewedMatchLeaseCurrent(reviewedMatchLease) {
+            throw MobileTransferPolicyChangedError.changed
+        }
+        let (data, response) = try await sameOriginUpload(
+            for: request,
+            fromFile: source,
+            origin: baseURL
+        )
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        if (200..<300).contains(http.statusCode),
+        if http.statusCode == 201,
            let song = try? JSONDecoder().decode(MobileRemoteSong.self, from: data) {
+            guard isRawUploadRequestContextCurrent(uploadLease) else {
+                throw CancellationError()
+            }
             return song
         }
         if http.statusCode == 409,
            let duplicate = try? JSONDecoder().decode(DuplicateSongUploadResponse.self, from: data) {
+            guard isRawUploadRequestContextCurrent(uploadLease) else {
+                throw CancellationError()
+            }
             return duplicate.duplicateOf
         }
         throw playlistServerError(status: http.statusCode, data: data)
     }
 
-    private func adoptUploadedDownload(trackID: UUID, remoteID: String, sourceServer: String) {
-        guard let targetIndex = tracks.firstIndex(where: { $0.id == trackID }) else { return }
+    private func recordUploadedSong(_ song: MobileRemoteSong) {
+        uploadCatalogMutationGeneration &+= 1
+        uploadedSongsAwaitingCatalog[song.id] = song
+        remoteSongs = [song] + remoteSongs.filter { $0.id != song.id }
+    }
+
+    private func adoptUploadedDownload(
+        trackID: UUID,
+        remoteID: String,
+        sourceServer: String,
+        profileID: String
+    ) throws {
+        guard let targetIndex = tracks.firstIndex(where: { $0.id == trackID }) else {
+            throw URLError(.fileDoesNotExist)
+        }
         let oldTrack = tracks[targetIndex]
         let oldRemoteID = oldTrack.remoteID
         let oldClipKey = clipRangeKey(for: oldTrack)
-        let newClipKey = clipRangeKey(remoteID: remoteID)
+        guard let activeSource = URL(string: sourceServer),
+              let targetContext = MobileServerEndpointPolicy.context(
+                  serverURL: activeSource,
+                  profileID: profileID
+              ) else { throw URLError(.badURL) }
+        try MobileRemoteAssociationPolicy.validateAdoption(
+            track: oldTrack,
+            targetContext: targetContext
+        )
+        let expectedIdentity = MobileRemoteIdentity(context: targetContext, remoteID: remoteID)
+        let newClipKey = clipRangeKey(identity: expectedIdentity)
         let duplicateIDs = Set(tracks.compactMap { candidate -> UUID? in
             guard candidate.id != trackID,
-                  candidate.remoteID == remoteID,
-                  (candidate.syncProfileID ?? "default") == syncProfileID else { return nil }
-            if let candidateSource = candidate.sourceServer.flatMap(URL.init(string:)),
-               let activeSource = URL(string: sourceServer),
-               !sameOrigin(candidateSource, activeSource) {
-                return nil
-            }
+                  candidate.remoteIdentity() == expectedIdentity else { return nil }
             return candidate.id
         })
         tracks[targetIndex].remoteID = remoteID
         tracks[targetIndex].sourceServer = sourceServer
-        tracks[targetIndex].syncProfileID = syncProfileID
+        tracks[targetIndex].syncProfileID = profileID
 
         let remapTrackIDs: ([UUID]) -> [UUID] = { values in
             var seen = Set<UUID>()
@@ -1458,6 +3714,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 if !result.contains(value) { result.append(value) }
             })
             updateRemoteSongIDs(forPlaylistAt: index)
+            playlistMutationGeneration &+= 1
             dirtyPlaylistIDs.insert(playlists[index].id)
         }
 
@@ -1490,20 +3747,48 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func deleteRemoteSong(_ song: MobileRemoteSong) async {
-        guard let baseURL = normalizedServer(), !serverAdminToken.isEmpty else { return }
+        guard !isActivatingSyncProfile else { return }
+        guard let baseURL = normalizedServer(), !serverAdminToken.isEmpty else {
+            recordTransferFailure(
+                .delete,
+                item: song.title,
+                reason: "Save a valid server URL and admin key first.",
+                retryTarget: .delete(remoteSongID: song.id)
+            )
+            return
+        }
         var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/admin/songs/\(song.id)"))
         request.httpMethod = "DELETE"
         request.setValue("Bearer \(serverAdminToken)", forHTTPHeaderField: "Authorization")
         setProfileHeader(on: &request)
-        if let (_, response) = try? await URLSession.shared.data(for: request),
-           (response as? HTTPURLResponse)?.statusCode == 204 {
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard status == 204 else {
+                let detail = (try? JSONDecoder().decode(ServerErrorPayload.self, from: data).error)
+                recordTransferFailure(
+                    .delete,
+                    item: song.title,
+                    reason: detail.map { "HTTP \(status): \($0)" } ?? "Server returned HTTP \(status).",
+                    retryTarget: .delete(remoteSongID: song.id)
+                )
+                return
+            }
+            uploadedSongsAwaitingCatalog.removeValue(forKey: song.id)
             remoteSongs.removeAll { $0.id == song.id }
             selectedRemoteSongIDs.remove(song.id)
+        } catch {
+            recordTransferFailure(
+                .delete,
+                item: song.title,
+                reason: error.localizedDescription,
+                retryTarget: .delete(remoteSongID: song.id)
+            )
         }
     }
 
     func syncPlaylistsNow() async {
-        guard !isSyncingPlaylists else { return }
+        guard !isActivatingSyncProfile, !isSyncingPlaylists else { return }
         guard let baseURL = normalizedServer() else {
             playlistSyncDetail = "Enter a valid server URL"
             return
@@ -1512,6 +3797,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             playlistSyncDetail = "Enter the access token"
             return
         }
+        let submittedProfileID = syncProfileID
 
         let serverKey = "\(baseURL.absoluteString)#profile=\(syncProfileID)"
         if playlistSyncServerURL != serverKey {
@@ -1528,6 +3814,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
         do {
             var remoteDocument = try await fetchRemotePlaylists(from: baseURL)
+            guard isCurrentServerContext(baseURL: baseURL, profileID: submittedProfileID) else { return }
             var attempts = 0
 
             while attempts < 2 {
@@ -1542,10 +3829,18 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 let submittedDirtyLikeIDs = dirtyRemoteLikeSongIDs
                 let submittedClipGeneration = clipRangeMutationGeneration
                 let submittedDirtyClipKeys = dirtyClipRangeKeys.filter(isActiveProfileClipKey)
+                let submittedPlaylistGeneration = playlistMutationGeneration
                 switch try await putRemotePlaylists(merge.document, to: baseURL) {
                 case .updated(let updated):
-                    dirtyPlaylistIDs.removeAll()
-                    deletedPlaylistIDs.removeAll()
+                    guard isCurrentServerContext(baseURL: baseURL, profileID: submittedProfileID) else { return }
+                    let canApplySubmittedPlaylists = MobilePlaylistSyncResponsePolicy.shouldApplyResponse(
+                        submittedMutationGeneration: submittedPlaylistGeneration,
+                        currentMutationGeneration: playlistMutationGeneration
+                    )
+                    if canApplySubmittedPlaylists {
+                        dirtyPlaylistIDs.removeAll()
+                        deletedPlaylistIDs.removeAll()
+                    }
                     if likesMutationGeneration == submittedLikesGeneration {
                         dirtyRemoteLikeSongIDs.subtract(submittedDirtyLikeIDs)
                     }
@@ -1554,13 +3849,23 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                         dirtyClipRangeKeys.subtract(submittedDirtyClipKeys)
                         deletedClipRangeKeys.subtract(submittedDirtyClipKeys)
                     }
-                    applyRemotePlaylists(updated)
-                    playlistSyncDetail = "Synced \(updated.playlists.count) playlist\(updated.playlists.count == 1 ? "" : "s")"
-                    if likesDirty || dirtyClipRangeKeys.contains(where: isActiveProfileClipKey) {
+                    if canApplySubmittedPlaylists {
+                        applyRemotePlaylists(updated)
+                        playlistSyncDetail = "Synced \(updated.playlists.count) playlist\(updated.playlists.count == 1 ? "" : "s")"
+                    } else {
+                        playlistRevision = updated.revision
+                        knownRemotePlaylistIDs = Set(updated.playlists.map(\.id))
+                        playlistSyncDetail = "Saved; syncing newer playlist changes…"
+                        save()
+                    }
+                    if !canApplySubmittedPlaylists
+                        || likesDirty
+                        || dirtyClipRangeKeys.contains(where: isActiveProfileClipKey) {
                         schedulePlaylistSync()
                     }
                     return
                 case .conflict(let current):
+                    guard isCurrentServerContext(baseURL: baseURL, profileID: submittedProfileID) else { return }
                     remoteDocument = current
                     attempts += 1
                 }
@@ -1642,6 +3947,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         return PlaylistServerError(status: status, message: message)
     }
 
+    private func isCurrentServerContext(baseURL: URL, profileID: String) -> Bool {
+        syncProfileID == profileID && normalizedServer()?.absoluteString == baseURL.absoluteString
+    }
+
     private func mergedPlaylistDocument(
         from remote: MobileRemotePlaylistsDocument
     ) -> (document: MobileRemotePlaylistsDocument, needsUpload: Bool) {
@@ -1672,9 +3981,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             }
         }
 
-        var remoteClipRanges = Dictionary(uniqueKeysWithValues: remote.clipRanges.map {
-            ($0.songID, MobileClipRange(startSeconds: $0.startSeconds, endSeconds: $0.endSeconds))
-        })
+        var remoteClipRanges = remote.clipRanges.reduce(into: [String: MobileClipRange]()) { result, payload in
+            result[payload.songID] = MobileClipRange(
+                startSeconds: payload.startSeconds,
+                endSeconds: payload.endSeconds
+            )
+        }
         let activeDirtyClipKeys = dirtyClipRangeKeys.filter(isActiveProfileClipKey)
         for key in activeDirtyClipKeys {
             guard let remoteID = remoteSongID(fromClipKey: key) else { continue }
@@ -1702,7 +4014,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private func remotePlaylist(from playlist: MobilePlaylist) -> MobileRemotePlaylist {
         var songIDs: [String] = []
         for trackID in playlist.trackIDs {
-            guard let remoteID = tracks.first(where: { $0.id == trackID })?.remoteID,
+            guard let track = tracks.first(where: { $0.id == trackID }),
+                  belongsToActiveServerContext(track),
+                  let remoteID = track.remoteID,
                   !songIDs.contains(remoteID) else { continue }
             songIDs.append(remoteID)
         }
@@ -1713,14 +4027,19 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func applyRemotePlaylists(_ document: MobileRemotePlaylistsDocument) {
-        let existing = Dictionary(uniqueKeysWithValues: playlists.filter { !$0.isSystem }.map { ($0.id, $0) })
+        let existing = playlists.filter { !$0.isSystem }.reduce(into: [UUID: MobilePlaylist]()) { result, playlist in
+            if result[playlist.id] == nil { result[playlist.id] = playlist }
+        }
         let systemPlaylists = playlists.filter(\.isSystem)
-        let remotePlaylists = document.playlists.map { remote -> MobilePlaylist in
+        let uniqueRemotePlaylists = MobileCollectionNormalization.uniqueRemotePlaylists(document.playlists)
+        let remotePlaylists = uniqueRemotePlaylists.map { remote -> MobilePlaylist in
             let localOnlyTrackIDs = existing[remote.id]?.trackIDs.filter { trackID in
                 tracks.first(where: { $0.id == trackID })?.remoteID == nil
             } ?? []
-            let downloadedTrackIDs = remote.songIDs.compactMap { remoteID in
-                tracks.first(where: { $0.remoteID == remoteID })?.id
+            let downloadedTrackIDs: [UUID] = remote.songIDs.compactMap { remoteID -> UUID? in
+                guard let activeServerContext else { return nil }
+                let identity = MobileRemoteIdentity(context: activeServerContext, remoteID: remoteID)
+                return tracks.first(where: { $0.remoteIdentity() == identity })?.id
             }
             var combined = downloadedTrackIDs
             combined.append(contentsOf: localOnlyTrackIDs.filter { !combined.contains($0) })
@@ -1754,7 +4073,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
         hydrateRemoteLikedTracks()
         playlistRevision = document.revision
-        knownRemotePlaylistIDs = Set(document.playlists.map(\.id))
+        knownRemotePlaylistIDs = Set(uniqueRemotePlaylists.map(\.id))
         dirtyPlaylistIDs.subtract(knownRemotePlaylistIDs)
         likesDirty = !dirtyRemoteLikeSongIDs.isEmpty
         normalizeSystemPlaylist()
@@ -1762,13 +4081,15 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func hydrateRemotePlaylistTracks() {
+        guard let activeServerContext else { return }
         for index in playlists.indices where !playlists[index].isSystem {
             guard let remoteSongIDs = playlists[index].remoteSongIDs else { continue }
             let localOnlyTrackIDs = playlists[index].trackIDs.filter { trackID in
                 tracks.first(where: { $0.id == trackID })?.remoteID == nil
             }
-            var hydrated = remoteSongIDs.compactMap { remoteID in
-                tracks.first(where: { $0.remoteID == remoteID })?.id
+            var hydrated: [UUID] = remoteSongIDs.compactMap { remoteID -> UUID? in
+                let identity = MobileRemoteIdentity(context: activeServerContext, remoteID: remoteID)
+                return tracks.first(where: { $0.remoteIdentity() == identity })?.id
             }
             hydrated.append(contentsOf: localOnlyTrackIDs.filter { !hydrated.contains($0) })
             playlists[index].trackIDs = hydrated
@@ -1781,7 +4102,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
         let hydratedRemoteFavorites = tracks.compactMap { track -> UUID? in
             guard let remoteID = track.remoteID,
-                  (track.syncProfileID ?? "default") == syncProfileID,
+                  let activeServerContext,
+                  track.remoteIdentity() == MobileRemoteIdentity(context: activeServerContext, remoteID: remoteID),
                   remoteLikedSongIDs.contains(remoteID) else { return nil }
             return track.id
         }
@@ -1791,10 +4113,14 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private func updateRemoteSongIDs(forPlaylistAt index: Int) {
         guard playlists.indices.contains(index), !playlists[index].isSystem else { return }
         let previouslyUnresolved = (playlists[index].remoteSongIDs ?? []).filter { remoteID in
-            !tracks.contains { $0.remoteID == remoteID }
+            guard let activeServerContext else { return true }
+            let identity = MobileRemoteIdentity(context: activeServerContext, remoteID: remoteID)
+            return !tracks.contains { $0.remoteIdentity() == identity }
         }
-        var ordered = playlists[index].trackIDs.compactMap { trackID in
-            tracks.first(where: { $0.id == trackID })?.remoteID
+        var ordered: [String] = playlists[index].trackIDs.compactMap { trackID -> String? in
+            guard let track = tracks.first(where: { $0.id == trackID }),
+                  belongsToActiveServerContext(track) else { return nil }
+            return track.remoteID
         }
         ordered.append(contentsOf: previouslyUnresolved.filter { !ordered.contains($0) })
         playlists[index].remoteSongIDs = ordered
@@ -1811,16 +4137,22 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func clipRangeKey(for track: MobileTrack) -> String {
-        if let remoteID = track.remoteID { return clipRangeKey(remoteID: remoteID) }
-        return "\(syncProfileID)|local:\(track.id.uuidString.lowercased())"
+        if let identity = track.remoteIdentity() { return clipRangeKey(identity: identity) }
+        return "local:\(track.id.uuidString.lowercased())"
     }
 
     private func clipRangeKey(remoteID: String) -> String {
-        "\(syncProfileID)|remote:\(remoteID)"
+        guard let activeServerContext else { return "unscoped|remote:\(remoteID)" }
+        return clipRangeKey(identity: MobileRemoteIdentity(context: activeServerContext, remoteID: remoteID))
+    }
+
+    private func clipRangeKey(identity: MobileRemoteIdentity) -> String {
+        "\(identity.context.storagePrefix)|remote:\(identity.remoteID)"
     }
 
     private func isActiveProfileClipKey(_ key: String) -> Bool {
-        key.hasPrefix("\(syncProfileID)|")
+        guard let activeServerContext else { return false }
+        return key.hasPrefix("\(activeServerContext.storagePrefix)|remote:")
     }
 
     private func remoteSongID(fromClipKey key: String) -> String? {
@@ -1829,15 +4161,97 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         return String(key[range.upperBound...])
     }
 
+    private func migrateLegacyClipRangeKeys(fallbackServerURL: URL?) {
+        func migrated(_ key: String) -> String {
+            if key.hasPrefix("origin=") || key.hasPrefix("local:") { return key }
+            if let localRange = key.range(of: "|local:") {
+                return "local:" + String(key[localRange.upperBound...])
+            }
+            guard let remoteRange = key.range(of: "|remote:"),
+                  let fallbackServerURL else { return key }
+            let profileID = String(key[..<remoteRange.lowerBound])
+            let remoteID = String(key[remoteRange.upperBound...])
+            guard let context = MobileServerEndpointPolicy.context(
+                serverURL: fallbackServerURL,
+                profileID: profileID
+            ) else { return key }
+            return clipRangeKey(identity: MobileRemoteIdentity(context: context, remoteID: remoteID))
+        }
+
+        clipRanges = clipRanges.reduce(into: [:]) { result, pair in
+            result[migrated(pair.key)] = pair.value
+        }
+        dirtyClipRangeKeys = Set(dirtyClipRangeKeys.map(migrated))
+        deletedClipRangeKeys = Set(deletedClipRangeKeys.map(migrated))
+    }
+
     private func playbackBounds(for track: MobileTrack, duration: TimeInterval? = nil) -> (start: TimeInterval, end: TimeInterval) {
-        let maximum = max(duration ?? track.duration, 0)
-        guard let range = clipRange(for: track) else { return (0, maximum) }
-        let start = min(max(range.startSeconds, 0), maximum)
-        let end = min(max(range.endSeconds, start), maximum)
-        return end - start >= 0.25 ? (start, end) : (0, maximum)
+        let bounds = MobileClipPlaybackPolicy.bounds(
+            range: clipRange(for: track),
+            duration: duration ?? track.duration
+        )
+        return (bounds.start, bounds.end)
+    }
+
+    private func captureActiveProfileState() {
+        guard let activeServerContext else { return }
+        profileSyncStates[activeServerContext] = MobileProfileSyncState(
+            playlists: playlists.filter { !$0.isSystem },
+            playlistRevision: playlistRevision,
+            knownRemotePlaylistIDs: knownRemotePlaylistIDs,
+            dirtyPlaylistIDs: dirtyPlaylistIDs,
+            deletedPlaylistIDs: deletedPlaylistIDs,
+            playlistSyncServerURL: playlistSyncServerURL,
+            remoteLikedSongIDs: remoteLikedSongIDs,
+            dirtyRemoteLikeSongIDs: dirtyRemoteLikeSongIDs,
+            likesDirty: likesDirty
+        )
+    }
+
+    private func restoreActiveProfileState() {
+        let localFavorites = favorites.filter { trackID in
+            tracks.first(where: { $0.id == trackID })?.remoteID == nil
+        }
+        let systemPlaylist = playlists.first(where: \.isSystem)
+            ?? MobilePlaylist(name: "Liked Songs", isSystem: true)
+        guard let activeServerContext,
+              let state = profileSyncStates[activeServerContext] else {
+            playlists = [systemPlaylist]
+            favorites = localFavorites
+            playlistRevision = 0
+            knownRemotePlaylistIDs.removeAll()
+            dirtyPlaylistIDs.removeAll()
+            deletedPlaylistIDs.removeAll()
+            playlistSyncServerURL = nil
+            remoteLikedSongIDs.removeAll()
+            dirtyRemoteLikeSongIDs.removeAll()
+            likesDirty = false
+            normalizeSystemPlaylist()
+            return
+        }
+
+        playlists = [systemPlaylist] + state.playlists
+        favorites = localFavorites
+        playlistRevision = state.playlistRevision
+        knownRemotePlaylistIDs = state.knownRemotePlaylistIDs
+        dirtyPlaylistIDs = state.dirtyPlaylistIDs
+        deletedPlaylistIDs = state.deletedPlaylistIDs
+        playlistSyncServerURL = state.playlistSyncServerURL
+        remoteLikedSongIDs = state.remoteLikedSongIDs
+        dirtyRemoteLikeSongIDs = state.dirtyRemoteLikeSongIDs
+        likesDirty = state.likesDirty || !dirtyRemoteLikeSongIDs.isEmpty
+        hydrateRemotePlaylistTracks()
+        hydrateRemoteLikedTracks()
+        normalizeSystemPlaylist()
     }
 
     func activateSyncProfile(named rawName: String) async -> Bool {
+        guard !isProfileTransitionBusy else {
+            serverMessage = "Wait for active transfers and playlist sync to finish."
+            return false
+        }
+        isActivatingSyncProfile = true
+        defer { isActivatingSyncProfile = false }
         let name = rawName
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
@@ -1899,40 +4313,37 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             save()
             return
         }
-        let currentTrackBelongsToPreviousProfile = currentTrack.map {
-            $0.remoteID != nil && ($0.syncProfileID ?? "default") != id
-        } ?? false
-        if currentTrackBelongsToPreviousProfile {
+        playlistSyncTask?.cancel()
+        clientConfigRequestGeneration &+= 1
+        captureActiveProfileState()
+        syncProfileID = id
+        syncProfileName = name
+        restoreActiveProfileState()
+
+        if let currentTrack, currentTrack.remoteID != nil, !belongsToActiveServerContext(currentTrack) {
             stopTimer()
             player?.stop()
             player = nil
             isPlaying = false
+            discardStreamingPlayback()
             currentTrackID = nil
             position = 0
             UserDefaults.standard.removeObject(forKey: "Resonance.currentTrack")
             UserDefaults.standard.set(position, forKey: "Resonance.position")
         }
-        syncProfileID = id
-        syncProfileName = name
+        catalogRequestGeneration &+= 1
+        uploadedSongsAwaitingCatalog.removeAll()
         playbackPlaylistID = nil
         playbackQueue = tracksForActiveProfile.map(\.id)
         let activeTrackIDs = Set(playbackQueue)
         history.removeAll { !activeTrackIDs.contains($0) }
-        playlists = playlists.filter(\.isSystem)
-        favorites = favorites.filter { trackID in
-            tracks.first(where: { $0.id == trackID })?.remoteID == nil
-        }
-        playlistRevision = 0
-        knownRemotePlaylistIDs.removeAll()
-        dirtyPlaylistIDs.removeAll()
-        deletedPlaylistIDs.removeAll()
-        playlistSyncServerURL = nil
-        remoteLikedSongIDs.removeAll()
-        dirtyRemoteLikeSongIDs.removeAll()
+        playlistMutationGeneration &+= 1
         likesMutationGeneration &+= 1
-        likesDirty = false
         remoteSongs.removeAll()
         selectedRemoteSongIDs.removeAll()
+        transferFailures.removeAll()
+        transferNotice = nil
+        useSafeClientConfiguration(status: "Using safe defaults until the profile policy refreshes")
         normalizeSystemPlaylist()
         save()
         updateNowPlaying()
@@ -1958,13 +4369,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func normalizedServer() -> URL? {
-        guard var components = URLComponents(string: serverURL.trimmingCharacters(in: .whitespacesAndNewlines)),
-              components.scheme == "https" || components.scheme == "http",
-              components.host != nil else { return nil }
-        while components.path.hasSuffix("/") {
-            components.path.removeLast()
-        }
-        return components.url
+        try? MobileServerEndpointPolicy.resolve(serverURL).url
     }
 
     private func uniqueFilename(_ preferred: String) -> String {
@@ -1991,6 +4396,26 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private func save() {
         normalizeSystemPlaylist()
+        captureActiveProfileState()
+        let queueReferences = playbackQueue.compactMap { trackID -> MobilePlaybackQueueReference? in
+            guard let track = tracks.first(where: { $0.id == trackID }) else { return nil }
+            return MobilePlaybackQueueReference(trackID: track.id, remoteIdentity: track.remoteIdentity())
+        }
+        let currentReference = currentTrack.flatMap { track -> MobilePlaybackQueueReference? in
+            guard streamingTrack?.id != track.id else { return nil }
+            return MobilePlaybackQueueReference(trackID: track.id, remoteIdentity: track.remoteIdentity())
+        }
+        let historyReferences = history.compactMap { trackID -> MobilePlaybackQueueReference? in
+            guard let track = tracks.first(where: { $0.id == trackID }) else { return nil }
+            return MobilePlaybackQueueReference(trackID: track.id, remoteIdentity: track.remoteIdentity())
+        }
+        let playbackSnapshot = MobilePlaybackSnapshot(
+            version: MobilePlaybackSnapshot.currentVersion,
+            queue: queueReferences,
+            playlistID: playbackPlaylistID,
+            currentTrack: currentReference,
+            history: historyReferences
+        )
         let stored = MobileStoredLibrary(
             tracks: tracks,
             playlists: playlists,
@@ -2008,38 +4433,120 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             likesDirty: likesDirty,
             clipRanges: clipRanges,
             dirtyClipRangeKeys: dirtyClipRangeKeys,
-            deletedClipRangeKeys: deletedClipRangeKeys
+            deletedClipRangeKeys: deletedClipRangeKeys,
+            profileStates: profileSyncStates,
+            playbackQueue: queueReferences.map(\.trackID),
+            playbackPlaylistID: queueReferences.isEmpty ? nil : playbackPlaylistID,
+            playbackSnapshot: playbackSnapshot,
+            transferFailures: transferFailures
         )
-        if let data = try? JSONEncoder().encode(stored) { try? data.write(to: stateURL, options: .atomic) }
+        do {
+            let data = try JSONEncoder().encode(stored)
+            if let existing = try? Data(contentsOf: stateURL),
+               MobileStoredLibraryRecoveryPolicy.recover(primaryData: existing, backupData: nil).source == .primary {
+                try existing.write(to: backupStateURL, options: .atomic)
+            }
+            try data.write(to: stateURL, options: .atomic)
+        } catch {
+            libraryRecoveryNotice = MobileLibraryRecoveryNotice(
+                title: "Library could not be saved",
+                message: "Your in-memory changes are still available. \(error.localizedDescription)"
+            )
+        }
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: stateURL), let stored = try? JSONDecoder().decode(MobileStoredLibrary.self, from: data) else { return }
-        var seenRemoteIDs = Set<String>()
-        tracks = stored.tracks.filter { fileManager.fileExists(atPath: musicDirectory.appendingPathComponent($0.relativePath).path) }
-            .filter { track in guard let remoteID = track.remoteID else { return true }; return seenRemoteIDs.insert(remoteID).inserted }
-        playlists = stored.playlists
-        favorites = stored.favorites.intersection(Set(tracks.map(\.id)))
+        let primaryData = try? Data(contentsOf: stateURL)
+        let backupData = try? Data(contentsOf: backupStateURL)
+        let recovery = MobileStoredLibraryRecoveryPolicy.recover(
+            primaryData: primaryData,
+            backupData: backupData
+        )
+        if recovery.primaryWasCorrupt {
+            let quarantineURL = root.appendingPathComponent(
+                "library-corrupt-\(Int(Date().timeIntervalSince1970)).json"
+            )
+            do {
+                if fileManager.fileExists(atPath: stateURL.path) {
+                    try fileManager.moveItem(at: stateURL, to: quarantineURL)
+                }
+                if recovery.source == .backup, let backupData {
+                    try backupData.write(to: stateURL, options: .atomic)
+                }
+                libraryRecoveryNotice = MobileLibraryRecoveryNotice(
+                    title: recovery.source == .backup ? "Library recovered" : "Library needs recovery",
+                    message: recovery.source == .backup
+                        ? "The primary library was damaged. Resonance restored the last valid backup and preserved the damaged file as \(quarantineURL.lastPathComponent)."
+                        : "The library file was damaged and no valid backup was available. It was preserved as \(quarantineURL.lastPathComponent)."
+                )
+            } catch {
+                libraryRecoveryNotice = MobileLibraryRecoveryNotice(
+                    title: "Library recovery incomplete",
+                    message: "Resonance did not overwrite the damaged library. \(error.localizedDescription)"
+                )
+            }
+        } else if recovery.source == .backup, let backupData {
+            do {
+                try backupData.write(to: stateURL, options: .atomic)
+                libraryRecoveryNotice = MobileLibraryRecoveryNotice(
+                    title: "Library restored",
+                    message: "The primary library file was missing. Resonance restored the last valid backup."
+                )
+            } catch {
+                libraryRecoveryNotice = MobileLibraryRecoveryNotice(
+                    title: "Library recovery incomplete",
+                    message: "Resonance loaded the backup in memory but could not restore the primary library file. \(error.localizedDescription)"
+                )
+            }
+        }
+        guard let stored = recovery.library else { return }
+
         serverURL = stored.serverURL
+        do {
+            _ = try MobileServerEndpointPolicy.resolve(stored.serverURL)
+        } catch {
+            serverConfigurationMessage = error.localizedDescription
+            serverMessage = error.localizedDescription
+        }
+        syncProfileID = stored.syncProfileID ?? "default"
+        syncProfileName = stored.syncProfileName ?? (syncProfileID == "default" ? "Default" : syncProfileID)
+        let fallbackServerURL = URL(string: stored.serverURL)
+        var availableTracks = stored.tracks.filter {
+            fileManager.fileExists(atPath: musicDirectory.appendingPathComponent($0.relativePath).path)
+        }
+        for index in availableTracks.indices where availableTracks[index].remoteID != nil {
+            if availableTracks[index].sourceServer == nil {
+                availableTracks[index].sourceServer = fallbackServerURL?.absoluteString
+            }
+            if availableTracks[index].syncProfileID == nil {
+                availableTracks[index].syncProfileID = "default"
+            }
+        }
+        let normalization = MobileCollectionNormalization.normalize(
+            tracks: availableTracks,
+            playlists: stored.playlists,
+            fallbackServerURL: fallbackServerURL
+        )
+        tracks = normalization.tracks
+        transferFailures = stored.transferFailures ?? []
+        playlists = normalization.playlists
+        favorites = stored.favorites.intersection(Set(tracks.map(\.id)))
         playlistRevision = stored.playlistRevision ?? 0
         knownRemotePlaylistIDs = stored.knownRemotePlaylistIDs ?? []
         dirtyPlaylistIDs = stored.dirtyPlaylistIDs ?? []
         deletedPlaylistIDs = stored.deletedPlaylistIDs ?? []
         playlistSyncServerURL = stored.playlistSyncServerURL
-        syncProfileID = stored.syncProfileID ?? "default"
-        syncProfileName = stored.syncProfileName ?? (syncProfileID == "default" ? "Default" : syncProfileID)
-        let migratedLikedSongIDs = Set(favorites.compactMap { trackID in
-            tracks.first(where: {
-                $0.id == trackID && ($0.syncProfileID ?? "default") == syncProfileID
-            })?.remoteID
+        let migratedLikedSongIDs = Set<String>(favorites.compactMap { trackID -> String? in
+            guard let track = tracks.first(where: { $0.id == trackID }),
+                  belongsToActiveServerContext(track) else { return nil }
+            return track.remoteID
         })
         remoteLikedSongIDs = stored.remoteLikedSongIDs ?? migratedLikedSongIDs
         if let storedDirtyLikeIDs = stored.dirtyRemoteLikeSongIDs {
             dirtyRemoteLikeSongIDs = storedDirtyLikeIDs
         } else if stored.likesDirty ?? false {
-            dirtyRemoteLikeSongIDs = Set(tracks.compactMap { track in
-                guard track.remoteID != nil,
-                      (track.syncProfileID ?? "default") == syncProfileID else { return nil }
+            dirtyRemoteLikeSongIDs = Set<String>(tracks.compactMap { track -> String? in
+                guard track.remoteID != nil, belongsToActiveServerContext(track) else { return nil }
                 return track.remoteID
             })
         } else if stored.remoteLikedSongIDs == nil {
@@ -2052,14 +4559,61 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         clipRanges = stored.clipRanges ?? [:]
         dirtyClipRangeKeys = stored.dirtyClipRangeKeys ?? []
         deletedClipRangeKeys = stored.deletedClipRangeKeys ?? []
+        migrateLegacyClipRangeKeys(fallbackServerURL: fallbackServerURL)
+        profileSyncStates = stored.profileStates ?? [:]
+        captureActiveProfileState()
         hydrateRemotePlaylistTracks()
         hydrateRemoteLikedTracks()
         normalizeSystemPlaylist()
         let savedID = UserDefaults.standard.string(forKey: "Resonance.currentTrack").flatMap(UUID.init(uuidString:))
-        currentTrackID = savedID.flatMap { wanted in
+        let legacyCurrentTrackID = savedID.flatMap { wanted in
             tracksForActiveProfile.first(where: { $0.id == wanted })?.id
         } ?? tracksForActiveProfile.first?.id
         position = UserDefaults.standard.double(forKey: "Resonance.position")
+        let activeTrackIDs = Set(tracksForActiveProfile.map(\.id))
+        let playlistIDs = Set(playlists.map(\.id))
+        let restoredPlayback: MobilePlaybackRestoreResult
+        if let snapshot = stored.playbackSnapshot,
+           (1...MobilePlaybackSnapshot.currentVersion).contains(snapshot.version) {
+            restoredPlayback = MobilePlaybackSnapshotPolicy.restore(
+                snapshot: snapshot,
+                tracks: tracks,
+                activeTrackIDs: activeTrackIDs,
+                playlistIDs: playlistIDs
+            )
+        } else {
+            restoredPlayback = MobilePlaybackSnapshotPolicy.restore(
+                queue: stored.playbackQueue ?? [],
+                playlistID: stored.playbackPlaylistID,
+                currentTrackID: legacyCurrentTrackID,
+                activeTrackIDs: activeTrackIDs,
+                playlistIDs: playlistIDs
+            )
+        }
+        playbackQueue = restoredPlayback.queue
+        playbackPlaylistID = restoredPlayback.playlistID
+        currentTrackID = restoredPlayback.currentTrackID ?? legacyCurrentTrackID
+        history = restoredPlayback.history
+
+        for track in tracks where track.remoteID != nil {
+            try? markServerDownloadExcludedFromBackup(at: fileURL(for: track))
+        }
+        if normalization.repairCount > 0 {
+            let repairMessage = "Resonance repaired \(normalization.repairCount) duplicate identifier or remote-association conflict\(normalization.repairCount == 1 ? "" : "s") without deleting audio files."
+            if let existing = libraryRecoveryNotice {
+                libraryRecoveryNotice = MobileLibraryRecoveryNotice(
+                    title: existing.title,
+                    message: existing.message + " " + repairMessage
+                )
+            } else {
+                libraryRecoveryNotice = MobileLibraryRecoveryNotice(
+                    title: "Library identifiers repaired",
+                    message: repairMessage
+                )
+            }
+            dirtyPlaylistIDs.formUnion(playlists.filter { !$0.isSystem }.map(\.id))
+            save()
+        }
     }
 
     private func configureAudioSession() {
@@ -2108,7 +4662,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
         switch type {
         case .began:
-            wasPlayingBeforeInterruption = player?.isPlaying == true || isPlaying
+            wasPlayingBeforeInterruption = player?.isPlaying == true
+                || streamingPlayer?.timeControlStatus == .playing
+                || isPlaying
+            streamingPlayer?.pause()
             stopTimer()
             isPlaying = false
             updateNowPlaying()
@@ -2118,12 +4675,19 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             let options = AVAudioSession.InterruptionOptions(rawValue: rawOptions)
             let shouldResume = wasPlayingBeforeInterruption && options.contains(.shouldResume)
             wasPlayingBeforeInterruption = false
-            guard shouldResume, let player else { return }
+            guard shouldResume else { return }
 
             do {
                 try AVAudioSession.sharedInstance().setActive(true)
-                player.rate = playbackRate
-                isPlaying = player.play()
+                if isTransientStreamActive, let streamingPlayer {
+                    streamingPlayer.playImmediately(atRate: playbackRate)
+                    isPlaying = true
+                } else if let player {
+                    player.rate = playbackRate
+                    isPlaying = player.play()
+                } else {
+                    isPlaying = false
+                }
                 if isPlaying { startTimer() }
                 updateNowPlaying()
             } catch {
@@ -2140,6 +4704,13 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         let resumePosition = position
         configureAudioSession()
         guard shouldResume, let track = currentTrack else { return }
+        if isTransientStreamActive,
+           let remoteID = track.remoteID,
+           let remoteSong = remoteSongs.first(where: { $0.id == remoteID }) {
+            discardStreamingPlayback()
+            Task { await streamRemoteSong(remoteSong) }
+            return
+        }
         startPlayback(track, recordHistory: false, startingAt: resumePosition)
     }
 
@@ -2163,10 +4734,38 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private func startTimer() {
         stopTimer()
-        guard player?.isPlaying == true else { return }
+        guard player?.isPlaying == true || isTransientStreamActive else { return }
         let playbackTimer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, let player = self.player else { return }
+                guard let self else { return }
+                if self.isTransientStreamActive, let streamingPlayer = self.streamingPlayer {
+                    let currentTime = streamingPlayer.currentTime().seconds
+                    if currentTime.isFinite, let track = self.streamingTrack {
+                        let bounds = self.playbackBounds(for: track)
+                        if currentTime + 0.02 < bounds.start {
+                            streamingPlayer.seek(
+                                to: CMTime(seconds: bounds.start, preferredTimescale: 600),
+                                toleranceBefore: .zero,
+                                toleranceAfter: .zero
+                            )
+                            self.position = bounds.start
+                        } else if MobileClipPlaybackPolicy.reachedEnd(
+                            position: currentTime,
+                            bounds: .init(start: bounds.start, end: bounds.end)
+                        ) {
+                            self.completeAuthenticatedStreamPlayback(
+                                generation: self.streamingGeneration
+                            )
+                            return
+                        } else {
+                            self.position = max(currentTime, bounds.start)
+                        }
+                    }
+                    self.isPlaying = streamingPlayer.timeControlStatus != .paused
+                    self.updateNowPlaying()
+                    return
+                }
+                guard let player = self.player else { return }
                 guard player.isPlaying else {
                     self.stopTimer()
                     self.isPlaying = false
@@ -2196,7 +4795,13 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func updateNowPlaying() {
-        guard let track = currentTrack else { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil; return }
+        let remoteCommands = MPRemoteCommandCenter.shared()
+        remoteCommands.nextTrackCommand.isEnabled = !isTransientStreamActive
+        remoteCommands.previousTrackCommand.isEnabled = !isTransientStreamActive
+        guard let track = currentTrack else {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            return
+        }
         let bounds = playbackBounds(for: track, duration: player?.duration)
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: track.title,
@@ -2279,18 +4884,57 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             if self.activeQueue.count > 1 {
                 self.next()
             } else {
+                if self.currentTrackID == self.streamingTrack?.id {
+                    self.player = nil
+                    self.discardStreamingPlayback()
+                }
                 self.updateNowPlaying()
             }
         }
     }
 
     private static let keychainService = "com.gavindietrich.LikedSongsMobile"
-    private static func saveToken(_ token: String, account: String) {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: keychainService, kSecAttrAccount as String: account]
-        SecItemDelete(query as CFDictionary)
-        var value = query
-        value[kSecValueData as String] = Data(token.utf8)
-        SecItemAdd(value as CFDictionary, nil)
+
+    private struct KeychainStoreError: LocalizedError {
+        let operation: String
+        let status: OSStatus
+
+        var errorDescription: String? {
+            let detail = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
+            return "Keychain \(operation) failed: \(detail)"
+        }
+    }
+
+    private static func storeToken(_ token: String, account: String) throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: account,
+        ]
+        if token.isEmpty {
+            let status = SecItemDelete(query as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw KeychainStoreError(operation: "delete", status: status)
+            }
+            return
+        }
+
+        let data = Data(token.utf8)
+        let updateStatus = SecItemUpdate(
+            query as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
+        )
+        if updateStatus == errSecSuccess { return }
+        guard updateStatus == errSecItemNotFound else {
+            throw KeychainStoreError(operation: "update", status: updateStatus)
+        }
+
+        var newItem = query
+        newItem[kSecValueData as String] = data
+        let addStatus = SecItemAdd(newItem as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw KeychainStoreError(operation: "add", status: addStatus)
+        }
     }
 
     private static func readToken(account: String) -> String {
@@ -2304,6 +4948,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
               let data = item as? Data else { return "" }
-        return String(data: data, encoding: .utf8) ?? ""
+        return (String(data: data, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

@@ -55,11 +55,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import mov.unblocked.resonance.BuildConfig
 import mov.unblocked.resonance.data.Playlist
+import mov.unblocked.resonance.data.ServerNetworkPolicy
 import mov.unblocked.resonance.data.Track
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.text.DecimalFormat
 import java.net.HttpURLConnection
-import java.net.URI
 import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -126,7 +129,7 @@ fun RemoteArtwork(
     }
     val bitmap by produceState<Bitmap?>(initialValue = null, key1 = resolvedURL) {
         value = resolvedURL?.let { url ->
-            withContext(Dispatchers.IO) { loadRemoteArtwork(url) }
+            withContext(Dispatchers.IO) { loadRemoteArtwork(serverURL, url) }
         }
     }
     Box(
@@ -154,27 +157,117 @@ fun RemoteArtwork(
     }
 }
 
-internal fun resolveRemoteArtworkURL(serverURL: String, artworkURL: String?): String? {
+internal fun resolveRemoteArtworkURL(
+    serverURL: String,
+    artworkURL: String?,
+    allowCleartextDevelopment: Boolean = BuildConfig.DEBUG,
+): String? {
     val trimmed = artworkURL?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    val allowCleartext = BuildConfig.DEBUG && allowCleartextDevelopment
     return runCatching {
-        val artwork = URI(trimmed)
-        if (artwork.isAbsolute) artwork.toString()
-        else URI(serverURL.trimEnd('/') + "/").resolve(artwork).toString()
+        ServerNetworkPolicy.resolveArtworkURL(
+            baseURL = serverURL,
+            pathOrURL = trimmed,
+            allowCleartextDevelopment = allowCleartext,
+        ).toString()
     }.getOrNull()
 }
 
-private fun loadRemoteArtwork(url: String): Bitmap? = runCatching {
-    val connection = URL(url).openConnection() as HttpURLConnection
-    try {
-        connection.connectTimeout = 10_000
-        connection.readTimeout = 20_000
-        connection.instanceFollowRedirects = true
-        if (connection.responseCode !in 200..299) return@runCatching null
-        connection.inputStream.use(BitmapFactory::decodeStream)
-    } finally {
-        connection.disconnect()
+private fun loadRemoteArtwork(serverURL: String, url: String): Bitmap? =
+    loadRemoteArtworkBytes(serverURL, url)?.let { bytes ->
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
     }
+
+/**
+ * Fetches public artwork without credentials. Redirects are deliberately handled here so every
+ * hop is checked by [ServerNetworkPolicy] before a connection is opened.
+ */
+internal fun loadRemoteArtworkBytes(
+    serverURL: String,
+    url: String,
+    allowCleartextDevelopment: Boolean = BuildConfig.DEBUG,
+    connectionFactory: (URL) -> HttpURLConnection = { target ->
+        target.openConnection() as HttpURLConnection
+    },
+): ByteArray? = runCatching {
+    val allowCleartext = BuildConfig.DEBUG && allowCleartextDevelopment
+    var currentURL = ServerNetworkPolicy.requireArtworkURL(
+        baseURL = serverURL,
+        url = URL(url),
+        allowCleartextDevelopment = allowCleartext,
+    )
+
+    for (redirectCount in 0..MAX_REMOTE_ARTWORK_REDIRECTS) {
+        val connection = connectionFactory(currentURL)
+        try {
+            connection.requestMethod = "GET"
+            connection.instanceFollowRedirects = false
+            connection.useCaches = false
+            connection.connectTimeout = REMOTE_ARTWORK_CONNECT_TIMEOUT_MS
+            connection.readTimeout = REMOTE_ARTWORK_READ_TIMEOUT_MS
+            connection.setRequestProperty("Accept", "image/*")
+
+            val responseCode = connection.responseCode
+            if (responseCode in REMOTE_ARTWORK_REDIRECT_STATUSES) {
+                if (redirectCount == MAX_REMOTE_ARTWORK_REDIRECTS) {
+                    throw IOException("The artwork download redirected too many times")
+                }
+                val location = connection.getHeaderField("Location")
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                    ?: throw IOException("The artwork redirect is missing a location")
+                currentURL = ServerNetworkPolicy.resolveArtworkRedirect(
+                    baseURL = serverURL,
+                    currentURL = currentURL,
+                    location = location,
+                    allowCleartextDevelopment = allowCleartext,
+                )
+                continue
+            }
+            if (responseCode !in 200..299) return@runCatching null
+
+            val declaredBytes = connection.contentLengthLong
+            if (declaredBytes > MAX_REMOTE_ARTWORK_BYTES) return@runCatching null
+            return@runCatching connection.inputStream.use { input ->
+                readRemoteArtworkBytes(input, MAX_REMOTE_ARTWORK_BYTES)
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+    null
 }.getOrNull()
+
+internal fun readRemoteArtworkBytes(
+    input: java.io.InputStream,
+    maxBytes: Long,
+): ByteArray? {
+    require(maxBytes > 0L) { "Artwork byte limit must be positive" }
+    val output = ByteArrayOutputStream()
+    val buffer = ByteArray(REMOTE_ARTWORK_BUFFER_SIZE)
+    var totalBytes = 0L
+    while (true) {
+        val read = input.read(buffer)
+        if (read < 0) break
+        totalBytes += read
+        if (totalBytes > maxBytes) return null
+        output.write(buffer, 0, read)
+    }
+    return output.toByteArray().takeIf(ByteArray::isNotEmpty)
+}
+
+internal const val MAX_REMOTE_ARTWORK_BYTES = 10L * 1_024L * 1_024L
+private const val MAX_REMOTE_ARTWORK_REDIRECTS = 5
+private const val REMOTE_ARTWORK_CONNECT_TIMEOUT_MS = 10_000
+private const val REMOTE_ARTWORK_READ_TIMEOUT_MS = 20_000
+private const val REMOTE_ARTWORK_BUFFER_SIZE = 32 * 1_024
+private val REMOTE_ARTWORK_REDIRECT_STATUSES = setOf(
+    HttpURLConnection.HTTP_MOVED_PERM,
+    HttpURLConnection.HTTP_MOVED_TEMP,
+    HttpURLConnection.HTTP_SEE_OTHER,
+    307,
+    308,
+)
 
 @Composable
 fun Eyebrow(text: String, modifier: Modifier = Modifier) {
@@ -269,7 +362,7 @@ fun TrackRow(
     queue: List<Track> = state.tracks,
     playlistId: String? = null,
     playlistsForAdding: List<Playlist> = state.playlists.filterNot { it.isSystem },
-    trailingText: String = durationText(track.durationMs),
+    trailingText: String = track.durationText,
     showSelection: Boolean = false,
     selected: Boolean = false,
     onSelect: (() -> Unit)? = null,

@@ -8,18 +8,32 @@ on:
       - "windows/**"
       - "installers/windows/**"
       - "release/version.json"
+      - "scripts/release-now.mjs"
+      - "scripts/release-now.test.mjs"
       - "scripts/release-version.mjs"
+      - "scripts/record-desktop-signing-evidence.mjs"
+      - "scripts/validate-release-assets.mjs"
+      - "scripts/validate-release-assets.test.mjs"
       - ".github/workflows/windows.yml"
   pull_request:
     paths:
       - "windows/**"
       - "installers/windows/**"
       - "release/version.json"
+      - "scripts/release-now.mjs"
+      - "scripts/release-now.test.mjs"
       - "scripts/release-version.mjs"
+      - "scripts/record-desktop-signing-evidence.mjs"
+      - "scripts/validate-release-assets.mjs"
+      - "scripts/validate-release-assets.test.mjs"
       - ".github/workflows/windows.yml"
   workflow_call:
     inputs:
       release_candidate:
+        required: false
+        type: boolean
+        default: false
+      unsigned_desktop:
         required: false
         type: boolean
         default: false
@@ -35,6 +49,13 @@ on:
         required: false
         type: string
         default: ""
+    secrets:
+      RESONANCE_WINDOWS_CERTIFICATE_BASE64:
+        required: false
+      RESONANCE_WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+      RESONANCE_WINDOWS_CERTIFICATE_SHA1:
+        required: false
   workflow_dispatch:
 
 permissions:
@@ -67,6 +88,41 @@ jobs:
           [[ "$VERSION" == "$EXPECTED_VERSION" ]]
           [[ "$BUILD" == "$EXPECTED_BUILD" ]]
 
+      - name: Validate Authenticode signing secrets
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        shell: pwsh
+        working-directory: .
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_PASSWORD }}
+          CERTIFICATE_SHA1: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_SHA1 }}
+        run: |
+          $required = @("CERTIFICATE_BASE64", "CERTIFICATE_PASSWORD", "CERTIFICATE_SHA1")
+          foreach ($name in $required) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing required Windows release-signing secret: $name"
+            }
+          }
+          if (($env:CERTIFICATE_SHA1 -replace '[^0-9A-Fa-f]', '').Length -ne 40) {
+            throw "RESONANCE_WINDOWS_CERTIFICATE_SHA1 must be a SHA-1 certificate thumbprint."
+          }
+
+      - name: Configure Authenticode signing
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        shell: pwsh
+        working-directory: .
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_BASE64 }}
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP "resonance-code-signing.pfx"
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:CERTIFICATE_BASE64)
+          )
+          if ((Get-Item $certificatePath).Length -lt 1) {
+            throw "The decoded Windows code-signing certificate is empty."
+          }
+
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
         with:
@@ -96,8 +152,76 @@ jobs:
       - name: Run tests
         run: pnpm test
 
-      - name: Build installer
+      - name: Run release policy tests
+        working-directory: .
+        run: node --test scripts/release-now.test.mjs scripts/validate-release-assets.test.mjs
+
+      - name: Build unsigned development installer
+        if: ${{ !inputs.release_candidate || inputs.unsigned_desktop }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: pnpm run installer:win
+
+      - name: Build signed release candidate
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        env:
+          WIN_CSC_LINK: ${{ runner.temp }}\resonance-code-signing.pfx
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_PASSWORD }}
+        run: pnpm exec electron-builder --win nsis --x64 --publish never --config.forceCodeSigning=true
+
+      - name: Verify Authenticode signatures and record evidence
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        shell: pwsh
+        working-directory: .
+        env:
+          VERSION: ${{ inputs.version }}
+          EXPECTED_CERTIFICATE_SHA1: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_SHA1 }}
+        run: |
+          $installer = Resolve-Path "installers/windows/dist/Resonance-Setup-$env:VERSION.exe"
+          $application = Resolve-Path "installers/windows/dist/win-unpacked/Resonance.exe"
+          $expectedThumbprint = ($env:EXPECTED_CERTIFICATE_SHA1 -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+
+          $signToolCommand = Get-Command signtool.exe -ErrorAction SilentlyContinue
+          if ($null -eq $signToolCommand) {
+            $signToolCommand = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+              Sort-Object FullName |
+              Select-Object -Last 1
+          }
+          if ($null -eq $signToolCommand) {
+            throw "signtool.exe was not found on the Windows runner."
+          }
+          $signToolPath = if ($signToolCommand.PSObject.Properties.Name -contains "Source") {
+            $signToolCommand.Source
+          } else {
+            $signToolCommand.FullName
+          }
+
+          foreach ($path in @($application.Path, $installer.Path)) {
+            $signature = Get-AuthenticodeSignature -FilePath $path
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              throw "Authenticode validation failed for $path with status $($signature.Status)."
+            }
+            if ($null -eq $signature.SignerCertificate) {
+              throw "Authenticode did not return a signer certificate for $path."
+            }
+            if ($signature.SignerCertificate.Thumbprint.ToUpperInvariant() -ne $expectedThumbprint) {
+              throw "The Authenticode signer for $path is not the configured release certificate."
+            }
+            if ($signature.SignerCertificate.Subject -eq $signature.SignerCertificate.Issuer) {
+              throw "The Authenticode signer for $path is self-signed."
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "The Authenticode signature for $path does not have a trusted timestamp."
+            }
+            & $signToolPath verify /pa /all /v $path
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool trust-chain validation failed for $path."
+            }
+          }
+
+          node scripts/record-desktop-signing-evidence.mjs `
+            windows installers/windows/dist "$env:VERSION" `
+            "$env:RUNNER_TEMP/resonance-signing-evidence/windows.json"
 
       - name: Verify Windows release manifest
         if: ${{ inputs.release_candidate }}
@@ -132,6 +256,22 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           overwrite: true
+
+      - name: Upload Windows signing evidence
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-signing-windows
+          path: ${{ runner.temp }}/resonance-signing-evidence/windows.json
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
+      - name: Remove temporary signing material
+        if: ${{ always() && inputs.release_candidate && !inputs.unsigned_desktop }}
+        shell: pwsh
+        working-directory: .
+        run: Remove-Item "$env:RUNNER_TEMP/resonance-code-signing.pfx" -Force -ErrorAction SilentlyContinue
 
       - name: Save Electron packaging cache from main
         if: ${{ github.ref == 'refs/heads/main' && steps.electron-cache.outputs.cache-hit != 'true' }}

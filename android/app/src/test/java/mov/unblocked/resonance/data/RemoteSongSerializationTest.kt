@@ -2,7 +2,9 @@ package mov.unblocked.resonance.data
 
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RemoteSongSerializationTest {
@@ -56,5 +58,24 @@ class RemoteSongSerializationTest {
 
         assertNull(song.durationText)
         assertNull(song.artworkURL)
+    }
+
+    @Test
+    fun identifiesVideoFromContentTypeOrSupportedContainerExtension() {
+        val audio = RemoteSong(
+            id = "audio",
+            filename = "song.mp3",
+            title = "Song",
+            artist = "Artist",
+            album = "Album",
+            size = 1,
+            modifiedAt = "",
+            contentType = "audio/mpeg",
+            downloadURL = "/download",
+            streamURL = "/stream",
+        )
+        assertFalse(audio.isVideoMedia)
+        assertTrue(audio.copy(filename = "clip.MP4").isVideoMedia)
+        assertTrue(audio.copy(contentType = "video/webm", filename = "clip.bin").isVideoMedia)
     }
 }

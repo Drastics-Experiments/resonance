@@ -4,6 +4,8 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { sanitizeWindowsFilename, windowsCollisionFilename } = require("./filename-policy.cjs");
+const { normalizeSourceIdentity } = require("./provenance.cjs");
 const {
   LocalImportError,
   isSpotifyURL,
@@ -70,7 +72,7 @@ function normalizedMetadata(value, fallback = {}) {
 }
 
 function safeFilename(value) {
-  return path.basename(String(value || "")).replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-").replace(/\s+/g, " ").trim();
+  return sanitizeWindowsFilename(value, { pathInput: false });
 }
 
 async function uniqueDestination(directory, preferred) {
@@ -81,7 +83,7 @@ async function uniqueDestination(directory, preferred) {
   for (let counter = 2; ; counter += 1) {
     try { await fs.access(candidate); }
     catch { return candidate; }
-    candidate = path.join(directory, `${base} ${counter}${extension}`);
+    candidate = path.join(directory, windowsCollisionFilename(`${base}${extension}`, counter));
   }
 }
 
@@ -521,6 +523,12 @@ async function resolveLocalImportSource(source, signal, onStage = () => {}, adap
 async function importConfirmedSource(input, signal, onStage = () => {}, adapters = {}) {
   const mediaKind = normalizedMediaKind(input.mediaKind);
   const soundCloudSource = isSoundCloudURL(input.sourceURL);
+  const sourceIdentity = normalizeSourceIdentity(input.sourceIdentity, {
+    provider: soundCloudSource ? "soundcloud" : "youtube",
+    providerID: soundCloudSource ? null : youtubeVideoID(input.sourceURL),
+    sourcePageURL: input.metadata?.sourceURL || input.sourceURL,
+    mediaSourceURL: input.sourceURL,
+  });
   if (soundCloudSource && mediaKind === "video") {
     throw localImportError("inspecting_source", "SOUNDCLOUD_AUDIO_ONLY", "SoundCloud links can only be imported as audio.");
   }
@@ -572,7 +580,7 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
       }
       if (!sourceSha256) throw localImportError("processing", "VIDEO_HASH_FAILED", "The completed video could not be verified.");
       const existingDuplicate = duplicateTrack(input.existing, sourceSha256);
-      if (existingDuplicate) return { kind: "duplicate", track: existingDuplicate };
+      if (existingDuplicate) return { kind: "duplicate", track: existingDuplicate, sourceIdentity };
       assertNotAborted(signal);
       onStage({ stage: "saving_local" });
       const artworkPath = await artworkFetch(metadata.artworkURL, temporary, signal).catch((error) => {
@@ -593,12 +601,13 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
         sourceSha256,
         contentSha256: sourceSha256,
         sourceURL: metadata.sourceURL,
+        sourceIdentity,
         artwork,
         metadata,
       };
     }
     const existingDuplicate = duplicateTrack(input.existing, result.download.sha256);
-    if (existingDuplicate) return { kind: "duplicate", track: existingDuplicate };
+    if (existingDuplicate) return { kind: "duplicate", track: existingDuplicate, sourceIdentity };
     onStage({ stage: "processing", progress: null });
     const artwork = await artworkFetch(metadata.artworkURL, temporary, signal).catch((error) => {
       if (error?.name === "AbortError") throw error;
@@ -613,7 +622,7 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
     }
     const contentSha256 = await fileHash(outputPath);
     const processedDuplicate = duplicateTrack(input.existing, result.download.sha256, contentSha256);
-    if (processedDuplicate) return { kind: "duplicate", track: processedDuplicate };
+    if (processedDuplicate) return { kind: "duplicate", track: processedDuplicate, sourceIdentity };
     assertNotAborted(signal);
     onStage({ stage: "saving_local" });
     await fs.mkdir(input.destinationDirectory, { recursive: true });
@@ -629,6 +638,7 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
       sourceSha256: result.download.sha256,
       contentSha256,
       sourceURL: metadata.sourceURL,
+      sourceIdentity,
       metadata,
     };
   } catch (error) {

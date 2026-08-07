@@ -8,18 +8,32 @@ on:
       - "mac/**"
       - "installers/macos/**"
       - "release/version.json"
+      - "scripts/release-now.mjs"
+      - "scripts/release-now.test.mjs"
       - "scripts/release-version.mjs"
+      - "scripts/record-desktop-signing-evidence.mjs"
+      - "scripts/validate-release-assets.mjs"
+      - "scripts/validate-release-assets.test.mjs"
       - ".github/workflows/macos.yml"
   pull_request:
     paths:
       - "mac/**"
       - "installers/macos/**"
       - "release/version.json"
+      - "scripts/release-now.mjs"
+      - "scripts/release-now.test.mjs"
       - "scripts/release-version.mjs"
+      - "scripts/record-desktop-signing-evidence.mjs"
+      - "scripts/validate-release-assets.mjs"
+      - "scripts/validate-release-assets.test.mjs"
       - ".github/workflows/macos.yml"
   workflow_call:
     inputs:
       release_candidate:
+        required: false
+        type: boolean
+        default: false
+      unsigned_desktop:
         required: false
         type: boolean
         default: false
@@ -35,6 +49,25 @@ on:
         required: false
         type: string
         default: ""
+    secrets:
+      RESONANCE_MACOS_APP_CERTIFICATE_BASE64:
+        required: false
+      RESONANCE_MACOS_APP_CERTIFICATE_PASSWORD:
+        required: false
+      RESONANCE_MACOS_APP_IDENTITY:
+        required: false
+      RESONANCE_MACOS_INSTALLER_CERTIFICATE_BASE64:
+        required: false
+      RESONANCE_MACOS_INSTALLER_CERTIFICATE_PASSWORD:
+        required: false
+      RESONANCE_MACOS_INSTALLER_IDENTITY:
+        required: false
+      RESONANCE_MACOS_NOTARY_KEY_BASE64:
+        required: false
+      RESONANCE_MACOS_NOTARY_KEY_ID:
+        required: false
+      RESONANCE_MACOS_NOTARY_ISSUER_ID:
+        required: false
   workflow_dispatch:
 
 permissions:
@@ -66,6 +99,78 @@ jobs:
             [[ "$BUILD" == "$EXPECTED_BUILD" ]]
           fi
 
+      - name: Validate production signing secrets
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        shell: bash
+        env:
+          APP_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_MACOS_APP_CERTIFICATE_BASE64 }}
+          APP_CERTIFICATE_PASSWORD: ${{ secrets.RESONANCE_MACOS_APP_CERTIFICATE_PASSWORD }}
+          APP_IDENTITY: ${{ secrets.RESONANCE_MACOS_APP_IDENTITY }}
+          INSTALLER_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_MACOS_INSTALLER_CERTIFICATE_BASE64 }}
+          INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.RESONANCE_MACOS_INSTALLER_CERTIFICATE_PASSWORD }}
+          INSTALLER_IDENTITY: ${{ secrets.RESONANCE_MACOS_INSTALLER_IDENTITY }}
+          NOTARY_KEY_BASE64: ${{ secrets.RESONANCE_MACOS_NOTARY_KEY_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.RESONANCE_MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.RESONANCE_MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          required=(
+            APP_CERTIFICATE_BASE64
+            APP_CERTIFICATE_PASSWORD
+            APP_IDENTITY
+            INSTALLER_CERTIFICATE_BASE64
+            INSTALLER_CERTIFICATE_PASSWORD
+            INSTALLER_IDENTITY
+            NOTARY_KEY_BASE64
+            NOTARY_KEY_ID
+            NOTARY_ISSUER_ID
+          )
+          for name in "${required[@]}"; do
+            [[ -n "${!name}" ]] || { echo "::error::Missing required macOS release-signing secret: ${name}"; exit 1; }
+          done
+          [[ "$APP_IDENTITY" == "Developer ID Application:"* ]] || {
+            echo "::error::RESONANCE_MACOS_APP_IDENTITY must name a Developer ID Application identity."
+            exit 1
+          }
+          [[ "$INSTALLER_IDENTITY" == "Developer ID Installer:"* ]] || {
+            echo "::error::RESONANCE_MACOS_INSTALLER_IDENTITY must name a Developer ID Installer identity."
+            exit 1
+          }
+
+      - name: Configure production signing
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        shell: bash
+        env:
+          APP_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_MACOS_APP_CERTIFICATE_BASE64 }}
+          APP_CERTIFICATE_PASSWORD: ${{ secrets.RESONANCE_MACOS_APP_CERTIFICATE_PASSWORD }}
+          APP_IDENTITY: ${{ secrets.RESONANCE_MACOS_APP_IDENTITY }}
+          INSTALLER_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_MACOS_INSTALLER_CERTIFICATE_BASE64 }}
+          INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.RESONANCE_MACOS_INSTALLER_CERTIFICATE_PASSWORD }}
+          INSTALLER_IDENTITY: ${{ secrets.RESONANCE_MACOS_INSTALLER_IDENTITY }}
+          NOTARY_KEY_BASE64: ${{ secrets.RESONANCE_MACOS_NOTARY_KEY_BASE64 }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/resonance-release-signing.keychain-db"
+          APP_CERTIFICATE_PATH="$RUNNER_TEMP/resonance-app-signing.p12"
+          INSTALLER_CERTIFICATE_PATH="$RUNNER_TEMP/resonance-installer-signing.p12"
+          NOTARY_KEY_PATH="$RUNNER_TEMP/resonance-notary-key.p8"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+
+          printf '%s' "$APP_CERTIFICATE_BASE64" | base64 -D > "$APP_CERTIFICATE_PATH"
+          printf '%s' "$INSTALLER_CERTIFICATE_BASE64" | base64 -D > "$INSTALLER_CERTIFICATE_PATH"
+          printf '%s' "$NOTARY_KEY_BASE64" | base64 -D > "$NOTARY_KEY_PATH"
+          chmod 0600 "$APP_CERTIFICATE_PATH" "$INSTALLER_CERTIFICATE_PATH" "$NOTARY_KEY_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$APP_CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$APP_CERTIFICATE_PASSWORD" -A -f pkcs12
+          security import "$INSTALLER_CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$INSTALLER_CERTIFICATE_PASSWORD" -A -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -Fq -- "$APP_IDENTITY"
+          security find-certificate -a -c "$INSTALLER_IDENTITY" "$KEYCHAIN_PATH" >/dev/null
+
       - name: Restore Swift build cache
         id: swift-cache
         uses: actions/cache/restore@v6
@@ -87,11 +192,27 @@ jobs:
       - name: Run macOS tests
         run: mac/scripts/test.sh
 
+      - name: Run release policy tests
+        run: node --test scripts/release-now.test.mjs scripts/validate-release-assets.test.mjs
+
       - name: Build app and installer
         run: mac/scripts/build-release.sh
         env:
           APP_VERSION: ${{ steps.release.outputs.version }}
           BUILD_NUMBER: ${{ steps.release.outputs.build }}
+          RESONANCE_REQUIRE_PRODUCTION_SIGNING: ${{ inputs.release_candidate && !inputs.unsigned_desktop && '1' || '0' }}
+          MACOS_APP_IDENTITY: ${{ inputs.release_candidate && !inputs.unsigned_desktop && secrets.RESONANCE_MACOS_APP_IDENTITY || '' }}
+          MACOS_INSTALLER_IDENTITY: ${{ inputs.release_candidate && !inputs.unsigned_desktop && secrets.RESONANCE_MACOS_INSTALLER_IDENTITY || '' }}
+          NOTARY_KEY_PATH: ${{ inputs.release_candidate && !inputs.unsigned_desktop && format('{0}/resonance-notary-key.p8', runner.temp) || '' }}
+          NOTARY_KEY_ID: ${{ inputs.release_candidate && !inputs.unsigned_desktop && secrets.RESONANCE_MACOS_NOTARY_KEY_ID || '' }}
+          NOTARY_ISSUER_ID: ${{ inputs.release_candidate && !inputs.unsigned_desktop && secrets.RESONANCE_MACOS_NOTARY_ISSUER_ID || '' }}
+
+      - name: Record verified macOS signing evidence
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        run: >-
+          node scripts/record-desktop-signing-evidence.mjs
+          macos installers/macos/dist "${{ steps.release.outputs.version }}"
+          "${{ runner.temp }}/resonance-signing-evidence/macos.json"
 
       - name: Upload macOS artifact
         if: ${{ !inputs.release_candidate }}
@@ -118,6 +239,26 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           overwrite: true
+
+      - name: Upload macOS signing evidence
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-signing-macos
+          path: ${{ runner.temp }}/resonance-signing-evidence/macos.json
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
+      - name: Remove temporary signing material
+        if: ${{ always() && inputs.release_candidate && !inputs.unsigned_desktop }}
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/resonance-release-signing.keychain-db" 2>/dev/null || true
+          rm -f \
+            "$RUNNER_TEMP/resonance-app-signing.p12" \
+            "$RUNNER_TEMP/resonance-installer-signing.p12" \
+            "$RUNNER_TEMP/resonance-notary-key.p8"
 
       - name: Save Swift build cache from main
         if: ${{ github.ref == 'refs/heads/main' && steps.swift-cache.outputs.cache-hit != 'true' }}

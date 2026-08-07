@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import LikedSongsFocus
@@ -48,6 +49,77 @@ private final class AsyncSignal: @unchecked Sendable {
         continuations.removeAll()
         lock.unlock()
         waiting.forEach { $0.resume() }
+    }
+}
+
+private final class DelayedCatalogRegressionURLProtocol: URLProtocol {
+    static var catalogStarted: AsyncSignal?
+    static var releaseCatalog: DispatchSemaphore?
+    static var uploadStarted: AsyncSignal?
+    static var releaseUpload: DispatchSemaphore?
+    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        if request.httpMethod == "GET", url.path == "/api/v1/songs" {
+            Self.catalogStarted?.signal()
+            DispatchQueue.global().async { [self] in
+                _ = Self.releaseCatalog?.wait(timeout: .now() + 5)
+                let response = HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data(#"{"count":0,"songs":[]}"#.utf8))
+                client?.urlProtocolDidFinishLoading(self)
+            }
+            return
+        }
+        if request.httpMethod == "PUT",
+           let uploadStarted = Self.uploadStarted,
+           let releaseUpload = Self.releaseUpload {
+            uploadStarted.signal()
+            DispatchQueue.global().async { [self] in
+                _ = releaseUpload.wait(timeout: .now() + 5)
+                do {
+                    guard let handler = Self.handler else { throw URLError(.badServerResponse) }
+                    let (response, data) = try handler(request)
+                    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                    client?.urlProtocol(self, didLoad: data)
+                    client?.urlProtocolDidFinishLoading(self)
+                } catch {
+                    client?.urlProtocol(self, didFailWithError: error)
+                }
+            }
+            return
+        }
+        do {
+            guard let handler = Self.handler else { throw URLError(.badServerResponse) }
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+
+    static func reset() {
+        catalogStarted = nil
+        releaseCatalog = nil
+        uploadStarted = nil
+        releaseUpload = nil
+        handler = nil
     }
 }
 
@@ -159,6 +231,10 @@ struct PlayerModelRegressionTests {
         )!
     }
 
+    private func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     @Test
     func listeningHistoryUploadsEveryLocalProfileAndMergesTheActiveProfile() async throws {
         let (defaults, suiteName) = try isolatedDefaults()
@@ -186,6 +262,7 @@ struct PlayerModelRegressionTests {
                     trackID: localTrack.id,
                     startedAt: startedAt,
                     listenedSeconds: 42,
+                    serverOrigin: "https://music.test",
                     syncProfileID: "default",
                     title: "Mac song",
                     artist: "Mac artist",
@@ -196,6 +273,7 @@ struct PlayerModelRegressionTests {
                     trackID: localTrack.id,
                     startedAt: startedAt.addingTimeInterval(30),
                     listenedSeconds: 18,
+                    serverOrigin: "https://music.test",
                     syncProfileID: "profile-b",
                     title: "Other profile song",
                     originatedOnThisDevice: true
@@ -286,26 +364,80 @@ struct PlayerModelRegressionTests {
         #expect(reloaded.listeningHistoryEntries.contains(where: { $0.id == remoteEventID }))
     }
 
+    @Test
+    func listeningHistoryFromAnotherServerIsNeverUploadedOrShownInTheActiveScope() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let seed = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        await seed.importLocalFiles(at: [glass])
+        let trackID = try #require(seed.tracks.first?.id)
+        let oldEntry = ListeningHistoryEntry(
+            trackID: trackID,
+            startedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            listenedSeconds: 30,
+            serverOrigin: "https://old-music.test",
+            syncProfileID: "default",
+            title: "Old server song",
+            originatedOnThisDevice: true
+        )
+        defaults.set(
+            try JSONEncoder().encode([oldEntry]),
+            forKey: "LikedSongsFocus.listeningHistory.v1"
+        )
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+        var posted = false
+        RegressionURLProtocol.handler = { request in
+            if request.httpMethod == "POST" { posted = true }
+            let payload = Data(#"{"profile_id":"default","entries":[]}"#.utf8)
+            return (try response(for: request), payload)
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: true,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+
+        await model.syncListeningHistoryNow()
+
+        #expect(!posted)
+        #expect(model.activeProfileListeningHistoryEntries.isEmpty)
+        #expect(model.listeningHistoryEntries.first?.serverOrigin == "https://old-music.test")
+    }
+
     private func catalog(
         id: String,
         filename: String = "Glass.aiff",
         size: Int,
-        downloadURL: String
+        downloadURL: String,
+        contentSHA256: String? = nil
     ) throws -> Data {
-        try JSONSerialization.data(withJSONObject: [
+        var song: [String: Any] = [
+            "id": id,
+            "filename": filename,
+            "title": "Remote song",
+            "artist": "Remote artist",
+            "album": "Remote album",
+            "size": size,
+            "modified_at": "2026-07-16T00:00:00Z",
+            "content_type": "audio/aiff",
+            "download_url": downloadURL,
+            "stream_url": "/stream/\(id)",
+        ]
+        if let contentSHA256 { song["content_sha256"] = contentSHA256 }
+        return try JSONSerialization.data(withJSONObject: [
             "count": 1,
-            "songs": [[
-                "id": id,
-                "filename": filename,
-                "title": "Remote song",
-                "artist": "Remote artist",
-                "album": "Remote album",
-                "size": size,
-                "modified_at": "2026-07-16T00:00:00Z",
-                "content_type": "audio/aiff",
-                "download_url": downloadURL,
-                "stream_url": "/stream/\(id)",
-            ]],
+            "songs": [song],
         ])
     }
 
@@ -315,6 +447,216 @@ struct PlayerModelRegressionTests {
 
     private func emptyPlaylists() throws -> Data {
         try JSONEncoder().encode(RemotePlaylistsDocument(revision: 0, playlists: []))
+    }
+
+    @Test
+    func completedDownloadReleasesUploadActionsBeforePlaylistSyncFinishes() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+        let playlistFetchStarted = AsyncSignal()
+        let releasePlaylistFetch = DispatchSemaphore(value: 0)
+        RegressionURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.path == "/api/v1/songs" {
+                return (try response(for: request), try emptyCatalog())
+            }
+            if url.path == "/api/v1/playlists" {
+                playlistFetchStarted.signal()
+                _ = releasePlaylistFetch.wait(timeout: .now() + 5)
+                return (try response(for: request), try emptyPlaylists())
+            }
+            throw URLError(.unsupportedURL)
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+
+        let download = Task { await model.syncServerLibrary() }
+        await playlistFetchStarted.wait()
+
+        #expect(!model.isSyncingServer)
+        #expect(model.isSyncingPlaylists)
+        #expect(!model.serverUploadActionsDisabled)
+
+        releasePlaylistFetch.signal()
+        await download.value
+    }
+
+    @Test
+    func catalogRefreshLandingPreservesAnUploadThatCompletedWhileItWasInFlight() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DelayedCatalogRegressionURLProtocol.self]
+        let network = URLSession(configuration: configuration)
+        let catalogFetchStarted = AsyncSignal()
+        let releaseCatalogFetch = DispatchSemaphore(value: 0)
+        defer {
+            releaseCatalogFetch.signal()
+            network.invalidateAndCancel()
+            DelayedCatalogRegressionURLProtocol.reset()
+        }
+        DelayedCatalogRegressionURLProtocol.catalogStarted = catalogFetchStarted
+        DelayedCatalogRegressionURLProtocol.releaseCatalog = releaseCatalogFetch
+        DelayedCatalogRegressionURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if request.httpMethod == "PUT", url.path == "/api/v1/admin/songs" {
+                let data = Data(#"{"id":"race-upload","filename":"Glass.aiff","title":"Glass","artist":"System","album":"Sounds","size":1,"modified_at":"now","content_type":"audio/aiff","download_url":"/download/race-upload","stream_url":"/stream/race-upload"}"#.utf8)
+                return (try response(for: request, status: 201), data)
+            }
+            throw URLError(.unsupportedURL)
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+
+        let refresh = Task { await model.refreshServerCatalogNow() }
+        await catalogFetchStarted.wait()
+        model.serverAdminToken = "admin-token"
+        await model.uploadSongsToServer([glass])
+        #expect(model.remoteSongs.map(\.id) == ["race-upload"])
+
+        releaseCatalogFetch.signal()
+        await refresh.value
+
+        #expect(model.remoteSongs.map(\.id) == ["race-upload"])
+        #expect(model.uploadStatus == "Uploaded 1 songs")
+    }
+
+    @Test
+    func catalogRefreshRemainsReadOnlyEvenWhenAnAdminKeyIsConfigured() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+        var requests: [(method: String, path: String)] = []
+        RegressionURLProtocol.handler = { request in
+            requests.append((request.httpMethod ?? "GET", request.url?.path ?? ""))
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
+            return (try response(for: request), try emptyCatalog())
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+        model.serverAdminToken = "admin-token"
+
+        await model.refreshServerCatalogNow()
+
+        #expect(requests.count == 1)
+        #expect(requests.first?.method == "GET")
+        #expect(requests.first?.path == "/api/v1/songs")
+    }
+
+    @Test
+    func insecureServerURLIsRejectedBeforeAnyBearerRequestIsCreated() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+        var requestWasSent = false
+        RegressionURLProtocol.handler = { request in
+            requestWasSent = true
+            return (try response(for: request), try emptyCatalog())
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "http://music.test"
+        model.serverToken = "must-not-leak"
+
+        await model.refreshServerCatalogNow()
+
+        #expect(!requestWasSent)
+        #expect(model.serverMessage.contains("HTTPS"))
+    }
+
+    @Test
+    func localImportDoesNotApplyAnUploadResponseAfterItsReservedContextChanges() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DelayedCatalogRegressionURLProtocol.self]
+        let network = URLSession(configuration: configuration)
+        let uploadStarted = AsyncSignal()
+        let releaseUpload = DispatchSemaphore(value: 0)
+        defer {
+            releaseUpload.signal()
+            network.invalidateAndCancel()
+            DelayedCatalogRegressionURLProtocol.reset()
+        }
+        DelayedCatalogRegressionURLProtocol.uploadStarted = uploadStarted
+        DelayedCatalogRegressionURLProtocol.releaseUpload = releaseUpload
+        DelayedCatalogRegressionURLProtocol.handler = { request in
+            _ = try #require(request.url)
+            let data = Data(#"{"id":"late-upload","filename":"Glass.aiff","title":"Late","artist":"Server","album":"Catalog","size":1,"modified_at":"now","content_type":"audio/aiff","download_url":"/download/late-upload","stream_url":"/stream/late-upload"}"#.utf8)
+            return (try response(for: request, status: 201), data)
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        let track = Track(
+            title: "Local Context",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .liked,
+            fileURL: glass
+        )
+        model.tracks = [track]
+        model.serverURLString = "https://music.test"
+        model.serverAdminToken = "admin-token"
+        let context = try model.beginLocalImportTransfer(reservingUpload: true)
+        defer { model.endLocalImportTransfer(context) }
+
+        let upload = Task {
+            try await model.uploadLocalImportToActiveProfile(track, context: context)
+        }
+        await uploadStarted.wait()
+        model.serverURLString = "https://other-music.test"
+        releaseUpload.signal()
+
+        var rejectedChangedContext = false
+        do {
+            _ = try await upload.value
+        } catch is LocalImportTransferContextError {
+            rejectedChangedContext = true
+        }
+
+        #expect(rejectedChangedContext)
+        #expect(model.remoteSongs.isEmpty)
+        #expect(model.tracks.first?.remoteID == nil)
     }
 
     @Test
@@ -492,6 +834,7 @@ struct PlayerModelRegressionTests {
         #expect(relaunched.listeningHistoryEntries.count == 1)
         #expect(relaunched.listeningHistoryEntries.first?.syncProfileID == "default")
         #expect(relaunched.activeProfileListeningHistoryEntries.count == 1)
+        relaunched.flushPersistence()
         let migratedData = try #require(
             defaults.data(forKey: "LikedSongsFocus.listeningHistory.v1")
         )
@@ -500,6 +843,246 @@ struct PlayerModelRegressionTests {
             from: migratedData
         )
         #expect(migrated.first?.syncProfileID == "default")
+    }
+
+    @Test
+    func legacyListeningHistoryUsesTheConfiguredServerWhenNoPlaylistContextWasSaved() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let initial = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        await initial.importLocalFiles(at: [hero])
+        initial.flushPersistence()
+        let track = try #require(initial.tracks.first)
+        defaults.set("https://MUSIC.test:443/path", forKey: "LikedSongsFocus.serverURL.v1")
+        defaults.set(
+            try JSONEncoder().encode([
+                LegacyListeningHistoryEntry(
+                    id: UUID(),
+                    trackID: track.id,
+                    startedAt: .now,
+                    listenedSeconds: 42
+                ),
+            ]),
+            forKey: "LikedSongsFocus.listeningHistory.v1"
+        )
+
+        let relaunched = PlayerModel(
+            loadPersistedLibrary: true,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+
+        #expect(relaunched.listeningHistoryEntries.first?.serverOrigin == "https://music.test")
+        #expect(relaunched.activeProfileListeningHistoryEntries.count == 1)
+    }
+
+    @Test
+    func duplicateTrackReconciliationRemapsListeningHistoryBeforeRemovingTheDuplicate() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        await model.importLocalFiles(at: [glass])
+        let localTrack = try #require(model.tracks.first)
+        let downloadedTrack = Track(
+            title: "Downloaded",
+            artist: "Artist",
+            album: "Album",
+            duration: localTrack.duration,
+            artwork: .electric,
+            fileURL: glass,
+            remoteID: "remote-id",
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
+        )
+        model.tracks.append(downloadedTrack)
+        model.serverURLString = "https://music.test"
+        model.selectAndPlay(downloadedTrack)
+
+        #expect(model.reconcileUploadedLocalTrack(
+            trackID: localTrack.id,
+            remoteID: "remote-id",
+            sourceServer: "https://music.test",
+            profileID: "default"
+        ))
+
+        #expect(!model.tracks.contains(where: { $0.id == downloadedTrack.id }))
+        #expect(model.listeningHistoryEntries.first?.trackID == localTrack.id)
+        if model.isPlaying { model.togglePlay() }
+        model.flushPersistence()
+        let relaunched = PlayerModel(
+            loadPersistedLibrary: true,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        #expect(relaunched.listeningHistoryEntries.first?.trackID == localTrack.id)
+    }
+
+    @Test
+    func reconciliationNeverRebindsAcrossServerOrProfileContexts() throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        let track = Track(
+            title: "Linked",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .liked,
+            fileURL: glass,
+            remoteID: "original-id",
+            sourceServer: "https://music.test",
+            syncProfileID: "profile-a"
+        )
+        model.tracks = [track]
+
+        #expect(throws: LocalImportTransferContextError.self) {
+            try model.reconcileUploadedLocalTrackForImport(
+                trackID: track.id,
+                remoteID: "import-match-id",
+                sourceServer: "https://archive.test",
+                profileID: "profile-a"
+            )
+        }
+        #expect(!model.reconcileUploadedLocalTrack(
+            trackID: track.id,
+            remoteID: "other-server-id",
+            sourceServer: "https://archive.test",
+            profileID: "profile-a"
+        ))
+        #expect(!model.reconcileUploadedLocalTrack(
+            trackID: track.id,
+            remoteID: "other-profile-id",
+            sourceServer: "https://music.test",
+            profileID: "profile-b"
+        ))
+        #expect(model.tracks.first?.remoteID == "original-id")
+        #expect(model.tracks.first?.sourceServer == "https://music.test")
+        #expect(model.tracks.first?.syncProfileID == "profile-a")
+        #expect(model.serverMessage.contains("already linked"))
+
+        #expect(try model.reconcileUploadedLocalTrackForImport(
+            trackID: track.id,
+            remoteID: "replacement-id",
+            sourceServer: "https://MUSIC.test:443/path",
+            profileID: "profile-a"
+        ))
+        #expect(model.tracks.first?.remoteID == "replacement-id")
+        #expect(model.tracks.first?.sourceServer == "https://music.test")
+        #expect(model.tracks.first?.syncProfileID == "profile-a")
+    }
+
+    @Test
+    func sourceOnlyRemoteAssociationNeverRebindsAndCanAdoptWithinItsContext() throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        let track = Track(
+            title: "Partially linked",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .liked,
+            fileURL: glass,
+            sourceServer: "https://archive.test",
+            syncProfileID: "profile-a"
+        )
+        model.tracks = [track]
+
+        #expect(throws: LocalImportTransferContextError.self) {
+            try model.reconcileUploadedLocalTrackForImport(
+                trackID: track.id,
+                remoteID: "other-server-id",
+                sourceServer: "https://music.test",
+                profileID: "profile-a"
+            )
+        }
+        #expect(!model.reconcileUploadedLocalTrack(
+            trackID: track.id,
+            remoteID: "other-profile-id",
+            sourceServer: "https://archive.test",
+            profileID: "profile-b"
+        ))
+        #expect(model.tracks.first?.remoteID == nil)
+        #expect(model.tracks.first?.sourceServer == "https://archive.test")
+        #expect(model.tracks.first?.syncProfileID == "profile-a")
+
+        #expect(try model.reconcileUploadedLocalTrackForImport(
+            trackID: track.id,
+            remoteID: "adopted-id",
+            sourceServer: "https://ARCHIVE.test:443/path",
+            profileID: "profile-a"
+        ))
+        #expect(model.tracks.first?.remoteID == "adopted-id")
+        #expect(model.tracks.first?.sourceServer == "https://archive.test")
+        #expect(model.tracks.first?.syncProfileID == "profile-a")
+    }
+
+    @Test
+    func cachedUploadReconciliationRejectsAmbiguousExactHashes() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        let hash = String(repeating: "a", count: 64)
+        let local = Track(
+            title: "Local",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .liked,
+            fileURL: glass,
+            contentSHA256: hash
+        )
+        let firstRemote = Track(
+            title: "First remote",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .electric,
+            fileURL: glass,
+            remoteID: "first",
+            sourceServer: "https://music.test",
+            syncProfileID: "default",
+            contentSHA256: hash
+        )
+        let secondRemote = Track(
+            title: "Second remote",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .echoes,
+            fileURL: glass,
+            remoteID: "second",
+            sourceServer: "https://music.test",
+            syncProfileID: "default",
+            contentSHA256: hash
+        )
+        model.tracks = [local, firstRemote, secondRemote]
+        model.serverURLString = "https://music.test"
+
+        #expect(!(await model.reconcileCachedUploadedLocalTracks()))
+        #expect(model.tracks.map(\.id) == [local.id, firstRemote.id, secondRemote.id])
+        #expect(model.tracks.first?.remoteID == nil)
     }
 
     @Test
@@ -582,6 +1165,12 @@ struct PlayerModelRegressionTests {
             if url.path == "/api/v1/playlists" {
                 return (try response(for: request), try emptyPlaylists())
             }
+            if url.path == "/api/v1/client-config" {
+                return (
+                    HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!,
+                    Data()
+                )
+            }
             downloadRequested = true
             return (try response(for: request), Data("evil".utf8))
         }
@@ -650,6 +1239,88 @@ struct PlayerModelRegressionTests {
     }
 
     @Test
+    func identicalSongIDsFromDifferentProfilesUseDifferentCacheFiles() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let cacheRoot = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+        let defaultAudio = try Data(contentsOf: glass)
+        let otherAudio = try Data(contentsOf: ping)
+        RegressionURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            let profileID = request.value(forHTTPHeaderField: "X-Resonance-Profile") ?? "default"
+            if url.path == "/api/v1/profiles" {
+                let payload: [String: Any] = [
+                    "default_profile_id": "default",
+                    "profiles": [
+                        ["id": "default", "name": "Default", "is_default": true],
+                        ["id": "profile-b", "name": "Profile B", "is_default": false],
+                    ],
+                ]
+                return (try response(for: request), try JSONSerialization.data(withJSONObject: payload))
+            }
+            if url.path == "/api/v1/songs" {
+                let audio = profileID == "profile-b" ? otherAudio : defaultAudio
+                return (
+                    try response(for: request),
+                    try catalog(
+                        id: "shared-song-id",
+                        size: audio.count,
+                        downloadURL: "/download/\(profileID).aiff",
+                        contentSHA256: sha256(audio)
+                    )
+                )
+            }
+            if url.path == "/download/default.aiff" {
+                return (try response(for: request), defaultAudio)
+            }
+            if url.path == "/download/profile-b.aiff" {
+                return (try response(for: request), otherAudio)
+            }
+            if url.path == "/api/v1/playlists" {
+                return (
+                    try response(for: request),
+                    try JSONEncoder().encode(RemotePlaylistsDocument(
+                        profileID: profileID,
+                        revision: 0,
+                        playlists: []
+                    ))
+                )
+            }
+            throw URLError(.unsupportedURL)
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            serverCacheRoot: cacheRoot,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "token"
+
+        await model.syncServerLibrary()
+        let defaultTrack = try #require(model.tracks.first(where: { $0.syncProfileID == "default" }))
+        let defaultURL = try #require(defaultTrack.fileURL)
+        #expect(try Data(contentsOf: defaultURL) == defaultAudio)
+
+        #expect(await model.selectSyncProfile(matching: "Profile B"))
+        await model.syncServerLibrary()
+        let otherTrack = try #require(model.tracks.first(where: { $0.syncProfileID == "profile-b" }))
+        let otherURL = try #require(otherTrack.fileURL)
+
+        #expect(defaultURL.standardizedFileURL != otherURL.standardizedFileURL)
+        #expect(try Data(contentsOf: defaultURL) == defaultAudio)
+        #expect(try Data(contentsOf: otherURL) == otherAudio)
+        #expect(model.tracks.count == 2)
+    }
+
+    @Test
     func traversalSongIdentifierIsRejectedBeforeAdminDeleteRequest() async throws {
         let (defaults, suiteName) = try isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -704,7 +1375,9 @@ struct PlayerModelRegressionTests {
             duration: 1,
             artwork: .electric,
             fileURL: glass,
-            remoteID: "first-remote-id"
+            remoteID: "first-remote-id",
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
         )
         let second = Track(
             title: "Second",
@@ -713,7 +1386,9 @@ struct PlayerModelRegressionTests {
             duration: 1,
             artwork: .golden,
             fileURL: ping,
-            remoteID: "second-remote-id"
+            remoteID: "second-remote-id",
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
         )
         let model = PlayerModel(
             loadPersistedLibrary: false,
@@ -808,7 +1483,9 @@ struct PlayerModelRegressionTests {
             duration: 1,
             artwork: .electric,
             fileURL: glass,
-            remoteID: "remote-like-id"
+            remoteID: "remote-like-id",
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
         )
         let local = Track(
             title: "Local",
@@ -876,7 +1553,9 @@ struct PlayerModelRegressionTests {
             duration: 1,
             artwork: .electric,
             fileURL: glass,
-            remoteID: "remote-like-id"
+            remoteID: "remote-like-id",
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
         )
         let model = PlayerModel(
             loadPersistedLibrary: false,
@@ -932,7 +1611,9 @@ struct PlayerModelRegressionTests {
             duration: 1,
             artwork: .electric,
             fileURL: glass,
-            remoteID: "first-remote-id"
+            remoteID: "first-remote-id",
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
         )
         let second = Track(
             title: "Second",
@@ -941,7 +1622,9 @@ struct PlayerModelRegressionTests {
             duration: 1,
             artwork: .golden,
             fileURL: ping,
-            remoteID: "second-remote-id"
+            remoteID: "second-remote-id",
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
         )
         let model = PlayerModel(
             loadPersistedLibrary: false,
@@ -1086,10 +1769,10 @@ struct PlayerModelRegressionTests {
             sourceServer: "https://music.test"
         )
         model.tracks = [track]
+        model.serverURLString = "https://music.test"
         model.toggleFavorite(track)
         let playlist = try #require(model.createPlaylist(named: "Keep membership"))
         model.addTrack(track, to: playlist)
-        model.serverURLString = "https://music.test"
         model.serverToken = "token"
 
         await model.syncServerLibrary(reconcile: true)
@@ -1151,6 +1834,179 @@ struct PlayerModelRegressionTests {
         let files = FileManager.default.enumerator(at: cacheRoot, includingPropertiesForKeys: nil)?
             .allObjects.compactMap { $0 as? URL }.filter { !$0.hasDirectoryPath } ?? []
         #expect(files.isEmpty)
+    }
+
+    @Test
+    func catalogChecksumMismatchNeverInstallsOrPersistsTheDownload() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let cacheRoot = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+        let audio = try Data(contentsOf: glass)
+        var downloadCount = 0
+        RegressionURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.path == "/api/v1/songs" {
+                return (
+                    try response(for: request),
+                    try catalog(
+                        id: "checksum-mismatch-id",
+                        size: audio.count,
+                        downloadURL: "/checksum.aiff",
+                        contentSHA256: String(repeating: "0", count: 64)
+                    )
+                )
+            }
+            if url.path == "/checksum.aiff" {
+                downloadCount += 1
+                return (try response(for: request), audio)
+            }
+            return (try response(for: request), try emptyPlaylists())
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            serverCacheRoot: cacheRoot,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "token"
+
+        await model.syncServerLibrary()
+
+        #expect(downloadCount == 1)
+        #expect(model.tracks.isEmpty)
+        #expect(model.downloadStatus == "Downloaded 0; 1 failed")
+        let cachedFiles = FileManager.default.enumerator(
+            at: cacheRoot,
+            includingPropertiesForKeys: nil
+        )?.allObjects.compactMap { $0 as? URL }.filter { !$0.hasDirectoryPath } ?? []
+        #expect(cachedFiles.isEmpty)
+        let relaunched = PlayerModel(
+            loadPersistedLibrary: true,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        #expect(relaunched.tracks.isEmpty)
+    }
+
+    @Test
+    func failedReplacementKeepsThePreviouslyInstalledCacheFile() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let cacheRoot = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        let audio = try Data(contentsOf: glass)
+        let originalHash = sha256(audio)
+        var downloadData = audio
+        var catalogHash = originalHash
+        var failDownload = false
+        RegressionURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.path == "/api/v1/songs" {
+                return (
+                    try response(for: request),
+                    try catalog(
+                        id: "replace-cache-id",
+                        size: downloadData.count,
+                        downloadURL: "/replace-cache.aiff",
+                        contentSHA256: catalogHash
+                    )
+                )
+            }
+            if url.path == "/replace-cache.aiff" {
+                if failDownload { throw URLError(.networkConnectionLost) }
+                return (try response(for: request), downloadData)
+            }
+            return (try response(for: request), try emptyPlaylists())
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            serverCacheRoot: cacheRoot,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "token"
+        await model.syncServerLibrary()
+        let cachedURL = try #require(model.tracks.first?.fileURL)
+        #expect(try Data(contentsOf: cachedURL) == audio)
+
+        catalogHash = String(repeating: "0", count: 64)
+        failDownload = true
+        await model.syncServerLibrary()
+
+        #expect(model.downloadStatus == "Downloaded 0; 1 failed")
+        #expect(FileManager.default.fileExists(atPath: cachedURL.path))
+        #expect(try Data(contentsOf: cachedURL) == audio)
+        #expect(model.tracks.first?.fileURL == cachedURL)
+
+        let replacement = try Data(contentsOf: ping)
+        downloadData = replacement
+        catalogHash = sha256(replacement)
+        failDownload = false
+        await model.syncServerLibrary()
+
+        #expect(model.downloadStatus == "Downloaded 1 songs")
+        #expect(try Data(contentsOf: cachedURL) == replacement)
+        #expect(model.tracks.first?.contentSHA256 == catalogHash)
+    }
+
+    @Test
+    func oversizedCatalogEntryIsRejectedBeforeDownload() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let cacheRoot = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+        var downloadWasRequested = false
+        RegressionURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.path == "/api/v1/songs" {
+                return (
+                    try response(for: request),
+                    try catalog(
+                        id: "oversized-audio-id",
+                        size: 256 * 1_024 * 1_024 + 1,
+                        downloadURL: "/oversized.aiff"
+                    )
+                )
+            }
+            if url.path == "/oversized.aiff" { downloadWasRequested = true }
+            return (try response(for: request), try emptyPlaylists())
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            serverCacheRoot: cacheRoot,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "token"
+
+        await model.syncServerLibrary()
+
+        #expect(!downloadWasRequested)
+        #expect(model.tracks.isEmpty)
+        #expect(model.downloadStatus == "Downloaded 0; 1 failed")
     }
 
     @Test

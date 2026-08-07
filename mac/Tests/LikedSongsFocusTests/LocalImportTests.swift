@@ -79,7 +79,7 @@ private final class LocalImportRequestCounter: @unchecked Sendable {
     }
 }
 
-private func makeLocalImportVideoFixture(at url: URL) async throws {
+private func makeLocalImportVideoFixture(at url: URL, lastFrameSecond: Int = 1) async throws {
     let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
     let input = AVAssetWriterInput(
         mediaType: .video,
@@ -104,7 +104,7 @@ private func makeLocalImportVideoFixture(at url: URL) async throws {
     guard writer.startWriting() else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
     writer.startSession(atSourceTime: .zero)
 
-    for frame in 0...1 {
+    for frame in 0...lastFrameSecond {
         while !input.isReadyForMoreMediaData {
             try await Task.sleep(for: .milliseconds(5))
         }
@@ -379,7 +379,7 @@ struct LocalImportTests {
     }
 
     @Test
-    func spotifyPlaylistUsesConfiguredServerForPreviewableMatchesMissingLocally() async throws {
+    func spotifyTrackSurfacesServerReviewCandidatesWithSnapshottedClientContext() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalImportServerPlaylist-\(UUID().uuidString)", isDirectory: true)
         let library = root.appendingPathComponent("Library", isDirectory: true)
@@ -399,6 +399,7 @@ struct LocalImportTests {
         let playlistID = "37i9dQZF1DXcBWIGoYBM5M"
         let spotifyID = self.spotifyID
         let videoID = self.videoID
+        let unsafeVideoID = "9bZkp7q19f0"
         let trackArtworkURL = "https://image-cdn-fa.spotifycdn.com/image/track-cover"
         LocalImportMockURLProtocol.handler = { request in
             let url = try #require(request.url)
@@ -447,6 +448,20 @@ struct LocalImportTests {
                 let data = Data("<html><script id=\"__NEXT_DATA__\" type=\"application/json\">\(json)</script></html>".utf8)
                 return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
             }
+            if url.host == "open.spotify.com", url.path == "/embed/track/\(spotifyID)" {
+                let entity: [String: Any] = [
+                    "type": "track",
+                    "id": spotifyID,
+                    "title": "Never Gonna Give You Up",
+                    "artists": [["name": "Rick Astley"]],
+                    "duration": 213_573,
+                    "visualIdentity": ["image": [["url": trackArtworkURL, "maxWidth": 640]]],
+                ]
+                let embedded: [String: Any] = ["props": ["pageProps": ["state": ["data": ["entity": entity]]]]]
+                let json = String(data: try JSONSerialization.data(withJSONObject: embedded), encoding: .utf8)!
+                let data = Data("<html><script id=\"__NEXT_DATA__\" type=\"application/json\">\(json)</script></html>".utf8)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
+            }
             if url.host == "music.youtube.com" || url.host == "www.youtube.com" {
                 let data = Data("<html></html>".utf8)
                 return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
@@ -455,32 +470,63 @@ struct LocalImportTests {
                 #expect(request.httpMethod == "POST")
                 #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer preview-admin")
                 #expect(request.value(forHTTPHeaderField: "X-Resonance-Profile") == "profile-b")
+                #expect(request.value(forHTTPHeaderField: "X-Resonance-Client-Platform") == "macos")
+                #expect(request.value(forHTTPHeaderField: "X-Resonance-App-Version") == "1.1.4")
+                #expect(request.value(forHTTPHeaderField: "X-Resonance-App-Build") == "15")
+                #expect(request.value(forHTTPHeaderField: "X-Resonance-Cohort-Key") == "AAECAwQFBgcICQoLDA0ODw")
+                #expect(request.value(forHTTPHeaderField: "X-Resonance-Config-Protocol") == "1")
                 let body = try localImportRequestBody(request)
                 let input = try #require(JSONSerialization.jsonObject(with: body) as? [String: String])
                 #expect(input["source"] == "https://open.spotify.com/track/\(spotifyID)")
                 let payload: [String: Any] = [
-                    "audio_sources": [[
-                        "provider": "youtube_music",
-                        "source_url": "https://www.youtube.com/watch?v=\(videoID)",
-                        "video_id": videoID,
-                        "title": "Never Gonna Give You Up",
-                        "artist": "Rick Astley",
-                        "album": "Whenever You Need Somebody",
-                        "duration_seconds": 213,
-                        "thumbnail_url": "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg",
-                        "score": 0.98,
-                        "confidence": "high",
-                        "match": [
-                            "title": 1.0,
-                            "artist": 1.0,
-                            "album": 1.0,
-                            "duration": 1.0,
-                            "duration_delta_seconds": 0,
+                    "audio_sources": [],
+                    "review_candidates": [
+                        [
+                            "provider": "youtube",
+                            "source_url": "https://www.youtube.com/watch?v=\(unsafeVideoID)",
+                            "video_id": unsafeVideoID,
+                            "title": "Unsafe automatic candidate",
+                            "artist": "Rick Astley",
+                            "score": 0.99,
+                            "confidence": "high",
+                            "actionable": true,
+                            "auto_selectable": true,
+                            "requires_review": false,
+                            "match": [
+                                "title": 1.0,
+                                "artist": 1.0,
+                                "duration_delta_seconds": 0,
+                            ],
                         ],
-                    ]],
+                        [
+                            "provider": "youtube_music",
+                            "source_url": "https://www.youtube.com/watch?v=\(videoID)",
+                            "video_id": videoID,
+                            "title": "Never Gonna Give You Up",
+                            "artist": "Rick Astley",
+                            "album": "Whenever You Need Somebody",
+                            "duration_seconds": 213,
+                            "thumbnail_url": "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg",
+                            "score": 0.98,
+                            "confidence": "possible",
+                            "actionable": false,
+                            "auto_selectable": false,
+                            "requires_review": true,
+                            "match": [
+                                "title": 1.0,
+                                "artist": 1.0,
+                                "album": 1.0,
+                                "duration": 1.0,
+                                "duration_delta_seconds": 0,
+                            ],
+                        ],
+                    ],
                 ]
                 let data = try JSONSerialization.data(withJSONObject: payload)
-                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: [
+                    "Content-Type": "application/json",
+                    "Content-Length": String(data.count),
+                ])!, data)
             }
             throw URLError(.unsupportedURL)
         }
@@ -491,22 +537,31 @@ struct LocalImportTests {
             temporaryRoot: temporary
         )
         let resolution = try await service.resolve(
-            source: "https://open.spotify.com/playlist/\(playlistID)",
+            source: "https://open.spotify.com/track/\(spotifyID)",
             serverConfiguration: .init(
                 baseURL: URL(string: "https://music.example.test")!,
                 adminToken: "preview-admin",
-                profileID: "profile-b"
+                profileID: "profile-b",
+                clientContext: .init(
+                    origin: "https://music.example.test",
+                    profileID: "profile-b",
+                    appVersion: "1.1.4",
+                    appBuild: 15,
+                    cohortKey: "AAECAwQFBgcICQoLDA0ODw",
+                    cohortBucket: MacClientConfigContext.cohortBucket(for: "AAECAwQFBgcICQoLDA0ODw"),
+                    tokenFingerprint: MacClientConfigContext.tokenFingerprint("preview-admin")
+                )
             )
         ) { _ in }
 
-        let playlist = try #require(resolution.playlist)
-        #expect(resolution.kind == .spotifyPlaylist)
-        #expect(playlist.items.count == 1)
-        #expect(playlist.skippedItems.isEmpty)
-        #expect(playlist.items[0].track.artworkURL == trackArtworkURL)
-        #expect(playlist.items[0].candidate.videoID == videoID)
-        #expect(playlist.items[0].candidate.sourceProvider == .youtubeMusic)
-        #expect(playlist.items[0].candidate.sourceURL == "https://www.youtube.com/watch?v=\(videoID)")
+        #expect(resolution.kind == .spotify)
+        #expect(resolution.playlist == nil)
+        #expect(resolution.track.artworkURL == trackArtworkURL)
+        #expect(resolution.candidates.count == 1)
+        #expect(resolution.candidates[0].videoID == videoID)
+        #expect(resolution.candidates[0].sourceProvider == .youtubeMusic)
+        #expect(resolution.candidates[0].sourceURL == "https://www.youtube.com/watch?v=\(videoID)")
+        #expect(resolution.reviewCandidateVideoIDs == [videoID])
         #expect(LocalImportMockURLProtocol.hosts().contains("music.example.test"))
     }
 
@@ -598,6 +653,9 @@ struct LocalImportTests {
                 }
                 return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
             }
+            if url.host == "music.example.test" {
+                Issue.record("Playlist matching must not auto-select server review candidates")
+            }
             throw URLError(.unsupportedURL)
         }
 
@@ -607,7 +665,21 @@ struct LocalImportTests {
             temporaryRoot: temporary
         )
         let resolution = try await service.resolve(
-            source: "https://open.spotify.com/playlist/\(playlistID)"
+            source: "https://open.spotify.com/playlist/\(playlistID)",
+            serverConfiguration: .init(
+                baseURL: URL(string: "https://music.example.test")!,
+                adminToken: "preview-admin",
+                profileID: "profile-b",
+                clientContext: .init(
+                    origin: "https://music.example.test",
+                    profileID: "profile-b",
+                    appVersion: "1.1.4",
+                    appBuild: 15,
+                    cohortKey: "AAECAwQFBgcICQoLDA0ODw",
+                    cohortBucket: MacClientConfigContext.cohortBucket(for: "AAECAwQFBgcICQoLDA0ODw"),
+                    tokenFingerprint: MacClientConfigContext.tokenFingerprint("preview-admin")
+                )
+            )
         ) { _ in }
 
         let playlist = try #require(resolution.playlist)
@@ -974,7 +1046,7 @@ struct LocalImportTests {
         }
 
         let videoFixtureURL = root.appendingPathComponent("video-only.mp4")
-        try await makeLocalImportVideoFixture(at: videoFixtureURL)
+        try await makeLocalImportVideoFixture(at: videoFixtureURL, lastFrameSecond: 5)
         let videoFixture = try Data(contentsOf: videoFixtureURL)
         let audioFixture = try Data(contentsOf: m4a)
         #expect(!videoFixture.isEmpty)
@@ -1073,7 +1145,14 @@ struct LocalImportTests {
         #expect(imported.fileURL.pathExtension == "mp4")
         #expect(!(try await asset.loadTracks(withMediaType: .video)).isEmpty)
         #expect(!(try await asset.loadTracks(withMediaType: .audio)).isEmpty)
-        #expect((try await asset.load(.duration)).seconds > 0)
+        let videoDuration = try #require(
+            try await asset.loadTracks(withMediaType: .video).first?.load(.timeRange).duration.seconds
+        )
+        let audioDuration = try #require(
+            try await asset.loadTracks(withMediaType: .audio).first?.load(.timeRange).duration.seconds
+        )
+        #expect(abs(videoDuration - audioDuration) < 0.1)
+        #expect(abs(imported.duration - audioDuration) < 0.1)
     }
 
     @Test
@@ -1222,9 +1301,8 @@ struct LocalImportTests {
                 return (HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!, data)
             }
             if request.httpMethod == "GET", url.path == "/api/v1/songs" {
-                #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
-                let data = Data(#"{"songs":[],"count":0}"#.utf8)
-                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+                Issue.record("An admin upload must not require a catalog refresh")
+                throw URLError(.unsupportedURL)
             }
             throw URLError(.unsupportedURL)
         }
@@ -1244,6 +1322,7 @@ struct LocalImportTests {
         model.serverToken = "access-token"
         model.serverAdminToken = "admin-token"
         #expect(await model.selectSyncProfile(matching: "profile-b"))
+        model.serverToken = ""
         let track = model.insertLocalImportedAudio(LocalImportedAudio(
             fileURL: localFile,
             metadata: .init(title: "Local Upload", artist: "Device", album: "Only", artworkURL: nil, sourceURL: "https://youtu.be/\(videoID)"),
@@ -1251,12 +1330,6 @@ struct LocalImportTests {
             artworkData: nil,
             sourceSHA256: "upload-source-hash",
             contentSHA256: "upload-content-hash"
-        ))
-        #expect(model.reconcileUploadedLocalTrack(
-            trackID: track.id,
-            remoteID: "old-server-audio",
-            sourceServer: "https://old-music.test/",
-            profileID: "default"
         ))
 
         #expect(try await model.uploadLocalImportToActiveProfile(track))
@@ -1294,6 +1367,177 @@ struct LocalImportTests {
         #expect(FileManager.default.fileExists(atPath: failedFile.path))
         #expect(model.visibleTracks.contains(where: { $0.id == failedTrack.id }))
         #expect(model.tracks.first(where: { $0.id == track.id })?.syncProfileID == "profile-b")
+    }
+
+    @Test
+    func optionalUploadRefusesToReplaceAnotherServerAssociation() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            LocalImportMockURLProtocol.reset()
+        }
+        LocalImportMockURLProtocol.reset()
+        LocalImportMockURLProtocol.handler = { _ in
+            Issue.record("A conflicting remote association must be rejected before upload")
+            throw URLError(.unsupportedURL)
+        }
+
+        let suiteName = "LocalImportAssociationConflict.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: session,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverAdminToken = "admin-token"
+        let track = model.insertLocalImportedAudio(LocalImportedAudio(
+            fileURL: m4a,
+            metadata: .init(
+                title: "Already linked",
+                artist: "Device",
+                album: "Only",
+                artworkURL: nil,
+                sourceURL: "https://youtu.be/\(videoID)"
+            ),
+            duration: 4,
+            artworkData: nil,
+            sourceSHA256: "linked-source-hash",
+            contentSHA256: "linked-content-hash"
+        ))
+        #expect(model.reconcileUploadedLocalTrack(
+            trackID: track.id,
+            remoteID: "old-server-audio",
+            sourceServer: "https://old-music.test/",
+            profileID: "default"
+        ))
+
+        var rejectedConflict = false
+        do {
+            _ = try await model.uploadLocalImportToActiveProfile(track)
+        } catch LocalImportTransferContextError.remoteAssociationConflict {
+            rejectedConflict = true
+        }
+
+        #expect(rejectedConflict)
+        let preserved = try #require(model.tracks.first(where: { $0.id == track.id }))
+        #expect(preserved.remoteID == "old-server-audio")
+        #expect(preserved.sourceServer == "https://old-music.test")
+        #expect(preserved.syncProfileID == "default")
+        #expect(!model.isUploadingLocalImport)
+    }
+
+    @Test
+    func localImportOnlyTrustsCachedRemoteIDsFromTheActiveContextAndNeverRebindsOthers() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalImportCachedRemoteID-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            LocalImportMockURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let suiteName = "LocalImportCachedRemoteID.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: session,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverAdminToken = "admin-token"
+        model.remoteSongs = try JSONDecoder().decode(RemoteCatalog.self, from: Data(#"""
+        {
+          "songs":[
+            {"id":"cross-collision","filename":"cross.m4a","title":"Different Cross Song","artist":"Different Artist","album":"Catalog","size":1,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/cross","stream_url":"/stream/cross"},
+            {"id":"unknown-collision","filename":"unknown.m4a","title":"Different Unknown Song","artist":"Different Artist","album":"Catalog","size":1,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/unknown","stream_url":"/stream/unknown"},
+            {"id":"inactive-collision","filename":"inactive.m4a","title":"Different Inactive Song","artist":"Different Artist","album":"Catalog","size":1,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/inactive","stream_url":"/stream/inactive"},
+            {"id":"active-id","filename":"active.m4a","title":"Different Active Song","artist":"Different Artist","album":"Catalog","size":1,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/active","stream_url":"/stream/active"},
+            {"id":"hash-active","filename":"hash.m4a","title":"Different Hash Song","artist":"Different Artist","album":"Catalog","size":1,"modified_at":"now","content_type":"audio/mp4","content_sha256":"MATCH-HASH","download_url":"/download/hash","stream_url":"/stream/hash"}
+          ],
+          "count":5
+        }
+        """#.utf8)).songs
+
+        func importedTrack(named name: String, hash: String) throws -> Track {
+            let file = root.appendingPathComponent("\(name).m4a")
+            try FileManager.default.copyItem(at: m4a, to: file)
+            return model.insertLocalImportedAudio(LocalImportedAudio(
+                fileURL: file,
+                metadata: .init(
+                    title: name,
+                    artist: "Local Artist",
+                    album: "Local Album",
+                    artworkURL: nil,
+                    sourceURL: "https://youtu.be/\(name)"
+                ),
+                duration: 4,
+                artworkData: nil,
+                sourceSHA256: "source-\(hash)",
+                contentSHA256: hash
+            ))
+        }
+
+        let crossServer = try importedTrack(named: "Cross Server", hash: "cross-hash")
+        let unknownOrigin = try importedTrack(named: "Unknown Origin", hash: "unknown-hash")
+        let inactiveProfile = try importedTrack(named: "Inactive Profile", hash: "inactive-hash")
+        let activeIdentity = try importedTrack(named: "Active Identity", hash: "active-hash")
+        let hashMatch = try importedTrack(named: "Hash Match", hash: "match-hash")
+        let crossIndex = try #require(model.tracks.firstIndex(where: { $0.id == crossServer.id }))
+        model.tracks[crossIndex].remoteID = "cross-collision"
+        model.tracks[crossIndex].sourceServer = "https://archive.test"
+        model.tracks[crossIndex].syncProfileID = "default"
+        let unknownIndex = try #require(model.tracks.firstIndex(where: { $0.id == unknownOrigin.id }))
+        model.tracks[unknownIndex].remoteID = "unknown-collision"
+        model.tracks[unknownIndex].sourceServer = nil
+        model.tracks[unknownIndex].syncProfileID = "default"
+        let inactiveIndex = try #require(model.tracks.firstIndex(where: { $0.id == inactiveProfile.id }))
+        model.tracks[inactiveIndex].remoteID = "inactive-collision"
+        model.tracks[inactiveIndex].sourceServer = "https://music.test"
+        model.tracks[inactiveIndex].syncProfileID = "old-profile"
+        let activeIndex = try #require(model.tracks.firstIndex(where: { $0.id == activeIdentity.id }))
+        model.tracks[activeIndex].remoteID = "active-id"
+        model.tracks[activeIndex].sourceServer = "https://music.test"
+        model.tracks[activeIndex].syncProfileID = "default"
+        let hashIndex = try #require(model.tracks.firstIndex(where: { $0.id == hashMatch.id }))
+        model.tracks[hashIndex].remoteID = "stale-hash-id"
+        model.tracks[hashIndex].sourceServer = "https://archive.test"
+        model.tracks[hashIndex].syncProfileID = "default"
+
+        let requestCount = LocalImportRequestCounter()
+        LocalImportMockURLProtocol.handler = { request in
+            _ = requestCount.increment()
+            Issue.record("A track linked to another context must not be uploaded")
+            throw URLError(.unsupportedURL)
+        }
+
+        var conflictCount = 0
+        for track in [crossServer, unknownOrigin, inactiveProfile, hashMatch] {
+            do {
+                _ = try await model.uploadLocalImportToActiveProfile(track)
+            } catch LocalImportTransferContextError.remoteAssociationConflict {
+                conflictCount += 1
+            }
+        }
+        #expect(try await model.uploadLocalImportToActiveProfile(activeIdentity) == false)
+
+        #expect(conflictCount == 4)
+        #expect(requestCount.value == 0)
+        #expect(model.tracks.first(where: { $0.id == crossServer.id })?.remoteID == "cross-collision")
+        #expect(model.tracks.first(where: { $0.id == unknownOrigin.id })?.remoteID == "unknown-collision")
+        #expect(model.tracks.first(where: { $0.id == inactiveProfile.id })?.remoteID == "inactive-collision")
+        #expect(model.tracks.first(where: { $0.id == hashMatch.id })?.remoteID == "stale-hash-id")
     }
 
     @Test
@@ -1385,6 +1629,9 @@ struct LocalImportTests {
             #expect(request.value(forHTTPHeaderField: "X-Resonance-Profile") == "profile-b")
             if request.httpMethod == "PUT", url.path == "/api/v1/admin/songs" {
                 #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer admin-token")
+                #expect(request.value(forHTTPHeaderField: "X-Resonance-Client-Platform") == "macos")
+                #expect(request.value(forHTTPHeaderField: "X-Resonance-Config-Protocol") == "1")
+                #expect(!(request.value(forHTTPHeaderField: "X-Resonance-Cohort-Key") ?? "").isEmpty)
                 #expect(request.value(forHTTPHeaderField: "Content-Type") == "video/mp4")
                 #expect(request.value(forHTTPHeaderField: "Content-Length") == String(uploadSize))
                 let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems

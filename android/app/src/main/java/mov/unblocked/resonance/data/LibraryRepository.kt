@@ -37,11 +37,18 @@ class LibraryRepository(
 
     suspend fun load(): StoredLibrary = withContext(Dispatchers.IO) {
         stateMutex.withLock {
-            val decoded = runCatching {
-                if (!stateFile.isFile) StoredLibrary()
-                else json.decodeFromString<StoredLibrary>(stateFile.readText())
-            }.getOrDefault(StoredLibrary())
-            normalize(decoded)
+            val decoded = if (!stateFile.isFile) {
+                StoredLibrary()
+            } else {
+                try {
+                    json.decodeFromString<StoredLibrary>(stateFile.readText())
+                } catch (_: Throwable) {
+                    // A corrupt state file cannot safely tell us which media is still owned.
+                    // Keep every file in place so recovery remains possible.
+                    return@withLock normalize(StoredLibrary())
+                }
+            }
+            normalize(decoded).also(::cleanupUnreferencedAppOwnedFiles)
         }
     }
 
@@ -119,23 +126,25 @@ class LibraryRepository(
             }
         }
 
-    /**
-     * Registers a file already downloaded into this repository's Music directory.
-     * The caller owns cleanup if metadata extraction fails.
-     */
+    /** Registers an app-owned file already downloaded into this repository's Music directory. */
     suspend fun registerDownloadedFile(
         file: File,
         song: RemoteSong,
         sourceServer: String,
         syncProfileID: String,
         fallbackArtwork: ByteArray? = null,
+        verifiedContentSHA256: String,
     ): Track = withContext(Dispatchers.IO) {
         require(file.parentFile?.canonicalFile == musicDirectory.canonicalFile) {
             "Downloaded audio must be inside the Resonance Music directory"
         }
+        val trackID = requireNotNull(RepositoryFilePolicy.downloadID(file.name)) {
+            "Downloaded audio must use an app-owned random filename"
+        }
         try {
             trackFromFile(
                 file = file,
+                trackID = trackID,
                 fallbackTitle = song.title.ifBlank { file.nameWithoutExtension },
                 fallbackArtist = usefulFallback(song.artist, "Unknown Artist"),
                 fallbackAlbum = usefulFallback(song.album, "Server Library"),
@@ -143,9 +152,10 @@ class LibraryRepository(
                 sourceServer = sourceServer,
                 syncProfileID = syncProfileID,
                 fallbackArtwork = fallbackArtwork,
+                contentSHA256 = verifiedContentSHA256,
             )
         } catch (error: Throwable) {
-            file.delete()
+            discardUncommittedDownload(file)
             throw error
         }
     }
@@ -206,15 +216,66 @@ class LibraryRepository(
             track.copy(artworkFilename = filename, artworkScanComplete = true)
         }
 
-    internal fun newDownloadFile(preferredFilename: String): File =
-        uniqueMusicFile(preferredFilename)
+    internal fun newDownloadFile(preferredFilename: String): File = File(
+        musicDirectory,
+        RepositoryFilePolicy.newDownloadFilename(
+            preferredFilename = preferredFilename,
+            randomID = UUID.randomUUID().toString(),
+        ),
+    )
+
+    internal fun newDownloadStagingFile(): File {
+        repeat(4) {
+            val candidate = File(
+                musicDirectory,
+                RepositoryFilePolicy.newStagingFilename(UUID.randomUUID().toString()),
+            )
+            if (candidate.createNewFile()) return candidate
+        }
+        error("Unable to allocate a temporary download file")
+    }
+
+    internal fun discardUncommittedDownload(file: File) {
+        if (!isDirectChild(file, musicDirectory)) return
+        val downloadID = RepositoryFilePolicy.downloadID(file.name) ?: return
+        file.delete()
+        File(artworkDirectory, "$downloadID.artwork").delete()
+    }
+
+    private fun cleanupUnreferencedAppOwnedFiles(library: StoredLibrary) {
+        val referencedMusic = library.tracks.mapTo(linkedSetOf(), Track::relativePath)
+        val musicFiles = musicDirectory.listFiles().orEmpty().filter(File::isFile)
+        val removableMusic = RepositoryFilePolicy.orphanedMusicFilenames(
+            candidateFilenames = musicFiles.map(File::getName),
+            referencedFilenames = referencedMusic,
+            stateIsTrustworthy = true,
+        )
+        musicFiles.filter { it.name in removableMusic }.forEach(File::delete)
+
+        val referencedArtwork = library.tracks
+            .mapNotNullTo(linkedSetOf(), Track::artworkFilename)
+        val artworkFiles = artworkDirectory.listFiles().orEmpty().filter(File::isFile)
+        val removableArtwork = RepositoryFilePolicy.orphanedArtworkFilenames(
+            candidateFilenames = artworkFiles.map(File::getName),
+            referencedFilenames = referencedArtwork,
+            stateIsTrustworthy = true,
+        )
+        artworkFiles.filter { it.name in removableArtwork }.forEach(File::delete)
+    }
+
+    private fun isDirectChild(file: File, directory: File): Boolean = runCatching {
+        file.parentFile?.canonicalFile == directory.canonicalFile
+    }.getOrDefault(false)
 
     private fun normalize(library: StoredLibrary): StoredLibrary {
-        val existingTracks = library.tracks.filter { fileForTrack(it).isFile }
-            .distinctBy { it.remoteID ?: it.id }
+        val reconciled = RemoteTrackIdentityPolicy.reconcileLibraryTracks(
+            library = library,
+            candidateTracks = library.tracks.filter { fileForTrack(it).isFile },
+        )
+        val existingTracks = reconciled.tracks
         val trackIDs = existingTracks.mapTo(linkedSetOf()) { it.id }
-        val favorites = library.favorites.intersect(trackIDs)
-        val cleanedPlaylists = library.playlists.map { playlist ->
+        val favorites = reconciled.favorites.intersect(trackIDs)
+        val cleanedPlaylists = reconciled.playlists.map { playlist ->
             playlist.copy(trackIDs = playlist.trackIDs.filter { it in trackIDs }.distinct())
         }.toMutableList()
         val likedIndex = cleanedPlaylists.indexOfFirst(Playlist::isSystem)
@@ -225,15 +286,39 @@ class LibraryRepository(
             isSystem = true,
         )
         if (likedIndex >= 0) cleanedPlaylists[likedIndex] = liked else cleanedPlaylists.add(0, liked)
-        return library.copy(
+        return reconciled.copy(
             tracks = existingTracks,
             playlists = cleanedPlaylists,
             favorites = favorites,
+            profileStates = reconciled.profileStates.mapValues { (_, state) ->
+                normalizeProfileState(state, existingTracks)
+            },
         )
+    }
+
+    private fun normalizeProfileState(
+        state: ProfileLibraryState,
+        existingTracks: List<Track>,
+    ): ProfileLibraryState {
+        val trackIDs = existingTracks.mapTo(linkedSetOf(), Track::id)
+        val favorites = state.favorites.intersect(trackIDs)
+        val playlists = state.playlists.map { playlist ->
+            playlist.copy(trackIDs = playlist.trackIDs.filter(trackIDs::contains).distinct())
+        }.toMutableList()
+        val likedIndex = playlists.indexOfFirst(Playlist::isSystem)
+        val liked = Playlist(
+            id = playlists.getOrNull(likedIndex)?.id ?: UUID.randomUUID().toString(),
+            name = "Liked Songs",
+            trackIDs = existingTracks.map(Track::id).filter(favorites::contains),
+            isSystem = true,
+        )
+        if (likedIndex >= 0) playlists[likedIndex] = liked else playlists.add(0, liked)
+        return state.copy(playlists = playlists, favorites = favorites)
     }
 
     private fun trackFromFile(
         file: File,
+        trackID: String = UUID.randomUUID().toString(),
         fallbackTitle: String,
         fallbackArtist: String = "Unknown Artist",
         fallbackAlbum: String = "Imported",
@@ -246,23 +331,30 @@ class LibraryRepository(
         contentSHA256: String? = null,
     ): Track {
         val metadata = readMetadata(file)
-        val id = UUID.randomUUID().toString()
-        val artworkFilename = (metadata.artwork ?: fallbackArtwork)?.let { writeArtwork(id, it) }
-        return Track(
-            id = id,
-            title = metadata.title ?: fallbackTitle,
-            artist = metadata.artist ?: fallbackArtist,
-            album = metadata.album ?: fallbackAlbum,
-            durationMs = metadata.durationMs.takeIf { it > 0 } ?: fallbackDurationMs,
-            relativePath = file.name,
-            remoteID = remoteID,
-            sourceServer = sourceServer,
-            syncProfileID = syncProfileID,
-            artworkFilename = artworkFilename,
-            artworkScanComplete = true,
-            sourceSHA256 = sourceSHA256,
-            contentSHA256 = contentSHA256,
-        )
+        var artworkFilename: String? = null
+        return try {
+            artworkFilename = (metadata.artwork ?: fallbackArtwork)?.let {
+                writeArtwork(trackID, it)
+            }
+            Track(
+                id = trackID,
+                title = metadata.title ?: fallbackTitle,
+                artist = metadata.artist ?: fallbackArtist,
+                album = metadata.album ?: fallbackAlbum,
+                durationMs = metadata.durationMs.takeIf { it > 0 } ?: fallbackDurationMs,
+                relativePath = file.name,
+                remoteID = remoteID,
+                sourceServer = sourceServer,
+                syncProfileID = syncProfileID,
+                artworkFilename = artworkFilename,
+                artworkScanComplete = true,
+                sourceSHA256 = sourceSHA256,
+                contentSHA256 = contentSHA256,
+            )
+        } catch (error: Throwable) {
+            artworkFilename?.let { File(artworkDirectory, it).delete() }
+            throw error
+        }
     }
 
     private fun writeArtwork(trackID: String, artwork: ByteArray): String? {
@@ -357,4 +449,78 @@ class LibraryRepository(
         val durationMs: Long = 0L,
         val artwork: ByteArray? = null,
     )
+}
+
+/**
+ * Restricts automatic cleanup to names generated randomly by this repository. User-imported
+ * filenames are deliberately never inferred to be disposable.
+ */
+internal object RepositoryFilePolicy {
+    private const val DOWNLOAD_PREFIX = "resonance-download-"
+    private const val STAGING_PREFIX = ".resonance-staging-"
+    private const val STAGING_SUFFIX = ".download"
+    private val uuidText = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    private val uuidPattern = Regex("^$uuidText$", RegexOption.IGNORE_CASE)
+    private val downloadPattern = Regex(
+        "^$DOWNLOAD_PREFIX($uuidText)(?:\\.[a-z0-9]{1,16})?$",
+        RegexOption.IGNORE_CASE,
+    )
+    private val stagingPattern = Regex(
+        "^\\$STAGING_PREFIX$uuidText\\$STAGING_SUFFIX$",
+        RegexOption.IGNORE_CASE,
+    )
+    private val artworkPattern = Regex("^$uuidText\\.artwork$", RegexOption.IGNORE_CASE)
+
+    fun newDownloadFilename(preferredFilename: String, randomID: String): String {
+        require(uuidPattern.matches(randomID)) { "Download ID must be a UUID" }
+        val rawExtension = File(preferredFilename).name.substringAfterLast('.', "")
+        val extension = rawExtension
+            .filter(Char::isLetterOrDigit)
+            .lowercase()
+            .take(16)
+        return buildString {
+            append(DOWNLOAD_PREFIX)
+            append(randomID.lowercase())
+            if (extension.isNotEmpty()) {
+                append('.')
+                append(extension)
+            }
+        }
+    }
+
+    fun newStagingFilename(randomID: String): String {
+        require(uuidPattern.matches(randomID)) { "Download ID must be a UUID" }
+        return "$STAGING_PREFIX${randomID.lowercase()}$STAGING_SUFFIX"
+    }
+
+    fun downloadID(filename: String): String? = downloadPattern
+        .matchEntire(filename)
+        ?.groupValues
+        ?.get(1)
+        ?.lowercase()
+
+    fun isAppOwnedArtwork(filename: String): Boolean = artworkPattern.matches(filename)
+
+    fun orphanedMusicFilenames(
+        candidateFilenames: Iterable<String>,
+        referencedFilenames: Set<String>,
+        stateIsTrustworthy: Boolean,
+    ): Set<String> {
+        if (!stateIsTrustworthy) return emptySet()
+        return candidateFilenames.filterTo(linkedSetOf()) { filename ->
+            filename !in referencedFilenames &&
+                (downloadPattern.matches(filename) || stagingPattern.matches(filename))
+        }
+    }
+
+    fun orphanedArtworkFilenames(
+        candidateFilenames: Iterable<String>,
+        referencedFilenames: Set<String>,
+        stateIsTrustworthy: Boolean,
+    ): Set<String> {
+        if (!stateIsTrustworthy) return emptySet()
+        return candidateFilenames.filterTo(linkedSetOf()) { filename ->
+            filename !in referencedFilenames && isAppOwnedArtwork(filename)
+        }
+    }
 }

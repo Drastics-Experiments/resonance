@@ -1,5 +1,6 @@
 package mov.unblocked.resonance.data
 
+import java.net.URI
 import kotlin.math.roundToInt
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -43,6 +44,61 @@ internal object LinkImportInput {
         if (scheme.containsMatchIn(input)) return true
         if (input.any(Char::isWhitespace)) return false
         return input.startsWith("www.", ignoreCase = true) || domain.containsMatchIn(input)
+    }
+
+    fun isReviewedTrackLink(value: String): Boolean {
+        val uri = runCatching { URI(value.trim()) }.getOrNull() ?: return false
+        if (!uri.scheme.equals("https", ignoreCase = true) || uri.userInfo != null || uri.port != -1) {
+            return false
+        }
+        val host = uri.host?.lowercase() ?: return false
+        val segments = uri.path.split('/').filter(String::isNotBlank)
+        if (host == "open.spotify.com") {
+            return segments.size == 2 &&
+                segments[0] == "track" &&
+                segments[1].matches(Regex("^[A-Za-z0-9]{22}$")) &&
+                uri.rawFragment == null
+        }
+        return reviewedYouTubeVideoID(value) != null
+    }
+
+    fun reviewedYouTubeVideoID(value: String): String? {
+        val uri = runCatching { URI(value.trim()) }.getOrNull() ?: return null
+        if (!uri.scheme.equals("https", ignoreCase = true) || uri.userInfo != null || uri.port != -1) {
+            return null
+        }
+        val host = uri.host?.lowercase() ?: return null
+        val segments = uri.path.split('/').filter(String::isNotBlank)
+        if (uri.rawQuery.orEmpty().split('&').any { it.substringBefore('=') == "list" }) return null
+        val videoID = when {
+            host in setOf("youtu.be", "www.youtu.be") && segments.size == 1 -> segments.single()
+            host in setOf("youtube.com", "www.youtube.com", "m.youtube.com") && uri.path == "/watch" ->
+                uri.rawQuery.orEmpty().split('&')
+                    .firstOrNull { it.substringBefore('=') == "v" }
+                    ?.substringAfter('=')
+            host in setOf("youtube.com", "www.youtube.com", "m.youtube.com") &&
+                segments.size == 2 && segments.firstOrNull() in setOf("shorts", "live", "embed") ->
+                segments.getOrNull(1)
+            else -> null
+        }
+        return videoID?.takeIf { it.matches(Regex("^[A-Za-z0-9_-]{11}$")) }
+    }
+}
+
+internal object ReviewedMatchResolutionPolicy {
+    fun bindLocalYouTubeCandidate(
+        requestedSource: String,
+        resolution: LinkImportResolution,
+    ): LinkImportResolution? {
+        if (resolution.kind != LinkImportKind.Track) return null
+        val videoID = LinkImportInput.reviewedYouTubeVideoID(requestedSource) ?: return null
+        val candidate = resolution.candidates.singleOrNull {
+            it.videoID == videoID && it.sourceProvider == LinkImportSourceProvider.YouTube
+        } ?: return null
+        return resolution.copy(
+            candidates = listOf(candidate.copy(fallbackCandidates = emptyList())),
+            reviewedMatchPolicyBound = true,
+        )
     }
 }
 

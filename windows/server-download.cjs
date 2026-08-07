@@ -33,6 +33,7 @@ async function retryServerDownload(operation, options = {}) {
     } catch (error) {
       if (options.signal?.aborted) options.signal.throwIfAborted();
       if (error?.name === "AbortError") throw error;
+      if (error?.retryable === false) throw error;
       lastError = error;
       if (attempt >= attempts) break;
       options.onRetry?.({ attempt, nextAttempt: attempt + 1, error });

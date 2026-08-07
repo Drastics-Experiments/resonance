@@ -7,11 +7,13 @@ import {
   nextPatchVersion,
   parseArguments,
   porcelainChangedPaths,
+  requiredReleaseSecretNames,
   selectLatestRun,
 } from "./release-now.mjs";
 
 test("defaults require no arguments", () => {
   assert.deepEqual(parseArguments([]), {
+    allowUnsignedDesktop: false,
     build: undefined,
     dryRun: false,
     help: false,
@@ -22,8 +24,17 @@ test("defaults require no arguments", () => {
 
 test("explicit release arguments are parsed", () => {
   assert.deepEqual(
-    parseArguments(["--version", "2.4.0", "--build", "91", "--retry-failed", "--dry-run"]),
+    parseArguments([
+      "--version",
+      "2.4.0",
+      "--build",
+      "91",
+      "--retry-failed",
+      "--dry-run",
+      "--allow-unsigned-desktop",
+    ]),
     {
+      allowUnsignedDesktop: true,
       build: 91,
       dryRun: true,
       help: false,
@@ -54,6 +65,18 @@ test("public release contract contains exactly twelve assets", () => {
   assert.ok(assets.includes("Resonance-Setup-1.2.3.exe"));
   assert.ok(assets.includes("Resonance-iOS-Simulator-1.2.3.zip"));
   assert.ok(assets.includes("latest-android.json"));
+});
+
+test("explicit unsigned desktop mode never requires Apple or Windows credentials", () => {
+  const unsignedSecrets = requiredReleaseSecretNames(true);
+  assert.deepEqual(unsignedSecrets.sort(), [
+    "RESONANCE_ANDROID_KEYSTORE_BASE64",
+    "RESONANCE_ANDROID_KEYSTORE_PASSWORD",
+    "RESONANCE_ANDROID_KEY_ALIAS",
+    "RESONANCE_ANDROID_KEY_PASSWORD",
+  ]);
+  assert.ok(requiredReleaseSecretNames(false).some((name) => name.startsWith("RESONANCE_MACOS_")));
+  assert.ok(requiredReleaseSecretNames(false).some((name) => name.startsWith("RESONANCE_WINDOWS_")));
 });
 
 test("workflow discovery selects the newest exact-SHA run", () => {

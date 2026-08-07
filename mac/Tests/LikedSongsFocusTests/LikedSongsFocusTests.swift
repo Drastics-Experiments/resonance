@@ -1,4 +1,5 @@
 import Combine
+import AVFoundation
 import Foundation
 import MediaPlayer
 import Testing
@@ -91,11 +92,208 @@ struct LikedSongsFocusTests {
     }
 
     @Test
-    func missingServerUploadPolicyOnlyUploadsActiveProfileDownloadsMissingFromCatalog() throws {
+    func uploadActionsIgnoreRefreshAndPlaylistSyncButStillBlockTransfers() throws {
+        let (defaults, suiteName) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+
+        model.isSyncingServer = true
+        model.isRefreshingServerCatalog = true
+        model.isSyncingPlaylists = true
+        #expect(!model.serverUploadActionsDisabled)
+
+        model.isRefreshingServerCatalog = false
+        #expect(model.serverUploadActionsDisabled)
+
+        model.isSyncingServer = false
+        model.isUploadingServer = true
+        #expect(model.serverUploadActionsDisabled)
+    }
+
+    @Test
+    func localImportReservationSynchronouslyLocksProfileAndManualUploadContext() async throws {
+        let (defaults, suiteName) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+        model.serverAdminToken = "admin-token"
+
+        let context = try model.beginLocalImportTransfer(reservingUpload: true)
+        defer { model.endLocalImportTransfer(context) }
+
+        #expect(model.isUploadingLocalImport)
+        #expect(model.serverUploadActionsDisabled)
+        #expect(context.profileID == "default")
+        #expect(context.baseURL?.absoluteString == "https://music.test")
+        #expect(throws: LocalImportTransferContextError.self) {
+            _ = try model.beginLocalImportTransfer(reservingUpload: true)
+        }
+
+        await model.uploadSongsToServer([glass])
+        #expect(model.uploadStatus == "Idle")
+        #expect(await model.selectSyncProfile(matching: "other") == false)
+        #expect(model.serverMessage == "Wait for the current server transfer or sync to finish")
+
+        model.serverAdminToken = "changed-admin-token"
+        #expect(throws: LocalImportTransferContextError.self) {
+            try model.validateLocalImportTransfer(context)
+        }
+    }
+
+    @Test
+    func localOnlyImportReservesTransferContextWithoutServerCredentials() async throws {
+        let (defaults, suiteName) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+
+        let context = try model.beginLocalImportTransfer(reservingUpload: false)
+        defer { model.endLocalImportTransfer(context) }
+
+        #expect(context.baseURL == nil)
+        #expect(context.adminToken == nil)
+        #expect(!context.reservesUpload)
+        #expect(model.isUploadingLocalImport)
+        #expect(model.serverUploadActionsDisabled)
+        #expect(throws: LocalImportTransferContextError.self) {
+            _ = try model.beginLocalImportTransfer(reservingUpload: false)
+        }
+        #expect(throws: LocalImportTransferContextError.self) {
+            _ = try model.beginLocalImportTransfer(reservingUpload: true)
+        }
+
+        await model.uploadSongsToServer([glass])
+        #expect(model.uploadStatus == "Idle")
+        #expect(await model.selectSyncProfile(matching: "other") == false)
+        #expect(model.serverMessage == "Wait for the current server transfer or sync to finish")
+        #expect(throws: Never.self) {
+            try model.validateLocalImportTransfer(context)
+        }
+
+        model.endLocalImportTransfer(context)
+        #expect(!model.isUploadingLocalImport)
+        #expect(!model.serverUploadActionsDisabled)
+        #expect(throws: LocalImportTransferContextError.self) {
+            try model.validateLocalImportTransfer(context)
+        }
+    }
+
+    @Test
+    func serverConnectionCanSaveEitherSyncOrAdminCredentials() {
+        #expect(ServerConnectionPolicy.canSave(
+            serverURL: "https://music.test",
+            accessToken: "",
+            adminToken: "admin-token"
+        ))
+        #expect(ServerConnectionPolicy.canSave(
+            serverURL: "https://music.test",
+            accessToken: "access-token",
+            adminToken: ""
+        ))
+        #expect(!ServerConnectionPolicy.canSave(
+            serverURL: "https://music.test",
+            accessToken: "",
+            adminToken: ""
+        ))
+        #expect(!ServerConnectionPolicy.canSave(
+            serverURL: "",
+            accessToken: "access-token",
+            adminToken: "admin-token"
+        ))
+        #expect(!ServerConnectionPolicy.canSave(
+            serverURL: "not-a-server",
+            accessToken: "",
+            adminToken: "admin-token"
+        ))
+        #expect(!ServerConnectionPolicy.canSave(
+            serverURL: "http://music.test",
+            accessToken: "access-token",
+            adminToken: ""
+        ))
+        #expect(!ServerConnectionPolicy.canSave(
+            serverURL: "http://localhost:8765",
+            accessToken: "access-token",
+            adminToken: ""
+        ))
+        #expect(ServerConnectionPolicy.canSave(
+            serverURL: "http://localhost:8765",
+            accessToken: "access-token",
+            adminToken: "",
+            allowsInsecurePreviewLoopback: true
+        ))
+        #expect(ServerConnectionPolicy.canSave(
+            serverURL: "http://[::1]:8765",
+            accessToken: "access-token",
+            adminToken: "",
+            allowsInsecurePreviewLoopback: true
+        ))
+        #expect(!ServerConnectionPolicy.canSave(
+            serverURL: "http://music.test",
+            accessToken: "access-token",
+            adminToken: "",
+            allowsInsecurePreviewLoopback: true
+        ))
+        #expect(ServerEndpointPolicy.normalizedURL("https://MUSIC.test:443/base/")?.absoluteString
+            == "https://music.test/base")
+        #expect(ServerEndpointPolicy.normalizedURL("https://user:secret@music.test") == nil)
+    }
+
+    @Test
+    func remoteSongIdentityIncludesNormalizedOriginAndProfile() throws {
+        let active = try #require(ServerSongIdentity(
+            serverURLString: "https://MUSIC.test:443/api/v1",
+            profileID: "profile-a",
+            songID: "same-id"
+        ))
+        let sameOrigin = try #require(ServerSongIdentity(
+            serverURLString: "https://music.test/another/path",
+            profileID: "profile-a",
+            songID: "same-id"
+        ))
+        let otherProfile = try #require(ServerSongIdentity(
+            serverURLString: "https://music.test",
+            profileID: "profile-b",
+            songID: "same-id"
+        ))
+        let otherServer = try #require(ServerSongIdentity(
+            serverURLString: "https://archive.test",
+            profileID: "profile-a",
+            songID: "same-id"
+        ))
+
+        #expect(active == sameOrigin)
+        #expect(active != otherProfile)
+        #expect(active != otherServer)
+    }
+
+    @Test
+    func changingServerOriginInvalidatesTheCachedUploadCatalog() throws {
+        let (defaults, suiteName) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        let catalog = try JSONDecoder().decode(RemoteCatalog.self, from: Data("""
+        {
+          "songs":[{"id":"old-id","filename":"old.m4a","title":"Old","artist":"Artist","album":"Album","size":1,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/old","stream_url":"/stream/old"}],
+          "count":1
+        }
+        """.utf8))
+
+        model.serverURLString = "https://old.example"
+        model.remoteSongs = catalog.songs
+        model.selectedRemoteSongIDs = ["old-id"]
+        model.serverURLString = "https://new.example"
+
+        #expect(model.remoteSongs.isEmpty)
+        #expect(model.selectedRemoteSongIDs.isEmpty)
+    }
+
+    @Test
+    func missingServerUploadPolicyRequiresTheActiveIdentityAndAnExactHashMatch() throws {
+        let exactHash = String(repeating: "a", count: 64)
         let catalogData = Data("""
         {"songs":[
           {"id":"live-id","filename":"live.m4a","title":"Live","artist":"Artist","album":"Album","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/live","stream_url":"/stream/live"},
-          {"id":"hash-id","filename":"hash.m4a","title":"Hash","artist":"Artist","album":"Album","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/hash","stream_url":"/stream/hash","content_sha256":"ABC123"},
+          {"id":"hash-id","filename":"hash.m4a","title":"Hash","artist":"Artist","album":"Album","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/hash","stream_url":"/stream/hash","content_sha256":"\(exactHash)"},
           {"id":"metadata-id","filename":"All for You - Radio Version.m4a","title":"All for You Radio Version","artist":"Ace of Base","album":"Imported","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/download/metadata","stream_url":"/stream/metadata","duration_seconds":217.9}
         ],"count":3}
         """.utf8)
@@ -109,7 +307,7 @@ struct LikedSongsFocusTests {
         let hashMatch = Track(
             title: "Hash", artist: "Artist", album: "Album", duration: 1, artwork: .liked,
             fileURL: fileURL, remoteID: "deleted-id", sourceServer: "https://music.test",
-            syncProfileID: "profile-a", contentSHA256: "abc123"
+            syncProfileID: "profile-a", contentSHA256: exactHash.uppercased()
         )
         let missing = Track(
             title: "Missing", artist: "Artist", album: "Album", duration: 1, artwork: .liked,
@@ -130,19 +328,193 @@ struct LikedSongsFocusTests {
             fileURL: fileURL, remoteID: "other-profile", sourceServer: "https://music.test",
             syncProfileID: "profile-b"
         )
+        let anotherServerWithCollidingID = Track(
+            title: "Other Server", artist: "Artist", album: "Album", duration: 1, artwork: .liked,
+            fileURL: fileURL, remoteID: "live-id", sourceServer: "https://archive.test",
+            syncProfileID: "profile-b"
+        )
+        let anotherServerHashMatch = Track(
+            title: "Hash", artist: "Artist", album: "Album", duration: 1, artwork: .liked,
+            fileURL: fileURL, remoteID: "old-hash-id", sourceServer: "https://archive.test",
+            syncProfileID: "profile-b", contentSHA256: exactHash
+        )
+        let legacyRemoteOnly = Track(
+            title: "Legacy Download", artist: "Artist", album: "Album", duration: 1, artwork: .liked,
+            fileURL: fileURL, remoteID: "legacy-missing-id", syncProfileID: "profile-b"
+        )
 
         let plan = MissingServerUploadPolicy.plan(
-            tracks: [present, hashMatch, metadataMatch, missing, localImport, anotherProfile],
+            tracks: [
+                present,
+                hashMatch,
+                metadataMatch,
+                missing,
+                localImport,
+                anotherProfile,
+                anotherServerWithCollidingID,
+                anotherServerHashMatch,
+                legacyRemoteOnly,
+            ],
             catalog: catalog,
             activeProfileID: "profile-a",
             activeServerURL: try #require(URL(string: "https://music.test"))
         )
 
-        #expect(plan.uploadTrackIDs == [missing.id])
+        #expect(plan.uploadTrackIDs == [metadataMatch.id, missing.id])
         #expect(plan.existingRemoteIDsByTrackID == [
             hashMatch.id: "hash-id",
-            metadataMatch.id: "metadata-id",
         ])
+        #expect(plan.ambiguousTrackIDs.isEmpty)
+        #expect(!plan.uploadTrackIDs.contains(localImport.id))
+        #expect(plan.existingRemoteIDsByTrackID[localImport.id] == nil)
+    }
+
+    @Test
+    func ambiguousCatalogHashesAreNeverAutoReconciled() throws {
+        let hash = String(repeating: "b", count: 64)
+        let catalog = try JSONDecoder().decode(RemoteCatalog.self, from: Data("""
+        {"songs":[
+          {"id":"first","filename":"first.m4a","title":"First","artist":"Artist","album":"Album","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/first","stream_url":"/first","content_sha256":"\(hash)"},
+          {"id":"second","filename":"second.m4a","title":"Second","artist":"Artist","album":"Album","size":10,"modified_at":"now","content_type":"audio/mp4","download_url":"/second","stream_url":"/second","content_sha256":"\(hash)"}
+        ],"count":2}
+        """.utf8)).songs
+        let track = Track(
+            title: "Local",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .liked,
+            fileURL: glass,
+            remoteID: "missing",
+            sourceServer: "https://music.test",
+            syncProfileID: "default",
+            contentSHA256: hash
+        )
+
+        let plan = MissingServerUploadPolicy.plan(
+            tracks: [track],
+            catalog: catalog,
+            activeProfileID: "default",
+            activeServerURL: try #require(URL(string: "https://music.test"))
+        )
+
+        #expect(plan.uploadTrackIDs.isEmpty)
+        #expect(plan.existingRemoteIDsByTrackID.isEmpty)
+        #expect(plan.ambiguousTrackIDs == [track.id])
+    }
+
+    @Test
+    func downloadedUploadContinuesDuringRefreshWithoutWaitingForTheCatalog() async throws {
+        let (defaults, suiteName) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockMusicURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            MockMusicURLProtocol.handler = nil
+        }
+        MockMusicURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.path == "/api/v1/client-config" {
+                return (
+                    HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!,
+                    Data()
+                )
+            }
+            #expect(request.httpMethod == "PUT")
+            #expect(url.path == "/api/v1/admin/songs")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer admin-token")
+            #expect(request.value(forHTTPHeaderField: "X-Resonance-Profile") == "default")
+            #expect(request.value(forHTTPHeaderField: "X-Resonance-Client-Platform") == "macos")
+            #expect(request.value(forHTTPHeaderField: "X-Resonance-Config-Protocol") == "1")
+            #expect(!(request.value(forHTTPHeaderField: "X-Resonance-Cohort-Key") ?? "").isEmpty)
+            let data = Data(#"{"duplicate_of":{"id":"uploaded-id","filename":"Glass.aiff","title":"Downloaded","artist":"Artist","album":"Album","size":1,"modified_at":"now","content_type":"audio/aiff","download_url":"/download/uploaded-id","stream_url":"/stream/uploaded-id"}}"#.utf8)
+            return (HTTPURLResponse(url: url, statusCode: 409, httpVersion: nil, headerFields: nil)!, data)
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: session,
+            persistServerCredentials: false
+        )
+        let track = Track(
+            title: "Downloaded",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .liked,
+            fileURL: glass,
+            remoteID: "old-id",
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
+        )
+        model.tracks = [track]
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+        model.serverAdminToken = "admin-token"
+        model.isSyncingServer = true
+        model.isRefreshingServerCatalog = true
+        model.isSyncingPlaylists = true
+
+        model.uploadMissingDownloadedSongs()
+        for _ in 0..<200 where model.uploadStatus != "Uploaded 1; matched 0 already on the server" {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(model.uploadStatus == "Uploaded 1; matched 0 already on the server")
+        #expect(model.tracks.first?.remoteID == "uploaded-id")
+        #expect(model.tracks.first?.syncProfileID == "default")
+        #expect(model.isSyncingServer)
+        #expect(model.isSyncingPlaylists)
+    }
+
+    @Test
+    func fileUploadRefusesToDuplicateATrackLinkedToAnotherContext() async throws {
+        let (defaults, suiteName) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockMusicURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            MockMusicURLProtocol.handler = nil
+        }
+        MockMusicURLProtocol.handler = { _ in
+            Issue.record("A conflicting library file must be rejected before upload")
+            throw URLError(.unsupportedURL)
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: session,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = ""
+        model.serverAdminToken = "admin-token"
+        let linkedTrack = Track(
+            title: "Glass",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .liked,
+            fileURL: glass,
+            sourceServer: "https://archive.test",
+            syncProfileID: "profile-a"
+        )
+        model.tracks = [linkedTrack]
+
+        await model.uploadSongsToServer([glass])
+
+        #expect(model.uploadStatus.contains("already linked"))
+        #expect(model.uploadStatus.contains("import a separate local copy"))
+        #expect(model.serverMessage == model.uploadStatus)
+        #expect(model.remoteSongs.isEmpty)
+        #expect(model.tracks.first?.remoteID == nil)
+        #expect(model.tracks.first?.sourceServer == "https://archive.test")
+        #expect(model.tracks.first?.syncProfileID == "profile-a")
+        #expect(!model.isUploadingServer)
     }
 
     @Test
@@ -338,6 +710,29 @@ struct LikedSongsFocusTests {
     }
 
     @Test
+    func playbackUsesThePlayableAudioDurationInsteadOfStaleTrackMetadata() async throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        await model.importLocalFiles(at: [hero])
+        let imported = try #require(model.tracks.first)
+        let playableDuration = imported.duration
+        var stale = imported
+        stale.duration = playableDuration * 2
+        model.tracks = [stale]
+
+        model.selectAndPlay(stale)
+
+        #expect(abs(model.playbackDuration - playableDuration) < 0.02)
+        #expect(abs((model.currentTrack?.duration ?? 0) - playableDuration) < 0.02)
+        model.togglePlay()
+    }
+
+    @Test
     func playbackProgressDoesNotInvalidateTheWholeLibraryGraph() async throws {
         let (defaults, suite) = try defaults()
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -415,6 +810,48 @@ struct LikedSongsFocusTests {
     }
 
     @Test
+    func installedVideoOwnershipRoutesSystemPlaybackCommandsToAVPlayer() async throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let controller = RecordingMacSystemPlaybackController()
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false,
+            systemPlaybackController: controller
+        )
+        await model.importLocalFiles(at: [glass])
+        let track = try #require(model.tracks.first)
+        model.selectAndPlay(track)
+
+        let videoPlayer = AVPlayer(url: glass)
+        videoPlayer.play()
+        model.beginInstalledVideoPlayback(videoPlayer, trackID: track.id)
+        controller.handlers.seek(0.25)
+        #expect(abs(model.position - 0.25) < 0.01)
+
+        controller.handlers.pause()
+        #expect(!model.isPlaying)
+        #expect(videoPlayer.rate == 0)
+        #expect(controller.lastSnapshot?.isPlaying == false)
+
+        controller.handlers.play()
+        #expect(model.isPlaying)
+        #expect(videoPlayer.rate > 0)
+        #expect(controller.lastSnapshot?.isPlaying == true)
+
+        controller.handlers.changeRate(1.5)
+        #expect(model.playbackRate == 1.5)
+        #expect(videoPlayer.defaultRate == 1.5)
+        model.endInstalledVideoPlayback(
+            videoPlayer,
+            trackID: track.id,
+            position: model.position,
+            resumeAudio: false
+        )
+    }
+
+    @Test
     func nativeMacPlaybackSnapshotSanitizesSystemMetadata() {
         let track = Track(
             title: "  ",
@@ -424,6 +861,7 @@ struct LikedSongsFocusTests {
             kind: .video,
             artwork: .electric,
             remoteID: "server-song",
+            sourceServer: "https://music.test",
             syncProfileID: "profile-a"
         )
         let snapshot = MacNowPlayingSnapshot(
@@ -443,7 +881,8 @@ struct LikedSongsFocusTests {
         #expect(snapshot.elapsedTime == 120)
         #expect(snapshot.playbackRate == 1)
         #expect(snapshot.isVideo)
-        #expect(snapshot.contentIdentifier == "server-song")
+        #expect(snapshot.contentIdentifier
+            == "https://music.test#profile=profile-a#song=server-song")
         #expect(snapshot.profileID == "profile-a")
         #expect(snapshot.queueIndex == 0)
         #expect(snapshot.queueCount == 1)
@@ -650,6 +1089,9 @@ struct LikedSongsFocusTests {
             guard request.value(forHTTPHeaderField: "Authorization") == "Bearer client-token-123" else {
                 throw URLError(.userAuthenticationRequired)
             }
+            #expect(request.value(forHTTPHeaderField: "X-Resonance-Client-Platform") == "macos")
+            #expect(request.value(forHTTPHeaderField: "X-Resonance-Config-Protocol") == "1")
+            #expect(!(request.value(forHTTPHeaderField: "X-Resonance-Cohort-Key") ?? "").isEmpty)
             let url = try #require(request.url)
             if url.path == "/api/v1/songs" {
                 let payload: [String: Any] = [
@@ -683,14 +1125,14 @@ struct LikedSongsFocusTests {
             serverCacheRoot: cacheRoot,
             persistServerCredentials: false
         )
-        model.serverURLString = "http://music.test:8765"
+        model.serverURLString = "https://music.test:8765"
         model.serverToken = "client-token-123"
         await model.syncServerLibrary()
 
         #expect(model.remoteSongs.count == 1)
         #expect(model.tracks.count == 1)
         #expect(model.tracks[0].remoteID == identifier)
-        #expect(model.tracks[0].sourceServer == "http://music.test:8765")
+        #expect(model.tracks[0].sourceServer == "https://music.test:8765")
         #expect(model.tracks[0].fileURL.map { FileManager.default.fileExists(atPath: $0.path) } == true)
         #expect(model.serverMessage == "Synced 1 song")
     }
@@ -715,8 +1157,8 @@ struct LikedSongsFocusTests {
             networkSession: session,
             persistServerCredentials: false
         )
-        let first = Track(title: "First", artist: "Artist", album: "Album", duration: 1, artwork: .electric, fileURL: glass, remoteID: firstRemoteID)
-        let second = Track(title: "Second", artist: "Artist", album: "Album", duration: 1, artwork: .golden, fileURL: ping, remoteID: secondRemoteID)
+        let first = Track(title: "First", artist: "Artist", album: "Album", duration: 1, artwork: .electric, fileURL: glass, remoteID: firstRemoteID, sourceServer: "https://music.test", syncProfileID: "default")
+        let second = Track(title: "Second", artist: "Artist", album: "Album", duration: 1, artwork: .golden, fileURL: ping, remoteID: secondRemoteID, sourceServer: "https://music.test", syncProfileID: "default")
         model.tracks = [first, second]
         let playlist = try #require(model.createPlaylist(named: "Synced Order"))
         model.addTrack(second, to: playlist)
@@ -771,7 +1213,7 @@ struct LikedSongsFocusTests {
             networkSession: session,
             persistServerCredentials: false
         )
-        let track = Track(title: "Remote", artist: "Artist", album: "Album", duration: 1, artwork: .electric, fileURL: glass, remoteID: remoteID)
+        let track = Track(title: "Remote", artist: "Artist", album: "Album", duration: 1, artwork: .electric, fileURL: glass, remoteID: remoteID, sourceServer: "https://music.test", syncProfileID: "default")
         model.tracks = [track]
         let playlist = try #require(model.createPlaylist(named: "Conflict Safe"))
         model.addTrack(track, to: playlist)

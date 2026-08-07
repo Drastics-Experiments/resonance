@@ -87,6 +87,9 @@ import androidx.media3.ui.PlayerView
 import java.io.File
 import kotlinx.coroutines.delay
 import mov.unblocked.resonance.data.LinkImportStage
+import mov.unblocked.resonance.data.LinkImportInput
+import mov.unblocked.resonance.data.ServerUploadMode
+import mov.unblocked.resonance.data.SourceImportPolicy
 import mov.unblocked.resonance.data.LinkImportKind
 import mov.unblocked.resonance.data.LinkImportSearchProvider
 import mov.unblocked.resonance.data.LinkImportSearchResponse
@@ -107,9 +110,13 @@ fun ClipEditorDialog(
     var selectedTrackId by remember { mutableStateOf(state.currentTrackId ?: state.tracks.firstOrNull()?.id) }
     val selectedTrack = state.tracks.firstOrNull { it.id == selectedTrackId }
     var startMs by remember { mutableLongStateOf(0L) }
-    var endMs by remember { mutableLongStateOf(1L) }
-    var startText by remember { mutableStateOf("0:00") }
-    var endText by remember { mutableStateOf("0:01") }
+    var endMs by remember { mutableLongStateOf(selectedTrack?.durationMs?.takeIf { it > 0L } ?: 0L) }
+    var startText by remember {
+        mutableStateOf(if ((selectedTrack?.durationMs ?: 0L) > 0L) "0:00" else "--:--")
+    }
+    var endText by remember {
+        mutableStateOf(selectedTrack?.durationMs?.takeIf { it > 0L }?.let(::clipTime) ?: "--:--")
+    }
     var trackMenu by remember { mutableStateOf(false) }
     var previewing by remember { mutableStateOf(false) }
     var previewPositionMs by remember { mutableLongStateOf(0L) }
@@ -123,13 +130,21 @@ fun ClipEditorDialog(
 
     fun resetRange(track: Track?) {
         if (track == null) return
+        if (track.durationMs <= 0L) {
+            startMs = 0L
+            endMs = 0L
+            previewPositionMs = 0L
+            startText = "--:--"
+            endText = "--:--"
+            return
+        }
         val saved = state.clipRangesByTrackId[track.id]
         val defaultStart = if (track.durationMs > 60_000) 15_000L else 0L
         startMs = saved?.startMs ?: defaultStart
         endMs = saved?.endMs ?: minOf(track.durationMs, defaultStart + 45_000L)
         if (endMs - startMs < 250) {
             startMs = 0
-            endMs = track.durationMs.coerceAtLeast(250)
+            endMs = track.durationMs
         }
         previewPositionMs = startMs
         updateTexts()
@@ -229,6 +244,13 @@ fun ClipEditorDialog(
                             }
                             Text(selectedTrack.durationText, fontSize = 12.sp)
                         }
+                        if (selectedTrack.durationMs <= 0L) {
+                            Text(
+                                "Resonance couldn't read this song's duration. Re-import it or repair its metadata before setting a clip range.",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
+                                fontSize = 13.sp,
+                            )
+                        } else {
                         if (isVideoClipTrack(selectedTrack)) {
                             ClipVideoPreview(
                                 player = previewPlayer,
@@ -350,6 +372,7 @@ fun ClipEditorDialog(
                                 colors = ButtonDefaults.buttonColors(containerColor = Violet),
                                 modifier = Modifier.weight(1f),
                             ) { Text("Save Range") }
+                        }
                         }
                     }
                 }
@@ -586,11 +609,49 @@ fun LinkImportDialog(
     actions: ResonanceActions,
     onDismiss: () -> Unit,
 ) {
-    var source by remember { mutableStateOf("") }
-    var uploadAfterImport by rememberSaveable { mutableStateOf(true) }
+    var source by remember { mutableStateOf(state.linkImport.requestedSource.orEmpty()) }
+    val canUploadReviewedLink = state.hasServerUploadCredentials &&
+        state.serverUploadMode in setOf(
+            ServerUploadMode.ServerSourceLink,
+            ServerUploadMode.ReviewedMatch,
+        )
+    var uploadAfterImport by rememberSaveable { mutableStateOf(false) }
     val focus = LocalFocusManager.current
     val clipboard = LocalClipboardManager.current
     val importState = state.linkImport
+    val reviewedMatchPolicyBound = importState.resolution?.reviewedMatchPolicyBound == true
+    val uploadInputAccepted = when (state.serverUploadMode) {
+        ServerUploadMode.ServerSourceLink -> runCatching {
+            SourceImportPolicy.canonicalYouTubePageURL(source)
+        }.isSuccess
+        ServerUploadMode.ReviewedMatch -> LinkImportInput.isReviewedTrackLink(source)
+        else -> false
+    }
+    val modeSubtitle = when (state.serverUploadMode) {
+        ServerUploadMode.ServerSourceLink ->
+            "For server upload, paste the exact https://www.youtube.com/watch?v=… page. Searches and other links stay device-only."
+        ServerUploadMode.ReviewedMatch ->
+            "For server upload, paste one full Spotify track or individual YouTube video link. Search text and SoundCloud stay device-only."
+        else -> "Search Spotify, SoundCloud, and YouTube, or inspect a supported link directly."
+    }
+    val inputLabel = when (state.serverUploadMode) {
+        ServerUploadMode.ServerSourceLink -> "Exact YouTube page or device-only search"
+        ServerUploadMode.ReviewedMatch -> "Spotify/YouTube track link or device-only search"
+        else -> "Search or link"
+    }
+    val inputPlaceholder = when (state.serverUploadMode) {
+        ServerUploadMode.ServerSourceLink -> "https://www.youtube.com/watch?v=…"
+        ServerUploadMode.ReviewedMatch -> "Spotify track or YouTube video link"
+        else -> "Song, artist, album, or link"
+    }
+    LaunchedEffect(reviewedMatchPolicyBound) {
+        if (reviewedMatchPolicyBound) uploadAfterImport = true
+    }
+    LaunchedEffect(source, state.serverUploadMode, canUploadReviewedLink) {
+        if (!reviewedMatchPolicyBound && (!canUploadReviewedLink || !uploadInputAccepted)) {
+            uploadAfterImport = false
+        }
+    }
     val close = {
         if (importState.isRunning) actions.cancelLinkImport()
         else actions.stopLinkImportPreview()
@@ -609,7 +670,7 @@ fun LinkImportDialog(
             shape = RoundedCornerShape(22.dp),
         ) {
             Column(Modifier.fillMaxSize()) {
-                ToolHeader("Import from Link", "Search Spotify, SoundCloud, and YouTube, or inspect a supported link directly.", close)
+                ToolHeader("Import from Link", modeSubtitle, close)
                 Column(
                     modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -617,10 +678,13 @@ fun LinkImportDialog(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(
                             value = source,
-                            onValueChange = { source = it },
+                            onValueChange = {
+                                source = it
+                                actions.updateLinkImportSource(it)
+                            },
                             modifier = Modifier.weight(1f),
-                            label = { Text("Search or link") },
-                            placeholder = { Text("Song, artist, album, or link") },
+                            label = { Text(inputLabel) },
+                            placeholder = { Text(inputPlaceholder) },
                             leadingIcon = { Icon(Icons.Default.Search, null) },
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Search),
@@ -630,7 +694,10 @@ fun LinkImportDialog(
                             }),
                         )
                         TextButton(onClick = {
-                            clipboard.getText()?.text?.takeIf(String::isNotBlank)?.let { source = it }
+                            clipboard.getText()?.text?.takeIf(String::isNotBlank)?.let {
+                                source = it
+                                actions.updateLinkImportSource(it)
+                            }
                         }) { Text("Paste") }
                     }
                     Surface(color = Color.White.copy(alpha = .045f), shape = RoundedCornerShape(13.dp)) {
@@ -641,16 +708,37 @@ fun LinkImportDialog(
                             Column(Modifier.weight(1f)) {
                                 Text("Upload after downloading", fontWeight = FontWeight.SemiBold)
                                 Text(
-                                    if (state.serverUrl.isNotBlank() && state.serverToken.isNotBlank() && state.serverAdminKey.isNotBlank()) {
-                                        "Downloads every selected song first, then uploads missing songs to the active server profile."
+                                    if (canUploadReviewedLink) {
+                                        if (reviewedMatchPolicyBound) {
+                                            "Choose one server-ranked candidate explicitly. The exact selected audio is downloaded, verified, then uploaded as local bytes; hidden fallbacks are disabled."
+                                        } else if (!uploadInputAccepted) {
+                                            when (state.serverUploadMode) {
+                                                ServerUploadMode.ServerSourceLink ->
+                                                    "Server upload is off until this is the exact canonical YouTube watch page. Generic searches, SoundCloud, Spotify, shortened links, and playlists remain device-only."
+                                                ServerUploadMode.ReviewedMatch ->
+                                                    "Server upload is off until this is one full Spotify track or individual YouTube video link. Generic search, SoundCloud, and playlists remain device-only."
+                                                else -> "Server upload is unavailable for this input."
+                                            }
+                                        } else when (state.serverUploadMode) {
+                                            ServerUploadMode.ServerSourceLink ->
+                                                "The original YouTube page is sent to the active server profile; no provider playback URL is stored."
+                                            ServerUploadMode.ReviewedMatch ->
+                                                "After you review the match, its verified local bytes upload to the active server profile."
+                                            else -> "Server upload is unavailable for link-derived audio."
+                                        }
                                     } else {
-                                        "Configure the access token and admin key, or turn this off for a local-only import."
+                                        "Choose Source link or Reviewed match in Server settings, or keep this import only on this device."
                                     },
                                     fontSize = 12.sp,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                                 )
                             }
-                            Switch(checked = uploadAfterImport, onCheckedChange = { uploadAfterImport = it })
+                            Switch(
+                                checked = uploadAfterImport && canUploadReviewedLink &&
+                                    (reviewedMatchPolicyBound || uploadInputAccepted),
+                                enabled = canUploadReviewedLink && uploadInputAccepted && !reviewedMatchPolicyBound,
+                                onCheckedChange = { uploadAfterImport = it },
+                            )
                         }
                     }
                     LinkStageCard(importState)
@@ -671,7 +759,13 @@ fun LinkImportDialog(
                                     }.joinToString(" • "),
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                                 )
-                                val existing = LinkImportExistingPolicy.match(resolution.track, state.tracks, state.remoteSongs)
+                                val existing = LinkImportExistingPolicy.match(
+                                    resolution.track,
+                                    state.tracks,
+                                    state.remoteSongs,
+                                    state.serverUrl,
+                                    state.syncProfileId,
+                                )
                                 if (!isPlaylist && (existing.isOnDevice || existing.isOnServer)) {
                                     Text(
                                         linkExistingStatus(existing.isOnDevice, existing.isOnServer),
@@ -700,7 +794,13 @@ fun LinkImportDialog(
                                 }
                             }
                         }
-                        Eyebrow(if (isPlaylist) "Tracks to Import" else "Audio Source")
+                        Eyebrow(
+                            when {
+                                reviewedMatchPolicyBound -> "Review-only candidates • explicit choice required"
+                                isPlaylist -> "Tracks to Import"
+                                else -> "Audio Source"
+                            },
+                        )
                         resolution.candidates.forEach { candidate ->
                             val metadata = candidate.importTrack
                             val selected = if (isPlaylist) {
@@ -721,7 +821,7 @@ fun LinkImportDialog(
                                     }
                                     RemoteArtwork(
                                         metadata?.artworkURL ?: candidate.thumbnailURL,
-                                        "",
+                                        state.serverUrl,
                                         Modifier.size(44.dp),
                                     )
                                     Spacer(Modifier.width(10.dp))
@@ -738,7 +838,13 @@ fun LinkImportDialog(
                                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                                         )
                                         metadata?.let {
-                                            val existing = LinkImportExistingPolicy.match(it, state.tracks, state.remoteSongs)
+                                            val existing = LinkImportExistingPolicy.match(
+                                                it,
+                                                state.tracks,
+                                                state.remoteSongs,
+                                                state.serverUrl,
+                                                state.syncProfileId,
+                                            )
                                             if (existing.isOnDevice || existing.isOnServer) {
                                                 Text(
                                                     linkExistingStatus(existing.isOnDevice, existing.isOnServer),
@@ -796,7 +902,9 @@ fun LinkImportDialog(
                     } else {
                         Button(
                             onClick = {
-                                if (actions.confirmLinkImport(uploadAfterImport)) onDismiss()
+                                val serverUploadRequested = uploadAfterImport && canUploadReviewedLink &&
+                                    (reviewedMatchPolicyBound || uploadInputAccepted)
+                                if (actions.confirmLinkImport(serverUploadRequested)) onDismiss()
                             },
                             enabled = !importState.isRunning && if (importState.resolution.kind.isPlaylist) {
                                 importState.selectedVideoIds.isNotEmpty()
@@ -878,7 +986,7 @@ private fun LinkSearchResultRow(
             RadioButton(selected = selected, onClick = { actions.selectLinkImportSearchResult(result.id) })
             RemoteArtwork(
                 result.track.artworkURL ?: candidate?.thumbnailURL,
-                "${result.track.title} artwork",
+                state.serverUrl,
                 Modifier.size(44.dp),
             )
             Spacer(Modifier.width(10.dp))
@@ -899,7 +1007,13 @@ private fun LinkSearchResultRow(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     maxLines = 2,
                 )
-                val existing = LinkImportExistingPolicy.match(result.track, state.tracks, state.remoteSongs)
+                val existing = LinkImportExistingPolicy.match(
+                    result.track,
+                    state.tracks,
+                    state.remoteSongs,
+                    state.serverUrl,
+                    state.syncProfileId,
+                )
                 if (existing.isOnDevice || existing.isOnServer) {
                     Text(
                         linkExistingStatus(existing.isOnDevice, existing.isOnServer),

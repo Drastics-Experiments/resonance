@@ -1,5 +1,94 @@
 import Foundation
 
+struct MobileServerContext: Codable, Hashable, Sendable {
+    let origin: String
+    let profileID: String
+
+    var storagePrefix: String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let encodedOrigin = origin.addingPercentEncoding(withAllowedCharacters: allowed) ?? origin
+        let encodedProfile = profileID.addingPercentEncoding(withAllowedCharacters: allowed) ?? profileID
+        return "origin=\(encodedOrigin)&profile=\(encodedProfile)"
+    }
+}
+
+struct MobileRemoteIdentity: Codable, Hashable, Sendable {
+    let context: MobileServerContext
+    let remoteID: String
+}
+
+struct MobileServerEndpointResolution: Equatable, Sendable {
+    let url: URL
+    let usesInsecureLocalHTTP: Bool
+}
+
+enum MobileServerEndpointError: LocalizedError, Equatable {
+    case invalidURL
+    case credentialsInURL
+    case insecureRemoteHTTP
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            "Enter a valid HTTPS server URL."
+        case .credentialsInURL:
+            "Do not put credentials in the server URL. Use the secure token fields."
+        case .insecureRemoteHTTP:
+            "HTTPS is required. Unencrypted HTTP is allowed only for localhost development."
+        }
+    }
+}
+
+enum MobileServerEndpointPolicy {
+    static func resolve(_ rawValue: String) throws -> MobileServerEndpointResolution {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased(),
+              !host.isEmpty,
+              scheme == "https" || scheme == "http" else {
+            throw MobileServerEndpointError.invalidURL
+        }
+        guard components.user == nil, components.password == nil else {
+            throw MobileServerEndpointError.credentialsInURL
+        }
+        components.scheme = scheme
+        components.host = host
+        components.query = nil
+        components.fragment = nil
+        while components.path.count > 1, components.path.hasSuffix("/") {
+            components.path.removeLast()
+        }
+        let isLoopback = host == "localhost"
+            || host.hasSuffix(".localhost")
+            || host == "127.0.0.1"
+            || host == "::1"
+        if scheme == "http", !isLoopback {
+            throw MobileServerEndpointError.insecureRemoteHTTP
+        }
+        guard let url = components.url else { throw MobileServerEndpointError.invalidURL }
+        return MobileServerEndpointResolution(url: url, usesInsecureLocalHTTP: scheme == "http")
+    }
+
+    static func normalizedOrigin(of url: URL) -> String? {
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              let host = url.host?.lowercased(),
+              !host.isEmpty else { return nil }
+        let port = url.port ?? (scheme == "https" ? 443 : 80)
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host
+        components.port = port
+        return components.string
+    }
+
+    static func context(serverURL: URL, profileID: String) -> MobileServerContext? {
+        guard let origin = normalizedOrigin(of: serverURL), !profileID.isEmpty else { return nil }
+        return MobileServerContext(origin: origin, profileID: profileID)
+    }
+}
+
 enum PlaybackVolumePolicy {
     static func gain(for sliderValue: Double) -> Float {
         guard sliderValue.isFinite else { return 0 }
@@ -73,7 +162,7 @@ enum MobileServerSongIdentityPolicy {
 }
 
 struct MobileTrack: Identifiable, Codable, Hashable {
-    let id: UUID
+    var id: UUID
     var title: String
     var artist: String
     var album: String
@@ -125,6 +214,90 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         let seconds = Int(duration)
         return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
     }
+
+    func remoteIdentity(fallbackServerURL: URL? = nil) -> MobileRemoteIdentity? {
+        guard let remoteID, !remoteID.isEmpty else { return nil }
+        let serverURL = sourceServer.flatMap(URL.init(string:)) ?? fallbackServerURL
+        guard let serverURL,
+              let context = MobileServerEndpointPolicy.context(
+                serverURL: serverURL,
+                profileID: syncProfileID ?? "default"
+              ) else { return nil }
+        return MobileRemoteIdentity(context: context, remoteID: remoteID)
+    }
+}
+
+enum MobileRemoteAssociationError: LocalizedError, Equatable {
+    case incompleteExistingIdentity(remoteID: String?)
+    case contextConflict(existingContext: MobileServerContext, targetContext: MobileServerContext)
+
+    var errorDescription: String? {
+        switch self {
+        case .incompleteExistingIdentity:
+            "This song already has a server link, but its server or profile identity is incomplete. Resonance kept the existing link. Re-download it or import a separate local copy before uploading it to another server profile."
+        case .contextConflict(let existingContext, let targetContext):
+            "This song is already linked to profile \(existingContext.profileID) at \(existingContext.origin). Resonance kept that link instead of reusing this managed copy for profile \(targetContext.profileID) at \(targetContext.origin). Import a separate local copy to upload it there."
+        }
+    }
+}
+
+enum MobileRemoteAssociationPolicy {
+    static func validateAdoption(
+        track: MobileTrack,
+        targetContext: MobileServerContext
+    ) throws {
+        let hasRemoteID = track.remoteID?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty == false
+        let hasSourceServer = track.sourceServer?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty == false
+        let hasPersistedAssociation = hasRemoteID || hasSourceServer
+        guard hasPersistedAssociation else { return }
+        guard let sourceServer = track.sourceServer,
+              !sourceServer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let profileID = track.syncProfileID,
+              !profileID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let serverURL = URL(string: sourceServer),
+              let existingContext = MobileServerEndpointPolicy.context(
+                  serverURL: serverURL,
+                  profileID: profileID
+              ) else {
+            throw MobileRemoteAssociationError.incompleteExistingIdentity(remoteID: track.remoteID)
+        }
+        guard existingContext == targetContext else {
+            throw MobileRemoteAssociationError.contextConflict(
+                existingContext: existingContext,
+                targetContext: targetContext
+            )
+        }
+    }
+}
+
+enum MobileManagedTrackUploadPolicy {
+    static func managedTrack(
+        matching sourceURL: URL,
+        tracks: [MobileTrack],
+        musicDirectory: URL
+    ) -> MobileTrack? {
+        guard let sourcePath = canonicalPath(for: sourceURL),
+              let musicRoot = canonicalPath(for: musicDirectory) else { return nil }
+        let rootPrefix = musicRoot.hasSuffix("/") ? musicRoot : musicRoot + "/"
+
+        return tracks.first { track in
+            guard !track.relativePath.isEmpty,
+                  let managedPath = canonicalPath(
+                      for: musicDirectory.appendingPathComponent(track.relativePath)
+                  ),
+                  managedPath.hasPrefix(rootPrefix) else { return false }
+            return managedPath == sourcePath
+        }
+    }
+
+    private static func canonicalPath(for url: URL) -> String? {
+        guard url.isFileURL else { return nil }
+        return url.standardizedFileURL.resolvingSymlinksInPath().path
+    }
 }
 
 struct MobileMissingServerUploadPlan: Equatable {
@@ -139,6 +312,153 @@ struct MobileTransferNotice: Identifiable, Equatable {
     let isError: Bool
 }
 
+struct MobileTransferFailure: Identifiable, Codable, Equatable {
+    enum Operation: String, Codable, Equatable {
+        case download = "Download"
+        case upload = "Upload"
+        case delete = "Delete"
+    }
+
+    let id: UUID
+    let operation: Operation
+    let item: String
+    let reason: String
+    let retryTarget: MobileTransferRetryTarget?
+
+    init(
+        id: UUID = UUID(),
+        operation: Operation,
+        item: String,
+        reason: String,
+        retryTarget: MobileTransferRetryTarget? = nil
+    ) {
+        self.id = id
+        self.operation = operation
+        self.item = item
+        self.reason = reason
+        self.retryTarget = retryTarget
+    }
+}
+
+struct MobileLibraryRecoveryNotice: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
+enum MobileTransferRetryTarget: Codable, Equatable {
+    case download(remoteSongID: String)
+    case uploadTrack(trackID: UUID)
+    case uploadFile(URL)
+    case delete(remoteSongID: String)
+}
+
+enum MobileDownloadIntegrityError: LocalizedError, Equatable {
+    case tooLarge(actual: Int64, limit: Int64)
+    case sizeMismatch(expected: Int64, actual: Int64)
+    case missingHash
+    case hashMismatch
+
+    var errorDescription: String? {
+        switch self {
+        case .tooLarge(let actual, let limit):
+            "The downloaded file is \(actual) bytes, above the \(limit)-byte safety limit."
+        case .sizeMismatch(let expected, let actual):
+            "The downloaded file size was \(actual) bytes; the catalog expected \(expected)."
+        case .missingHash:
+            "The server catalog did not provide a valid SHA-256 for this file."
+        case .hashMismatch:
+            "The downloaded file did not match the catalog SHA-256."
+        }
+    }
+}
+
+enum MobileContentHashPolicy {
+    static func normalizedSHA256(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalized.count == 64, normalized.allSatisfy({ $0.isHexDigit }) else { return nil }
+        return normalized
+    }
+}
+
+enum MobileDownloadIntegrityPolicy {
+    static let maximumFileSize: Int64 = 2 * 1_024 * 1_024 * 1_024
+
+    static func validate(
+        expectedSize: Int64,
+        expectedSHA256: String?,
+        actualSize: Int64,
+        actualSHA256: String,
+        maximumSize: Int64 = maximumFileSize
+    ) throws {
+        guard actualSize <= maximumSize else {
+            throw MobileDownloadIntegrityError.tooLarge(actual: actualSize, limit: maximumSize)
+        }
+        if expectedSize > 0, expectedSize != actualSize {
+            throw MobileDownloadIntegrityError.sizeMismatch(expected: expectedSize, actual: actualSize)
+        }
+        guard let expected = MobileContentHashPolicy.normalizedSHA256(expectedSHA256) else {
+            throw MobileDownloadIntegrityError.missingHash
+        }
+        if expected != actualSHA256.lowercased() {
+            throw MobileDownloadIntegrityError.hashMismatch
+        }
+    }
+
+}
+
+enum MobileDownloadByteLimitPolicy {
+    static func oversizedByteCount(
+        totalBytesWritten: Int64,
+        totalBytesExpected: Int64,
+        maximumSize: Int64 = MobileDownloadIntegrityPolicy.maximumFileSize
+    ) -> Int64? {
+        if totalBytesExpected > maximumSize { return totalBytesExpected }
+        if totalBytesWritten > maximumSize { return totalBytesWritten }
+        return nil
+    }
+}
+
+enum MobileUploadBlockingPolicy {
+    static func blocksUpload(
+        isUploading: Bool,
+        isDownloading: Bool,
+        isSyncing: Bool,
+        isRefreshingCatalog: Bool,
+        isSyncingPlaylists _: Bool
+    ) -> Bool {
+        isUploading || isDownloading || (isSyncing && !isRefreshingCatalog)
+    }
+}
+
+enum MobileUploadCredentialPolicy {
+    static func canUpload(serverURL: URL?, adminKey: String) -> Bool {
+        serverURL != nil && !adminKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+enum MobilePlaylistSyncResponsePolicy {
+    static func shouldApplyResponse(
+        submittedMutationGeneration: UInt64,
+        currentMutationGeneration: UInt64
+    ) -> Bool {
+        submittedMutationGeneration == currentMutationGeneration
+    }
+}
+
+enum MobileCatalogRefreshMergePolicy {
+    static func merge(
+        catalog: [MobileRemoteSong],
+        uploadedSongsAwaitingCatalog: [String: MobileRemoteSong]
+    ) -> [MobileRemoteSong] {
+        let catalogIDs = Set(catalog.map(\.id))
+        return catalog + uploadedSongsAwaitingCatalog.values
+            .filter { !catalogIDs.contains($0.id) }
+            .sorted { $0.id < $1.id }
+    }
+}
+
 enum MobileMissingServerUploadPolicy {
     static func plan(
         tracks: [MobileTrack],
@@ -149,40 +469,32 @@ enum MobileMissingServerUploadPolicy {
         let liveRemoteIDs = Set(catalog.map(\.id))
         let remoteIDByHash = Dictionary(
             catalog.compactMap { song -> (String, String)? in
-                guard let hash = normalizedHash(song.contentSHA256) else { return nil }
+                guard let hash = MobileContentHashPolicy.normalizedSHA256(song.contentSHA256) else { return nil }
                 return (hash, song.id)
             },
             uniquingKeysWith: { first, _ in first }
         )
-        let serverOrigin = origin(of: activeServerURL)
+        guard let activeContext = MobileServerEndpointPolicy.context(
+            serverURL: activeServerURL,
+            profileID: activeProfileID
+        ) else {
+            return MobileMissingServerUploadPlan(uploadTrackIDs: [], existingRemoteIDsByTrackID: [:])
+        }
         var uploadTrackIDs: [UUID] = []
         var existingRemoteIDsByTrackID: [UUID: String] = [:]
 
         for track in tracks {
             guard !track.relativePath.isEmpty,
-                  track.remoteID != nil || track.sourceServer != nil,
-                  (track.syncProfileID ?? "default") == activeProfileID else { continue }
-            if let sourceServer = track.sourceServer {
-                guard let sourceURL = URL(string: sourceServer),
-                      origin(of: sourceURL) == serverOrigin else { continue }
-            }
-            if let remoteID = track.remoteID, liveRemoteIDs.contains(remoteID) {
+                  let identity = track.remoteIdentity(),
+                  identity.context == activeContext else { continue }
+
+            if let remoteID = track.remoteID,
+               liveRemoteIDs.contains(remoteID) {
                 continue
             }
-            if let hash = normalizedHash(track.contentSHA256),
+            if let hash = MobileContentHashPolicy.normalizedSHA256(track.contentSHA256),
                let existingRemoteID = remoteIDByHash[hash] {
                 existingRemoteIDsByTrackID[track.id] = existingRemoteID
-            } else if let existing = catalog.first(where: { song in
-                MobileServerSongIdentityPolicy.metadataMatches(
-                    expectedTitle: track.title,
-                    expectedArtist: track.artist,
-                    expectedDuration: track.duration,
-                    actualTitle: song.title,
-                    actualArtist: song.artist,
-                    actualDuration: song.duration
-                )
-            }) {
-                existingRemoteIDsByTrackID[track.id] = existing.id
             } else {
                 uploadTrackIDs.append(track.id)
             }
@@ -194,18 +506,6 @@ enum MobileMissingServerUploadPolicy {
         )
     }
 
-    private static func normalizedHash(_ value: String?) -> String? {
-        guard let hash = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              !hash.isEmpty else { return nil }
-        return hash
-    }
-
-    private static func origin(of url: URL) -> String {
-        let scheme = url.scheme?.lowercased() ?? ""
-        let host = url.host?.lowercased() ?? ""
-        let port = url.port ?? (scheme == "https" ? 443 : 80)
-        return "\(scheme)://\(host):\(port)"
-    }
 }
 
 struct MobileClipRange: Codable, Hashable {
@@ -213,6 +513,37 @@ struct MobileClipRange: Codable, Hashable {
     var endSeconds: TimeInterval
 
     var duration: TimeInterval { max(0, endSeconds - startSeconds) }
+}
+
+enum MobileClipPlaybackPolicy {
+    struct Bounds: Equatable {
+        let start: TimeInterval
+        let end: TimeInterval
+    }
+
+    static func bounds(range: MobileClipRange?, duration: TimeInterval) -> Bounds {
+        let maximum = max(duration.isFinite ? duration : 0, 0)
+        guard let range else { return Bounds(start: 0, end: maximum) }
+        let start = min(max(range.startSeconds.isFinite ? range.startSeconds : 0, 0), maximum)
+        let end = min(max(range.endSeconds.isFinite ? range.endSeconds : start, start), maximum)
+        guard end - start >= 0.25 else { return Bounds(start: 0, end: maximum) }
+        return Bounds(start: start, end: end)
+    }
+
+    static func position(fraction: Double, within bounds: Bounds) -> TimeInterval {
+        let fraction = fraction.isFinite ? min(max(fraction, 0), 1) : 0
+        return bounds.start + ((bounds.end - bounds.start) * fraction)
+    }
+
+    static func reachedEnd(
+        position: TimeInterval,
+        bounds: Bounds,
+        tolerance: TimeInterval = 0.02
+    ) -> Bool {
+        bounds.end > bounds.start
+            && position.isFinite
+            && position + max(tolerance, 0) >= bounds.end
+    }
 }
 
 struct MobileRemoteClipRange: Codable, Hashable {
@@ -228,7 +559,7 @@ struct MobileRemoteClipRange: Codable, Hashable {
 }
 
 struct MobilePlaylist: Identifiable, Codable, Hashable {
-    let id: UUID
+    var id: UUID
     var name: String
     var trackIDs: [UUID]
     var isSystem: Bool
@@ -437,7 +768,19 @@ struct MobileRemoteCatalog: Decodable {
     let count: Int
 }
 
-struct MobileStoredLibrary: Codable {
+struct MobileProfileSyncState: Codable, Equatable {
+    var playlists: [MobilePlaylist]
+    var playlistRevision: Int
+    var knownRemotePlaylistIDs: Set<UUID>
+    var dirtyPlaylistIDs: Set<UUID>
+    var deletedPlaylistIDs: Set<UUID>
+    var playlistSyncServerURL: String?
+    var remoteLikedSongIDs: Set<String>
+    var dirtyRemoteLikeSongIDs: Set<String>
+    var likesDirty: Bool
+}
+
+struct MobileStoredLibrary: Codable, Equatable {
     var tracks: [MobileTrack]
     var playlists: [MobilePlaylist]
     var favorites: Set<UUID>
@@ -455,4 +798,238 @@ struct MobileStoredLibrary: Codable {
     var clipRanges: [String: MobileClipRange]?
     var dirtyClipRangeKeys: Set<String>?
     var deletedClipRangeKeys: Set<String>?
+    var profileStates: [MobileServerContext: MobileProfileSyncState]? = nil
+    var playbackQueue: [UUID]? = nil
+    var playbackPlaylistID: UUID? = nil
+    var playbackSnapshot: MobilePlaybackSnapshot? = nil
+    var transferFailures: [MobileTransferFailure]? = nil
+}
+
+struct MobileLibraryNormalizationResult: Equatable {
+    var tracks: [MobileTrack]
+    var playlists: [MobilePlaylist]
+    var repairedTrackIDs: Int
+    var repairedRemoteAssociations: Int
+    var repairedPlaylistIDs: Int
+
+    var repairCount: Int {
+        repairedTrackIDs + repairedRemoteAssociations + repairedPlaylistIDs
+    }
+}
+
+enum MobileCollectionNormalization {
+    static func normalize(
+        tracks: [MobileTrack],
+        playlists: [MobilePlaylist],
+        fallbackServerURL: URL?
+    ) -> MobileLibraryNormalizationResult {
+        var normalizedTracks: [MobileTrack] = []
+        var seenTrackIDs = Set<UUID>()
+        var seenRemoteIdentities = Set<MobileRemoteIdentity>()
+        var repairedTrackIDs = 0
+        var repairedRemoteAssociations = 0
+
+        for var track in tracks {
+            while !seenTrackIDs.insert(track.id).inserted {
+                track.id = UUID()
+                repairedTrackIDs += 1
+            }
+            if let identity = track.remoteIdentity(fallbackServerURL: fallbackServerURL),
+               !seenRemoteIdentities.insert(identity).inserted {
+                track.remoteID = nil
+                track.sourceServer = nil
+                track.syncProfileID = nil
+                repairedRemoteAssociations += 1
+            }
+            normalizedTracks.append(track)
+        }
+
+        var normalizedPlaylists: [MobilePlaylist] = []
+        var seenPlaylistIDs = Set<UUID>()
+        var hasSystemPlaylist = false
+        var repairedPlaylistIDs = 0
+        for var playlist in playlists {
+            while !seenPlaylistIDs.insert(playlist.id).inserted {
+                playlist.id = UUID()
+                repairedPlaylistIDs += 1
+            }
+            if playlist.isSystem {
+                if hasSystemPlaylist {
+                    playlist.isSystem = false
+                    playlist.name = playlist.name == "Liked Songs" ? "Recovered Liked Songs" : "Recovered \(playlist.name)"
+                    repairedPlaylistIDs += 1
+                } else {
+                    hasSystemPlaylist = true
+                }
+            }
+            normalizedPlaylists.append(playlist)
+        }
+
+        return MobileLibraryNormalizationResult(
+            tracks: normalizedTracks,
+            playlists: normalizedPlaylists,
+            repairedTrackIDs: repairedTrackIDs,
+            repairedRemoteAssociations: repairedRemoteAssociations,
+            repairedPlaylistIDs: repairedPlaylistIDs
+        )
+    }
+
+    static func uniqueRemoteSongs(_ songs: [MobileRemoteSong]) -> [MobileRemoteSong] {
+        var seen = Set<String>()
+        return songs.filter { seen.insert($0.id).inserted }
+    }
+
+    static func uniqueRemotePlaylists(_ playlists: [MobileRemotePlaylist]) -> [MobileRemotePlaylist] {
+        var seen = Set<UUID>()
+        return playlists.filter { seen.insert($0.id).inserted }
+    }
+}
+
+struct MobilePlaybackRestoreResult: Equatable {
+    let queue: [UUID]
+    let playlistID: UUID?
+    let currentTrackID: UUID?
+    let history: [UUID]
+
+    init(
+        queue: [UUID],
+        playlistID: UUID?,
+        currentTrackID: UUID?,
+        history: [UUID] = []
+    ) {
+        self.queue = queue
+        self.playlistID = playlistID
+        self.currentTrackID = currentTrackID
+        self.history = history
+    }
+}
+
+struct MobilePlaybackQueueReference: Codable, Equatable {
+    let trackID: UUID
+    let remoteIdentity: MobileRemoteIdentity?
+}
+
+struct MobilePlaybackSnapshot: Codable, Equatable {
+    static let currentVersion = 2
+
+    let version: Int
+    let queue: [MobilePlaybackQueueReference]
+    let playlistID: UUID?
+    let currentTrack: MobilePlaybackQueueReference?
+    let history: [MobilePlaybackQueueReference]?
+
+    init(
+        version: Int,
+        queue: [MobilePlaybackQueueReference],
+        playlistID: UUID?,
+        currentTrack: MobilePlaybackQueueReference?,
+        history: [MobilePlaybackQueueReference]? = nil
+    ) {
+        self.version = version
+        self.queue = queue
+        self.playlistID = playlistID
+        self.currentTrack = currentTrack
+        self.history = history
+    }
+}
+
+enum MobilePlaybackSnapshotPolicy {
+    static func restore(
+        queue: [UUID],
+        playlistID: UUID?,
+        currentTrackID: UUID?,
+        activeTrackIDs: Set<UUID>,
+        playlistIDs: Set<UUID>
+    ) -> MobilePlaybackRestoreResult {
+        var seen = Set<UUID>()
+        var restored = queue.filter { activeTrackIDs.contains($0) && seen.insert($0).inserted }
+        if let currentTrackID,
+           activeTrackIDs.contains(currentTrackID),
+           !restored.contains(currentTrackID) {
+            restored.insert(currentTrackID, at: 0)
+        }
+        let restoredPlaylistID = playlistID.flatMap { playlistIDs.contains($0) ? $0 : nil }
+        return MobilePlaybackRestoreResult(
+            queue: restored,
+            playlistID: restored.isEmpty ? nil : restoredPlaylistID,
+            currentTrackID: currentTrackID.flatMap { activeTrackIDs.contains($0) ? $0 : nil }
+        )
+    }
+
+    static func restore(
+        snapshot: MobilePlaybackSnapshot,
+        tracks: [MobileTrack],
+        activeTrackIDs: Set<UUID>,
+        playlistIDs: Set<UUID>
+    ) -> MobilePlaybackRestoreResult {
+        guard (1...MobilePlaybackSnapshot.currentVersion).contains(snapshot.version) else {
+            return MobilePlaybackRestoreResult(queue: [], playlistID: nil, currentTrackID: nil)
+        }
+
+        func resolvedID(for reference: MobilePlaybackQueueReference) -> UUID? {
+            if activeTrackIDs.contains(reference.trackID),
+               let track = tracks.first(where: { $0.id == reference.trackID }),
+               reference.remoteIdentity == nil || track.remoteIdentity() == reference.remoteIdentity {
+                return reference.trackID
+            }
+            guard let remoteIdentity = reference.remoteIdentity else { return nil }
+            return tracks.first {
+                activeTrackIDs.contains($0.id) && $0.remoteIdentity() == remoteIdentity
+            }?.id
+        }
+
+        var seen = Set<UUID>()
+        var queue = snapshot.queue.compactMap(resolvedID).filter { seen.insert($0).inserted }
+        let currentTrackID = snapshot.currentTrack.flatMap(resolvedID)
+        if let currentTrackID, !queue.contains(currentTrackID) {
+            queue.insert(currentTrackID, at: 0)
+        }
+        let playlistID = snapshot.playlistID.flatMap { playlistIDs.contains($0) ? $0 : nil }
+        return MobilePlaybackRestoreResult(
+            queue: queue,
+            playlistID: queue.isEmpty ? nil : playlistID,
+            currentTrackID: currentTrackID,
+            history: (snapshot.history ?? []).compactMap(resolvedID)
+        )
+    }
+}
+
+enum MobileStoredLibraryRecoverySource: Equatable {
+    case primary
+    case backup
+    case empty
+}
+
+struct MobileStoredLibraryRecoveryResult: Equatable {
+    let library: MobileStoredLibrary?
+    let source: MobileStoredLibraryRecoverySource
+    let primaryWasCorrupt: Bool
+}
+
+enum MobileStoredLibraryRecoveryPolicy {
+    static func recover(primaryData: Data?, backupData: Data?) -> MobileStoredLibraryRecoveryResult {
+        let decoder = JSONDecoder()
+        if let primaryData,
+           let library = try? decoder.decode(MobileStoredLibrary.self, from: primaryData) {
+            return MobileStoredLibraryRecoveryResult(
+                library: library,
+                source: .primary,
+                primaryWasCorrupt: false
+            )
+        }
+        let primaryWasCorrupt = primaryData != nil
+        if let backupData,
+           let library = try? decoder.decode(MobileStoredLibrary.self, from: backupData) {
+            return MobileStoredLibraryRecoveryResult(
+                library: library,
+                source: .backup,
+                primaryWasCorrupt: primaryWasCorrupt
+            )
+        }
+        return MobileStoredLibraryRecoveryResult(
+            library: nil,
+            source: .empty,
+            primaryWasCorrupt: primaryWasCorrupt
+        )
+    }
 }

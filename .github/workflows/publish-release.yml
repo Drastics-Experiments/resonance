@@ -120,10 +120,24 @@ jobs:
           CANDIDATE_RUN_ID: ${{ steps.candidate.outputs.run_id }}
         run: |
           node scripts/release-version.mjs --check
-          node scripts/validate-release-assets.mjs candidate/assets "$VERSION"
+          read -r POLICY_SCHEMA POLICY_VERSION POLICY_BUILD DESKTOP_SIGNING < <(node -e 'const value = require("./release/policy.json"); console.log(value.schemaVersion, value.version, value.build, value.desktopSigning)')
+          [[ "$POLICY_SCHEMA" == "1" ]]
+          [[ "$POLICY_VERSION" == "$VERSION" ]]
+          [[ "$DESKTOP_SIGNING" == "production" || "$DESKTOP_SIGNING" == "unsigned" ]]
+          if [[ "$DESKTOP_SIGNING" == "unsigned" ]]; then
+            node scripts/validate-release-assets.mjs \
+              candidate/assets "$VERSION" \
+              --allow-unsigned-desktop-release
+          else
+            node scripts/validate-release-assets.mjs \
+              candidate/assets "$VERSION" \
+              --signing-evidence candidate/signing
+          fi
           git fetch --no-tags origin "$CANDIDATE_SHA"
           export SOURCE_TREE="$(git rev-parse "${CANDIDATE_SHA}^{tree}")"
           export BUILD="$(node -e 'const value = require("./release/version.json"); process.stdout.write(String(value.build))')"
+          [[ "$POLICY_BUILD" == "$BUILD" ]]
+          export DESKTOP_SIGNING
           node --input-type=module -e '
             import fs from "node:fs";
             const value = JSON.parse(fs.readFileSync("candidate/candidate.json", "utf8"));
@@ -134,6 +148,7 @@ jobs:
               sourceSha: process.env.CANDIDATE_SHA,
               sourceTree: process.env.SOURCE_TREE,
               workflowRunId: Number(process.env.CANDIDATE_RUN_ID),
+              desktopSigning: process.env.DESKTOP_SIGNING,
             };
             for (const [key, expectedValue] of Object.entries(expected)) {
               if (value[key] !== expectedValue) {
@@ -209,12 +224,23 @@ jobs:
         run: |
           assets=(candidate/assets/*)
           [[ "${#assets[@]}" -eq 12 ]]
-          gh release create "$TAG" "${assets[@]}" \
-            --repo "$REPOSITORY" \
-            --target "$RELEASE_TARGET" \
-            --title "Resonance ${VERSION}" \
-            --generate-notes \
+          DESKTOP_SIGNING="$(node -e 'const value = require("./release/policy.json"); process.stdout.write(value.desktopSigning)')"
+          release_arguments=(
+            "$TAG"
+            "${assets[@]}"
+            --repo "$REPOSITORY"
+            --target "$RELEASE_TARGET"
+            --title "Resonance ${VERSION}"
+            --generate-notes
             --latest
+          )
+          if [[ "$DESKTOP_SIGNING" == "unsigned" ]]; then
+            release_arguments+=(
+              --notes
+              "⚠️ The macOS and Windows downloads in this release are intentionally unsigned. No personal Apple or Windows signing credentials were used or published. Users may need to approve the applications manually through their operating-system security settings."
+            )
+          fi
+          gh release create "${release_arguments[@]}"
 
           RELEASE_JSON="$(gh release view "$TAG" --repo "$REPOSITORY" --json isDraft,assets,url)"
           [[ "$(jq -r '.isDraft' <<< "$RELEASE_JSON")" == "false" ]]

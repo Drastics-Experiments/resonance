@@ -289,10 +289,10 @@ enum LocalImportSoundCloud {
         }
         let author = clean((record["user"] as? [String: Any])?["username"] as? String) ?? "SoundCloud"
         let limitedTracks = Array(rawTracks.prefix(maxPlaylistItems))
-        var records = Dictionary(uniqueKeysWithValues: limitedTracks.compactMap { item -> (Int, [String: Any])? in
-            guard let id = nonnegativeInteger(item["id"]) else { return nil }
-            return (id, item)
-        })
+        var records = limitedTracks.reduce(into: [Int: [String: Any]]()) { result, item in
+            guard let id = nonnegativeInteger(item["id"]), result[id] == nil else { return }
+            result[id] = item
+        }
         let missingIDs = limitedTracks.compactMap { item -> Int? in
             LocalImportSoundCloudParser.track(item) == nil ? nonnegativeInteger(item["id"]) : nil
         }

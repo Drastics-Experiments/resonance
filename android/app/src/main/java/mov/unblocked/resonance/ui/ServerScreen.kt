@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -77,6 +79,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import mov.unblocked.resonance.data.RemoteSong
+import mov.unblocked.resonance.data.ServerDownloadMode
+import mov.unblocked.resonance.data.ServerUploadMode
 import java.net.URI
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -89,6 +93,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
     var filterOpen by remember { mutableStateOf(false) }
     var selecting by remember { mutableStateOf(false) }
     var deleteCandidate by remember { mutableStateOf<RemoteSong?>(null) }
+    var linkImportOpen by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { actions.onServerScreenOpened() }
 
@@ -176,7 +181,10 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                     actions.downloadSelectedRemoteSongs()
                     selecting = false
                 },
-                onUpload = actions::uploadAudio,
+                onUpload = {
+                    if (state.serverUploadMode == ServerUploadMode.LocalFile) actions.uploadAudio()
+                    else linkImportOpen = true
+                },
                 onUploadMissing = actions::uploadMissingDownloads,
                 onToggleSelection = {
                     selecting = !selecting
@@ -184,6 +192,28 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                 },
                 onRefresh = actions::refreshServer,
             )
+        }
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { connectionOpen = true }
+                    .background(Color.White.copy(alpha = .045f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Upload: ${state.serverUploadMode?.label ?: "Disabled"}",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .62f),
+                )
+                Text(
+                    "Download: ${state.serverDownloadMode.label}",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .62f),
+                )
+            }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -256,6 +286,9 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
     if (connectionOpen) {
         ConnectionDialog(state, actions) { connectionOpen = false }
     }
+    if (linkImportOpen) {
+        LinkImportDialog(state, actions) { linkImportOpen = false }
+    }
     deleteCandidate?.let { song ->
         AlertDialog(
             onDismissRequest = { deleteCandidate = null },
@@ -317,6 +350,11 @@ private fun ServerActionBar(
 ) {
     val enabled = !state.isDownloading && !state.isUploading &&
         !state.isRefreshingServer && !state.isApplyingServerConnection && !state.isSyncingPlaylists
+    val uploadEnabled = canStartServerUpload(state)
+    val selectedStreamNeedsFile = state.serverDownloadMode == ServerDownloadMode.StreamOnly &&
+        state.selectedRemoteSongIds.singleOrNull()?.let { selectedID ->
+            state.remoteSongs.firstOrNull { it.id == selectedID }?.isVideoMedia
+        } == true
     val refreshRotation = remember { Animatable(0f) }
     LaunchedEffect(state.isRefreshingServer) {
         if (state.isRefreshingServer) {
@@ -338,27 +376,50 @@ private fun ServerActionBar(
     ) {
         ServerAction(
             icon = Icons.Default.CloudDownload,
-            label = "Download",
-            enabled = enabled && (!selecting || state.selectedRemoteSongIds.isNotEmpty()),
+            label = when {
+                selectedStreamNeedsFile -> "No video"
+                state.serverDownloadMode == ServerDownloadMode.StreamOnly -> "Stream"
+                else -> "Download"
+            },
+            enabled = enabled && if (state.serverDownloadMode == ServerDownloadMode.StreamOnly) {
+                state.selectedRemoteSongIds.size == 1 && !selectedStreamNeedsFile
+            } else {
+                !selecting || state.selectedRemoteSongIds.isNotEmpty()
+            },
             onClick = onDownload,
             modifier = Modifier.weight(1f),
         )
-        ActionDivider()
-        ServerAction(
-            icon = Icons.Default.CloudUpload,
-            label = "Downloads",
-            enabled = enabled,
-            onClick = onUploadMissing,
-            modifier = Modifier.weight(1f),
-        )
-        ActionDivider()
-        ServerAction(
-            icon = Icons.Default.CloudUpload,
-            label = "Files",
-            enabled = enabled,
-            onClick = onUpload,
-            modifier = Modifier.weight(1f),
-        )
+        if (state.serverUploadMode == ServerUploadMode.LocalFile) {
+            ActionDivider()
+            ServerAction(
+                icon = Icons.Default.CloudUpload,
+                label = "Downloads",
+                enabled = uploadEnabled,
+                onClick = onUploadMissing,
+                modifier = Modifier.weight(1f),
+            )
+            ActionDivider()
+            ServerAction(
+                icon = Icons.Default.CloudUpload,
+                label = "Files",
+                enabled = uploadEnabled,
+                onClick = onUpload,
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            ActionDivider()
+            ServerAction(
+                icon = Icons.Default.Language,
+                label = when (state.serverUploadMode) {
+                    ServerUploadMode.ReviewedMatch -> "Review"
+                    ServerUploadMode.ServerSourceLink -> "Link"
+                    else -> "Disabled"
+                },
+                enabled = uploadEnabled,
+                onClick = onUpload,
+                modifier = Modifier.weight(2f),
+            )
+        }
         ActionDivider()
         ServerAction(
             icon = Icons.Default.Checklist,
@@ -378,6 +439,14 @@ private fun ServerActionBar(
         )
     }
 }
+
+internal fun canStartServerUpload(state: ResonanceUiState): Boolean =
+    !state.isDownloading &&
+        !state.isUploading &&
+        !state.isApplyingServerConnection &&
+        state.hasServerUploadCredentials &&
+        state.serverUploadMode != null &&
+        state.serverUploadMode in state.availableServerUploadModes
 
 @Composable
 private fun ServerAction(
@@ -571,8 +640,18 @@ private fun ServerSongRow(
             if (!selecting) {
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     if (!synced) DropdownMenuItem(
-                        text = { Text("Download") },
+                        text = {
+                            Text(
+                                when {
+                                    state.serverDownloadMode == ServerDownloadMode.StreamOnly && song.isVideoMedia ->
+                                        "Video streaming unavailable"
+                                    state.serverDownloadMode == ServerDownloadMode.StreamOnly -> "Stream"
+                                    else -> "Download"
+                                },
+                            )
+                        },
                         leadingIcon = { Icon(Icons.Default.CloudDownload, null) },
+                        enabled = state.serverDownloadMode != ServerDownloadMode.StreamOnly || !song.isVideoMedia,
                         onClick = { menu = false; actions.downloadRemoteSong(song.id) },
                     )
                     DropdownMenuItem(
@@ -591,12 +670,7 @@ private fun ServerSongRow(
 }
 
 private val RemoteSong.mediaKindLabel: String
-    get() {
-        val extension = filename.substringAfterLast('.', "").lowercase()
-        return if (contentType.contains("video", ignoreCase = true) ||
-            extension in setOf("mp4", "mov", "m4v", "webm")
-        ) "Video" else "Audio"
-    }
+    get() = if (isVideoMedia) "Video" else "Audio"
 
 @Composable
 internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions, dismiss: () -> Unit) {
@@ -612,16 +686,26 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
     val profileFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     val connecting = state.isApplyingServerConnection || state.isRefreshingServer
+    val editingConnection = url.trim() != state.serverUrl.trim() ||
+        token.trim() != state.serverToken.trim() ||
+        admin.trim() != state.serverAdminKey.trim() ||
+        profileName.trim() != activeSyncProfileName(state).trim()
 
-    LaunchedEffect(connectRequested, connecting, state.isConnected) {
-        if (connectRequested && !connecting && state.isConnected) dismiss()
+    LaunchedEffect(connectRequested, connecting, state.isConnected, state.serverMessage) {
+        val uploadOnlyReady = state.hasServerUploadCredentials &&
+            state.serverToken.isBlank() &&
+            state.serverMessage.startsWith("Upload ready")
+        if (connectRequested && !connecting && (state.isConnected || uploadOnlyReady)) dismiss()
     }
 
     AlertDialog(
         onDismissRequest = dismiss,
         title = { Text("Connection") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
                 OutlinedTextField(
                     url,
                     { url = it },
@@ -660,6 +744,32 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
                 )
+                TransferModeSelector(
+                    title = "Upload mode",
+                    selected = if (editingConnection) "Connect first" else state.serverUploadMode?.label ?: "Disabled",
+                    options = if (editingConnection) emptyList() else state.availableServerUploadModes.map { mode ->
+                        mode.label to { actions.setServerUploadMode(mode) }
+                    },
+                )
+                TransferModeSelector(
+                    title = "Download mode",
+                    selected = if (editingConnection) "Connect first" else state.serverDownloadMode.label,
+                    options = if (editingConnection) emptyList() else state.availableServerDownloadModes.map { mode ->
+                        mode.label to { actions.setServerDownloadMode(mode) }
+                    },
+                )
+                if (editingConnection) {
+                    Text(
+                        "Connect this URL, credential, and profile first. Then reopen Connection to choose modes from that context's signed policy.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                    )
+                }
+                Text(
+                    state.clientConfigStatus,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f),
+                )
                 Text(state.serverMessage, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
             }
         },
@@ -681,4 +791,44 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
         },
         dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
     )
+}
+
+@Composable
+private fun TransferModeSelector(
+    title: String,
+    selected: String,
+    options: List<Pair<String, () -> Unit>>,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Color.White.copy(alpha = .16f), RoundedCornerShape(4.dp))
+                .clickable(enabled = options.isNotEmpty()) { expanded = true }
+                .padding(horizontal = 14.dp, vertical = 11.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                Text(selected, fontSize = 14.sp)
+            }
+            Icon(Icons.Default.Settings, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { (label, select) ->
+                DropdownMenuItem(
+                    text = { Text(label) },
+                    leadingIcon = {
+                        if (label == selected) Icon(Icons.Default.Check, null)
+                    },
+                    onClick = {
+                        select()
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
 }

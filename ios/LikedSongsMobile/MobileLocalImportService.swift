@@ -1207,10 +1207,6 @@ actor LocalDeviceImportService {
     private func prepareDirectories() async throws {
         guard !preparedDirectories else { return }
         try fileManager.createDirectory(at: localRoot, withIntermediateDirectories: true)
-        let entries = (try? fileManager.contentsOfDirectory(at: temporaryRoot, includingPropertiesForKeys: nil)) ?? []
-        for entry in entries where entry.lastPathComponent.hasPrefix("resonance-import-") {
-            try? fileManager.removeItem(at: entry)
-        }
         preparedDirectories = true
     }
 

@@ -18,7 +18,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     }
 }
 
-enum SongFilter: String, CaseIterable, Identifiable, Codable {
+enum SongFilter: String, CaseIterable, Identifiable, Codable, Sendable {
     case all = "All songs"
     case recentlyAdded = "Recently added"
     case audio = "Audio"
@@ -34,6 +34,86 @@ enum MediaKindClassifier {
         let normalizedType = contentType.lowercased()
         let fileExtension = URL(fileURLWithPath: filename).pathExtension.lowercased()
         return normalizedType.contains("video") || videoExtensions.contains(fileExtension) ? .video : .audio
+    }
+}
+
+struct ServerSongIdentity: Hashable, Sendable {
+    let origin: String
+    let profileID: String
+    let songID: String
+
+    init?(serverURL: URL, profileID: String?, songID: String) {
+        guard let origin = Self.normalizedOrigin(serverURL),
+              let normalizedSongID = Self.nonempty(songID) else { return nil }
+        self.origin = origin
+        self.profileID = Self.nonempty(profileID) ?? "default"
+        self.songID = normalizedSongID
+    }
+
+    init?(serverURLString: String?, profileID: String?, songID: String) {
+        guard let serverURLString = Self.nonempty(serverURLString),
+              let serverURL = URL(string: serverURLString) else { return nil }
+        self.init(serverURL: serverURL, profileID: profileID, songID: songID)
+    }
+
+    static func normalizedOrigin(_ url: URL) -> String? {
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host?.lowercased(),
+              !host.isEmpty else { return nil }
+        let defaultPort = scheme == "https" ? 443 : 80
+        let port = url.port ?? defaultPort
+        let renderedHost = host.contains(":") ? "[\(host)]" : host
+        return port == defaultPort
+            ? "\(scheme)://\(renderedHost)"
+            : "\(scheme)://\(renderedHost):\(port)"
+    }
+
+    static func normalizedOrigin(_ value: String?) -> String? {
+        guard let value = nonempty(value), let url = URL(string: value) else { return nil }
+        return normalizedOrigin(url)
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+enum ServerEndpointPolicy {
+    static func normalizedURL(
+        _ rawValue: String,
+        allowsInsecurePreviewLoopback: Bool = false
+    ) -> URL? {
+        let raw = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: raw),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased(),
+              !host.isEmpty else { return nil }
+        let isSecure = scheme == "https"
+        let isAllowedPreviewLoopback = allowsInsecurePreviewLoopback
+            && scheme == "http"
+            && isLoopback(host)
+        guard isSecure || isAllowedPreviewLoopback else { return nil }
+        guard components.user == nil, components.password == nil else { return nil }
+        components.scheme = scheme
+        components.host = host
+        if (scheme == "https" && components.port == 443)
+            || (scheme == "http" && components.port == 80) {
+            components.port = nil
+        }
+        components.query = nil
+        components.fragment = nil
+        let trimmedPath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        components.path = trimmedPath.isEmpty ? "" : "/\(trimmedPath)"
+        return components.url
+    }
+
+    private static func isLoopback(_ host: String) -> Bool {
+        let unbracketed = host.hasPrefix("[") && host.hasSuffix("]")
+            ? String(host.dropFirst().dropLast())
+            : host
+        return unbracketed == "localhost" || unbracketed == "127.0.0.1" || unbracketed == "::1"
     }
 }
 
@@ -186,6 +266,15 @@ struct Track: Identifiable, Hashable, Codable {
 
     var durationText: String { Self.timeText(duration) }
 
+    var remoteIdentity: ServerSongIdentity? {
+        guard let remoteID else { return nil }
+        return ServerSongIdentity(
+            serverURLString: sourceServer,
+            profileID: syncProfileID,
+            songID: remoteID
+        )
+    }
+
     var installedVideoURL: URL? {
         guard kind == .video,
               let fileURL,
@@ -205,6 +294,7 @@ struct Track: Identifiable, Hashable, Codable {
 struct MissingServerUploadPlan: Equatable {
     let uploadTrackIDs: [UUID]
     let existingRemoteIDsByTrackID: [UUID: String]
+    let ambiguousTrackIDs: [UUID]
 }
 
 enum MissingServerUploadPolicy {
@@ -215,42 +305,34 @@ enum MissingServerUploadPolicy {
         activeServerURL: URL
     ) -> MissingServerUploadPlan {
         let liveRemoteIDs = Set(catalog.map(\.id))
-        let remoteIDByHash = Dictionary(
-            catalog.compactMap { song -> (String, String)? in
-                guard let hash = normalizedHash(song.contentSHA256) else { return nil }
-                return (hash, song.id)
-            },
-            uniquingKeysWith: { first, _ in first }
-        )
+        let remoteIDsByHash = Dictionary(grouping: catalog.compactMap { song -> (String, String)? in
+            guard let hash = normalizedHash(song.contentSHA256) else { return nil }
+            return (hash, song.id)
+        }, by: \.0)
         let serverOrigin = origin(of: activeServerURL)
         var uploadTrackIDs: [UUID] = []
         var existingRemoteIDsByTrackID: [UUID: String] = [:]
+        var ambiguousTrackIDs: [UUID] = []
 
         for track in tracks {
             guard track.fileURL != nil,
                   track.remoteID != nil || track.sourceServer != nil,
-                  (track.syncProfileID ?? "default") == activeProfileID else { continue }
-            if let sourceServer = track.sourceServer {
-                guard let sourceURL = URL(string: sourceServer),
-                      origin(of: sourceURL) == serverOrigin else { continue }
-            }
-            if let remoteID = track.remoteID, liveRemoteIDs.contains(remoteID) {
+                  (track.syncProfileID ?? "default") == activeProfileID,
+                  let sourceServer = track.sourceServer,
+                  ServerSongIdentity.normalizedOrigin(sourceServer) == serverOrigin else { continue }
+            if let remoteID = track.remoteID,
+               liveRemoteIDs.contains(remoteID) {
                 continue
             }
-            if let hash = normalizedHash(track.contentSHA256),
-               let existingRemoteID = remoteIDByHash[hash] {
-                existingRemoteIDsByTrackID[track.id] = existingRemoteID
-            } else if let existing = catalog.first(where: { song in
-                ServerSongIdentityPolicy.metadataMatches(
-                    expectedTitle: track.title,
-                    expectedArtist: track.artist,
-                    expectedDuration: track.duration,
-                    actualTitle: song.title,
-                    actualArtist: song.artist,
-                    actualDuration: song.durationSeconds
-                )
-            }) {
-                existingRemoteIDsByTrackID[track.id] = existing.id
+            if let hash = normalizedHash(track.contentSHA256) {
+                let matchingRemoteIDs = Set(remoteIDsByHash[hash, default: []].map(\.1))
+                if matchingRemoteIDs.count == 1, let existingRemoteID = matchingRemoteIDs.first {
+                    existingRemoteIDsByTrackID[track.id] = existingRemoteID
+                } else if matchingRemoteIDs.count > 1 {
+                    ambiguousTrackIDs.append(track.id)
+                } else {
+                    uploadTrackIDs.append(track.id)
+                }
             } else {
                 uploadTrackIDs.append(track.id)
             }
@@ -258,29 +340,47 @@ enum MissingServerUploadPolicy {
 
         return MissingServerUploadPlan(
             uploadTrackIDs: uploadTrackIDs,
-            existingRemoteIDsByTrackID: existingRemoteIDsByTrackID
+            existingRemoteIDsByTrackID: existingRemoteIDsByTrackID,
+            ambiguousTrackIDs: ambiguousTrackIDs
         )
     }
 
     private static func normalizedHash(_ value: String?) -> String? {
         guard let hash = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              !hash.isEmpty else { return nil }
+              hash.count == 64,
+              hash.allSatisfy({ $0.isHexDigit }) else { return nil }
         return hash
     }
 
     private static func origin(of url: URL) -> String {
-        let scheme = url.scheme?.lowercased() ?? ""
-        let host = url.host?.lowercased() ?? ""
-        let port = url.port ?? (scheme == "https" ? 443 : 80)
-        return "\(scheme)://\(host):\(port)"
+        ServerSongIdentity.normalizedOrigin(url) ?? ""
+    }
+}
+
+enum ServerConnectionPolicy {
+    static func canSave(
+        serverURL: String,
+        accessToken: String,
+        adminToken: String,
+        allowsInsecurePreviewLoopback: Bool = false
+    ) -> Bool {
+        let values = [serverURL, accessToken, adminToken].map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard ServerEndpointPolicy.normalizedURL(
+            values[0],
+            allowsInsecurePreviewLoopback: allowsInsecurePreviewLoopback
+        ) != nil else { return false }
+        return !values[1].isEmpty || !values[2].isEmpty
     }
 }
 
 struct ListeningHistoryEntry: Identifiable, Codable, Hashable {
     let id: UUID
-    let trackID: UUID
+    var trackID: UUID
     let startedAt: Date
     var listenedSeconds: TimeInterval
+    var serverOrigin: String?
     var syncProfileID: String?
     var remoteSongID: String?
     var title: String?
@@ -294,6 +394,7 @@ struct ListeningHistoryEntry: Identifiable, Codable, Hashable {
         trackID: UUID,
         startedAt: Date = .now,
         listenedSeconds: TimeInterval = 0,
+        serverOrigin: String? = nil,
         syncProfileID: String? = nil,
         remoteSongID: String? = nil,
         title: String? = nil,
@@ -306,6 +407,7 @@ struct ListeningHistoryEntry: Identifiable, Codable, Hashable {
         self.trackID = trackID
         self.startedAt = startedAt
         self.listenedSeconds = listenedSeconds
+        self.serverOrigin = ServerSongIdentity.normalizedOrigin(serverOrigin)
         self.syncProfileID = syncProfileID
         self.remoteSongID = remoteSongID
         self.title = title
@@ -316,17 +418,47 @@ struct ListeningHistoryEntry: Identifiable, Codable, Hashable {
     }
 }
 
-enum ListeningHistoryTrackResolver {
-    static func identity(for entry: ListeningHistoryEntry) -> String {
-        let profileID = entry.syncProfileID ?? "default"
-        if let remoteSongID = nonempty(entry.remoteSongID) {
-            return "\(profileID)#remote:\(remoteSongID)"
-        }
-        return "\(profileID)#track:\(entry.trackID.uuidString.lowercased())"
+enum ListeningHistoryRetentionPolicy {
+    static let maximumEntries = 2_000
+
+    static func entry(
+        for track: Track,
+        serverOrigin: String?,
+        profileID: String
+    ) -> ListeningHistoryEntry {
+        ListeningHistoryEntry(
+            trackID: track.id,
+            serverOrigin: serverOrigin,
+            syncProfileID: profileID,
+            remoteSongID: track.remoteID,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            duration: track.duration,
+            originatedOnThisDevice: true
+        )
     }
 
-    static func remoteIdentity(profileID: String?, remoteSongID: String) -> String {
-        "\(profileID ?? "default")#remote:\(remoteSongID)"
+    static func append(_ entry: ListeningHistoryEntry, to entries: inout [ListeningHistoryEntry]) {
+        entries.append(entry)
+        if entries.count > maximumEntries {
+            entries.removeFirst(entries.count - maximumEntries)
+        }
+    }
+}
+
+enum ListeningHistoryTrackResolver {
+    static func identity(for entry: ListeningHistoryEntry) -> String {
+        let origin = entry.serverOrigin ?? "local"
+        let profileID = entry.syncProfileID ?? "default"
+        if let remoteSongID = nonempty(entry.remoteSongID) {
+            return "\(origin)#profile:\(profileID)#remote:\(remoteSongID)"
+        }
+        return "\(origin)#profile:\(profileID)#track:\(entry.trackID.uuidString.lowercased())"
+    }
+
+    static func remoteIdentity(serverOrigin: String?, profileID: String?, remoteSongID: String) -> String {
+        "\(serverOrigin ?? "local")#profile:\(profileID ?? "default")#remote:\(remoteSongID)"
     }
 
     static func track(
@@ -336,6 +468,7 @@ enum ListeningHistoryTrackResolver {
     ) -> Track {
         if let remoteSongID = nonempty(entry.remoteSongID),
            let track = tracksByRemoteIdentity[remoteIdentity(
+               serverOrigin: entry.serverOrigin,
                profileID: entry.syncProfileID,
                remoteSongID: remoteSongID
            )] {
@@ -354,6 +487,7 @@ enum ListeningHistoryTrackResolver {
             duration: duration,
             artwork: .weightless,
             remoteID: nonempty(entry.remoteSongID),
+            sourceServer: entry.serverOrigin,
             syncProfileID: entry.syncProfileID ?? "default",
             dateAdded: entry.startedAt
         )
@@ -480,6 +614,7 @@ struct ListeningHistoryCalendarSummary: Hashable {
         for track in tracks {
             guard let remoteID = track.remoteID else { continue }
             tracksByRemoteIdentity[ListeningHistoryTrackResolver.remoteIdentity(
+                serverOrigin: ServerSongIdentity.normalizedOrigin(track.sourceServer),
                 profileID: track.syncProfileID,
                 remoteSongID: remoteID
             )] = track
@@ -598,6 +733,7 @@ struct ListeningHistoryStatsSummary: Hashable {
         for track in tracks {
             guard let remoteID = track.remoteID else { continue }
             tracksByRemoteIdentity[ListeningHistoryTrackResolver.remoteIdentity(
+                serverOrigin: ServerSongIdentity.normalizedOrigin(track.sourceServer),
                 profileID: track.syncProfileID,
                 remoteSongID: remoteID
             )] = track

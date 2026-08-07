@@ -55,6 +55,13 @@ struct RootView: View {
         ) { result in
             if case .success(let urls) = result { Task { await library.importFiles(urls) } }
         }
+        .alert(item: $library.libraryRecoveryNotice) { notice in
+            Alert(
+                title: Text(notice.title),
+                message: Text(notice.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
     }
 }
 
@@ -106,9 +113,7 @@ private struct LibraryView: View {
     private var recentlyAddedTracks: [MobileTrack] {
         Array(
             library.tracks
-                .filter {
-                    $0.remoteID == nil || ($0.syncProfileID ?? "default") == library.syncProfileID
-                }
+                .filter(library.belongsToActiveServerContext)
                 .sorted { $0.dateAdded > $1.dateAdded }
                 .prefix(6)
         )
@@ -123,7 +128,7 @@ private struct LibraryView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("MUSIC LIBRARY").eyebrow()
                             Text("Resonance").font(.system(size: 38, weight: .regular, design: .rounded))
-                            Text("\(library.tracks.count) tracks • Stored locally")
+                            Text("\(library.tracksForActiveProfile.count) tracks • Stored locally")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -138,11 +143,11 @@ private struct LibraryView: View {
                             Label(library.isPlaying ? "Pause" : "Play", systemImage: library.isPlaying ? "pause.fill" : "play.fill")
                                 .pill(color: .accent)
                         }
-                        .disabled(library.tracks.isEmpty)
+                        .disabled(library.tracksForActiveProfile.isEmpty)
                         Button { library.shuffleEnabled.toggle() } label: {
                             Image(systemName: "shuffle").roundButton(active: library.shuffleEnabled)
                         }
-                        .disabled(library.tracks.isEmpty)
+                        .disabled(library.tracksForActiveProfile.isEmpty)
                         Spacer()
                     }
                     if library.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -591,7 +596,7 @@ private struct PlaylistSongPicker: View {
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
 
-                    ForEach(Array(library.tracks.enumerated()), id: \.element.id) { index, track in
+                    ForEach(Array(library.tracksForActiveProfile.enumerated()), id: \.element.id) { index, track in
                         Button {
                             guard let playlist else { return }
                             if playlist.trackIDs.contains(track.id) {
@@ -884,10 +889,10 @@ private struct StorageView: View {
     }
 
     private func refreshStorageMetrics() {
-        fileSizes = Dictionary(uniqueKeysWithValues: library.tracks.map { track in
+        fileSizes = library.tracks.reduce(into: [:]) { result, track in
             let values = try? library.fileURL(for: track).resourceValues(forKeys: [.fileSizeKey])
-            return (track.id, Int64(values?.fileSize ?? 0))
-        })
+            result[track.id] = Int64(values?.fileSize ?? 0)
+        }
         let home = URL(fileURLWithPath: NSHomeDirectory())
         let values = try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         availableBytes = max(values?.volumeAvailableCapacityForImportantUsage ?? 0, 0)
@@ -1206,7 +1211,9 @@ private struct ServerView: View {
 
     private var localTracksByRemoteID: [String: MobileTrack] {
         library.tracks.reduce(into: [:]) { result, track in
-            guard let remoteID = track.remoteID, result[remoteID] == nil else { return }
+            guard library.belongsToActiveServerContext(track),
+                  let remoteID = track.remoteID,
+                  result[remoteID] == nil else { return }
             result[remoteID] = track
         }
     }
@@ -1226,6 +1233,11 @@ private struct ServerView: View {
 
                     serverActions
                         .padding(.bottom, 12)
+
+                    if !library.transferFailures.isEmpty {
+                        ServerTransferFailuresCard()
+                            .padding(.bottom, 12)
+                    }
 
                     Divider()
 
@@ -1323,12 +1335,23 @@ private struct ServerView: View {
         .task {
             let hasServer = !library.serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let hasAccessToken = !library.serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let hasAdminToken = !library.serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             guard hasServer,
-                  hasAccessToken,
+                  hasAccessToken || hasAdminToken,
                   !library.isSyncing,
                   !library.isUploading,
                   !library.isSyncingPlaylists else { return }
-            await library.refreshCatalog()
+            if hasAccessToken {
+                await library.refreshCatalog()
+            } else {
+                await library.refreshClientConfiguration()
+            }
+        }
+        .onChange(of: library.activeDownloadMode) { _, mode in
+            guard mode == .streamOnly || mode == nil else { return }
+            isSelecting = false
+            library.selectedRemoteSongIDs.removeAll()
+            scope = .all
         }
         .fileImporter(isPresented: $choosingUploads, allowedContentTypes: [.audio, .movie], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { Task { await library.uploadFiles(urls) } }
@@ -1336,6 +1359,8 @@ private struct ServerView: View {
         .sheet(item: $presentedSheet) { sheet in
             switch sheet {
             case .connection: ServerConnectionSheet()
+            case .sourceImport: ServerSourceImportSheet()
+            case .reviewedImport: MobileLocalImportSheet(reviewedServerMatch: true)
             }
         }
         .confirmationDialog("Delete this song from the server?", isPresented: Binding(get: { deletionCandidate != nil }, set: { if !$0 { deletionCandidate = nil } })) {
@@ -1395,8 +1420,12 @@ private struct ServerView: View {
         HStack(spacing: 0) {
             ServerTextActionButton(
                 symbol: "tray.and.arrow.down",
-                label: "Download",
-                isDisabled: library.isSyncing || library.isUploading || (isSelecting && library.selectedRemoteSongIDs.isEmpty)
+                label: library.activeDownloadMode == .streamOnly ? "Tap a Song" : "Download",
+                isDisabled: library.isSyncing
+                    || library.isUploading
+                    || library.activeDownloadMode == nil
+                    || library.activeDownloadMode == .streamOnly
+                    || (isSelecting && library.selectedRemoteSongIDs.isEmpty)
             ) {
                 Task {
                     if isSelecting {
@@ -1413,15 +1442,28 @@ private struct ServerView: View {
             ServerIconActionButton(
                 symbol: "icloud.and.arrow.up",
                 label: "Upload downloaded songs missing from the server",
-                isDisabled: library.isSyncing || library.isUploading
+                isDisabled: library.isUploadTransferBusy || library.activeUploadMode != .localFile
             ) {
                 Task { await library.uploadDownloadedSongsMissingFromServer() }
             }
 
             ServerActionDivider()
 
-            ServerTextActionButton(symbol: "square.and.arrow.up", label: "Files", isDisabled: library.isSyncing || library.isUploading) {
-                choosingUploads = true
+            ServerTextActionButton(
+                symbol: uploadModeSymbol,
+                label: uploadModeLabel,
+                isDisabled: library.isUploadTransferBusy || library.activeUploadMode == nil
+            ) {
+                switch library.activeUploadMode {
+                case .localFile:
+                    choosingUploads = true
+                case .serverSourceLink:
+                    presentedSheet = .sourceImport
+                case .reviewedMatch:
+                    presentedSheet = .reviewedImport
+                case nil:
+                    break
+                }
             }
 
             ServerActionDivider()
@@ -1429,7 +1471,10 @@ private struct ServerView: View {
             ServerIconActionButton(
                 symbol: "checklist",
                 label: isSelecting ? "Cancel song selection" : "Select songs",
-                isDisabled: library.isSyncing || library.isUploading,
+                isDisabled: library.isSyncing
+                    || library.isUploading
+                    || library.activeDownloadMode == .streamOnly
+                    || library.activeDownloadMode == nil,
                 count: isSelecting ? library.selectedRemoteSongIDs.count : nil
             ) {
                 withAnimation(.easeInOut(duration: 0.18)) {
@@ -1465,10 +1510,75 @@ private struct ServerView: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
+
+    private var uploadModeLabel: String {
+        switch library.activeUploadMode {
+        case .localFile: "Files"
+        case .serverSourceLink: "Link"
+        case .reviewedMatch: "Review"
+        case nil: "Upload"
+        }
+    }
+
+    private var uploadModeSymbol: String {
+        switch library.activeUploadMode {
+        case .localFile: "square.and.arrow.up"
+        case .serverSourceLink: "link.badge.plus"
+        case .reviewedMatch: "checkmark.bubble"
+        case nil: "nosign"
+        }
+    }
+}
+
+private struct ServerTransferFailuresCard: View {
+    @EnvironmentObject private var library: MusicLibrary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Transfer issues", systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.orange)
+                Spacer()
+                Button("Clear") { library.clearTransferFailures() }
+                    .font(.caption.weight(.semibold))
+            }
+
+            ForEach(library.transferFailures) { failure in
+                HStack(alignment: .top, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("\(failure.operation.rawValue): \(failure.item)")
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(2)
+                        Text(failure.reason)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    Spacer(minLength: 8)
+                    if failure.retryTarget != nil {
+                        Button("Retry") {
+                            Task { await library.retryTransferFailure(failure) }
+                        }
+                        .font(.caption.weight(.semibold))
+                        .disabled(library.isProfileTransitionBusy)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 2)
+            }
+        }
+        .padding(14)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.orange.opacity(0.25), lineWidth: 1)
+        }
+    }
 }
 
 private enum ServerSheet: String, Identifiable {
-    case connection
+    case connection, sourceImport, reviewedImport
     var id: String { rawValue }
 }
 
@@ -1928,7 +2038,11 @@ private struct ServerSongRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(isSelecting ? (isSelected ? "Deselect \(song.title)" : "Select \(song.title)") : (isSynced ? "Play \(song.title)" : "Download \(song.title)"))
+            .accessibilityLabel(
+                isSelecting
+                    ? (isSelected ? "Deselect \(song.title)" : "Select \(song.title)")
+                    : (isSynced ? "Play \(song.title)" : "\(remoteActionTitle) \(song.title)")
+            )
 
         }
         .mobileCatalogRow(isSelected: isSelected)
@@ -1937,7 +2051,10 @@ private struct ServerSongRow: View {
             if !isSelecting {
                 Group {
                     if !isSynced {
-                        Button("Download", systemImage: "icloud.and.arrow.down") { Task { await library.download(song) } }
+                        Button(
+                            remoteActionTitle,
+                            systemImage: remoteActionSymbol
+                        ) { Task { await library.download(song) } }
                     }
                     Button("Delete from Server", systemImage: "trash", role: .destructive, action: onDelete)
                 }
@@ -1953,14 +2070,36 @@ private struct ServerSongRow: View {
             Task { await library.download(song) }
         }
     }
+
+    private var remoteActionTitle: String {
+        if library.activeDownloadMode == .streamOnly,
+           song.contentType.lowercased().hasPrefix("video/") {
+            return "Download Required"
+        }
+        return library.activeDownloadMode == .streamOnly ? "Stream" : "Download"
+    }
+
+    private var remoteActionSymbol: String {
+        if library.activeDownloadMode == .streamOnly,
+           song.contentType.lowercased().hasPrefix("video/") {
+            return "video.slash"
+        }
+        return library.activeDownloadMode == .streamOnly
+            ? "dot.radiowaves.left.and.right"
+            : "icloud.and.arrow.down"
+    }
 }
 
 private struct ServerConnectionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @FocusState private var focusedField: ConnectionField?
+    @State private var serverURLDraft = ""
+    @State private var accessTokenDraft = ""
+    @State private var adminTokenDraft = ""
     @State private var profileName = ""
     @State private var isApplyingProfile = false
+    @State private var validationMessage: String?
 
     private enum ConnectionField: Hashable {
         case url, accessToken, adminKey, profile
@@ -1970,7 +2109,7 @@ private struct ServerConnectionSheet: View {
         NavigationStack {
             Form {
                 Section("Server") {
-                    TextField("https://music.unblocked.mov", text: $library.serverURL)
+                    TextField("https://music.unblocked.mov", text: $serverURLDraft)
                         .focused($focusedField, equals: .url)
                         .submitLabel(.next)
                         .onSubmit { focusedField = .accessToken }
@@ -1978,17 +2117,18 @@ private struct ServerConnectionSheet: View {
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    SecureField("Server access token", text: $library.serverToken)
+                    SecureField("Server access token", text: $accessTokenDraft)
                         .focused($focusedField, equals: .accessToken)
                         .submitLabel(.next)
                         .onSubmit { focusedField = .adminKey }
                         .textContentType(.password)
-                    SecureField("Server admin key", text: $library.serverAdminToken)
+                    SecureField("Server admin key", text: $adminTokenDraft)
                         .focused($focusedField, equals: .adminKey)
                         .submitLabel(.next)
                         .onSubmit { focusedField = .profile }
                         .textContentType(.password)
                 }
+                .disabled(library.isProfileTransitionBusy)
                 Section {
                     TextField("Profile name", text: $profileName)
                         .focused($focusedField, equals: .profile)
@@ -2001,16 +2141,62 @@ private struct ServerConnectionSheet: View {
                 } footer: {
                     Text("Type one profile name. Existing names reconnect; new names are created.")
                 }
+                .disabled(library.isProfileTransitionBusy)
+                Section {
+                    if library.availableUploadModes.isEmpty {
+                        Label("Uploads disabled by server policy", systemImage: "nosign")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Upload mode", selection: uploadModeBinding) {
+                            ForEach(library.availableUploadModes) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        Text((library.activeUploadMode ?? .localFile).detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if library.availableDownloadModes.isEmpty {
+                        Label("Downloads disabled by server policy", systemImage: "nosign")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Download mode", selection: downloadModeBinding) {
+                            ForEach(library.availableDownloadModes) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        Text((library.activeDownloadMode ?? .verifiedFileCache).detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("Transfers")
+                } footer: {
+                    Text(library.clientConfigurationDisplayStatus)
+                }
+                .disabled(library.isProfileTransitionBusy)
                 Section {
                     Button {
                         focusedField = nil
+                        guard saveServerDraft() else { return }
                         Task {
                             isApplyingProfile = true
                             defer { isApplyingProfile = false }
-                            guard await library.activateSyncProfile(named: profileName) else { return }
+                            if isSavedConfigurationAdminOnly {
+                                await library.refreshClientConfiguration()
+                                dismiss()
+                                return
+                            }
+                            guard await library.activateSyncProfile(named: profileName) else {
+                                validationMessage = library.serverMessage
+                                return
+                            }
                             await library.refreshCatalog()
                             if library.isServerConnected {
                                 dismiss()
+                            } else {
+                                validationMessage = library.serverMessage
                             }
                         }
                     } label: {
@@ -2026,14 +2212,26 @@ private struct ServerConnectionSheet: View {
                     .disabled(
                         isApplyingProfile
                             || library.isSyncing
-                            || profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || library.isProfileTransitionBusy
+                            || (!isAdminOnlyDraft
+                                && profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     )
                 }
                 Section {
-                    Text(library.serverMessage).foregroundStyle(.secondary)
+                    Text(validationMessage ?? library.serverConfigurationMessage ?? library.serverMessage)
+                        .foregroundStyle(validationMessage == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.orange))
                 }
             }
-            .onAppear { profileName = library.syncProfileName }
+            .onAppear {
+                serverURLDraft = library.serverURL
+                accessTokenDraft = library.serverToken
+                adminTokenDraft = library.serverAdminToken
+                profileName = library.syncProfileName
+                validationMessage = nil
+            }
+            .task {
+                await library.refreshClientConfiguration()
+            }
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Connection")
             .navigationBarTitleDisplayMode(.inline)
@@ -2041,26 +2239,159 @@ private struct ServerConnectionSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
                         focusedField = nil
+                        let previousContext = library.activeServerContext
+                        guard saveServerDraft() else { return }
+                        if isSavedConfigurationAdminOnly {
+                            Task {
+                                isApplyingProfile = true
+                                defer { isApplyingProfile = false }
+                                await library.refreshClientConfiguration()
+                                dismiss()
+                            }
+                            return
+                        }
                         let trimmed = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !trimmed.isEmpty else { return }
-                        guard trimmed != library.syncProfileName else {
-                            dismiss()
+                        guard !trimmed.isEmpty else {
+                            validationMessage = "Enter a profile name."
+                            return
+                        }
+                        guard previousContext != library.activeServerContext
+                            || trimmed != library.syncProfileName else {
+                            Task {
+                                await library.refreshClientConfiguration()
+                                dismiss()
+                            }
                             return
                         }
                         Task {
                             isApplyingProfile = true
                             defer { isApplyingProfile = false }
                             if await library.activateSyncProfile(named: trimmed) {
+                                await library.refreshClientConfiguration()
                                 dismiss()
+                            } else {
+                                validationMessage = library.serverMessage
                             }
                         }
                     }
-                    .disabled(isApplyingProfile)
+                    .disabled(isApplyingProfile || library.isProfileTransitionBusy)
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Done") { focusedField = nil }
                 }
+            }
+        }
+    }
+
+    private var uploadModeBinding: Binding<MobileUploadMode> {
+        Binding(
+            get: { library.activeUploadMode ?? .localFile },
+            set: library.selectUploadMode
+        )
+    }
+
+    private var isSavedConfigurationAdminOnly: Bool {
+        library.serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !library.serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var isAdminOnlyDraft: Bool {
+        accessTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !adminTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var downloadModeBinding: Binding<MobileDownloadMode> {
+        Binding(
+            get: { library.activeDownloadMode ?? .verifiedFileCache },
+            set: library.selectDownloadMode
+        )
+    }
+
+    @discardableResult
+    private func saveServerDraft() -> Bool {
+        let saved = library.applyServerConfiguration(
+            serverURL: serverURLDraft,
+            accessToken: accessTokenDraft,
+            adminToken: adminTokenDraft
+        )
+        validationMessage = saved ? nil : library.serverConfigurationMessage
+        return saved
+    }
+}
+
+private struct ServerSourceImportSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var library: MusicLibrary
+    @FocusState private var sourceIsFocused: Bool
+    @State private var sourcePage = ""
+    @State private var isSubmitting = false
+    @State private var message: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("YouTube source page") {
+                    TextField("https://www.youtube.com/watch?v=…", text: $sourcePage)
+                        .focused($sourceIsFocused)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .submitLabel(.go)
+                        .onSubmit(submit)
+                    Button("Paste") {
+                        if let pasted = UIPasteboard.general.string {
+                            sourcePage = pasted
+                        }
+                    }
+                }
+
+                Section {
+                    Text("Resonance sends only the canonical page address to your server. The server verifies and ingests the audio into its own R2 storage; provider playback links and credentials are never forwarded.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let message {
+                    Section("Status") {
+                        Text(message)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .navigationTitle("Upload from Link")
+            .navigationBarTitleDisplayMode(.inline)
+            .scrollDismissesKeyboard(.interactively)
+            .onAppear { sourceIsFocused = true }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isSubmitting ? "Uploading…" : "Upload", action: submit)
+                        .disabled(isSubmitting || sourcePage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { sourceIsFocused = false }
+                }
+            }
+        }
+    }
+
+    private func submit() {
+        guard !isSubmitting else { return }
+        sourceIsFocused = false
+        isSubmitting = true
+        message = nil
+        Task {
+            let succeeded = await library.importServerSourceLink(sourcePage)
+            isSubmitting = false
+            if succeeded {
+                dismiss()
+            } else {
+                message = library.serverMessage
             }
         }
     }
@@ -2092,6 +2423,7 @@ private struct MobilePlayerBar: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("Open Now Playing for \(track.title)")
                     Button { library.previous() } label: { Image(systemName: "backward.end.fill") }
+                        .disabled(library.isTransientStreamActive)
                     Button { library.togglePlay() } label: {
                         Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
                             .font(.title3)
@@ -2102,6 +2434,7 @@ private struct MobilePlayerBar: View {
                             .shadow(color: Color.accent.opacity(0.22), radius: 8)
                     }
                     Button { library.next() } label: { Image(systemName: "forward.end.fill") }
+                        .disabled(library.isTransientStreamActive)
                 }
                 GeometryReader { geometry in
                     ZStack(alignment: .leading) {
@@ -2150,13 +2483,15 @@ private struct NowPlayingView: View {
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Button { library.toggleFavorite(track) } label: {
-                                Image(systemName: library.favorites.contains(track.id) ? "heart.fill" : "heart")
-                                    .font(.title2)
-                                    .foregroundStyle(library.favorites.contains(track.id) ? Color.accent : .primary)
-                                    .frame(width: 44, height: 44)
+                            if !library.isTransientStreamActive {
+                                Button { library.toggleFavorite(track) } label: {
+                                    Image(systemName: library.favorites.contains(track.id) ? "heart.fill" : "heart")
+                                        .font(.title2)
+                                        .foregroundStyle(library.favorites.contains(track.id) ? Color.accent : .primary)
+                                        .frame(width: 44, height: 44)
+                                }
+                                .accessibilityLabel(library.favorites.contains(track.id) ? "Remove from Liked Songs" : "Add to Liked Songs")
                             }
-                            .accessibilityLabel(library.favorites.contains(track.id) ? "Remove from Liked Songs" : "Add to Liked Songs")
                         }
 
                         progress(for: track)
@@ -2260,6 +2595,7 @@ private struct NowPlayingView: View {
             Button { library.previous() } label: {
                 Image(systemName: "backward.end.fill").font(.title)
             }
+            .disabled(library.isTransientStreamActive)
             Button { library.togglePlay() } label: {
                 Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 30, weight: .bold))
@@ -2272,6 +2608,7 @@ private struct NowPlayingView: View {
             Button { library.next() } label: {
                 Image(systemName: "forward.end.fill").font(.title)
             }
+            .disabled(library.isTransientStreamActive)
         }
         .buttonStyle(.plain)
     }
@@ -2298,8 +2635,13 @@ private struct NowPlayingView: View {
         HStack {
             Button { library.shuffleEnabled.toggle() } label: {
                 Label("Shuffle", systemImage: "shuffle")
-                    .foregroundStyle(library.shuffleEnabled ? Color.accent : .secondary)
+                    .foregroundStyle(
+                        library.isTransientStreamActive
+                            ? AnyShapeStyle(.tertiary)
+                            : AnyShapeStyle(library.shuffleEnabled ? Color.accent : .secondary)
+                    )
             }
+            .disabled(library.isTransientStreamActive)
             Spacer()
             Menu {
                 ForEach([0.75, 1, 1.25, 1.5, 2], id: \.self) { rate in

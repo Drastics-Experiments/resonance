@@ -38,7 +38,8 @@ data class Track(
 ) {
     val durationText: String
         get() {
-            val totalSeconds = durationMs.coerceAtLeast(0L) / 1_000L
+            if (durationMs <= 0L) return "Unknown"
+            val totalSeconds = durationMs / 1_000L
             return "${totalSeconds / 60}:${(totalSeconds % 60).toString().padStart(2, '0')}"
         }
 }
@@ -88,6 +89,10 @@ data class RemoteSong(
             ?.takeIf { it.isFinite() && it > 0.0 }
             ?.toLong()
             ?.let { seconds -> "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}" }
+
+    val isVideoMedia: Boolean
+        get() = contentType.contains("video", ignoreCase = true) ||
+            filename.substringAfterLast('.', "").lowercase() in setOf("mp4", "mov", "m4v", "webm")
 }
 
 @Serializable
@@ -143,6 +148,31 @@ data class StoredLibrary(
     val syncProfiles: List<SyncProfile> = listOf(SyncProfile("default", "Default", true)),
     val remoteLikedSongIDs: Set<String>? = null,
     val dirtyRemoteLikeSongIDs: Set<String>? = null,
+    val likesDirty: Boolean = false,
+    val clipRanges: Map<String, ClipRange> = emptyMap(),
+    val dirtyClipRangeKeys: Set<String> = emptySet(),
+    val deletedClipRangeKeys: Set<String> = emptySet(),
+    /**
+     * Durable profile-scoped snapshots keyed by normalized server origin and profile ID.
+     *
+     * The duplicated top-level fields remain the active profile's working set for
+     * backwards-compatible decoding. They are captured into this map before every
+     * save and restored when the server/profile context changes.
+     */
+    val profileStates: Map<String, ProfileLibraryState> = emptyMap(),
+)
+
+@Serializable
+data class ProfileLibraryState(
+    val playlists: List<Playlist> = listOf(Playlist(name = "Liked Songs", isSystem = true)),
+    val favorites: Set<String> = emptySet(),
+    val playlistRevision: Int? = 0,
+    val knownRemotePlaylistIDs: Set<String> = emptySet(),
+    val dirtyPlaylistIDs: Set<String> = emptySet(),
+    val deletedPlaylistIDs: Set<String> = emptySet(),
+    val playlistSyncServerURL: String? = null,
+    val remoteLikedSongIDs: Set<String> = emptySet(),
+    val dirtyRemoteLikeSongIDs: Set<String> = emptySet(),
     val likesDirty: Boolean = false,
     val clipRanges: Map<String, ClipRange> = emptyMap(),
     val dirtyClipRangeKeys: Set<String> = emptySet(),

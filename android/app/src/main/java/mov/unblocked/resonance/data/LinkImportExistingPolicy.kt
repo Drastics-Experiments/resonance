@@ -1,5 +1,6 @@
 package mov.unblocked.resonance.data
 
+import java.net.URI
 import java.text.Normalizer
 
 data class LinkImportExistingMatch(
@@ -44,9 +45,15 @@ object LinkImportExistingPolicy {
         expected: LinkImportTrack,
         deviceTracks: List<Track>,
         activeServerSongs: List<RemoteSong>,
+        activeServerURL: String,
+        activeProfileID: String,
     ): LinkImportExistingMatch {
         val device = deviceTracks.firstOrNull { candidate ->
-            ServerSongIdentityPolicy.metadataMatches(
+            RemoteTrackIdentityPolicy.visibleInContext(
+                candidate,
+                activeServerURL,
+                activeProfileID,
+            ) && ServerSongIdentityPolicy.metadataMatches(
                 expected.title,
                 expected.artist,
                 expected.durationSeconds?.toDouble(),
@@ -55,9 +62,15 @@ object LinkImportExistingPolicy {
                 candidate.durationMs.takeIf { it > 0 }?.div(1_000.0),
             )
         }
-        val server = device?.remoteID?.let { remoteID ->
+        val activeOrigin = serverOrigin(activeServerURL)
+        val trustedDeviceRemoteID = device?.remoteID?.takeIf {
+            activeOrigin != null &&
+                serverOrigin(device.sourceServer.orEmpty()) == activeOrigin &&
+                (device.syncProfileID ?: "default") == activeProfileID
+        }
+        val server = trustedDeviceRemoteID?.let { remoteID ->
             activeServerSongs.firstOrNull { it.id == remoteID }
-        } ?: activeServerSongs.firstOrNull { candidate ->
+        } ?: activeServerSongs.filter { candidate ->
             ServerSongIdentityPolicy.metadataMatches(
                 expected.title,
                 expected.artist,
@@ -66,8 +79,13 @@ object LinkImportExistingPolicy {
                 candidate.artist,
                 candidate.durationSeconds,
             )
-        }
+        }.singleOrNull()
         return LinkImportExistingMatch(device?.id, server?.id)
     }
 
+    private fun serverOrigin(value: String): String? = runCatching {
+        val uri = URI(value)
+        val port = if (uri.port >= 0) uri.port else if (uri.scheme.equals("https", true)) 443 else 80
+        "${uri.scheme.lowercase()}://${uri.host.lowercase()}:$port"
+    }.getOrNull()
 }

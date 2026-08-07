@@ -86,6 +86,13 @@ struct LocalImportResolution: Hashable, Sendable {
     }
 }
 
+enum LocalImportSourceIdentityPolicy {
+    static func isCurrent(resolvedInput: String?, displayedInput: String) -> Bool {
+        guard let resolvedInput else { return false }
+        return resolvedInput == displayedInput
+    }
+}
+
 struct LocalImportPlaylistItem: Hashable, Identifiable, Sendable {
     var id: String { track.trackID }
     let position: Int
@@ -142,7 +149,9 @@ enum LocalImportExistingSongPolicy {
     static func match(
         spotifyTrack: LocalImportSpotifyTrack,
         deviceTracks: [MobileTrack],
-        activeServerSongs: [MobileRemoteSong]
+        activeServerSongs: [MobileRemoteSong],
+        activeServerURL: URL?,
+        activeProfileID: String
     ) -> LocalImportExistingSongMatch {
         let deviceTrack = deviceTracks.first { candidate in
             metadataMatches(
@@ -154,17 +163,17 @@ enum LocalImportExistingSongPolicy {
                 actualDuration: candidate.duration
             )
         }
-        let serverSong = deviceTrack?.remoteID.flatMap { remoteID in
+        let trustedDeviceRemoteID = deviceTrack.flatMap { candidate -> String? in
+            guard let activeServerURL,
+                  let activeContext = MobileServerEndpointPolicy.context(
+                    serverURL: activeServerURL,
+                    profileID: activeProfileID
+                  ),
+                  candidate.remoteIdentity()?.context == activeContext else { return nil }
+            return candidate.remoteID
+        }
+        let serverSong = trustedDeviceRemoteID.flatMap { remoteID in
             activeServerSongs.first { $0.id == remoteID }
-        } ?? activeServerSongs.first { candidate in
-            metadataMatches(
-                expectedTitle: spotifyTrack.title,
-                expectedArtist: spotifyTrack.artist,
-                expectedDuration: spotifyTrack.durationSeconds.map(Double.init),
-                actualTitle: candidate.title,
-                actualArtist: candidate.artist,
-                actualDuration: candidate.duration
-            )
         }
         return LocalImportExistingSongMatch(
             deviceTrackID: deviceTrack?.id,
@@ -189,6 +198,7 @@ enum LocalImportExistingSongPolicy {
             actualDuration: actualDuration
         )
     }
+
 }
 
 struct LocalImportedAudio: Hashable, Sendable {
