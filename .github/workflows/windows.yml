@@ -33,6 +33,10 @@ on:
         required: false
         type: boolean
         default: false
+      unsigned_desktop:
+        required: false
+        type: boolean
+        default: false
       version:
         required: false
         type: string
@@ -85,7 +89,7 @@ jobs:
           [[ "$BUILD" == "$EXPECTED_BUILD" ]]
 
       - name: Validate Authenticode signing secrets
-        if: ${{ inputs.release_candidate }}
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
         shell: pwsh
         working-directory: .
         env:
@@ -104,7 +108,7 @@ jobs:
           }
 
       - name: Configure Authenticode signing
-        if: ${{ inputs.release_candidate }}
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
         shell: pwsh
         working-directory: .
         env:
@@ -153,18 +157,20 @@ jobs:
         run: node --test scripts/release-now.test.mjs scripts/validate-release-assets.test.mjs
 
       - name: Build unsigned development installer
-        if: ${{ !inputs.release_candidate }}
+        if: ${{ !inputs.release_candidate || inputs.unsigned_desktop }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: pnpm run installer:win
 
       - name: Build signed release candidate
-        if: ${{ inputs.release_candidate }}
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
         env:
           WIN_CSC_LINK: ${{ runner.temp }}\resonance-code-signing.pfx
           WIN_CSC_KEY_PASSWORD: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_PASSWORD }}
         run: pnpm exec electron-builder --win nsis --x64 --publish never --config.forceCodeSigning=true
 
       - name: Verify Authenticode signatures and record evidence
-        if: ${{ inputs.release_candidate }}
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
         shell: pwsh
         working-directory: .
         env:
@@ -252,7 +258,7 @@ jobs:
           overwrite: true
 
       - name: Upload Windows signing evidence
-        if: ${{ inputs.release_candidate }}
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
         uses: actions/upload-artifact@v7
         with:
           name: release-signing-windows
@@ -262,7 +268,7 @@ jobs:
           overwrite: true
 
       - name: Remove temporary signing material
-        if: ${{ always() && inputs.release_candidate }}
+        if: ${{ always() && inputs.release_candidate && !inputs.unsigned_desktop }}
         shell: pwsh
         working-directory: .
         run: Remove-Item "$env:RUNNER_TEMP/resonance-code-signing.pfx" -Force -ErrorAction SilentlyContinue

@@ -40,6 +40,8 @@ const versionFiles = [
   "release/version.json",
   "windows/package.json",
 ];
+const releasePolicyFile = "release/policy.json";
+const releaseFiles = [...versionFiles, releasePolicyFile];
 
 function fail(message) {
   throw new Error(message);
@@ -108,6 +110,7 @@ function sleep(milliseconds) {
 
 export function parseArguments(arguments_) {
   const options = {
+    allowUnsignedDesktop: false,
     build: undefined,
     dryRun: false,
     help: false,
@@ -118,6 +121,9 @@ export function parseArguments(arguments_) {
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
     switch (argument) {
+      case "--allow-unsigned-desktop":
+        options.allowUnsignedDesktop = true;
+        break;
       case "--build": {
         const value = arguments_[index + 1];
         if (!value || !/^[0-9]+$/.test(value)) fail("--build requires a positive integer");
@@ -205,6 +211,12 @@ export function porcelainChangedPaths(status) {
     .map((line) => line.replace(/^[ MADRCU?!]{1,2} /, ""));
 }
 
+export function requiredReleaseSecretNames(allowUnsignedDesktop) {
+  return allowUnsignedDesktop
+    ? [...requiredAndroidSecrets]
+    : [...requiredAndroidSecrets, ...requiredMacOSSecrets, ...requiredWindowsSecrets];
+}
+
 function usage() {
   console.log(`Usage: /path/to/Resonance/app/scripts/release-now.mjs [options]
 
@@ -215,6 +227,9 @@ same artifacts, and verifies the public release plus its desktop-signing evidenc
 Options:
   --version X.Y.Z   Release version (default: next patch)
   --build N         Cross-platform build number (default: current + 1)
+  --allow-unsigned-desktop
+                    Publish macOS and Windows without signing credentials and
+                    label the release with an unsigned-desktop warning
   --dry-run         Run preflight and print the plan without changing anything
   --retry-failed    Rerun failed candidate/publisher jobs when resuming
   -h, --help        Show this help
@@ -232,6 +247,35 @@ function readManifest() {
     fail("release/version.json has an invalid build number");
   }
   return manifest;
+}
+
+function readReleasePolicy() {
+  const policy = JSON.parse(
+    fs.readFileSync(path.join(repositoryRoot, releasePolicyFile), "utf8"),
+  );
+  if (
+    policy.schemaVersion !== 1 ||
+    !versionPattern.test(policy.version) ||
+    !Number.isInteger(policy.build) ||
+    policy.build < 1 ||
+    !["production", "unsigned"].includes(policy.desktopSigning)
+  ) {
+    fail(`${releasePolicyFile} is invalid`);
+  }
+  return policy;
+}
+
+function writeReleasePolicy(version, build, allowUnsignedDesktop) {
+  const policy = {
+    schemaVersion: 1,
+    version,
+    build,
+    desktopSigning: allowUnsignedDesktop ? "unsigned" : "production",
+  };
+  fs.writeFileSync(
+    path.join(repositoryRoot, releasePolicyFile),
+    `${JSON.stringify(policy, null, 2)}\n`,
+  );
 }
 
 function git(arguments_, options = {}) {
@@ -282,14 +326,10 @@ function resolveRepository() {
   return gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
 }
 
-function ensureReleaseSigningSecrets(repository) {
+function ensureReleaseSigningSecrets(repository, allowUnsignedDesktop) {
   const secrets = ghJSON(["secret", "list", "--repo", repository, "--json", "name"]);
   const names = new Set(secrets.map((secret) => secret.name));
-  const required = [
-    ...requiredAndroidSecrets,
-    ...requiredMacOSSecrets,
-    ...requiredWindowsSecrets,
-  ];
+  const required = requiredReleaseSecretNames(allowUnsignedDesktop);
   const missing = required.filter((name) => !names.has(name));
   if (missing.length > 0) {
     fail(`missing production release-signing secret(s): ${missing.join(", ")}`);
@@ -322,7 +362,7 @@ function validateVersionChanges() {
   run("node", ["scripts/release-version.mjs", "--check"], { capture: false });
   run("git", ["diff", "--check"], { capture: false });
   const changed = porcelainChangedPaths(git(["status", "--porcelain=v1"])).sort();
-  const expected = [...versionFiles].sort();
+  const expected = [...releaseFiles].sort();
   if (JSON.stringify(changed) !== JSON.stringify(expected)) {
     fail(
       `version synchronization changed an unexpected file set:\n${changed.join("\n")}`,
@@ -330,10 +370,13 @@ function validateVersionChanges() {
   }
 }
 
-function releaseBody(version, build, sourceSha) {
+function releaseBody(version, build, sourceSha, allowUnsignedDesktop) {
+  const desktopPolicy = allowUnsignedDesktop
+    ? "macOS and Windows are intentionally unsigned; no desktop signing credentials are used"
+    : "macOS and Windows are production-signed and verified";
   return `## Release\n- version: ${version}\n- build: ${build}\n- source: ${sourceSha}\n\n` +
-    "The release-candidate workflow builds iOS, Android, production-signed macOS, and " +
-    "production-signed Windows in parallel, validates the complete asset and signing " +
+    `The release-candidate workflow builds all four platforms in parallel; ${desktopPolicy}. ` +
+    "It validates the complete asset and release-policy " +
     "contract, and records exact source provenance. Merging " +
     "this PR publishes those already-built artifacts without rebuilding them.";
 }
@@ -356,7 +399,14 @@ function findReleasePullRequest(repository, branch) {
   return pullRequests.sort((left, right) => right.number - left.number)[0];
 }
 
-function createReleasePullRequest(repository, branch, version, build, sourceSha) {
+function createReleasePullRequest(
+  repository,
+  branch,
+  version,
+  build,
+  sourceSha,
+  allowUnsignedDesktop,
+) {
   const url = gh([
     "pr",
     "create",
@@ -369,7 +419,7 @@ function createReleasePullRequest(repository, branch, version, build, sourceSha)
     "--title",
     `Prepare Resonance ${version}`,
     "--body",
-    releaseBody(version, build, sourceSha),
+    releaseBody(version, build, sourceSha, allowUnsignedDesktop),
   ]);
   console.log(`Opened ${url}`);
   return findReleasePullRequest(repository, branch);
@@ -490,7 +540,14 @@ function mergeReleasePullRequest(repository, pullRequest, candidateSha) {
   return merged;
 }
 
-async function verifyPublicRelease(repository, version, candidateSha, mergeSha, candidateRunId) {
+async function verifyPublicRelease(
+  repository,
+  version,
+  candidateSha,
+  mergeSha,
+  candidateRunId,
+  allowUnsignedDesktop,
+) {
   const tag = `v${version}`;
   const release = ghJSON([
     "release",
@@ -547,17 +604,15 @@ async function verifyPublicRelease(repository, version, candidateSha, mergeSha, 
       ],
       { capture: false },
     );
-    run(
-      process.execPath,
-      [
-        "scripts/validate-release-assets.mjs",
-        assetDirectory,
-        version,
-        "--signing-evidence",
-        path.join(provenanceDirectory, "signing"),
-      ],
-      { capture: false },
-    );
+    const validationArguments = [
+      "scripts/validate-release-assets.mjs",
+      assetDirectory,
+      version,
+      ...(allowUnsignedDesktop
+        ? ["--allow-unsigned-desktop-release"]
+        : ["--signing-evidence", path.join(provenanceDirectory, "signing")]),
+    ];
+    run(process.execPath, validationArguments, { capture: false });
   } finally {
     fs.rmSync(verificationRoot, { force: true, recursive: true });
   }
@@ -578,9 +633,11 @@ async function main() {
   const initialBranch = currentBranch;
   const repository = resolveRepository();
   const source = ensureCurrentSourceContainsMain(currentBranch);
-  ensureReleaseSigningSecrets(repository);
-
   let manifest = readManifest();
+  let releasePolicy = readReleasePolicy();
+  if (releasePolicy.version !== manifest.version || releasePolicy.build !== manifest.build) {
+    fail(`${releasePolicyFile} does not match release/version.json`);
+  }
   let releaseBranchMatch = /^release\/v([0-9]+\.[0-9]+\.[0-9]+)$/.exec(currentBranch);
   const resuming = Boolean(releaseBranchMatch);
   const version = resuming
@@ -589,6 +646,14 @@ async function main() {
   const build = resuming ? manifest.build : options.build || manifest.build + 1;
   const branch = `release/v${version}`;
   const tag = `v${version}`;
+  const allowUnsignedDesktop = resuming
+    ? releasePolicy.desktopSigning === "unsigned"
+    : options.allowUnsignedDesktop;
+
+  if (resuming && options.allowUnsignedDesktop && !allowUnsignedDesktop) {
+    fail(`${currentBranch} is configured for production desktop signing`);
+  }
+  ensureReleaseSigningSecrets(repository, allowUnsignedDesktop);
 
   if (resuming) {
     if (manifest.version !== version) {
@@ -612,6 +677,11 @@ async function main() {
   console.log(
     `${options.dryRun ? "Dry-run" : "Release"} plan: ${tag} build ${build} from ${source.head}`,
   );
+  console.log(
+    allowUnsignedDesktop
+      ? "Desktop mode: unsigned macOS and Windows; no desktop signing credentials will be used."
+      : "Desktop mode: production signing and signing evidence required.",
+  );
   console.log("One PR; Android, iOS, macOS, and Windows build in parallel; no post-merge rebuild.");
   if (options.dryRun) return;
 
@@ -622,10 +692,12 @@ async function main() {
     run("node", ["scripts/release-version.mjs", "--set", version, String(build)], {
       capture: false,
     });
+    writeReleasePolicy(version, build, allowUnsignedDesktop);
     validateVersionChanges();
-    run("git", ["add", "--", ...versionFiles], { capture: false });
+    run("git", ["add", "--", ...releaseFiles], { capture: false });
     run("git", ["commit", "-m", `Prepare Resonance ${version}`], { capture: false });
     manifest = readManifest();
+    releasePolicy = readReleasePolicy();
   }
 
   const candidateSha = git(["rev-parse", "HEAD"]);
@@ -646,6 +718,7 @@ async function main() {
       manifest.version,
       manifest.build,
       candidateSha,
+      allowUnsignedDesktop,
     );
   }
   if (!pullRequest) fail(`could not resolve the release PR for ${branch}`);
@@ -677,6 +750,7 @@ async function main() {
     candidateSha,
     mergeSha,
     candidateRun.databaseId,
+    allowUnsignedDesktop,
   );
 
   if (initialBranch !== branch && succeeds("git", ["show-ref", "--verify", "--quiet", `refs/heads/${initialBranch}`])) {

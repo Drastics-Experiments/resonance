@@ -33,6 +33,10 @@ on:
         required: false
         type: boolean
         default: false
+      unsigned_desktop:
+        required: false
+        type: boolean
+        default: false
       version:
         required: false
         type: string
@@ -96,7 +100,7 @@ jobs:
           fi
 
       - name: Validate production signing secrets
-        if: ${{ inputs.release_candidate }}
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
         shell: bash
         env:
           APP_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_MACOS_APP_CERTIFICATE_BASE64 }}
@@ -133,7 +137,7 @@ jobs:
           }
 
       - name: Configure production signing
-        if: ${{ inputs.release_candidate }}
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
         shell: bash
         env:
           APP_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_MACOS_APP_CERTIFICATE_BASE64 }}
@@ -196,15 +200,15 @@ jobs:
         env:
           APP_VERSION: ${{ steps.release.outputs.version }}
           BUILD_NUMBER: ${{ steps.release.outputs.build }}
-          RESONANCE_REQUIRE_PRODUCTION_SIGNING: ${{ inputs.release_candidate && '1' || '0' }}
-          MACOS_APP_IDENTITY: ${{ inputs.release_candidate && secrets.RESONANCE_MACOS_APP_IDENTITY || '' }}
-          MACOS_INSTALLER_IDENTITY: ${{ inputs.release_candidate && secrets.RESONANCE_MACOS_INSTALLER_IDENTITY || '' }}
-          NOTARY_KEY_PATH: ${{ inputs.release_candidate && format('{0}/resonance-notary-key.p8', runner.temp) || '' }}
-          NOTARY_KEY_ID: ${{ inputs.release_candidate && secrets.RESONANCE_MACOS_NOTARY_KEY_ID || '' }}
-          NOTARY_ISSUER_ID: ${{ inputs.release_candidate && secrets.RESONANCE_MACOS_NOTARY_ISSUER_ID || '' }}
+          RESONANCE_REQUIRE_PRODUCTION_SIGNING: ${{ inputs.release_candidate && !inputs.unsigned_desktop && '1' || '0' }}
+          MACOS_APP_IDENTITY: ${{ inputs.release_candidate && !inputs.unsigned_desktop && secrets.RESONANCE_MACOS_APP_IDENTITY || '' }}
+          MACOS_INSTALLER_IDENTITY: ${{ inputs.release_candidate && !inputs.unsigned_desktop && secrets.RESONANCE_MACOS_INSTALLER_IDENTITY || '' }}
+          NOTARY_KEY_PATH: ${{ inputs.release_candidate && !inputs.unsigned_desktop && format('{0}/resonance-notary-key.p8', runner.temp) || '' }}
+          NOTARY_KEY_ID: ${{ inputs.release_candidate && !inputs.unsigned_desktop && secrets.RESONANCE_MACOS_NOTARY_KEY_ID || '' }}
+          NOTARY_ISSUER_ID: ${{ inputs.release_candidate && !inputs.unsigned_desktop && secrets.RESONANCE_MACOS_NOTARY_ISSUER_ID || '' }}
 
       - name: Record verified macOS signing evidence
-        if: ${{ inputs.release_candidate }}
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
         run: >-
           node scripts/record-desktop-signing-evidence.mjs
           macos installers/macos/dist "${{ steps.release.outputs.version }}"
@@ -237,7 +241,7 @@ jobs:
           overwrite: true
 
       - name: Upload macOS signing evidence
-        if: ${{ inputs.release_candidate }}
+        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
         uses: actions/upload-artifact@v7
         with:
           name: release-signing-macos
@@ -247,7 +251,7 @@ jobs:
           overwrite: true
 
       - name: Remove temporary signing material
-        if: ${{ always() && inputs.release_candidate }}
+        if: ${{ always() && inputs.release_candidate && !inputs.unsigned_desktop }}
         shell: bash
         run: |
           security delete-keychain "$RUNNER_TEMP/resonance-release-signing.keychain-db" 2>/dev/null || true

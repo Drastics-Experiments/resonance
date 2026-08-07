@@ -224,7 +224,18 @@ export function validateReleaseAssets(
 const scriptPath = fileURLToPath(import.meta.url);
 if (path.resolve(process.argv[1] || "") === scriptPath) {
   const arguments_ = process.argv.slice(2);
-  const allowUnsignedIndex = arguments_.indexOf("--allow-unsigned-development");
+  const unsignedFlags = [
+    "--allow-unsigned-development",
+    "--allow-unsigned-desktop-release",
+  ];
+  const selectedUnsignedFlags = unsignedFlags.filter((flag) => arguments_.includes(flag));
+  const allowUnsignedIndex = selectedUnsignedFlags.length === 1
+    ? arguments_.indexOf(selectedUnsignedFlags[0])
+    : -1;
+  if (selectedUnsignedFlags.length > 1) {
+    console.error("validate-release-assets: specify only one unsigned desktop mode");
+    process.exitCode = 1;
+  }
   const allowUnsignedDevelopment = allowUnsignedIndex !== -1;
   if (allowUnsignedDevelopment) arguments_.splice(allowUnsignedIndex, 1);
   const signingEvidenceIndex = arguments_.indexOf("--signing-evidence");
@@ -234,10 +245,16 @@ if (path.resolve(process.argv[1] || "") === scriptPath) {
     arguments_.splice(signingEvidenceIndex, 2);
   }
   const [assetDirectory, version] = arguments_;
-  if (!assetDirectory || !version || arguments_.length !== 2 || (signingEvidenceIndex !== -1 && !signingEvidenceDirectory)) {
+  if (
+    process.exitCode ||
+    !assetDirectory ||
+    !version ||
+    arguments_.length !== 2 ||
+    (signingEvidenceIndex !== -1 && !signingEvidenceDirectory)
+  ) {
     console.error(
       "usage: validate-release-assets.mjs <asset-directory> <version> " +
-        "[--signing-evidence <directory> | --allow-unsigned-development]",
+        "[--signing-evidence <directory> | --allow-unsigned-desktop-release]",
     );
     process.exitCode = 1;
   } else if (allowUnsignedDevelopment && signingEvidenceDirectory) {
@@ -249,7 +266,9 @@ if (path.resolve(process.argv[1] || "") === scriptPath) {
         requireDesktopSignatures: !allowUnsignedDevelopment,
         signingEvidenceDirectory,
       });
-      const suffix = allowUnsignedDevelopment ? " (unsigned development mode)" : " with desktop signing evidence";
+      const suffix = allowUnsignedDevelopment
+        ? " (explicit unsigned desktop release mode)"
+        : " with desktop signing evidence";
       console.log(`Validated ${assets.length} release assets for Resonance ${version}${suffix}`);
     } catch (error) {
       console.error(`validate-release-assets: ${error.message}`);

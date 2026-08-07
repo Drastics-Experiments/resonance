@@ -120,18 +120,18 @@ test("production validation rejects incomplete verification policy", () => {
   });
 });
 
-test("unsigned development fixtures require an explicit opt-out", () => {
+test("unsigned desktop release fixtures require an explicit opt-out", () => {
   withFixture(({ assets }) => {
     assert.equal(validateReleaseAssets(assets, version, { requireDesktopSignatures: false }).length, 12);
     const production = spawnSync(process.execPath, [validatorPath, assets, version], { encoding: "utf8" });
     assert.equal(production.status, 1);
     assert.match(production.stderr, /desktop signing evidence is required/);
-    const development = spawnSync(
+    const unsignedRelease = spawnSync(
       process.execPath,
-      [validatorPath, assets, version, "--allow-unsigned-development"],
+      [validatorPath, assets, version, "--allow-unsigned-desktop-release"],
       { encoding: "utf8" },
     );
-    assert.equal(development.status, 0);
-    assert.match(development.stdout, /unsigned development mode/);
+    assert.equal(unsignedRelease.status, 0);
+    assert.match(unsignedRelease.stdout, /explicit unsigned desktop release mode/);
   });
 });

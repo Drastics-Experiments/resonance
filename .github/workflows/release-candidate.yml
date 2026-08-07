@@ -28,6 +28,8 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       source_sha: ${{ steps.source.outputs.sha }}
       source_tree: ${{ steps.source.outputs.tree }}
+      desktop_signing: ${{ steps.release.outputs.desktop_signing }}
+      unsigned_desktop: ${{ steps.release.outputs.unsigned_desktop }}
 
     steps:
       - name: Check out candidate source
@@ -48,6 +50,13 @@ jobs:
           [[ "$ACTUAL_BRANCH" == "$EXPECTED_BRANCH" ]]
           git merge-base --is-ancestor "$BASE_SHA" HEAD
           read -r VERSION BUILD < <(node -e 'const value = require("./release/version.json"); console.log(value.version, value.build)')
+          read -r POLICY_SCHEMA POLICY_VERSION POLICY_BUILD DESKTOP_SIGNING < <(node -e 'const value = require("./release/policy.json"); console.log(value.schemaVersion, value.version, value.build, value.desktopSigning)')
+          [[ "$POLICY_SCHEMA" == "1" ]]
+          [[ "$POLICY_VERSION" == "$VERSION" ]]
+          [[ "$POLICY_BUILD" == "$BUILD" ]]
+          [[ "$DESKTOP_SIGNING" == "production" || "$DESKTOP_SIGNING" == "unsigned" ]]
+          echo "desktop_signing=$DESKTOP_SIGNING" >> "$GITHUB_OUTPUT"
+          [[ "$DESKTOP_SIGNING" == "unsigned" ]] && echo "unsigned_desktop=true" >> "$GITHUB_OUTPUT" || echo "unsigned_desktop=false" >> "$GITHUB_OUTPUT"
           read -r BASE_VERSION BASE_BUILD < <(git show "${BASE_SHA}:release/version.json" | node -e 'let text = ""; process.stdin.on("data", value => text += value); process.stdin.on("end", () => { const value = JSON.parse(text); console.log(value.version, value.build); });')
           node -e '
             const [current, previous] = process.argv.slice(1).map(value => value.split(".").map(Number));
@@ -110,6 +119,7 @@ jobs:
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
       source_ref: ${{ needs.prepare.outputs.source_sha }}
+      unsigned_desktop: ${{ needs.prepare.outputs.unsigned_desktop == 'true' }}
 
   windows:
     name: Windows candidate
@@ -124,6 +134,7 @@ jobs:
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
       source_ref: ${{ needs.prepare.outputs.source_sha }}
+      unsigned_desktop: ${{ needs.prepare.outputs.unsigned_desktop == 'true' }}
 
   bundle:
     name: Bundle release candidate
@@ -149,17 +160,26 @@ jobs:
           merge-multiple: true
 
       - name: Download desktop signing evidence
+        if: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
         uses: actions/download-artifact@v7
         with:
           pattern: release-signing-*
           path: candidate/signing
           merge-multiple: true
 
-      - name: Validate complete asset set
+      - name: Validate signed complete asset set
+        if: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
         run: >-
           node scripts/validate-release-assets.mjs
           candidate/assets "${{ needs.prepare.outputs.version }}"
           --signing-evidence candidate/signing
+
+      - name: Validate explicit unsigned-desktop asset set
+        if: ${{ needs.prepare.outputs.unsigned_desktop == 'true' }}
+        run: >-
+          node scripts/validate-release-assets.mjs
+          candidate/assets "${{ needs.prepare.outputs.version }}"
+          --allow-unsigned-desktop-release
 
       - name: Write candidate provenance
         shell: bash
@@ -170,6 +190,7 @@ jobs:
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           SOURCE_TREE: ${{ needs.prepare.outputs.source_tree }}
           RUN_ID: ${{ github.run_id }}
+          DESKTOP_SIGNING: ${{ needs.prepare.outputs.desktop_signing }}
         run: |
           node --input-type=module -e '
             import fs from "node:fs";
@@ -180,6 +201,7 @@ jobs:
               sourceSha: process.env.SOURCE_SHA,
               sourceTree: process.env.SOURCE_TREE,
               workflowRunId: Number(process.env.RUN_ID),
+              desktopSigning: process.env.DESKTOP_SIGNING,
             };
             fs.writeFileSync("candidate/candidate.json", `${JSON.stringify(value, null, 2)}\n`);
           '
@@ -190,8 +212,7 @@ jobs:
           name: release-provenance-${{ needs.prepare.outputs.tag }}-${{ needs.prepare.outputs.source_sha }}
           path: |
             candidate/candidate.json
-            candidate/signing/macos.json
-            candidate/signing/windows.json
+            candidate/signing/*.json
           if-no-files-found: error
           retention-days: 14
           overwrite: true
