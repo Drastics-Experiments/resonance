@@ -11,6 +11,7 @@ export function createEmptyState() {
     currentTrackID: null,
     position: 0,
     playbackQueueIDs: [],
+    playbackSourceQueueIDs: [],
     playbackPlaylistID: null,
     playlistRevision: 0,
     knownRemotePlaylistIDs: [],
@@ -27,7 +28,170 @@ export function createEmptyState() {
     dirtyClipRangeKeys: [],
     deletedClipRangeKeys: [],
     listeningHistory: [],
+    serverUploadManifests: [],
+    serverTransferPreferences: {},
   };
+}
+
+export const SAFE_CLIENT_CONFIG = Object.freeze({
+  schema_version: 1,
+  revision: 0,
+  values: Object.freeze({
+    "upload.local_file": true,
+    "upload.server_source_link": false,
+    "upload.reviewed_match": false,
+    "upload.external_object": false,
+    "download.offline_mode": "verified_file_cache",
+    "download.playback_mode": "same_origin_resolver",
+    "matcher.mode": "off",
+    "storage.read_mode": "r2_only",
+    "storage.r2_reclaim": false,
+  }),
+  kill_switches: Object.freeze({
+    all_uploads: false,
+    link_imports: true,
+    offline_downloads: false,
+    external_reads: true,
+    r2_reclaim: true,
+  }),
+  source: "safe-defaults",
+});
+
+const UPLOAD_MODE_VALUES = new Set(["local_file", "server_source_link", "reviewed_match"]);
+const DOWNLOAD_MODE_VALUES = new Set(["verified_file_cache", "stream_only"]);
+
+export function canonicalYouTubeSourcePageURL(...values) {
+  for (const value of values) {
+    let url;
+    try { url = new URL(String(value || "").trim()); }
+    catch { continue; }
+    if (url.protocol !== "https:" || url.username || url.password) continue;
+    const hostname = url.hostname.toLocaleLowerCase().replace(/^www\./, "");
+    let videoID = null;
+    if (hostname === "youtu.be") videoID = url.pathname.split("/").filter(Boolean)[0];
+    else if (["youtube.com", "m.youtube.com", "music.youtube.com"].includes(hostname)) {
+      const segments = url.pathname.split("/").filter(Boolean);
+      videoID = url.pathname === "/watch" ? url.searchParams.get("v")
+        : ["embed", "live", "shorts"].includes(segments[0]) ? segments[1] : null;
+    }
+    if (/^[a-zA-Z0-9_-]{11}$/.test(videoID || "")) return `https://www.youtube.com/watch?v=${videoID}`;
+  }
+  return null;
+}
+
+export function exactYouTubeSourcePageURL(value) {
+  const source = typeof value === "string" ? value.trim() : "";
+  return /^https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(source) ? source : null;
+}
+
+export function serverTransferPreferenceKey(serverURL, profileID = "default") {
+  const origin = normalizedServerOrigin(serverURL);
+  return origin ? `${origin}#profile=${String(profileID || "default").slice(0, 128)}` : "";
+}
+
+function normalizedServerTransferPreferences(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).slice(0, 64).flatMap(([key, preference]) => {
+    if (typeof key !== "string" || !key || key.length > 512 || !preference || typeof preference !== "object") return [];
+    const uploadMode = UPLOAD_MODE_VALUES.has(preference.uploadMode) ? preference.uploadMode : "local_file";
+    const downloadMode = DOWNLOAD_MODE_VALUES.has(preference.downloadMode) ? preference.downloadMode : "verified_file_cache";
+    return [[key, { uploadMode, downloadMode }]];
+  }));
+}
+
+export function activeServerClientConfig(config = SAFE_CLIENT_CONFIG, now = Date.now()) {
+  if (!config || config === SAFE_CLIENT_CONFIG || config.verified !== true) return SAFE_CLIENT_CONFIG;
+  const current = now instanceof Date ? now.getTime() : Number(now);
+  const issuedAt = Date.parse(config.issued_at);
+  const notBefore = Date.parse(config.not_before);
+  const expiresAt = Date.parse(config.expires_at);
+  if (!Number.isFinite(current)
+    || !Number.isFinite(issuedAt)
+    || !Number.isFinite(notBefore)
+    || !Number.isFinite(expiresAt)
+    || issuedAt > current
+    || notBefore > current
+    || current >= expiresAt
+    || issuedAt > notBefore
+    || notBefore >= expiresAt
+    || expiresAt - issuedAt > 15 * 60 * 1000) return SAFE_CLIENT_CONFIG;
+  return config;
+}
+
+export function clientConfigRenewalDelay(config = SAFE_CLIENT_CONFIG, now = Date.now(), {
+  renewalLeadMs = 60_000,
+  minimumDelayMs = 5_000,
+  maximumDelayMs = 10 * 60_000,
+  retryDelayMs = 60_000,
+} = {}) {
+  const current = now instanceof Date ? now.getTime() : Number(now);
+  if (!Number.isFinite(current) || activeServerClientConfig(config, current) === SAFE_CLIENT_CONFIG) {
+    return retryDelayMs;
+  }
+  const expiresAt = Date.parse(config.expires_at);
+  return Math.max(minimumDelayMs, Math.min(maximumDelayMs, expiresAt - current - renewalLeadMs));
+}
+
+export function persistentPlaybackIDs(trackIDs, tracks) {
+  const persistent = new Set((Array.isArray(tracks) ? tracks : [])
+    .filter((track) => track && track.transientStream !== true && typeof track.id === "string")
+    .map((track) => track.id));
+  return [...new Set(Array.isArray(trackIDs) ? trackIDs : [])].filter((id) => persistent.has(id));
+}
+
+export function availableServerTransferModes(
+  config = SAFE_CLIENT_CONFIG,
+  now = Date.now(),
+  { localImportAvailable = true } = {},
+) {
+  const activeConfig = activeServerClientConfig(config, now);
+  const values = activeConfig.values;
+  const kills = activeConfig.kill_switches;
+  const upload = [];
+  const localFileUpload = !kills.all_uploads && values["upload.local_file"] === true;
+  if (localFileUpload) upload.push("local_file");
+  if (!kills.all_uploads && !kills.link_imports && values["upload.server_source_link"] === true) upload.push("server_source_link");
+  if (localImportAvailable
+      && localFileUpload
+      && values["upload.reviewed_match"] === true
+      && values["matcher.mode"] === "review") upload.push("reviewed_match");
+  const requestedDownloadMode = values["download.offline_mode"];
+  const download = requestedDownloadMode === "stream_only"
+    ? ["stream_only"]
+    : (!kills.offline_downloads && requestedDownloadMode === "verified_file_cache" ? ["verified_file_cache"] : ["stream_only"]);
+  return { upload, download };
+}
+
+export function resolveServerTransferModes({
+  state,
+  serverURL,
+  profileID,
+  config = SAFE_CLIENT_CONFIG,
+  now = Date.now(),
+  localImportAvailable = true,
+} = {}) {
+  const available = availableServerTransferModes(config, now, { localImportAvailable });
+  const key = serverTransferPreferenceKey(serverURL, profileID);
+  const preferences = normalizedServerTransferPreferences(state?.serverTransferPreferences);
+  const selected = key ? preferences[key] : null;
+  return {
+    key,
+    available,
+    uploadMode: available.upload.includes(selected?.uploadMode) ? selected.uploadMode : (available.upload[0] || null),
+    downloadMode: available.download.includes(selected?.downloadMode) ? selected.downloadMode : available.download[0],
+  };
+}
+
+export function setServerTransferPreference(state, { serverURL, profileID, uploadMode, downloadMode, config = SAFE_CLIENT_CONFIG, now = Date.now() } = {}) {
+  if (!state || typeof state !== "object") return resolveServerTransferModes({ state, serverURL, profileID, config, now });
+  const resolved = resolveServerTransferModes({ state, serverURL, profileID, config, now });
+  if (!resolved.key) return resolved;
+  state.serverTransferPreferences = normalizedServerTransferPreferences(state.serverTransferPreferences);
+  state.serverTransferPreferences[resolved.key] = {
+    uploadMode: resolved.available.upload.includes(uploadMode) ? uploadMode : resolved.uploadMode,
+    downloadMode: resolved.available.download.includes(downloadMode) ? downloadMode : resolved.downloadMode,
+  };
+  return resolveServerTransferModes({ state, serverURL, profileID, config, now });
 }
 
 export function titleMarqueeMetrics(contentWidth, availableWidth) {
@@ -45,6 +209,35 @@ export function isInstalledVideoTrack(track) {
   if (!/^file:/i.test(fileURL)) return false;
   const source = String(track?.filePath || fileURL).split(/[?#]/, 1)[0];
   return /\.(?:mp4|mov|m4v|webm)$/i.test(source);
+}
+
+export function serverSongRequiresDownload(song) {
+  const contentType = String(song?.content_type || song?.contentType || "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (contentType.startsWith("video/")) return true;
+  const filename = String(song?.filename || song?.name || "").split(/[?#]/, 1)[0];
+  return /\.(?:avi|mkv|mov|mp4|m4v|webm)$/i.test(filename);
+}
+
+export function localImportOperationFingerprint({ source, mediaKind, selection = [], uploadRequested = false } = {}) {
+  const normalizedSource = String(source || "").trim();
+  const normalizedKind = mediaKind === "video" ? "video" : "audio";
+  const normalizedSelection = (Array.isArray(selection) ? selection : [])
+    .map((value) => String(value))
+    .sort();
+  return JSON.stringify([normalizedKind, normalizedSource, normalizedSelection, Boolean(uploadRequested)]);
+}
+
+export function localImportOperationIsCurrent(snapshot, current) {
+  return Boolean(
+    snapshot
+    && current
+    && Number.isSafeInteger(snapshot.generation)
+    && snapshot.generation === current.generation
+    && snapshot.fingerprint === current.fingerprint,
+  );
 }
 
 export function squareArtworkCropRect(
@@ -211,10 +404,83 @@ function normalizedHistoryDuration(value) {
   return Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60 ? duration : null;
 }
 
+function boundedUploadText(value, maximumLength = 500) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text ? text.slice(0, maximumLength) : null;
+}
+
+function normalizedServerUploadManifestItem(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const status = ["uploaded", "failed", "cancelled"].includes(value.status) ? value.status : null;
+  const title = boundedUploadText(value.title) || boundedUploadText(value.filename) || "Untitled song";
+  if (!status) return null;
+  return {
+    retryID: boundedUploadText(value.retryID, 128),
+    trackID: boundedUploadText(value.trackID, 128),
+    filename: boundedUploadText(value.filename),
+    title,
+    artist: boundedUploadText(value.artist),
+    status,
+    attempts: Math.max(0, Math.min(10, Math.floor(Number(value.attempts) || 0))),
+    message: status === "uploaded" ? null : boundedUploadText(value.message, 1_000) || (status === "cancelled" ? "Upload cancelled." : "Upload failed."),
+    remoteID: boundedUploadText(value.remoteID, 128),
+  };
+}
+
+export function normalizeServerUploadManifest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = boundedUploadText(value.id, 128);
+  const serverOrigin = normalizedServerOrigin(value.serverOrigin);
+  const items = (Array.isArray(value.items) ? value.items : [])
+    .map(normalizedServerUploadManifestItem)
+    .filter(Boolean)
+    .slice(0, 500);
+  if (!id || !serverOrigin || !items.length) return null;
+  const startedAt = Number.isFinite(Date.parse(value.startedAt))
+    ? new Date(value.startedAt).toISOString()
+    : new Date().toISOString();
+  const updatedAt = Number.isFinite(Date.parse(value.updatedAt))
+    ? new Date(value.updatedAt).toISOString()
+    : startedAt;
+  return {
+    id,
+    serverOrigin,
+    profileID: boundedUploadText(value.profileID, 128) || "default",
+    source: ["picker", "missing-downloads", "link-import"].includes(value.source) ? value.source : "picker",
+    startedAt,
+    updatedAt,
+    items,
+  };
+}
+
+export function serverUploadManifestRetryIDs(value) {
+  const manifest = normalizeServerUploadManifest(value);
+  return manifest ? manifest.items
+    .filter((item) => item.status !== "uploaded" && item.retryID)
+    .map((item) => item.retryID) : [];
+}
+
+export function serverUploadManifestCanCleanup(value) {
+  const manifest = normalizeServerUploadManifest(value);
+  return Boolean(manifest?.items.length) && manifest.items.every((item) => item.status === "uploaded");
+}
+
+export function physicalStorageClassForTrack(track) {
+  if (track?.storageLocation === "server-cache") return "downloads";
+  if (track?.storageLocation === "external") return "external";
+  if (track?.storageLocation === "local") return "files";
+  // Legacy normalized state may be constructed outside the main process. The
+  // main-process loader replaces this fallback with the path-derived class.
+  return track?.remoteID ? "downloads" : "files";
+}
+
 function listeningHistorySongKey(entry) {
   const profileID = entry?.profileID || "default";
+  const serverOrigin = normalizedServerOrigin(entry?.serverOrigin) || "unowned";
   const remoteID = optionalHistoryText(entry?.remoteID, 128);
-  return remoteID ? `${profileID}#remote:${remoteID}` : `${profileID}#track:${entry?.trackID || "unknown"}`;
+  return remoteID
+    ? `${serverOrigin}#${profileID}#remote:${remoteID}`
+    : `${serverOrigin}#${profileID}#track:${entry?.trackID || "unknown"}`;
 }
 
 function listeningHistoryTrackSnapshot(state, entry) {
@@ -361,10 +627,10 @@ export function restoreProfileState(state, profileID, serverURL = state.serverUR
 
 export function trackBelongsToActiveProfile(state, track) {
   if (!track?.remoteID) return true;
-  const profileMatches = (track.syncProfileID || "default") === (state.syncProfileID || "default");
-  const source = normalizedServerOrigin(track.sourceServer);
   const activeServer = normalizedServerOrigin(state.serverURL);
-  return profileMatches && (!source || source === activeServer);
+  const source = normalizedServerOrigin(track.sourceServer);
+  const profileMatches = (track.syncProfileID || "default") === (state.syncProfileID || "default");
+  return profileMatches && Boolean(source && activeServer && source === activeServer);
 }
 
 export function tracksForActiveProfile(state) {
@@ -413,16 +679,32 @@ export function normalizeState(value) {
   state.clipRanges = normalizedClipRanges(state.clipRanges);
   state.dirtyClipRangeKeys = unique(Array.isArray(state.dirtyClipRangeKeys) ? state.dirtyClipRangeKeys.filter((key) => typeof key === "string" && key.startsWith("remote:")) : []);
   state.deletedClipRangeKeys = unique(Array.isArray(state.deletedClipRangeKeys) ? state.deletedClipRangeKeys.filter((key) => typeof key === "string" && key.startsWith("remote:")) : []);
+  const historyOriginByTrackID = new Map();
+  for (const track of state.tracks) {
+    if (!track || typeof track !== "object") continue;
+    const origin = normalizedServerOrigin(track.sourceServer);
+    if (track.id && origin) historyOriginByTrackID.set(track.id, origin);
+  }
+  const inferredHistoryOrigin = (entry) => {
+    const explicit = normalizedServerOrigin(entry?.serverOrigin);
+    if (explicit) return explicit;
+    // A bare remote ID is not globally unique. Only the referenced track's
+    // persisted origin can safely migrate a legacy history entry.
+    return historyOriginByTrackID.get(entry?.trackID) || null;
+  };
   state.listeningHistory = (Array.isArray(state.listeningHistory) ? state.listeningHistory : [])
     .filter((entry) =>
       entry
       && typeof entry.id === "string"
       && typeof entry.trackID === "string"
+      && entry.id.length <= 128
+      && entry.trackID.length <= 128
       && Number.isFinite(Date.parse(entry.startedAt)))
     .map((entry) => ({
       id: entry.id,
       trackID: entry.trackID,
       profileID: typeof entry.profileID === "string" && entry.profileID ? entry.profileID : "default",
+      serverOrigin: inferredHistoryOrigin(entry),
       startedAt: new Date(entry.startedAt).toISOString(),
       listenedSeconds: Math.max(0, Number(entry.listenedSeconds) || 0),
       remoteID: optionalHistoryText(entry.remoteID, 128),
@@ -433,23 +715,46 @@ export function normalizeState(value) {
       originatedOnThisDevice: entry.originatedOnThisDevice !== false,
     }))
     .slice(-2000);
-  const activeServerOrigin = normalizedServerOrigin(state.serverURL);
+  state.serverUploadManifests = (Array.isArray(state.serverUploadManifests) ? state.serverUploadManifests : [])
+    .map(normalizeServerUploadManifest)
+    .filter(Boolean)
+    .slice(-20);
+  state.serverTransferPreferences = normalizedServerTransferPreferences(state.serverTransferPreferences);
   state.tracks = state.tracks.map((track) => track?.remoteID ? {
     ...track,
-    sourceServer: normalizedServerOrigin(track.sourceServer) || activeServerOrigin,
+    // A source-less legacy remote record has ambiguous ownership. Keep it
+    // quarantined until an exact compound identity or content hash proves its
+    // server instead of assigning whichever server happens to be configured.
+    sourceServer: normalizedServerOrigin(track.sourceServer) || null,
     syncProfileID: track.syncProfileID || "default",
-  } : track);
+    available: track.available !== false,
+    missing: Boolean(track.missing || track.available === false),
+    storageLocation: typeof track.storageLocation === "string" ? track.storageLocation : "server-cache",
+  } : {
+    ...track,
+    available: track?.available !== false,
+    missing: Boolean(track?.missing || track?.available === false),
+    storageLocation: typeof track?.storageLocation === "string" ? track.storageLocation : "local",
+  });
   reconcileServerBackedTrackDuplicates(state);
   const seenRemote = new Set();
   state.tracks = state.tracks.filter((track) => {
     if (!track?.remoteID) return true;
-    const key = `${track.sourceServer}#${track.syncProfileID}#${track.remoteID}`;
+    const sourceServer = normalizedServerOrigin(track.sourceServer);
+    // Source-less legacy records have no proven compound identity. Preserve
+    // each local record until a later exact association can reconcile it.
+    if (!sourceServer) return true;
+    const key = `${sourceServer}#${track.syncProfileID}#${track.remoteID}`;
     if (seenRemote.has(key)) return false;
     seenRemote.add(key);
     return true;
   });
   const trackIDs = new Set(state.tracks.map((track) => track.id));
   state.playbackQueueIDs = unique(Array.isArray(state.playbackQueueIDs) ? state.playbackQueueIDs : [])
+    .filter((id) => trackIDs.has(id));
+  state.playbackSourceQueueIDs = unique(Array.isArray(state.playbackSourceQueueIDs)
+    ? state.playbackSourceQueueIDs
+    : state.playbackQueueIDs)
     .filter((id) => trackIDs.has(id));
   state.playbackPlaylistID = typeof state.playbackPlaylistID === "string" ? state.playbackPlaylistID : null;
   let system = state.playlists.find((playlist) => playlist.isSystem);
@@ -467,12 +772,12 @@ export function normalizeState(value) {
   const favorites = new Set(state.favorites);
   if (!hadRemoteLikedSongIDs) {
     state.remoteLikedSongIDs = unique(state.tracks
-      .filter((track) => track.remoteID && favorites.has(track.id) && (track.syncProfileID || "default") === state.syncProfileID)
+      .filter((track) => track.remoteID && favorites.has(track.id) && trackBelongsToActiveProfile(state, track))
       .map((track) => track.remoteID));
   }
   if (state.likesDirty && !hadDirtyRemoteLikeSongIDs) {
     state.dirtyRemoteLikeSongIDs = unique(state.tracks
-      .filter((track) => track.remoteID && (track.syncProfileID || "default") === state.syncProfileID)
+      .filter((track) => track.remoteID && trackBelongsToActiveProfile(state, track))
       .map((track) => track.remoteID));
   }
   state.likesDirty = state.dirtyRemoteLikeSongIDs.length > 0;
@@ -497,7 +802,14 @@ function listeningHistoryEntryMatchesActiveProfile(state, entry) {
   const entryProfileID = typeof entry?.profileID === "string" && entry.profileID
     ? entry.profileID
     : "default";
-  return entryProfileID === activeProfileID;
+  const activeServerOrigin = normalizedServerOrigin(state?.serverURL);
+  const entryServerOrigin = normalizedServerOrigin(entry?.serverOrigin);
+  if (entryProfileID !== activeProfileID) return false;
+  // A library that has never been connected to a server still owns its local
+  // history. Once a server is configured, unowned legacy entries stay private
+  // instead of being silently attributed to (and synced with) that server.
+  if (!activeServerOrigin) return !entryServerOrigin;
+  return Boolean(entryServerOrigin && activeServerOrigin === entryServerOrigin);
 }
 
 export function summarizeListeningHistory(state, dayCount = 30, now = new Date(), windowOffset = 0) {
@@ -631,15 +943,28 @@ export function summarizeListeningStats(state, now = new Date()) {
   };
 }
 
-export function mergeListeningHistoryDocument(state, document, requestedProfileID = state?.syncProfileID || "default") {
+export function mergeListeningHistoryDocument(
+  state,
+  document,
+  requestedProfileID = state?.syncProfileID || "default",
+  requestedServerURL = state?.serverURL,
+) {
   const profileID = typeof document?.profile_id === "string" && document.profile_id
     ? document.profile_id
     : typeof document?.profileID === "string" && document.profileID
       ? document.profileID
       : requestedProfileID;
-  if (profileID !== requestedProfileID || !Array.isArray(document?.entries)) return false;
+  const requestedServerOrigin = normalizedServerOrigin(requestedServerURL);
+  const documentServerOrigin = normalizedServerOrigin(document?.server_origin ?? document?.serverOrigin);
+  if (
+    profileID !== requestedProfileID
+    || !requestedServerOrigin
+    || (documentServerOrigin && documentServerOrigin !== requestedServerOrigin)
+    || !Array.isArray(document?.entries)
+  ) return false;
 
-  const entriesByID = new Map((state.listeningHistory || []).map((entry) => [entry.id, entry]));
+  const historyIdentity = (entry) => `${normalizedServerOrigin(entry?.serverOrigin) || "unowned"}#${entry?.profileID || "default"}#${entry?.id || ""}`;
+  const entriesByID = new Map((state.listeningHistory || []).map((entry) => [historyIdentity(entry), entry]));
   const activeTracks = tracksForActiveProfile(state);
   const tracksByID = new Map(activeTracks.map((track) => [track.id, track]));
   const tracksByRemoteID = new Map(activeTracks
@@ -651,14 +976,16 @@ export function mergeListeningHistoryDocument(state, document, requestedProfileI
     const rawTrackID = optionalHistoryText(remote?.track_id ?? remote?.trackID, 128);
     const startedAt = new Date(remote?.started_at ?? remote?.startedAt);
     if (!id || !rawTrackID || !Number.isFinite(startedAt.getTime())) continue;
-    const existing = entriesByID.get(id);
+    const identity = `${requestedServerOrigin}#${profileID}#${id}`;
+    const existing = entriesByID.get(identity);
     const remoteID = optionalHistoryText(remote?.song_id ?? remote?.remoteID, 128)
       || existing?.remoteID;
     const mappedTrack = (remoteID && tracksByRemoteID.get(remoteID)) || tracksByID.get(rawTrackID);
-    entriesByID.set(id, {
+    entriesByID.set(identity, {
       id,
       trackID: mappedTrack?.id || existing?.trackID || rawTrackID,
       profileID,
+      serverOrigin: requestedServerOrigin,
       startedAt: existing?.startedAt || startedAt.toISOString(),
       listenedSeconds: Math.max(existing?.listenedSeconds || 0, Number(remote?.listened_seconds ?? remote?.listenedSeconds) || 0),
       remoteID: remoteID || mappedTrack?.remoteID || null,
@@ -765,14 +1092,25 @@ export function filterPlaylists(playlists, tracks, query) {
   });
 }
 
-export function nextIndex(tracks, currentID, direction = 1, shuffle = false, random = Math.random) {
-  if (!tracks.length) return -1;
-  if (shuffle && tracks.length > 1) {
-    const candidates = tracks.map((_, index) => index).filter((index) => tracks[index].id !== currentID);
-    return candidates[Math.floor(random() * candidates.length)];
+export function shuffledTrackIDs(tracks, currentID = null, random = Math.random) {
+  const ids = unique((Array.isArray(tracks) ? tracks : []).map((track) => track?.id).filter(Boolean));
+  if (!ids.length) return [];
+  const currentIndex = ids.indexOf(currentID);
+  const remaining = currentIndex >= 0 ? ids.filter((id) => id !== currentID) : [...ids];
+  for (let index = remaining.length - 1; index > 0; index -= 1) {
+    const randomValue = Math.max(0, Math.min(0.999999999999, Number(random()) || 0));
+    const otherIndex = Math.floor(randomValue * (index + 1));
+    [remaining[index], remaining[otherIndex]] = [remaining[otherIndex], remaining[index]];
   }
-  const current = Math.max(0, tracks.findIndex((track) => track.id === currentID));
-  return (current + direction + tracks.length) % tracks.length;
+  return currentIndex >= 0 ? [currentID, ...remaining] : remaining;
+}
+
+export function nextIndex(tracks, currentID, direction = 1) {
+  if (!tracks.length) return -1;
+  const current = tracks.findIndex((track) => track.id === currentID);
+  if (current < 0) return direction >= 0 ? 0 : -1;
+  const next = current + (direction >= 0 ? 1 : -1);
+  return next >= 0 && next < tracks.length ? next : -1;
 }
 
 export function tracksForPlaylist(state, playlistID) {
@@ -793,13 +1131,18 @@ export function reconcileUploadedTrack(state, trackID, remoteSong, options = {})
   if (!target || !remoteID) return false;
   const profileID = String(options.profileID || state.syncProfileID || "default");
   const sourceServer = normalizedServerOrigin(options.serverURL || state.serverURL);
+  const associationConflict = remoteAssociationConflictMessage(target, {
+    serverURL: sourceServer,
+    profileID,
+  });
+  if (associationConflict) throw new Error(associationConflict);
   const previousRemoteID = String(target.remoteID || "").trim() || null;
   const duplicateIDs = new Set(state.tracks
     .filter((track) =>
       track?.id !== target.id
       && track?.remoteID === remoteID
       && (track.syncProfileID || "default") === profileID
-      && (!sourceServer || !normalizedServerOrigin(track.sourceServer) || normalizedServerOrigin(track.sourceServer) === sourceServer))
+      && Boolean(sourceServer && normalizedServerOrigin(track.sourceServer) === sourceServer))
     .map((track) => track.id));
   const identityChanged = target.remoteID !== remoteID
     || (target.syncProfileID || null) !== profileID
@@ -842,6 +1185,7 @@ export function reconcileUploadedTrack(state, trackID, remoteSong, options = {})
   }
 
   state.playbackQueueIDs = remap(state.playbackQueueIDs);
+  state.playbackSourceQueueIDs = remap(state.playbackSourceQueueIDs);
   if (duplicateIDs.has(state.currentTrackID)) state.currentTrackID = target.id;
   state.listeningHistory = (state.listeningHistory || []).map((entry) =>
     duplicateIDs.has(entry.trackID) ? { ...entry, trackID: target.id } : entry);
@@ -893,7 +1237,7 @@ export function reconcileServerBackedTrackDuplicates(state) {
   for (const serverTrack of [...state.tracks]) {
     const hash = String(serverTrack?.contentSha256 || "").trim().toLocaleLowerCase();
     const size = Number(serverTrack?.size);
-    if (!serverTrack?.remoteID || !hash || !Number.isFinite(size) || size <= 0) continue;
+    if (!serverTrack?.remoteID || !trackBelongsToActiveProfile(state, serverTrack) || !hash || !Number.isFinite(size) || size <= 0) continue;
     const localTrackID = localByContent.get(`${size}#${hash}`);
     if (!localTrackID) continue;
     if (reconcileUploadedTrack(state, localTrackID, { ...serverTrack, id: serverTrack.remoteID }, {
@@ -926,31 +1270,240 @@ export function formatServerDownloadFailureNotice(failures) {
   return `${items.length} song${items.length === 1 ? "" : "s"} failed to download after retrying: ${items.join("; ")}.`;
 }
 
+export function serverUploadConfigurationError({ serverURL, adminToken } = {}) {
+  let parsedServerURL = null;
+  try { parsedServerURL = new URL(String(serverURL || "").trim()); } catch { /* Report the shared URL error below. */ }
+  if (!parsedServerURL || !["http:", "https:"].includes(parsedServerURL.protocol)) {
+    return "Add a complete http:// or https:// server URL before uploading.";
+  }
+  if (parsedServerURL.username || parsedServerURL.password) {
+    return "Remove credentials from the server URL before uploading.";
+  }
+  const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
+  const hostname = parsedServerURL.hostname.toLocaleLowerCase().replace(/\.$/, "");
+  if (parsedServerURL.protocol !== "https:" && !loopbackHosts.has(hostname)) {
+    return "Use an HTTPS server URL before sending an admin key. HTTP is only available for explicit loopback development.";
+  }
+  if (!String(adminToken || "").trim()) return "Enter the server admin key before uploading.";
+  return null;
+}
+
+export function serverUploadBlockedByActivity({ uploadInFlight = false, transferActive = false } = {}) {
+  return Boolean(uploadInFlight || transferActive);
+}
+
+export function localImportNeedsServerContext({ serverBacked = false, uploadRequested = false } = {}) {
+  return Boolean(serverBacked || uploadRequested);
+}
+
+export function localImportCandidateCanAutoSelect(candidate) {
+  if (!candidate || typeof candidate !== "object") return false;
+  return candidate.autoSelectable !== false
+    && candidate.auto_selectable !== false
+    && candidate.requiresReview !== true
+    && candidate.requires_review !== true
+    && candidate.actionable !== false;
+}
+
+export function buildLocalImportSourceIdentity(candidate, metadata = {}) {
+  if (candidate?.sourceIdentity && typeof candidate.sourceIdentity === "object") return candidate.sourceIdentity;
+  const match = candidate?.match && typeof candidate.match === "object" ? candidate.match : {};
+  const mediaProvider = candidate?.sourceProvider || candidate?.searchProvider || "unknown";
+  const mediaProviderID = candidate?.providerID || candidate?.candidateID || candidate?.videoID || candidate?.trackID || candidate?.fileID || null;
+  const mediaPageURL = candidate?.sourcePageURL || candidate?.sourceURL || null;
+  const metadataProvider = metadata?.provider || (metadata?.trackID ? candidate?.searchProvider : null) || mediaProvider;
+  const metadataProviderID = metadata?.providerID || metadata?.providerId || metadata?.trackID
+    || (metadataProvider === mediaProvider ? mediaProviderID : null);
+  const metadataPageURL = metadata?.sourcePageURL || metadata?.sourceURL
+    || (metadataProvider === mediaProvider ? mediaPageURL : null);
+  const evidence = {
+    evidenceStrength: candidate?.evidenceStrength || candidate?.evidence_strength || null,
+    requiresReview: candidate?.requiresReview === true || candidate?.requires_review === true,
+    actionable: candidate?.actionable !== false,
+    sourceKind: candidate?.sourceKind || null,
+    searchProvider: candidate?.searchProvider || null,
+    matchedMediaProvider: mediaProvider,
+    matchedMediaProviderID: mediaProviderID,
+    matchedMediaReference: candidate?.mediaSourceURL || candidate?.sourceURL || null,
+    titleScore: Number.isFinite(Number(match.title)) ? Number(match.title) : null,
+    artistScore: Number.isFinite(Number(match.artist)) ? Number(match.artist) : null,
+    albumScore: Number.isFinite(Number(match.album)) ? Number(match.album) : null,
+    durationScore: Number.isFinite(Number(match.duration)) ? Number(match.duration) : null,
+    durationDeltaSeconds: Number.isFinite(Number(match.durationDeltaSeconds)) ? Number(match.durationDeltaSeconds) : null,
+  };
+  const identity = {
+    provider: metadataProvider,
+    providerID: metadataProviderID,
+    sourcePageURL: metadataPageURL,
+    confidence: candidate?.confidence || null,
+    score: Number.isFinite(Number(candidate?.score)) ? Number(candidate.score) : null,
+    evidence,
+  };
+  const sameIdentity = metadataProvider === mediaProvider
+    && String(metadataProviderID || "") === String(mediaProviderID || "")
+    && String(metadataPageURL || "") === String(mediaPageURL || "");
+  if (sameIdentity) {
+    identity.mediaSourceURL = candidate?.mediaSourceURL || candidate?.sourceURL || null;
+    return identity;
+  }
+  identity.aliases = [{
+    provider: mediaProvider,
+    providerID: mediaProviderID,
+    sourcePageURL: mediaPageURL,
+    mediaSourceURL: candidate?.mediaSourceURL || candidate?.sourceURL || null,
+    confidence: candidate?.confidence || null,
+    score: Number.isFinite(Number(candidate?.score)) ? Number(candidate.score) : null,
+    evidence: { ...evidence, identityRole: "matched_media" },
+  }];
+  return identity;
+}
+
+export function mergeTrackSourceIdentity(track, sourceIdentity) {
+  if (!track || !sourceIdentity || typeof sourceIdentity !== "object") return false;
+  const existingCandidates = [
+    ...(Array.isArray(track.sourceIdentities) ? track.sourceIdentities : []),
+    ...(track.sourceIdentity ? [track.sourceIdentity, ...(track.sourceIdentity.aliases || [])] : []),
+  ].filter((identity) => identity && typeof identity === "object");
+  const incomingCandidates = [
+    sourceIdentity,
+    ...(Array.isArray(sourceIdentity.aliases) ? sourceIdentity.aliases : []),
+  ].filter((identity) => identity && typeof identity === "object");
+  const identityKey = (identity) => JSON.stringify([
+    identity.provider || null,
+    identity.providerID || identity.providerId || null,
+    identity.sourcePageURL || identity.sourceURL || null,
+    identity.mediaSourceURL || null,
+  ]);
+  const identityPayload = (identity) => {
+    const { aliases: _aliases, ...payload } = identity;
+    return payload;
+  };
+  const mergeIdentityValues = (current, incoming) => {
+    const merged = current ? { ...identityPayload(current) } : {};
+    for (const [key, value] of Object.entries(identityPayload(incoming))) {
+      if (value === null || value === undefined || value === "") continue;
+      if (key === "evidence" && value && typeof value === "object" && !Array.isArray(value)) {
+        const priorEvidence = merged.evidence && typeof merged.evidence === "object" && !Array.isArray(merged.evidence)
+          ? merged.evidence
+          : {};
+        merged.evidence = { ...priorEvidence };
+        for (const [evidenceKey, evidenceValue] of Object.entries(value)) {
+          if (evidenceValue !== null && evidenceValue !== undefined && evidenceValue !== "") {
+            merged.evidence[evidenceKey] = evidenceValue;
+          }
+        }
+      } else {
+        merged[key] = value;
+      }
+    }
+    return merged;
+  };
+  const collectIdentities = (candidates) => {
+    const keys = [];
+    const identitiesByKey = new Map();
+    for (const identity of candidates) {
+      const key = identityKey(identity);
+      if (!identitiesByKey.has(key)) keys.push(key);
+      identitiesByKey.set(key, mergeIdentityValues(identitiesByKey.get(key), identity));
+    }
+    return { keys: keys.slice(0, 8), identitiesByKey };
+  };
+  const previous = collectIdentities(existingCandidates);
+  const next = collectIdentities([...existingCandidates, ...incomingCandidates]);
+  const previousIdentities = previous.keys.map((key) => previous.identitiesByKey.get(key));
+  const identities = next.keys.map((key) => next.identitiesByKey.get(key));
+  const changed = JSON.stringify(previousIdentities) !== JSON.stringify(identities);
+  if (!changed) return false;
+  const canonical = track.sourceIdentity || sourceIdentity;
+  const canonicalKey = identityKey(canonical);
+  track.sourceIdentity = {
+    ...(next.identitiesByKey.get(canonicalKey) || identityPayload(canonical)),
+    aliases: identities.filter((identity) => identityKey(identity) !== canonicalKey),
+  };
+  track.sourceIdentities = identities;
+  track.sourceURL = track.sourceIdentity.sourcePageURL || track.sourceURL || null;
+  return true;
+}
+
+export function catalogRequestCanApply({ requestGeneration, currentGeneration, contextCurrent = true } = {}) {
+  return Boolean(contextCurrent) && requestGeneration === currentGeneration;
+}
+
+export function serverTrackRemoteIDBelongsToContext(track, { serverURL, profileID = "default" } = {}) {
+  if (!String(track?.remoteID || "").trim()) return false;
+  const sourceServer = normalizedServerOrigin(track?.sourceServer);
+  const activeServer = normalizedServerOrigin(serverURL);
+  return Boolean(sourceServer && activeServer && sourceServer === activeServer)
+    && String(track?.syncProfileID || "default") === String(profileID || "default");
+}
+
+export function remoteAssociationConflictMessage(track, { serverURL, profileID = "default" } = {}) {
+  const remoteID = String(track?.remoteID || "").trim();
+  const rawSourceServer = String(track?.sourceServer || "").trim();
+  const rawProfileID = String(track?.syncProfileID || "").trim();
+  if (!remoteID && !rawSourceServer && !rawProfileID) return null;
+  const sourceServer = normalizedServerOrigin(rawSourceServer);
+  const activeServer = normalizedServerOrigin(serverURL);
+  const storedProfileID = rawProfileID || "default";
+  const targetProfileID = String(profileID || "default");
+  if (sourceServer && activeServer && sourceServer === activeServer && storedProfileID === targetProfileID) return null;
+  return "This song is already linked to a different server or profile. Switch back to its original server and profile; Resonance left the existing link unchanged.";
+}
+
+export function remoteAssociationConflictFilePaths(tracks, context = {}) {
+  return unique((Array.isArray(tracks) ? tracks : []).flatMap((track) => {
+    const filePath = String(track?.filePath || "").trim();
+    return filePath && remoteAssociationConflictMessage(track, context) ? [filePath] : [];
+  }));
+}
+
+export function mergeUploadedSongsIntoCatalog(catalog, results) {
+  const merged = Array.isArray(catalog) ? [...catalog] : [];
+  for (const result of Array.isArray(results) ? results : []) {
+    const remoteSong = result?.remoteSong;
+    const remoteID = String(remoteSong?.id || "").trim();
+    if (!remoteID) continue;
+    const index = merged.findIndex((song) => String(song?.id || "").trim() === remoteID);
+    if (index >= 0) merged[index] = { ...merged[index], ...remoteSong };
+    else merged.push(remoteSong);
+  }
+  return merged;
+}
+
 export function planMissingDownloadedUploads(state, catalog) {
   const songs = Array.isArray(catalog) ? catalog : [];
   const remoteIDs = new Set(songs.map((song) => String(song?.id || "").trim()).filter(Boolean));
-  const remoteByHash = new Map(songs.map((song) => [
-    String(song?.content_sha256 || song?.contentSha256 || "").trim().toLocaleLowerCase(),
-    song,
-  ]).filter(([hash]) => hash));
+  const validSHA256 = (value) => /^[a-f\d]{64}$/i.test(String(value || "").trim());
+  const remoteByHash = new Map(songs.map((song) => {
+    const hash = String(song?.content_sha256 || song?.contentSha256 || "").trim().toLocaleLowerCase();
+    return [hash, song];
+  }).filter(([hash]) => validSHA256(hash)));
   const uploadTracks = [];
   const matches = [];
-  const activeProfileID = String(state?.syncProfileID || "default");
+  const ambiguous = [];
   const activeServer = normalizedServerOrigin(state?.serverURL);
+  const activeProfileID = String(state?.syncProfileID || "default");
 
   for (const track of state.tracks || []) {
-    if (!track?.filePath || (!track.remoteID && !track.sourceServer)) continue;
-    if (String(track.syncProfileID || "default") !== activeProfileID) continue;
+    if (!track?.filePath || track.available === false || (!track.remoteID && !track.sourceServer)) continue;
     const sourceServer = normalizedServerOrigin(track.sourceServer);
-    if (track.sourceServer && (!sourceServer || sourceServer !== activeServer)) continue;
+    const profileID = String(track.syncProfileID || "default");
+    if (!activeServer || sourceServer !== activeServer || profileID !== activeProfileID) continue;
     if (track.remoteID && remoteIDs.has(String(track.remoteID))) continue;
     const hash = String(track.contentSha256 || "").trim().toLocaleLowerCase();
-    const remoteSong = (hash ? remoteByHash.get(hash) : null)
-      || songs.find((song) => serverSongMetadataMatches(track, song));
-    if (remoteSong) matches.push({ trackID: track.id, remoteSong });
-    else uploadTracks.push(track);
+    const exactMatch = validSHA256(hash) ? remoteByHash.get(hash) : null;
+    if (exactMatch) {
+      matches.push({ trackID: track.id, remoteSong: exactMatch });
+      continue;
+    }
+    const metadataMatches = songs.filter((song) => serverSongMetadataMatches(track, song));
+    if (metadataMatches.length) {
+      ambiguous.push({ track, candidates: metadataMatches });
+      continue;
+    }
+    uploadTracks.push(track);
   }
-  return { uploadTracks, matches };
+  return { uploadTracks, matches, ambiguous };
 }
 
 export function formatServerUploadFailureNotice(failures) {

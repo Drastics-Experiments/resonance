@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- The anonymous cohort is per installation and must never roam to a restore. -->
+    <exclude domain="sharedpref" path="resonance.client.config.v1.xml" />
+</full-backup-content>

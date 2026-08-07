@@ -16,6 +16,22 @@ const requiredAndroidSecrets = [
   "RESONANCE_ANDROID_KEY_ALIAS",
   "RESONANCE_ANDROID_KEY_PASSWORD",
 ];
+const requiredMacOSSecrets = [
+  "RESONANCE_MACOS_APP_CERTIFICATE_BASE64",
+  "RESONANCE_MACOS_APP_CERTIFICATE_PASSWORD",
+  "RESONANCE_MACOS_APP_IDENTITY",
+  "RESONANCE_MACOS_INSTALLER_CERTIFICATE_BASE64",
+  "RESONANCE_MACOS_INSTALLER_CERTIFICATE_PASSWORD",
+  "RESONANCE_MACOS_INSTALLER_IDENTITY",
+  "RESONANCE_MACOS_NOTARY_KEY_BASE64",
+  "RESONANCE_MACOS_NOTARY_KEY_ID",
+  "RESONANCE_MACOS_NOTARY_ISSUER_ID",
+];
+const requiredWindowsSecrets = [
+  "RESONANCE_WINDOWS_CERTIFICATE_BASE64",
+  "RESONANCE_WINDOWS_CERTIFICATE_PASSWORD",
+  "RESONANCE_WINDOWS_CERTIFICATE_SHA1",
+];
 const versionFiles = [
   "android/app/build.gradle.kts",
   "ios/LikedSongsMobile.xcodeproj/project.pbxproj",
@@ -194,7 +210,7 @@ function usage() {
 
 Creates one release PR from the current clean, committed HEAD, waits for all four
 platform candidates, merges only after the validated bundle passes, publishes the
-same artifacts, and verifies the public release.
+same artifacts, and verifies the public release plus its desktop-signing evidence.
 
 Options:
   --version X.Y.Z   Release version (default: next patch)
@@ -266,12 +282,17 @@ function resolveRepository() {
   return gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
 }
 
-function ensureAndroidSigningSecrets(repository) {
+function ensureReleaseSigningSecrets(repository) {
   const secrets = ghJSON(["secret", "list", "--repo", repository, "--json", "name"]);
   const names = new Set(secrets.map((secret) => secret.name));
-  const missing = requiredAndroidSecrets.filter((name) => !names.has(name));
+  const required = [
+    ...requiredAndroidSecrets,
+    ...requiredMacOSSecrets,
+    ...requiredWindowsSecrets,
+  ];
+  const missing = required.filter((name) => !names.has(name));
   if (missing.length > 0) {
-    fail(`missing Android release-signing secret(s): ${missing.join(", ")}`);
+    fail(`missing production release-signing secret(s): ${missing.join(", ")}`);
   }
 }
 
@@ -311,8 +332,9 @@ function validateVersionChanges() {
 
 function releaseBody(version, build, sourceSha) {
   return `## Release\n- version: ${version}\n- build: ${build}\n- source: ${sourceSha}\n\n` +
-    "The release-candidate workflow builds iOS, Android, macOS, and Windows in parallel, " +
-    "validates the complete asset contract, and records exact source provenance. Merging " +
+    "The release-candidate workflow builds iOS, Android, production-signed macOS, and " +
+    "production-signed Windows in parallel, validates the complete asset and signing " +
+    "contract, and records exact source provenance. Merging " +
     "this PR publishes those already-built artifacts without rebuilding them.";
 }
 
@@ -468,7 +490,7 @@ function mergeReleasePullRequest(repository, pullRequest, candidateSha) {
   return merged;
 }
 
-async function verifyPublicRelease(repository, version, candidateSha, mergeSha) {
+async function verifyPublicRelease(repository, version, candidateSha, mergeSha, candidateRunId) {
   const tag = `v${version}`;
   const release = ghJSON([
     "release",
@@ -497,22 +519,47 @@ async function verifyPublicRelease(repository, version, candidateSha, mergeSha) 
     fail(`${tag} targets ${tagSha}, expected ${candidateSha} or ${mergeSha}`);
   }
 
-  const verificationDirectory = fs.mkdtempSync(
+  const verificationRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), `resonance-release-${version}-`),
   );
   try {
+    const assetDirectory = path.join(verificationRoot, "assets");
+    const provenanceDirectory = path.join(verificationRoot, "provenance");
+    fs.mkdirSync(assetDirectory);
+    fs.mkdirSync(provenanceDirectory);
     run(
       "gh",
-      ["release", "download", tag, "--repo", repository, "--dir", verificationDirectory],
+      ["release", "download", tag, "--repo", repository, "--dir", assetDirectory],
+      { capture: false },
+    );
+    run(
+      "gh",
+      [
+        "run",
+        "download",
+        String(candidateRunId),
+        "--repo",
+        repository,
+        "--name",
+        `release-provenance-${tag}-${candidateSha}`,
+        "--dir",
+        provenanceDirectory,
+      ],
       { capture: false },
     );
     run(
       process.execPath,
-      ["scripts/validate-release-assets.mjs", verificationDirectory, version],
+      [
+        "scripts/validate-release-assets.mjs",
+        assetDirectory,
+        version,
+        "--signing-evidence",
+        path.join(provenanceDirectory, "signing"),
+      ],
       { capture: false },
     );
   } finally {
-    fs.rmSync(verificationDirectory, { force: true, recursive: true });
+    fs.rmSync(verificationRoot, { force: true, recursive: true });
   }
   console.log(`Published and verified ${release.url}`);
   return release;
@@ -531,7 +578,7 @@ async function main() {
   const initialBranch = currentBranch;
   const repository = resolveRepository();
   const source = ensureCurrentSourceContainsMain(currentBranch);
-  ensureAndroidSigningSecrets(repository);
+  ensureReleaseSigningSecrets(repository);
 
   let manifest = readManifest();
   let releaseBranchMatch = /^release\/v([0-9]+\.[0-9]+\.[0-9]+)$/.exec(currentBranch);
@@ -604,13 +651,13 @@ async function main() {
   if (!pullRequest) fail(`could not resolve the release PR for ${branch}`);
 
   let mergedPullRequest = currentPullRequest(repository, pullRequest.number);
+  const candidateRun = await requireSuccessfulWorkflow(
+    repository,
+    "release-candidate.yml",
+    candidateSha,
+    options.retryFailed,
+  );
   if (mergedPullRequest.state === "OPEN") {
-    await requireSuccessfulWorkflow(
-      repository,
-      "release-candidate.yml",
-      candidateSha,
-      options.retryFailed,
-    );
     mergedPullRequest = mergeReleasePullRequest(repository, mergedPullRequest, candidateSha);
   } else if (mergedPullRequest.state !== "MERGED") {
     fail(`release PR ${mergedPullRequest.url} is closed without being merged`);
@@ -624,7 +671,13 @@ async function main() {
     candidateSha,
     options.retryFailed,
   );
-  await verifyPublicRelease(repository, version, candidateSha, mergeSha);
+  await verifyPublicRelease(
+    repository,
+    version,
+    candidateSha,
+    mergeSha,
+    candidateRun.databaseId,
+  );
 
   if (initialBranch !== branch && succeeds("git", ["show-ref", "--verify", "--quiet", `refs/heads/${initialBranch}`])) {
     run("git", ["switch", initialBranch], { capture: false });

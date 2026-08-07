@@ -8,8 +8,12 @@ import mov.unblocked.resonance.data.ClipRange
 import mov.unblocked.resonance.data.LinkImportResolution
 import mov.unblocked.resonance.data.LinkImportSearchResponse
 import mov.unblocked.resonance.data.LinkImportStage
+import mov.unblocked.resonance.data.EffectiveClientConfig
+import mov.unblocked.resonance.data.ServerDownloadMode
+import mov.unblocked.resonance.data.ServerUploadMode
 
 data class LinkImportUiState(
+    val requestedSource: String? = null,
     val stage: LinkImportStage = LinkImportStage.Idle,
     val resolution: LinkImportResolution? = null,
     val searchResponse: LinkImportSearchResponse? = null,
@@ -71,6 +75,14 @@ enum class ServerSort(val label: String) {
     RecentlyUpdated("Recently Updated"),
 }
 
+sealed interface PlaybackUiStatus {
+    data object Idle : PlaybackUiStatus
+    data object Ready : PlaybackUiStatus
+    data object Buffering : PlaybackUiStatus
+    data object Ended : PlaybackUiStatus
+    data class Failed(val message: String, val retryable: Boolean) : PlaybackUiStatus
+}
+
 /** A complete, render-only snapshot of Resonance. The ViewModel owns this state. */
 data class ResonanceUiState(
     val tracks: List<Track> = emptyList(),
@@ -81,9 +93,15 @@ data class ResonanceUiState(
     val playlists: List<Playlist> = emptyList(),
     val favoriteTrackIds: Set<String> = emptySet(),
     val currentTrackId: String? = null,
+    /** Render-only metadata for an authenticated stream; never part of the stored library. */
+    val transientCurrentTrack: Track? = null,
+    /** Same-origin catalog artwork for the transient stream; never persisted as a library path. */
+    val transientArtworkURL: String? = null,
     val activePlaylistId: String? = null,
     val isPlaying: Boolean = false,
+    val playbackStatus: PlaybackUiStatus = PlaybackUiStatus.Idle,
     val positionMs: Long = 0,
+    val playerDurationMs: Long? = null,
     val shuffleEnabled: Boolean = false,
     val repeatEnabled: Boolean = false,
     val playbackSpeed: Float = 1f,
@@ -93,6 +111,10 @@ data class ResonanceUiState(
     val serverToken: String = "",
     val serverAdminKey: String = "",
     val serverMessage: String = "Not connected",
+    val clientConfig: EffectiveClientConfig = EffectiveClientConfig.safeDefaults(),
+    val clientConfigStatus: String = "Safe defaults",
+    val serverUploadMode: ServerUploadMode? = ServerUploadMode.LocalFile,
+    val serverDownloadMode: ServerDownloadMode = ServerDownloadMode.VerifiedFileCache,
     val remoteSongs: List<RemoteSong> = emptyList(),
     val downloadedRemoteSongIds: Set<String> = emptySet(),
     val selectedRemoteSongIds: Set<String> = emptySet(),
@@ -113,10 +135,24 @@ data class ResonanceUiState(
     val linkImport: LinkImportUiState = LinkImportUiState(),
 ) {
     val currentTrack: Track?
-        get() = currentTrackId?.let { id -> tracks.firstOrNull { it.id == id } }
+        get() = currentTrackId?.let { id ->
+            tracks.firstOrNull { it.id == id } ?: transientCurrentTrack?.takeIf { it.id == id }
+        }
+
+    val isTransientPlayback: Boolean
+        get() = currentTrackId != null && transientCurrentTrack?.id == currentTrackId
 
     val isConnected: Boolean
         get() = remoteSongs.isNotEmpty() || serverMessage.startsWith("Connected", ignoreCase = true)
+
+    val hasServerUploadCredentials: Boolean
+        get() = serverUrl.isNotBlank() && serverAdminKey.isNotBlank()
+
+    val availableServerUploadModes: List<ServerUploadMode>
+        get() = clientConfig.availableUploadModes
+
+    val availableServerDownloadModes: List<ServerDownloadMode>
+        get() = clientConfig.availableDownloadModes
 
     val currentClipRange: ClipRange?
         get() = currentTrackId?.let(clipRangesByTrackId::get)
@@ -124,12 +160,32 @@ data class ResonanceUiState(
     val playbackStartMs: Long
         get() = currentClipRange?.startMs ?: 0L
 
-    val playbackEndMs: Long
-        get() = currentClipRange?.endMs ?: currentTrack?.durationMs ?: 0L
+    val playbackEndMs: Long?
+        get() = currentClipRange?.let { range ->
+            range.endMs.takeIf { it > range.startMs }
+        } ?: playerDurationMs?.takeIf { it > 0L }
+            ?: currentTrack?.durationMs?.takeIf { it > 0L }
 
-    val playbackDurationMs: Long
-        get() = (playbackEndMs - playbackStartMs).coerceAtLeast(1L)
+    val playbackDurationMs: Long?
+        get() = playbackEndMs?.let { end -> (end - playbackStartMs).takeIf { it > 0L } }
+
+    val canSeekPlayback: Boolean
+        get() = playbackDurationMs != null
 
     val playbackElapsedMs: Long
-        get() = (positionMs - playbackStartMs).coerceIn(0L, playbackDurationMs)
+        get() {
+            val elapsed = (positionMs - playbackStartMs).coerceAtLeast(0L)
+            return playbackDurationMs?.let { elapsed.coerceAtMost(it) } ?: elapsed
+        }
+
+    val playbackProgressFraction: Float?
+        get() = playbackDurationMs?.let { duration ->
+            (playbackElapsedMs.toFloat() / duration).coerceIn(0f, 1f)
+    }
+}
+
+internal fun LinkImportUiState.invalidatedForSourceEdit(source: String): LinkImportUiState {
+    val resolvedSource = requestedSource ?: return this
+    if (source.trim() == resolvedSource.trim()) return this
+    return LinkImportUiState()
 }

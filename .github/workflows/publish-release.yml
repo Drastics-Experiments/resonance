@@ -120,7 +120,9 @@ jobs:
           CANDIDATE_RUN_ID: ${{ steps.candidate.outputs.run_id }}
         run: |
           node scripts/release-version.mjs --check
-          node scripts/validate-release-assets.mjs candidate/assets "$VERSION"
+          node scripts/validate-release-assets.mjs \
+            candidate/assets "$VERSION" \
+            --signing-evidence candidate/signing
           git fetch --no-tags origin "$CANDIDATE_SHA"
           export SOURCE_TREE="$(git rev-parse "${CANDIDATE_SHA}^{tree}")"
           export BUILD="$(node -e 'const value = require("./release/version.json"); process.stdout.write(String(value.build))')"

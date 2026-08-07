@@ -86,6 +86,8 @@ data class LinkImportResolution(
     val candidates: List<LinkImportCandidate>,
     val kind: LinkImportKind = LinkImportKind.Track,
     val playlist: LinkImportPlaylist? = null,
+    /** True when the explicit choices are bound to the active Reviewed-match policy. */
+    val reviewedMatchPolicyBound: Boolean = false,
 )
 data class LinkImportProgress(val stage: LinkImportStage, val completedBytes: Long = 0, val totalBytes: Long = 0)
 data class LinkImportDownload(

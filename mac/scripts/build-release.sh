@@ -9,6 +9,11 @@ APP_VERSION="${APP_VERSION:-1.1.4}"
 BUILD_NUMBER="${BUILD_NUMBER:-15}"
 APP_SIGN_IDENTITY="${MACOS_APP_IDENTITY:--}"
 INSTALLER_IDENTITY="${MACOS_INSTALLER_IDENTITY:-}"
+PRODUCTION_SIGNING_REQUIRED="${RESONANCE_REQUIRE_PRODUCTION_SIGNING:-0}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-}"
+NOTARY_KEY_PATH="${NOTARY_KEY_PATH:-}"
+NOTARY_KEY_ID="${NOTARY_KEY_ID:-}"
+NOTARY_ISSUER_ID="${NOTARY_ISSUER_ID:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -20,9 +25,55 @@ APP="$WORK_DIR/$APP_NAME.app"
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT HUP INT TERM
 
-for tool in swift sips iconutil plutil codesign ditto pkgbuild pkgutil shasum lipo; do
+for tool in swift sips iconutil plutil codesign ditto pkgbuild pkgutil shasum lipo spctl xcrun; do
     command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 69; }
 done
+
+case "$PRODUCTION_SIGNING_REQUIRED" in
+    0|1) ;;
+    *) echo "RESONANCE_REQUIRE_PRODUCTION_SIGNING must be 0 or 1." >&2; exit 64 ;;
+esac
+
+NOTARY_API_CONFIGURED=0
+if [[ -n "$NOTARY_KEY_PATH" || -n "$NOTARY_KEY_ID" || -n "$NOTARY_ISSUER_ID" ]]; then
+    [[ -f "$NOTARY_KEY_PATH" && -n "$NOTARY_KEY_ID" && -n "$NOTARY_ISSUER_ID" ]] || {
+        echo "Notary API authentication requires NOTARY_KEY_PATH, NOTARY_KEY_ID, and NOTARY_ISSUER_ID." >&2
+        exit 64
+    }
+    NOTARY_API_CONFIGURED=1
+fi
+if [[ -n "$NOTARY_PROFILE" && "$NOTARY_API_CONFIGURED" == "1" ]]; then
+    echo "Configure either NOTARY_PROFILE or Notary API authentication, not both." >&2
+    exit 64
+fi
+
+if [[ "$PRODUCTION_SIGNING_REQUIRED" == "1" ]]; then
+    [[ "$APP_SIGN_IDENTITY" == "Developer ID Application:"* ]] || {
+        echo "A Developer ID Application identity is required for a production release." >&2
+        exit 64
+    }
+    [[ "$INSTALLER_IDENTITY" == "Developer ID Installer:"* ]] || {
+        echo "A Developer ID Installer identity is required for a production release." >&2
+        exit 64
+    }
+    [[ -n "$NOTARY_PROFILE" || "$NOTARY_API_CONFIGURED" == "1" ]] || {
+        echo "Notary authentication is required for a production release." >&2
+        exit 64
+    }
+fi
+
+submit_for_notarization() {
+    local artifact="$1"
+    if [[ -n "$NOTARY_PROFILE" ]]; then
+        xcrun notarytool submit "$artifact" --keychain-profile "$NOTARY_PROFILE" --wait
+    else
+        xcrun notarytool submit "$artifact" \
+            --key "$NOTARY_KEY_PATH" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait
+    fi
+}
 
 cd "$ROOT_DIR"
 EXECUTABLES=()
@@ -56,8 +107,6 @@ plutil -insert LSApplicationCategoryType -string public.app-category.music "$PLI
 plutil -insert LSMinimumSystemVersion -string 14.0 "$PLIST"
 plutil -insert NSHighResolutionCapable -bool YES "$PLIST"
 plutil -insert NSPrincipalClass -string NSApplication "$PLIST"
-plutil -insert NSAppTransportSecurity -dictionary "$PLIST"
-plutil -insert NSAppTransportSecurity.NSAllowsArbitraryLoads -bool YES "$PLIST"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 BASE_ICON="$WORK_DIR/AppIcon-1024.png"
@@ -85,16 +134,36 @@ else
 fi
 codesign --verify --deep --strict --verbose=2 "$APP"
 
-if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+if [[ "$PRODUCTION_SIGNING_REQUIRED" == "1" ]]; then
+    APP_SIGNATURE_DETAILS="$(codesign --display --verbose=4 "$APP" 2>&1)"
+    grep -Fqx "Authority=$APP_SIGN_IDENTITY" <<< "$APP_SIGNATURE_DETAILS" || {
+        echo "The app is not signed by the configured Developer ID Application certificate." >&2
+        exit 65
+    }
+    grep -Eq '^Timestamp=.+' <<< "$APP_SIGNATURE_DETAILS" || {
+        echo "The app signature does not have a secure timestamp." >&2
+        exit 65
+    }
+    grep -Eq 'flags=.*\(runtime\)' <<< "$APP_SIGNATURE_DETAILS" || {
+        echo "The app signature does not enable the hardened runtime." >&2
+        exit 65
+    }
+fi
+
+if [[ -n "$NOTARY_PROFILE" || "$NOTARY_API_CONFIGURED" == "1" ]]; then
     [[ "$APP_SIGN_IDENTITY" != "-" && -n "$INSTALLER_IDENTITY" ]] || {
-        echo "NOTARY_PROFILE requires Developer ID app and installer identities." >&2
+        echo "Notarization requires Developer ID app and installer identities." >&2
         exit 64
     }
     NOTARY_ZIP="$WORK_DIR/Resonance-notary.zip"
     ditto -c -k --sequesterRsrc --keepParent "$APP" "$NOTARY_ZIP"
-    xcrun notarytool submit "$NOTARY_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+    submit_for_notarization "$NOTARY_ZIP"
     xcrun stapler staple "$APP"
+    xcrun stapler validate "$APP"
     codesign --verify --deep --strict --verbose=2 "$APP"
+    if [[ "$PRODUCTION_SIGNING_REQUIRED" == "1" ]]; then
+        spctl --assess --type execute --verbose=4 "$APP"
+    fi
 fi
 
 ZIP="$OUTPUT_DIR/Resonance-macOS.zip"
@@ -122,9 +191,19 @@ if ! pkgutil --payload-files "$INSTALLER" | grep -Eq '(^|/)Applications/Resonanc
     exit 70
 fi
 
-if [[ -n "${NOTARY_PROFILE:-}" ]]; then
-    xcrun notarytool submit "$INSTALLER" --keychain-profile "$NOTARY_PROFILE" --wait
+if [[ -n "$NOTARY_PROFILE" || "$NOTARY_API_CONFIGURED" == "1" ]]; then
+    submit_for_notarization "$INSTALLER"
     xcrun stapler staple "$INSTALLER"
+    xcrun stapler validate "$INSTALLER"
+fi
+
+if [[ "$PRODUCTION_SIGNING_REQUIRED" == "1" ]]; then
+    INSTALLER_SIGNATURE_DETAILS="$(pkgutil --check-signature "$INSTALLER" 2>&1)"
+    grep -Fq "$INSTALLER_IDENTITY" <<< "$INSTALLER_SIGNATURE_DETAILS" || {
+        echo "The installer is not signed by the configured Developer ID Installer certificate." >&2
+        exit 65
+    }
+    spctl --assess --type install --verbose=4 "$INSTALLER"
 fi
 
 echo "App archive: $ZIP"

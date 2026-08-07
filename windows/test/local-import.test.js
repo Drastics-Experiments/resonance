@@ -40,6 +40,13 @@ const { importFileBackedSource, searchFileBackedSources } = debrid;
 
 const spotifyTrackID = "4PTG3Z6ehGkBFwjybzWkR8";
 const spotifyPlaylistID = "37i9dQZF1DXcBWIGoYBM5M";
+const windowsClientContextHeaders = Object.freeze({
+  "X-Resonance-Config-Protocol": "1",
+  "X-Resonance-Client-Platform": "windows",
+  "X-Resonance-App-Version": "1.1.4",
+  "X-Resonance-App-Build": "17",
+  "X-Resonance-Cohort-Key": "ABEiM0RVZneImaq7zN3u_w",
+});
 
 function spotifyEmbedFixture(overrides = {}) {
   const entity = {
@@ -353,7 +360,11 @@ test("parses both provider searches and preserves the API scoring rejection gate
     thumbnailURL: null,
     officialArtist: true,
   });
-  assert.equal(exact.confidence, "high");
+  assert.equal(exact.confidence, "possible");
+  assert.equal(exact.evidenceStrength, "metadata_only");
+  assert.equal(exact.requiresReview, true);
+  assert.equal(exact.autoSelectable, false);
+  assert.equal(exact.actionable, false);
   assert.equal(scoreAudioSource(track, {
     videoID: "dQw4w9WgXcQ",
     title: "Never Gonna Give You Up (Karaoke Cover)",
@@ -495,7 +506,7 @@ test("resolves direct YouTube video mode without offering it for Spotify metadat
   );
 });
 
-test("adds Debrid Vault releases only when they can produce a TorBox-backed file", async () => {
+test("forwards the snapshotted Windows client context and exposes only explicit review candidates", async () => {
   const track = {
     provider: "spotify",
     type: "track",
@@ -512,35 +523,121 @@ test("adds Debrid Vault releases only when they can produce a TorBox-backed file
     baseURL: "https://music.example",
     adminToken: "admin-secret",
     profileID: "drastic",
+    clientContextHeaders: windowsClientContextHeaders,
   }, new AbortController().signal, async (url, options) => {
     request = { url: url.toString(), options };
     return new Response(JSON.stringify({
-      debrid_configured: true,
-      releases: [{
-        title: "Rick Astley - Whenever You Need Somebody FLAC",
-        info_hash: "0123456789abcdef0123456789abcdef01234567",
-        magnet_link: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-        size: 123456789,
-        seeders: 14,
-        quality: "FLAC",
-        indexer: "Debrid Vault",
+      review_candidates: [{
+        provider: "youtube_music",
+        source_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        video_id: "dQw4w9WgXcQ",
+        title: "Rick Astley - Never Gonna Give You Up",
+        artist: "Rick Astley",
+        album: "Whenever You Need Somebody",
+        duration_seconds: 213,
+        thumbnail_url: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+        score: 0.99,
+        confidence: "possible",
+        evidence_strength: "metadata_only",
+        requires_review: true,
+        auto_selectable: false,
+        actionable: false,
+        match: {
+          title: 1,
+          artist: 1,
+          album: 0.9,
+          duration: 0.88,
+          duration_delta_seconds: 1,
+        },
       }],
     }), { status: 200, headers: { "content-type": "application/json" } });
   });
   assert.equal(request.url, "https://music.example/api/v1/admin/debrid/resolve");
   assert.equal(request.options.headers.Authorization, "Bearer admin-secret");
   assert.equal(request.options.headers["X-Resonance-Profile"], "drastic");
+  assert.equal(request.options.redirect, "manual");
+  for (const [name, value] of Object.entries(windowsClientContextHeaders)) {
+    assert.equal(request.options.headers[name], value);
+  }
   assert.equal(JSON.parse(request.options.body).source, track.sourceURL);
   assert.equal(candidates.length, 1);
-  assert.equal(candidates[0].sourceProvider, "debrid_vault");
-  assert.equal(candidates[0].serverBacked, true);
-  assert.equal(candidates[0].quality, "FLAC");
+  assert.equal(candidates[0].sourceProvider, "youtube_music");
+  assert.equal(candidates[0].sourceURL, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.equal(candidates[0].serverBacked, false);
+  assert.equal(candidates[0].requiresReview, true);
+  assert.equal(candidates[0].autoSelectable, false);
+  assert.equal(candidates[0].actionable, false);
+  assert.deepEqual(candidates[0].match, {
+    title: 1,
+    artist: 1,
+    album: 0.9,
+    duration: 0.88,
+    durationDeltaSeconds: 1,
+  });
 
   assert.deepEqual(await searchFileBackedSources(track, {
     baseURL: "https://music.example",
     adminToken: "",
     profileID: "default",
   }, new AbortController().signal, async () => { throw new Error("must not fetch"); }), []);
+});
+
+test("fails reviewed lookup closed for missing context and rejects legacy or actionable server results", async () => {
+  const track = {
+    title: "Never Gonna Give You Up",
+    artist: "Rick Astley",
+    sourceURL: `https://open.spotify.com/track/${spotifyTrackID}`,
+  };
+  let requests = 0;
+  await assert.rejects(
+    searchFileBackedSources(track, {
+      baseURL: "https://music.example",
+      adminToken: "admin-secret",
+      profileID: "drastic",
+    }, new AbortController().signal, async () => {
+      requests += 1;
+      throw new Error("must not fetch");
+    }),
+    (error) => error?.code === "INVALID_CLIENT_CONTEXT",
+  );
+  assert.equal(requests, 0);
+
+  const candidates = await searchFileBackedSources(track, {
+    baseURL: "https://music.example",
+    adminToken: "admin-secret",
+    profileID: "drastic",
+    clientContextHeaders: windowsClientContextHeaders,
+  }, new AbortController().signal, async () => new Response(JSON.stringify({
+    releases: [{
+      title: "Legacy torrent result",
+      magnet_link: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+    }],
+    review_candidates: [
+      {
+        provider: "youtube",
+        source_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        video_id: "dQw4w9WgXcQ",
+        title: "Unsafe automatic result",
+        score: 1,
+        requires_review: true,
+        auto_selectable: false,
+        actionable: true,
+        match: { title: 1, artist: 1, album: null, duration: 1, duration_delta_seconds: 0 },
+      },
+      {
+        provider: "youtube",
+        source_url: "https://youtu.be/dQw4w9WgXcQ",
+        video_id: "dQw4w9WgXcQ",
+        title: "Non-canonical result",
+        score: 1,
+        requires_review: true,
+        auto_selectable: false,
+        actionable: false,
+        match: { title: 1, artist: 1, album: null, duration: 1, duration_delta_seconds: 0 },
+      },
+    ],
+  }), { status: 200, headers: { "content-type": "application/json" } }));
+  assert.deepEqual(candidates, []);
 });
 
 test("resumes a TorBox file selection and verifies the downloaded local file", async () => {
@@ -845,12 +942,40 @@ test("tags a downloaded M4A locally, saves it outside profile ownership, and det
     assert.equal(imported.kind, "created");
     assert.equal(imported.sourceSha256, sourceSha256);
     assert.equal(imported.metadata.title, "Local Test");
+    assert.equal(imported.sourceIdentity.providerID, "jNQXAC9IVRw");
+    assert.equal(imported.sourceIdentity.sourcePageURL, `https://open.spotify.com/track/${spotifyTrackID}`);
     assert.deepEqual(stages, ["inspecting_source", "processing", "saving_local"]);
     const tags = await metadata.readAudioMetadata(imported.filePath);
     assert.equal(tags.title, "Local Test");
     assert.equal(tags.artist, "Resonance");
     assert.equal(tags.album, "Device Library");
     assert.equal(duplicateTrack([{ id: "existing", sourceSha256 }], sourceSha256).id, "existing");
+
+    const duplicate = await importConfirmedSource({
+      sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+      sourceIdentity: imported.sourceIdentity,
+      metadata: imported.metadata,
+      existing: [{ id: "existing", sourceSha256 }],
+      destinationDirectory: library,
+      temporaryRoot: root,
+    }, new AbortController().signal, () => {}, {
+      downloadYouTubeAudio: async (_source, destination) => {
+        await fs.copyFile(fixture, destination);
+        return {
+          preview: {
+            videoID: "jNQXAC9IVRw",
+            title: "Fallback",
+            author: "Uploader",
+            durationSeconds: 1,
+            thumbnailURL: null,
+            sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+          },
+          download: { path: destination, sha256: sourceSha256, size: sourceBytes.length },
+        };
+      },
+    });
+    assert.equal(duplicate.kind, "duplicate");
+    assert.equal(duplicate.sourceIdentity.providerID, "jNQXAC9IVRw");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

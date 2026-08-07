@@ -6,17 +6,21 @@ import Testing
 @Suite("Resonance Preview regressions")
 struct PreviewRegressionTests {
     @Test
-    func nativeMenuKeepsTextEditingCommandsForPasteableFields() {
-        let applicationItem = NSMenuItem(title: "Resonance", action: nil, keyEquivalent: "")
-        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
-        let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(NSMenuItem(title: "Paste", action: NSSelectorFromString("paste:"), keyEquivalent: "v"))
-        editItem.submenu = editMenu
-        let viewItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+    func nativeMenuCommandsUseStableNotificationRoutes() {
+        #expect(Notification.Name.focusMusicSearch.rawValue == "focusMusicSearch")
+        #expect(Notification.Name.newMusicPlaylist.rawValue == "newMusicPlaylist")
+        #expect(Notification.Name.focusMusicSearch != .newMusicPlaylist)
+    }
 
-        #expect(MacMenuPolicy.keepsMainMenuItem(applicationItem, at: 0))
-        #expect(MacMenuPolicy.keepsMainMenuItem(editItem, at: 1))
-        #expect(!MacMenuPolicy.keepsMainMenuItem(viewItem, at: 2))
+    @Test
+    func plaintextCredentialsAreLimitedToTheExactPreviewBundle() {
+        #expect(CredentialStorePolicy.usesPlaintextStore(
+            bundleIdentifier: CredentialStorePolicy.previewBundleIdentifier
+        ))
+        #expect(!CredentialStorePolicy.usesPlaintextStore(
+            bundleIdentifier: "com.gavindietrich.LikedSongsFocus"
+        ))
+        #expect(!CredentialStorePolicy.usesPlaintextStore(bundleIdentifier: nil))
     }
 
     @MainActor
@@ -111,14 +115,57 @@ struct PreviewRegressionTests {
         #expect(InstalledVideoLayoutPolicy.edgeInset == 38)
         #expect(InstalledVideoLayoutPolicy.artworkCornerRadius == 22)
         #expect(InstalledVideoLayoutPolicy.videoCornerRadius == 18)
-        #expect(InstalledVideoLayoutPolicy.geometryDuration == 0.52)
-        #expect(InstalledVideoLayoutPolicy.revealDuration == 0.20)
+        #expect(InstalledVideoLayoutPolicy.leadInDuration == 0.035)
+        #expect(InstalledVideoLayoutPolicy.revealDelay == 0.035)
+        #expect(InstalledVideoLayoutPolicy.revealDelay < InstalledVideoLayoutPolicy.geometryDuration)
+        #expect(InstalledVideoLayoutPolicy.geometryDuration == 0.40)
+        #expect(InstalledVideoLayoutPolicy.revealDuration == 0.14)
+        #expect(InstalledVideoLayoutPolicy.chromeFadeDuration == 0.30)
+        #expect(InstalledVideoLayoutPolicy.exitArtworkRestoreLeadDuration == 0.19)
+        #expect(InstalledVideoLayoutPolicy.chromeRestoreLeadDuration == 0.12)
+        #expect(abs(InstalledVideoLayoutPolicy.exitArtworkRestoreDelay(reduceMotion: false) - 0.21) < 0.001)
+        #expect(InstalledVideoLayoutPolicy.exitArtworkRestoreDelay(reduceMotion: true) == 0)
+        #expect(InstalledVideoLayoutPolicy.duration(0.40, reduceMotion: false) == 0.40)
+        #expect(InstalledVideoLayoutPolicy.duration(0.40, reduceMotion: true) == 0)
         #expect(abs(standardArtwork.minX - 70) < 0.001)
         #expect(abs(standardArtwork.minY - 138) < 0.001)
         #expect(abs(standardArtwork.width - 486) < 0.001)
         #expect(abs(standardArtwork.height - 486) < 0.001)
         #expect(standardVideo == CGRect(x: 38, y: 38, width: 1_124, height: 674))
         #expect(tinyVideo == CGRect(x: 38, y: 38, width: 1, height: 1))
+    }
+
+    @Test
+    func fullscreenVideoStaysMutedUntilItTakesPlaybackFromAudio() {
+        #expect(InstalledVideoAudioHandoffPolicy.videoGain(
+            volume: 0.8,
+            audioWasPlayingOnOpen: true,
+            videoOwnsPlayback: false
+        ) == 0)
+        #expect(InstalledVideoAudioHandoffPolicy.videoGain(
+            volume: 0.8,
+            audioWasPlayingOnOpen: true,
+            videoOwnsPlayback: true
+        ) == PlaybackVolumePolicy.gain(for: 0.8))
+        #expect(InstalledVideoAudioHandoffPolicy.videoGain(
+            volume: 0.8,
+            audioWasPlayingOnOpen: false,
+            videoOwnsPlayback: false
+        ) == PlaybackVolumePolicy.gain(for: 0.8))
+    }
+
+    @Test
+    func fullscreenVideoControlsClampSeekProgressAndUseWindowsTiming() {
+        #expect(InstalledVideoControlsPolicy.autoHideDelay == 2.2)
+        #expect(InstalledVideoControlsPolicy.pointerExitDelay == 0.45)
+        #expect(InstalledVideoControlsPolicy.progress(position: 30, duration: 120) == 0.25)
+        #expect(InstalledVideoControlsPolicy.progress(position: -1, duration: 120) == 0)
+        #expect(InstalledVideoControlsPolicy.progress(position: 180, duration: 120) == 1)
+        #expect(InstalledVideoControlsPolicy.progress(position: .nan, duration: 120) == 0)
+        #expect(InstalledVideoControlsPolicy.seekTime(progress: 0.5, duration: 120) == 60)
+        #expect(InstalledVideoControlsPolicy.seekTime(progress: -1, duration: 120) == 0)
+        #expect(InstalledVideoControlsPolicy.seekTime(progress: 2, duration: 120) == 120)
+        #expect(InstalledVideoControlsPolicy.seekTime(progress: .nan, duration: 120) == 0)
     }
 
     @Test
@@ -214,6 +261,25 @@ struct PreviewRegressionTests {
 
         #expect(viewModel.stage == .idle)
         #expect(!viewModel.showsStageCard)
+    }
+
+    @MainActor
+    @Test
+    func linkImportUploadEligibilityNeedsAdminCredentialsButNotCatalogCredentials() {
+        let suiteName = "LinkImportUploadEligibilityTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = ""
+        model.serverAdminToken = "admin-token"
+        let viewModel = MacLocalImportViewModel(model: model)
+
+        #expect(viewModel.canSync)
     }
 
     @Test
@@ -683,10 +749,20 @@ struct PreviewRegressionTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try Data(#"{"clientToken":"legacy-client","adminToken":"legacy-admin"}"#.utf8)
             .write(to: storeURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: storeURL.path)
 
         let store = LocalServerCredentialStore(storeURL: storeURL)
         #expect(store.read(account: "music-server-client-token") == "legacy-client")
         #expect(store.read(account: "music-server-admin-token") == "legacy-admin")
+        let directoryPermissions = try #require(
+            FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber
+        )
+        let filePermissions = try #require(
+            FileManager.default.attributesOfItem(atPath: storeURL.path)[.posixPermissions] as? NSNumber
+        )
+        #expect(directoryPermissions.intValue == 0o700)
+        #expect(filePermissions.intValue == 0o600)
     }
 
     @Test

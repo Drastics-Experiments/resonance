@@ -15,4 +15,31 @@ The installer accepts only HTTPS release URLs from this repository, verifies the
 archive checksum and application bundle identity, validates the code signature,
 and replaces an existing installation atomically.
 
-Release builds are ad-hoc signed unless Developer ID identities are supplied through `MACOS_APP_IDENTITY` and `MACOS_INSTALLER_IDENTITY`. Production releases should also set `NOTARY_PROFILE` so the package is notarized and stapled.
+## Signing policy
+
+Local builds and ordinary pull-request/main CI artifacts remain ad-hoc signed so
+contributors can build without Apple credentials. They are development artifacts
+and cannot be promoted by the release-candidate workflow.
+
+A production candidate fails closed unless the app has a timestamped Developer ID
+Application signature with hardened runtime, the PKG has a trusted Developer ID
+Installer signature, and Apple notarization is stapled and validated on both. The
+native macOS job records hash-bound verification evidence; the candidate bundler
+and publisher both require that evidence.
+
+Configure these GitHub Actions repository secrets before starting a release. The
+values themselves must never be committed:
+
+- `RESONANCE_MACOS_APP_CERTIFICATE_BASE64` — base64-encoded Developer ID Application P12
+- `RESONANCE_MACOS_APP_CERTIFICATE_PASSWORD` — password for that P12
+- `RESONANCE_MACOS_APP_IDENTITY` — full `Developer ID Application: ...` identity
+- `RESONANCE_MACOS_INSTALLER_CERTIFICATE_BASE64` — base64-encoded Developer ID Installer P12
+- `RESONANCE_MACOS_INSTALLER_CERTIFICATE_PASSWORD` — password for that P12
+- `RESONANCE_MACOS_INSTALLER_IDENTITY` — full `Developer ID Installer: ...` identity
+- `RESONANCE_MACOS_NOTARY_KEY_BASE64` — base64-encoded App Store Connect API `.p8` key
+- `RESONANCE_MACOS_NOTARY_KEY_ID` — API key ID
+- `RESONANCE_MACOS_NOTARY_ISSUER_ID` — API issuer ID
+
+`mac/scripts/build-release.sh` still supports `NOTARY_PROFILE` for an explicitly
+configured local build. Set `RESONANCE_REQUIRE_PRODUCTION_SIGNING=1` to apply the
+same fail-closed production policy locally.

@@ -40,4 +40,31 @@ Use `-Silent` for an unattended per-user installation.
 3. Open the release PR and wait for the centralized `Bundle release candidate` job, including the Windows tests and NSIS build.
 4. Merge the release PR. The single publish workflow attaches `Resonance-Setup-<version>.exe`, its block map, and `latest.yml` alongside the other platform assets. Do not push a version tag manually.
 
-The current installer is unsigned. Windows SmartScreen may display a warning until a code-signing certificate is configured in the release workflow.
+## Signing policy
+
+Local builds and ordinary pull-request/main CI artifacts remain unsigned so they
+can be produced without release credentials. They are development artifacts and
+cannot be promoted by the release-candidate workflow.
+
+A production candidate fails closed unless electron-builder signs both the app
+executable and NSIS installer with the configured Authenticode certificate. The
+Windows runner requires a trusted chain, the exact configured certificate
+thumbprint, and a timestamp, then records hash-bound verification evidence. The
+candidate bundler and publisher both require that evidence.
+
+Configure these GitHub Actions repository secrets before starting a release. The
+values themselves must never be committed:
+
+- `RESONANCE_WINDOWS_CERTIFICATE_BASE64` — base64-encoded code-signing PFX
+- `RESONANCE_WINDOWS_CERTIFICATE_PASSWORD` — password for that PFX
+- `RESONANCE_WINDOWS_CERTIFICATE_SHA1` — expected signer-certificate thumbprint
+
+This PFX path is only for an existing publicly trusted certificate whose issuer
+and key-custody rules permit its private key to be exported and used on a
+GitHub-hosted runner. Do not assume that a newly issued certificate can be
+converted to PFX: current CA/Browser Forum requirements keep newly issued public
+code-signing keys in qualifying hardware or cloud HSM custody. If Resonance uses
+a hardware- or cloud-backed certificate (for example, Azure Artifact Signing),
+select and review that provider integration before releasing; the current
+workflow does not implement it. Never copy a non-exportable hardware-backed key
+into a repository secret.

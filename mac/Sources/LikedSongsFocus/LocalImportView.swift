@@ -76,11 +76,17 @@ enum LocalImportCandidateFallbackPolicy {
 
 @MainActor
 final class MacLocalImportViewModel: ObservableObject {
-    @Published var source = ""
+    @Published var source = "" {
+        didSet {
+            guard source != oldValue else { return }
+            invalidateResolvedSelectionAfterSourceMutation()
+        }
+    }
     @Published private(set) var stage: LocalImportStage = .idle
     @Published private(set) var completedBytes: Int64 = 0
     @Published private(set) var totalBytes: Int64 = 0
     @Published private(set) var resolution: LocalImportResolution?
+    @Published private(set) var resolvedSourceInput: String?
     @Published private(set) var searchResponse: LocalImportSearchResponse?
     @Published private(set) var selectedSearchResultID: String?
     @Published var selectedVideoID: String?
@@ -152,7 +158,7 @@ final class MacLocalImportViewModel: ObservableObject {
     func existingMatch(for track: LocalImportSpotifyTrack) -> LocalImportExistingSongMatch {
         LocalImportExistingSongPolicy.match(
             spotifyTrack: track,
-            deviceTracks: model.tracks,
+            deviceTracks: model.visibleTracks,
             activeServerSongs: model.remoteSongs
         )
     }
@@ -182,10 +188,61 @@ final class MacLocalImportViewModel: ObservableObject {
         return values.isEmpty ? nil : values.joined(separator: " • ")
     }
 
+    var uploadUnavailableMessage: String? {
+        guard !model.serverURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !model.serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "Add a server URL and admin key in Connection settings to enable upload."
+        }
+        guard !model.clientConfiguration.permittedUploadModes.isEmpty else {
+            return "Uploads are disabled by the verified server configuration."
+        }
+        guard model.clientConfiguration.permittedUploadModes.contains(model.uploadMode) else {
+            return "\(model.uploadMode.title) is disabled. Choose an available upload mode in Connection settings."
+        }
+        guard resolution != nil else { return nil }
+        switch model.uploadMode {
+        case .serverSourceLink:
+            guard mediaMode == .audio else {
+                return "Server source-link import creates audio only. Choose Audio to upload this source."
+            }
+            guard resolution?.kind == .youtube,
+                  MacSourceImportPolicy.exactCanonicalYouTubePage(resolvedSourceInput) != nil else {
+                return "Server source link requires the exact original https://www.youtube.com/watch?v=… URL. Choose Reviewed match for short links, searches, and matched sources."
+            }
+        case .reviewedMatch:
+            guard model.clientConfiguration.allowsReviewedMatch else {
+                return "Reviewed match is disabled by the verified server configuration."
+            }
+        case .localFile:
+            if requiresReviewedMatchForUpload {
+                return "Discovered and matched sources require Reviewed match mode before upload."
+            }
+        }
+        return nil
+    }
+
     var canSync: Bool {
-        !model.serverURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !model.serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !model.serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        uploadUnavailableMessage == nil
+    }
+
+    var syncAvailabilityMessage: String {
+        uploadUnavailableMessage ?? "Upload with \(model.uploadMode.title) after saving on this Mac."
+    }
+
+    var requiresReviewedMatchForUpload: Bool {
+        guard let resolution else { return false }
+        return resolution.kind != .youtube
+            || MacSourceImportPolicy.exactCanonicalYouTubePage(resolvedSourceInput) == nil
+    }
+
+    func isServerReviewCandidate(_ candidate: LocalImportAudioSourceMatch) -> Bool {
+        resolution?.reviewCandidateVideoIDs.contains(candidate.videoID) == true
+    }
+
+    func normalizeUploadSelection() {
+        if uploadUnavailableMessage != nil {
+            syncAfterImport = false
+        }
     }
 
     var activeProfileName: String {
@@ -299,6 +356,7 @@ final class MacLocalImportViewModel: ObservableObject {
 
     func resolve() {
         guard !isRunning else { return }
+        let rawSourceInput = source
         let value = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else {
             error = .init(stage: .resolvingMetadata, code: "MISSING_SOURCE", message: "Enter a song, artist, album, or supported Spotify, SoundCloud, or YouTube link first.")
@@ -313,6 +371,7 @@ final class MacLocalImportViewModel: ObservableObject {
         error = nil
         previewErrorMessage = nil
         resolution = nil
+        resolvedSourceInput = rawSourceInput
         searchResponse = nil
         selectedSearchResultID = nil
         selectedVideoID = nil
@@ -330,8 +389,6 @@ final class MacLocalImportViewModel: ObservableObject {
                 if searchesProviders {
                     let response = try await service.search(query: value)
                     try Task.checkCancellation()
-                    await model.refreshRemoteCatalogForLocalImport()
-                    try Task.checkCancellation()
                     searchResponse = response
                     guard let first = response.results.first else {
                         throw LocalImportError(
@@ -342,6 +399,7 @@ final class MacLocalImportViewModel: ObservableObject {
                     }
                     selectSearchResult(first)
                     stage = .awaitingSelection
+                    normalizeUploadSelection()
                     task = nil
                     return
                 }
@@ -353,15 +411,14 @@ final class MacLocalImportViewModel: ObservableObject {
                     self?.apply(progress)
                 }
                 try Task.checkCancellation()
-                if result.kind != .youtube {
-                    await model.refreshRemoteCatalogForLocalImport()
-                    try Task.checkCancellation()
-                }
                 resolution = result
-                selectedVideoID = result.candidates.first?.videoID
+                selectedVideoID = result.reviewCandidateVideoIDs.isEmpty
+                    ? result.candidates.first?.videoID
+                    : nil
                 selectedPlaylistTrackIDs = Set(result.playlist?.items.map { $0.track.trackID } ?? [])
                 selectedReleaseInfoHash = result.candidates.isEmpty ? result.releases.first?.infoHash : nil
                 stage = .awaitingSelection
+                normalizeUploadSelection()
             } catch is CancellationError {
                 stage = .cancelled
             } catch let failure as LocalImportError {
@@ -379,6 +436,9 @@ final class MacLocalImportViewModel: ObservableObject {
         if previewingVideoID != result.candidates.first?.videoID {
             stopPreview()
         }
+        if resolvedSourceInput == nil {
+            resolvedSourceInput = source
+        }
         resolution = result.resolution
         selectedSearchResultID = result.id
         selectedVideoID = result.candidates.first?.videoID
@@ -386,6 +446,37 @@ final class MacLocalImportViewModel: ObservableObject {
         selectedReleaseInfoHash = nil
         releaseActionMessage = nil
         previewErrorMessage = nil
+        normalizeUploadSelection()
+    }
+
+    private func invalidateResolvedSelectionAfterSourceMutation() {
+        guard resolvedSourceInput != nil
+                || resolution != nil
+                || searchResponse != nil
+                || selectedSearchResultID != nil
+                || selectedVideoID != nil
+                || !selectedPlaylistTrackIDs.isEmpty
+                || selectedReleaseInfoHash != nil else { return }
+        stopPreview()
+        resolution = nil
+        resolvedSourceInput = nil
+        searchResponse = nil
+        selectedSearchResultID = nil
+        selectedVideoID = nil
+        selectedPlaylistTrackIDs = []
+        selectedReleaseInfoHash = nil
+        releaseActionMessage = nil
+        previewErrorMessage = nil
+        completedSummary = nil
+        error = nil
+        completedTrack = nil
+        completedBytes = 0
+        totalBytes = 0
+        batchCurrentTitle = nil
+        batchPhase = nil
+        batchCompletedItems = 0
+        batchTotalItems = 0
+        stage = .idle
     }
 
     func toggleSearchPreview(_ result: LocalImportSearchResult) {
@@ -401,6 +492,25 @@ final class MacLocalImportViewModel: ObservableObject {
             return importSelectedPlaylist(resolution)
         }
         guard let candidate = selectedCandidate else { return false }
+        let shouldUpload = syncAfterImport
+        if shouldUpload, let unavailable = uploadUnavailableMessage {
+            error = .init(stage: .syncing, code: "UPLOAD_MODE_UNAVAILABLE", message: unavailable)
+            stage = .failed
+            return false
+        }
+        let transferContext: LocalImportTransferContext
+        do {
+            transferContext = try model.beginLocalImportTransfer(
+                reservingUpload: shouldUpload,
+                rawSourceInput: resolvedSourceInput,
+                mediaMode: mediaMode,
+                requiresReviewedMatch: requiresReviewedMatchForUpload
+            )
+        } catch {
+            self.error = .init(stage: .syncing, code: "UPLOAD_RESERVATION_FAILED", message: error.localizedDescription)
+            stage = .failed
+            return false
+        }
         stopPreview()
         task?.cancel()
         error = nil
@@ -416,8 +526,16 @@ final class MacLocalImportViewModel: ObservableObject {
         )
         let existingMatch = existingMatch(for: resolution.track)
         let requestedMode = mediaMode
+        let reservedModel = model
         task = Task { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                reservedModel.endLocalImportTransfer(transferContext)
+                return
+            }
+            defer {
+                reservedModel.endLocalImportTransfer(transferContext)
+                task = nil
+            }
             do {
                 var track: Track
                 if let deviceTrackID = existingMatch.deviceTrackID,
@@ -450,20 +568,22 @@ final class MacLocalImportViewModel: ObservableObject {
                 }
 
                 if let serverSongID = existingMatch.serverSongID {
-                    model.reconcileUploadedLocalTrack(
+                    try model.validateLocalImportTransfer(transferContext)
+                    try model.reconcileUploadedLocalTrackForImport(
                         trackID: track.id,
                         remoteID: serverSongID,
-                        profileID: model.syncProfileID
+                        sourceServer: transferContext.baseURL?.absoluteString,
+                        profileID: transferContext.profileID
                     )
                     track = model.tracks.first(where: { $0.id == track.id }) ?? track
                 }
                 completedTrack = track
                 stage = .localComplete
 
-                if syncAfterImport, existingMatch.serverSongID == nil {
+                if shouldUpload, existingMatch.serverSongID == nil {
                     stage = .syncing
                     do {
-                        try await model.uploadLocalImportToActiveProfile(track)
+                        try await model.uploadLocalImportToActiveProfile(track, context: transferContext)
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
@@ -473,7 +593,6 @@ final class MacLocalImportViewModel: ObservableObject {
                             message: "Saved locally, but the optional upload failed: \(error.localizedDescription)"
                         )
                         stage = .failed
-                        task = nil
                         return
                     }
                 }
@@ -487,7 +606,6 @@ final class MacLocalImportViewModel: ObservableObject {
                 self.error = .init(stage: stage, code: "LOCAL_IMPORT_FAILED", message: error.localizedDescription)
                 stage = .failed
             }
-            task = nil
         }
         return true
     }
@@ -503,6 +621,25 @@ final class MacLocalImportViewModel: ObservableObject {
     private func importSelectedPlaylist(_ resolution: LocalImportResolution) -> Bool {
         let items = selectedPlaylistItems
         guard let playlist = resolution.playlist, !items.isEmpty else { return false }
+        let shouldUpload = syncAfterImport
+        if shouldUpload, let unavailable = uploadUnavailableMessage {
+            error = .init(stage: .syncing, code: "UPLOAD_MODE_UNAVAILABLE", message: unavailable)
+            stage = .failed
+            return false
+        }
+        let transferContext: LocalImportTransferContext
+        do {
+            transferContext = try model.beginLocalImportTransfer(
+                reservingUpload: shouldUpload,
+                rawSourceInput: resolvedSourceInput,
+                mediaMode: mediaMode,
+                requiresReviewedMatch: true
+            )
+        } catch {
+            self.error = .init(stage: .syncing, code: "UPLOAD_RESERVATION_FAILED", message: error.localizedDescription)
+            stage = .failed
+            return false
+        }
         stopPreview()
         task?.cancel()
         error = nil
@@ -521,9 +658,12 @@ final class MacLocalImportViewModel: ObservableObject {
         batchCompletedItems = 0
         batchTotalItems = plannedDownloadTransfers
         stage = .inspectingSource
-        let shouldUpload = syncAfterImport
+        let reservedModel = model
         task = Task { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                reservedModel.endLocalImportTransfer(transferContext)
+                return
+            }
             var keptTracks: [Track] = []
             var keptTrackIDs = Set<UUID>()
             var failures: [String] = []
@@ -536,6 +676,7 @@ final class MacLocalImportViewModel: ObservableObject {
             var completedUploadTransfers = 0
             var plannedUploadTrackIDs = Set<UUID>()
             defer {
+                reservedModel.endLocalImportTransfer(transferContext)
                 batchCurrentTitle = nil
                 batchPhase = nil
                 batchCompletedItems = 0
@@ -611,12 +752,14 @@ final class MacLocalImportViewModel: ObservableObject {
                         }
 
                         if let serverSongID = existingMatch.serverSongID {
-                            knownServerSongIDsByTrackID[track.id] = serverSongID
-                            self.model.reconcileUploadedLocalTrack(
+                            try self.model.validateLocalImportTransfer(transferContext)
+                            try self.model.reconcileUploadedLocalTrackForImport(
                                 trackID: track.id,
                                 remoteID: serverSongID,
-                                profileID: self.model.syncProfileID
+                                sourceServer: transferContext.baseURL?.absoluteString,
+                                profileID: transferContext.profileID
                             )
+                            knownServerSongIDsByTrackID[track.id] = serverSongID
                             track = self.model.tracks.first(where: { $0.id == track.id }) ?? track
                         }
                         self.completedTrack = self.completedTrack ?? track
@@ -628,6 +771,7 @@ final class MacLocalImportViewModel: ObservableObject {
                         self.model.upsertImportedPlaylist(named: playlist.title, tracks: tracks)
                         self.stage = .localComplete
                         guard shouldUpload, !tracks.isEmpty else { return }
+                        try self.model.validateLocalImportTransfer(transferContext)
                         plannedUploadTrackIDs = Set(
                             tracks.compactMap { track in
                                 knownServerSongIDsByTrackID[track.id] == nil ? track.id : nil
@@ -661,7 +805,10 @@ final class MacLocalImportViewModel: ObservableObject {
                             do {
                                 if attempt > 1 { try await Task.sleep(for: .milliseconds(attempt == 2 ? 400 : 1_200)) }
                                 self.stage = .syncing
-                                let didUpload = try await self.model.uploadLocalImportToActiveProfile(track)
+                                let didUpload = try await self.model.uploadLocalImportToActiveProfile(
+                                    track,
+                                    context: transferContext
+                                )
                                 uploaded = true
                                 if didUpload {
                                     uploadedCount += 1
@@ -682,7 +829,7 @@ final class MacLocalImportViewModel: ObservableObject {
 
                 completedSummary = "Imported \(importedTracks.count) of \(items.count) songs into \(playlist.title)."
                 if shouldUpload, uploadedCount > 0 {
-                    completedSummary = (completedSummary ?? "") + " Uploaded \(uploadedCount) to \(activeProfileName)."
+                    completedSummary = (completedSummary ?? "") + " Uploaded \(uploadedCount) to \(transferContext.profileName)."
                 }
                 if skippedDeviceDownloads > 0 {
                     completedSummary = (completedSummary ?? "") + " Skipped \(skippedDeviceDownloads) existing device download\(skippedDeviceDownloads == 1 ? "" : "s")."
@@ -847,6 +994,7 @@ final class MacLocalImportViewModel: ObservableObject {
         completedBytes = 0
         totalBytes = 0
         resolution = nil
+        resolvedSourceInput = nil
         searchResponse = nil
         selectedSearchResultID = nil
         selectedVideoID = nil
@@ -985,6 +1133,7 @@ struct MacLocalImportSheet: View {
                 .disabled(viewModel.isRunning)
                 .onChange(of: viewModel.mediaMode) { _, _ in
                     viewModel.normalizeMediaModeForSource()
+                    viewModel.normalizeUploadSelection()
                 }
 
                 Button {
@@ -1416,10 +1565,21 @@ struct MacLocalImportSheet: View {
 
     private func candidateList(_ candidates: [LocalImportAudioSourceMatch]) -> some View {
         VStack(alignment: .leading, spacing: 9) {
-            Text(viewModel.mediaMode == .video ? "DIRECT YOUTUBE VIDEO" : "DIRECT AUDIO MATCHES")
+            Text(viewModel.mediaMode == .video
+                ? "DIRECT YOUTUBE VIDEO"
+                : candidates.contains(where: viewModel.isServerReviewCandidate)
+                    ? "REVIEW AUDIO MATCHES"
+                    : "DIRECT AUDIO MATCHES")
                 .font(.system(size: 10, weight: .bold))
                 .tracking(1.0)
                 .foregroundStyle(Color.appMuted)
+
+            if candidates.contains(where: viewModel.isServerReviewCandidate) {
+                Text("Server matches are metadata-only suggestions. Preview and explicitly select the exact recording before importing or uploading it.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Color.appMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             ForEach(candidates) { candidate in
                 HStack(spacing: 10) {
@@ -1444,7 +1604,9 @@ struct MacLocalImportSheet: View {
 
                             Spacer(minLength: 8)
 
-                            Text(candidate.confidence.uppercased())
+                            Text(viewModel.isServerReviewCandidate(candidate)
+                                ? "SERVER REVIEW"
+                                : candidate.confidence.uppercased())
                                 .font(.system(size: 8, weight: .bold))
                                 .foregroundStyle(Color.appViolet)
                                 .padding(.horizontal, 8)
@@ -1603,15 +1765,23 @@ struct MacLocalImportSheet: View {
     }
 
     private var syncOption: some View {
-        Toggle("Upload to server", isOn: $viewModel.syncAfterImport)
-            .font(.system(size: 12, weight: .semibold))
-            .toggleStyle(.switch)
-            .tint(Color.appViolet)
-            .disabled(!viewModel.canSync || viewModel.isRunning)
-            .fixedSize()
-            .help(viewModel.canSync
-                ? "Upload a copy after saving it on this Mac"
-                : "Add server credentials in Settings to enable upload")
+        VStack(alignment: .leading, spacing: 3) {
+            Toggle("Upload to server", isOn: $viewModel.syncAfterImport)
+                .font(.system(size: 12, weight: .semibold))
+                .toggleStyle(.switch)
+                .tint(Color.appViolet)
+                .disabled(!viewModel.canSync || viewModel.isRunning)
+                .fixedSize()
+                .help(viewModel.syncAvailabilityMessage)
+
+            if !viewModel.canSync {
+                Text(viewModel.syncAvailabilityMessage)
+                    .font(.system(size: 8))
+                    .foregroundStyle(Color.appMuted)
+                    .lineLimit(2)
+                    .frame(maxWidth: 300, alignment: .leading)
+            }
+        }
     }
 
     private func errorCard(_ error: LocalImportError) -> some View {

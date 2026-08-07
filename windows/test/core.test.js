@@ -4,6 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import {
   applyRemotePlaylistDocument,
+  buildLocalImportSourceIdentity,
+  catalogRequestCanApply,
   createEmptyState,
   filterPlaylists,
   filterTracks,
@@ -12,9 +14,15 @@ import {
   formatHistoryWindowLabel,
   formatTime,
   isInstalledVideoTrack,
+  localImportCandidateCanAutoSelect,
+  localImportOperationFingerprint,
+  localImportOperationIsCurrent,
+  localImportNeedsServerContext,
   mergeListeningHistoryDocument,
   mergePlaylistDocument,
   mergeSyncedTracks,
+  mergeTrackSourceIdentity,
+  mergeUploadedSongsIntoCatalog,
   nextIndex,
   niceChartMaximum,
   normalizedVolume,
@@ -22,12 +30,19 @@ import {
   normalizeState,
   playbackRangeForTrack,
   planMissingDownloadedUploads,
+  remoteAssociationConflictFilePaths,
+  remoteAssociationConflictMessage,
   serverSongMetadataMatches,
   reconcileServerBackedTrackDuplicates,
   reconcileUploadedTrack,
   removeClipRangeForTrack,
   restoreProfileState,
   resolveSyncProfile,
+  serverUploadBlockedByActivity,
+  serverUploadConfigurationError,
+  serverTrackRemoteIDBelongsToContext,
+  serverSongRequiresDownload,
+  shuffledTrackIDs,
   storeActiveProfileState,
   setClipRangeForTrack,
   squareArtworkCropRect,
@@ -47,7 +62,7 @@ const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdat
 const { isManagedLibraryFile } = libraryPaths;
 const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload } = serverDownload;
 
-test("offers the fullscreen video action only for installed local video files", () => {
+test("uses a custom fullscreen video player with queue, repeat, controls, and shared volume", () => {
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.mp4", fileUrl: "file:///C:/Music/clip.mp4" }), true);
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.MOV", fileUrl: "file:///C:/Music/clip.MOV" }), true);
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\song.m4a", fileUrl: "file:///C:/Music/song.m4a" }), false);
@@ -60,14 +75,140 @@ test("offers the fullscreen video action only for installed local video files", 
   assert.doesNotMatch(appSource, /ON DEVICE|fullPlayerMediaBadge/);
   assert.doesNotMatch(htmlSource, /VIDEO • ON DEVICE|fullPlayerMediaBadge/);
   assert.match(htmlSource, /id="fullPlayerArtwork"[\s\S]+id="installedVideoArtwork"[\s\S]+id="installedVideoPlayer"/);
-  assert.match(appSource, /function setInstalledVideoSourceGeometry\(sourceRect, targetRect\)[\s\S]+--video-source-left[\s\S]+--video-source-width[\s\S]+--video-target-width[\s\S]+--video-source-border-color[\s\S]+--video-source-shadow/);
-  assert.match(appSource, /INSTALLED_VIDEO_TRANSITION_MS = 520[\s\S]+INSTALLED_VIDEO_REVEAL_MS = 220/);
+  assert.doesNotMatch(htmlSource, /id="installedVideoPlayer"[^>]*\scontrols(?:\s|>|=)/);
+  assert.match(htmlSource, /id="installedVideoControls"[\s\S]+id="installedVideoSeek"[\s\S]+id="installedVideoPrevious"[\s\S]+id="installedVideoToggle"[\s\S]+id="installedVideoNext"[\s\S]+id="installedVideoRepeat"[\s\S]+id="installedVideoVolume"/);
+  assert.match(appSource, /function setInstalledVideoSourceGeometry\(sourceRect, targetRect\)[\s\S]+--video-source-translate-x[\s\S]+--video-source-scale-x[\s\S]+--video-source-radius-x[\s\S]+--video-source-border-color[\s\S]+--video-source-shadow/);
+  assert.match(appSource, /INSTALLED_VIDEO_LEAD_IN_MS = 35[\s\S]+INSTALLED_VIDEO_TRANSITION_MS = 400[\s\S]+INSTALLED_VIDEO_REVEAL_MS = 140[\s\S]+INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS = 190[\s\S]+INSTALLED_VIDEO_CHROME_RESTORE_LEAD_MS = 120/);
   assert.match(appSource, /function openInstalledVideo\([\s\S]+video-from-art[\s\S]+video-expanded[\s\S]+video-revealed/);
-  assert.match(appSource, /function closeInstalledVideo\(\)[\s\S]+classList\.remove\("video-revealed"\)[\s\S]+video-closing[\s\S]+finishInstalledVideoClose/);
+  assert.doesNotMatch(appSource, /function openInstalledVideo\([^]*?if \(!audio\.paused\) audio\.pause\(\)/);
+  assert.match(appSource, /function startInstalledVideoPlayback\(\)[\s\S]+audioNeedsHandoff[\s\S]+installedVideoPlayer\.muted = audioNeedsHandoff[\s\S]+installedVideoPlayer\.play/);
+  assert.match(appSource, /function installedVideoPlaybackPlaying\(\)[\s\S]+videoOwnsPlayback = true[\s\S]+audio\.pause\(\)[\s\S]+installedVideoPlayer\.muted = false/);
+  assert.match(appSource, /function animateInstalledVideoStage\(from, to, onFinish\)[\s\S]+\.animate\(\[from, to\],[\s\S]+duration,[\s\S]+cubic-bezier\(\.25, \.1, \.25, 1\)/);
+  assert.match(appSource, /dialog\.classList\.add\("video-expanded", "video-revealed"\);[\s\S]+startInstalledVideoPlayback\(\);[\s\S]+animateInstalledVideoStage\(geometry\.source, geometry\.target/);
+  assert.match(appSource, /function handOffInstalledVideoToAudio\([\s\S]+audio\.currentTime = position[\s\S]+audio\.addEventListener\("playing"[\s\S]+installedVideoPlayer\.pause\(\)/);
+  assert.match(appSource, /function closeInstalledVideo\([^)]*\)[\s\S]+currentGeometry = installedVideoStageGeometry\(\)[\s\S]+classList\.add\("video-revealed", "video-closing"\)[\s\S]+syncFullPlayerTitleMarquee\(\)[\s\S]+animateInstalledVideoStage\(currentGeometry, geometry\.source[\s\S]+finishInstalledVideoClose/);
+  assert.match(appSource, /installedVideoArtworkTimer = setTimeout\([\s\S]+classList\.add\("video-artwork-restored"\)[\s\S]+geometryDuration - installedVideoAnimationDuration\(INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS\)/);
+  assert.match(appSource, /const completeHandoff = \(\) => \{[\s\S]+installedVideoPlayer\.muted = true[\s\S]+audio\.muted = false/);
+  assert.match(appSource, /function handleInstalledVideoEnded\(\)[\s\S]+if \(repeat\)[\s\S]+startInstalledVideoPlayback\(\)[\s\S]+advanceInstalledVideo\(1\)/);
+  assert.match(appSource, /function advanceInstalledVideo\(direction = 1\)[\s\S]+nextIndex\(tracks, currentID, direction\)[\s\S]+selectInstalledVideoTarget/);
+  assert.match(appSource, /installedVideoPlayer\.onended = handleInstalledVideoEnded/);
+  assert.match(appSource, /installedVideoStage\.onpointermove = \(\) => showInstalledVideoControls\(\)/);
+  assert.match(appSource, /function setPlaybackVolume\([\s\S]+audio\.volume = gain[\s\S]+installedVideoPlayer\.volume = gain[\s\S]+installedVideoVolume/);
   assert.match(styleSource, /\.full-player-dialog\.video-active \.full-player-details[\s\S]+opacity: 0/);
-  assert.match(styleSource, /\.installed-video-dialog\.video-from-art \.installed-video-stage[\s\S]+--video-source-left[\s\S]+--video-source-width[\s\S]+--video-source-border-color[\s\S]+--video-source-shadow/);
+  assert.doesNotMatch(styleSource, /\.installed-video-dialog\.video-from-art \.installed-video-stage/);
+  assert.match(styleSource, /\.installed-video-stage\s*\{[\s\S]+will-change: transform, border-radius[\s\S]+transition: none/);
   assert.match(styleSource, /\.installed-video-dialog\.video-revealed \.installed-video-stage video[\s\S]+opacity: 1/);
+  assert.match(styleSource, /\.installed-video-artwork,[\s\S]+\.installed-video-stage video[\s\S]+transition: opacity 140ms ease/);
+  assert.match(styleSource, /\.installed-video-dialog\.video-revealed\.video-artwork-restored \.installed-video-stage video[\s\S]+opacity: 0[\s\S]+\.installed-video-dialog\.video-revealed\.video-artwork-restored \.installed-video-artwork[\s\S]+opacity: 1/);
   assert.match(styleSource, /\.installed-video-stage video\s*\{[\s\S]*?object-fit: contain;[\s\S]*?object-position: center;/);
+  assert.match(styleSource, /\.installed-video-controls\s*\{[\s\S]+bottom: 0[\s\S]+opacity: 0[\s\S]+pointer-events: none/);
+  assert.match(styleSource, /\.installed-video-dialog\.video-revealed\.video-controls-visible \.installed-video-controls[\s\S]+\.installed-video-dialog\.video-revealed\.video-paused \.installed-video-controls[\s\S]+opacity: 1[\s\S]+pointer-events: auto/);
+});
+
+test("classifies remote video as download-required without confusing audio MP4", () => {
+  assert.equal(serverSongRequiresDownload({ content_type: "video/mp4", filename: "clip.bin" }), true);
+  assert.equal(serverSongRequiresDownload({ filename: "clip.WEBM" }), true);
+  assert.equal(serverSongRequiresDownload({ content_type: "audio/mp4", filename: "song.m4a" }), false);
+  assert.equal(serverSongRequiresDownload({ content_type: "audio/mpeg", filename: "song.mp3" }), false);
+});
+
+test("requires explicit review before selecting metadata-only audio matches", () => {
+  assert.equal(localImportCandidateCanAutoSelect({ confidence: "direct" }), true);
+  assert.equal(localImportCandidateCanAutoSelect({ requiresReview: true }), false);
+  assert.equal(localImportCandidateCanAutoSelect({ requires_review: true }), false);
+  assert.equal(localImportCandidateCanAutoSelect({ autoSelectable: false }), false);
+  assert.equal(localImportCandidateCanAutoSelect({ auto_selectable: false }), false);
+  assert.equal(localImportCandidateCanAutoSelect({ actionable: false }), false);
+  assert.equal(localImportCandidateCanAutoSelect(null), false);
+
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  assert.match(appSource, /localImportCandidateCanAutoSelect\(candidate\) \? "checked" : ""/);
+  assert.doesNotMatch(appSource, /localImportResolution\.candidates\[Number\(selected\?\.value\) \|\| 0\]/);
+});
+
+test("rejects stale link-import operations after source, media, or selection mutation", () => {
+  const snapshot = {
+    generation: 4,
+    fingerprint: localImportOperationFingerprint({ source: "A", mediaKind: "audio", selection: [0] }),
+  };
+  assert.equal(localImportOperationIsCurrent(snapshot, { ...snapshot }), true);
+  assert.equal(localImportOperationIsCurrent(snapshot, {
+    generation: 5,
+    fingerprint: localImportOperationFingerprint({ source: "B", mediaKind: "audio", selection: [0] }),
+  }), false);
+  assert.equal(localImportOperationIsCurrent(snapshot, {
+    generation: 5,
+    fingerprint: localImportOperationFingerprint({ source: "A", mediaKind: "audio", selection: [1] }),
+  }), false);
+  assert.equal(localImportOperationIsCurrent(snapshot, {
+    generation: 4,
+    fingerprint: localImportOperationFingerprint({ source: "A", mediaKind: "video", selection: [0] }),
+  }), false);
+  assert.notEqual(
+    localImportOperationFingerprint({ source: "A", mediaKind: "audio", selection: [0], uploadRequested: false }),
+    localImportOperationFingerprint({ source: "A", mediaKind: "audio", selection: [0], uploadRequested: true }),
+  );
+});
+
+test("keeps metadata provenance separate from matched media aliases", () => {
+  const identity = buildLocalImportSourceIdentity({
+    sourceProvider: "youtube",
+    videoID: "yt-video",
+    sourceURL: "https://www.youtube.com/watch?v=yt-video",
+    confidence: "possible",
+    score: 0.89,
+    evidenceStrength: "metadata_only",
+    requiresReview: true,
+    actionable: false,
+    match: { title: 1, artist: 0.9, durationDeltaSeconds: 1 },
+  }, {
+    provider: "spotify",
+    trackID: "spotify-track",
+    sourceURL: "https://open.spotify.com/track/spotify-track",
+  });
+  assert.equal(identity.provider, "spotify");
+  assert.equal(identity.providerID, "spotify-track");
+  assert.equal(identity.sourcePageURL, "https://open.spotify.com/track/spotify-track");
+  assert.equal(identity.aliases[0].provider, "youtube");
+  assert.equal(identity.aliases[0].providerID, "yt-video");
+  assert.equal(identity.evidence.matchedMediaProviderID, "yt-video");
+
+  const debrid = buildLocalImportSourceIdentity({
+    sourceProvider: "debrid_vault",
+    candidateID: "debrid:info-hash",
+    sourceURL: "magnet:?xt=urn:btih:info-hash",
+  }, {
+    provider: "spotify",
+    trackID: "spotify-track",
+    sourceURL: "https://open.spotify.com/track/spotify-track",
+  });
+  assert.equal(debrid.aliases[0].providerID, "debrid:info-hash");
+
+  const track = { id: "local", sourceIdentity: identity, sourceIdentities: [identity] };
+  const soundCloud = {
+    provider: "soundcloud",
+    providerID: "soundcloud-track",
+    sourcePageURL: "https://soundcloud.com/artist/track",
+  };
+  assert.equal(mergeTrackSourceIdentity(track, soundCloud), true);
+  assert.deepEqual(track.sourceIdentities.map((item) => item.provider), ["spotify", "youtube", "soundcloud"]);
+  assert.equal(mergeTrackSourceIdentity(track, soundCloud), false);
+  const enrichedSoundCloud = {
+    ...soundCloud,
+    confidence: "fingerprint-and-metadata",
+    score: 0.98,
+    evidence: { fingerprintDistance: 0.01, durationMatched: true },
+  };
+  assert.equal(mergeTrackSourceIdentity(track, enrichedSoundCloud), true);
+  const storedSoundCloud = track.sourceIdentities.find((item) => item.provider === "soundcloud");
+  assert.equal(storedSoundCloud.confidence, "fingerprint-and-metadata");
+  assert.equal(storedSoundCloud.score, 0.98);
+  assert.deepEqual(storedSoundCloud.evidence, { fingerprintDistance: 0.01, durationMatched: true });
+  assert.equal(mergeTrackSourceIdentity(track, enrichedSoundCloud), false);
+  for (let index = 0; index < 12; index += 1) {
+    mergeTrackSourceIdentity(track, { provider: "provider", providerID: `alias-${index}` });
+  }
+  assert.equal(track.sourceIdentities.length, 8);
 });
 
 test("accepts both managed library folders for batch uploads", () => {
@@ -81,6 +222,177 @@ test("accepts both managed library folders for batch uploads", () => {
   assert.equal(isManagedLibraryFile(remote, [local, remote]), false);
   assert.equal(isManagedLibraryFile(path.join(root, "outside.m4a"), [local, remote]), false);
   assert.equal(isManagedLibraryFile(path.join(root, "ServerCache-backup", "outside.m4a"), [local, remote]), false);
+});
+
+test("requires only upload credentials and ignores unrelated synchronization activity", () => {
+  assert.equal(serverUploadConfigurationError({
+    serverURL: "https://music.example",
+    adminToken: "admin-key",
+    accessToken: "",
+  }), null);
+  assert.match(serverUploadConfigurationError({ serverURL: "", adminToken: "admin-key" }), /server URL/);
+  assert.match(serverUploadConfigurationError({ serverURL: "ftp://music.example", adminToken: "admin-key" }), /server URL/);
+  assert.match(serverUploadConfigurationError({ serverURL: "https://music.example", adminToken: "" }), /admin key/);
+  assert.equal(serverUploadBlockedByActivity({
+    playlistSyncInFlight: true,
+    catalogRefreshInFlight: true,
+    profileSyncInFlight: true,
+    likesSyncInFlight: true,
+    listeningHistorySyncInFlight: true,
+  }), false);
+  assert.equal(serverUploadBlockedByActivity({ uploadInFlight: true }), true);
+  assert.equal(serverUploadBlockedByActivity({ transferActive: true }), true);
+});
+
+test("keeps fresh-install local-only imports independent of server context", () => {
+  assert.equal(localImportNeedsServerContext({ serverBacked: false, uploadRequested: false }), false);
+  assert.equal(localImportNeedsServerContext({ serverBacked: false, uploadRequested: true }), true);
+  assert.equal(localImportNeedsServerContext({ serverBacked: true, uploadRequested: false }), true);
+});
+
+test("merges upload responses into the cached catalog without waiting for a refresh", () => {
+  const original = [{ id: "existing", title: "Old title" }];
+  assert.deepEqual(mergeUploadedSongsIntoCatalog(original, [
+    { remoteSong: { id: "existing", title: "Updated title" } },
+    { remoteSong: { id: "new", title: "New song" } },
+    { remoteSong: null },
+  ]), [
+    { id: "existing", title: "Updated title" },
+    { id: "new", title: "New song" },
+  ]);
+  assert.deepEqual(original, [{ id: "existing", title: "Old title" }]);
+});
+
+test("trusts a cached remote ID only for the exact active server and profile", () => {
+  const context = { serverURL: "https://music.example/library", profileID: "profile-a" };
+  assert.equal(serverTrackRemoteIDBelongsToContext({
+    remoteID: "song-id",
+    sourceServer: "https://music.example",
+    syncProfileID: "profile-a",
+  }, context), true);
+  assert.equal(serverTrackRemoteIDBelongsToContext({
+    remoteID: "song-id",
+    sourceServer: "https://other.example",
+    syncProfileID: "profile-a",
+  }, context), false);
+  assert.equal(serverTrackRemoteIDBelongsToContext({
+    remoteID: "song-id",
+    sourceServer: "https://music.example",
+    syncProfileID: "profile-b",
+  }, context), false);
+  assert.equal(serverTrackRemoteIDBelongsToContext({ remoteID: "song-id" }, context), false);
+});
+
+test("refuses to overwrite a track association from another server or profile", () => {
+  const state = createEmptyState();
+  const track = {
+    id: "linked",
+    remoteID: "song-a",
+    sourceServer: "https://one.example",
+    syncProfileID: "profile-a",
+  };
+  state.tracks = [track];
+
+  assert.equal(remoteAssociationConflictMessage(track, {
+    serverURL: "https://one.example/library",
+    profileID: "profile-a",
+  }), null);
+  assert.match(remoteAssociationConflictMessage(track, {
+    serverURL: "https://one.example",
+    profileID: "profile-b",
+  }), /different server or profile/);
+  assert.match(remoteAssociationConflictMessage(track, {
+    serverURL: "https://two.example",
+    profileID: "profile-a",
+  }), /existing link unchanged/);
+  assert.match(remoteAssociationConflictMessage({ ...track, sourceServer: null }, {
+    serverURL: "https://one.example",
+    profileID: "profile-a",
+  }), /different server or profile/);
+
+  const partialAssociation = {
+    id: "partial",
+    remoteID: null,
+    sourceServer: "https://one.example",
+    syncProfileID: "profile-a",
+  };
+  assert.equal(remoteAssociationConflictMessage(partialAssociation, {
+    serverURL: "https://one.example",
+    profileID: "profile-a",
+  }), null);
+  assert.match(remoteAssociationConflictMessage(partialAssociation, {
+    serverURL: "https://two.example",
+    profileID: "profile-a",
+  }), /different server or profile/);
+  assert.match(remoteAssociationConflictMessage({ id: "profile-only", syncProfileID: "profile-a" }, {
+    serverURL: "https://one.example",
+    profileID: "profile-a",
+  }), /different server or profile/);
+
+  assert.throws(() => reconcileUploadedTrack(state, track.id, { id: "song-b" }, {
+    serverURL: "https://two.example",
+    profileID: "profile-a",
+  }), /different server or profile/);
+  assert.deepEqual(state.tracks, [track]);
+  assert.equal(track.remoteID, "song-a");
+  assert.equal(track.sourceServer, "https://one.example");
+  assert.equal(track.syncProfileID, "profile-a");
+
+  state.tracks.push(partialAssociation);
+  assert.throws(() => reconcileUploadedTrack(state, partialAssociation.id, { id: "song-b" }, {
+    serverURL: "https://two.example",
+    profileID: "profile-a",
+  }), /different server or profile/);
+  assert.equal(partialAssociation.remoteID, null);
+  assert.equal(partialAssociation.sourceServer, "https://one.example");
+
+  assert.deepEqual(remoteAssociationConflictFilePaths([
+    track,
+    { id: "local", filePath: "C:\\Music\\Local.mp3" },
+    {
+      id: "same-context",
+      filePath: "C:\\Music\\Same.mp3",
+      remoteID: "song-c",
+      sourceServer: "https://two.example",
+      syncProfileID: "profile-a",
+    },
+    { ...track, filePath: "C:\\Music\\Linked.mp3" },
+  ], {
+    serverURL: "https://two.example",
+    profileID: "profile-a",
+  }), ["C:\\Music\\Linked.mp3"]);
+
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const manualUploadSource = appSource.slice(
+    appSource.indexOf("async function uploadServerSongs"),
+    appSource.indexOf("async function uploadMissingDownloadedSongs"),
+  );
+  const nativeUploadSource = mainSource.slice(
+    mainSource.indexOf('ipcMain.handle("server:upload"'),
+    mainSource.indexOf('ipcMain.handle("server:cancel-transfer"'),
+  );
+  assert.match(manualUploadSource, /associationConflictPaths: remoteAssociationConflictFilePaths\(state\.tracks, context\)/);
+  assert.ok(nativeUploadSource.indexOf("normalizedAssociationConflictPaths.has") >= 0);
+  assert.ok(nativeUploadSource.indexOf("normalizedAssociationConflictPaths.has") < nativeUploadSource.indexOf("beginServerTransfer(event)"));
+});
+
+test("rejects stale same-context catalog responses after an upload mutates the catalog", () => {
+  assert.equal(catalogRequestCanApply({
+    requestGeneration: 4,
+    currentGeneration: 4,
+    contextCurrent: true,
+  }), true);
+  assert.equal(catalogRequestCanApply({
+    requestGeneration: 4,
+    currentGeneration: 5,
+    contextCurrent: true,
+  }), false);
+  assert.equal(catalogRequestCanApply({
+    requestGeneration: 4,
+    currentGeneration: 4,
+    contextCurrent: false,
+  }), false);
 });
 
 test("moves fullscreen titles only by their rendered overflow", () => {
@@ -178,7 +490,9 @@ test("renders every Windows select through the themed custom dropdown", () => {
   const customControls = htmlSource.match(/<div\b[^>]*\bdata-custom-select\b[^>]*>/gi) || [];
 
   assert.doesNotMatch(htmlSource, /<select\b/i);
-  assert.equal(customControls.length, 5);
+  assert.equal(customControls.length, 7);
+  assert.match(htmlSource, /id="serverUploadMode"[^>]+data-custom-select/);
+  assert.match(htmlSource, /id="serverDownloadMode"[^>]+data-custom-select/);
   assert.match(appSource, /function initializeCustomSelects\(\)[\s\S]+querySelectorAll\("\[data-custom-select\]"\)/);
   assert.match(appSource, /function setCustomSelectOptions\(/);
   assert.match(appSource, /role\", \"listbox/);
@@ -202,16 +516,17 @@ test("avoids macOS Keychain access while persisting source Preview credentials l
   assert.match(mainSource, /fs\.mkdir\(directory, \{ recursive: true, mode: 0o700 \}\)/);
   assert.match(mainSource, /fs\.chmod\(destination, 0o600\)/);
   assert.match(mainSource, /server:credentials:load[\s\S]+usesPreviewCredentialStore\(\)[\s\S]+readPreviewCredentials/);
-  assert.match(mainSource, /server:credentials:save[\s\S]+usesPreviewCredentialStore\(\)[\s\S]+writePreviewCredentials/);
+  assert.match(mainSource, /function persistServerCredentials\(credentialsValue\)[\s\S]+usesPreviewCredentialStore\(\)[\s\S]+writePreviewCredentials/);
+  assert.match(mainSource, /server:credentials:save[\s\S]+persistServerCredentials\(credentialsValue\)/);
   assert.match(mainSource, /function encryptedCredentialStorage\(\)[\s\S]+require\("electron"\)\.safeStorage/);
 });
 
 test("uploads link imports even when the selected source is already saved locally", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   assert.match(appSource, /function localImportUploadConfigurationError/);
-  assert.match(appSource, /response\.result\.kind === "duplicate"[\s\S]+importedTrack = state\.tracks\.find[\s\S]+uploadLocalImportTrack\(importedTrack\)/);
-  assert.match(appSource, /!response\.result\.serverBacked && \$\("#localImportSync"\)\.checked && importedTrack\?\.filePath\)/);
-  assert.match(appSource, /refreshServerCatalogAfterLocalImportUpload/);
+  assert.match(appSource, /response\.result\.kind === "duplicate"[\s\S]+importedTrack = state\.tracks\.find[\s\S]+uploadLocalImportTrack\(importedTrack, importContext\)/);
+  assert.match(appSource, /!response\.result\.serverBacked && uploadRequested && importedTrack\?\.filePath\)/);
+  assert.match(appSource, /scheduleServerCatalogRefresh/);
   assert.match(appSource, /Uploaded \$\{importedTrack\.title\}/);
   assert.doesNotMatch(appSource, /importedTrack\?\.filePath && response\.result\.kind === "created"/);
 });
@@ -261,7 +576,7 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   assert.match(appSource, /async function saveClipRange\(\)[\s\S]+setClipRangeForTrack\(state, track/);
   assert.match(appSource, /#saveClipRange"\)\.onclick = saveClipRange/);
   assert.match(appSource, /function finishClipPlaybackIfNeeded\(\)/);
-  assert.match(appSource, /clippedPlaybackPosition\(audio\.duration/);
+  assert.match(appSource, /currentPlaybackDuration\(\)[\s\S]{0,180}clippedPlaybackPosition\(duration \* Number/);
   assert.match(appSource, /async function toggleClipRangePreview\(\)[\s\S]+prepareClipRangePreviewMedia\(track\)[\s\S]+clipEditorPreviewAudio\.play\(\)/);
   assert.match(appSource, /function waitForClipRangePreviewMetadata\(\)[\s\S]+loadedmetadata/);
   assert.match(appSource, /function syncClipRangePreviewTransport\(\)[\s\S]+clipEditorPreviewSeek[\s\S]+aria-valuetext/);
@@ -301,7 +616,7 @@ test("keeps reviewed Windows empty, selection, filter, and metadata states truth
   assert.match(appSource, /data-search-scope="\$\{value\}"/);
   assert.match(appSource, /\["all", "All"\][\s\S]+\["device", "On Device"\][\s\S]+\["available", "Not Downloaded"\]/);
   assert.match(appSource, /const selectLabel = serverSelecting \? "Cancel song selection"/);
-  assert.match(appSource, /id="syncAll"[\s\S]+serverSelecting && !selectedRemoteIDs\.size \? "disabled"/);
+  assert.match(appSource, /id="syncAll"[\s\S]+!offlineDownloadAvailable \|\| \(serverSelecting && !selectedRemoteIDs\.size\) \? "disabled"/);
   assert.match(appSource, /event\.key === "Escape"[\s\S]+serverSelecting = false;[\s\S]+selectedRemoteIDs\.clear\(\)/);
   assert.match(appSource, /const resultSummary = filtered \? `Showing \$\{filteredCount\} of \$\{serverCatalog\.length\} tracks` : "All tracks"/);
   assert.match(appSource, /const showConnectionDetail = !connected;/);
@@ -355,7 +670,7 @@ test("keeps playlist heroes while the root Library starts with compact filter pi
   assert.match(appSource, /const collectionHeader = selectedPlaylistID[\s\S]+class="hero"[\s\S]+: libraryFilters/);
   assert.match(appSource, /collection-scroll">\$\{collectionHeader\}[\s\S]+recently-added/);
   assert.match(appSource, /\$\{selectedPlaylistID \? libraryFilters : ""\}/);
-  assert.match(appSource, /const recentTracks = !selectedPlaylistID \? filterTracks\(tracks, "", "recent"\) : \[\]/);
+  assert.match(appSource, /const recentTracks = !selectedPlaylistID \? filterTracks\(tracks, "", "recent"\)\.filter/);
   assert.match(styleSource, /\.recent-track-list\s*\{[\s\S]*?grid-auto-flow: column/);
   assert.match(styleSource, /\.recent-track-list\s*\{[\s\S]*?grid-auto-columns: minmax\(128px, calc\(\(100% - 90px\) \/ 6\)\)/);
   assert.match(styleSource, /\.recent-track-list\s*\{[\s\S]*?overflow-x: auto/);
@@ -411,7 +726,8 @@ test("opens a synchronized full-screen Now Playing viewer from the mini-player",
   assert.match(appSource, /fullPlayerQueueTab === "history" \? fullPlayerHistoryTracks\(\) : fullPlayerQueueTracks\(\)/);
   assert.match(appSource, /data-full-player-queue/);
   assert.match(appSource, /#fullPlayerSeek"\)\.oninput[\s\S]+audio\.currentTime/);
-  assert.match(appSource, /#fullPlayerVolume"\)\.oninput[\s\S]+#volume/);
+  assert.match(appSource, /#fullPlayerVolume"\)\.oninput = \(event\) => setPlaybackVolume\(event\.target\.value\)/);
+  assert.match(appSource, /function setPlaybackVolume\([\s\S]+#volume[\s\S]+#fullPlayerVolume[\s\S]+#installedVideoVolume/);
   assert.match(appSource, /#fullPlayerSpeed"\)\.onchange[\s\S]+#speed/);
   assert.match(appSource, /#fullPlayerMore"\)\.onclick[\s\S]+openTrackContextMenu/);
   assert.match(appSource, /audio\.ontimeupdate = \(\) => \{[\s\S]+updateFullPlayerProgress\(\)/);
@@ -438,6 +754,9 @@ test("opens a synchronized full-screen Now Playing viewer from the mini-player",
   assert.match(appSource, /function setFullPlayerTitle\(title\)[\s\S]+aria-label[\s\S]+syncFullPlayerTitleMarquee/);
   assert.match(styleSource, /#fullPlayerTitle\.overflowing #fullPlayerTitleText\s*\{[\s\S]+full-player-title-marquee/);
   assert.match(styleSource, /@keyframes full-player-title-marquee\s*\{[\s\S]+var\(--full-player-title-travel\)/);
+  assert.doesNotMatch(styleSource, /full-player-title-marquee[^;]+alternate/);
+  assert.match(appSource, /function currentPlaybackDuration\([^]*?audioMetadataTrackID !== track\.id[^]*?isInstalledVideoTrack\(track\)/);
+  assert.match(appSource, /audio\.onloadedmetadata = async \(\) => \{[^]*?audioSourceTrackID[^]*?!isInstalledVideoTrack\(track\)/);
   assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]+#fullPlayerTitle\.overflowing #fullPlayerTitleText/);
   assert.match(styleSource, /\.full-player-transport \.full-player-play\s*\{/);
   assert.match(styleSource, /\.full-player-queue-panel\s*\{/);
@@ -568,7 +887,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(mainSource, /Only a song already saved in the managed Resonance library can be uploaded/);
   assert.match(localImportUploadSource, /managedRoots = \[paths\.local, paths\.remote\]/);
   assert.match(localImportUploadSource, /isManagedLibraryFile\(absolute, managedRoots\)/);
-  assert.match(mainSource, /profileHeaders\(String\(adminToken\), profileID\)/);
+  assert.match(mainSource, /adminToken = canonicalCredentialToken\(adminToken\)[\s\S]+profileHeaders\(adminToken, profileID\)/);
   assert.match(mainSource, /cleanupLocalImportTemporaryFiles[\s\S]+startsWith\("resonance-local-import-"\)/);
   assert.match(preloadSource, /resolveLocalImport:[\s\S]+local-import:resolve/);
   assert.match(preloadSource, /fetchLocalImportArtwork:[\s\S]+local-import:artwork/);
@@ -634,8 +953,8 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /api\.onLocalImportProgress\(\(value\) => \{[\s\S]+updateLocalImportTransfer\(value\)/);
   assert.match(appSource, /sourceURL: candidate\.sourceURL/);
   assert.match(appSource, /state\.tracks\.push\(importedTrack\)[\s\S]+await persist\(\)/);
-  assert.match(appSource, /if \(!response\.result\.serverBacked && \$\("#localImportSync"\)\.checked[\s\S]+uploadLocalImportTrack\(importedTrack\)/);
-  assert.match(appSource, /function uploadLocalImportTrack\(track\)[\s\S]+api\.uploadLocalImport/);
+  assert.match(appSource, /if \(!response\.result\.serverBacked && uploadRequested[\s\S]+uploadLocalImportTrack\(importedTrack, importContext\)/);
+  assert.match(appSource, /function uploadLocalImportTrack\(track, context\)[\s\S]+api\.uploadLocalImport/);
   assert.doesNotMatch(appSource, /A failed upload will not remove or alter the local media file/);
   assert.match(appSource, /mediaKind: localImportResolution\.mediaKind|mediaKind,/);
   assert.match(mainSource, /outputFormats: \{ audio: "m4a", video: "mp4" \}/);
@@ -657,8 +976,8 @@ test("keeps link import local-first with explicit candidate confirmation and opt
     playlistImportSource.indexOf("await saveImportedPlaylist();"),
   );
   assert.doesNotMatch(downloadPhase, /uploadLocalImportTrack|uploadLocalImportTracks|api\.uploadServer/);
-  assert.match(playlistImportSource, /await saveImportedPlaylist\(\);[\s\S]+prepareLocalImportUploadBatch\(uploadQueue\)[\s\S]+uploadLocalImportTracks\(pendingUploads\)/);
-  assert.match(appSource, /async function uploadLocalImportTracks\(tracks\)[\s\S]+api\.uploadServer\([\s\S]+result\?\.results/);
+  assert.match(playlistImportSource, /await saveImportedPlaylist\(\);[\s\S]+prepareLocalImportUploadBatch\(uploadQueue, importContext\)[\s\S]+uploadLocalImportTracks\(pendingUploads, importContext\)/);
+  assert.match(appSource, /async function uploadLocalImportTracks\(tracks, context\)[\s\S]+api\.uploadServer\([\s\S]+result\?\.results/);
   assert.match(playlistImportSource, /uploadFailures\.push\(\.\.\.\(uploadResult\?\.failed \|\| \[\]\)\)/);
   assert.match(playlistImportSource, /formatServerUploadFailureNotice\(uploadFailures\)/);
   assert.match(mainSource, /mediaKind: value\.mediaKind/);
@@ -667,7 +986,9 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /sourceProvider === "debrid_vault"[\s\S]+return "Debrid Vault"/);
   assert.match(appSource, /api\.startExternalImport\(/);
   assert.match(appSource, /response\.result\.kind === "selection_required"/);
-  assert.match(mainSource, /searchFileBackedSources\(track, \{ baseURL, adminToken, profileID \}, signal\)/);
+  assert.match(mainSource, /const reviewedSearch = \(async \(\) => \{[\s\S]+clientConfigContext\(baseURL, profileID\)[\s\S]+searchFileBackedSources\(track, \{[\s\S]+clientContextHeaders: \{ \.\.\.requestContext\.expected\.request_headers \}[\s\S]+\}, signal\)/);
+  assert.match(debridSource, /review_candidates/);
+  assert.match(debridSource, /redirect: "manual"/);
   assert.match(debridSource, /api\/v1\/admin\/debrid\/resolve/);
   assert.match(debridSource, /api\/v1\/admin\/debrid\/import/);
   assert.match(debridSource, /temporary_download_url/);
@@ -748,7 +1069,7 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /profileID: activeProfileID\(\)/);
   assert.match(appSource, /function pendingListeningHistoryBatches\(\)/);
   assert.match(appSource, /api\.postListeningHistory\(\{/);
-  assert.match(appSource, /api\.fetchListeningHistory\(\{[\s\S]+mergeListeningHistoryDocument\(state, remoteDocument, requestedProfileID\)/);
+  assert.match(appSource, /api\.fetchListeningHistory\(\{[\s\S]+mergeListeningHistoryDocument\(state, remoteDocument, context\.profileID, context\.serverURL\)/);
   assert.match(appSource, /result\?\.supported === false/);
   assert.match(appSource, /scheduleListeningHistorySync\(\)/);
   assert.match(appSource, /syncListeningHistoryNow\(\{ force: true \}\)/);
@@ -873,11 +1194,12 @@ test("opens a listening-history analytics dialog and records real playback time"
 test("summarizes persisted listening history by local day", () => {
   const now = new Date(2026, 6, 30, 12, 0, 0);
   const state = normalizeState({
+    serverURL: "https://music.unblocked.mov",
     syncProfileID: "music-room",
     listeningHistory: [
-      { id: "first", trackID: "a", profileID: "music-room", startedAt: new Date(2026, 6, 30, 8, 0, 0).toISOString(), listenedSeconds: 600 },
-      { id: "second", trackID: "b", startedAt: new Date(2026, 6, 29, 8, 0, 0).toISOString(), listenedSeconds: 300 },
-      { id: "old", trackID: "c", startedAt: new Date(2026, 5, 1, 8, 0, 0).toISOString(), listenedSeconds: 900 },
+      { id: "first", trackID: "a", profileID: "music-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 8, 0, 0).toISOString(), listenedSeconds: 600 },
+      { id: "second", trackID: "b", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 29, 8, 0, 0).toISOString(), listenedSeconds: 300 },
+      { id: "old", trackID: "c", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 5, 1, 8, 0, 0).toISOString(), listenedSeconds: 900 },
     ],
   });
   const summary = summarizeListeningHistory(state, 7, now);
@@ -969,6 +1291,7 @@ test("merges and displays server-only listening history snapshots", () => {
 test("summarizes all-time listening stats independently of the graph window", () => {
   const now = new Date(2026, 6, 30, 12, 0, 0);
   const result = summarizeListeningStats({
+    serverURL: "https://music.unblocked.mov",
     syncProfileID: "alpha-room",
     tracks: [
       { id: "a", title: "First", artist: "Alpha" },
@@ -976,10 +1299,10 @@ test("summarizes all-time listening stats independently of the graph window", ()
       { id: "c", title: "Other profile", artist: "Gamma" },
     ],
     listeningHistory: [
-      { trackID: "a", profileID: "alpha-room", startedAt: new Date(2026, 6, 29, 10, 0, 0).toISOString(), listenedSeconds: 120 },
-      { trackID: "a", profileID: "alpha-room", startedAt: new Date(2026, 6, 30, 8, 0, 0).toISOString(), listenedSeconds: 60 },
-      { trackID: "b", profileID: "alpha-room", startedAt: new Date(2026, 6, 30, 9, 0, 0).toISOString(), listenedSeconds: 30 },
-      { trackID: "c", profileID: "other-room", startedAt: new Date(2026, 6, 30, 10, 0, 0).toISOString(), listenedSeconds: 900 },
+      { trackID: "a", profileID: "alpha-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 29, 10, 0, 0).toISOString(), listenedSeconds: 120 },
+      { trackID: "a", profileID: "alpha-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 8, 0, 0).toISOString(), listenedSeconds: 60 },
+      { trackID: "b", profileID: "alpha-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 9, 0, 0).toISOString(), listenedSeconds: 30 },
+      { trackID: "c", profileID: "other-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 10, 0, 0).toISOString(), listenedSeconds: 900 },
     ],
   }, now);
   assert.equal(result.totalSeconds, 210);
@@ -995,10 +1318,11 @@ test("summarizes all-time listening stats independently of the graph window", ()
 test("summarizes one-day windows into calendar hours", () => {
   const now = new Date(2026, 6, 30, 12, 35, 0);
   const state = normalizeState({
+    serverURL: "https://music.unblocked.mov",
     listeningHistory: [
-      { id: "current-day", trackID: "a", startedAt: new Date(2026, 6, 30, 11, 10, 0).toISOString(), listenedSeconds: 120 },
-      { id: "current-morning", trackID: "b", startedAt: new Date(2026, 6, 30, 1, 30, 0).toISOString(), listenedSeconds: 180 },
-      { id: "previous-day", trackID: "c", startedAt: new Date(2026, 6, 29, 23, 15, 0).toISOString(), listenedSeconds: 300 },
+      { id: "current-day", trackID: "a", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 11, 10, 0).toISOString(), listenedSeconds: 120 },
+      { id: "current-morning", trackID: "b", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 1, 30, 0).toISOString(), listenedSeconds: 180 },
+      { id: "previous-day", trackID: "c", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 29, 23, 15, 0).toISOString(), listenedSeconds: 300 },
     ],
   });
   const summary = summarizeListeningHistory(state, 1, now);
@@ -1142,8 +1466,9 @@ test("search, queue movement, playlists, and time formatting work", () => {
   assert.deepEqual(filterTracks(tracks, "", "audio").map((track) => track.id), ["a"]);
   assert.deepEqual(filterTracks(tracks, "", "recent").map((track) => track.id), ["b", "a"]);
   assert.equal(nextIndex(tracks, "a", 1), 1);
-  assert.equal(nextIndex(tracks, "a", -1), 1);
-  assert.equal(nextIndex(tracks, "a", 1, true, () => 0), 1);
+  assert.equal(nextIndex(tracks, "a", -1), -1);
+  assert.equal(nextIndex(tracks, "b", 1), -1);
+  assert.deepEqual(shuffledTrackIDs(tracks, "a", () => 0), ["a", "b"]);
   assert.equal(formatTime(222), "3:42");
   assert.equal(normalizedVolume(0), 0);
   assert.equal(normalizedVolume(2), 1);
@@ -1245,11 +1570,13 @@ test("guards profile transitions, authenticated downloads, persistence, and tran
 
   assert.match(appSource, /storeActiveProfileState\(state\);[\s\S]+restoreProfileState\(state, profileID, serverURL\)/);
   assert.match(appSource, /if \(!profileContextIsCurrent\(context\)\) return;/);
-  assert.match(appSource, /serverConnected = false;[\s\S]+serverCatalog = \[\];[\s\S]+selectedRemoteIDs\.clear\(\)/);
+  assert.match(appSource, /serverConnected = false;[\s\S]+replaceServerCatalog\(\[\]\);[\s\S]+selectedRemoteIDs\.clear\(\)/);
   assert.match(appSource, /updatePlaylistRemoteSongIDs\(state, playlist\);[\s\S]+markPlaylistDirty\(playlist\)/);
   assert.match(mainSource, /app\.requestSingleInstanceLock\(\)/);
   assert.match(mainSource, /function atomicWriteFile\([\s\S]+fs\.rename\(temporary, destination\)/);
-  assert.match(syncSource, /fileURL\.origin !== base\.origin/);
+  assert.match(mainSource, /function sameOriginServerMediaURL\([\s\S]+url\.origin !== base\.origin/);
+  assert.match(syncSource, /sameOriginServerMediaURL\(mediaLocation\?\.download_url \|\| song\.download_url/);
+  assert.match(syncSource, /redirect: "manual"/);
   assert.match(syncSource, /syncProfileID \|\| "default"\) === \(profileID \|\| "default"\)/);
   const alreadyDownloadedBranch = syncSource.match(/if \(alreadyDownloaded\) \{([\s\S]*?)\n    \}/)?.[1] || "";
   assert.match(alreadyDownloadedBranch, /continue;/);
@@ -1285,6 +1612,15 @@ test("retries individual server downloads and reports every song that still fail
     throw new Error("still unavailable");
   }, { pause: async () => undefined }), /still unavailable/);
   assert.equal(permanentAttempts, 3);
+
+  let revokedAttempts = 0;
+  await assert.rejects(retryServerDownload(async () => {
+    revokedAttempts += 1;
+    const error = new Error("download policy revoked");
+    error.retryable = false;
+    throw error;
+  }, { pause: async () => undefined }), /download policy revoked/);
+  assert.equal(revokedAttempts, 1);
 
   const controller = new AbortController();
   let cancelledAttempts = 0;
@@ -1327,7 +1663,7 @@ test("replaces stale synced tracks instead of discarding the fresh download", ()
   state.playlists.push({ id: "mix", name: "Mix", trackIDs: ["stale", "local"], isSystem: false });
   mergeSyncedTracks(state, {
     replacedTrackIDs: ["stale"],
-    downloaded: [{ id: "stale", remoteID: "remote-1", title: "Fresh copy" }],
+    downloaded: [{ id: "stale", remoteID: "remote-1", sourceServer: state.serverURL, syncProfileID: "default", title: "Fresh copy" }],
   });
   assert.deepEqual(state.tracks.map((track) => track.id), ["local", "stale"]);
   assert.deepEqual(state.favorites, ["stale"]);
@@ -1415,7 +1751,8 @@ test("reconciling a stale downloaded identity removes its old playlist, like, an
   assert.deepEqual(state.deletedClipRangeKeys, ["remote:old-song"]);
 });
 
-test("plans uploads only for downloaded active-profile songs missing from the live catalog", () => {
+test("plans only exact-context downloads and leaves metadata-only matches ambiguous", () => {
+  const exactHash = "a".repeat(64);
   const state = normalizeState({
     ...createEmptyState(),
     serverURL: "https://music.example",
@@ -1423,25 +1760,103 @@ test("plans uploads only for downloaded active-profile songs missing from the li
     tracks: [
       { id: "present", filePath: "/music/present.mp3", remoteID: "remote-present", sourceServer: "https://music.example", syncProfileID: "profile-a" },
       { id: "missing", filePath: "/music/missing.mp3", remoteID: "remote-gone", sourceServer: "https://music.example", syncProfileID: "profile-a" },
-      { id: "hash-match", filePath: "/music/hash.mp3", remoteID: "old-id", sourceServer: "https://music.example", syncProfileID: "profile-a", contentSha256: "ABC" },
+      { id: "hash-match", filePath: "/music/hash.mp3", remoteID: "old-id", sourceServer: "https://music.example", syncProfileID: "profile-a", contentSha256: exactHash },
       { id: "local", filePath: "/music/local.mp3", remoteID: null },
       { id: "other-profile", filePath: "/music/other.mp3", remoteID: "gone", sourceServer: "https://music.example", syncProfileID: "profile-b" },
       { id: "metadata-match", title: "All for You - Radio Version", artist: "Ace of Base", duration: 217.1, filePath: "/music/metadata.mp3", remoteID: "old-metadata-id", sourceServer: "https://music.example", syncProfileID: "profile-a" },
       { id: "source-only-current", title: "Actually Missing", artist: "Artist", duration: 180, filePath: "/music/source.mp3", sourceServer: "https://music.example", syncProfileID: "profile-a" },
       { id: "source-only-other-profile", filePath: "/music/profile.mp3", sourceServer: "https://music.example", syncProfileID: "profile-b" },
       { id: "source-only-other-server", filePath: "/music/server.mp3", sourceServer: "https://other.example", syncProfileID: "profile-a" },
+      { id: "cross-server-id-collision", filePath: "/music/collision.mp3", remoteID: "remote-present", sourceServer: "https://other.example", syncProfileID: "profile-b" },
+      { id: "cross-server-hash-match", filePath: "/music/cross-hash.mp3", remoteID: "other-id", sourceServer: "https://other.example", syncProfileID: "profile-b", contentSha256: exactHash },
     ],
   });
   const plan = planMissingDownloadedUploads(state, [
     { id: "remote-present" },
-    { id: "replacement", content_sha256: "abc" },
+    { id: "replacement", content_sha256: exactHash },
     { id: "metadata-replacement", title: "All for You Radio Version", artist: "Ace of Base", duration_seconds: 217.9 },
   ]);
-  assert.deepEqual(plan.uploadTracks.map((track) => track.id), ["missing", "source-only-current"]);
+  assert.deepEqual(plan.uploadTracks.map((track) => track.id), [
+    "missing",
+    "source-only-current",
+  ]);
   assert.deepEqual(plan.matches.map((match) => [match.trackID, match.remoteSong.id]), [
     ["hash-match", "replacement"],
+  ]);
+  assert.deepEqual(plan.ambiguous.map((match) => [match.track.id, match.candidates[0].id]), [
     ["metadata-match", "metadata-replacement"],
   ]);
+});
+
+test("does not hold uploads behind catalog, playlist, likes, profile, or history synchronization", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const sourceBetween = (start, end) => appSource.slice(appSource.indexOf(start), appSource.indexOf(end));
+  const localUploadSource = sourceBetween("async function uploadLocalImportTrack", "async function refreshServerCatalogAfterUpload");
+  const catalogRefreshSource = sourceBetween("async function refreshServerCatalogAfterUpload", "function scheduleServerCatalogRefresh");
+  const rememberUploadsSource = sourceBetween("function rememberUploadedServerSongs", "function serverCatalogMatchForLocalImport");
+  const localCatalogMatchSource = sourceBetween("function serverCatalogMatchForLocalImport", "async function prepareLocalImportUploadBatch");
+  const localBatchPlanSource = sourceBetween("async function prepareLocalImportUploadBatch", "async function uploadLocalImportTracks");
+  const serverActionSource = sourceBetween("async function serverAction", "async function uploadServerSongs");
+  const manualUploadSource = sourceBetween("async function uploadServerSongs", "async function uploadMissingDownloadedSongs");
+  const missingUploadSource = sourceBetween("async function uploadMissingDownloadedSongs", "async function requestPlayback");
+
+  assert.doesNotMatch(localUploadSource, /fetchCatalog|refreshServerCatalogAfterUpload/);
+  assert.doesNotMatch(localBatchPlanSource, /fetchCatalog|refreshServerCatalogAfterUpload/);
+  assert.match(localCatalogMatchSource, /serverTrackRemoteIDBelongsToContext\(track/);
+  assert.doesNotMatch(serverActionSource, /await syncPlaylistsNow/);
+  assert.match(serverActionSource, /schedulePlaylistSync\(\)/);
+  assert.match(serverActionSource, /const catalogRequestGeneration = serverCatalogGeneration/);
+  assert.match(serverActionSource, /catalogRequestCanApply\(\{[\s\S]+requestGeneration: catalogRequestGeneration[\s\S]+contextCurrent: profileContextIsCurrent\(context\)/);
+  assert.match(catalogRefreshSource, /const requestGeneration = serverCatalogGeneration[\s\S]+catalogRequestCanApply\(\{[\s\S]+currentGeneration: serverCatalogGeneration/);
+  assert.match(rememberUploadsSource, /replaceServerCatalog\(merged\)/);
+  assert.doesNotMatch(manualUploadSource, /await serverAction\("catalog"\)|await api\.fetchCatalog/);
+  assert.match(manualUploadSource, /scheduleServerCatalogRefresh\(context\)/);
+  assert.match(manualUploadSource, /rememberUploadedServerSongs\(result\.results\)/);
+  assert.doesNotMatch(missingUploadSource, /await api\.fetchCatalog/);
+  assert.match(missingUploadSource, /planMissingDownloadedUploads\(state, serverCatalog\)/);
+  assert.match(missingUploadSource, /scheduleServerCatalogRefresh\(context\)/);
+  assert.match(missingUploadSource, /rememberUploadedServerSongs\(result\.results\)/);
+  assert.match(manualUploadSource, /serverUploadConfigurationError\(\{ serverURL: state\.serverURL, adminToken: serverAdminToken \}\)/);
+  assert.match(missingUploadSource, /serverUploadConfigurationError\(\{ serverURL: state\.serverURL, adminToken: serverAdminToken \}\)/);
+  assert.equal(manualUploadSource.match(/serverUploadBlockedByActivity/g)?.length, 2);
+  assert.equal(missingUploadSource.match(/serverUploadBlockedByActivity/g)?.length, 2);
+  assert.match(manualUploadSource, /await saveServerForm\(\);\s+if \(serverUploadBlockedByActivity/);
+  assert.match(missingUploadSource, /await saveServerForm\(\);\s+if \(serverUploadBlockedByActivity/);
+});
+
+test("reserves an immutable local-import context and clears explicitly blank credentials", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  const sourceBetween = (start, end) => appSource.slice(appSource.indexOf(start), appSource.indexOf(end));
+  const contextSource = sourceBetween("function currentServerUploadContext", "function serverArtworkKey");
+  const saveFormSource = sourceBetween("async function saveServerForm", "function renderSettings");
+  const localUploadSource = sourceBetween("async function uploadLocalImportTrack", "async function refreshServerCatalogAfterUpload");
+  const localBatchSource = sourceBetween("async function prepareLocalImportUploadBatch", "function resetLocalImportArtwork");
+  const playlistImportSource = sourceBetween("async function confirmPlaylistImport", "async function confirmLinkImport");
+  const linkImportSource = sourceBetween("async function confirmLinkImport", "async function cancelLinkImport");
+  const settingsSubmitSource = sourceBetween('$("#serverSettingsForm").onsubmit', "async function finishProfileSelection");
+
+  assert.match(contextSource, /Object\.freeze\(\{[\s\S]+adminToken: serverAdminToken/);
+  assert.match(contextSource, /serverUploadContextIsCurrent[\s\S]+context\?\.adminToken === serverAdminToken/);
+  assert.match(contextSource, /ensureServerContextCanChange[\s\S]+serverTransferActive \|\| serverContextReservation/);
+  assert.match(saveFormSource, /const settingsOpen = Boolean\(\$\("#serverSettingsDialog"\)\?\.open\)/);
+  assert.match(saveFormSource, /const nextServerToken = settingsOpen \? \$\("#serverToken"\)\.value\.trim\(\) : serverToken\.trim\(\)/);
+  assert.match(saveFormSource, /const nextServerAdminToken = settingsOpen \? \$\("#serverAdminToken"\)\.value\.trim\(\) : serverAdminToken\.trim\(\)/);
+  assert.match(saveFormSource, /serverToken = nextServerToken/);
+  assert.match(saveFormSource, /serverAdminToken = nextServerAdminToken/);
+  assert.doesNotMatch(saveFormSource, /serverToken[^\n]+\|\| serverToken|serverAdminToken[^\n]+\|\| serverAdminToken/);
+  assert.doesNotMatch(htmlSource, /id="serverToken"[^>]+required/);
+  assert.match(localUploadSource, /uploadLocalImportTrack\(track, context\)[\s\S]+requireLocalImportServerContext\(context\)/);
+  assert.match(localUploadSource, /baseURL: context\.serverURL[\s\S]+adminToken: context\.adminToken[\s\S]+profileID: context\.profileID/);
+  assert.match(localBatchSource, /prepareLocalImportUploadBatch\(tracks, context\)[\s\S]+uploadLocalImportTracks\(tracks, context\)/);
+  assert.match(playlistImportSource, /reserveServerContext\(importContext\)[\s\S]+prepareLocalImportUploadBatch\(uploadQueue, importContext\)[\s\S]+releaseServerContext\(importContext\)/);
+  assert.match(linkImportSource, /reserveServerContext\(importContext\)[\s\S]+uploadLocalImportTrack\(importedTrack, importContext\)[\s\S]+releaseServerContext\(importContext\)/);
+  assert.match(playlistImportSource, /localImportNeedsServerContext\(\{ uploadRequested \}\)[\s\S]+if \(needsServerContext\) \{[\s\S]+currentServerUploadContext\(\)/);
+  assert.match(linkImportSource, /localImportNeedsServerContext\(\{ serverBacked, uploadRequested \}\)[\s\S]+if \(needsServerContext\) \{[\s\S]+currentServerUploadContext\(\)/);
+  assert.doesNotMatch(playlistImportSource, /const importContext = currentServerUploadContext\(\)/);
+  assert.doesNotMatch(linkImportSource, /const importContext = currentServerUploadContext\(\)/);
+  assert.match(settingsSubmitSource, /if \(!serverToken\.trim\(\)\)[\s\S]+Upload ready • catalog sync off/);
+  assert.doesNotMatch(settingsSubmitSource.match(/if \(!serverToken\.trim\(\)\) \{([\s\S]*?)\n    \} else/)?.[1] || "", /serverAction\("catalog"\)/);
 });
 
 test("matches re-encoded server copies by title artist and duration", () => {
@@ -1486,7 +1901,7 @@ test("matching cached server hashes reconcile old uploads during state normaliza
 test("merges dirty local playlists over the server without deleting unrelated playlists", () => {
   const state = createEmptyState();
   state.tracks = [
-    { id: "local-a", remoteID: "a".repeat(24) },
+    { id: "local-a", remoteID: "a".repeat(24), sourceServer: state.serverURL, syncProfileID: "default" },
     { id: "local-only", remoteID: null },
   ];
   state.playlists.push({
@@ -1558,7 +1973,7 @@ test("applies remote ordering, preserves local-only songs, and hydrates later do
   const secondRemoteID = "b".repeat(24);
   const state = createEmptyState();
   state.tracks = [
-    { id: "downloaded-a", remoteID: firstRemoteID },
+    { id: "downloaded-a", remoteID: firstRemoteID, sourceServer: state.serverURL, syncProfileID: "default" },
     { id: "local-only", remoteID: null },
   ];
   state.playlists.push({ id: playlistID, name: "Old", trackIDs: ["local-only"], remoteSongIDs: [], isSystem: false });
@@ -1571,7 +1986,7 @@ test("applies remote ordering, preserves local-only songs, and hydrates later do
   assert.deepEqual(state.playlists[1].trackIDs, ["downloaded-a", "local-only"]);
   assert.deepEqual(state.playlists[1].remoteSongIDs, [secondRemoteID, firstRemoteID]);
 
-  mergeSyncedTracks(state, { downloaded: [{ id: "downloaded-b", remoteID: secondRemoteID }], replacedTrackIDs: [] });
+  mergeSyncedTracks(state, { downloaded: [{ id: "downloaded-b", remoteID: secondRemoteID, sourceServer: state.serverURL, syncProfileID: "default" }], replacedTrackIDs: [] });
   assert.deepEqual(state.playlists[1].trackIDs, ["downloaded-b", "downloaded-a", "local-only"]);
 });
 
@@ -1624,7 +2039,7 @@ test("stale playlist responses preserve newer edits and in-flight deletions", ()
 
 test("removing a downloaded song updates remote membership while keeping unresolved songs", () => {
   const state = createEmptyState();
-  state.tracks = [{ id: "downloaded", remoteID: "a".repeat(24) }];
+  state.tracks = [{ id: "downloaded", remoteID: "a".repeat(24), sourceServer: state.serverURL, syncProfileID: "default" }];
   const playlist = {
     id: "12345678-1234-abcd-9876-abcdef123456",
     name: "Membership",
@@ -1638,10 +2053,11 @@ test("removing a downloaded song updates remote membership while keeping unresol
 
 test("profile playlist documents include remote likes and apply them without touching local likes", () => {
   const state = normalizeState({
+    serverURL: "https://music.unblocked.mov",
     tracks: [
       { id: "local", remoteID: null },
-      { id: "remote-a", remoteID: "song-a" },
-      { id: "remote-b", remoteID: "song-b" },
+      { id: "remote-a", remoteID: "song-a", sourceServer: "https://music.unblocked.mov", syncProfileID: "default" },
+      { id: "remote-b", remoteID: "song-b", sourceServer: "https://music.unblocked.mov", syncProfileID: "default" },
     ],
     playlists: [{ id: "liked", name: "Liked Songs", trackIDs: [], isSystem: true }],
     favorites: ["local", "remote-a"],
@@ -1679,7 +2095,7 @@ test("keeps unavailable server likes and hydrates them after download", () => {
   assert.deepEqual(state.favorites, ["local"]);
 
   mergeSyncedTracks(state, {
-    downloaded: [{ id: "downloaded", remoteID: "not-downloaded-yet", syncProfileID: "default" }],
+    downloaded: [{ id: "downloaded", remoteID: "not-downloaded-yet", sourceServer: state.serverURL, syncProfileID: "default" }],
     replacedTrackIDs: [],
   });
   assert.deepEqual(state.favorites.sort(), ["downloaded", "local"]);

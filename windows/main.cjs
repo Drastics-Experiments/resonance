@@ -1,13 +1,47 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, protocol, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
-const { createHash, randomUUID } = require("node:crypto");
+const { createHash, createHmac, randomBytes, randomUUID } = require("node:crypto");
 const { createReadStream } = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { crashSafeReplace, crashSafeReplaceMirrored, readPrimaryOrBackup } = require("./crash-safe-file.cjs");
+const {
+  cachedConfigMeetsRevisionFloor,
+  clientConfigRevisionFloor,
+  commitClientConfigRecord,
+  currentFloorSafeCachedConfig,
+} = require("./client-config-state.cjs");
+const {
+  CLIENT_CONFIG_MAX_BYTES,
+  clientConfigRequestContext,
+  configCacheKey,
+  createClientConfigCacheRecord,
+  monotonicClientConfigRevision,
+  safeClientConfig,
+  validCachedClientConfig,
+  verifyClientConfigResponse,
+} = require("./client-config.cjs");
+const { MAX_SERVER_MEDIA_BYTES, adoptDownloadedFile, writeResponseToFile } = require("./download-file.cjs");
+const { sanitizeWindowsFilename, windowsCollisionFilename } = require("./filename-policy.cjs");
 const { isManagedLibraryFile } = require("./library-paths.cjs");
 const { readAudioMetadata } = require("./metadata.cjs");
+const { normalizeSourceIdentities, normalizeSourceIdentity } = require("./provenance.cjs");
+const { createRenewablePolicyLease } = require("./policy-lease.cjs");
 const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload } = require("./server-download.cjs");
+const {
+  SERVER_STREAM_SCHEME,
+  ServerStreamValidationError,
+  createExactLengthRelay,
+  parseSingleByteRange,
+  remoteStreamHistoryTrackID,
+  serverStreamSongIsVideo,
+  serverStreamURL,
+  streamSessionIDFromURL,
+  supportedMediaSize,
+  validateStreamResponse,
+} = require("./server-stream.cjs");
+const { catalogSHA256, normalizeServerBaseURL } = require("./server-policy.cjs");
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
 const { LocalImportError, searchYouTubeAudioSources } = require("./local-import-core.cjs");
 const { importFileBackedSource, searchFileBackedSources } = require("./local-debrid.cjs");
@@ -15,7 +49,18 @@ const { artworkFileDataURL, fetchArtwork, importConfirmedSource, resolveLocalImp
 const { looksLikeLink, searchAllPlatforms } = require("./local-search.cjs");
 const { downloadResolvedSoundCloudAudio, isSoundCloudURL, resolveSoundCloudAudio } = require("./local-soundcloud.cjs");
 const { downloadResolvedAudio, resolveYouTubeAudio } = require("./local-youtube.cjs");
-const { serverUploadFilename } = require("./server-upload.cjs");
+const { policyBlockedUploadEntries, serverUploadFilename } = require("./server-upload.cjs");
+const { readServerUploadResponse } = require("./server-upload-response.cjs");
+const windowsPackage = require("./package.json");
+
+protocol.registerSchemesAsPrivileged([{
+  scheme: SERVER_STREAM_SCHEME,
+  privileges: {
+    standard: true,
+    secure: true,
+    stream: true,
+  },
+}]);
 
 function protectDetachedOutput(stream) {
   if (!stream?.on) return;
@@ -38,6 +83,22 @@ const MAX_LOCAL_IMPORT_UPLOAD_BYTES = 256 * 1024 * 1024;
 const MAX_LOCAL_IMPORT_PREVIEW_BYTES = 32 * 1024 * 1024;
 const AUTOMATIC_UPDATE_CHECK_DELAY_MS = 10_000;
 const AUTOMATIC_UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const MAX_SERVER_UPLOAD_BATCH_FILES = 500;
+const MAX_SERVER_UPLOAD_MANIFESTS = 20;
+const MAX_SERVER_UPLOAD_RETRY_RECORDS = MAX_SERVER_UPLOAD_BATCH_FILES * MAX_SERVER_UPLOAD_MANIFESTS;
+const SERVER_UPLOAD_RETRY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_SERVER_STREAM_SESSIONS = 32;
+const MAX_SERVER_STREAM_SESSIONS_PER_OWNER = 2;
+const MAX_SERVER_STREAM_REQUESTS_PER_SESSION = 4;
+const MAX_ACTIVE_SERVER_STREAM_REQUESTS = 32;
+const MAX_SERVER_STREAM_CATALOG_BYTES = 8 * 1024 * 1024;
+const SERVER_STREAM_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const SERVER_STREAM_REQUEST_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+const SERVER_STREAM_IDLE_TIMEOUT_MS = 45 * 1000;
+const WINDOWS_APP_BUILD = Number(windowsPackage.resonanceBuild);
+if (!Number.isSafeInteger(WINDOWS_APP_BUILD) || WINDOWS_APP_BUILD < 1) {
+  throw new Error("windows/package.json must contain a positive resonanceBuild for client-config audience targeting.");
+}
 
 let mainWindow;
 let applicationQuitRequested = false;
@@ -47,6 +108,18 @@ const activeLocalImportPreviews = new Map();
 const cachedLocalImportPreviews = new Map();
 const pendingExternalImports = new Map();
 let librarySaveQueue = Promise.resolve();
+let credentialSaveQueue = Promise.resolve();
+let serverUploadRetrySaveQueue = Promise.resolve();
+let serverUploadRetryLoadPromise = null;
+let clientConfigStateLoadPromise = null;
+let clientConfigStateSaveQueue = Promise.resolve();
+let clientConfigMutationQueue = Promise.resolve();
+let clientConfigState = null;
+const serverUploadRetries = new Map();
+const serverStreamSessions = new Map();
+const rendererCredentialFingerprints = new Map();
+const rendererCredentialEpochs = new Map();
+const credentialFingerprintKey = randomBytes(32);
 let currentWindowsUpdateStatus = { type: "idle" };
 let windowsUpdateCheckPromise = null;
 let automaticUpdateCheckTimer = null;
@@ -73,43 +146,23 @@ async function fileSHA256(filePath) {
   });
 }
 
-async function writeResponseToFile(response, destination, { signal, expectedSize } = {}) {
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error("The server returned an empty download.");
-  const handle = await fs.open(destination, "wx");
-  const hash = createHash("sha256");
-  let total = 0;
-  try {
-    while (true) {
-      signal?.throwIfAborted();
-      const { done, value } = await reader.read();
-      if (done) break;
-      const buffer = Buffer.from(value);
-      hash.update(buffer);
-      let offset = 0;
-      while (offset < buffer.length) {
-        const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset);
-        if (!bytesWritten) throw new Error("The downloaded file could not be written.");
-        offset += bytesWritten;
-      }
-      total += buffer.length;
-    }
-    signal?.throwIfAborted();
-    if (Number.isFinite(expectedSize) && expectedSize >= 0 && total !== expectedSize) {
-      throw new Error("The downloaded file was incomplete.");
-    }
-    return { size: total, sha256: hash.digest("hex") };
-  } catch (error) {
-    await reader.cancel(error).catch(() => undefined);
-    throw error;
-  } finally {
-    reader.releaseLock();
-    await handle.close();
-  }
-}
-
 function usesPreviewCredentialStore() {
   return process.platform === "darwin" && !app.isPackaged;
+}
+
+function canonicalCredentialToken(value) {
+  const token = String(value || "").trim();
+  if (token.length > 8192 || /[\u0000-\u001f\u007f]/.test(token)) {
+    throw new Error("Server credentials must be at most 8192 characters and contain no control characters.");
+  }
+  return token;
+}
+
+function canonicalServerCredentials(value) {
+  return {
+    clientToken: canonicalCredentialToken(value?.clientToken),
+    adminToken: canonicalCredentialToken(value?.adminToken),
+  };
 }
 
 function previewCredentialStorePath() {
@@ -147,6 +200,22 @@ async function writePreviewCredentials(credentials) {
 
 function encryptedCredentialStorage() {
   return require("electron").safeStorage;
+}
+
+async function persistServerCredentials(credentialsValue) {
+  if (usesPreviewCredentialStore()) {
+    await writePreviewCredentials(credentialsValue);
+    return;
+  }
+  const safeStorage = encryptedCredentialStorage();
+  if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows credential encryption is unavailable.");
+  const { credentials, credentialsBackup } = await ensureDirectories();
+  const payload = JSON.stringify(credentialsValue);
+  const save = credentialSaveQueue
+    .catch(() => {})
+    .then(() => crashSafeReplace(credentials, safeStorage.encryptString(payload), { backupPath: credentialsBackup }));
+  credentialSaveQueue = save;
+  await save;
 }
 
 function localImportEnabled() {
@@ -263,13 +332,249 @@ function applicationPaths() {
   return {
     state: path.join(root, "library.json"),
     credentials: path.join(root, "server-credentials.bin"),
+    credentialsBackup: path.join(root, "server-credentials.bin.backup"),
+    uploadRetries: path.join(root, "server-upload-retries.json"),
+    uploadRetriesBackup: path.join(root, "server-upload-retries.json.backup"),
+    clientConfigState: path.join(root, "client-config-state.json"),
+    clientConfigStateBackup: path.join(root, "client-config-state.json.backup"),
     local: path.join(root, "LocalMusic"),
     remote: path.join(root, "ServerCache"),
   };
 }
 
+function boundedText(value, maximumLength = 500) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text ? text.slice(0, maximumLength) : null;
+}
+
+function canonicalCohortKey(value) {
+  const key = typeof value === "string" ? value : "";
+  if (!/^[A-Za-z0-9_-]{22}$/.test(key)) return null;
+  try {
+    const bytes = Buffer.from(key, "base64url");
+    return bytes.length === 16 && bytes.toString("base64url") === key ? key : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeClientConfigState(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const cohortKey = canonicalCohortKey(value.cohort_key);
+  if (!cohortKey) return null;
+  const entries = value.entries && typeof value.entries === "object" && !Array.isArray(value.entries)
+    ? Object.fromEntries(Object.entries(value.entries).slice(-64).filter(([key, record]) =>
+      typeof key === "string"
+      && /^client-config-v1-[a-f0-9]{64}$/.test(key)
+      && record
+      && typeof record === "object"
+      && !Array.isArray(record)))
+    : {};
+  const revisionFloors = value.revision_floors && typeof value.revision_floors === "object" && !Array.isArray(value.revision_floors)
+    ? Object.fromEntries(Object.entries(value.revision_floors).filter(([key, revision]) =>
+      typeof key === "string"
+      && /^client-config-v1-[a-f0-9]{64}$/.test(key)
+      && Number.isSafeInteger(revision)
+      && revision >= 0))
+    : {};
+  return { schema_version: 1, cohort_key: cohortKey, entries, revision_floors: revisionFloors };
+}
+
+function safeServerTransferPreferences(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const uploadModes = new Set(["local_file", "server_source_link", "reviewed_match"]);
+  const downloadModes = new Set(["verified_file_cache", "stream_only"]);
+  return Object.fromEntries(Object.entries(value).slice(0, 64).flatMap(([key, preference]) => {
+    if (typeof key !== "string" || key.length > 512 || !preference || typeof preference !== "object") return [];
+    const separator = key.lastIndexOf("#profile=");
+    const serverOrigin = separator > 0 ? normalizedServerOrigin(key.slice(0, separator)) : null;
+    const profileID = separator > 0 ? key.slice(separator + "#profile=".length) : "";
+    if (!serverOrigin || !profileID || profileID.length > 128 || key !== `${serverOrigin}#profile=${profileID}`) return [];
+    return [[key, {
+      uploadMode: uploadModes.has(preference.uploadMode) ? preference.uploadMode : "local_file",
+      downloadMode: downloadModes.has(preference.downloadMode) ? preference.downloadMode : "verified_file_cache",
+    }]];
+  }));
+}
+
+async function persistClientConfigState() {
+  if (!clientConfigState) return;
+  const { clientConfigState: destination, clientConfigStateBackup: backupPath } = applicationPaths();
+  const snapshot = safeClientConfigState(clientConfigState);
+  if (!snapshot) return;
+  const save = clientConfigStateSaveQueue
+    .catch(() => {})
+    .then(() => crashSafeReplaceMirrored(destination, JSON.stringify(snapshot, null, 2), {
+      backupPath,
+      encoding: "utf8",
+      mode: 0o600,
+    }));
+  clientConfigStateSaveQueue = save;
+  await save;
+}
+
+function mutateClientConfigState(operation) {
+  const pending = clientConfigMutationQueue
+    .catch(() => undefined)
+    .then(operation);
+  clientConfigMutationQueue = pending;
+  return pending;
+}
+
+async function ensureClientConfigStateLoaded() {
+  if (clientConfigState) return clientConfigState;
+  if (!clientConfigStateLoadPromise) {
+    clientConfigStateLoadPromise = (async () => {
+      const { clientConfigState: source, clientConfigStateBackup: backupPath } = applicationPaths();
+      try {
+        const result = await readPrimaryOrBackup(source, (bytes) => {
+          const state = safeClientConfigState(JSON.parse(bytes.toString("utf8")));
+          if (!state) throw new Error("Invalid client config state.");
+          return state;
+        }, { backupPath, mode: 0o600 });
+        clientConfigState = result.value;
+      } catch (error) {
+        if (error?.code !== "ENOENT") console.error("Could not restore the client-config cache", error);
+        clientConfigState = {
+          schema_version: 1,
+          cohort_key: randomBytes(16).toString("base64url"),
+          entries: {},
+          revision_floors: {},
+        };
+        await persistClientConfigState();
+      }
+      return clientConfigState;
+    })();
+  }
+  return clientConfigStateLoadPromise;
+}
+
+function safeServerUploadRetryRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const retryID = boundedText(value.retryID, 128);
+  const filePath = boundedText(value.filePath, 32_767);
+  const serverOrigin = normalizedServerOrigin(value.serverOrigin);
+  const createdAt = Number.isFinite(Date.parse(value.createdAt))
+    ? new Date(value.createdAt).toISOString()
+    : null;
+  const recordAge = createdAt ? Date.now() - Date.parse(createdAt) : Number.POSITIVE_INFINITY;
+  if (!retryID || !filePath || !serverOrigin || !createdAt
+      || recordAge < -5 * 60 * 1000
+      || recordAge > SERVER_UPLOAD_RETRY_MAX_AGE_MS) return null;
+  return {
+    retryID,
+    filePath: path.resolve(filePath),
+    trackID: boundedText(value.trackID, 128),
+    title: boundedText(value.title) || path.basename(filePath, path.extname(filePath)),
+    artist: boundedText(value.artist),
+    uploadFilename: safeFilename(value.uploadFilename || path.basename(filePath)),
+    serverOrigin,
+    profileID: boundedText(value.profileID, 128) || "default",
+    createdAt,
+  };
+}
+
+async function ensureServerUploadRetriesLoaded() {
+  if (serverUploadRetryLoadPromise) return serverUploadRetryLoadPromise;
+  serverUploadRetryLoadPromise = (async () => {
+    const { uploadRetries, uploadRetriesBackup } = await ensureDirectories();
+    try {
+      const result = await readPrimaryOrBackup(uploadRetries, (bytes) => {
+        const payload = JSON.parse(bytes.toString("utf8"));
+        if (!Array.isArray(payload)) throw new Error("Invalid upload retry records.");
+        return payload;
+      }, { backupPath: uploadRetriesBackup });
+      for (const value of result.value.slice(-MAX_SERVER_UPLOAD_RETRY_RECORDS)) {
+        const record = safeServerUploadRetryRecord(value);
+        if (record) serverUploadRetries.set(record.retryID, record);
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") console.error("Could not restore server upload retries", error);
+    }
+  })();
+  return serverUploadRetryLoadPromise;
+}
+
+async function persistServerUploadRetries() {
+  const { uploadRetries, uploadRetriesBackup } = await ensureDirectories();
+  const records = [...serverUploadRetries.values()]
+    .map(safeServerUploadRetryRecord)
+    .filter(Boolean)
+    .slice(-MAX_SERVER_UPLOAD_RETRY_RECORDS);
+  serverUploadRetries.clear();
+  for (const record of records) serverUploadRetries.set(record.retryID, record);
+  const save = serverUploadRetrySaveQueue
+    .catch(() => {})
+    .then(() => crashSafeReplace(
+      uploadRetries,
+      JSON.stringify(records, null, 2),
+      { backupPath: uploadRetriesBackup, encoding: "utf8" },
+    ));
+  serverUploadRetrySaveQueue = save;
+  await save;
+}
+
+function safeServerUploadManifests(value) {
+  const safeItem = (item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)
+        || !["uploaded", "failed", "cancelled"].includes(item.status)) return null;
+    return {
+      retryID: boundedText(item.retryID, 128),
+      trackID: boundedText(item.trackID, 128),
+      filename: boundedText(item.filename),
+      title: boundedText(item.title) || boundedText(item.filename) || "Untitled song",
+      artist: boundedText(item.artist),
+      status: item.status,
+      attempts: Math.max(0, Math.min(10, Math.floor(Number(item.attempts) || 0))),
+      message: item.status === "uploaded" ? null : boundedText(item.message, 1_000),
+      remoteID: boundedText(item.remoteID, 128),
+    };
+  };
+  return (Array.isArray(value) ? value : []).flatMap((manifest) => {
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return [];
+    const id = boundedText(manifest.id, 128);
+    const serverOrigin = normalizedServerOrigin(manifest.serverOrigin);
+    const items = (Array.isArray(manifest.items) ? manifest.items : []).map(safeItem).filter(Boolean).slice(0, MAX_SERVER_UPLOAD_BATCH_FILES);
+    if (!id || !serverOrigin || !items.length) return [];
+    const startedAt = Number.isFinite(Date.parse(manifest.startedAt))
+      ? new Date(manifest.startedAt).toISOString()
+      : new Date().toISOString();
+    return [{
+      id,
+      serverOrigin,
+      profileID: boundedText(manifest.profileID, 128) || "default",
+      source: ["picker", "missing-downloads", "link-import"].includes(manifest.source) ? manifest.source : "picker",
+      startedAt,
+      updatedAt: Number.isFinite(Date.parse(manifest.updatedAt))
+        ? new Date(manifest.updatedAt).toISOString()
+        : startedAt,
+      items,
+    }];
+  }).slice(-MAX_SERVER_UPLOAD_MANIFESTS);
+}
+
 function safeFilename(value) {
-  return path.basename(String(value || "")).replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-").trim();
+  return sanitizeWindowsFilename(value);
+}
+
+function normalizedServerOrigin(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    return ["https:", "http:"].includes(url.protocol) ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+function storageLocationForPath(filePath) {
+  if (!filePath) return null;
+  const paths = applicationPaths();
+  const absolute = path.resolve(String(filePath));
+  const local = path.resolve(paths.local);
+  const remote = path.resolve(paths.remote);
+  if (absolute === local || absolute.startsWith(local + path.sep)) return "local";
+  if (absolute === remote || absolute.startsWith(remote + path.sep)) return "server-cache";
+  return "external";
 }
 
 function safeListeningHistory(value) {
@@ -282,11 +587,14 @@ function safeListeningHistory(value) {
       entry
       && typeof entry.id === "string"
       && typeof entry.trackID === "string"
+      && entry.id.length <= 128
+      && entry.trackID.length <= 128
       && Number.isFinite(Date.parse(entry.startedAt)))
     .map((entry) => ({
       id: entry.id,
       trackID: entry.trackID,
       profileID: typeof entry.profileID === "string" && entry.profileID ? entry.profileID : "default",
+      serverOrigin: normalizedServerOrigin(entry.serverOrigin),
       startedAt: new Date(entry.startedAt).toISOString(),
       listenedSeconds: Math.max(0, Number(entry.listenedSeconds) || 0),
       remoteID: optionalText(entry.remoteID, 128),
@@ -330,7 +638,7 @@ async function uniqueDestination(directory, preferred) {
   while (true) {
     try {
       await fs.access(candidate);
-      candidate = path.join(directory, `${base} ${counter}${extension}`);
+      candidate = path.join(directory, windowsCollisionFilename(`${base}${extension}`, counter));
       counter += 1;
     } catch {
       return candidate;
@@ -339,6 +647,11 @@ async function uniqueDestination(directory, preferred) {
 }
 
 function publicTrack(filePath, details = {}) {
+  const sourceIdentity = normalizeSourceIdentity(details.sourceIdentity, { sourcePageURL: details.sourceURL });
+  const sourceIdentities = normalizeSourceIdentities(details.sourceIdentities, sourceIdentity
+    ? [sourceIdentity, ...(sourceIdentity.aliases || [])]
+    : []);
+  const storedPath = typeof filePath === "string" ? filePath : "";
   return {
     id: details.id || randomUUID(),
     title: details.title || path.basename(filePath, path.extname(filePath)),
@@ -347,13 +660,18 @@ function publicTrack(filePath, details = {}) {
     duration: Number(details.duration) || 0,
     artwork: details.artwork || null,
     size: Number(details.size) || 0,
-    filePath,
-    fileUrl: pathToFileURL(filePath).href,
+    filePath: storedPath,
+    fileUrl: storedPath ? pathToFileURL(storedPath).href : null,
+    available: details.available !== false,
+    missing: Boolean(details.missing || details.available === false),
+    storageLocation: details.storageLocation || storageLocationForPath(filePath),
     remoteID: details.remoteID || null,
     sourceServer: details.sourceServer || null,
     syncProfileID: details.syncProfileID || null,
     remoteModified: details.remoteModified || null,
-    sourceURL: details.sourceURL || null,
+    sourceURL: sourceIdentity?.sourcePageURL || null,
+    sourceIdentity,
+    sourceIdentities,
     sourceSha256: details.sourceSha256 || null,
     contentSha256: details.contentSha256 || null,
     dateAdded: details.dateAdded || new Date().toISOString(),
@@ -373,14 +691,11 @@ async function enrichedTrack(filePath, details = {}) {
 }
 
 function normalizeBaseURL(value) {
-  const url = new URL(String(value || "").trim());
-  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Enter a complete http:// or https:// server URL.");
-  url.pathname = url.pathname.replace(/\/+$/, "") + "/";
-  return url;
+  return normalizeServerBaseURL(value, { allowInsecureLoopback: !app.isPackaged });
 }
 
 function matchesServerOrigin(value, expectedOrigin) {
-  if (!value) return true;
+  if (!value) return false;
   try {
     return new URL(value).origin === expectedOrigin;
   } catch {
@@ -434,6 +749,7 @@ async function responseBytesWithLimit(response, limit) {
 }
 
 function createWindow() {
+  const trustedRendererURL = pathToFileURL(path.join(__dirname, "ui", "index.html")).href;
   const window = new BrowserWindow({
     width: 1360,
     height: 850,
@@ -454,6 +770,17 @@ function createWindow() {
   window.resonanceCloseReady = false;
   window.resonanceCloseRequested = false;
   window.resonanceCloseTimer = null;
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-navigate", (event, targetURL) => {
+    if (targetURL !== trustedRendererURL) event.preventDefault();
+  });
+  window.webContents.on("will-attach-webview", (event) => event.preventDefault());
+  const windowWebContentsID = window.webContents.id;
+  window.webContents.once("destroyed", () => {
+    revokeServerStreamsForOwner(windowWebContentsID);
+    rendererCredentialFingerprints.delete(windowWebContentsID);
+    rendererCredentialEpochs.delete(windowWebContentsID);
+  });
   window.on("close", (event) => {
     if (window.resonanceCloseReady || window.isDestroyed()) return;
     event.preventDefault();
@@ -485,6 +812,7 @@ ipcMain.on("app:close-ready", (event) => {
 
 app.on("before-quit", () => {
   applicationQuitRequested = true;
+  revokeAllServerStreams();
   if (automaticUpdateCheckTimer) clearTimeout(automaticUpdateCheckTimer);
   if (automaticUpdateCheckInterval) clearInterval(automaticUpdateCheckInterval);
   automaticUpdateCheckTimer = null;
@@ -505,6 +833,7 @@ app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
   await cleanupLocalImportTemporaryFiles();
   await ensureDirectories();
+  protocol.handle(SERVER_STREAM_SCHEME, handleServerStreamRequest);
   createWindow();
   startAutomaticUpdateChecks();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
@@ -531,25 +860,70 @@ ipcMain.handle("update:install", () => {
   return installDownloadedWindowsUpdate(autoUpdater);
 });
 
+function persistableLibraryTrack(track) {
+  return Boolean(track
+    && typeof track === "object"
+    && track.transientStream !== true
+    && !(typeof track.id === "string" && track.id.startsWith("stream:"))
+    && !(typeof track.fileUrl === "string" && track.fileUrl.startsWith(`${SERVER_STREAM_SCHEME}:`)));
+}
+
+function sanitizePersistentPlaybackReferences(value, persistentTrackIDs) {
+  value.currentTrackID = persistentTrackIDs.has(value.currentTrackID) ? value.currentTrackID : null;
+  value.playbackQueueIDs = Array.isArray(value.playbackQueueIDs)
+    ? value.playbackQueueIDs.filter((id) => persistentTrackIDs.has(id))
+    : [];
+  value.playbackSourceQueueIDs = Array.isArray(value.playbackSourceQueueIDs)
+    ? value.playbackSourceQueueIDs.filter((id) => persistentTrackIDs.has(id))
+    : [];
+  value.favorites = Array.isArray(value.favorites) ? value.favorites.filter((id) => persistentTrackIDs.has(id)) : [];
+  value.playlists = Array.isArray(value.playlists) ? value.playlists.map((playlist) => ({
+    ...playlist,
+    trackIDs: Array.isArray(playlist?.trackIDs) ? playlist.trackIDs.filter((id) => persistentTrackIDs.has(id)) : [],
+  })) : [];
+  value.listeningHistory = safeListeningHistory(value.listeningHistory)
+    .filter((entry) => typeof entry.trackID !== "string" || !entry.trackID.startsWith("stream:"));
+  return value;
+}
+
 ipcMain.handle("library:load", async () => {
   const { state } = await ensureDirectories();
   try {
     const stored = JSON.parse(await fs.readFile(state, "utf8"));
-    const localUploadSizes = new Set((stored.tracks || [])
+    const storedTracks = Array.isArray(stored.tracks) ? stored.tracks.filter(persistableLibraryTrack) : [];
+    const localUploadSizes = new Set(storedTracks
       .filter((track) => !track?.remoteID && track?.contentSha256 && Number.isFinite(Number(track?.size)))
       .map((track) => Number(track.size)));
-    const tracks = await Promise.all((stored.tracks || []).filter((track) => track.filePath).map(async (track) => {
+    const tracks = await Promise.all(storedTracks.map(async (track) => {
+      if (!track.filePath) {
+        return publicTrack("", { ...track, available: false, missing: true, storageLocation: null });
+      }
       try {
         const information = await fs.stat(track.filePath);
-        if (!information.isFile()) return null;
+        if (!information.isFile()) throw Object.assign(new Error("The stored path is not a file."), { code: "ENOENT" });
         const contentSha256 = track.contentSha256
           || (track.remoteID && localUploadSizes.has(information.size) ? await fileSHA256(track.filePath) : null);
-        return enrichedTrack(track.filePath, { ...track, size: information.size, contentSha256 });
+        return enrichedTrack(track.filePath, {
+          ...track,
+          size: information.size,
+          contentSha256,
+          available: true,
+          missing: false,
+          storageLocation: storageLocationForPath(track.filePath),
+        });
       } catch {
-        return null;
+        return publicTrack(track.filePath, {
+          ...track,
+          available: false,
+          missing: true,
+          storageLocation: storageLocationForPath(track.filePath),
+        });
       }
     }));
-    stored.tracks = tracks.filter(Boolean);
+    stored.tracks = tracks;
+    sanitizePersistentPlaybackReferences(stored, new Set(tracks.map((track) => track.id).filter(Boolean)));
+    stored.serverUploadManifests = safeServerUploadManifests(stored.serverUploadManifests);
+    stored.serverTransferPreferences = safeServerTransferPreferences(stored.serverTransferPreferences);
     await atomicWriteFile(state, JSON.stringify({
       ...stored,
       tracks: stored.tracks.map(({ fileUrl, ...track }) => track),
@@ -569,18 +943,38 @@ ipcMain.handle("library:load", async () => {
 
 ipcMain.handle("library:save", async (_event, state) => {
   const paths = await ensureDirectories();
+  const tracks = Array.isArray(state.tracks) ? state.tracks.filter(persistableLibraryTrack) : [];
+  const persistentTrackIDs = new Set(tracks.map((track) => track.id).filter(Boolean));
   const safeState = {
-    tracks: Array.isArray(state.tracks) ? state.tracks.map(({ fileUrl, ...track }) => track) : [],
-    playlists: Array.isArray(state.playlists) ? state.playlists : [],
-    favorites: Array.isArray(state.favorites) ? state.favorites : [],
+    tracks: tracks.map(({ fileUrl, transientStream, ...track }) => {
+      const sourceIdentity = normalizeSourceIdentity(track.sourceIdentity, { sourcePageURL: track.sourceURL });
+      const sourceIdentities = normalizeSourceIdentities(track.sourceIdentities, sourceIdentity
+        ? [sourceIdentity, ...(sourceIdentity.aliases || [])]
+        : []);
+      return {
+        ...track,
+        sourceURL: sourceIdentity?.sourcePageURL || null,
+        sourceIdentity,
+        sourceIdentities,
+        available: track.available !== false,
+        missing: Boolean(track.missing || track.available === false),
+        storageLocation: storageLocationForPath(track.filePath) || track.storageLocation || null,
+      };
+    }),
+    playlists: Array.isArray(state.playlists) ? state.playlists.map((playlist) => ({
+      ...playlist,
+      trackIDs: Array.isArray(playlist?.trackIDs) ? playlist.trackIDs.filter((id) => persistentTrackIDs.has(id)) : [],
+    })) : [],
+    favorites: Array.isArray(state.favorites) ? state.favorites.filter((id) => persistentTrackIDs.has(id)) : [],
     serverURL: typeof state.serverURL === "string" ? state.serverURL : "",
     volume: Number.isFinite(state.volume) ? state.volume : 0.78,
     playbackRate: Number.isFinite(state.playbackRate) ? state.playbackRate : 1,
     shuffle: Boolean(state.shuffle),
     repeat: Boolean(state.repeat),
-    currentTrackID: state.currentTrackID || null,
+    currentTrackID: persistentTrackIDs.has(state.currentTrackID) ? state.currentTrackID : null,
     position: Number.isFinite(state.position) ? state.position : 0,
-    playbackQueueIDs: Array.isArray(state.playbackQueueIDs) ? state.playbackQueueIDs : [],
+    playbackQueueIDs: Array.isArray(state.playbackQueueIDs) ? state.playbackQueueIDs.filter((id) => persistentTrackIDs.has(id)) : [],
+    playbackSourceQueueIDs: Array.isArray(state.playbackSourceQueueIDs) ? state.playbackSourceQueueIDs.filter((id) => persistentTrackIDs.has(id)) : [],
     playbackPlaylistID: typeof state.playbackPlaylistID === "string" ? state.playbackPlaylistID : null,
     playlistRevision: Number.isInteger(state.playlistRevision) && state.playlistRevision >= 0 ? state.playlistRevision : 0,
     knownRemotePlaylistIDs: Array.isArray(state.knownRemotePlaylistIDs) ? state.knownRemotePlaylistIDs : [],
@@ -593,7 +987,10 @@ ipcMain.handle("library:save", async (_event, state) => {
     remoteLikedSongIDs: Array.isArray(state.remoteLikedSongIDs) ? state.remoteLikedSongIDs : [],
     dirtyRemoteLikeSongIDs: Array.isArray(state.dirtyRemoteLikeSongIDs) ? state.dirtyRemoteLikeSongIDs : [],
     likesDirty: Boolean(state.likesDirty),
-    listeningHistory: safeListeningHistory(state.listeningHistory),
+    listeningHistory: safeListeningHistory(state.listeningHistory)
+      .filter((entry) => typeof entry.trackID !== "string" || !entry.trackID.startsWith("stream:")),
+    serverUploadManifests: safeServerUploadManifests(state.serverUploadManifests),
+    serverTransferPreferences: safeServerTransferPreferences(state.serverTransferPreferences),
   };
   const save = librarySaveQueue
     .catch(() => {})
@@ -603,33 +1000,63 @@ ipcMain.handle("library:save", async (_event, state) => {
   return true;
 });
 
-ipcMain.handle("server:credentials:load", async () => {
-  if (usesPreviewCredentialStore()) return readPreviewCredentials();
-  const { credentials } = await ensureDirectories();
-  const safeStorage = encryptedCredentialStorage();
-  if (!safeStorage.isEncryptionAvailable()) return { clientToken: "", adminToken: "" };
-  try {
-    const encrypted = await fs.readFile(credentials);
-    return JSON.parse(safeStorage.decryptString(encrypted));
-  } catch {
-    return { clientToken: "", adminToken: "" };
+function credentialFingerprint(value) {
+  const { clientToken, adminToken } = canonicalServerCredentials(value);
+  return createHmac("sha256", credentialFingerprintKey)
+    .update(`${Buffer.byteLength(clientToken, "utf8")}:`, "utf8")
+    .update(clientToken, "utf8")
+    .update(`${Buffer.byteLength(adminToken, "utf8")}:`, "utf8")
+    .update(adminToken, "utf8")
+    .digest("hex");
+}
+
+ipcMain.handle("server:credentials:load", async (event) => {
+  let rawValue = { clientToken: "", adminToken: "" };
+  if (usesPreviewCredentialStore()) {
+    rawValue = await readPreviewCredentials();
+  } else {
+    const { credentials, credentialsBackup } = await ensureDirectories();
+    const safeStorage = encryptedCredentialStorage();
+    if (safeStorage.isEncryptionAvailable()) {
+      try {
+        const result = await readPrimaryOrBackup(credentials, (encrypted) => {
+          const parsed = JSON.parse(safeStorage.decryptString(encrypted));
+          return {
+            clientToken: String(parsed?.clientToken || ""),
+            adminToken: String(parsed?.adminToken || ""),
+          };
+        }, { backupPath: credentialsBackup });
+        rawValue = result.value;
+      } catch {
+        // Missing or invalid credentials remain empty.
+      }
+    }
   }
+  let value;
+  let canMigrate = true;
+  try { value = canonicalServerCredentials(rawValue); }
+  catch {
+    value = { clientToken: "", adminToken: "" };
+    canMigrate = false;
+  }
+  if (canMigrate && (value.clientToken !== rawValue.clientToken || value.adminToken !== rawValue.adminToken)) {
+    await persistServerCredentials(value).catch(() => undefined);
+  }
+  rendererCredentialFingerprints.set(event.sender.id, credentialFingerprint(value));
+  if (!rendererCredentialEpochs.has(event.sender.id)) rendererCredentialEpochs.set(event.sender.id, 0);
+  return value;
 });
 
-ipcMain.handle("server:credentials:save", async (_event, value) => {
-  const credentialsValue = {
-    clientToken: String(value.clientToken || ""),
-    adminToken: String(value.adminToken || ""),
-  };
-  if (usesPreviewCredentialStore()) {
-    await writePreviewCredentials(credentialsValue);
-    return true;
+ipcMain.handle("server:credentials:save", async (event, value) => {
+  const credentialsValue = canonicalServerCredentials(value);
+  const previousFingerprint = rendererCredentialFingerprints.get(event.sender.id);
+  const nextFingerprint = credentialFingerprint(credentialsValue);
+  await persistServerCredentials(credentialsValue);
+  if (previousFingerprint !== nextFingerprint) {
+    rendererCredentialEpochs.set(event.sender.id, (rendererCredentialEpochs.get(event.sender.id) || 0) + 1);
+    revokeServerStreamsForOwner(event.sender.id);
   }
-  const safeStorage = encryptedCredentialStorage();
-  if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows credential encryption is unavailable.");
-  const { credentials } = await ensureDirectories();
-  const payload = JSON.stringify(credentialsValue);
-  await fs.writeFile(credentials, safeStorage.encryptString(payload));
+  rendererCredentialFingerprints.set(event.sender.id, nextFingerprint);
   return true;
 });
 
@@ -743,9 +1170,20 @@ ipcMain.handle("local-import:resolve", async (event, { source, mediaKind, baseUR
       ? await searchAllPlatforms(input, controller.signal)
       : await resolveLocalImportSource(input, controller.signal, publish, {
       searchYouTubeAudioSources: async (track, signal) => {
+        const reviewedSearch = (async () => {
+          const exactAdminToken = canonicalCredentialToken(adminToken);
+          if (!exactAdminToken) return [];
+          const requestContext = await clientConfigContext(baseURL, profileID);
+          return searchFileBackedSources(track, {
+            baseURL: requestContext.base.href,
+            adminToken: exactAdminToken,
+            profileID,
+            clientContextHeaders: { ...requestContext.expected.request_headers },
+          }, signal);
+        })();
         const [youtubeResult, externalResult] = await Promise.allSettled([
           searchYouTubeAudioSources(track, signal),
-          searchFileBackedSources(track, { baseURL, adminToken, profileID }, signal),
+          reviewedSearch,
         ]);
         const candidates = [];
         if (youtubeResult.status === "fulfilled") candidates.push(...youtubeResult.value);
@@ -782,6 +1220,15 @@ ipcMain.handle("local-import:start-external", async (event, value = {}) => {
     if (!event.sender.isDestroyed()) event.sender.send("local-import:progress", progress);
   };
   try {
+    const base = normalizeBaseURL(value.baseURL);
+    const adminToken = canonicalCredentialToken(value.adminToken);
+    await requireClientUploadMode({
+      baseURL: base.href,
+      token: adminToken,
+      profileID: value.profileID,
+      mode: "external_object",
+      force: true,
+    });
     const paths = await ensureDirectories();
     const pending = pendingExternalImports.get(event.sender.id) || null;
     const fileID = Number(value.fileID);
@@ -789,10 +1236,11 @@ ipcMain.handle("local-import:start-external", async (event, value = {}) => {
       throw new LocalImportError("awaiting_selection", "EXTERNAL_SELECTION_EXPIRED", "Choose the file-backed release again before selecting its audio file.");
     }
     const result = await importFileBackedSource({
-      baseURL: value.baseURL,
-      adminToken: value.adminToken,
+      baseURL: base.href,
+      adminToken,
       profileID: value.profileID,
       sourceURL: value.sourceURL,
+      sourceIdentity: value.sourceIdentity,
       resume: value.resumeSelection ? pending : null,
       fileID: value.resumeSelection ? fileID : null,
       metadata: value.metadata,
@@ -807,7 +1255,7 @@ ipcMain.handle("local-import:start-external", async (event, value = {}) => {
     pendingExternalImports.delete(event.sender.id);
     if (result.kind === "duplicate") {
       publish({ stage: "local_complete", duplicate: true, trackID: result.track.id, serverBacked: true });
-      return { ok: true, result: { kind: "duplicate", trackID: result.track.id, serverBacked: true, remoteSong: result.remoteSong } };
+      return { ok: true, result: { kind: "duplicate", trackID: result.track.id, sourceIdentity: result.sourceIdentity || null, serverBacked: true, remoteSong: result.remoteSong } };
     }
     const track = await enrichedTrack(result.filePath, {
       title: result.metadata.title,
@@ -816,6 +1264,7 @@ ipcMain.handle("local-import:start-external", async (event, value = {}) => {
       artwork: result.artwork || null,
       size: result.size,
       sourceURL: result.sourceURL,
+      sourceIdentity: result.sourceIdentity || value.sourceIdentity,
       sourceSha256: result.sourceSha256,
       contentSha256: result.contentSha256,
     });
@@ -844,6 +1293,7 @@ ipcMain.handle("local-import:start", async (event, value = {}) => {
     const paths = await ensureDirectories();
     const result = await importConfirmedSource({
       sourceURL: String(value.sourceURL || ""),
+      sourceIdentity: value.sourceIdentity,
       mediaKind: value.mediaKind,
       metadata: value.metadata,
       existing: Array.isArray(value.existing) ? value.existing : [],
@@ -852,7 +1302,7 @@ ipcMain.handle("local-import:start", async (event, value = {}) => {
     }, controller.signal, publish);
     if (result.kind === "duplicate") {
       publish({ stage: "local_complete", duplicate: true, trackID: result.track.id });
-      return { ok: true, result: { kind: "duplicate", trackID: result.track.id } };
+      return { ok: true, result: { kind: "duplicate", trackID: result.track.id, sourceIdentity: result.sourceIdentity || null } };
     }
     const track = await enrichedTrack(result.filePath, {
       title: result.metadata.title,
@@ -861,6 +1311,7 @@ ipcMain.handle("local-import:start", async (event, value = {}) => {
       artwork: result.artwork || null,
       size: result.size,
       sourceURL: result.sourceURL,
+      sourceIdentity: result.sourceIdentity || value.sourceIdentity,
       sourceSha256: result.sourceSha256,
       contentSha256: result.contentSha256,
     });
@@ -882,12 +1333,13 @@ ipcMain.handle("local-import:cancel", (event) => {
   return true;
 });
 
-ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profileID, filePath, title } = {}) => {
+ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profileID, filePath, title, mode } = {}) => {
   if (!localImportEnabled()) {
     return { ok: false, error: { stage: "syncing", code: "FEATURE_DISABLED", message: "Local link import is disabled in this build." } };
   }
   const controller = beginLocalImport(event);
   try {
+    adminToken = canonicalCredentialToken(adminToken);
     const paths = await ensureDirectories();
     const absolute = path.resolve(String(filePath || ""));
     const managedRoots = [paths.local, paths.remote];
@@ -898,15 +1350,17 @@ ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profi
     if (!information.isFile() || information.size <= 0 || information.size > MAX_LOCAL_IMPORT_UPLOAD_BYTES) {
       throw new LocalImportError("syncing", "INVALID_LOCAL_FILE", "The local song cannot be uploaded because its size is invalid.");
     }
-    if (!String(adminToken || "").trim()) {
+    if (!adminToken) {
       throw new LocalImportError("syncing", "ADMIN_KEY_REQUIRED", "Add a server admin key before uploading this local song.");
     }
     const base = normalizeBaseURL(baseURL);
+    const requestedMode = mode === "reviewed_match" ? "reviewed_match" : "local_file";
+    const requestContext = await clientConfigContext(base.href, profileID);
     const filename = serverUploadFilename(absolute, title);
     const url = new URL("api/v1/admin/songs", base);
     url.searchParams.set("filename", filename);
     let completed = 0;
-    const body = createReadStream(absolute);
+    let body = null;
     const publishUploadProgress = () => {
       if (!event.sender.isDestroyed()) {
         event.sender.send("local-import:progress", {
@@ -918,29 +1372,35 @@ ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profi
         });
       }
     };
+    publishUploadProgress();
+    await requireClientUploadMode({
+      baseURL: base.href,
+      token: adminToken,
+      profileID,
+      mode: requestedMode,
+      force: true,
+    });
+    controller.signal.throwIfAborted();
+    body = createReadStream(absolute);
     body.on("data", (chunk) => {
       completed += chunk.length;
       publishUploadProgress();
     });
     controller.signal.addEventListener("abort", () => body.destroy(controller.signal.reason), { once: true });
-    publishUploadProgress();
     const response = await fetch(url, {
       method: "PUT",
       headers: {
-        ...profileHeaders(String(adminToken), profileID),
+        ...profileHeaders(adminToken, profileID),
+        ...requestContext.expected.request_headers,
         "Content-Type": "application/octet-stream",
         "Content-Length": String(information.size),
       },
       body,
       duplex: "half",
+      redirect: "manual",
       signal: controller.signal,
     });
-    let responsePayload = null;
-    try { responsePayload = await response.json(); } catch { /* Some server versions return no JSON body. */ }
-    const remoteSong = response.status === 409
-      ? responsePayload?.duplicate_of || responsePayload?.duplicateOf || null
-      : responsePayload;
-    if (!response.ok && !(response.status === 409 && remoteSong?.id)) throw await serverResponseError(response);
+    const { song: remoteSong } = await readServerUploadResponse(response, { serverOrigin: base.origin });
     completed = information.size;
     publishUploadProgress();
     event.sender.send("local-import:progress", {
@@ -991,7 +1451,9 @@ ipcMain.handle("library:storage", async () => {
 });
 
 function authorizationHeaders(token) {
-  return { Authorization: `Bearer ${token}` };
+  const exactToken = canonicalCredentialToken(token);
+  if (!exactToken) throw new Error("Enter the required server credential.");
+  return { Authorization: `Bearer ${exactToken}` };
 }
 
 function profileHeaders(token, profileID) {
@@ -1000,6 +1462,383 @@ function profileHeaders(token, profileID) {
     "X-Resonance-Profile": String(profileID || "default"),
   };
 }
+
+async function boundedResponseBody(response, maximumBytes, label) {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+    throw new Error(`${label} is too large.`);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) return Buffer.alloc(0);
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maximumBytes) {
+      await reader.cancel();
+      throw new Error(`${label} is too large.`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, total);
+}
+
+async function clientConfigContext(baseURL, profileID) {
+  const base = normalizeBaseURL(baseURL);
+  const stored = await ensureClientConfigStateLoaded();
+  const expected = clientConfigRequestContext({
+    origin: base.origin,
+    profileID: String(profileID || "default"),
+    appVersion: app.getVersion(),
+    appBuild: WINDOWS_APP_BUILD,
+    cohortKey: stored.cohort_key,
+  });
+  return { base, stored, expected };
+}
+
+async function loadClientConfig({ baseURL, token, profileID, force = false }) {
+  const exactToken = canonicalCredentialToken(token);
+  if (!exactToken) return { config: safeClientConfig(), source: "safe-defaults" };
+  let context;
+  try {
+    context = await clientConfigContext(baseURL, profileID);
+  } catch {
+    return { config: safeClientConfig(), source: "safe-defaults" };
+  }
+  const cacheKey = configCacheKey(context.expected, exactToken);
+  const cachedForCurrentState = () => currentFloorSafeCachedConfig(
+    context.stored,
+    cacheKey,
+    (record) => validCachedClientConfig(record, {
+      expected: context.expected,
+      token: exactToken,
+    }),
+  );
+  const cached = cachedForCurrentState();
+  if (!force && cached) return { config: cached, source: "cache" };
+  const safeResult = () => ({ config: safeClientConfig(context.expected), source: "safe-defaults" });
+  const cachedResult = () => {
+    const currentCached = cachedForCurrentState();
+    return currentCached ? { config: currentCached, source: "cache" } : safeResult();
+  };
+  const evictCache = async () => {
+    await mutateClientConfigState(async () => {
+      if (!context.stored.entries[cacheKey]) return;
+      delete context.stored.entries[cacheKey];
+      try {
+        await persistClientConfigState();
+      } catch {
+        // Keep the record unavailable for this process. The durable revision
+        // floor still prevents a lower signed snapshot from being activated.
+      }
+    });
+  };
+
+  let response = null;
+  try {
+    response = await fetch(new URL("api/v1/client-config", context.base), {
+      headers: {
+        ...profileHeaders(exactToken, profileID),
+        ...context.expected.request_headers,
+        Accept: "application/json",
+      },
+      redirect: "manual",
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    return cachedResult();
+  }
+  try {
+    if (response.status === 404 || response.status === 405) {
+      await evictCache();
+      return { config: safeClientConfig(context.expected), source: "legacy" };
+    }
+    if (response.status >= 500) return cachedResult();
+    if (response.status !== 200) {
+      await evictCache();
+      return safeResult();
+    }
+    const contentType = String(response.headers.get("content-type") || "").toLocaleLowerCase();
+    if (!contentType.startsWith("application/json")) {
+      await evictCache();
+      return safeResult();
+    }
+    let rawBody;
+    try {
+      rawBody = await boundedResponseBody(response, CLIENT_CONFIG_MAX_BYTES, "Server client configuration");
+    } catch (error) {
+      if (/too large/i.test(String(error?.message || ""))) await evictCache();
+      return /too large/i.test(String(error?.message || "")) ? safeResult() : cachedResult();
+    }
+    const contentDigest = response.headers.get("content-digest");
+    const signature = response.headers.get("x-resonance-config-signature");
+    const etag = response.headers.get("etag") || undefined;
+    let verified;
+    try {
+      verified = verifyClientConfigResponse({
+        rawBody,
+        contentDigest,
+        signature,
+        token: exactToken,
+        expected: context.expected,
+        etag,
+      });
+    } catch {
+      await evictCache();
+      return safeResult();
+    }
+    try {
+      await mutateClientConfigState(async () => {
+        const highestRevision = monotonicClientConfigRevision(
+          verified,
+          clientConfigRevisionFloor(context.stored, cacheKey),
+        );
+        const record = createClientConfigCacheRecord({
+          rawBody,
+          contentDigest,
+          signature,
+          token: exactToken,
+          expected: context.expected,
+          etag,
+          highestRevision,
+        });
+        await commitClientConfigRecord({
+          state: context.stored,
+          cacheKey,
+          record,
+          revision: highestRevision,
+          persist: persistClientConfigState,
+          maximumEntries: 64,
+        });
+      });
+    } catch {
+      return cachedResult();
+    }
+    return { config: { ...verified, source: "remote" }, source: "remote" };
+  } finally {
+    response?.body?.cancel?.().catch?.(() => undefined);
+  }
+}
+
+async function requireClientUploadMode({ baseURL, token, profileID, mode, force = false }) {
+  const evaluated = await loadClientConfig({ baseURL, token, profileID, force });
+  const values = evaluated.config?.values || {};
+  const kills = evaluated.config?.kill_switches || {};
+  const enabled = !kills.all_uploads
+    && (mode === "local_file"
+      ? values["upload.local_file"] === true
+      : mode === "server_source_link"
+        ? !kills.link_imports && values["upload.server_source_link"] === true
+        : mode === "reviewed_match"
+          && values["upload.reviewed_match"] === true
+          && values["upload.local_file"] === true
+          && values["matcher.mode"] === "review");
+  if (!enabled) {
+    const error = new Error(`The signed server configuration disables ${mode.replaceAll("_", " ")} uploads.`);
+    error.name = "ClientUploadPolicyError";
+    error.retryable = false;
+    error.verifiedRevocation = evaluated.config?.verified === true;
+    throw error;
+  }
+  return evaluated.config;
+}
+
+async function requireOfflineDownloadMode({ baseURL, token, profileID }) {
+  const evaluated = await loadClientConfig({ baseURL, token, profileID, force: true });
+  const values = evaluated.config?.values || {};
+  const kills = evaluated.config?.kill_switches || {};
+  if (kills.offline_downloads || values["download.offline_mode"] !== "verified_file_cache") {
+    const error = new Error("Offline downloads are disabled by the signed server configuration.");
+    error.verifiedRevocation = true;
+    throw error;
+  }
+  return evaluated.config;
+}
+
+class OfflineDownloadPolicyError extends Error {
+  constructor(message = "Offline download authorization expired or was revoked.") {
+    super(message);
+    this.name = "OfflineDownloadPolicyError";
+    this.retryable = false;
+  }
+}
+
+async function beginOfflineDownloadPolicyLease({ baseURL, token, profileID, parentSignal }) {
+  let initialConfig;
+  try {
+    initialConfig = await requireOfflineDownloadMode({ baseURL, token, profileID });
+  } catch (error) {
+    const policyError = new OfflineDownloadPolicyError(error?.message || undefined);
+    policyError.verifiedRevocation = error?.verifiedRevocation === true;
+    throw policyError;
+  }
+  parentSignal?.throwIfAborted();
+  return createRenewablePolicyLease({
+    initialConfig,
+    allowUnsignedInitial: initialConfig?.verified !== true,
+    parentSignal,
+    errorFactory: (message) => new OfflineDownloadPolicyError(message),
+  });
+}
+
+async function requireServerStreamMode({ baseURL, token, profileID, force = false }) {
+  const evaluated = await loadClientConfig({ baseURL, token, profileID, force });
+  const values = evaluated.config?.values || {};
+  const kills = evaluated.config?.kill_switches || {};
+  const streamOnly = values["download.offline_mode"] === "stream_only" || kills.offline_downloads === true;
+  if (evaluated.config?.verified !== true
+      || !streamOnly
+      || values["download.playback_mode"] !== "same_origin_resolver") {
+    const error = new ServerStreamValidationError(
+      "STREAM_POLICY_DISABLED",
+      "The signed server configuration does not authorize stream-only playback.",
+      403,
+    );
+    // Safe/legacy/invalid fallbacks do not authorize StreamOnly. Only a
+    // still-fresh verified cached allow-policy reaches this branch-free path.
+    error.verifiedRevocation = true;
+    throw error;
+  }
+  return evaluated.config;
+}
+
+ipcMain.handle("server:client-config", async (_event, settings = {}) => loadClientConfig(settings));
+
+function exactYouTubeSourcePageURL(value) {
+  const source = typeof value === "string" ? value.trim() : "";
+  return /^https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(source) ? source : null;
+}
+
+function sanitizedSourceImportSong(value, serverOrigin) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = boundedText(value.id, 128);
+  if (!id) return null;
+  const sameOriginURL = (candidate) => {
+    if (typeof candidate !== "string" || !candidate.trim()) return null;
+    try {
+      const url = new URL(String(candidate || ""), `${serverOrigin}/`);
+      return url.origin === serverOrigin && !url.username && !url.password && !url.hash ? url.href : null;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    id,
+    filename: boundedText(value.filename || value.name, 500),
+    name: boundedText(value.name || value.filename, 500),
+    title: boundedText(value.title, 500) || boundedText(value.name || value.filename, 500) || "Untitled song",
+    artist: boundedText(value.artist, 500),
+    album: boundedText(value.album, 500),
+    size: Number.isSafeInteger(value.size) && value.size >= 0 ? value.size : 0,
+    duration_seconds: Number.isFinite(Number(value.duration_seconds)) && Number(value.duration_seconds) >= 0
+      ? Number(value.duration_seconds)
+      : null,
+    content_sha256: /^[a-f0-9]{64}$/i.test(String(value.content_sha256 || ""))
+      ? String(value.content_sha256).toLocaleLowerCase()
+      : null,
+    content_type: boundedText(value.content_type, 128),
+    download_url: sameOriginURL(value.download_url),
+    stream_url: sameOriginURL(value.stream_url),
+    artwork_url: sameOriginURL(value.artwork_url),
+  };
+}
+
+ipcMain.handle("server:source-import", async (event, settings = {}) => {
+  const controller = beginLocalImport(event);
+  try {
+  const base = normalizeBaseURL(settings.baseURL);
+  const adminToken = canonicalCredentialToken(settings.adminToken);
+  const configToken = canonicalCredentialToken(settings.token || adminToken);
+  const profileID = String(settings.profileID || "default");
+  if (!adminToken) throw new Error("Add the server admin key before importing a source link.");
+  if (!configToken) throw new Error("A server credential is required before importing a source link.");
+  if (settings.mode !== "server_source_link") {
+    throw new Error("The source-import endpoint is available only for server source-link mode.");
+  }
+  const sourcePageURL = exactYouTubeSourcePageURL(settings.sourcePageURL);
+  if (!sourcePageURL) {
+    throw new Error("Source import requires the original canonical HTTPS YouTube song page.");
+  }
+  const requestContext = await clientConfigContext(base.href, profileID);
+  const metadata = settings.metadata && typeof settings.metadata === "object" && !Array.isArray(settings.metadata)
+    ? settings.metadata
+    : {};
+  const duration = Number(metadata.durationSeconds);
+  const safeMetadata = {
+    ...(boundedText(metadata.title, 500) ? { title: boundedText(metadata.title, 500) } : {}),
+    ...(boundedText(metadata.artist, 500) ? { artist: boundedText(metadata.artist, 500) } : {}),
+    ...(boundedText(metadata.album, 500) ? { album: boundedText(metadata.album, 500) } : {}),
+    ...(Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60
+      ? { duration_seconds: duration }
+      : {}),
+  };
+  const body = {
+    schema_version: 1,
+    source_page_url: sourcePageURL,
+    ...(boundedText(settings.filename, 500) ? { filename: safeFilename(settings.filename) } : {}),
+    ...(Object.keys(safeMetadata).length ? { metadata: safeMetadata } : {}),
+  };
+  await requireClientUploadMode({
+    baseURL: base.href,
+    token: configToken,
+    profileID,
+    mode: "server_source_link",
+    force: true,
+  });
+  controller.signal.throwIfAborted();
+  const response = await fetch(new URL("api/v1/admin/source-imports", base), {
+    method: "POST",
+    headers: {
+      ...profileHeaders(adminToken, profileID),
+      ...requestContext.expected.request_headers,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(body),
+    redirect: "manual",
+    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5 * 60 * 1000)]),
+  });
+  // HTTP 201/409 means the server has committed. Stop exposing cancellation
+  // before reading and reconciling that authoritative response body. Error
+  // responses remain cancellable while their body is read.
+  if (response.status === 201 || response.status === 409) finishLocalImport(event, controller);
+  const responseContentType = String(response.headers.get("content-type") || "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (responseContentType !== "application/json") {
+    response.body?.cancel?.().catch?.(() => undefined);
+    throw new Error(`Server returned HTTP ${response.status} with an invalid source-import content type.`);
+  }
+  const rawBody = await boundedResponseBody(response, CLIENT_CONFIG_MAX_BYTES, "Source-import response");
+  let payload = null;
+  try { payload = JSON.parse(rawBody.toString("utf8")); }
+  catch { /* The status-specific error below is clearer than a JSON parse failure. */ }
+  if (response.status !== 201 && response.status !== 409) {
+    const detail = boundedText(payload?.error, 500);
+    throw new Error(`Server returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
+  if (payload?.schema_version !== 1) {
+    throw new Error("The server returned an unsupported source-import response.");
+  }
+  if (response.status === 409) {
+    if (payload.status !== "duplicate") throw new Error("The server returned an unsupported source-import response.");
+    const song = sanitizedSourceImportSong(payload.duplicate_of, base.origin);
+    if (!song) throw new Error("The server returned an invalid duplicate source-import song record.");
+    return { schema_version: 1, status: "duplicate", song };
+  }
+  if (!["imported", "restored"].includes(payload.status)) {
+    throw new Error("The server returned an unsupported source-import response.");
+  }
+  const song = sanitizedSourceImportSong(payload.song, base.origin);
+  if (!song) throw new Error("The server returned an invalid source-import song record.");
+  return { schema_version: 1, status: payload.status, song };
+  } finally {
+    finishLocalImport(event, controller);
+  }
+});
 
 ipcMain.handle("server:profiles:get", async (_event, { baseURL, token }) => {
   if (!token) throw new Error("Enter the server access token.");
@@ -1041,9 +1880,27 @@ ipcMain.handle("server:artwork", async (_event, { baseURL, token, profileID, son
 ipcMain.handle("server:catalog", async (_event, { baseURL, token, profileID }) => {
   if (!token) throw new Error("Enter the server access token.");
   const base = normalizeBaseURL(baseURL);
-  const response = await fetch(new URL("api/v1/songs", base), { headers: profileHeaders(token, profileID) });
-  if (!response.ok) throw await serverResponseError(response);
-  return response.json();
+  const response = await fetch(new URL("api/v1/songs", base), {
+    headers: { ...profileHeaders(token, profileID), Accept: "application/json" },
+    redirect: "manual",
+  });
+  if (response.status !== 200) {
+    response.body?.cancel?.().catch?.(() => undefined);
+    throw new Error(`Server catalog request returned HTTP ${response.status}.`);
+  }
+  const contentType = String(response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") {
+    response.body?.cancel?.().catch?.(() => undefined);
+    throw new Error("The server returned an invalid catalog content type.");
+  }
+  const rawBody = await boundedResponseBody(response, MAX_SERVER_STREAM_CATALOG_BYTES, "Server catalog");
+  let catalog;
+  try { catalog = JSON.parse(rawBody.toString("utf8")); }
+  catch { throw new Error("The server returned malformed catalog JSON."); }
+  if (!catalog || typeof catalog !== "object" || Array.isArray(catalog) || !Array.isArray(catalog.songs)) {
+    throw new Error("The server returned an invalid catalog document.");
+  }
+  return catalog;
 });
 
 ipcMain.handle("server:playlists:get", async (_event, { baseURL, token, profileID }) => {
@@ -1108,8 +1965,473 @@ ipcMain.handle("server:listening-history:get", async (_event, { baseURL, token, 
   return { supported: true, ...(await response.json()) };
 });
 
+function sameOriginServerMediaURL(candidate, base, label) {
+  if (!candidate) throw new Error(`The server did not provide a ${label} URL.`);
+  const url = new URL(String(candidate), base);
+  if (url.origin !== base.origin || url.username || url.password || url.hash) {
+    throw new Error(`The server returned an unsafe cross-origin ${label} URL.`);
+  }
+  return url;
+}
+
+function validateCatalogMediaLocation(song) {
+  const location = song?.media_location;
+  if (!location || typeof location !== "object" || Array.isArray(location)) return null;
+  const declaredSize = Number(location.byte_length);
+  if (Number.isSafeInteger(declaredSize) && declaredSize >= 0 && declaredSize !== Number(song.size)) {
+    throw new Error(`The media descriptor size does not match the catalog for ${song.title || song.name || song.id}.`);
+  }
+  const descriptorSHA256 = catalogSHA256({ content_sha256: location.content_sha256 });
+  const songSHA256 = catalogSHA256(song);
+  if (descriptorSHA256 && songSHA256 && descriptorSHA256 !== songSHA256) {
+    throw new Error(`The media descriptor checksum does not match the catalog for ${song.title || song.name || song.id}.`);
+  }
+  return location;
+}
+
+async function refreshedSongMediaLocation(song, base, token, profileID, requestContext, signal) {
+  const location = validateCatalogMediaLocation(song);
+  const refreshURL = sameOriginServerMediaURL(
+    location?.refresh_url || `/api/v1/songs/${encodeURIComponent(song.id)}/media-location/refresh`,
+    base,
+    "media refresh",
+  );
+  const response = await fetch(refreshURL, {
+    method: "POST",
+    headers: {
+      ...profileHeaders(token, profileID),
+      ...requestContext.expected.request_headers,
+      Accept: "application/json",
+    },
+    redirect: "manual",
+    signal,
+  });
+  if (response.status !== 200) throw new Error(`Media refresh failed for ${song.title || song.name || song.id} (HTTP ${response.status}).`);
+  const rawBody = await boundedResponseBody(response, CLIENT_CONFIG_MAX_BYTES, "Media refresh response");
+  let payload;
+  try { payload = JSON.parse(rawBody.toString("utf8")); }
+  catch { throw new Error("The server returned an invalid media refresh response."); }
+  const refreshed = payload?.media_location;
+  if (!refreshed || typeof refreshed !== "object" || Array.isArray(refreshed)) {
+    throw new Error("The server returned an invalid media refresh descriptor.");
+  }
+  validateCatalogMediaLocation({ ...song, media_location: refreshed });
+  return refreshed;
+}
+
+async function refreshedSongDownloadURL(song, base, token, profileID, requestContext, signal) {
+  const refreshed = await refreshedSongMediaLocation(song, base, token, profileID, requestContext, signal);
+  return sameOriginServerMediaURL(refreshed.download_url, base, "download");
+}
+
+function revokeServerStreamSession(sessionID) {
+  const session = serverStreamSessions.get(sessionID);
+  if (!session) return false;
+  serverStreamSessions.delete(sessionID);
+  if (session.expirationTimer) clearTimeout(session.expirationTimer);
+  for (const controller of session.controllers) controller.abort();
+  session.controllers.clear();
+  return true;
+}
+
+function revokeServerStreamsForOwner(ownerWebContentsID) {
+  for (const [sessionID, session] of serverStreamSessions) {
+    if (session.ownerWebContentsID === ownerWebContentsID) revokeServerStreamSession(sessionID);
+  }
+}
+
+function revokeAllServerStreams() {
+  for (const sessionID of [...serverStreamSessions.keys()]) revokeServerStreamSession(sessionID);
+}
+
+function activeServerStreamRequestCount() {
+  let count = 0;
+  for (const session of serverStreamSessions.values()) count += session.controllers.size;
+  return count;
+}
+
+function pruneServerStreamSessions(now = Date.now()) {
+  for (const [sessionID, session] of serverStreamSessions) {
+    if (!Number.isFinite(session.createdAt)
+        || now - session.createdAt >= SERVER_STREAM_SESSION_TTL_MS) {
+      revokeServerStreamSession(sessionID);
+    }
+  }
+}
+
+function makeServerStreamCapacity() {
+  pruneServerStreamSessions();
+  while (serverStreamSessions.size >= MAX_SERVER_STREAM_SESSIONS) {
+    const oldest = [...serverStreamSessions.entries()]
+      .sort((left, right) => left[1].lastAccessAt - right[1].lastAccessAt)[0];
+    if (!oldest) break;
+    revokeServerStreamSession(oldest[0]);
+  }
+}
+
+function makeServerStreamOwnerCapacity(ownerWebContentsID) {
+  const owned = [...serverStreamSessions.entries()]
+    .filter(([, session]) => session.ownerWebContentsID === ownerWebContentsID)
+    .sort((left, right) => left[1].createdAt - right[1].createdAt);
+  while (owned.length >= MAX_SERVER_STREAM_SESSIONS_PER_OWNER) {
+    const oldest = owned.shift();
+    if (oldest) revokeServerStreamSession(oldest[0]);
+  }
+}
+
+function canonicalStreamSongID(value) {
+  const songID = typeof value === "string" ? value.trim() : "";
+  if (!songID || songID.length > 128 || songID !== value || /[\u0000-\u001f\u007f]/.test(songID)) {
+    throw new ServerStreamValidationError("INVALID_SONG_ID", "A valid catalog song is required.", 400);
+  }
+  return songID;
+}
+
+function canonicalStreamCredential(value) {
+  let token;
+  try { token = canonicalCredentialToken(value); }
+  catch { token = ""; }
+  if (!token) {
+    throw new ServerStreamValidationError("INVALID_CREDENTIAL", "A valid server access token is required.", 400);
+  }
+  return token;
+}
+
+function canonicalStreamProfileID(value) {
+  const profileID = typeof value === "string" ? value : "default";
+  if (!profileID || profileID.length > 128 || /[\u0000-\u001f\u007f]/.test(profileID)) {
+    throw new ServerStreamValidationError("INVALID_PROFILE", "A valid server profile is required.", 400);
+  }
+  return profileID;
+}
+
+function canonicalStreamBaseURL(value) {
+  const input = typeof value === "string" ? value.trim() : "";
+  if (!input || input.length > 2048) {
+    throw new ServerStreamValidationError("INVALID_SERVER", "A valid server URL is required.", 400);
+  }
+  return normalizeBaseURL(input);
+}
+
+function boundedStreamURLValue(value) {
+  if (typeof value !== "string" || !value || value !== value.trim() || value.length > 4096) return null;
+  return value;
+}
+
+function streamMediaURLForSong(song, base) {
+  const mediaLocation = validateCatalogMediaLocation(song);
+  return sameOriginServerMediaURL(mediaLocation?.stream_url || song.stream_url, base, "stream");
+}
+
+function boundedStreamCatalogSong(song) {
+  const mediaLocation = validateCatalogMediaLocation(song);
+  const expectedSize = supportedMediaSize(mediaLocation?.byte_length ?? song.size);
+  const contentSHA256 = catalogSHA256(song);
+  return Object.freeze({
+    id: canonicalStreamSongID(song.id),
+    filename: boundedText(song.filename || song.name, 500),
+    title: boundedText(song.title || song.name, 500),
+    name: boundedText(song.name || song.filename, 500),
+    content_type: boundedText(song.content_type, 128),
+    size: expectedSize,
+    ...(contentSHA256 ? { content_sha256: contentSHA256 } : {}),
+    stream_url: boundedStreamURLValue(song.stream_url),
+    media_location: mediaLocation ? Object.freeze({
+      byte_length: expectedSize,
+      ...(catalogSHA256({ content_sha256: mediaLocation.content_sha256 })
+        ? { content_sha256: catalogSHA256({ content_sha256: mediaLocation.content_sha256 }) }
+        : {}),
+      refresh_url: boundedStreamURLValue(mediaLocation.refresh_url),
+      stream_url: boundedStreamURLValue(mediaLocation.stream_url),
+    }) : null,
+  });
+}
+
+async function fetchFreshStreamCatalogSong({ base, token, profileID, songID, requestContext, signal }) {
+  const response = await fetch(new URL("api/v1/songs", base), {
+    headers: {
+      ...profileHeaders(token, profileID),
+      ...requestContext.expected.request_headers,
+      Accept: "application/json",
+    },
+    redirect: "manual",
+    signal,
+  });
+  if (response.status !== 200) {
+    response.body?.cancel?.().catch?.(() => undefined);
+    throw new ServerStreamValidationError("CATALOG_UNAVAILABLE", "The server catalog is unavailable.", 502);
+  }
+  const contentType = String(response.headers.get("content-type") || "").split(";", 1)[0].trim().toLocaleLowerCase();
+  if (contentType !== "application/json") {
+    response.body?.cancel?.().catch?.(() => undefined);
+    throw new ServerStreamValidationError("INVALID_CATALOG", "The server returned an invalid catalog.", 502);
+  }
+  const rawBody = await boundedResponseBody(response, MAX_SERVER_STREAM_CATALOG_BYTES, "Server catalog");
+  let catalog;
+  try { catalog = JSON.parse(rawBody.toString("utf8")); }
+  catch { throw new ServerStreamValidationError("INVALID_CATALOG", "The server returned an invalid catalog.", 502); }
+  const matchingSongs = Array.isArray(catalog?.songs)
+    ? catalog.songs.filter((candidate) => candidate && typeof candidate === "object" && candidate.id === songID)
+    : [];
+  if (matchingSongs.length === 0) {
+    throw new ServerStreamValidationError("SONG_NOT_FOUND", "The catalog song is unavailable.", 404);
+  }
+  if (matchingSongs.length !== 1) {
+    throw new ServerStreamValidationError("INVALID_CATALOG", "The server returned an ambiguous catalog song.", 502);
+  }
+  return boundedStreamCatalogSong(matchingSongs[0]);
+}
+
+function serverStreamErrorResponse(error, expectedSize = null) {
+  const status = error instanceof ServerStreamValidationError
+    ? error.status
+    : error?.name === "AbortError"
+      ? 499
+      : 502;
+  const safeStatus = [400, 403, 404, 405, 416, 429, 499, 502].includes(status) ? status : 502;
+  const headers = new Headers({
+    "Cache-Control": "no-store, private",
+    "Content-Type": "text/plain; charset=utf-8",
+  });
+  if (safeStatus === 405) headers.set("Allow", "GET, HEAD");
+  if (safeStatus === 416 && Number.isSafeInteger(expectedSize)) {
+    headers.set("Content-Range", `bytes */${expectedSize}`);
+  }
+  return new Response(null, { status: safeStatus, headers });
+}
+
+async function handleServerStreamRequest(request) {
+  const sessionID = streamSessionIDFromURL(request.url);
+  if (!sessionID) return serverStreamErrorResponse(new ServerStreamValidationError("INVALID_SESSION", "Invalid stream session.", 404));
+  pruneServerStreamSessions();
+  const session = serverStreamSessions.get(sessionID);
+  if (!session) return serverStreamErrorResponse(new ServerStreamValidationError("INVALID_SESSION", "Invalid stream session.", 404));
+  let requestedRange = null;
+  let controller = null;
+  let response = null;
+  let removeRequestAbortListener = () => {};
+  let removePolicyAbortListener = () => {};
+  let requestTimeoutTimer = null;
+  let idleTimeoutTimer = null;
+  let policyLease = null;
+  let requestFinished = false;
+  const finishRequest = () => {
+    if (requestFinished) return;
+    requestFinished = true;
+    if (controller) session.controllers.delete(controller);
+    removeRequestAbortListener();
+    if (requestTimeoutTimer) clearTimeout(requestTimeoutTimer);
+    if (idleTimeoutTimer) clearTimeout(idleTimeoutTimer);
+    removePolicyAbortListener();
+    policyLease?.close();
+  };
+  const abortRequest = () => {
+    controller?.abort();
+    finishRequest();
+  };
+  const resetIdleTimeout = () => {
+    if (idleTimeoutTimer) clearTimeout(idleTimeoutTimer);
+    idleTimeoutTimer = setTimeout(abortRequest, SERVER_STREAM_IDLE_TIMEOUT_MS);
+    idleTimeoutTimer.unref?.();
+  };
+  try {
+    const method = String(request.method || "GET").toLocaleUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+      throw new ServerStreamValidationError("METHOD_NOT_ALLOWED", "Only GET and HEAD stream requests are supported.", 405);
+    }
+    requestedRange = parseSingleByteRange(request.headers.get("range"), session.expectedSize);
+    if (session.controllers.size >= MAX_SERVER_STREAM_REQUESTS_PER_SESSION) {
+      throw new ServerStreamValidationError("TOO_MANY_REQUESTS", "Too many active stream requests.", 429);
+    }
+    if (activeServerStreamRequestCount() >= MAX_ACTIVE_SERVER_STREAM_REQUESTS) {
+      throw new ServerStreamValidationError("TOO_MANY_REQUESTS", "Too many active stream requests.", 429);
+    }
+    controller = new AbortController();
+    session.controllers.add(controller);
+    requestTimeoutTimer = setTimeout(abortRequest, SERVER_STREAM_REQUEST_TIMEOUT_MS);
+    requestTimeoutTimer.unref?.();
+    resetIdleTimeout();
+    const abortUpstream = abortRequest;
+    if (request.signal?.aborted) abortUpstream();
+    else if (request.signal?.addEventListener) {
+      request.signal.addEventListener("abort", abortUpstream, { once: true });
+      removeRequestAbortListener = () => request.signal.removeEventListener("abort", abortUpstream);
+    }
+    const streamPolicy = await requireServerStreamMode({
+      baseURL: session.base.href,
+      token: session.token,
+      profileID: session.profileID,
+    });
+    controller.signal.throwIfAborted();
+    const requestContext = await clientConfigContext(session.base.href, session.profileID);
+    controller.signal.throwIfAborted();
+    policyLease = createRenewablePolicyLease({
+      initialConfig: streamPolicy,
+      renew: () => requireServerStreamMode({
+        baseURL: session.base.href,
+        token: session.token,
+        profileID: session.profileID,
+        force: true,
+      }),
+      parentSignal: controller.signal,
+      errorFactory: (message) => new ServerStreamValidationError("STREAM_POLICY_DISABLED", message, 403),
+    });
+    const abortForPolicy = () => abortRequest();
+    if (policyLease.signal.aborted) abortForPolicy();
+    else {
+      policyLease.signal.addEventListener("abort", abortForPolicy, { once: true });
+      removePolicyAbortListener = () => policyLease?.signal.removeEventListener("abort", abortForPolicy);
+    }
+    policyLease.assertAuthorized();
+    const upstreamHeaders = {
+      ...profileHeaders(session.token, session.profileID),
+      ...requestContext.expected.request_headers,
+      Accept: "audio/*, application/ogg, application/octet-stream",
+      "Accept-Encoding": "identity",
+      ...(requestedRange ? { Range: requestedRange.header } : {}),
+    };
+    response = await fetch(session.mediaURL.href, {
+      method,
+      headers: upstreamHeaders,
+      redirect: "manual",
+      signal: policyLease.signal,
+    });
+    if (response.status === 409) {
+      response.body?.cancel?.().catch?.(() => undefined);
+      const refreshed = await refreshedSongMediaLocation(
+        session.song,
+        session.base,
+        session.token,
+        session.profileID,
+        requestContext,
+        policyLease.signal,
+      );
+      session.song = Object.freeze({ ...session.song, stream_url: null, media_location: Object.freeze({
+        byte_length: session.expectedSize,
+        ...(catalogSHA256({ content_sha256: refreshed.content_sha256 })
+          ? { content_sha256: catalogSHA256({ content_sha256: refreshed.content_sha256 }) }
+          : {}),
+        refresh_url: boundedStreamURLValue(refreshed.refresh_url) || session.song.media_location?.refresh_url,
+        stream_url: boundedStreamURLValue(refreshed.stream_url),
+      }) });
+      session.mediaURL = streamMediaURLForSong(session.song, session.base);
+      response = await fetch(session.mediaURL.href, {
+        method,
+        headers: upstreamHeaders,
+        redirect: "manual",
+        signal: policyLease.signal,
+      });
+    }
+    const validated = validateStreamResponse({
+      status: response.status,
+      headers: response.headers,
+      expectedSize: session.expectedSize,
+      requestedRange,
+      method,
+    });
+    session.lastAccessAt = Date.now();
+    if (method === "HEAD") {
+      response.body?.cancel?.().catch?.(() => undefined);
+      finishRequest();
+      return new Response(null, { status: validated.status, headers: validated.headers });
+    }
+    if (!response.body) throw new ServerStreamValidationError("INVALID_STREAM_BODY", "The server returned no stream body.", 502);
+    const body = createExactLengthRelay(response.body, validated.contentLength, finishRequest, resetIdleTimeout);
+    return new Response(body, { status: validated.status, headers: validated.headers });
+  } catch (error) {
+    response?.body?.cancel?.().catch?.(() => undefined);
+    controller?.abort();
+    finishRequest();
+    return serverStreamErrorResponse(error, session.expectedSize);
+  }
+}
+
+ipcMain.handle("server:stream:create", async (event, settings = {}) => {
+  const owner = event.sender;
+  const trustedRendererURL = pathToFileURL(path.join(__dirname, "ui", "index.html")).href;
+  if (owner.isDestroyed() || owner.getURL() !== trustedRendererURL) throw new Error("Stream playback is unavailable.");
+  const credentialEpoch = rendererCredentialEpochs.get(owner.id) || 0;
+  const token = canonicalStreamCredential(settings.token);
+  const profileID = canonicalStreamProfileID(settings.profileID);
+  const songID = canonicalStreamSongID(settings.songID);
+  const base = canonicalStreamBaseURL(settings.baseURL);
+  const ownerClosed = new AbortController();
+  const abortForOwnerClose = () => ownerClosed.abort();
+  owner.once("destroyed", abortForOwnerClose);
+  try {
+    await requireServerStreamMode({ baseURL: base.href, token, profileID, force: true });
+    const requestContext = await clientConfigContext(base.href, profileID);
+    const song = await fetchFreshStreamCatalogSong({
+      base,
+      token,
+      profileID,
+      songID,
+      requestContext,
+      signal: AbortSignal.any([AbortSignal.timeout(15_000), ownerClosed.signal]),
+    });
+    if (serverStreamSongIsVideo(song)) {
+      throw new ServerStreamValidationError(
+        "VIDEO_DOWNLOAD_REQUIRED",
+        "Windows stream-only playback supports audio songs. Download this video before playing it.",
+        415,
+      );
+    }
+    if (owner.isDestroyed()
+        || owner.getURL() !== trustedRendererURL
+        || (rendererCredentialEpochs.get(owner.id) || 0) !== credentialEpoch) {
+      throw new Error("Stream playback is unavailable.");
+    }
+    const mediaURL = streamMediaURLForSong(song, base);
+    makeServerStreamCapacity();
+    makeServerStreamOwnerCapacity(owner.id);
+    const sessionID = randomBytes(32).toString("hex");
+    const now = Date.now();
+    const session = {
+      ownerWebContentsID: owner.id,
+      base,
+      token,
+      profileID,
+      song,
+      mediaURL,
+      expectedSize: supportedMediaSize(song.media_location?.byte_length ?? song.size),
+      createdAt: now,
+      lastAccessAt: now,
+      controllers: new Set(),
+      expirationTimer: null,
+    };
+    session.expirationTimer = setTimeout(() => revokeServerStreamSession(sessionID), SERVER_STREAM_SESSION_TTL_MS);
+    session.expirationTimer.unref?.();
+    serverStreamSessions.set(sessionID, session);
+    return Object.freeze({
+      url: serverStreamURL(sessionID),
+      historyTrackID: remoteStreamHistoryTrackID({
+        serverOrigin: base.origin,
+        profileID,
+        songID,
+      }),
+    });
+  } finally {
+    owner.removeListener("destroyed", abortForOwnerClose);
+  }
+});
+
+ipcMain.handle("server:stream:release", (event, value) => {
+  const sessionID = streamSessionIDFromURL(value);
+  const session = sessionID ? serverStreamSessions.get(sessionID) : null;
+  if (!session || session.ownerWebContentsID !== event.sender.id) return false;
+  return revokeServerStreamSession(sessionID);
+});
+
 ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existing = [], songIDs = null }) => {
+  token = canonicalCredentialToken(token);
   if (!token) throw new Error("Enter the server access token.");
+  const base = normalizeBaseURL(baseURL);
+  await requireOfflineDownloadMode({ baseURL: base.href, token, profileID });
+  const requestContext = await clientConfigContext(base.href, profileID);
+  const downloadHeaders = {
+    ...profileHeaders(token, profileID),
+    ...requestContext.expected.request_headers,
+  };
   const controller = beginServerTransfer(event);
   const { signal } = controller;
   let catalog = null;
@@ -1117,11 +2439,27 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
   const replacedTrackIDs = [];
   const failed = [];
   try {
-  const base = normalizeBaseURL(baseURL);
   {
-    const response = await fetch(new URL("api/v1/songs", base), { headers: profileHeaders(token, profileID), signal });
-    if (!response.ok) throw await serverResponseError(response);
-    catalog = await response.json();
+    const response = await fetch(new URL("api/v1/songs", base), {
+      headers: { ...downloadHeaders, Accept: "application/json" },
+      redirect: "manual",
+      signal,
+    });
+    if (response.status !== 200) {
+      response.body?.cancel?.().catch?.(() => undefined);
+      throw new Error(`Server catalog request returned HTTP ${response.status}.`);
+    }
+    const contentType = String(response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
+    if (contentType !== "application/json") {
+      response.body?.cancel?.().catch?.(() => undefined);
+      throw new Error("The server returned an invalid catalog content type.");
+    }
+    const rawCatalog = await boundedResponseBody(response, MAX_SERVER_STREAM_CATALOG_BYTES, "Server catalog");
+    try { catalog = JSON.parse(rawCatalog.toString("utf8")); }
+    catch { throw new Error("The server returned malformed catalog JSON."); }
+    if (!catalog || typeof catalog !== "object" || Array.isArray(catalog) || !Array.isArray(catalog.songs)) {
+      throw new Error("The server returned an invalid catalog document.");
+    }
   }
   const paths = await ensureDirectories();
   const requested = Array.isArray(songIDs) ? new Set(songIDs) : null;
@@ -1131,6 +2469,9 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
     signal.throwIfAborted();
     const remoteName = song.filename || song.name || `Track-${song.id}.mp3`;
     const remoteModified = song.modified_at || song.modified_utc || null;
+    const expectedSize = Number(song.size);
+    const expectedSHA256 = catalogSHA256(song);
+    const mediaLocation = validateCatalogMediaLocation(song);
     const matching = existing.find((item) =>
       item.remoteID === song.id
       && matchesServerOrigin(item.sourceServer, base.origin)
@@ -1139,43 +2480,97 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
     if (matching?.filePath) {
       try {
         const information = await fs.stat(matching.filePath);
-        const correctSize = !Number.isFinite(Number(song.size)) || information.size === Number(song.size);
+        const correctSize = Number.isSafeInteger(expectedSize)
+          && expectedSize > 0
+          && expectedSize <= MAX_SERVER_MEDIA_BYTES
+          && information.size === expectedSize;
         const correctRevision = !matching.remoteModified || !remoteModified || matching.remoteModified === remoteModified;
-        alreadyDownloaded = information.isFile() && correctSize && correctRevision;
+        const correctHash = information.isFile() && correctSize && expectedSHA256
+          ? await fileSHA256(matching.filePath) === expectedSHA256
+          : false;
+        alreadyDownloaded = information.isFile() && correctSize && correctRevision && correctHash;
       } catch {
         alreadyDownloaded = false;
       }
     }
     if (alreadyDownloaded) {
       completed += 1;
-      event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length });
+      event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length, autoHide: false });
       // Skip only this song. The rest of a Download All batch must still run.
       continue;
     }
-    event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length });
+    event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length, autoHide: false });
     try {
-      const fileURL = new URL(song.download_url, base);
-      if (fileURL.origin !== base.origin) {
-        throw new Error(`The server returned an unsafe cross-origin download URL for ${song.title || song.name || song.id}.`);
-      }
+      let fileURL = sameOriginServerMediaURL(mediaLocation?.download_url || song.download_url, base, "download");
+      let refreshedMediaLocation = false;
       const destination = matching?.filePath && path.dirname(path.resolve(matching.filePath)) === path.resolve(paths.remote)
         ? matching.filePath
         : await uniqueDestination(paths.remote, remoteName);
       let downloadedSize = 0;
       let downloadedSHA256 = null;
       await retryServerDownload(async () => {
-        const response = await fetch(fileURL, { headers: profileHeaders(token, profileID), signal });
-        if (!response.ok) throw new Error(`Download failed for ${song.title || song.name || song.id} (HTTP ${response.status})`);
-        const temporary = `${destination}.${randomUUID()}.part`;
+        const policyLease = await beginOfflineDownloadPolicyLease({
+          baseURL: base.href,
+          token,
+          profileID,
+          parentSignal: signal,
+        });
         try {
-          const downloadedFile = await writeResponseToFile(response, temporary, { signal, expectedSize: Number(song.size) });
-          downloadedSize = downloadedFile.size;
-          downloadedSHA256 = downloadedFile.sha256;
-          signal.throwIfAborted();
-          await fs.rename(temporary, destination);
-        } catch (error) {
-          await fs.rm(temporary, { force: true });
-          throw error;
+          policyLease.signal.throwIfAborted();
+          let response = await fetch(fileURL, {
+            headers: downloadHeaders,
+            redirect: "manual",
+            signal: policyLease.signal,
+          });
+          if (response.status === 409 && !refreshedMediaLocation) {
+            response.body?.cancel?.().catch?.(() => undefined);
+            fileURL = await refreshedSongDownloadURL(song, base, token, profileID, requestContext, policyLease.signal);
+            refreshedMediaLocation = true;
+            response = await fetch(fileURL, {
+              headers: downloadHeaders,
+              redirect: "manual",
+              signal: policyLease.signal,
+            });
+          }
+          if (response.status !== 200) throw new Error(`Download failed for ${song.title || song.name || song.id} (HTTP ${response.status})`);
+          const temporary = `${destination}.${randomUUID()}.part`;
+          try {
+            const downloadedFile = await writeResponseToFile(response, temporary, {
+              signal: policyLease.signal,
+              expectedSize,
+              expectedSHA256,
+              maximumBytes: MAX_SERVER_MEDIA_BYTES,
+            });
+            downloadedSize = downloadedFile.size;
+            downloadedSHA256 = downloadedFile.sha256;
+            policyLease.assertAuthorized();
+            const finalConfig = await requireOfflineDownloadMode({ baseURL: base.href, token, profileID });
+            const finalPolicyLease = createRenewablePolicyLease({
+              initialConfig: finalConfig,
+              allowUnsignedInitial: finalConfig?.verified !== true,
+              parentSignal: policyLease.signal,
+              errorFactory: (message) => new OfflineDownloadPolicyError(message),
+            });
+            try {
+              const assertFinalAuthorization = () => {
+                // The original fixed lease remains the maximum authorization
+                // window. A freshly verified shorter config also constrains
+                // the atomic adoption boundary instead of being discarded.
+                policyLease.assertAuthorized();
+                finalPolicyLease.assertAuthorized();
+              };
+              await adoptDownloadedFile(temporary, destination, {
+                assertAuthorized: assertFinalAuthorization,
+              });
+            } finally {
+              finalPolicyLease.close();
+            }
+          } catch (error) {
+            await fs.rm(temporary, { force: true });
+            throw error;
+          }
+        } finally {
+          policyLease.close();
         }
       }, {
         signal,
@@ -1184,6 +2579,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
           currentFile: `Retrying ${remoteName} (${nextAttempt}/${SERVER_DOWNLOAD_ATTEMPTS})`,
           completed,
           total: songs.length,
+          autoHide: false,
         }),
       });
       if (matching?.id) replacedTrackIDs.push(matching.id);
@@ -1201,6 +2597,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
       }));
     } catch (error) {
       if (error?.name === "AbortError") throw error;
+      if (error instanceof OfflineDownloadPolicyError) throw error;
       failed.push({
         id: song.id,
         title: song.title || song.name || path.basename(remoteName, path.extname(remoteName)),
@@ -1211,7 +2608,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
       });
     }
     completed += 1;
-    event.sender.send("server:transfer-progress", { direction: "download", currentFile: song.filename || song.name, completed, total: songs.length });
+    event.sender.send("server:transfer-progress", { direction: "download", currentFile: song.filename || song.name, completed, total: songs.length, autoHide: false });
   }
   return { catalog, downloaded, replacedTrackIDs, failed };
   } catch (error) {
@@ -1222,18 +2619,41 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
   }
 });
 
-ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, files } = {}) => {
+ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, files, retryIDs, associationConflictPaths } = {}) => {
+  adminToken = canonicalCredentialToken(adminToken);
   if (!adminToken) throw new Error("Enter the server admin key.");
+  const base = normalizeBaseURL(baseURL);
+  const requestedProfileID = String(profileID || "default");
+  await requireClientUploadMode({ baseURL: base.href, token: String(adminToken), profileID: requestedProfileID, mode: "local_file", force: true });
+  const requestContext = await clientConfigContext(base.href, requestedProfileID);
+  await ensureServerUploadRetriesLoaded();
   let requestedFiles;
-  if (Array.isArray(files)) {
+  if (Array.isArray(retryIDs)) {
+    const uniqueRetryIDs = [...new Set(retryIDs.map((value) => String(value || "").trim()).filter(Boolean))];
+    if (uniqueRetryIDs.length > MAX_SERVER_UPLOAD_BATCH_FILES) {
+      throw new Error(`Retry at most ${MAX_SERVER_UPLOAD_BATCH_FILES} uploads at a time.`);
+    }
+    requestedFiles = uniqueRetryIDs.map((retryID) => serverUploadRetries.get(retryID)).filter((record) =>
+      record?.serverOrigin === base.origin && record.profileID === requestedProfileID);
+    if (!uniqueRetryIDs.length || requestedFiles.length !== uniqueRetryIDs.length) {
+      throw new Error("One or more failed uploads are no longer authorized for retry. Choose those files again.");
+    }
+  } else if (Array.isArray(files)) {
+    if (!files.length || files.length > MAX_SERVER_UPLOAD_BATCH_FILES) {
+      throw new Error(`Choose between 1 and ${MAX_SERVER_UPLOAD_BATCH_FILES} songs to upload.`);
+    }
     const paths = await ensureDirectories();
     const managedRoots = [paths.local, paths.remote];
     requestedFiles = files.map((item) => ({
+      retryID: randomUUID(),
       trackID: String(item?.trackID || ""),
       filePath: path.resolve(String(item?.filePath || "")),
       title: String(item?.title || ""),
       artist: String(item?.artist || ""),
       uploadFilename: serverUploadFilename(item?.filePath, item?.title),
+      serverOrigin: base.origin,
+      profileID: requestedProfileID,
+      createdAt: new Date().toISOString(),
     }));
     if (requestedFiles.some((item) => !item.trackID || !isManagedLibraryFile(item.filePath, managedRoots))) {
       throw new Error("Only songs stored in the managed Resonance library can be batch uploaded.");
@@ -1244,13 +2664,31 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
       properties: ["openFile", "multiSelections"],
       filters: [{ name: "Audio", extensions: [...AUDIO_EXTENSIONS].map((item) => item.slice(1)) }],
     });
-    if (selection.canceled) return { uploaded: 0, results: [], failed: [] };
+    if (selection.canceled) return { uploaded: 0, results: [], failed: [], selectionCancelled: true };
+    if (!selection.filePaths.length || selection.filePaths.length > MAX_SERVER_UPLOAD_BATCH_FILES) {
+      throw new Error(`Choose between 1 and ${MAX_SERVER_UPLOAD_BATCH_FILES} songs to upload.`);
+    }
     requestedFiles = selection.filePaths.map((filePath) => ({
+      retryID: randomUUID(),
       filePath,
       title: path.basename(filePath, path.extname(filePath)),
       artist: "",
       uploadFilename: serverUploadFilename(filePath),
+      serverOrigin: base.origin,
+      profileID: requestedProfileID,
+      createdAt: new Date().toISOString(),
     }));
+  }
+  const rawAssociationConflictPaths = Array.isArray(associationConflictPaths) ? associationConflictPaths : [];
+  if (rawAssociationConflictPaths.length > 50_000) {
+    throw new Error("The local library is too large to verify this manual upload safely.");
+  }
+  const normalizedAssociationConflictPaths = new Set(rawAssociationConflictPaths.flatMap((value) => {
+    const candidate = typeof value === "string" ? value.trim() : "";
+    return candidate ? [path.resolve(candidate).toLowerCase()] : [];
+  }));
+  if (requestedFiles.some((item) => normalizedAssociationConflictPaths.has(path.resolve(item.filePath).toLowerCase()))) {
+    throw new Error("A selected song is already linked to a different server or profile. Switch back to its original server and profile; Resonance did not upload any selected files.");
   }
   const controller = beginServerTransfer(event);
   const { signal } = controller;
@@ -1258,18 +2696,24 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
   let completed = 0;
   const results = [];
   const failed = [];
+  const attemptsByRetryID = new Map();
+  const completedRetryIDs = new Set();
+  const rememberRetry = (item) => {
+    const record = safeServerUploadRetryRecord(item);
+    if (record) serverUploadRetries.set(record.retryID, record);
+  };
   try {
-  const base = normalizeBaseURL(baseURL);
   for (const item of requestedFiles) {
     signal.throwIfAborted();
     const filePath = item.filePath;
     const filename = item.uploadFilename || serverUploadFilename(filePath, item.title);
-    event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed, total: requestedFiles.length });
+    event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed, total: requestedFiles.length, autoHide: false });
     let remoteSong = null;
     let lastError = null;
     let attempts = 0;
     while (attempts < 3 && !remoteSong) {
       attempts += 1;
+      attemptsByRetryID.set(item.retryID, attempts);
       const url = new URL("api/v1/admin/songs", base);
       url.searchParams.set("filename", filename);
       let body = null;
@@ -1279,27 +2723,32 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
         if (!information.isFile() || information.size <= 0) throw new Error("The local song file is missing or empty.");
         body = createReadStream(filePath);
         signal.addEventListener("abort", abortBody, { once: true });
+        await requireClientUploadMode({
+          baseURL: base.href,
+          token: String(adminToken),
+          profileID: requestedProfileID,
+          mode: "local_file",
+          force: true,
+        });
+        signal.throwIfAborted();
         const response = await fetch(url, {
           method: "PUT",
           headers: {
-            ...profileHeaders(adminToken, profileID),
+            ...profileHeaders(adminToken, requestedProfileID),
+            ...requestContext.expected.request_headers,
             "Content-Type": "application/octet-stream",
             "Content-Length": String(information.size),
           },
           body,
           duplex: "half",
+          redirect: "manual",
           signal,
         });
-        let payload = null;
-        try { payload = await response.json(); } catch { /* Preserve the HTTP error below. */ }
-        remoteSong = response.status === 409 ? payload?.duplicate_of || payload?.duplicateOf || null : payload;
-        if (!response.ok && !(response.status === 409 && remoteSong?.id)) {
-          throw new Error(payload?.error || `Server returned HTTP ${response.status}.`);
-        }
-        if (!remoteSong?.id) throw new Error(`Server did not return the uploaded song for ${filename}.`);
+        ({ song: remoteSong } = await readServerUploadResponse(response, { serverOrigin: base.origin }));
       } catch (error) {
         if (signal.aborted || error?.name === "AbortError") throw error;
         lastError = error;
+        if (error?.retryable === false) throw error;
         if (attempts < 3) await new Promise((resolve) => setTimeout(resolve, attempts === 1 ? 400 : 1200));
       } finally {
         signal.removeEventListener("abort", abortBody);
@@ -1308,16 +2757,69 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
     }
     if (remoteSong) {
       uploaded += 1;
-      results.push({ trackID: item.trackID || null, filePath, remoteSong });
+      completedRetryIDs.add(item.retryID);
+      serverUploadRetries.delete(item.retryID);
+      results.push({
+        retryID: item.retryID,
+        trackID: item.trackID || null,
+        filePath,
+        title: item.title || path.basename(filename, path.extname(filename)),
+        artist: item.artist || "",
+        filename,
+        attempts,
+        remoteSong,
+      });
     } else {
-      failed.push({ trackID: item.trackID || null, title: item.title || path.basename(filename, path.extname(filename)), artist: item.artist, filename, attempts, message: lastError?.message || "Upload failed." });
+      completedRetryIDs.add(item.retryID);
+      rememberRetry(item);
+      failed.push({ retryID: item.retryID, trackID: item.trackID || null, title: item.title || path.basename(filename, path.extname(filename)), artist: item.artist, filename, attempts, status: "failed", message: lastError?.message || "Upload failed." });
     }
     completed += 1;
-    event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed, total: requestedFiles.length });
+    event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed, total: requestedFiles.length, autoHide: false });
   }
+  await persistServerUploadRetries().catch((error) => console.error("Could not persist server upload retries", error));
   return { uploaded, results, failed };
   } catch (error) {
-    if (error?.name === "AbortError" || signal.aborted) return { uploaded, results, failed, cancelled: true };
+    if (error?.name === "AbortError" || signal.aborted) {
+      for (const item of requestedFiles) {
+        if (completedRetryIDs.has(item.retryID)) continue;
+        rememberRetry(item);
+        failed.push({
+          retryID: item.retryID,
+          trackID: item.trackID || null,
+          title: item.title || path.basename(item.uploadFilename || item.filePath, path.extname(item.uploadFilename || item.filePath)),
+          artist: item.artist || "",
+          filename: item.uploadFilename || path.basename(item.filePath),
+          attempts: attemptsByRetryID.get(item.retryID) || 0,
+          status: "cancelled",
+          message: "Upload cancelled.",
+        });
+      }
+      await persistServerUploadRetries().catch((persistError) => console.error("Could not persist server upload retries", persistError));
+      return { uploaded, results, failed, cancelled: true };
+    }
+    if (error?.retryable === false) {
+      const blockedEntries = policyBlockedUploadEntries(
+        requestedFiles,
+        completedRetryIDs,
+        attemptsByRetryID,
+        error.message,
+      );
+      for (const { item, failure } of blockedEntries) {
+        completedRetryIDs.add(item.retryID);
+        rememberRetry(item);
+        failed.push(failure);
+      }
+      await persistServerUploadRetries().catch((persistError) => console.error("Could not persist server upload retries", persistError));
+      event.sender.send("server:transfer-progress", {
+        direction: "upload",
+        currentFile: "Uploads stopped by server policy",
+        completed: requestedFiles.length,
+        total: requestedFiles.length,
+        autoHide: false,
+      });
+      return { uploaded, results, failed, policyBlocked: true };
+    }
     throw error;
   } finally {
     finishServerTransfer(event, controller);
@@ -1331,9 +2833,26 @@ ipcMain.handle("server:cancel-transfer", (event) => {
   return true;
 });
 
+ipcMain.handle("server:upload:discard-retries", async (_event, { baseURL, profileID, retryIDs } = {}) => {
+  const base = normalizeBaseURL(baseURL);
+  const requestedProfileID = String(profileID || "default");
+  await ensureServerUploadRetriesLoaded();
+  let removed = 0;
+  for (const retryID of [...new Set((Array.isArray(retryIDs) ? retryIDs : []).map((value) => String(value || "").trim()).filter(Boolean))].slice(0, MAX_SERVER_UPLOAD_RETRY_RECORDS)) {
+    const record = serverUploadRetries.get(retryID);
+    if (record?.serverOrigin !== base.origin || record.profileID !== requestedProfileID) continue;
+    serverUploadRetries.delete(retryID);
+    removed += 1;
+  }
+  if (removed) await persistServerUploadRetries();
+  return removed;
+});
+
 ipcMain.handle("server:delete", async (_event, { baseURL, adminToken, profileID, songID }) => {
   const base = normalizeBaseURL(baseURL);
-  const response = await fetch(new URL(`api/v1/admin/songs/${songID}`, base), { method: "DELETE", headers: profileHeaders(adminToken, profileID) });
+  const encodedSongID = encodeURIComponent(String(songID || ""));
+  if (!encodedSongID) throw new Error("Choose a server song to delete.");
+  const response = await fetch(new URL(`api/v1/admin/songs/${encodedSongID}`, base), { method: "DELETE", headers: profileHeaders(adminToken, profileID) });
   if (!response.ok) throw new Error(`Server returned HTTP ${response.status}`);
   return true;
 });

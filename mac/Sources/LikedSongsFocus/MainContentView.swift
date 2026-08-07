@@ -125,7 +125,7 @@ private struct ServerLibraryView: View {
     }
 
     private var localTracksByRemoteID: [String: Track] {
-        model.tracks.reduce(into: [:]) { result, track in
+        model.visibleTracks.reduce(into: [:]) { result, track in
             guard let remoteID = track.remoteID, result[remoteID] == nil else { return }
             result[remoteID] = track
         }
@@ -239,11 +239,14 @@ private struct ServerLibraryView: View {
         .task {
             let hasServer = !model.serverURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let hasToken = !model.serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let hasAdminToken = !model.serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             guard hasServer,
-                  hasToken,
+                  hasToken || hasAdminToken,
                   !model.isSyncingServer,
                   !model.isUploadingServer,
                   !model.isSyncingPlaylists else { return }
+            await model.refreshClientConfigurationNow()
+            guard hasToken else { return }
             await model.refreshServerCatalogNow()
             await model.syncPlaylistsNow()
         }
@@ -308,21 +311,21 @@ private struct ServerLibraryView: View {
             MacServerCircleActionButton(
                 symbol: "icloud.and.arrow.up",
                 label: "Upload downloaded songs missing from the server",
-                isDisabled: model.isUploadingServer || model.isSyncingServer,
+                isDisabled: model.localFileUploadActionsDisabled,
                 action: model.uploadMissingDownloadedSongs
             )
 
             MacServerCircleActionButton(
                 symbol: "square.and.arrow.up",
-                label: "Upload files",
-                isDisabled: model.isUploadingServer || model.isSyncingServer,
+                label: "Upload mode: \(model.uploadMode.title)",
+                isDisabled: model.selectedUploadActionDisabled,
                 action: model.chooseSongsToUpload
             )
 
             MacServerCircleActionButton(
                 symbol: "square.and.arrow.down",
                 label: isSelecting ? "Download selected songs" : "Download all missing songs",
-                isDisabled: model.isUploadingServer || model.isSyncingServer || (isSelecting && model.selectedRemoteSongIDs.isEmpty)
+                isDisabled: model.offlineDownloadActionsDisabled || (isSelecting && model.selectedRemoteSongIDs.isEmpty)
             ) {
                 if isSelecting {
                     model.downloadSelectedServerSongs()
@@ -336,7 +339,7 @@ private struct ServerLibraryView: View {
                 symbol: "checklist",
                 label: isSelecting ? "Cancel song selection" : "Select songs to download",
                 valueText: isSelecting ? "\(model.selectedRemoteSongIDs.count)" : nil,
-                isDisabled: model.isUploadingServer || model.isSyncingServer
+                isDisabled: model.offlineDownloadActionsDisabled
             ) {
                 if isSelecting {
                     endSelectionMode()
@@ -351,10 +354,18 @@ private struct ServerLibraryView: View {
 
             MacServerCircleActionButton(
                 symbol: "arrow.clockwise",
-                label: "Refresh catalog and sync playlists",
-                isRotating: model.isRefreshingServerCatalog || model.isSyncingPlaylists,
+                label: "Refresh server catalog",
+                isRotating: model.isRefreshingServerCatalog,
                 isDisabled: model.isUploadingServer || model.isSyncingServer || model.isSyncingPlaylists,
                 action: model.refreshServerCatalog
+            )
+
+            MacServerCircleActionButton(
+                symbol: "wrench.and.screwdriver",
+                label: "Repair server metadata (admin)",
+                isRotating: model.isRepairingServerMetadata,
+                isDisabled: model.serverUploadActionsDisabled || model.isSyncingPlaylists,
+                action: model.repairServerMetadata
             )
         }
     }
@@ -548,12 +559,38 @@ private struct MacServerSongRow: View {
     }
 
     private var isCurrent: Bool {
-        localTrack?.id == model.currentTrackID
+        localTrack?.id == model.currentTrackID || model.isStreamingRemoteSong(song)
     }
 
     private var isFavorite: Bool {
         guard let localTrack else { return false }
         return model.favorites.contains(localTrack.id)
+    }
+
+    private var isUnsupportedStreamVideo: Bool {
+        localTrack == nil
+            && model.clientConfiguration.allowsStreamOnlyPlayback
+            && song.kind == .video
+    }
+
+    private var remoteActionSymbol: String {
+        if isUnsupportedStreamVideo { return "video.slash.fill" }
+        if model.clientConfiguration.allowsStreamOnlyPlayback {
+            return model.isStreamingRemoteSong(song) && model.isPlaying ? "pause.fill" : "play.fill"
+        }
+        return "icloud.and.arrow.down"
+    }
+
+    private var remoteActionHelp: String {
+        if isUnsupportedStreamVideo {
+            return MacRemoteStreamMediaPolicy.videoUnavailableMessage
+        }
+        if model.clientConfiguration.allowsStreamOnlyPlayback {
+            return "Play without saving to this Mac"
+        }
+        return model.clientConfiguration.allowsOfflineDownload
+            ? "Download"
+            : model.offlineDownloadUnavailableMessage
     }
 
     var body: some View {
@@ -632,14 +669,24 @@ private struct MacServerSongRow: View {
                     .help(isFavorite ? "Remove from Liked Songs" : "Add to Liked Songs")
                 } else {
                     Button {
-                        model.downloadServerSong(song)
+                        if model.isStreamingRemoteSong(song) {
+                            model.togglePlay()
+                        } else if model.clientConfiguration.allowsStreamOnlyPlayback {
+                            model.playRemoteSong(song)
+                        } else {
+                            model.downloadServerSong(song)
+                        }
                     } label: {
-                        Image(systemName: "icloud.and.arrow.down")
+                        Image(systemName: remoteActionSymbol)
                             .font(.system(size: 11))
                             .foregroundStyle(Color(hex: 0xAEB4C2))
                     }
                     .buttonStyle(.plain)
-                    .help("Download")
+                    .disabled(
+                        !model.clientConfiguration.allowsOfflineDownload
+                            && !model.clientConfiguration.allowsStreamOnlyPlayback
+                    )
+                    .help(remoteActionHelp)
                 }
             }
             .frame(width: 44, alignment: .trailing)
@@ -658,7 +705,20 @@ private struct MacServerSongRow: View {
                 Button("Play", action: { model.selectAndPlay(localTrack) })
                 Button("Show in Finder", action: { model.revealInFinder(localTrack) })
             } else {
-                Button("Download", action: { model.downloadServerSong(song) })
+                if model.clientConfiguration.allowsStreamOnlyPlayback {
+                    Button(isUnsupportedStreamVideo
+                        ? "Video Stream Unavailable"
+                        : model.isStreamingRemoteSong(song) && model.isPlaying ? "Pause Stream" : "Play Stream") {
+                        if model.isStreamingRemoteSong(song) {
+                            model.togglePlay()
+                        } else {
+                            model.playRemoteSong(song)
+                        }
+                    }
+                } else {
+                    Button("Download", action: { model.downloadServerSong(song) })
+                        .disabled(!model.clientConfiguration.allowsOfflineDownload)
+                }
             }
             Divider()
             Button("Delete from Server", role: .destructive, action: onDelete)
@@ -667,6 +727,8 @@ private struct MacServerSongRow: View {
 
     private func primaryAction() {
         if let localTrack { model.selectAndPlay(localTrack) }
+        else if model.isStreamingRemoteSong(song) { model.togglePlay() }
+        else if model.clientConfiguration.allowsStreamOnlyPlayback { model.playRemoteSong(song) }
         else { model.downloadServerSong(song) }
     }
 }
@@ -726,12 +788,32 @@ private struct MacServerConnectionSheet: View {
     @State private var didLoadDrafts = false
     @State private var confirmingCredentialRemoval = false
 
+    private var uploadModeBinding: Binding<MacUploadMode> {
+        Binding(get: { model.uploadMode }, set: model.selectUploadMode)
+    }
+
+    private var downloadModeBinding: Binding<MacDownloadMode> {
+        Binding(get: { model.downloadMode }, set: model.selectDownloadMode)
+    }
+
+    private var displayedUploadModes: [MacUploadMode] {
+        let modes = model.clientConfiguration.permittedUploadModes
+        return modes.isEmpty ? [.localFile] : modes
+    }
+
+    private var displayedDownloadModes: [MacDownloadMode] {
+        let modes = model.clientConfiguration.permittedDownloadModes
+        return modes.isEmpty ? [.verifiedFileCache] : modes
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Server Connection").font(.system(size: 22, weight: .bold))
-                    Text("Stored locally for Resonance Preview.")
+                    Text(model.usesPreviewCredentialStore
+                        ? "Stored in a private local file for this disposable Preview build."
+                        : "Access and admin credentials are stored securely in Keychain.")
                         .font(.system(size: 10))
                         .foregroundStyle(Color.appMuted)
                 }
@@ -752,6 +834,44 @@ private struct MacServerConnectionSheet: View {
             }
             .font(.system(size: 11, weight: .semibold))
 
+            GroupBox("Transfer Modes") {
+                VStack(alignment: .leading, spacing: 13) {
+                    Picker("Upload", selection: uploadModeBinding) {
+                        ForEach(displayedUploadModes) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(model.clientConfiguration.permittedUploadModes.isEmpty)
+
+                    Text(model.clientConfiguration.permittedUploadModes.isEmpty
+                        ? "Uploads are disabled by the verified server configuration."
+                        : model.uploadMode.detail)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.appMuted)
+
+                    Picker("Download", selection: downloadModeBinding) {
+                        ForEach(displayedDownloadModes) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(model.clientConfiguration.permittedDownloadModes.isEmpty)
+
+                    Text(model.clientConfiguration.requestedStreamOnly
+                        ? model.offlineDownloadUnavailableMessage
+                        : model.downloadMode.detail)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.appMuted)
+
+                    Label(model.clientConfigMessage, systemImage: "checkmark.shield")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.appMuted)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             HStack {
                 Text(model.serverMessage)
                     .font(.system(size: 10))
@@ -765,9 +885,19 @@ private struct MacServerConnectionSheet: View {
                 Spacer()
                 Button {
                     Task {
+                        guard !model.serverUploadActionsDisabled else {
+                            model.serverMessage = "Wait for the current transfer to finish"
+                            return
+                        }
                         model.serverURLString = serverURLDraft
                         model.serverToken = accessTokenDraft
                         model.serverAdminToken = adminTokenDraft
+                        await model.refreshClientConfigurationNow()
+                        if accessTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            model.serverMessage = "Upload ready • Add access token to sync"
+                            dismiss()
+                            return
+                        }
                         await model.refreshServerCatalogNow()
                         await model.syncPlaylistsNow()
                         if model.serverMessage.localizedCaseInsensitiveContains("connected") { dismiss() }
@@ -778,11 +908,12 @@ private struct MacServerConnectionSheet: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Color.appAccent)
-                .disabled(
-                    model.isSyncingServer
-                        || serverURLDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || accessTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
+                .disabled(model.serverUploadActionsDisabled || !ServerConnectionPolicy.canSave(
+                    serverURL: serverURLDraft,
+                    accessToken: accessTokenDraft,
+                    adminToken: adminTokenDraft,
+                    allowsInsecurePreviewLoopback: model.allowsInsecurePreviewLoopback
+                ))
             }
         }
         .padding(24)
@@ -1037,7 +1168,6 @@ private struct MacProfileMenu: View {
         case switchProfile
         case listeningHistory
         case clipEditor
-        case settings
 
         var id: String { rawValue }
     }
@@ -1045,6 +1175,7 @@ private struct MacProfileMenu: View {
     @State private var isShowingProfileMenu = false
     @State private var presentedSheet: PresentedSheet?
     @EnvironmentObject private var model: PlayerModel
+    @Environment(\.openSettings) private var openSettings
 
     private var profileName: String {
         let name = model.activeSyncProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1117,7 +1248,7 @@ private struct MacProfileMenu: View {
 
                     Button {
                         isShowingProfileMenu = false
-                        presentedSheet = .settings
+                        openSettings()
                     } label: {
                         ProfilePopoverRow(symbol: "gearshape", title: "Settings")
                     }
@@ -1137,77 +1268,8 @@ private struct MacProfileMenu: View {
                 MacListeningHistorySheet()
             case .clipEditor:
                 MacClipEditorSheet()
-            case .settings:
-                MacUnderConstructionSheet(
-                    title: "Settings",
-                    message: "Settings are still being built.",
-                    symbol: "hammer.fill"
-                )
             }
         }
-    }
-}
-
-private struct MacUnderConstructionSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    let title: String
-    let message: String
-    let symbol: String
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(title)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Color.appInk)
-
-                Spacer()
-
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Color.appMuted)
-                        .frame(width: 28, height: 28)
-                        .background(Color.white.opacity(0.07), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .help("Close")
-                .accessibilityLabel("Close \(title)")
-            }
-
-            Spacer(minLength: 18)
-
-            ZStack {
-                Circle()
-                    .fill(Color.appViolet.opacity(0.14))
-                    .frame(width: 76, height: 76)
-
-                Circle()
-                    .stroke(Color.appViolet.opacity(0.34), lineWidth: 1)
-                    .frame(width: 76, height: 76)
-
-                Image(systemName: symbol)
-                    .font(.system(size: 27, weight: .semibold))
-                    .foregroundStyle(Color.appViolet)
-            }
-
-            Text("Under construction")
-                .font(.system(size: 22, weight: .bold))
-                .foregroundStyle(Color.appInk)
-                .padding(.top, 16)
-
-            Text(message)
-                .font(.system(size: 12))
-                .foregroundStyle(Color.appMuted)
-                .padding(.top, 6)
-
-            Spacer(minLength: 22)
-        }
-        .padding(22)
-        .frame(width: 370, height: 280)
-        .background(Color.appPanel)
     }
 }
 
@@ -1366,6 +1428,7 @@ private struct MacSwitchProfileSheet: View {
                 isSwitching = false
                 return
             }
+            await model.refreshClientConfigurationNow()
             await model.refreshServerCatalogNow()
             await model.syncPlaylistsNow()
             isSwitching = false
@@ -3896,6 +3959,16 @@ private struct TrackRowView: View {
     }
 }
 
+private struct StorageFileInspection: Sendable {
+    let id: UUID
+    let url: URL?
+}
+
+private struct StorageInspectionResult: Sendable {
+    let fileSizes: [UUID: Int64]
+    let availableBytes: Int64
+}
+
 private struct StorageView: View {
     @EnvironmentObject private var model: PlayerModel
     let onImportLink: () -> Void
@@ -4105,7 +4178,7 @@ private struct StorageView: View {
             }
         }
         .task(id: model.tracks.map(\.id)) {
-            refreshStorageMetrics()
+            await refreshStorageMetrics()
             reconcileVisibleSelection()
         }
         .onChange(of: scope) {
@@ -4157,11 +4230,29 @@ private struct StorageView: View {
         }
     }
 
-    private func refreshStorageMetrics() {
-        fileSizes = Dictionary(uniqueKeysWithValues: model.tracks.map { ($0.id, model.fileSize(for: $0)) })
-        let home = URL(fileURLWithPath: NSHomeDirectory())
-        let values = try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        availableBytes = max(values?.volumeAvailableCapacityForImportantUsage ?? 0, 0)
+    private func refreshStorageMetrics() async {
+        let inspections = model.tracks.map {
+            StorageFileInspection(id: $0.id, url: $0.fileURL)
+        }
+        let result = await Task.detached(priority: .utility) {
+            let fileSizes = Dictionary(uniqueKeysWithValues: inspections.map { inspection in
+                let bytes = inspection.url.flatMap {
+                    try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize
+                } ?? 0
+                return (inspection.id, Int64(bytes))
+            })
+            let home = URL(fileURLWithPath: NSHomeDirectory())
+            let values = try? home.resourceValues(
+                forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+            )
+            return StorageInspectionResult(
+                fileSizes: fileSizes,
+                availableBytes: max(values?.volumeAvailableCapacityForImportantUsage ?? 0, 0)
+            )
+        }.value
+        guard !Task.isCancelled else { return }
+        fileSizes = result.fileSizes
+        availableBytes = result.availableBytes
     }
 
     private func reconcileVisibleSelection() {

@@ -1,4 +1,5 @@
 const path = require("node:path");
+const { sanitizeWindowsFilename } = require("./filename-policy.cjs");
 
 function cleanFilenameStem(value) {
   return String(value || "")
@@ -19,7 +20,30 @@ function serverUploadFilename(filePath, title) {
     preferredStem = preferredStem.slice(0, -safeExtension.length);
   }
   const stem = cleanFilenameStem(preferredStem) || cleanFilenameStem(sourceStem) || "Untitled song";
-  return `${stem}${safeExtension}`;
+  return sanitizeWindowsFilename(`${stem}${safeExtension}`, {
+    fallback: `Untitled song${safeExtension}`,
+    pathInput: false,
+  });
 }
 
-module.exports = { serverUploadFilename };
+function policyBlockedUploadEntries(requestedFiles, completedRetryIDs, attemptsByRetryID, message) {
+  const completed = completedRetryIDs instanceof Set ? completedRetryIDs : new Set();
+  const attempts = attemptsByRetryID instanceof Map ? attemptsByRetryID : new Map();
+  return (Array.isArray(requestedFiles) ? requestedFiles : [])
+    .filter((item) => item?.retryID && !completed.has(item.retryID))
+    .map((item) => ({
+      item,
+      failure: {
+        retryID: item.retryID,
+        trackID: item.trackID || null,
+        title: item.title || path.basename(item.uploadFilename || item.filePath, path.extname(item.uploadFilename || item.filePath)),
+        artist: item.artist || "",
+        filename: item.uploadFilename || path.basename(item.filePath),
+        attempts: attempts.get(item.retryID) || 0,
+        status: "policy_blocked",
+        message: String(message || "Uploads were disabled by the signed server configuration."),
+      },
+    }));
+}
+
+module.exports = { policyBlockedUploadEntries, serverUploadFilename };

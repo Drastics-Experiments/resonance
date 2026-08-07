@@ -62,7 +62,7 @@ struct PlayerBarView: View {
                 }
 
                 PlayerBarProgressView(
-                    duration: model.currentTrack?.duration ?? 0,
+                    duration: model.playbackDuration,
                     onSeek: model.seek
                 )
             }
@@ -164,14 +164,16 @@ struct PlayerBarView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .help("Open Now Playing")
 
-                Button {
-                    model.toggleFavorite(track)
-                } label: {
-                    Image(systemName: model.favorites.contains(track.id) ? "heart.fill" : "heart")
-                        .font(.system(size: 15))
-                        .foregroundStyle(Color.appAccent)
+                if model.canFavorite(track) {
+                    Button {
+                        model.toggleFavorite(track)
+                    } label: {
+                        Image(systemName: model.favorites.contains(track.id) ? "heart.fill" : "heart")
+                            .font(.system(size: 15))
+                            .foregroundStyle(Color.appAccent)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         } else {
             HStack(spacing: 11) {

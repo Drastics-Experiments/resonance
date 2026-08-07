@@ -3,7 +3,6 @@ import SwiftUI
 
 @main
 struct LikedSongsFocusApp: App {
-    @NSApplicationDelegateAdaptor(ResonanceApplicationDelegate.self) private var appDelegate
     @StateObject private var model: PlayerModel
     @StateObject private var localImportModel: MacLocalImportViewModel
     @StateObject private var updateManager = UpdateManager()
@@ -24,60 +23,50 @@ struct LikedSongsFocusApp: App {
                 .environmentObject(localImportModel)
                 .environmentObject(updateManager)
                 .background(WindowConfigurator())
-                .task { await model.runAutomaticPlaylistSync() }
+                .task {
+                    await model.refreshClientConfigurationNow()
+                    await model.runAutomaticPlaylistSync()
+                }
                 .onChange(of: scenePhase) { _, phase in
-                    guard phase == .active else { return }
-                    Task { await model.syncPlaylistsAutomatically() }
+                    if phase == .active {
+                        Task {
+                            await model.refreshClientConfigurationNow()
+                            await model.syncPlaylistsAutomatically()
+                        }
+                    } else {
+                        model.flushPersistence()
+                    }
                 }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1200, height: 750)
+        .commands {
+            CommandMenu("Music") {
+                Button("Search Music") {
+                    NotificationCenter.default.post(name: .focusMusicSearch, object: nil)
+                }
+                .keyboardShortcut("k", modifiers: [.command])
+
+                Button("Add Music…") { model.importLocalFiles() }
+                    .keyboardShortcut("o", modifiers: [.command])
+
+                Button("New Playlist…") {
+                    NotificationCenter.default.post(name: .newMusicPlaylist, object: nil)
+                }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+
+                Divider()
+
+                Button(model.isPlaying ? "Pause" : "Play") { model.togglePlay() }
+                Button("Previous Track") { model.previous() }
+                Button("Next Track") { model.next() }
+            }
+        }
 
         Settings {
             MusicSettingsView()
                 .environmentObject(model)
                 .environmentObject(updateManager)
-        }
-    }
-}
-
-enum MacMenuPolicy {
-    private static let textEditingActions = Set(["cut:", "copy:", "paste:", "selectAll:"])
-
-    static func keepsMainMenuItem(_ item: NSMenuItem, at index: Int) -> Bool {
-        if index == 0 { return true }
-        guard let submenu = item.submenu else { return false }
-        return submenu.items.contains { menuItem in
-            guard let action = menuItem.action else { return false }
-            return textEditingActions.contains(NSStringFromSelector(action))
-        }
-    }
-}
-
-private final class ResonanceApplicationDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        scheduleMenuCleanup()
-    }
-
-    func applicationDidBecomeActive(_ notification: Notification) {
-        scheduleMenuCleanup()
-    }
-
-    static func keepApplicationAndTextEditingMenus() {
-        guard let mainMenu = NSApp.mainMenu else { return }
-        NSApp.windowsMenu = nil
-        NSApp.helpMenu = nil
-        for index in mainMenu.items.indices.reversed()
-        where !MacMenuPolicy.keepsMainMenuItem(mainMenu.items[index], at: index) {
-            mainMenu.removeItem(at: index)
-        }
-    }
-
-    private func scheduleMenuCleanup() {
-        for delay in [0.0, 0.1, 0.5, 1.0] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                Self.keepApplicationAndTextEditingMenus()
-            }
         }
     }
 }
@@ -103,6 +92,5 @@ private struct WindowConfigurator: NSViewRepresentable {
         window.standardWindowButton(.closeButton)?.isHidden = false
         window.standardWindowButton(.miniaturizeButton)?.isHidden = false
         window.standardWindowButton(.zoomButton)?.isHidden = false
-        ResonanceApplicationDelegate.keepApplicationAndTextEditingMenus()
     }
 }

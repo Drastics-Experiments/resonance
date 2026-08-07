@@ -61,6 +61,11 @@ function check({ quiet = false } = {}) {
     version,
   );
   expectValues(
+    "Windows client-config build",
+    matches("windows/package.json", /^\s*"resonanceBuild":\s*([0-9]+),?$/gm),
+    build,
+  );
+  expectValues(
     "Android versionName",
     matches("android/app/build.gradle.kts", /^\s*versionName\s*=\s*"([^"]+)"$/gm),
     version,
@@ -130,6 +135,11 @@ function setVersion(version, buildText) {
     "windows/package.json",
     /(^\s*"version":\s*")[^"]+("\s*,?\s*$)/m,
     (_match, prefix, suffix) => `${prefix}${version}${suffix}`,
+  );
+  replace(
+    "windows/package.json",
+    /(^\s*"resonanceBuild":\s*)[0-9]+(\s*,?\s*$)/m,
+    (_match, prefix, suffix) => `${prefix}${build}${suffix}`,
   );
   replace(
     "android/app/build.gradle.kts",

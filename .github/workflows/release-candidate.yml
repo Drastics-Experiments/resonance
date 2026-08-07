@@ -67,6 +67,9 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
 
+      - name: Test release policy
+        run: node --test scripts/release-now.test.mjs scripts/validate-release-assets.test.mjs
+
   android:
     name: Android candidate
     needs: prepare
@@ -92,6 +95,16 @@ jobs:
     name: macOS candidate
     needs: prepare
     uses: ./.github/workflows/macos.yml
+    secrets:
+      RESONANCE_MACOS_APP_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_MACOS_APP_CERTIFICATE_BASE64 }}
+      RESONANCE_MACOS_APP_CERTIFICATE_PASSWORD: ${{ secrets.RESONANCE_MACOS_APP_CERTIFICATE_PASSWORD }}
+      RESONANCE_MACOS_APP_IDENTITY: ${{ secrets.RESONANCE_MACOS_APP_IDENTITY }}
+      RESONANCE_MACOS_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_MACOS_INSTALLER_CERTIFICATE_BASE64 }}
+      RESONANCE_MACOS_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.RESONANCE_MACOS_INSTALLER_CERTIFICATE_PASSWORD }}
+      RESONANCE_MACOS_INSTALLER_IDENTITY: ${{ secrets.RESONANCE_MACOS_INSTALLER_IDENTITY }}
+      RESONANCE_MACOS_NOTARY_KEY_BASE64: ${{ secrets.RESONANCE_MACOS_NOTARY_KEY_BASE64 }}
+      RESONANCE_MACOS_NOTARY_KEY_ID: ${{ secrets.RESONANCE_MACOS_NOTARY_KEY_ID }}
+      RESONANCE_MACOS_NOTARY_ISSUER_ID: ${{ secrets.RESONANCE_MACOS_NOTARY_ISSUER_ID }}
     with:
       release_candidate: true
       version: ${{ needs.prepare.outputs.version }}
@@ -102,6 +115,10 @@ jobs:
     name: Windows candidate
     needs: prepare
     uses: ./.github/workflows/windows.yml
+    secrets:
+      RESONANCE_WINDOWS_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_BASE64 }}
+      RESONANCE_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_PASSWORD }}
+      RESONANCE_WINDOWS_CERTIFICATE_SHA1: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_SHA1 }}
     with:
       release_candidate: true
       version: ${{ needs.prepare.outputs.version }}
@@ -131,8 +148,18 @@ jobs:
           path: candidate/assets
           merge-multiple: true
 
+      - name: Download desktop signing evidence
+        uses: actions/download-artifact@v7
+        with:
+          pattern: release-signing-*
+          path: candidate/signing
+          merge-multiple: true
+
       - name: Validate complete asset set
-        run: node scripts/validate-release-assets.mjs candidate/assets "${{ needs.prepare.outputs.version }}"
+        run: >-
+          node scripts/validate-release-assets.mjs
+          candidate/assets "${{ needs.prepare.outputs.version }}"
+          --signing-evidence candidate/signing
 
       - name: Write candidate provenance
         shell: bash
@@ -161,7 +188,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: release-provenance-${{ needs.prepare.outputs.tag }}-${{ needs.prepare.outputs.source_sha }}
-          path: candidate/candidate.json
+          path: |
+            candidate/candidate.json
+            candidate/signing/macos.json
+            candidate/signing/windows.json
           if-no-files-found: error
           retention-days: 14
           overwrite: true

@@ -13,6 +13,52 @@ struct LocalImportServerConfiguration: Hashable, Sendable {
     let baseURL: URL
     let adminToken: String
     let profileID: String
+    let clientContext: MacClientConfigContext
+}
+
+struct LocalImportTransferContext: Hashable, Sendable {
+    let id: UUID
+    let baseURL: URL?
+    let adminToken: String?
+    let profileID: String
+    let profileName: String
+    let uploadMode: MacUploadMode
+    let rawSourceInput: String?
+    let mediaMode: LocalImportMediaMode
+    let requiresReviewedMatch: Bool
+    let reservesUpload: Bool
+}
+
+enum LocalImportTransferContextError: LocalizedError {
+    case serverBusy
+    case missingUploadConfiguration
+    case uploadModeUnavailable
+    case unsupportedSourceLink
+    case sourceLinkRequiresAudio
+    case reviewedMatchRequired
+    case contextChanged
+    case remoteAssociationConflict
+
+    var errorDescription: String? {
+        switch self {
+        case .serverBusy:
+            "Wait for the current server transfer to finish."
+        case .missingUploadConfiguration:
+            "Add a valid server URL and admin key before uploading."
+        case .uploadModeUnavailable:
+            "The selected upload mode is disabled by the verified server configuration. Choose an available mode and try again."
+        case .unsupportedSourceLink:
+            "Server source-link upload requires the exact original https://www.youtube.com/watch?v=… page typed into Import from Link. Short links, rewritten links, and discovered matches must use Reviewed match."
+        case .sourceLinkRequiresAudio:
+            "Server source-link import creates audio only. Choose Audio before uploading this source."
+        case .reviewedMatchRequired:
+            "This discovered source can only be uploaded in Reviewed match mode after you select it explicitly."
+        case .contextChanged:
+            "The server or profile changed while the import was running."
+        case .remoteAssociationConflict:
+            "This song is already linked to another server or profile. Switch back to that server and profile, or import a separate local copy before uploading here."
+        }
+    }
 }
 
 struct LocalImportSpotifyTrack: Codable, Hashable, Sendable {
@@ -104,6 +150,7 @@ struct LocalImportResolution: Hashable, Sendable {
     let kind: Kind
     let track: LocalImportSpotifyTrack
     let candidates: [LocalImportAudioSourceMatch]
+    let reviewCandidateVideoIDs: Set<String>
     let releases: [LocalImportDebridRelease]
     let playlist: LocalImportPlaylist?
 
@@ -111,12 +158,14 @@ struct LocalImportResolution: Hashable, Sendable {
         kind: Kind,
         track: LocalImportSpotifyTrack,
         candidates: [LocalImportAudioSourceMatch],
+        reviewCandidateVideoIDs: Set<String> = [],
         releases: [LocalImportDebridRelease],
         playlist: LocalImportPlaylist? = nil
     ) {
         self.kind = kind
         self.track = track
         self.candidates = candidates
+        self.reviewCandidateVideoIDs = reviewCandidateVideoIDs
         self.releases = releases
         self.playlist = playlist
     }

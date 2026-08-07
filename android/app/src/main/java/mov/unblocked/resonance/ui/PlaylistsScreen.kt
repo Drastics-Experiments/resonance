@@ -227,9 +227,13 @@ private fun PlaylistDetailScreen(
                     )
                 }
                 IconButton(
-                    enabled = tracks.isNotEmpty(),
+                    enabled = tracks.isNotEmpty() && !state.isTransientPlayback,
                     onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) },
-                    modifier = Modifier.size(46.dp).background(if (state.shuffleEnabled) Violet else Color.White.copy(alpha = .08f), CircleShape),
+                    modifier = Modifier.size(46.dp).background(
+                        if (state.shuffleEnabled && !state.isTransientPlayback) Violet
+                        else Color.White.copy(alpha = .08f),
+                        CircleShape,
+                    ),
                 ) { Icon(Icons.Default.Shuffle, "Shuffle") }
             }
         }
@@ -305,7 +309,7 @@ private fun PlaylistDetailScreen(
                                     maxLines = 1,
                                 )
                             }
-                            Text(durationText(track.durationMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                            Text(track.durationText, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                             Icon(if (added) Icons.Default.Check else Icons.Default.Add, null, tint = if (added) Accent else Color.White)
                         }
                     }

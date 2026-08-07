@@ -2,42 +2,67 @@ package mov.unblocked.resonance.playback
 
 import android.app.PendingIntent
 import android.content.Intent
-import android.os.Handler
-import android.os.Looper
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import mov.unblocked.resonance.MainActivity
 
 class PlaybackService : MediaSessionService() {
     private var player: ExoPlayer? = null
     private var session: MediaSession? = null
-    private val handler = Handler(Looper.getMainLooper())
-    private val boundaryCheck = object : Runnable {
-        override fun run() {
-            enforceClipBoundary()
-            handler.postDelayed(this, 100)
-        }
-    }
     private val clipListener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            if (reason !in setOf(Player.MEDIA_ITEM_TRANSITION_REASON_AUTO, Player.MEDIA_ITEM_TRANSITION_REASON_SEEK)) return
-            val start = mediaItem?.mediaMetadata?.extras?.getLong(CLIP_START_MS, 0L) ?: 0L
-            if (start > 0L) player?.seekTo(start)
+            seekToClipStartIfNeeded(mediaItem)
+        }
+
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int,
+        ) {
+            seekToClipStartIfNeeded(player?.currentMediaItem)
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            val player = player ?: return
+            if (playbackState != Player.STATE_ENDED || player.repeatMode == Player.REPEAT_MODE_ONE) return
+            val start = clipStartMs(player.currentMediaItem)
+            player.pause()
+            player.seekTo(start)
         }
     }
+    private val sessionCallback = object : MediaSession.Callback {
+        override fun onAddMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: List<MediaItem>,
+        ): ListenableFuture<List<MediaItem>> = Futures.immediateFuture(
+            mediaItems.map(::withExactClipEnd),
+        )
+    }
 
+    @UnstableApi
     override fun onCreate() {
         super.onCreate()
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
+        val dataSourceFactory = DefaultDataSource.Factory(
+            this,
+            AuthenticatedStreamDataSource.Factory(),
+        )
         val exoPlayer = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build()
@@ -52,8 +77,8 @@ class PlaybackService : MediaSessionService() {
         exoPlayer.addListener(clipListener)
         session = MediaSession.Builder(this, exoPlayer)
             .setSessionActivity(pendingIntent)
+            .setCallback(sessionCallback)
             .build()
-        handler.post(boundaryCheck)
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
@@ -62,35 +87,41 @@ class PlaybackService : MediaSessionService() {
         if (player?.playWhenReady != true) stopSelf()
     }
 
-    private fun enforceClipBoundary() {
-        val player = player ?: return
-        val extras = player.currentMediaItem?.mediaMetadata?.extras ?: return
+    private fun withExactClipEnd(mediaItem: MediaItem): MediaItem {
+        val extras = mediaItem.mediaMetadata.extras ?: return mediaItem
         val start = extras.getLong(CLIP_START_MS, 0L).coerceAtLeast(0L)
-        val end = extras.getLong(CLIP_END_MS, C.TIME_UNSET)
-        if (end <= start) return
-        when {
-            player.currentPosition < start -> player.seekTo(start)
-            player.isPlaying && player.currentPosition + 20L >= end -> when {
-                player.repeatMode == Player.REPEAT_MODE_ONE -> player.seekTo(start)
-                player.hasNextMediaItem() -> {
-                    player.seekToNextMediaItem()
-                    player.play()
-                }
-                else -> {
-                    player.pause()
-                    player.seekTo(start)
-                }
-            }
-        }
+        val end = ClipBoundaryPolicy.exactEndMs(
+            startMs = start,
+            endMs = extras.getLong(CLIP_END_MS, C.TIME_UNSET),
+        ) ?: return mediaItem
+        return mediaItem.buildUpon()
+            // Keep positions absolute because the clients persist and seek against source time.
+            // Starting playback at CLIP_START_MS prevents pre-roll; Media3 owns the exact end.
+            .setClippingConfiguration(
+                MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionMs(0L)
+                    .setEndPositionMs(end)
+                    .build(),
+            )
+            .build()
     }
 
+    private fun seekToClipStartIfNeeded(mediaItem: MediaItem?) {
+        val player = player ?: return
+        val start = clipStartMs(mediaItem)
+        if (player.currentPosition < start) player.seekTo(start)
+    }
+
+    private fun clipStartMs(mediaItem: MediaItem?): Long =
+        mediaItem?.mediaMetadata?.extras?.getLong(CLIP_START_MS, 0L)?.coerceAtLeast(0L) ?: 0L
+
     override fun onDestroy() {
-        handler.removeCallbacks(boundaryCheck)
         player?.removeListener(clipListener)
         session?.release()
         session = null
         player?.release()
         player = null
+        AuthenticatedStreamRegistry.clearAll()
         super.onDestroy()
     }
 

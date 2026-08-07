@@ -1100,7 +1100,14 @@ function scoreAudioSource(track, candidate) {
     ...candidate,
     sourceURL: `https://www.youtube.com/watch?v=${candidate.videoID}`,
     score: Number(score.toFixed(4)),
-    confidence: score >= 0.86 ? "high" : score >= 0.72 ? "good" : "possible",
+    // These candidates are inferred from public metadata rather than verified
+    // against the source audio. Keep them useful for human review, but never
+    // let a high text score silently become an automatic library association.
+    confidence: "possible",
+    evidenceStrength: "metadata_only",
+    requiresReview: true,
+    autoSelectable: false,
+    actionable: false,
     match: {
       title: Number(title.toFixed(4)),
       artist: Number(artist.toFixed(4)),

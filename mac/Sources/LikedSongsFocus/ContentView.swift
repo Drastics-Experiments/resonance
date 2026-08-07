@@ -85,6 +85,19 @@ struct ContentView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
 
+                    if model.isRepairingServerMetadata {
+                        TransferProgressOverlay(
+                            title: "Repairing Server Metadata",
+                            detail: model.uploadCurrentFile,
+                            status: model.uploadStatus,
+                            progress: model.uploadProgress,
+                            symbol: "wrench.and.screwdriver",
+                            color: Color.appAccent,
+                            cancel: model.cancelServerUpload
+                        )
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+
                     if localImportModel.showsTransferPopup {
                         TransferProgressOverlay(
                             title: localImportModel.transferTitle,

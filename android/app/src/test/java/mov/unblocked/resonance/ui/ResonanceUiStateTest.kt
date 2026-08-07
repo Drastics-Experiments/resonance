@@ -4,6 +4,7 @@ import mov.unblocked.resonance.data.ClipRange
 import mov.unblocked.resonance.data.RemoteSong
 import mov.unblocked.resonance.data.SyncProfile
 import mov.unblocked.resonance.data.Track
+import mov.unblocked.resonance.data.ServerUploadMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -83,9 +84,40 @@ class ResonanceUiStateTest {
 
     @Test
     fun transferPopupOnlyAppearsForDownloadsAndUploads() {
-        assertFalse(shouldShowTransferPopup(ResonanceUiState(isSyncingPlaylists = true)))
+        assertFalse(shouldShowTransferPopup(ResonanceUiState(isRefreshingServer = true, isSyncingPlaylists = true)))
         assertTrue(shouldShowTransferPopup(ResonanceUiState(isDownloading = true)))
         assertTrue(shouldShowTransferPopup(ResonanceUiState(isUploading = true)))
+    }
+
+    @Test
+    fun catalogAndPlaylistSyncDoNotBlockConfiguredUploads() {
+        val configured = ResonanceUiState(
+            serverUrl = "https://music.example",
+            serverAdminKey = "admin-key",
+            isRefreshingServer = true,
+            isSyncingPlaylists = true,
+        )
+
+        assertTrue(canStartServerUpload(configured))
+    }
+
+    @Test
+    fun activeTransfersConnectionChangesAndMissingCredentialsBlockUploads() {
+        val configured = ResonanceUiState(
+            serverUrl = "https://music.example",
+            serverToken = "access-token",
+            serverAdminKey = "admin-key",
+        )
+
+        assertFalse(canStartServerUpload(configured.copy(isDownloading = true)))
+        assertFalse(canStartServerUpload(configured.copy(isUploading = true)))
+        assertFalse(canStartServerUpload(configured.copy(isApplyingServerConnection = true)))
+        assertFalse(canStartServerUpload(configured.copy(serverUrl = "")))
+        assertTrue(configured.copy(serverToken = "").hasServerUploadCredentials)
+        assertTrue(canStartServerUpload(configured.copy(serverToken = "")))
+        assertFalse(canStartServerUpload(configured.copy(serverAdminKey = "")))
+        assertFalse(canStartServerUpload(configured.copy(serverUploadMode = null)))
+        assertFalse(canStartServerUpload(configured.copy(serverUploadMode = ServerUploadMode.ServerSourceLink)))
     }
 
     @Test
@@ -106,5 +138,24 @@ class ResonanceUiStateTest {
         assertEquals(15_000L, state.playbackStartMs)
         assertEquals(60_000L, state.playbackDurationMs)
         assertEquals(30_000L, state.playbackElapsedMs)
+    }
+
+    @Test
+    fun transientStreamIdentityDoesNotDependOnTheStoredLibrary() {
+        val stream = Track(
+            id = "remote-stream:song-1:session",
+            title = "Stream",
+            relativePath = "",
+        )
+        val state = ResonanceUiState(
+            currentTrackId = stream.id,
+            transientCurrentTrack = stream,
+            transientArtworkURL = "/api/v1/songs/song-1/artwork",
+        )
+
+        assertTrue(state.isTransientPlayback)
+        assertEquals(stream, state.currentTrack)
+        assertEquals("/api/v1/songs/song-1/artwork", state.transientArtworkURL)
+        assertFalse(state.copy(currentTrackId = null).isTransientPlayback)
     }
 }

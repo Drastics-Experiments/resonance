@@ -19,6 +19,7 @@ struct MacNowPlayingSnapshot: Equatable {
     let queueIndex: Int?
     let queueCount: Int
     let isFavorite: Bool
+    let canFavorite: Bool
     let shuffleEnabled: Bool
     let repeatEnabled: Bool
 
@@ -29,9 +30,12 @@ struct MacNowPlayingSnapshot: Equatable {
         isPlaying: Bool,
         queue: [Track],
         isFavorite: Bool,
+        canFavorite: Bool = true,
         shuffleEnabled: Bool,
         repeatEnabled: Bool,
-        profileID: String
+        profileID: String,
+        queueIndexOverride: Int? = nil,
+        queueCountOverride: Int? = nil
     ) {
         let safeDuration = track.duration.isFinite ? max(0, track.duration) : 0
         let safePosition = position.isFinite ? max(0, position) : 0
@@ -39,7 +43,9 @@ struct MacNowPlayingSnapshot: Equatable {
         let resolvedQueue = queue.contains(where: { $0.id == track.id }) ? queue : [track]
 
         trackID = track.id
-        contentIdentifier = track.remoteID ?? track.id.uuidString.lowercased()
+        contentIdentifier = track.remoteIdentity.map {
+            "\($0.origin)#profile=\($0.profileID)#song=\($0.songID)"
+        } ?? track.id.uuidString.lowercased()
         self.profileID = track.syncProfileID ?? profileID
         title = Self.nonempty(track.title, fallback: "Unknown song")
         artist = Self.nonempty(track.artist, fallback: "Unknown artist")
@@ -52,9 +58,10 @@ struct MacNowPlayingSnapshot: Equatable {
         artworkData = track.artworkData
         artworkStyle = track.artwork
         assetURL = track.fileURL
-        queueIndex = resolvedQueue.firstIndex(where: { $0.id == track.id })
-        queueCount = resolvedQueue.count
+        queueIndex = queueIndexOverride ?? resolvedQueue.firstIndex(where: { $0.id == track.id })
+        queueCount = queueCountOverride ?? resolvedQueue.count
         self.isFavorite = isFavorite
+        self.canFavorite = canFavorite
         self.shuffleEnabled = shuffleEnabled
         self.repeatEnabled = repeatEnabled
     }
@@ -208,7 +215,7 @@ final class MacSystemPlaybackController: NSObject, MacSystemPlaybackControlling 
         commandCenter.changePlaybackRateCommand.isEnabled = true
         commandCenter.changeShuffleModeCommand.isEnabled = snapshot.queueCount > 1
         commandCenter.changeRepeatModeCommand.isEnabled = true
-        commandCenter.likeCommand.isEnabled = true
+        commandCenter.likeCommand.isEnabled = snapshot.canFavorite
         commandCenter.likeCommand.isActive = snapshot.isFavorite
         commandCenter.changeShuffleModeCommand.currentShuffleType = snapshot.shuffleEnabled ? .items : .off
         commandCenter.changeRepeatModeCommand.currentRepeatType = snapshot.repeatEnabled ? .one : .off

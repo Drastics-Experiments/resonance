@@ -1,6 +1,12 @@
 import {
+  activeServerClientConfig,
   applyRemotePlaylistDocument,
+  buildLocalImportSourceIdentity,
+  canonicalYouTubeSourcePageURL,
+  catalogRequestCanApply,
+  clientConfigRenewalDelay,
   createEmptyState,
+  exactYouTubeSourcePageURL,
   filterPlaylists,
   filterTracks,
   formatServerDownloadFailureNotice,
@@ -8,23 +14,42 @@ import {
   formatHistoryWindowLabel,
   formatTime,
   isInstalledVideoTrack,
+  localImportCandidateCanAutoSelect,
+  localImportOperationFingerprint,
+  localImportOperationIsCurrent,
+  localImportNeedsServerContext,
   mergeListeningHistoryDocument,
   mergePlaylistDocument,
   mergeSyncedTracks,
+  mergeTrackSourceIdentity,
+  mergeUploadedSongsIntoCatalog,
   nextIndex,
   niceChartMaximum,
+  normalizeServerUploadManifest,
   normalizedVolume,
   playbackGainForVolume,
   normalizeState,
   playbackRangeForTrack,
+  persistentPlaybackIDs,
+  physicalStorageClassForTrack,
   planMissingDownloadedUploads,
+  remoteAssociationConflictFilePaths,
+  remoteAssociationConflictMessage,
   reconcileUploadedTrack,
+  resolveServerTransferModes,
   removeClipRangeForTrack,
   resolveSyncProfile,
   restoreProfileState,
-  serverSongMetadataMatches,
+  SAFE_CLIENT_CONFIG,
+  serverUploadBlockedByActivity,
+  serverUploadConfigurationError,
+  serverTrackRemoteIDBelongsToContext,
+  serverSongRequiresDownload,
+  serverUploadManifestRetryIDs,
+  shuffledTrackIDs,
   storeActiveProfileState,
   setClipRangeForTrack,
+  setServerTransferPreference,
   squareArtworkCropRect,
   summarizeListeningHistory,
   summarizeListeningStats,
@@ -49,6 +74,7 @@ let libraryFilter = "all";
 let serverToken = "";
 let serverAdminToken = "";
 let serverCatalog = [];
+let serverCatalogGeneration = 0;
 const serverArtworkCache = new Map();
 const serverArtworkPending = new Map();
 const squareArtworkCache = new Map();
@@ -59,6 +85,7 @@ let repeat = false;
 let history = [];
 let fullPlayerQueueTab = "up-next";
 let activePlaybackQueueIDs = [];
+let activePlaybackSourceQueueIDs = [];
 let activePlaybackPlaylistID = null;
 let pendingRestorePosition = null;
 let playbackProgressTimer = null;
@@ -80,11 +107,21 @@ let appNoticeDismissTimer = null;
 const APP_NOTICE_LIFETIME_MS = 5000;
 let nowPlayingCloseTimer = null;
 let fullPlayerTitleMarqueeFrame = null;
+let audioSourceTrackID = null;
+let audioMetadataTrackID = null;
 let installedVideoSession = null;
 let installedVideoTransitionTimer = null;
+let installedVideoGeometryAnimation = null;
+let installedVideoChromeTimer = null;
+let installedVideoArtworkTimer = null;
+let installedVideoControlsTimer = null;
 const FULL_PLAYER_TRANSITION_MS = 380;
-const INSTALLED_VIDEO_TRANSITION_MS = 520;
-const INSTALLED_VIDEO_REVEAL_MS = 220;
+const INSTALLED_VIDEO_LEAD_IN_MS = 35;
+const INSTALLED_VIDEO_TRANSITION_MS = 400;
+const INSTALLED_VIDEO_REVEAL_MS = 140;
+const INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS = 190;
+const INSTALLED_VIDEO_CHROME_RESTORE_LEAD_MS = 120;
+const INSTALLED_VIDEO_CONTROLS_TIMEOUT_MS = 2200;
 let navigationHistory = [{ section: "library", playlistID: null }];
 let navigationIndex = 0;
 let pendingPlaylistTrackID = null;
@@ -109,12 +146,19 @@ let serverSort = "title";
 let serverSelecting = false;
 let serverConnectionText = "Not connected";
 let serverConnected = false;
+let clientConfig = SAFE_CLIENT_CONFIG;
+let clientConfigRequestGeneration = 0;
+let clientConfigRenewalTimer = null;
+let clientConfigLeaseStatus = "safe-defaults";
+let activeServerStream = null;
+let serverStreamRequestGeneration = 0;
 let serverConnectInFlight = false;
 let serverConnectPending = false;
 let serverAutoAttempted = false;
 let serverTransferActive = false;
 let serverTransferCancelRequested = false;
 let serverTransferOwner = null;
+let serverContextReservation = null;
 let draggingPlaylistTrackID = null;
 let draggingPlaylistTargetID = null;
 let draggingPlaylistInsertAfter = false;
@@ -132,7 +176,9 @@ let localImportPreviewLimitSeconds = 30;
 let localImportPreviewInterruptedPlayback = false;
 let localImportAutoResolveTimer = null;
 let localImportResolvedSourceKey = null;
+let localImportInteractionGeneration = 0;
 let localImportBatchContext = null;
+let localImportServerUploadMode = null;
 let availableWindowsUpdateVersion = null;
 let dismissedWindowsUpdateVersion = null;
 let windowsUpdateReady = false;
@@ -146,6 +192,16 @@ let clipEditorPreviewRequest = 0;
 let clipBoundaryTrackID = null;
 let profileGeneration = 0;
 const activeProfileID = () => state.syncProfileID || "default";
+
+const serverUploadModeOptions = Object.freeze({
+  local_file: "Local files",
+  server_source_link: "Source link (server import)",
+  reviewed_match: "Reviewed audio match",
+});
+const serverDownloadModeOptions = Object.freeze({
+  verified_file_cache: "Verified files on this device",
+  stream_only: "Stream only",
+});
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -553,7 +609,20 @@ function initializeCustomSelects() {
   window.addEventListener("scroll", () => customSelectControllers.forEach(positionCustomSelect), true);
 }
 
-const currentTrack = () => state.tracks.find((track) => track.id === currentID && trackBelongsToActiveProfile(state, track)) || null;
+function playbackTrackByID(trackID) {
+  const persistent = state.tracks.find((track) => track.id === trackID && trackBelongsToActiveProfile(state, track));
+  if (persistent) return persistent;
+  return activeServerStream?.track.id === trackID ? activeServerStream.track : null;
+}
+
+function persistentPlaybackQueueIDs(trackIDs) {
+  return persistentPlaybackIDs(
+    trackIDs,
+    state.tracks.filter((track) => trackBelongsToActiveProfile(state, track)),
+  );
+}
+
+const currentTrack = () => playbackTrackByID(currentID);
 const playlistTracks = () => (selectedPlaylistID ? tracksForPlaylist(state, selectedPlaylistID) : tracksForActiveProfile(state))
   .filter((track) => trackBelongsToActiveProfile(state, track));
 const activeRemoteTrack = (remoteID) => state.tracks.find((track) => track.remoteID === remoteID && trackBelongsToActiveProfile(state, track));
@@ -563,14 +632,42 @@ const activeProfile = () => state.syncProfiles.find((profile) => profile.id === 
 
 function activePlaybackTracks() {
   return activePlaybackQueueIDs
-    .map((id) => state.tracks.find((track) => track.id === id && trackBelongsToActiveProfile(state, track)))
+    .map(playbackTrackByID)
     .filter(Boolean);
 }
 
-function setPlaybackContext(tracks, playlistID) {
-  activePlaybackQueueIDs = [...new Set(tracks.map((track) => track.id))];
+function activePlaybackSourceTracks() {
+  return activePlaybackSourceQueueIDs
+    .map(playbackTrackByID)
+    .filter((track) => track?.available !== false)
+    .filter(Boolean);
+}
+
+function applyShuffleToPlaybackContext(anchorTrackID = currentID) {
+  const sourceTracks = activePlaybackSourceTracks();
+  activePlaybackQueueIDs = shuffle
+    ? shuffledTrackIDs(sourceTracks, anchorTrackID)
+    : sourceTracks.map((track) => track.id);
+  state.playbackQueueIDs = persistentPlaybackQueueIDs(activePlaybackQueueIDs);
+  state.playbackSourceQueueIDs = persistentPlaybackQueueIDs(activePlaybackSourceQueueIDs);
+}
+
+function setShuffleEnabled(value) {
+  if (currentTrack()?.transientStream) return false;
+  shuffle = Boolean(value);
+  state.shuffle = shuffle;
+  applyShuffleToPlaybackContext();
+  persistInBackground();
+  updateChrome();
+  return true;
+}
+
+function setPlaybackContext(tracks, playlistID, anchorTrackID = currentID) {
+  activePlaybackSourceQueueIDs = [...new Set(tracks
+    .filter((track) => track?.available !== false)
+    .map((track) => track.id))];
   activePlaybackPlaylistID = typeof playlistID === "string" ? playlistID : null;
-  state.playbackQueueIDs = [...activePlaybackQueueIDs];
+  applyShuffleToPlaybackContext(anchorTrackID);
   state.playbackPlaylistID = activePlaybackPlaylistID;
 }
 
@@ -1419,15 +1516,40 @@ function openListeningHistory() {
   $("#listeningHistoryDialog").showModal();
 }
 
+function activePlaybackMedia() {
+  return installedVideoOwnsPlayback()
+    ? installedVideoPlayer
+    : audio;
+}
+
+function installedVideoOwnsPlayback() {
+  const videoDialog = $("#installedVideoDialog");
+  return Boolean(
+    installedVideoSession?.videoOwnsPlayback
+    && installedVideoSession.trackID === currentID
+    && videoDialog?.open,
+  );
+}
+
+function playbackIsActive() {
+  const media = activePlaybackMedia();
+  return Boolean(currentTrack() && !media.paused && !media.ended);
+}
+
 function beginListeningSession() {
   const track = currentTrack();
   if (!track) return;
+  const historyTrackID = track.transientStream ? track.historyTrackID : track.id;
+  if (typeof historyTrackID !== "string" || historyTrackID.length > 128) return;
   const activeEntry = state.listeningHistory.find((entry) => entry.id === activeListeningEntryID);
-  if (activeEntry?.trackID === track.id) return;
+  if (activeEntry?.trackID === historyTrackID) return;
   const entry = {
     id: crypto.randomUUID(),
-    trackID: track.id,
-    profileID: activeProfileID(),
+    trackID: historyTrackID,
+    profileID: track.transientStream ? track.syncProfileID : activeProfileID(),
+    serverOrigin: track.transientStream
+      ? normalizedServerOrigin(track.sourceServer)
+      : normalizedServerOrigin(state.serverURL),
     startedAt: new Date().toISOString(),
     listenedSeconds: 0,
     remoteID: track.remoteID || null,
@@ -1439,20 +1561,21 @@ function beginListeningSession() {
   };
   state.listeningHistory = [...state.listeningHistory, entry].slice(-2000);
   activeListeningEntryID = entry.id;
-  lastListeningPosition = Number(audio.currentTime) || 0;
+  lastListeningPosition = Number(activePlaybackMedia().currentTime) || 0;
   lastPersistedListeningSeconds = 0;
   persistInBackground();
 }
 
 function updateListeningSession() {
   const entry = state.listeningHistory.find((item) => item.id === activeListeningEntryID);
-  const position = Number(audio.currentTime) || 0;
+  const media = activePlaybackMedia();
+  const position = Number(media.currentTime) || 0;
   if (!entry) {
     lastListeningPosition = position;
     return;
   }
   const delta = position - lastListeningPosition;
-  if (!audio.paused && delta > 0 && delta < 5) entry.listenedSeconds += delta;
+  if (!media.paused && delta > 0 && delta < 5) entry.listenedSeconds += delta;
   lastListeningPosition = position;
   if (entry.listenedSeconds - lastPersistedListeningSeconds >= 15) {
     lastPersistedListeningSeconds = entry.listenedSeconds;
@@ -1462,8 +1585,18 @@ function updateListeningSession() {
   }
 }
 
+function checkpointListeningSessionForContextChange() {
+  const wasPlaying = playbackIsActive();
+  if (activeListeningEntryID) updateListeningSession();
+  activeListeningEntryID = null;
+  lastListeningPosition = 0;
+  lastPersistedListeningSeconds = 0;
+  return wasPlaying;
+}
+
 function pendingListeningHistoryBatches() {
-  const baseKey = normalizedServerKey(state.serverURL);
+  const serverOrigin = normalizedServerOrigin(state.serverURL);
+  if (!serverOrigin) return [];
   const tracksByID = new Map(state.tracks.map((track) => [track.id, track]));
   const entriesByProfile = new Map();
   const optionalText = (value, maximumLength) => {
@@ -1472,11 +1605,12 @@ function pendingListeningHistoryBatches() {
   };
   for (const entry of state.listeningHistory) {
     if (entry.originatedOnThisDevice === false) continue;
+    if (normalizedServerOrigin(entry.serverOrigin) !== serverOrigin) continue;
     const listenedSeconds = Math.max(0, Number(entry.listenedSeconds) || 0);
     if (listenedSeconds <= 0 || listenedSeconds > 31 * 24 * 60 * 60) continue;
     if (!entry.id || entry.id.length > 128 || !entry.trackID || entry.trackID.length > 128) continue;
     const profileID = entry.profileID || "default";
-    const syncKey = `${baseKey}#profile=${profileID}#event=${entry.id}`;
+    const syncKey = `${serverOrigin}#profile=${profileID}#event=${entry.id}`;
     if ((listeningHistorySyncedSeconds.get(syncKey) || 0) >= listenedSeconds) continue;
     const track = tracksByID.get(entry.trackID);
     const duration = Number(track?.duration);
@@ -1527,18 +1661,23 @@ async function syncListeningHistoryNow({ force = false } = {}) {
   }
   listeningHistorySyncInFlight = (async () => {
     let hadFailure = false;
-    const requestedProfileID = activeProfileID();
+    let context;
     let batches;
     try {
+      context = currentProfileContext();
       batches = pendingListeningHistoryBatches();
     } catch {
       return false;
     }
     for (const batch of batches) {
+      if (!profileContextIsCurrent(context)) {
+        hadFailure = true;
+        break;
+      }
       try {
         const result = await api.postListeningHistory({
-          baseURL: state.serverURL,
-          token: serverToken,
+          baseURL: context.serverURL,
+          token: context.token,
           profileID: batch.profileID,
           entries: batch.entries.map((item) => item.entry),
         });
@@ -1552,14 +1691,15 @@ async function syncListeningHistoryNow({ force = false } = {}) {
       }
     }
     try {
+      if (!profileContextIsCurrent(context)) return false;
       const remoteDocument = await api.fetchListeningHistory({
-        baseURL: state.serverURL,
-        token: serverToken,
-        profileID: requestedProfileID,
+        baseURL: context.serverURL,
+        token: context.token,
+        profileID: context.profileID,
         limit: 2000,
       });
-      if (remoteDocument?.supported !== false && requestedProfileID === activeProfileID()) {
-        if (mergeListeningHistoryDocument(state, remoteDocument, requestedProfileID)) {
+      if (remoteDocument?.supported !== false && profileContextIsCurrent(context)) {
+        if (mergeListeningHistoryDocument(state, remoteDocument, context.profileID, context.serverURL)) {
           await persist({ refreshSidebar: false });
           if ($("#listeningHistoryDialog").open) renderListeningHistory();
           if ($("#nowPlayingDialog").open && fullPlayerQueueTab === "history") renderFullPlayerQueue();
@@ -1627,9 +1767,30 @@ function updateTopSearch() {
   }
 }
 
-function closeSearchSort() {
+function closeSearchSort({ restoreFocus = false } = {}) {
   $("#searchSort").classList.remove("open");
   $("#searchSortButton").setAttribute("aria-expanded", "false");
+  if (restoreFocus) $("#searchSortButton").focus();
+}
+
+function focusSearchSortOption(direction = 0) {
+  const options = [...$("#searchSortMenu").querySelectorAll('[role="option"]:not(:disabled)')];
+  if (!options.length) return;
+  const focused = options.indexOf(document.activeElement);
+  const selected = options.findIndex((option) => option.getAttribute("aria-selected") === "true");
+  const base = focused >= 0 ? focused : Math.max(0, selected);
+  const index = direction === "first"
+    ? 0
+    : direction === "last"
+      ? options.length - 1
+      : (base + direction + options.length) % options.length;
+  options[index].focus();
+}
+
+function openSearchSort(direction = 0) {
+  $("#searchSort").classList.add("open");
+  $("#searchSortButton").setAttribute("aria-expanded", "true");
+  requestAnimationFrame(() => focusSearchSortOption(direction));
 }
 
 function updateSearchSort(options, value, label) {
@@ -1692,10 +1853,21 @@ function persistInBackground(options) {
 function normalizedServerKey(value) {
   const url = new URL(String(value || "").trim());
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Enter a complete http:// or https:// server URL.");
+  const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
+  const hostname = url.hostname.toLocaleLowerCase().replace(/\.$/, "");
+  if (url.protocol !== "https:" && !loopbackHosts.has(hostname)) {
+    throw new Error("Use HTTPS before sending server credentials. HTTP is only available for explicit loopback development.");
+  }
+  if (url.username || url.password) throw new Error("Do not include credentials in the server URL.");
   url.hash = "";
   url.search = "";
   url.pathname = url.pathname.replace(/\/+$/, "") + "/";
   return url.href;
+}
+
+function normalizedServerOrigin(value) {
+  try { return new URL(normalizedServerKey(value)).origin; }
+  catch { return null; }
 }
 
 function currentProfileContext() {
@@ -1708,6 +1880,121 @@ function currentProfileContext() {
   };
 }
 
+function currentServerTransferModes() {
+  return resolveServerTransferModes({
+    state,
+    serverURL: state.serverURL,
+    profileID: activeProfileID(),
+    config: clientConfig,
+    localImportAvailable,
+  });
+}
+
+function renderServerTransferModeOptions() {
+  const uploadControl = $("#serverUploadMode");
+  const downloadControl = $("#serverDownloadMode");
+  if (!uploadControl || !downloadControl) return;
+  const modes = currentServerTransferModes();
+  setCustomSelectOptions(uploadControl, modes.available.upload.map((value) => ({
+    value,
+    label: serverUploadModeOptions[value] || value,
+  })), modes.uploadMode || "");
+  setCustomSelectOptions(downloadControl, modes.available.download.map((value) => ({
+    value,
+    label: serverDownloadModeOptions[value] || value,
+  })), modes.downloadMode);
+  uploadControl.disabled = modes.available.upload.length === 0;
+  downloadControl.disabled = modes.available.download.length < 2;
+  const help = $("#serverTransferModeHelp");
+  if (!help) return;
+  if (activeServerClientConfig(clientConfig) !== SAFE_CLIENT_CONFIG) {
+    help.textContent = modes.downloadMode === "stream_only"
+      ? "Stream-only plays authenticated media directly from this server and never saves the song bytes to this device."
+      : "Only modes enabled by this server's signed configuration are shown. Flags never replace access or admin authorization.";
+  } else if (clientConfigLeaseStatus === "unavailable") {
+    help.textContent = "The signed configuration could not be renewed. Safe file modes are active while Resonance retries.";
+  } else if (clientConfigLeaseStatus === "missing-credential") {
+    help.textContent = "Safe file modes are active until a server credential can verify this server's signed configuration.";
+  } else {
+    help.textContent = "Safe file transfer modes are in use because no valid signed server configuration is available.";
+  }
+}
+
+function saveServerTransferModeControls({ serverURL = state.serverURL, profileID = activeProfileID() } = {}) {
+  const uploadMode = $("#serverUploadMode")?.value;
+  const downloadMode = $("#serverDownloadMode")?.value;
+  return setServerTransferPreference(state, {
+    serverURL,
+    profileID,
+    uploadMode,
+    downloadMode,
+    config: clientConfig,
+  });
+}
+
+async function refreshClientConfig({ force = false } = {}) {
+  const requestGeneration = ++clientConfigRequestGeneration;
+  const previousConfig = clientConfig;
+  let context = null;
+  try { context = { ...currentProfileContext(), configToken: serverToken || serverAdminToken }; }
+  catch {
+    clientConfig = SAFE_CLIENT_CONFIG;
+    clientConfigLeaseStatus = "invalid-context";
+    scheduleClientConfigRenewal();
+    return clientConfig;
+  }
+  if (!context.configToken) {
+    clientConfig = SAFE_CLIENT_CONFIG;
+    clientConfigLeaseStatus = "missing-credential";
+    renderServerTransferModeOptions();
+    scheduleClientConfigRenewal();
+    return clientConfig;
+  }
+  try {
+    const response = await api.fetchClientConfig({
+      baseURL: context.serverURL,
+      token: context.configToken,
+      profileID: context.profileID,
+      force,
+    });
+    if (requestGeneration !== clientConfigRequestGeneration
+      || !profileContextIsCurrent(context)
+      || context.configToken !== (serverToken || serverAdminToken)) return clientConfig;
+    clientConfig = response?.config && typeof response.config === "object"
+      ? { ...response.config, source: response.source === "remote" ? "remote" : (response.source || "cache") }
+      : SAFE_CLIENT_CONFIG;
+    clientConfigLeaseStatus = activeServerClientConfig(clientConfig) === SAFE_CLIENT_CONFIG
+      ? (force && previousConfig?.verified === true ? "unavailable" : "safe-defaults")
+      : (response.source || "cache");
+  } catch {
+    if (requestGeneration !== clientConfigRequestGeneration
+      || !profileContextIsCurrent(context)
+      || context.configToken !== (serverToken || serverAdminToken)) return clientConfig;
+    clientConfig = SAFE_CLIENT_CONFIG;
+    clientConfigLeaseStatus = "unavailable";
+  }
+  renderServerTransferModeOptions();
+  scheduleClientConfigRenewal();
+  if (activeServerStream && currentServerTransferModes().downloadMode !== "stream_only") {
+    releaseActiveServerStream({ stopPlayback: true });
+    showNotice("Streaming stopped because the signed server policy no longer authorizes stream-only playback.");
+  }
+  return clientConfig;
+}
+
+function scheduleClientConfigRenewal() {
+  if (clientConfigRenewalTimer) clearTimeout(clientConfigRenewalTimer);
+  clientConfigRenewalTimer = null;
+  if (!(serverToken || serverAdminToken)) return;
+  const delay = clientConfigRenewalDelay(clientConfig);
+  clientConfigRenewalTimer = setTimeout(async () => {
+    clientConfigRenewalTimer = null;
+    await refreshClientConfig({ force: true });
+    persistInBackground({ refreshSidebar: false });
+    if (section === "server") renderServer();
+  }, delay);
+}
+
 function profileContextIsCurrent(context) {
   try {
     return context.generation === profileGeneration
@@ -1716,6 +2003,158 @@ function profileContextIsCurrent(context) {
       && context.token === serverToken;
   } catch {
     return false;
+  }
+}
+
+function playableActiveRemoteTrack(remoteID) {
+  const track = activeRemoteTrack(remoteID);
+  return track && track.available !== false && !track.missing && typeof track.fileUrl === "string" && track.fileUrl
+    ? track
+    : null;
+}
+
+function releaseServerStreamCapability(stream) {
+  if (!stream?.url) return Promise.resolve(false);
+  return api.releaseServerStream(stream.url).catch(() => false);
+}
+
+function releaseActiveServerStream({ stopPlayback = false, invalidatePending = true } = {}) {
+  if (invalidatePending) serverStreamRequestGeneration += 1;
+  const stream = activeServerStream;
+  if (!stream) return false;
+  const ownsPlayback = currentID === stream.track.id;
+  if (stopPlayback && ownsPlayback) {
+    updateListeningSession();
+    scheduleListeningHistorySync();
+    activeListeningEntryID = null;
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+    audioSourceTrackID = null;
+    audioMetadataTrackID = null;
+    currentID = null;
+    state.currentTrackID = null;
+    state.position = 0;
+    activePlaybackQueueIDs = activePlaybackQueueIDs.filter((id) => id !== stream.track.id);
+    activePlaybackSourceQueueIDs = activePlaybackSourceQueueIDs.filter((id) => id !== stream.track.id);
+    state.playbackQueueIDs = persistentPlaybackQueueIDs(activePlaybackQueueIDs);
+    state.playbackSourceQueueIDs = persistentPlaybackQueueIDs(activePlaybackSourceQueueIDs);
+  }
+  activeServerStream = null;
+  void releaseServerStreamCapability(stream);
+  if (stopPlayback && ownsPlayback) {
+    persistInBackground({ refreshSidebar: false });
+    updateChrome();
+    render();
+  }
+  return true;
+}
+
+async function playRemoteStream(song) {
+  const cachedTrack = playableActiveRemoteTrack(song?.id);
+  if (cachedTrack) {
+    play(cachedTrack, tracksForActiveProfile(state), { playlistID: null });
+    return;
+  }
+  if (!song?.id || !serverToken.trim()) {
+    showNotice("Connect with a server access token before streaming this song.");
+    return;
+  }
+  if (serverSongRequiresDownload(song)) {
+    showNotice("Windows stream-only playback supports audio songs. Switch to Verified file cache and download this video to watch it.");
+    return;
+  }
+  if (currentServerTransferModes().downloadMode !== "stream_only") {
+    showNotice("Stream-only playback is not enabled by the current signed server policy.");
+    return;
+  }
+  const context = currentProfileContext();
+  const requestGeneration = ++serverStreamRequestGeneration;
+  try {
+    const result = await api.createServerStream({
+      baseURL: context.serverURL,
+      token: context.token,
+      profileID: context.profileID,
+      songID: song.id,
+    });
+    const streamURL = typeof result?.url === "string" ? result.url : "";
+    const historyTrackID = typeof result?.historyTrackID === "string" ? result.historyTrackID : "";
+    const stale = requestGeneration !== serverStreamRequestGeneration
+      || !profileContextIsCurrent(context)
+      || currentServerTransferModes().downloadMode !== "stream_only";
+    if (stale
+        || !/^resonance-stream:\/\/media\/[a-f0-9]{64}$/.test(streamURL)
+        || !/^remote-stream:[a-f0-9]{64}$/.test(historyTrackID)) {
+      if (streamURL) await api.releaseServerStream(streamURL).catch(() => false);
+      if (!stale) throw new Error("The server returned an invalid stream capability.");
+      return;
+    }
+    const previousStream = activeServerStream;
+    const duration = Number(song.duration_seconds ?? song.duration) || 0;
+    const track = Object.freeze({
+      id: `stream:${crypto.randomUUID()}`,
+      remoteID: song.id,
+      title: song.title || song.name || "Untitled",
+      artist: song.artist || "Unknown Artist",
+      album: song.album || "Server Library",
+      duration: duration > 0 ? duration : 0,
+      artwork: typeof song.artwork === "string" && song.artwork.startsWith("data:") ? song.artwork : null,
+      filePath: null,
+      fileUrl: streamURL,
+      available: true,
+      transientStream: true,
+      historyTrackID,
+      sourceServer: normalizedServerOrigin(context.serverURL),
+      syncProfileID: context.profileID,
+      contentSha256: typeof song.content_sha256 === "string" ? song.content_sha256 : null,
+      size: Number(song.size) || 0,
+    });
+    activeServerStream = { url: streamURL, track, context };
+    if (previousStream) void releaseServerStreamCapability(previousStream);
+    play(track, [track], { playlistID: null });
+  } catch (error) {
+    if (requestGeneration !== serverStreamRequestGeneration || !profileContextIsCurrent(context)) return;
+    showNotice(friendlyIPCError(error, "This song could not be streamed from the server."));
+  }
+}
+
+function currentServerUploadContext() {
+  return Object.freeze({
+    ...currentProfileContext(),
+    adminToken: serverAdminToken,
+    profileName: activeProfile().name || "the active server profile",
+  });
+}
+
+function serverUploadContextIsCurrent(context) {
+  return profileContextIsCurrent(context) && context?.adminToken === serverAdminToken;
+}
+
+function localImportServerContextError() {
+  return {
+    stage: "syncing",
+    code: "SERVER_CONTEXT_CHANGED",
+    message: "The server or profile changed during the import. The local file was kept; start its upload again.",
+  };
+}
+
+function requireLocalImportServerContext(context) {
+  if (!serverUploadContextIsCurrent(context)) throw localImportServerContextError();
+}
+
+function reserveServerContext(context) {
+  requireLocalImportServerContext(context);
+  if (serverContextReservation) throw new Error("Another import is already using the server connection.");
+  serverContextReservation = context;
+}
+
+function releaseServerContext(context) {
+  if (serverContextReservation === context) serverContextReservation = null;
+}
+
+function ensureServerContextCanChange() {
+  if (serverTransferActive || serverContextReservation) {
+    throw new Error("Wait for the current transfer to finish before changing the server or profile.");
   }
 }
 
@@ -1791,6 +2230,11 @@ function hydrateServerCatalogArtwork(songs) {
     while (queue.length) await hydrateServerArtwork(queue.shift());
   });
   void Promise.allSettled(workers);
+}
+
+function replaceServerCatalog(songs) {
+  serverCatalog = Array.isArray(songs) ? songs : [];
+  serverCatalogGeneration += 1;
 }
 
 function markPlaylistDirty(playlist) {
@@ -1997,17 +2441,20 @@ function recentTrackItem(track) {
 function trackRow(track, index) {
   const liked = state.favorites.includes(track.id);
   const mediaKind = isInstalledVideoTrack(track) ? "Video" : "Audio";
+  const unavailable = track.available === false || track.missing;
   const editablePlaylist = state.playlists.find((playlist) => playlist.id === selectedPlaylistID && !playlist.isSystem);
-  const actionLabel = `Play ${track.title || "Untitled"} by ${track.artist || "Unknown artist"}`;
+  const actionLabel = unavailable
+    ? `${track.title || "Untitled"} by ${track.artist || "Unknown artist"}. File unavailable on this device`
+    : `Play ${track.title || "Untitled"} by ${track.artist || "Unknown artist"}`;
   const reorderLabel = editablePlaylist ? ". Press Alt+Up or Alt+Down to reorder" : "";
   const draggableAttributes = editablePlaylist
     ? ` draggable="true" data-playlist-draggable="true" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Shift+F10"`
     : ` aria-keyshortcuts="Enter Space Shift+F10"`;
-  return `<div class="track-row ${track.id === currentID ? "playing" : ""}${editablePlaylist ? " playlist-draggable" : ""}" data-track="${track.id}" tabindex="0" aria-label="${escapeHTML(actionLabel + reorderLabel)}"${draggableAttributes}>
+  return `<div class="track-row ${track.id === currentID ? "playing" : ""}${editablePlaylist ? " playlist-draggable" : ""}${unavailable ? " unavailable" : ""}" data-track="${escapeHTML(track.id)}" tabindex="0" aria-label="${escapeHTML(actionLabel + reorderLabel)}" aria-disabled="${unavailable}"${draggableAttributes}>
     <span class="track-number" title="${track.id === currentID && !audio.paused ? "Now playing" : `Track ${index + 1}`}">${track.id === currentID && !audio.paused ? nowPlayingIcon : index + 1}</span>${artwork(track)}
-    <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / ${mediaKind}</small></div>
-    <span class="album">${escapeHTML(displayAlbum(track))}</span><span class="track-time">${formatTime(track.duration)}</span>
-    <button type="button" class="heart" data-favorite="${track.id}" aria-label="${liked ? "Remove from" : "Add to"} Liked Songs" aria-pressed="${liked}">${liked ? "♥" : "♡"}</button>
+    <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / ${unavailable ? "File unavailable" : mediaKind}</small></div>
+    <span class="album">${escapeHTML(displayAlbum(track))}</span><span class="track-time">${unavailable ? "Missing" : formatTime(track.duration)}</span>
+    <button type="button" class="heart" data-favorite="${escapeHTML(track.id)}" aria-label="${liked ? "Remove from" : "Add to"} Liked Songs" aria-pressed="${liked}">${liked ? "♥" : "♡"}</button>
   </div>`;
 }
 
@@ -2024,7 +2471,7 @@ function renderLibrary() {
   if (previousRecentTrackList) recentlyAddedScrollLeft = previousRecentTrackList.scrollLeft;
   updateTopSearch();
   const tracks = filterTracks(playlistTracks(), libraryQuery, libraryFilter);
-  const recentTracks = !selectedPlaylistID ? filterTracks(tracks, "", "recent") : [];
+  const recentTracks = !selectedPlaylistID ? filterTracks(tracks, "", "recent").filter((track) => track.available !== false) : [];
   const selectedPlaylist = selectedPlaylistID ? state.playlists.find((item) => item.id === selectedPlaylistID) : null;
   const title = selectedPlaylist?.name || (selectedPlaylistID ? "Playlist" : "Library");
   const editablePlaylist = Boolean(selectedPlaylist && !selectedPlaylist.isSystem);
@@ -2039,7 +2486,7 @@ function renderLibrary() {
     ? `<details class="playlist-more" id="playlistMore"><summary title="More options" aria-label="More playlist options"><span aria-hidden="true">•••</span></summary><div class="playlist-menu" role="menu">${playlistMenuItems}</div></details>`
     : "";
   const playlistCapsule = selectedPlaylist
-    ? `<div class="playlist-action-cluster"><button class="${shuffle ? "active" : ""}" id="heroShuffle" title="Shuffle" aria-label="Shuffle" aria-pressed="${shuffle}" ${tracks.length ? "" : "disabled"}>${shuffleIcon}</button><button id="heroAdd" title="Add songs" aria-label="Add songs">${plusIcon}</button>${playlistMoreMenu}</div>`
+    ? `<div class="playlist-action-cluster"><button class="${shuffle ? "active" : ""}" id="heroShuffle" title="${currentTrack()?.transientStream ? "Unavailable for one-song server playback" : "Shuffle"}" aria-label="${currentTrack()?.transientStream ? "Unavailable for one-song server playback" : "Shuffle"}" aria-pressed="${shuffle}" ${tracks.length && !currentTrack()?.transientStream ? "" : "disabled"}>${shuffleIcon}</button><button id="heroAdd" title="Add songs" aria-label="Add songs">${plusIcon}</button>${playlistMoreMenu}</div>`
     : "";
   const libraryFilters = `<div class="filters${selectedPlaylistID ? "" : " library-top-filters"}" role="group" aria-label="Library filter"><button class="${libraryFilter === "all" ? "active" : ""}" data-library-filter="all" aria-pressed="${libraryFilter === "all"}">All songs</button><button class="${libraryFilter === "recent" ? "active" : ""}" data-library-filter="recent" aria-pressed="${libraryFilter === "recent"}">Recently added</button><button class="${libraryFilter === "audio" ? "active" : ""}" data-library-filter="audio" aria-pressed="${libraryFilter === "audio"}">Audio</button></div>`;
   const hasLibraryFilter = Boolean(libraryQuery.trim()) || libraryFilter !== "all";
@@ -2063,13 +2510,13 @@ function renderLibrary() {
   bindTrackRows(tracks);
   if ($("#playCollection")) $("#playCollection").onclick = () => {
     if (isCurrentCollectionPlayback(tracks)) toggle();
-    else if (tracks[0]) play(tracks[0], tracks, { playlistID: selectedPlaylistID });
+    else {
+      const firstPlayable = tracks.find((track) => track.available !== false);
+      if (firstPlayable) play(firstPlayable, tracks, { playlistID: selectedPlaylistID });
+    }
   };
   if ($("#heroShuffle")) $("#heroShuffle").onclick = () => {
-    shuffle = !shuffle;
-    state.shuffle = shuffle;
-    persistInBackground();
-    updateChrome();
+    setShuffleEnabled(!shuffle);
     render();
   };
   if ($("#heroAdd") && selectedPlaylist) $("#heroAdd").onclick = () => openAddSongsDialog(selectedPlaylist);
@@ -2111,7 +2558,7 @@ function renderLibrary() {
 function renderPlaylists() {
   updateTopSearch();
   const playlists = filterPlaylists(state.playlists, tracksForActiveProfile(state), playlistQuery);
-  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${playlist.id}" aria-keyshortcuts="Shift+F10"><div class="playlist-art">${playlist.isSystem ? "♥" : "♪"}</div><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
+  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10"><div class="playlist-art">${playlist.isSystem ? "♥" : "♪"}</div><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
   $("#pageNewPlaylist").onclick = () => newPlaylist();
   $("#pageSyncPlaylists").onclick = () => syncPlaylistsNow();
   document.querySelectorAll("[data-open-playlist]").forEach((button) => {
@@ -2141,8 +2588,9 @@ function formatBytes(value) {
 
 function storageTracks() {
   let tracks = tracksForActiveProfile(state).filter((track) => {
-    if (storageScope === "downloads" && !track.remoteID) return false;
-    if (storageScope === "files" && track.remoteID) return false;
+    const storageClass = physicalStorageClassForTrack(track);
+    if (storageScope === "downloads" && storageClass !== "downloads") return false;
+    if (storageScope === "files" && storageClass === "downloads") return false;
     const haystack = `${track.title || ""} ${track.artist || ""} ${track.album || ""} ${track.filePath || ""}`.toLocaleLowerCase();
     return haystack.includes(storageQuery.toLocaleLowerCase());
   });
@@ -2161,7 +2609,7 @@ async function deleteStoredTracks(trackIDs) {
   const failed = [];
   for (const track of tracks) {
     try {
-      await api.deleteAudio(track.filePath);
+      if (track.available !== false && track.filePath) await api.deleteAudio(track.filePath);
       deleted.push(track);
     } catch (error) {
       failed.push({ track, error });
@@ -2182,7 +2630,9 @@ async function deleteStoredTracks(trackIDs) {
   state.playlists.filter((playlist) => playlist.isSystem)
     .forEach((playlist) => { playlist.trackIDs = playlist.trackIDs.filter((id) => !removed.has(id)); });
   activePlaybackQueueIDs = activePlaybackQueueIDs.filter((id) => !removed.has(id));
+  activePlaybackSourceQueueIDs = activePlaybackSourceQueueIDs.filter((id) => !removed.has(id));
   state.playbackQueueIDs = [...activePlaybackQueueIDs];
+  state.playbackSourceQueueIDs = [...activePlaybackSourceQueueIDs];
   if (removed.has(currentID)) {
     audio.pause();
     audio.removeAttribute("src");
@@ -2207,8 +2657,8 @@ function renderStorage() {
   updateTopSearch();
   const tracks = storageTracks();
   const visibleTracks = tracksForActiveProfile(state);
-  const localTracks = visibleTracks.filter((track) => !track.remoteID);
-  const remoteTracks = visibleTracks.filter((track) => track.remoteID);
+  const localTracks = visibleTracks.filter((track) => physicalStorageClassForTrack(track) === "files" && track.available !== false);
+  const remoteTracks = visibleTracks.filter((track) => physicalStorageClassForTrack(track) === "downloads" && track.available !== false);
   const localBytes = localTracks.reduce((sum, track) => sum + (track.size || 0), 0);
   const remoteBytes = remoteTracks.reduce((sum, track) => sum + (track.size || 0), 0);
   const total = Math.max(localBytes + remoteBytes, 1);
@@ -2217,11 +2667,14 @@ function renderStorage() {
   const storageEmptyTitle = storageHasQuery ? "No matching songs" : storageScope === "downloads" ? "No server downloads yet" : storageScope === "files" ? "No imported files yet" : "No songs stored yet";
   const storageEmptyHelp = storageHasQuery ? "Try another search." : storageScope === "downloads" ? "Download songs from Music Server to keep them on this device." : "Import audio files to add them to this device.";
   content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><div><span class="eyebrow">ON THIS DEVICE</span><h1>Song Storage</h1></div><div class="page-title-actions"><div class="storage-import-control" id="storageImportControl"><button class="primary storage-import-trigger" id="storageImportMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="storageImportMenu"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg></span><span>Import</span><svg class="storage-import-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="storage-import-menu" id="storageImportMenu" role="menu" aria-label="Choose an import type" hidden>${localImportAvailable ? '<button class="storage-import-option" type="button" role="menuitem" data-storage-import="link"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span><span><strong>Import from link</strong><small>Paste a link or search music</small></span></button>' : ""}<button class="storage-import-option" type="button" role="menuitem" data-storage-import="files"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4zM12 10v6m-3-3h6"/></svg></span><span><strong>Import files</strong><small>Choose audio from this device</small></span></button></div></div><button class="secondary" id="storageEdit" ${!storageEditing && !tracks.length ? "disabled" : ""}>${storageEditing ? "Done" : "Edit"}</button></div></div>
-    <div class="storage-summary" id="storageSummary"><div class="storage-ring" style="--local:${localDegrees}deg"><span>♪</span></div><div class="storage-stat"><small>Local audio</small><strong>${formatBytes(localBytes)}</strong><span>${localTracks.length} files</span></div><div class="storage-stat"><small>Server downloads</small><strong>${formatBytes(remoteBytes)}</strong><span>${remoteTracks.length} files</span></div><div class="storage-stat"><small>Available</small><strong id="storageAvailable">Calculating…</strong><span id="storageFreePercent">Disk space</span></div></div>
+    <div class="storage-summary" id="storageSummary"><div class="storage-ring" id="storageRing" style="--local:${localDegrees}deg"><span>♪</span></div><div class="storage-stat"><small>Local audio</small><strong id="storageLocalBytes">${formatBytes(localBytes)}</strong><span>${localTracks.length} available library ${localTracks.length === 1 ? "file" : "files"}</span></div><div class="storage-stat"><small>Server downloads</small><strong id="storageRemoteBytes">${formatBytes(remoteBytes)}</strong><span>${remoteTracks.length} available library ${remoteTracks.length === 1 ? "file" : "files"}</span></div><div class="storage-stat"><small>Available</small><strong id="storageAvailable">Calculating…</strong><span id="storageFreePercent">Disk space</span></div></div>
     <div class="segmented storage-tabs" role="group" aria-label="Storage scope"><button class="${storageScope === "songs" ? "active" : ""}" data-storage-scope="songs" aria-pressed="${storageScope === "songs"}">Songs</button><button class="${storageScope === "downloads" ? "active" : ""}" data-storage-scope="downloads" aria-pressed="${storageScope === "downloads"}">Downloads</button><button class="${storageScope === "files" ? "active" : ""}" data-storage-scope="files" aria-pressed="${storageScope === "files"}">Files</button></div>
     ${storageEditing ? `<div class="selection-bar"><span>${selectedStorageIDs.size} selected</span><button class="danger" id="deleteSelectedStorage" ${selectedStorageIDs.size ? "" : "disabled"}>Delete selected</button></div>` : ""}
     <div class="storage-section-heading"><strong>${storageScope === "downloads" ? "DOWNLOADED FROM SERVER" : storageScope === "files" ? "IMPORTED ON THIS PC" : "ALL SONGS"}</strong><span>${tracks.length} songs</span></div>
-    <div class="storage-list redesigned">${tracks.map((track) => `<div class="storage-row ${storageEditing ? "selecting" : ""}" data-storage-track="${track.id}" tabindex="0" aria-keyshortcuts="Shift+F10"><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${track.id}" aria-label="${selectedStorageIDs.has(track.id) ? "Deselect" : "Select"} ${escapeHTML(track.title || "song")}" aria-pressed="${selectedStorageIDs.has(track.id)}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(displayAlbum(track))}</small></span><span class="storage-size">${formatBytes(track.size)}</span><button class="row-menu" data-storage-menu="${track.id}" title="More options" aria-label="More options for ${escapeHTML(track.title || "song")}">•••</button></div>`).join("") || `<div class="empty"><b>${storageEmptyTitle}</b><span>${storageEmptyHelp}</span></div>`}</div></div>`;
+    <div class="storage-list redesigned">${tracks.map((track) => {
+      const unavailable = track.available === false || track.missing;
+      return `<div class="storage-row ${storageEditing ? "selecting" : ""}${unavailable ? " unavailable" : ""}" data-storage-track="${escapeHTML(track.id)}" tabindex="0" aria-keyshortcuts="Enter Space Shift+F10" aria-disabled="${unavailable}"><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${escapeHTML(track.id)}" aria-label="${selectedStorageIDs.has(track.id) ? "Deselect" : "Select"} ${escapeHTML(track.title || "song")}" aria-pressed="${selectedStorageIDs.has(track.id)}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${unavailable ? "File unavailable on this device" : `${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(displayAlbum(track))}`}</small></span><span class="storage-size">${unavailable ? "Missing" : formatBytes(track.size)}</span><button class="row-menu" data-storage-menu="${escapeHTML(track.id)}" title="More options" aria-label="More options for ${escapeHTML(track.title || "song")}">•••</button></div>`;
+    }).join("") || `<div class="empty"><b>${storageEmptyTitle}</b><span>${storageEmptyHelp}</span></div>`}</div></div>`;
   const importControl = $("#storageImportControl");
   const importButton = $("#storageImportMenuButton");
   const importMenu = $("#storageImportMenu");
@@ -2283,6 +2736,18 @@ function renderStorage() {
     row.oncontextmenu = openMenu;
     row.onkeydown = (event) => {
       if (event.target !== row) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        if (storageEditing) {
+          selectedStorageIDs.has(row.dataset.storageTrack)
+            ? selectedStorageIDs.delete(row.dataset.storageTrack)
+            : selectedStorageIDs.add(row.dataset.storageTrack);
+          renderStorage();
+        } else {
+          play(state.tracks.find((track) => track.id === row.dataset.storageTrack), tracks, { playlistID: null });
+        }
+        return;
+      }
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
         event.preventDefault();
         openMenu(event);
@@ -2294,8 +2759,15 @@ function renderStorage() {
   });
   api.storageSummary().then((summary) => {
     if (section !== "storage") return;
+    const local = $("#storageLocalBytes");
+    const remote = $("#storageRemoteBytes");
+    const ring = $("#storageRing");
     const available = $("#storageAvailable");
     const percent = $("#storageFreePercent");
+    if (local) local.textContent = formatBytes(summary.localBytes);
+    if (remote) remote.textContent = formatBytes(summary.remoteBytes);
+    const managedBytes = Math.max(0, Number(summary.localBytes) || 0) + Math.max(0, Number(summary.remoteBytes) || 0);
+    if (ring) ring.style.setProperty("--local", `${managedBytes ? Math.round((Number(summary.localBytes) || 0) / managedBytes * 360) : 0}deg`);
     if (available) available.textContent = formatBytes(summary.availableBytes);
     if (percent) percent.textContent = summary.capacityBytes ? `${Math.round(summary.availableBytes / summary.capacityBytes * 100)}% free` : "Disk space";
   }).catch((error) => {
@@ -2308,15 +2780,209 @@ function renderStorage() {
   });
 }
 
+function serverUploadManifestFromResult(result, context, source) {
+  if (result?.selectionCancelled) return null;
+  const uploaded = (Array.isArray(result?.results) ? result.results : []).map((item) => ({
+    retryID: item.retryID || null,
+    trackID: item.trackID || null,
+    filename: item.filename || null,
+    title: item.title || item.filename || "Untitled song",
+    artist: item.artist || null,
+    status: "uploaded",
+    attempts: item.attempts || 1,
+    message: null,
+    remoteID: item.remoteSong?.id || null,
+  }));
+  const failed = (Array.isArray(result?.failed) ? result.failed : []).map((item) => ({
+    retryID: item.retryID || null,
+    trackID: item.trackID || null,
+    filename: item.filename || null,
+    title: item.title || item.filename || "Untitled song",
+    artist: item.artist || null,
+    status: item.status === "cancelled" ? "cancelled" : "failed",
+    attempts: item.attempts || 0,
+    message: item.message || (item.status === "cancelled" ? "Upload cancelled." : "Upload failed."),
+    remoteID: null,
+  }));
+  if (!uploaded.length && !failed.length) return null;
+  const now = new Date().toISOString();
+  return normalizeServerUploadManifest({
+    id: crypto.randomUUID(),
+    serverOrigin: normalizedServerOrigin(context.serverURL),
+    profileID: context.profileID,
+    source,
+    startedAt: now,
+    updatedAt: now,
+    items: [...uploaded, ...failed],
+  });
+}
+
+async function retainServerUploadManifest(result, context, source) {
+  const manifest = serverUploadManifestFromResult(result, context, source);
+  if (!manifest) return null;
+  state.serverUploadManifests = [...state.serverUploadManifests, manifest].slice(-20);
+  await persist({ refreshSidebar: false });
+  return manifest;
+}
+
+function currentServerUploadManifests() {
+  const serverOrigin = normalizedServerOrigin(state.serverURL);
+  const profileID = activeProfileID();
+  return state.serverUploadManifests
+    .filter((manifest) => manifest.serverOrigin === serverOrigin && manifest.profileID === profileID)
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+}
+
+function serverUploadManifestMarkup() {
+  return currentServerUploadManifests().map((manifest) => {
+    const failures = manifest.items.filter((item) => item.status !== "uploaded");
+    const uploaded = manifest.items.length - failures.length;
+    const retryIDs = serverUploadManifestRetryIDs(manifest);
+    const label = manifest.source === "missing-downloads"
+      ? "Downloaded-song upload"
+      : manifest.source === "link-import" ? "Link-import upload" : "File upload";
+    const timestamp = new Date(manifest.updatedAt).toLocaleString();
+    const summary = failures.length
+      ? `${uploaded} uploaded · ${failures.length} need attention`
+      : `${uploaded} uploaded · no failures`;
+    return `<section class="server-upload-manifest${failures.length ? " has-failures" : " complete"}" data-server-upload-manifest="${escapeHTML(manifest.id)}" aria-label="${escapeHTML(label)} results">
+      <header><span><strong>${escapeHTML(label)}</strong><small>${escapeHTML(timestamp)} · ${escapeHTML(summary)}</small></span><button type="button" class="server-upload-manifest-dismiss" data-dismiss-upload-manifest="${escapeHTML(manifest.id)}" aria-label="Dismiss ${escapeHTML(label)} results">×</button></header>
+      <div class="server-upload-manifest-items">${manifest.items.map((item) => `<div class="server-upload-manifest-item ${item.status}">
+        <span class="server-upload-manifest-status" aria-hidden="true">${item.status === "uploaded" ? "✓" : item.status === "cancelled" ? "‖" : "!"}</span>
+        <span><strong>${escapeHTML(item.title)}</strong><small>${escapeHTML([item.artist, item.filename].filter(Boolean).join(" · ") || "Local file")}</small>${item.message ? `<em>${escapeHTML(item.message)}</em>` : ""}</span>
+        <span>${item.status === "uploaded" ? "Uploaded" : item.status === "cancelled" ? "Cancelled" : `Failed after ${item.attempts || 0} attempt${item.attempts === 1 ? "" : "s"}`}</span>
+      </div>`).join("")}</div>
+      <footer>${retryIDs.length ? `<button type="button" class="secondary" data-retry-upload-manifest="${escapeHTML(manifest.id)}" ${serverTransferActive ? "disabled" : ""}>Retry ${retryIDs.length} failed</button>` : ""}<span>${failures.length ? "Source files are kept; no cleanup is available until every required upload succeeds." : "All required uploads completed. Source files were not changed."}</span></footer>
+    </section>`;
+  }).join("");
+}
+
+async function dismissServerUploadManifest(manifestID) {
+  const manifest = state.serverUploadManifests.find((item) => item.id === manifestID);
+  if (!manifest) return;
+  const retryIDs = serverUploadManifestRetryIDs(manifest);
+  state.serverUploadManifests = state.serverUploadManifests.filter((item) => item.id !== manifestID);
+  await persist({ refreshSidebar: false });
+  if (retryIDs.length) {
+    await api.discardServerUploadRetries({
+      baseURL: state.serverURL,
+      profileID: activeProfileID(),
+      retryIDs,
+    }).catch(() => undefined);
+  }
+  if (section === "server") renderServer();
+}
+
+async function retryServerUploadManifest(manifestID) {
+  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || Boolean(serverContextReservation) })) return;
+  try {
+    await saveServerForm();
+  } catch (error) {
+    showNotice(friendlyIPCError(error, "Server settings could not be saved before retrying."));
+    return;
+  }
+  const configurationError = serverUploadConfigurationError({ serverURL: state.serverURL, adminToken: serverAdminToken });
+  if (configurationError) {
+    showNotice(configurationError);
+    return;
+  }
+  const manifest = state.serverUploadManifests.find((item) => item.id === manifestID);
+  const retryIDs = serverUploadManifestRetryIDs(manifest);
+  if (!manifest || !retryIDs.length) return;
+  const context = currentServerUploadContext();
+  if (manifest.serverOrigin !== normalizedServerOrigin(context.serverURL) || manifest.profileID !== context.profileID) {
+    showNotice("Switch back to the server and profile that created these upload results before retrying.");
+    return;
+  }
+  for (const item of manifest.items) {
+    if (!item.trackID || item.status === "uploaded") continue;
+    const track = state.tracks.find((candidate) => candidate.id === item.trackID);
+    if (track) {
+      const conflict = remoteAssociationConflictMessage(track, {
+        serverURL: context.serverURL,
+        profileID: context.profileID,
+      });
+      if (conflict) {
+        showNotice(conflict);
+        return;
+      }
+    }
+  }
+  serverTransferCancelRequested = false;
+  updateServerTransfer({ direction: "upload", currentFile: "Retrying failed uploads…", completed: 0, total: retryIDs.length });
+  try {
+    const result = await api.uploadServer({
+      baseURL: context.serverURL,
+      adminToken: context.adminToken,
+      profileID: context.profileID,
+      retryIDs,
+    });
+    if (!serverUploadContextIsCurrent(context)) return;
+    rememberUploadedServerSongs(result.results);
+    const uploadedByID = new Map((result.results || []).map((item) => [item.retryID, item]));
+    const failedByID = new Map((result.failed || []).map((item) => [item.retryID, item]));
+    manifest.items = manifest.items.map((item) => {
+      const uploaded = uploadedByID.get(item.retryID);
+      if (uploaded) return {
+        ...item,
+        status: "uploaded",
+        attempts: uploaded.attempts || item.attempts,
+        message: null,
+        remoteID: uploaded.remoteSong?.id || item.remoteID || null,
+      };
+      const failure = failedByID.get(item.retryID);
+      if (failure) return {
+        ...item,
+        status: failure.status === "cancelled" ? "cancelled" : "failed",
+        attempts: failure.attempts || 0,
+        message: failure.message || "Upload failed.",
+      };
+      return item;
+    });
+    manifest.updatedAt = new Date().toISOString();
+    state.serverUploadManifests = state.serverUploadManifests
+      .map((item) => item.id === manifest.id ? normalizeServerUploadManifest(manifest) : item)
+      .filter(Boolean);
+    for (const uploaded of result.results || []) {
+      if (!uploaded.trackID) continue;
+      reconcileUploadedTrack(state, uploaded.trackID, uploaded.remoteSong, {
+        serverURL: context.serverURL,
+        profileID: context.profileID,
+      });
+    }
+    await persist();
+    const failureNotice = formatServerUploadFailureNotice(result.failed);
+    if (failureNotice) showNotice(failureNotice);
+    else if (!result.cancelled) showNotice(`Retried ${result.uploaded} upload${result.uploaded === 1 ? "" : "s"} successfully.`, "status");
+    if ((result.results || []).length) {
+      schedulePlaylistSync();
+      scheduleServerCatalogRefresh(context);
+    }
+  } catch (error) {
+    if (!serverUploadContextIsCurrent(context)) return;
+    showNotice(friendlyIPCError(error, "Failed uploads could not be retried."));
+  } finally {
+    hideServerTransfer("server");
+    serverTransferCancelRequested = false;
+    if (section === "server") renderServer();
+  }
+}
+
 function renderServer() {
   updateTopSearch();
+  const transferModes = currentServerTransferModes();
+  const offlineDownloadAvailable = transferModes.downloadMode === "verified_file_cache";
+  const uploadAvailable = Boolean(transferModes.uploadMode);
+  const fileUploadSelected = transferModes.uploadMode === "local_file";
   const downloaded = serverCatalog.filter((song) => activeRemoteTrack(song.id)).length;
   const filteredCount = filteredServerCatalog().length;
   const playlistCount = state.playlists.filter((playlist) => !playlist.isSystem).length;
   const connected = serverConnected;
   const showConnectionDetail = !connected;
   const selectLabel = serverSelecting ? "Cancel song selection" : "Choose songs to download";
-  const downloadLabel = serverSelecting
+  const downloadLabel = !offlineDownloadAvailable
+    ? "Stream-only mode is enabled; choose a song row to play it without saving it"
+    : serverSelecting
     ? selectedRemoteIDs.size
       ? `Download ${selectedRemoteIDs.size} selected song${selectedRemoteIDs.size === 1 ? "" : "s"}`
       : "Select songs to download"
@@ -2332,11 +2998,12 @@ function renderServer() {
       <span class="server-dot">•</span><span class="server-inline-metric violet">${serverPlaylistMetricIcon}<strong>${playlistCount}</strong><span>playlists</span></span>
       <span class="server-dot">•</span><span class="server-inline-metric green">${serverDeviceIcon}<strong>${downloaded}</strong><span>on device</span></span>
     </div></div>
-    <div class="server-library-bar"><div><strong>${resultSummary}</strong></div><div class="server-actions">
-      <button id="uploadMissingDownloads" title="Upload downloaded songs missing from the server" aria-label="Upload downloaded songs missing from the server">${serverUploadMissingIcon}</button>
-      <button id="uploadServer" title="Upload files" aria-label="Upload files">${serverUploadIcon}</button>
-      <button id="syncAll" title="${downloadLabel}" aria-label="${downloadLabel}" ${serverSelecting && !selectedRemoteIDs.size ? "disabled" : ""}>${serverDownloadIcon}</button>
-      <button id="syncSelected" class="${serverSelecting ? "active" : ""}" title="${selectLabel}" aria-label="${selectLabel}" aria-pressed="${serverSelecting}">${serverSelecting ? `<b>${selectedRemoteIDs.size}</b>` : serverSelectIcon}</button>
+    ${serverUploadManifestMarkup()}
+    <div class="server-library-bar"><div><strong>${resultSummary}</strong><small class="server-transfer-mode-summary">${escapeHTML(`${serverUploadModeOptions[transferModes.uploadMode] || "Uploads disabled"} · ${serverDownloadModeOptions[transferModes.downloadMode] || "Downloads disabled"}`)}</small></div><div class="server-actions">
+      <button id="uploadMissingDownloads" title="${fileUploadSelected ? "Upload downloaded songs missing from the server" : "Available only in Local files upload mode"}" aria-label="Upload downloaded songs missing from the server" ${fileUploadSelected ? "" : "disabled"}>${serverUploadMissingIcon}</button>
+      <button id="uploadServer" title="${escapeHTML(uploadAvailable ? serverUploadModeOptions[transferModes.uploadMode] : "Uploads are disabled")}" aria-label="${escapeHTML(uploadAvailable ? serverUploadModeOptions[transferModes.uploadMode] : "Uploads are disabled")}" ${uploadAvailable ? "" : "disabled"}>${serverUploadIcon}</button>
+      <button id="syncAll" title="${downloadLabel}" aria-label="${downloadLabel}" ${!offlineDownloadAvailable || (serverSelecting && !selectedRemoteIDs.size) ? "disabled" : ""}>${serverDownloadIcon}</button>
+      <button id="syncSelected" class="${serverSelecting ? "active" : ""}" title="${offlineDownloadAvailable ? selectLabel : downloadLabel}" aria-label="${offlineDownloadAvailable ? selectLabel : downloadLabel}" aria-pressed="${serverSelecting}" ${offlineDownloadAvailable ? "" : "disabled"}>${serverSelecting ? `<b>${selectedRemoteIDs.size}</b>` : serverSelectIcon}</button>
       <button id="syncServerPlaylists" title="Sync playlists" aria-label="Sync playlists">${serverPlaylistIcon}</button>
     </div></div>
     <div class="server-table-head ${serverSelecting ? "selecting" : ""}">${serverSelecting ? "<span></span>" : ""}<span></span><span>TITLE</span><span>ARTIST</span><span>ALBUM</span><span>DURATION</span><span></span></div>
@@ -2358,6 +3025,12 @@ function renderServer() {
   $("#syncServerPlaylists").onclick = () => syncPlaylistsNow();
   bindServerArtworkLoadStates();
   bindRemoteRows();
+  document.querySelectorAll("[data-retry-upload-manifest]").forEach((button) => {
+    button.onclick = () => retryServerUploadManifest(button.dataset.retryUploadManifest);
+  });
+  document.querySelectorAll("[data-dismiss-upload-manifest]").forEach((button) => {
+    button.onclick = () => dismissServerUploadManifest(button.dataset.dismissUploadManifest);
+  });
   if (!serverAutoAttempted && !serverConnectInFlight && state.serverURL && serverToken) {
     serverAutoAttempted = true;
     queueMicrotask(() => { if (section === "server") serverAction("catalog"); });
@@ -2383,14 +3056,14 @@ function remoteRows() {
     const onDevice = Boolean(activeRemoteTrack(song.id));
     const selected = selectedRemoteIDs.has(song.id);
     const duration = Number(song.duration) > 0 ? formatTime(Number(song.duration)) : "—";
-    return `<div class="remote-row ${serverSelecting ? "selecting" : ""} ${selected ? "selected" : ""}" data-remote-row="${song.id}" tabindex="0" aria-keyshortcuts="Shift+F10">
-      <button class="remote-check ${selected ? "selected" : ""}" data-select-remote="${song.id}" ${serverSelecting ? "" : "hidden"} aria-label="${selected ? "Deselect" : "Select"} ${escapeHTML(song.title || song.name)}">${selected ? "✓" : ""}</button>
+    return `<div class="remote-row ${serverSelecting ? "selecting" : ""} ${selected ? "selected" : ""}" data-remote-row="${escapeHTML(song.id)}" tabindex="0" aria-keyshortcuts="Enter Space Shift+F10">
+      <button class="remote-check ${selected ? "selected" : ""}" data-select-remote="${escapeHTML(song.id)}" ${serverSelecting ? "" : "hidden"} aria-label="${selected ? "Deselect" : "Select"} ${escapeHTML(song.title || song.name)}">${selected ? "✓" : ""}</button>
       ${artwork(song, { animateLoading: true })}
-      <span class="server-song-title"><strong>${escapeHTML(song.title || song.name)}</strong>${onDevice ? '<small>On device</small>' : ""}</span>
+      <span class="server-song-title"><strong>${escapeHTML(song.title || song.name)}</strong>${onDevice ? '<small>On device</small>' : serverSongRequiresDownload(song) && currentServerTransferModes().downloadMode === "stream_only" ? '<small>Video · download required</small>' : ""}</span>
       <span class="server-cell">${escapeHTML(song.artist || "Unknown Artist")}</span>
       <span class="server-cell server-album">${escapeHTML(displayAlbum(song))}</span>
       <span class="server-cell server-duration">${duration}</span>
-      <button class="row-menu" data-remote-menu="${song.id}" title="More options" aria-label="More options for ${escapeHTML(song.title || song.name)}">•••</button>
+      <button class="row-menu" data-remote-menu="${escapeHTML(song.id)}" title="More options" aria-label="More options for ${escapeHTML(song.title || song.name)}">•••</button>
     </div>`;
   }).join("");
 }
@@ -2398,15 +3071,36 @@ function remoteRows() {
 function bindRemoteRows() {
   document.querySelectorAll("[data-select-remote]").forEach((button) => button.onclick = () => { selectedRemoteIDs.has(button.dataset.selectRemote) ? selectedRemoteIDs.delete(button.dataset.selectRemote) : selectedRemoteIDs.add(button.dataset.selectRemote); renderServer(); });
   document.querySelectorAll("[data-remote-row]").forEach((row) => {
-    row.onclick = (event) => {
-      if (!serverSelecting || event.target.closest("button")) return;
+    const activate = () => {
       const id = row.dataset.remoteRow;
-      selectedRemoteIDs.has(id) ? selectedRemoteIDs.delete(id) : selectedRemoteIDs.add(id);
-      renderServer();
+      if (serverSelecting) {
+        selectedRemoteIDs.has(id) ? selectedRemoteIDs.delete(id) : selectedRemoteIDs.add(id);
+        renderServer();
+        return;
+      }
+      const song = serverCatalog.find((candidate) => candidate.id === id);
+      const localTrack = playableActiveRemoteTrack(id);
+      if (localTrack) play(localTrack);
+      else if (currentServerTransferModes().downloadMode !== "verified_file_cache") {
+        void playRemoteStream(song);
+      } else {
+        serverSelecting = true;
+        selectedRemoteIDs = new Set([id]);
+        renderServer();
+      }
+    };
+    row.onclick = (event) => {
+      if (event.target.closest("button")) return;
+      activate();
     };
     row.oncontextmenu = (event) => openServerTrackContextMenu(event, row.dataset.remoteRow);
     row.onkeydown = (event) => {
       if (event.target !== row) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        activate();
+        return;
+      }
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
         event.preventDefault();
         openServerTrackContextMenu(event, row.dataset.remoteRow);
@@ -2502,18 +3196,25 @@ async function activateProfile(profileID, serverURL = state.serverURL) {
   if (!profileID) return;
   const targetServerKey = normalizedServerKey(serverURL);
   if (profileID === activeProfileID() && targetServerKey === normalizedServerKey(state.serverURL)) return;
+  ensureServerContextCanChange();
+  releaseActiveServerStream({ stopPlayback: true });
+  const resumeListeningSession = checkpointListeningSessionForContextChange();
   storeActiveProfileState(state);
   restoreProfileState(state, profileID, serverURL);
   profileGeneration += 1;
+  clientConfigRequestGeneration += 1;
+  clientConfig = SAFE_CLIENT_CONFIG;
   if (playlistSyncInFlight) playlistSyncPending = true;
   if (serverConnectInFlight) serverConnectPending = true;
   serverConnected = false;
-  serverCatalog = [];
+  replaceServerCatalog([]);
   selectedRemoteIDs.clear();
   selectedPlaylistID = null;
   const visibleTrackIDs = new Set(tracksForActiveProfile(state).map((track) => track.id));
   activePlaybackQueueIDs = activePlaybackQueueIDs.filter((id) => visibleTrackIDs.has(id));
+  activePlaybackSourceQueueIDs = activePlaybackSourceQueueIDs.filter((id) => visibleTrackIDs.has(id));
   state.playbackQueueIDs = [...activePlaybackQueueIDs];
+  state.playbackSourceQueueIDs = [...activePlaybackSourceQueueIDs];
   if (currentID && !visibleTrackIDs.has(currentID)) {
     audio.pause();
     audio.removeAttribute("src");
@@ -2528,6 +3229,7 @@ async function activateProfile(profileID, serverURL = state.serverURL) {
     }
   }
   await persist();
+  if (resumeListeningSession && currentID && playbackIsActive()) beginListeningSession();
 }
 
 async function openServerSettings() {
@@ -2535,16 +3237,41 @@ async function openServerSettings() {
   $("#serverToken").value = serverToken;
   $("#serverAdminToken").value = serverAdminToken;
   renderProfileOptions();
+  renderServerTransferModeOptions();
   $("#serverSettingsDialog").showModal();
-  try { await refreshProfiles(); } catch { /* connection fields may still be incomplete */ }
+  await Promise.allSettled([refreshProfiles(), refreshClientConfig()]);
 }
 
 async function saveServerForm() {
-  const nextServerURL = $("#serverURL")?.value.trim() || state.serverURL;
-  serverToken = $("#serverToken")?.value || serverToken;
-  serverAdminToken = $("#serverAdminToken")?.value || serverAdminToken;
-  await activateProfile($("#syncProfile")?.value || activeProfileID(), nextServerURL);
+  ensureServerContextCanChange();
+  const settingsOpen = Boolean($("#serverSettingsDialog")?.open);
+  const nextServerURL = settingsOpen ? $("#serverURL").value.trim() : state.serverURL;
+  const nextProfileID = settingsOpen ? ($("#syncProfile")?.value || activeProfileID()) : activeProfileID();
+  const requestedUploadMode = settingsOpen ? $("#serverUploadMode")?.value : currentServerTransferModes().uploadMode;
+  const requestedDownloadMode = settingsOpen ? $("#serverDownloadMode")?.value : currentServerTransferModes().downloadMode;
+  const nextServerToken = settingsOpen ? $("#serverToken").value.trim() : serverToken.trim();
+  const nextServerAdminToken = settingsOpen ? $("#serverAdminToken").value.trim() : serverAdminToken.trim();
+  const accessTokenChanged = nextServerToken !== serverToken;
+  if (accessTokenChanged) releaseActiveServerStream({ stopPlayback: true });
+  if (settingsOpen) {
+    serverToken = nextServerToken;
+    serverAdminToken = nextServerAdminToken;
+    if (accessTokenChanged) {
+      serverConnected = false;
+      replaceServerCatalog([]);
+      selectedRemoteIDs.clear();
+    }
+  }
+  await activateProfile(nextProfileID, nextServerURL);
   await api.saveServerCredentials({ clientToken: serverToken, adminToken: serverAdminToken });
+  await refreshClientConfig({ force: true });
+  setServerTransferPreference(state, {
+    serverURL: state.serverURL,
+    profileID: activeProfileID(),
+    uploadMode: requestedUploadMode,
+    downloadMode: requestedDownloadMode,
+    config: clientConfig,
+  });
   await persist();
   updateProfileControl();
   schedulePlaylistSync();
@@ -2559,7 +3286,7 @@ function renderSettings() {
     <span class="eyebrow">RESONANCE</span><h1>Settings</h1><p>Manage this device, your music server, playback tools, and updates.</p>
     <div class="settings-grid">
       <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">${serverDeviceIcon}</span><div><h2>Music Server</h2><p>${serverConnected ? "Connected" : "Not connected"} · ${escapeHTML(profile.name || "Default")}</p><small>${escapeHTML(state.serverURL || "No server configured")}</small></div><button id="settingsServer" class="secondary" type="button">Connection settings</button></section>
-      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">${historyClockIcon}</span><div><h2>Listening & clips</h2><p>${track ? escapeHTML(track.title) : "Nothing selected"}</p><small>${Math.round(state.volume * 100)}% volume · ${audio.playbackRate || 1}× speed</small></div><div class="settings-card-actions"><button id="settingsHistory" class="secondary" type="button">Listening History</button><button id="settingsClipEditor" class="secondary" type="button" ${track ? "" : "disabled"}>Clip Editor</button></div></section>
+      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">${historyClockIcon}</span><div><h2>Listening & clips</h2><p>${track ? escapeHTML(track.title) : "Nothing selected"}</p><small>${Math.round(state.volume * 100)}% volume · ${audio.playbackRate || 1}× speed</small></div><div class="settings-card-actions"><button id="settingsHistory" class="secondary" type="button">Listening History</button><button id="settingsClipEditor" class="secondary" type="button" ${track && !track.transientStream ? "" : "disabled"}>Clip Editor</button></div></section>
       <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">♪</span><div><h2>Local storage</h2><p>${tracksForActiveProfile(state).length} songs on this profile</p><small>Manage imports, downloads, and local files.</small></div><button id="settingsStorage" class="secondary" type="button">Manage storage</button></section>
       <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">↻</span><div><h2>Updates</h2><p id="settingsUpdateStatus">${escapeHTML($("#updateStatus").textContent || "Automatic in-app updates")}</p><small>Installed builds update through the GitHub release feed.</small></div><button id="settingsCheckUpdates" class="secondary" type="button">Check now</button></section>
     </div>
@@ -2846,7 +3573,7 @@ function renderTrackPlaylistContextMenu(track, options) {
 
 function renderTrackContextMenu(track, options = {}) {
   const activePlaylist = state.playlists.find((item) => item.id === options.playlistID && !item.isSystem);
-  const playing = track.id === currentID && !audio.paused;
+  const playing = track.id === currentID && playbackIsActive();
   const liked = state.favorites.includes(track.id);
   const playbackTracks = options.playbackTracks?.length ? options.playbackTracks : tracksForActiveProfile(state);
   const actions = [
@@ -2910,7 +3637,7 @@ function renderTrackContextMenu(track, options = {}) {
 
 function openTrackContextMenu(event, trackID, options = {}) {
   const track = state.tracks.find((item) => item.id === trackID && trackBelongsToActiveProfile(state, item));
-  if (!track) return;
+  if (!track || track.transientStream) return;
   beginContextMenu(event, { alignToEnd: options.alignToEnd });
   renderTrackContextMenu(track, options);
 }
@@ -2948,16 +3675,22 @@ function openServerTrackContextMenu(event, songID) {
   const song = serverCatalog.find((item) => item.id === songID);
   if (!song) return;
   beginContextMenu(event);
-  const localTrack = activeRemoteTrack(song.id);
+  const localTrack = playableActiveRemoteTrack(song.id);
+  const offlineDownloadAvailable = currentServerTransferModes().downloadMode === "verified_file_cache";
+  const requiresDownload = serverSongRequiresDownload(song);
   const actions = [
     localTrack
       ? { label: "Play on this device", icon: contextPlayIcon, onSelect: () => play(localTrack, tracksForActiveProfile(state), { playlistID: null }) }
       : {
-        label: "Download",
-        icon: contextDownloadIcon,
+        label: offlineDownloadAvailable ? "Download" : requiresDownload ? "Video requires download" : "Play from server",
+        icon: offlineDownloadAvailable ? contextDownloadIcon : contextPlayIcon,
+        disabled: !offlineDownloadAvailable && requiresDownload,
         onSelect: async () => {
-          selectedRemoteIDs = new Set([song.id]);
-          await serverAction("selected");
+          if (!offlineDownloadAvailable) await playRemoteStream(song);
+          else {
+            selectedRemoteIDs = new Set([song.id]);
+            await serverAction("selected");
+          }
         },
       },
     { divider: true },
@@ -3013,6 +3746,65 @@ function showLocalImportError(error) {
 
 function selectedLocalImportMediaKind() {
   return document.querySelector('input[name="localImportMediaKind"]:checked')?.value === "video" ? "video" : "audio";
+}
+
+function localImportSelectionValues(selectionName = null) {
+  if (!selectionName) return [];
+  return [...document.querySelectorAll(`input[name="${selectionName}"]:checked`)].map((input) => input.value);
+}
+
+function localImportOperationSnapshot(selectionName = null, { requiresResolvedSource = false } = {}) {
+  return Object.freeze({
+    generation: localImportInteractionGeneration,
+    fingerprint: localImportOperationFingerprint({
+      source: $("#localImportSource").value,
+      mediaKind: selectedLocalImportMediaKind(),
+      selection: localImportSelectionValues(selectionName),
+      uploadRequested: $("#localImportSync").checked,
+    }),
+    selectionName,
+    requiresResolvedSource,
+  });
+}
+
+function localImportOperationCurrent(snapshot) {
+  const current = localImportOperationIsCurrent(snapshot, {
+    generation: localImportInteractionGeneration,
+    fingerprint: localImportOperationFingerprint({
+      source: $("#localImportSource").value,
+      mediaKind: selectedLocalImportMediaKind(),
+      selection: localImportSelectionValues(snapshot?.selectionName),
+      uploadRequested: $("#localImportSync").checked,
+    }),
+  });
+  if (!current || !snapshot?.requiresResolvedSource) return current;
+  return localImportResolvedSourceKey === `${selectedLocalImportMediaKind()}:${$("#localImportSource").value.trim()}`;
+}
+
+function requireCurrentLocalImportOperation(snapshot) {
+  if (!localImportOperationCurrent(snapshot)) {
+    throw {
+      stage: "awaiting_selection",
+      code: "STALE_IMPORT_SELECTION",
+      message: "The source or selection changed. Review the visible choice and start the import again.",
+    };
+  }
+}
+
+function setLocalImportOperationLocked(locked) {
+  $("#localImportSource").disabled = locked;
+  $("#chooseLocalFiles").disabled = locked;
+  setLocalImportMediaKindDisabled(locked);
+  document.querySelectorAll('input[name="localImportCandidate"], input[name="localImportPlaylistItem"]').forEach((input) => {
+    input.disabled = locked;
+  });
+  document.querySelectorAll("[data-local-import-preview]").forEach((button) => {
+    const candidate = localImportResolution?.candidates?.[Number(button.dataset.localImportPreview)];
+    button.disabled = locked || !localImportCandidateCanPreview(candidate);
+  });
+  $("#localImportSync").disabled = locked;
+  $("#confirmLocalImport").disabled = locked;
+  if (!locked) updateLocalImportSyncForSelection({ preserveChecked: true });
 }
 
 function setLocalImportMediaKindDisabled(disabled) {
@@ -3097,9 +3889,28 @@ function clearLocalImportAutoResolve() {
   localImportAutoResolveTimer = null;
 }
 
+function updateDirectServerSourceImportState() {
+  if (localImportServerUploadMode !== "server_source_link") return false;
+  const ready = Boolean(exactYouTubeSourcePageURL($("#localImportSource").value));
+  const confirm = $("#confirmLocalImport");
+  confirm.hidden = !ready;
+  confirm.disabled = !ready || localImportRunning;
+  confirm.title = "Upload source link";
+  confirm.setAttribute("aria-label", "Upload source link");
+  $("#localImportResolved").hidden = true;
+  $("#localImportSyncRow").hidden = true;
+  $("#cancelLocalImport").hidden = true;
+  setLocalImportStage({ stage: ready ? "awaiting_selection" : "idle" });
+  return ready;
+}
+
 function scheduleLocalImportResolution({ immediate = false } = {}) {
   clearLocalImportAutoResolve();
   if (localImportRunning) return;
+  if (localImportServerUploadMode === "server_source_link") {
+    updateDirectServerSourceImportState();
+    return;
+  }
   const source = $("#localImportSource").value.trim();
   if (!localImportSourceIsReady(source)) return;
   const sourceKey = `${selectedLocalImportMediaKind()}:${source}`;
@@ -3111,11 +3922,13 @@ function scheduleLocalImportResolution({ immediate = false } = {}) {
 }
 
 function resetLocalImport() {
+  localImportInteractionGeneration += 1;
   void stopLocalImportPreview({ release: true, resumeMain: true });
   clearLocalImportAutoResolve();
   localImportResolution = null;
   localImportResolvedSourceKey = null;
   localImportBatchContext = null;
+  localImportServerUploadMode = null;
   localImportRunning = false;
   localImportArtworkRequest += 1;
   const audioKind = document.querySelector('input[name="localImportMediaKind"][value="audio"]');
@@ -3136,10 +3949,23 @@ function resetLocalImport() {
   $("#localImportSync").checked = false;
   setLocalImportStage({ stage: "idle" });
   updateLocalImportMediaKindUI();
+  $("#localImportMediaKind").hidden = false;
+  $("#chooseLocalFiles").hidden = false;
+  $("#localImportTitle").textContent = "Import from link";
+  $("#localImportSource").placeholder = "Song, artist, album, or supported link…";
 }
 
-function openLocalImport() {
+function openLocalImport({ serverUploadMode = null } = {}) {
   resetLocalImport();
+  if (["server_source_link", "reviewed_match"].includes(serverUploadMode)) {
+    localImportServerUploadMode = serverUploadMode;
+    $("#localImportTitle").textContent = serverUploadMode === "reviewed_match" ? "Upload reviewed match" : "Upload source link";
+    $("#localImportSource").placeholder = serverUploadMode === "reviewed_match"
+      ? "YouTube song link or music search…"
+      : "Canonical YouTube song link…";
+    $("#localImportMediaKind").hidden = true;
+    $("#chooseLocalFiles").hidden = true;
+  }
   $("#localImportSource").value = "";
   $("#localImportDialog").showModal();
   requestAnimationFrame(() => $("#localImportSource").focus());
@@ -3154,6 +3980,14 @@ function localImportProviderLabel(candidate) {
   if (candidate.sourceProvider === "debrid_vault") return "Debrid Vault";
   if (candidate.sourceProvider === "torbox_file") return "TorBox file";
   return "YouTube";
+}
+
+function localImportSourceIdentity(candidate, metadata = {}) {
+  return buildLocalImportSourceIdentity(candidate, metadata);
+}
+
+function backfillLocalImportSourceIdentity(track, sourceIdentity) {
+  return mergeTrackSourceIdentity(track, sourceIdentity);
 }
 
 function localImportCandidateDetails(candidate) {
@@ -3172,14 +4006,14 @@ function localImportCandidateDetails(candidate) {
   }
   if (localImportResolution?.kind?.endsWith("_playlist")) {
     const metadata = candidate.importMetadata || candidate;
-    return [metadata.artist || "Unknown artist", metadata.durationSeconds ? formatTime(metadata.durationSeconds) : null, localImportProviderLabel(candidate)];
+    return [metadata.artist || "Unknown artist", metadata.durationSeconds ? formatTime(metadata.durationSeconds) : null, candidate.requiresReview || candidate.requires_review ? "Review match" : null, localImportProviderLabel(candidate)];
   }
   if (localImportResolution?.mediaKind === "video") {
     const dimensions = candidate.width && candidate.height ? `${candidate.width}×${candidate.height}` : null;
     return [candidate.qualityLabel || "MP4", dimensions, candidate.fps ? `${candidate.fps} fps` : null, candidate.durationSeconds ? formatTime(candidate.durationSeconds) : null, localImportProviderLabel(candidate)];
   }
   if (candidate.sourceProvider === "debrid_vault") {
-    return [candidate.quality, Number.isFinite(candidate.seeders) ? `${candidate.seeders} seeders` : null, candidate.size ? formatBytes(candidate.size) : null, localImportProviderLabel(candidate)];
+    return [candidate.quality, Number.isFinite(candidate.seeders) ? `${candidate.seeders} seeders` : null, candidate.size ? formatBytes(candidate.size) : null, candidate.requiresReview || candidate.requires_review ? "Review match" : null, localImportProviderLabel(candidate)];
   }
   if (candidate.sourceProvider === "torbox_file") {
     return [candidate.size ? formatBytes(candidate.size) : null, candidate.contentType, localImportProviderLabel(candidate)];
@@ -3291,14 +4125,14 @@ async function toggleLocalImportPreview(index) {
   }
 }
 
-function updateLocalImportSyncForSelection() {
+function updateLocalImportSyncForSelection({ preserveChecked = false } = {}) {
   const selected = document.querySelector('input[name="localImportCandidate"]:checked, input[name="localImportPlaylistItem"]:checked');
-  const candidate = localImportResolution?.candidates?.[Number(selected?.value) || 0];
+  const candidate = selected ? localImportResolution?.candidates?.[Number(selected.value)] : null;
   const serverBacked = Boolean(candidate?.serverBacked);
   const canSync = Boolean(serverAdminToken.trim() && state.serverURL);
   const sync = $("#localImportSync");
   const row = $("#localImportSyncRow");
-  sync.checked = true;
+  if (!preserveChecked) sync.checked = true;
   sync.disabled = serverBacked;
   row.classList.toggle("disabled", serverBacked);
   row.title = serverBacked
@@ -3309,60 +4143,95 @@ function updateLocalImportSyncForSelection() {
   updateLocalImportConfirmLabel();
 }
 
-function localImportUploadConfigurationError(serverBacked = false) {
+function localImportUploadConfigurationError(serverBacked = false, context = null) {
   if (serverBacked || !$("#localImportSync").checked) return null;
-  if (!state.serverURL) {
+  if (!(context?.serverURL || state.serverURL)) {
     return { stage: "syncing", code: "SERVER_URL_REQUIRED", message: "Add a server URL in Music Server settings before uploading." };
   }
-  if (!serverAdminToken.trim()) {
+  if (!String(context?.adminToken ?? serverAdminToken).trim()) {
     return { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Add a server admin key in Music Server settings before uploading." };
   }
   return null;
 }
 
-async function uploadLocalImportTrack(track) {
+function requireTrackUploadAssociationContext(track, context) {
+  const conflict = remoteAssociationConflictMessage(track, {
+    serverURL: context?.serverURL,
+    profileID: context?.profileID,
+  });
+  if (conflict) throw new Error(conflict);
+}
+
+async function uploadLocalImportTrack(track, context) {
+  return uploadImportedTrackWithMode(track, context, "local_file");
+}
+
+async function uploadReviewedMatchTrack(track, context) {
+  return uploadImportedTrackWithMode(track, context, "reviewed_match");
+}
+
+async function uploadImportedTrackWithMode(track, context, mode) {
+  requireLocalImportServerContext(context);
+  requireTrackUploadAssociationContext(track, context);
   if (!track?.filePath) {
     return { ok: false, error: { stage: "syncing", code: "LOCAL_FILE_MISSING", message: "The local song file could not be found for server upload." } };
   }
-  await refreshServerCatalogAfterLocalImportUpload();
-  const existingRemoteSong = serverCatalogMatchForLocalImport(track);
+  const existingRemoteSong = serverCatalogMatchForLocalImport(track, context);
   if (existingRemoteSong) {
     if (reconcileUploadedTrack(state, track.id, existingRemoteSong, {
-      serverURL: state.serverURL,
-      profileID: activeProfileID(),
+      serverURL: context.serverURL,
+      profileID: context.profileID,
     })) {
       playlistMutationGeneration += 1;
       await persist({ refreshSidebar: false });
+      requireLocalImportServerContext(context);
       schedulePlaylistSync();
     }
     return { ok: true, remoteSong: existingRemoteSong, skipped: true };
   }
   const result = await api.uploadLocalImport({
-    baseURL: state.serverURL,
-    adminToken: serverAdminToken,
-    profileID: activeProfileID(),
+    baseURL: context.serverURL,
+    adminToken: context.adminToken,
+    profileID: context.profileID,
     filePath: track.filePath,
     title: track.title || "Untitled song",
+    mode,
   });
+  requireLocalImportServerContext(context);
+  if (result?.ok && result.remoteSong) rememberUploadedServerSongs([{ remoteSong: result.remoteSong }]);
   if (result?.ok && result.remoteSong && reconcileUploadedTrack(state, track.id, result.remoteSong, {
-    serverURL: state.serverURL,
-    profileID: activeProfileID(),
+    serverURL: context.serverURL,
+    profileID: context.profileID,
   })) {
     playlistMutationGeneration += 1;
     await persist({ refreshSidebar: false });
+    requireLocalImportServerContext(context);
     schedulePlaylistSync();
   }
   return result;
 }
 
-async function refreshServerCatalogAfterLocalImportUpload() {
-  if (!state.serverURL || !serverToken.trim()) return false;
+async function refreshServerCatalogAfterUpload(context) {
+  if (!context?.serverURL || !context.token?.trim()) return false;
+  const requestGeneration = serverCatalogGeneration;
   try {
-    const catalog = await api.fetchCatalog({ baseURL: state.serverURL, token: serverToken, profileID: activeProfileID() });
-    serverCatalog = catalog.songs || [];
+    const catalog = await api.fetchCatalog({
+      baseURL: context.serverURL,
+      token: context.token,
+      profileID: context.profileID,
+    });
+    if (!catalogRequestCanApply({
+      requestGeneration,
+      currentGeneration: serverCatalogGeneration,
+      contextCurrent: profileContextIsCurrent(context),
+    })) return false;
+    replaceServerCatalog(catalog.songs);
     hydrateServerCatalogArtwork(serverCatalog);
-    serverConnectionText = `Connected • ${catalog.count} song${catalog.count === 1 ? "" : "s"}`;
+    const count = Number.isFinite(Number(catalog.count)) ? Number(catalog.count) : serverCatalog.length;
+    serverConnectionText = `Connected • ${count} song${count === 1 ? "" : "s"}`;
+    serverConnected = true;
     if (section === "server") renderServer();
+    schedulePlaylistSync();
     return true;
   } catch {
     // The upload already succeeded. A catalog refresh failure should not report
@@ -3371,9 +4240,26 @@ async function refreshServerCatalogAfterLocalImportUpload() {
   }
 }
 
-function serverCatalogMatchForLocalImport(track) {
+function scheduleServerCatalogRefresh(context = currentProfileContext()) {
+  queueMicrotask(() => { void refreshServerCatalogAfterUpload(context); });
+}
+
+function rememberUploadedServerSongs(results) {
+  const merged = mergeUploadedSongsIntoCatalog(serverCatalog, results);
+  if (merged.length === serverCatalog.length && merged.every((song, index) => song === serverCatalog[index])) return;
+  replaceServerCatalog(merged);
+  serverConnected = true;
+  hydrateServerCatalogArtwork(serverCatalog);
+  if (section === "server") renderServer();
+}
+
+function serverCatalogMatchForLocalImport(track, context) {
+  requireLocalImportServerContext(context);
   const remoteID = String(track?.remoteID || "").trim();
-  if (remoteID) {
+  if (remoteID && serverTrackRemoteIDBelongsToContext(track, {
+    serverURL: context.serverURL,
+    profileID: context.profileID,
+  })) {
     const remoteMatch = serverCatalog.find((song) => String(song?.id || "").trim() === remoteID);
     if (remoteMatch) return remoteMatch;
   }
@@ -3382,38 +4268,41 @@ function serverCatalogMatchForLocalImport(track) {
     ? serverCatalog.find((song) =>
       String(song?.content_sha256 || song?.contentSha256 || "").trim().toLocaleLowerCase() === contentHash)
     : null;
-  return hashMatch || serverCatalog.find((song) => serverSongMetadataMatches(track, song)) || null;
+  return hashMatch || null;
 }
 
-async function prepareLocalImportUploadBatch(tracks) {
-  const catalogRefreshed = await refreshServerCatalogAfterLocalImportUpload();
+async function prepareLocalImportUploadBatch(tracks, context) {
+  requireLocalImportServerContext(context);
   const pending = [];
   let reconciled = false;
   for (const track of tracks) {
-    const remoteSong = serverCatalogMatchForLocalImport(track);
+    requireTrackUploadAssociationContext(track, context);
+    const remoteSong = serverCatalogMatchForLocalImport(track, context);
     if (remoteSong) {
       reconciled = reconcileUploadedTrack(state, track.id, remoteSong, {
-        serverURL: state.serverURL,
-        profileID: activeProfileID(),
+        serverURL: context.serverURL,
+        profileID: context.profileID,
       }) || reconciled;
       continue;
     }
-    if (!catalogRefreshed && track.remoteID && trackBelongsToActiveProfile(state, track)) continue;
     pending.push(track);
   }
   if (reconciled) {
     playlistMutationGeneration += 1;
     await persist({ refreshSidebar: false });
+    requireLocalImportServerContext(context);
     schedulePlaylistSync();
   }
   return pending;
 }
 
-async function uploadLocalImportTracks(tracks) {
+async function uploadLocalImportTracks(tracks, context) {
+  requireLocalImportServerContext(context);
+  tracks.forEach((track) => requireTrackUploadAssociationContext(track, context));
   const result = await api.uploadServer({
-    baseURL: state.serverURL,
-    adminToken: serverAdminToken,
-    profileID: activeProfileID(),
+    baseURL: context.serverURL,
+    adminToken: context.adminToken,
+    profileID: context.profileID,
     files: tracks.map((track) => ({
       trackID: track.id,
       filePath: track.filePath,
@@ -3421,16 +4310,21 @@ async function uploadLocalImportTracks(tracks) {
       artist: track.artist || "",
     })),
   });
+  requireLocalImportServerContext(context);
+  await retainServerUploadManifest(result, context, "link-import");
+  requireLocalImportServerContext(context);
+  rememberUploadedServerSongs(result?.results);
   let reconciled = false;
   for (const uploaded of result?.results || []) {
     reconciled = reconcileUploadedTrack(state, uploaded.trackID, uploaded.remoteSong, {
-      serverURL: state.serverURL,
-      profileID: activeProfileID(),
+      serverURL: context.serverURL,
+      profileID: context.profileID,
     }) || reconciled;
   }
   if (reconciled) {
     playlistMutationGeneration += 1;
     await persist({ refreshSidebar: false });
+    requireLocalImportServerContext(context);
     schedulePlaylistSync();
   }
   return result;
@@ -3504,7 +4398,7 @@ function renderLocalImportResolution() {
   const selectedKind = document.querySelector(`input[name="localImportMediaKind"][value="${mediaKind}"]`);
   if (selectedKind) selectedKind.checked = true;
   $("#localImportResolved").hidden = false;
-  $("#localImportSyncRow").hidden = false;
+  $("#localImportSyncRow").hidden = Boolean(localImportServerUploadMode);
   void renderLocalImportArtwork(track, candidates, mediaKind);
   $("#localImportTrackTitle").textContent = track.title || "Untitled";
   $("#localImportTrackMeta").textContent = searchResults
@@ -3517,7 +4411,7 @@ function renderLocalImportResolution() {
   $("#localImportCandidates").classList.toggle("playlist", playlist);
   $("#localImportCandidates").classList.toggle("search-results", searchResults);
   const candidateMarkup = (candidate, index) => `<label class="local-import-candidate${playlist ? " playlist-item" : ""}${searchResults ? " search-result" : ""}">
-    <input type="${playlist ? "checkbox" : "radio"}" name="${playlist ? "localImportPlaylistItem" : "localImportCandidate"}" value="${index}" ${playlist || index === 0 ? "checked" : ""}>
+    <input type="${playlist ? "checkbox" : "radio"}" name="${playlist ? "localImportPlaylistItem" : "localImportCandidate"}" value="${index}" ${(playlist || index === 0) && localImportCandidateCanAutoSelect(candidate) ? "checked" : ""}>
     ${playlist || searchResults ? `<span class="local-import-item-art" data-local-import-item-art="${index}">♪</span>` : ""}
     <span><strong>${escapeHTML(candidate.importMetadata?.title || candidate.title || "Untitled source")}</strong><small>${escapeHTML(localImportCandidateDetails(candidate).filter(Boolean).join(" • "))}</small></span>
     <span class="local-import-confidence">${searchResults ? escapeHTML(localImportProviderLabel(candidate)) : playlist ? candidate.playlistIndex || index + 1 : escapeHTML(candidate.quality || candidate.confidence || "file")}</span>
@@ -3544,7 +4438,12 @@ function renderLocalImportResolution() {
       );
     });
   }
-  document.querySelectorAll('input[name="localImportCandidate"], input[name="localImportPlaylistItem"]').forEach((input) => input.onchange = updateLocalImportSyncForSelection);
+  document.querySelectorAll('input[name="localImportCandidate"], input[name="localImportPlaylistItem"]').forEach((input) => {
+    input.onchange = () => {
+      localImportInteractionGeneration += 1;
+      updateLocalImportSyncForSelection();
+    };
+  });
   document.querySelectorAll("[data-local-import-preview]").forEach((button) => {
     button.onclick = (event) => {
       event.preventDefault();
@@ -3556,43 +4455,74 @@ function renderLocalImportResolution() {
   updateLocalImportSyncForSelection();
   $("#confirmLocalImport").hidden = false;
   updateLocalImportConfirmLabel();
+  if (localImportServerUploadMode) {
+    const label = localImportServerUploadMode === "reviewed_match" ? "Upload reviewed match" : "Upload source link";
+    $("#confirmLocalImport").title = label;
+    $("#confirmLocalImport").setAttribute("aria-label", label);
+  }
   $("#cancelLocalImport").hidden = true;
   setLocalImportStage({ stage: "awaiting_selection" });
 }
 
 async function resolveLinkImport() {
+  if (localImportServerUploadMode === "server_source_link") {
+    await confirmLinkImport();
+    return;
+  }
   if (localImportRunning) return;
   clearLocalImportAutoResolve();
+  normalizeLocalImportMediaKindForSource();
   const source = $("#localImportSource").value.trim();
   if (!source) {
     showLocalImportError({ stage: "resolving_metadata", message: "Enter a song, artist, album, or supported Spotify, SoundCloud, or YouTube link first." });
     return;
   }
-  await stopLocalImportPreview({ release: true, resumeMain: true });
-  normalizeLocalImportMediaKindForSource();
-  localImportRunning = true;
   const mediaKind = selectedLocalImportMediaKind();
   const sourceKey = `${mediaKind}:${source}`;
+  const reviewedDiscovery = localImportServerUploadMode === "reviewed_match";
+  let reviewedContext = null;
+  if (reviewedDiscovery) {
+    try {
+      reviewedContext = currentServerUploadContext();
+      if (!reviewedContext.adminToken.trim()) {
+        throw { stage: "searching_candidates", code: "ADMIN_KEY_REQUIRED", message: "Add a server admin key before requesting reviewed matches." };
+      }
+      reserveServerContext(reviewedContext);
+    } catch (error) {
+      showLocalImportError(error);
+      return;
+    }
+  }
+  const operation = localImportOperationSnapshot();
+  localImportRunning = true;
+  setLocalImportOperationLocked(true);
   localImportResolution = null;
   localImportResolvedSourceKey = null;
   $("#localImportError").hidden = true;
   $("#localImportResolved").hidden = true;
   $("#localImportSyncRow").hidden = true;
-  $("#localImportSource").disabled = true;
   $("#localImportSource").setAttribute("aria-busy", "true");
   $("#localImportSource").closest(".local-import-source").classList.add("searching");
   $("#cancelLocalImport").hidden = false;
-  $("#chooseLocalFiles").disabled = true;
-  setLocalImportMediaKindDisabled(true);
   setLocalImportStage({ stage: localImportInputIsLink(source) ? "resolving_metadata" : "searching_candidates" });
   try {
+    await stopLocalImportPreview({ release: true, resumeMain: true });
+    requireCurrentLocalImportOperation(operation);
+    if (reviewedContext) {
+      requireLocalImportServerContext(reviewedContext);
+      await requireCurrentServerUploadMode("reviewed_match", { requiresLocalFile: true });
+      requireCurrentLocalImportOperation(operation);
+      requireLocalImportServerContext(reviewedContext);
+    }
     const response = await api.resolveLocalImport({
       source,
       mediaKind,
-      baseURL: state.serverURL,
-      adminToken: serverAdminToken,
-      profileID: activeProfileID(),
+      baseURL: reviewedContext?.serverURL || state.serverURL,
+      adminToken: reviewedContext?.adminToken || "",
+      profileID: reviewedContext?.profileID || activeProfileID(),
     });
+    requireCurrentLocalImportOperation(operation);
+    if (reviewedContext) requireLocalImportServerContext(reviewedContext);
     if (!response?.ok) throw response?.error || { stage: "resolving_metadata", message: "The source could not be resolved." };
     localImportResolution = response.result;
     localImportResolvedSourceKey = sourceKey;
@@ -3600,39 +4530,57 @@ async function resolveLinkImport() {
   } catch (error) {
     showLocalImportError(error);
   } finally {
+    if (reviewedContext) releaseServerContext(reviewedContext);
     localImportRunning = false;
-    $("#localImportSource").disabled = false;
+    setLocalImportOperationLocked(false);
     $("#localImportSource").removeAttribute("aria-busy");
     $("#localImportSource").closest(".local-import-source").classList.remove("searching");
-    $("#chooseLocalFiles").disabled = false;
-    setLocalImportMediaKindDisabled(false);
     if (!localImportResolution) $("#cancelLocalImport").hidden = true;
   }
 }
 
 async function confirmPlaylistImport() {
+  const resolution = localImportResolution;
   const selected = [...document.querySelectorAll('input[name="localImportPlaylistItem"]:checked')]
-    .map((input) => localImportResolution.candidates[Number(input.value)])
+    .map((input) => resolution?.candidates?.[Number(input.value)])
     .filter(Boolean);
-  const mediaKind = localImportResolution.mediaKind === "video" ? "video" : "audio";
+  const mediaKind = resolution?.mediaKind === "video" ? "video" : "audio";
   if (!selected.length) {
     showLocalImportError({ stage: "awaiting_selection", message: `Choose at least one playlist ${mediaKind === "video" ? "video" : "song"} to download.` });
     return;
   }
+  const uploadRequested = $("#localImportSync").checked;
+  const needsServerContext = localImportNeedsServerContext({ uploadRequested });
   const uploadConfigurationError = localImportUploadConfigurationError(false);
   if (uploadConfigurationError) {
     showLocalImportError(uploadConfigurationError);
     return;
   }
-  const playlistTitle = localImportResolution.playlist?.title || localImportResolution.track.title || "Imported Playlist";
-  const uploadRequested = $("#localImportSync").checked;
-  await stopLocalImportPreview({ release: true, resumeMain: true });
+  let importContext = null;
+  if (needsServerContext) {
+    try { importContext = currentServerUploadContext(); }
+    catch {
+      showLocalImportError({ stage: "syncing", code: "SERVER_URL_REQUIRED", message: "Add a valid server URL before uploading." });
+      return;
+    }
+  }
+  const playlistTitle = resolution.playlist?.title || resolution.track.title || "Imported Playlist";
+  const operation = localImportOperationSnapshot("localImportPlaylistItem", { requiresResolvedSource: true });
+  if (importContext) reserveServerContext(importContext);
   localImportRunning = true;
+  setLocalImportOperationLocked(true);
+  try {
+    await stopLocalImportPreview({ release: true, resumeMain: true });
+    requireCurrentLocalImportOperation(operation);
+    if (importContext) requireLocalImportServerContext(importContext);
+  } catch (error) {
+    if (importContext) releaseServerContext(importContext);
+    localImportRunning = false;
+    setLocalImportOperationLocked(false);
+    showLocalImportError(error);
+    return;
+  }
   $("#localImportError").hidden = true;
-  $("#confirmLocalImport").disabled = true;
-  $("#localImportSource").disabled = true;
-  $("#chooseLocalFiles").disabled = true;
-  setLocalImportMediaKindDisabled(true);
   $("#cancelLocalImport").hidden = false;
   serverTransferCancelRequested = false;
   localImportKeepStateOnClose = true;
@@ -3674,13 +4622,19 @@ async function confirmPlaylistImport() {
       const importMetadata = candidate.importMetadata || candidate;
       let response = null;
       let lastDownloadError = null;
-      const downloadCandidates = [candidate, ...(Array.isArray(candidate.fallbackCandidates) ? candidate.fallbackCandidates : [])];
+      const downloadCandidates = [
+        candidate,
+        ...(Array.isArray(candidate.fallbackCandidates)
+          ? candidate.fallbackCandidates.filter(localImportCandidateCanAutoSelect)
+          : []),
+      ];
       for (const downloadCandidate of downloadCandidates) {
         for (let attempt = 0; attempt < 3; attempt += 1) {
           if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt === 1 ? 400 : 1200));
           try {
             response = await api.startLocalImport({
               sourceURL: downloadCandidate.sourceURL,
+              sourceIdentity: localImportSourceIdentity(downloadCandidate, importMetadata),
               mediaKind,
               metadata: {
                 title: importMetadata.title,
@@ -3708,10 +4662,14 @@ async function confirmPlaylistImport() {
         });
         continue;
       }
+      if (importContext) requireLocalImportServerContext(importContext);
       if (response.result.kind === "duplicate") {
         duplicates += 1;
         const duplicate = state.tracks.find((track) => track.id === response.result.trackID) || null;
-        if (duplicate) importedTrackIDs.push(duplicate.id);
+        if (duplicate) {
+          importedTrackIDs.push(duplicate.id);
+          if (backfillLocalImportSourceIdentity(duplicate, response.result.sourceIdentity)) await persist();
+        }
         queueUpload(duplicate, response.result);
         continue;
       }
@@ -3737,14 +4695,14 @@ async function confirmPlaylistImport() {
     await saveImportedPlaylist();
     if (!cancelled && uploadQueue.length) {
       localImportBatchContext = null;
-      const pendingUploads = await prepareLocalImportUploadBatch(uploadQueue);
+      const pendingUploads = await prepareLocalImportUploadBatch(uploadQueue, importContext);
       if (pendingUploads.length) {
-        const uploadResult = await uploadLocalImportTracks(pendingUploads);
+        const uploadResult = await uploadLocalImportTracks(pendingUploads, importContext);
         uploadedCount = Number(uploadResult?.uploaded) || 0;
         uploadFailures.push(...(uploadResult?.failed || []));
         uploadCancelled = Boolean(uploadResult?.cancelled || serverTransferCancelRequested);
       }
-      if (uploadedCount) await refreshServerCatalogAfterLocalImportUpload();
+      if (uploadedCount) scheduleServerCatalogRefresh(importContext);
     }
     if (created.length) {
       render();
@@ -3763,7 +4721,7 @@ async function confirmPlaylistImport() {
       setLocalImportStage({ stage: "failed" });
     } else {
       const duplicateText = duplicates ? ` ${duplicates} already on this device.` : "";
-      const uploadedText = uploadedCount ? ` Uploaded ${uploadedCount} to ${activeProfile().name || "the active server profile"}.` : "";
+      const uploadedText = uploadedCount ? ` Uploaded ${uploadedCount} to ${importContext.profileName}.` : "";
       const uploadFailureNotice = formatServerUploadFailureNotice(uploadFailures);
       const uploadText = uploadFailureNotice ? ` ${uploadFailureNotice} The local files were kept.` : "";
       showNotice(`Downloaded ${created.length} playlist ${mediaKind === "video" ? "video" : "song"}${created.length === 1 ? "" : "s"}.${duplicateText}${uploadedText}${uploadText}`, uploadFailures.length ? "error" : "status");
@@ -3779,43 +4737,160 @@ async function confirmPlaylistImport() {
     showLocalImportError(error);
     setLocalImportStage({ stage: "failed" });
   } finally {
+    if (importContext) releaseServerContext(importContext);
     localImportBatchContext = null;
     localImportRunning = false;
-    $("#confirmLocalImport").disabled = false;
-    $("#localImportSource").disabled = false;
-    $("#chooseLocalFiles").disabled = false;
-    setLocalImportMediaKindDisabled(false);
+    setLocalImportOperationLocked(false);
     $("#cancelLocalImport").hidden = true;
     hideServerTransfer();
     serverTransferCancelRequested = false;
   }
 }
 
+async function requireCurrentServerUploadMode(requestedMode, { requiresLocalFile = false } = {}) {
+  await refreshClientConfig({ force: true });
+  const modes = currentServerTransferModes();
+  if (requiresLocalFile && !modes.available.upload.includes("local_file")) {
+    throw {
+      stage: "syncing",
+      code: "LOCAL_FILE_MODE_REQUIRED",
+      message: "Reviewed-match upload also requires Local files mode because Windows uploads the verified reviewed bytes.",
+    };
+  }
+  if (modes.uploadMode !== requestedMode || !modes.available.upload.includes(requestedMode)) {
+    throw { stage: "syncing", code: "MODE_DISABLED", message: "That upload mode is no longer enabled for this server and profile." };
+  }
+  return modes;
+}
+
+async function confirmServerSourceImport() {
+  const requestedMode = localImportServerUploadMode;
+  if (requestedMode !== "server_source_link") return false;
+  const sourcePageURL = exactYouTubeSourcePageURL($("#localImportSource").value);
+  if (!sourcePageURL) {
+    throw { stage: "syncing", code: "SOURCE_PAGE_REQUIRED", message: "Server source import currently requires a canonical YouTube song page." };
+  }
+  const context = currentServerUploadContext();
+  if (!context.adminToken.trim()) {
+    throw { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Add a server admin key before importing a source link." };
+  }
+  reserveServerContext(context);
+  const operation = localImportOperationSnapshot();
+  localImportRunning = true;
+  setLocalImportOperationLocked(true);
+  try {
+    await requireCurrentServerUploadMode(requestedMode);
+    requireCurrentLocalImportOperation(operation);
+    requireLocalImportServerContext(context);
+    localImportKeepStateOnClose = true;
+    $("#localImportDialog").close();
+    updateServerTransfer({
+      direction: "upload",
+      owner: "local-import",
+      title: "Importing source link",
+      currentFile: "Preparing server import…",
+      completed: 0,
+      total: 1,
+    });
+    const response = await api.importServerSource({
+      baseURL: context.serverURL,
+      token: context.token || context.adminToken,
+      adminToken: context.adminToken,
+      profileID: context.profileID,
+      mode: requestedMode,
+      sourcePageURL,
+    });
+    requireLocalImportServerContext(context);
+    const song = response?.song;
+    if (!song?.id) throw new Error("The server imported the source but returned an invalid song record.");
+    rememberUploadedServerSongs([{ remoteSong: song }]);
+    serverConnectionText = `${response.status === "restored" ? "Restored" : "Imported"} ${song.title || "song"}`;
+    showNotice(`${serverConnectionText} on ${context.profileName}.`, "status");
+    setLocalImportStage({ stage: "complete" });
+    scheduleServerCatalogRefresh(context);
+    return true;
+  } finally {
+    releaseServerContext(context);
+    localImportRunning = false;
+    setLocalImportOperationLocked(false);
+    hideServerTransfer("local-import");
+  }
+}
+
 async function confirmLinkImport() {
-  if (localImportRunning || !localImportResolution) return;
-  if (localImportResolution.kind?.endsWith("_playlist")) {
+  if (localImportRunning) return;
+  if (localImportServerUploadMode === "server_source_link") {
+    try {
+      await confirmServerSourceImport();
+    } catch (error) {
+      showLocalImportError(error);
+    }
+    return;
+  }
+  if (!localImportResolution) return;
+  const resolution = localImportResolution;
+  const reviewedUpload = localImportServerUploadMode === "reviewed_match";
+  if (reviewedUpload && resolution.kind?.endsWith("_playlist")) {
+    showLocalImportError({ stage: "awaiting_selection", code: "PLAYLIST_UNSUPPORTED", message: "Reviewed-match upload accepts one explicitly selected song at a time." });
+    return;
+  }
+  if (resolution.kind?.endsWith("_playlist")) {
     await confirmPlaylistImport();
     return;
   }
   const selected = document.querySelector('input[name="localImportCandidate"]:checked');
-  const candidate = localImportResolution.candidates[Number(selected?.value) || 0];
-  const mediaKind = localImportResolution.mediaKind === "video" ? "video" : "audio";
+  const candidate = selected ? resolution.candidates[Number(selected.value)] : null;
+  const mediaKind = resolution.mediaKind === "video" ? "video" : "audio";
   if (!candidate) {
     showLocalImportError({ stage: "awaiting_selection", message: `Choose one ${mediaKind} source to import.` });
     return;
   }
-  const uploadConfigurationError = localImportUploadConfigurationError(Boolean(candidate.serverBacked));
+  if (reviewedUpload && candidate.serverBacked) {
+    showLocalImportError({
+      stage: "awaiting_selection",
+      code: "REVIEWED_LOCAL_SOURCE_REQUIRED",
+      message: "Choose a locally verifiable audio candidate for reviewed-match upload.",
+    });
+    return;
+  }
+  const uploadRequested = reviewedUpload || $("#localImportSync").checked;
+  if (reviewedUpload) $("#localImportSync").checked = true;
+  const serverBacked = Boolean(candidate.serverBacked);
+  const needsServerContext = localImportNeedsServerContext({ serverBacked, uploadRequested });
+  const uploadConfigurationError = localImportUploadConfigurationError(serverBacked);
   if (uploadConfigurationError) {
     showLocalImportError(uploadConfigurationError);
     return;
   }
-  await stopLocalImportPreview({ release: true, resumeMain: true });
+  let importContext = null;
+  if (needsServerContext) {
+    try { importContext = currentServerUploadContext(); }
+    catch {
+      showLocalImportError({ stage: "syncing", code: "SERVER_URL_REQUIRED", message: "Add a valid server URL before using this server-backed source." });
+      return;
+    }
+  }
+  const operation = localImportOperationSnapshot("localImportCandidate", { requiresResolvedSource: true });
+  if (importContext) reserveServerContext(importContext);
   localImportRunning = true;
+  setLocalImportOperationLocked(true);
+  try {
+    if (reviewedUpload) {
+      await requireCurrentServerUploadMode("reviewed_match", { requiresLocalFile: true });
+      requireCurrentLocalImportOperation(operation);
+      if (importContext) requireLocalImportServerContext(importContext);
+    }
+    await stopLocalImportPreview({ release: true, resumeMain: true });
+    requireCurrentLocalImportOperation(operation);
+    if (importContext) requireLocalImportServerContext(importContext);
+  } catch (error) {
+    if (importContext) releaseServerContext(importContext);
+    localImportRunning = false;
+    setLocalImportOperationLocked(false);
+    showLocalImportError(error);
+    return;
+  }
   $("#localImportError").hidden = true;
-  $("#confirmLocalImport").disabled = true;
-  $("#localImportSource").disabled = true;
-  $("#chooseLocalFiles").disabled = true;
-  setLocalImportMediaKindDisabled(true);
   $("#cancelLocalImport").hidden = false;
   setLocalImportStage({ stage: "inspecting_source", selected: candidate });
   serverTransferCancelRequested = false;
@@ -3823,14 +4898,17 @@ async function confirmLinkImport() {
   localImportKeepStateOnClose = true;
   $("#localImportDialog").close();
   try {
-    const selectedMetadata = candidate.importMetadata || localImportResolution.track;
+    const selectedMetadata = candidate.importMetadata || resolution.track;
     const metadata = {
+      provider: selectedMetadata.provider || candidate.searchProvider || null,
+      trackID: selectedMetadata.trackID || selectedMetadata.providerID || null,
       title: selectedMetadata.title,
       artist: selectedMetadata.artist,
       album: selectedMetadata.album,
       durationSeconds: selectedMetadata.durationSeconds,
       artworkURL: selectedMetadata.artworkURL || candidate.thumbnailURL,
       sourceURL: selectedMetadata.sourceURL || candidate.sourceURL,
+      sourcePageURL: selectedMetadata.sourcePageURL || selectedMetadata.sourceURL || null,
     };
     const existing = state.tracks.map((track) => ({
       id: track.id,
@@ -3840,28 +4918,31 @@ async function confirmLinkImport() {
       contentSha256: track.contentSha256 || null,
     }));
     const response = candidate.serverBacked ? await api.startExternalImport({
-      baseURL: state.serverURL,
-      adminToken: serverAdminToken,
-      profileID: activeProfileID(),
+      baseURL: importContext.serverURL,
+      adminToken: importContext.adminToken,
+      profileID: importContext.profileID,
       sourceURL: candidate.sourceURL,
+      sourceIdentity: localImportSourceIdentity(candidate, metadata),
       resumeSelection: candidate.sourceProvider === "torbox_file",
       fileID: candidate.fileID,
       metadata,
       existing,
     }) : await api.startLocalImport({
       sourceURL: candidate.sourceURL,
+      sourceIdentity: localImportSourceIdentity(candidate, metadata),
       mediaKind,
       metadata,
       existing,
     });
     if (!response?.ok) throw response?.error || { stage: "saving_local", message: "The local song could not be saved." };
+    if (importContext) requireLocalImportServerContext(importContext);
     if (response.result.kind === "selection_required") {
-      localImportResolution.candidates = response.result.files.map((file) => ({
+      resolution.candidates = response.result.files.map((file) => ({
         title: file.name,
         artist: "",
-        album: localImportResolution.track.album,
+        album: resolution.track.album,
         durationSeconds: null,
-        thumbnailURL: localImportResolution.track.artworkURL,
+        thumbnailURL: resolution.track.artworkURL,
         sourceProvider: "torbox_file",
         sourceKind: "server_file",
         sourceURL: null,
@@ -3869,6 +4950,7 @@ async function confirmLinkImport() {
         size: file.size,
         contentType: file.contentType,
         confidence: "file",
+        sourceIdentity: localImportSourceIdentity(candidate, metadata),
         serverBacked: true,
       }));
       renderLocalImportResolution();
@@ -3881,6 +4963,7 @@ async function confirmLinkImport() {
     let importedTrack = null;
     if (response.result.kind === "duplicate") {
       importedTrack = state.tracks.find((track) => track.id === response.result.trackID) || null;
+      if (backfillLocalImportSourceIdentity(importedTrack, response.result.sourceIdentity)) await persist();
       setLocalImportStage({ stage: "local_complete" });
       showNotice(importedTrack ? `${importedTrack.title} is already in this device library.` : `This ${mediaKind} is already in the device library.`, "status");
     } else {
@@ -3896,21 +4979,42 @@ async function confirmLinkImport() {
       updateChrome();
       setLocalImportStage({ stage: "local_complete" });
       showNotice(response.result.serverBacked
-        ? `Imported ${importedTrack.title} on this device and ${activeProfile().name || "the active server profile"}.`
+        ? `Imported ${importedTrack.title} on this device and ${importContext.profileName}.`
         : `${mediaKind === "video" ? "Downloaded" : "Imported"} ${importedTrack.title} on this device.`, "status");
     }
 
-    if (!response.result.serverBacked && $("#localImportSync").checked && importedTrack?.filePath) {
-      setLocalImportStage({ stage: "syncing", profileID: activeProfileID() });
-      const uploaded = await uploadLocalImportTrack(importedTrack);
+    if (response.result.serverBacked && response.result.remoteSong && importedTrack) {
+      requireTrackUploadAssociationContext(importedTrack, importContext);
+      rememberUploadedServerSongs([{ remoteSong: response.result.remoteSong }]);
+      if (reconcileUploadedTrack(state, importedTrack.id, response.result.remoteSong, {
+        serverURL: importContext.serverURL,
+        profileID: importContext.profileID,
+      })) {
+        playlistMutationGeneration += 1;
+        await persist({ refreshSidebar: false });
+        requireLocalImportServerContext(importContext);
+        schedulePlaylistSync();
+      }
+    }
+
+    if (!response.result.serverBacked && uploadRequested && importedTrack?.filePath) {
+      setLocalImportStage({ stage: "syncing", profileID: importContext.profileID });
+      const uploaded = reviewedUpload
+        ? await uploadReviewedMatchTrack(importedTrack, importContext)
+        : await uploadLocalImportTrack(importedTrack, importContext);
       if (!uploaded?.ok) {
-        showLocalImportError(uploaded?.error || { stage: "syncing", message: "The song was saved locally, but its optional profile upload failed." });
+        showLocalImportError(uploaded?.error || {
+          stage: "syncing",
+          message: reviewedUpload
+            ? "The reviewed song was saved locally, but its verified-byte upload failed."
+            : "The song was saved locally, but its optional profile upload failed.",
+        });
         return;
       }
-      await refreshServerCatalogAfterLocalImportUpload();
+      scheduleServerCatalogRefresh(importContext);
       showNotice(uploaded.skipped
-        ? `${importedTrack.title} is already on ${activeProfile().name || "the active server profile"}.`
-        : `Uploaded ${importedTrack.title} to ${activeProfile().name || "the active server profile"}.`, "status");
+        ? `${importedTrack.title} is already on ${importContext.profileName}.`
+        : `Uploaded ${importedTrack.title} to ${importContext.profileName}.`, "status");
     }
     setLocalImportStage({ stage: "complete" });
     $("#confirmLocalImport").hidden = true;
@@ -3921,11 +5025,9 @@ async function confirmLinkImport() {
   } catch (error) {
     showLocalImportError(error);
   } finally {
+    if (importContext) releaseServerContext(importContext);
     localImportRunning = false;
-    $("#confirmLocalImport").disabled = false;
-    $("#localImportSource").disabled = false;
-    $("#chooseLocalFiles").disabled = false;
-    setLocalImportMediaKindDisabled(false);
+    setLocalImportOperationLocked(false);
     if ($("#localImportStage").dataset.stage !== "downloading") $("#cancelLocalImport").hidden = true;
     hideServerTransfer("local-import");
     serverTransferCancelRequested = false;
@@ -3934,6 +5036,7 @@ async function confirmLinkImport() {
 
 async function cancelLinkImport() {
   if (!localImportRunning) return;
+  localImportInteractionGeneration += 1;
   $("#cancelLocalImport").disabled = true;
   try { await api.cancelLocalImport(); }
   finally {
@@ -3943,6 +5046,7 @@ async function cancelLinkImport() {
 }
 
 async function closeLocalImport() {
+  localImportInteractionGeneration += 1;
   await stopLocalImportPreview({ release: true, resumeMain: true });
   if (localImportRunning) await api.cancelLocalImport();
   $("#localImportDialog").close();
@@ -4070,10 +5174,20 @@ async function serverAction(mode) {
     serverConnectPending = true;
     return;
   }
-  serverToken = $("#serverToken")?.value || serverToken;
   const status = $("#serverStatus");
-  await saveServerForm();
+  try {
+    await saveServerForm();
+  } catch (error) {
+    showNotice(error.message || "The server connection cannot change during a transfer.");
+    return;
+  }
+  if (mode !== "catalog" && currentServerTransferModes().downloadMode !== "verified_file_cache") {
+    showNotice("Offline downloads are disabled by the signed server configuration. Choose a song to play it directly from the server.");
+    if (section === "server") renderServer();
+    return;
+  }
   const context = currentProfileContext();
+  const catalogRequestGeneration = serverCatalogGeneration;
   serverConnectInFlight = true;
   if (mode !== "catalog") {
     serverTransferCancelRequested = false;
@@ -4106,22 +5220,30 @@ async function serverAction(mode) {
       await persist();
     } else {
       catalog = await api.fetchCatalog({ baseURL: context.serverURL, token: context.token, profileID: context.profileID });
-      if (!profileContextIsCurrent(context)) return;
+      if (!catalogRequestCanApply({
+        requestGeneration: catalogRequestGeneration,
+        currentGeneration: serverCatalogGeneration,
+        contextCurrent: profileContextIsCurrent(context),
+      })) return;
       serverConnectionText = `Connected • ${catalog.count} song${catalog.count === 1 ? "" : "s"}`;
     }
     if (catalog) {
-      serverCatalog = catalog.songs || [];
+      replaceServerCatalog(catalog.songs);
       serverConnected = true;
       hydrateServerCatalogArtwork(serverCatalog);
     }
     await persist();
     renderSidebar();
-    if (!transferCancelled) await syncPlaylistsNow({ automatic: true });
+    if (!transferCancelled) schedulePlaylistSync();
   } catch (error) {
     if (!profileContextIsCurrent(context)) return;
+    if (mode === "catalog" && !catalogRequestCanApply({
+      requestGeneration: catalogRequestGeneration,
+      currentGeneration: serverCatalogGeneration,
+    })) return;
     serverConnectionText = serverTransferCancelRequested ? "Download cancelled" : friendlyIPCError(error, "Connection failed");
     serverConnected = false;
-    serverCatalog = [];
+    replaceServerCatalog([]);
     selectedRemoteIDs.clear();
     serverSelecting = false;
     if (!serverTransferCancelRequested) showNotice(serverConnectionText);
@@ -4140,32 +5262,56 @@ async function serverAction(mode) {
 }
 
 async function uploadServerSongs() {
-  if (serverTransferActive) return;
+  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || Boolean(serverContextReservation) })) return;
   await saveServerForm();
-  const context = currentProfileContext();
+  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || Boolean(serverContextReservation) })) return;
+  const uploadMode = currentServerTransferModes().uploadMode;
+  if (["server_source_link", "reviewed_match"].includes(uploadMode)) {
+    openLocalImport({ serverUploadMode: uploadMode });
+    return;
+  }
+  if (uploadMode !== "local_file") {
+    showNotice("Uploads are disabled by the signed server configuration.");
+    return;
+  }
+  const configurationError = serverUploadConfigurationError({ serverURL: state.serverURL, adminToken: serverAdminToken });
+  if (configurationError) {
+    showNotice(configurationError);
+    return;
+  }
+  const context = currentServerUploadContext();
   const status = $("#serverStatus");
   serverTransferCancelRequested = false;
   updateServerTransfer({ direction: "upload", currentFile: "Choose songs to upload…", completed: 0, total: 1 });
   try {
-    const result = await api.uploadServer({ baseURL: context.serverURL, adminToken: serverAdminToken, profileID: context.profileID });
-    if (!profileContextIsCurrent(context)) return;
+    const result = await api.uploadServer({
+      baseURL: context.serverURL,
+      adminToken: context.adminToken,
+      profileID: context.profileID,
+      associationConflictPaths: remoteAssociationConflictFilePaths(state.tracks, context),
+    });
+    if (!serverUploadContextIsCurrent(context)) return;
+    if (result.selectionCancelled) {
+      serverConnectionText = "No files selected";
+      if (status) status.textContent = serverConnectionText;
+      return;
+    }
+    rememberUploadedServerSongs(result.results);
+    await retainServerUploadManifest(result, context, "picker");
+    const failedUploads = Array.isArray(result.failed) ? result.failed : [];
+    const failureNotice = formatServerUploadFailureNotice(failedUploads);
     const cancelled = Boolean(result.cancelled || serverTransferCancelRequested);
     serverConnectionText = cancelled
       ? `Upload cancelled${result.uploaded ? ` • ${result.uploaded} completed` : ""}`
-      : `Uploaded ${result.uploaded} song${result.uploaded === 1 ? "" : "s"}`;
+      : failedUploads.length
+        ? `Uploaded ${result.uploaded} song${result.uploaded === 1 ? "" : "s"} • ${failedUploads.length} failed`
+        : `Uploaded ${result.uploaded} song${result.uploaded === 1 ? "" : "s"}`;
     if (status) status.textContent = serverConnectionText;
-    if (cancelled) {
-      const catalog = await api.fetchCatalog({ baseURL: context.serverURL, token: context.token, profileID: context.profileID });
-      if (!profileContextIsCurrent(context)) return;
-      serverCatalog = catalog.songs || [];
-      serverConnected = true;
-      hydrateServerCatalogArtwork(serverCatalog);
-      if (section === "server") renderServer();
-    } else {
-      await serverAction("catalog");
-    }
+    if (!cancelled && failureNotice) showNotice(failureNotice);
+    else if (!cancelled && result.uploaded) showNotice(serverConnectionText, "status");
+    if (result.uploaded) scheduleServerCatalogRefresh(context);
   } catch (error) {
-    if (!profileContextIsCurrent(context)) return;
+    if (!serverUploadContextIsCurrent(context)) return;
     serverConnectionText = serverTransferCancelRequested ? "Upload cancelled" : friendlyIPCError(error, "Upload failed");
     if (status) status.textContent = serverConnectionText;
     if (!serverTransferCancelRequested) showNotice(serverConnectionText);
@@ -4176,16 +5322,23 @@ async function uploadServerSongs() {
 }
 
 async function uploadMissingDownloadedSongs() {
-  if (serverTransferActive) return;
+  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || Boolean(serverContextReservation) })) return;
   await saveServerForm();
-  const context = currentProfileContext();
+  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || Boolean(serverContextReservation) })) return;
+  if (currentServerTransferModes().uploadMode !== "local_file") {
+    showNotice("Uploading downloaded songs is available only in Local files upload mode.");
+    return;
+  }
+  const configurationError = serverUploadConfigurationError({ serverURL: state.serverURL, adminToken: serverAdminToken });
+  if (configurationError) {
+    showNotice(configurationError);
+    return;
+  }
+  const context = currentServerUploadContext();
   const status = $("#serverStatus");
   serverTransferCancelRequested = false;
   updateServerTransfer({ direction: "upload", currentFile: "Checking downloaded songs…", completed: 0, total: 1 });
   try {
-    const catalog = await api.fetchCatalog({ baseURL: context.serverURL, token: context.token, profileID: context.profileID });
-    if (!profileContextIsCurrent(context)) return;
-    serverCatalog = catalog.songs || [];
     const plan = planMissingDownloadedUploads(state, serverCatalog);
     for (const match of plan.matches) {
       reconcileUploadedTrack(state, match.trackID, match.remoteSong, {
@@ -4193,17 +5346,24 @@ async function uploadMissingDownloadedSongs() {
         profileID: context.profileID,
       });
     }
-    if (plan.matches.length) await persist();
+    if (plan.matches.length) {
+      await persist();
+      schedulePlaylistSync();
+    }
     if (!plan.uploadTracks.length) {
-      serverConnectionText = "All downloaded songs are already on the server";
+      serverConnectionText = plan.ambiguous.length
+        ? `${plan.ambiguous.length} downloaded song${plan.ambiguous.length === 1 ? " needs" : "s need"} review before upload`
+        : "All downloaded songs are already on the server";
       if (status) status.textContent = serverConnectionText;
-      showNotice(serverConnectionText, "status");
+      showNotice(plan.ambiguous.length
+        ? `${serverConnectionText}. Resonance found metadata-only catalog matches and did not automatically associate or upload them.`
+        : serverConnectionText, plan.ambiguous.length ? "error" : "status");
       if (section === "server") renderServer();
       return;
     }
     const result = await api.uploadServer({
       baseURL: context.serverURL,
-      adminToken: serverAdminToken,
+      adminToken: context.adminToken,
       profileID: context.profileID,
       files: plan.uploadTracks.map((track) => ({
         trackID: track.id,
@@ -4212,35 +5372,38 @@ async function uploadMissingDownloadedSongs() {
         artist: track.artist,
       })),
     });
-    if (!profileContextIsCurrent(context)) return;
+    if (!serverUploadContextIsCurrent(context)) return;
+    rememberUploadedServerSongs(result.results);
     for (const uploaded of result.results || []) {
       reconcileUploadedTrack(state, uploaded.trackID, uploaded.remoteSong, {
         serverURL: context.serverURL,
         profileID: context.profileID,
       });
     }
-    if ((result.results || []).length) await persist();
+    await retainServerUploadManifest(result, context, "missing-downloads");
     const failureNotice = formatServerUploadFailureNotice(result.failed);
+    const ambiguousNotice = plan.ambiguous.length
+      ? `${plan.ambiguous.length} metadata-only match${plan.ambiguous.length === 1 ? " was" : "es were"} left unchanged for review.`
+      : "";
     const cancelled = Boolean(result.cancelled || serverTransferCancelRequested);
     if (cancelled) {
       serverConnectionText = `Upload cancelled${result.uploaded ? ` • ${result.uploaded} completed` : ""}`;
     } else if (failureNotice) {
       serverConnectionText = `Uploaded ${result.uploaded}; ${(result.failed || []).length} failed`;
-      showNotice(failureNotice);
+      showNotice(`${failureNotice}${ambiguousNotice ? ` ${ambiguousNotice}` : ""}`);
     } else {
       serverConnectionText = `Uploaded ${result.uploaded} missing song${result.uploaded === 1 ? "" : "s"}`;
-      showNotice(serverConnectionText, "status");
+      showNotice(`${serverConnectionText}.${ambiguousNotice ? ` ${ambiguousNotice}` : ""}`, ambiguousNotice ? "error" : "status");
     }
     if (status) status.textContent = serverConnectionText;
-    const refreshed = await api.fetchCatalog({ baseURL: context.serverURL, token: context.token, profileID: context.profileID });
-    if (!profileContextIsCurrent(context)) return;
-    serverCatalog = refreshed.songs || [];
     serverConnected = true;
-    hydrateServerCatalogArtwork(serverCatalog);
     if (section === "server") renderServer();
-    if ((result.results || []).length) schedulePlaylistSync();
+    if ((result.results || []).length) {
+      schedulePlaylistSync();
+      scheduleServerCatalogRefresh(context);
+    }
   } catch (error) {
-    if (!profileContextIsCurrent(context)) return;
+    if (!serverUploadContextIsCurrent(context)) return;
     serverConnectionText = serverTransferCancelRequested ? "Upload cancelled" : friendlyIPCError(error, "Upload failed");
     if (status) status.textContent = serverConnectionText;
     if (!serverTransferCancelRequested) showNotice(serverConnectionText);
@@ -4288,8 +5451,12 @@ function finishClipPlaybackIfNeeded() {
     audio.currentTime = range.startSeconds;
     state.position = range.startSeconds;
     void requestPlayback();
-  } else {
-    move(1);
+  } else if (!move(1)) {
+    audio.pause();
+    audio.currentTime = range.endSeconds;
+    state.position = range.endSeconds;
+    persistInBackground({ refreshSidebar: false });
+    updateChrome();
   }
   queueMicrotask(() => { clipBoundaryTrackID = null; });
   return true;
@@ -4297,10 +5464,21 @@ function finishClipPlaybackIfNeeded() {
 
 function play(track, queue = null, options = {}) {
   if (!track) return;
-  const { recordHistory = true, playlistID = activePlaybackPlaylistID } = options;
-  if (Array.isArray(queue) && queue.length) setPlaybackContext(queue, playlistID);
-  else if (!activePlaybackQueueIDs.includes(track.id)) setPlaybackContext(tracksForActiveProfile(state), null);
-  if (recordHistory && currentID && currentID !== track.id) history.push(currentID);
+  if (track.available === false || track.missing) {
+    showNotice(`${track.title || "This song"} is still in your library, but its file is unavailable on this device.`);
+    return;
+  }
+  const {
+    recordHistory = true,
+    playlistID = activePlaybackPlaylistID,
+    autoplay = true,
+  } = options;
+  if (Array.isArray(queue) && queue.length) setPlaybackContext(queue, playlistID, track.id);
+  else if (!activePlaybackQueueIDs.includes(track.id)) setPlaybackContext(tracksForActiveProfile(state), null, track.id);
+  if (recordHistory
+      && currentID
+      && currentID !== track.id
+      && state.tracks.some((candidate) => candidate.id === currentID)) history.push(currentID);
   if (activeListeningEntryID) {
     updateListeningSession();
     persistInBackground();
@@ -4309,22 +5487,29 @@ function play(track, queue = null, options = {}) {
   activeListeningEntryID = null;
   lastListeningPosition = 0;
   lastPersistedListeningSeconds = 0;
+  if (activeServerStream && track.id !== activeServerStream.track.id) {
+    releaseActiveServerStream({ stopPlayback: false });
+  }
   currentID = track.id;
-  state.currentTrackID = currentID;
+  state.currentTrackID = track.transientStream ? null : currentID;
   const range = playbackRangeForTrack(state, track);
   state.position = range?.startSeconds ?? 0;
   pendingRestorePosition = state.position;
-  audio.src = track.fileUrl;
+  setAudioSource(track);
   audio.volume = playbackGainForVolume(state.volume);
   audio.playbackRate = Number($("#speed").value) || 1;
-  void requestPlayback();
+  if (autoplay) void requestPlayback();
   persistInBackground(); updateChrome(); render();
 }
 
 function toggle() {
+  if (installedVideoOwnsPlayback()) {
+    toggleInstalledVideoPlayback();
+    return;
+  }
   const track = currentTrack();
   if (!track) {
-    const firstTrack = tracksForActiveProfile(state)[0];
+    const firstTrack = tracksForActiveProfile(state).find((candidate) => candidate.available !== false);
     if (firstTrack) play(firstTrack);
     return;
   }
@@ -4341,12 +5526,23 @@ function toggle() {
 }
 
 function move(direction, recordHistory = direction > 0) {
+  if (installedVideoOwnsPlayback()) {
+    return advanceInstalledVideo(direction);
+  }
+  if (currentTrack()?.transientStream) return false;
   const tracks = activePlaybackTracks();
-  const index = nextIndex(tracks, currentID, direction, shuffle);
-  if (index >= 0) play(tracks[index], null, { recordHistory });
+  const index = nextIndex(tracks, currentID, direction);
+  if (index < 0) return false;
+  play(tracks[index], null, { recordHistory });
+  return true;
 }
 
 function previous() {
+  if (installedVideoOwnsPlayback()) {
+    previousInstalledVideo();
+    return;
+  }
+  if (currentTrack()?.transientStream) return;
   const range = activeClipRange();
   const start = range?.startSeconds ?? 0;
   if (audio.currentTime > start + 3) {
@@ -4387,7 +5583,7 @@ function newPlaylist(trackID = null) {
 
 function renderSidebar() {
   normalizeState(state);
-  $("#sidebarPlaylists").innerHTML = state.playlists.map((playlist) => `<button data-side-playlist="${playlist.id}" aria-keyshortcuts="Shift+F10"><span>${playlist.isSystem ? "♥" : "♪"}</span><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div></button>`).join("");
+  $("#sidebarPlaylists").innerHTML = state.playlists.map((playlist) => `<button data-side-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10"><span>${playlist.isSystem ? "♥" : "♪"}</span><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div></button>`).join("");
   document.querySelectorAll("[data-side-playlist]").forEach((button) => {
     button.onclick = () => navigate("library", button.dataset.sidePlaylist);
     button.oncontextmenu = (event) => openPlaylistContextMenu(event, button.dataset.sidePlaylist);
@@ -4404,22 +5600,26 @@ function renderQueue() {
   if (!$("#queue")) return;
   const tracks = activePlaybackTracks();
   const index = tracks.findIndex((track) => track.id === currentID);
-  const queue = index < 0 ? tracks : [...tracks.slice(index + 1), ...tracks.slice(0, index)];
-  $("#queue").innerHTML = queue.slice(0, 12).map((track) => `<button data-queue="${track.id}">${artwork(track)}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)}</small></span><time>${formatTime(track.duration)}</time></button>`).join("") || `<div class="empty"><span>Queue is empty</span></div>`;
+  const queue = index < 0 ? tracks : tracks.slice(index + 1);
+  $("#queue").innerHTML = queue.slice(0, 12).map((track) => `<button data-queue="${escapeHTML(track.id)}">${artwork(track)}<span><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)}</small></span><time>${formatTime(track.duration)}</time></button>`).join("") || `<div class="empty"><span>Queue is empty</span></div>`;
   document.querySelectorAll("[data-queue]").forEach((button) => button.onclick = () => play(state.tracks.find((track) => track.id === button.dataset.queue && trackBelongsToActiveProfile(state, track))));
 }
 
 function fullPlayerQueueTracks() {
   const tracks = activePlaybackTracks();
   const index = tracks.findIndex((track) => track.id === currentID);
-  return index < 0 ? tracks : [...tracks.slice(index + 1), ...tracks.slice(0, index)];
+  return index < 0 ? tracks : tracks.slice(index + 1);
 }
 
 function fullPlayerHistoryTracks() {
   const profileID = activeProfileID();
+  const serverOrigin = normalizedServerOrigin(state.serverURL);
   const activeTracks = tracksForActiveProfile(state);
   const syncedHistory = [...state.listeningHistory]
-    .filter((entry) => (entry.profileID || "default") === profileID && entry.id !== activeListeningEntryID)
+    .filter((entry) =>
+      (entry.profileID || "default") === profileID
+      && normalizedServerOrigin(entry.serverOrigin) === serverOrigin
+      && entry.id !== activeListeningEntryID)
     .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))
     .map((entry) => {
       const track = activeTracks.find((item) => item.id === entry.trackID)
@@ -4461,13 +5661,26 @@ function renderFullPlayerQueue() {
 
 function updateFullPlayerProgress() {
   const elapsed = Number(audio.currentTime) || 0;
-  const duration = Number(audio.duration) || Number(currentTrack()?.duration) || 0;
+  const duration = currentPlaybackDuration();
   const seek = $("#fullPlayerSeek");
   $("#fullPlayerElapsed").textContent = formatTime(elapsed);
   $("#fullPlayerDuration").textContent = formatTime(duration);
   seek.value = duration ? String(Math.round(elapsed / duration * 1000)) : "0";
   seek.setAttribute("aria-valuetext", `${formatTime(elapsed)} of ${formatTime(duration)}`);
   paintRange(seek);
+}
+
+function setAudioSource(track) {
+  audioSourceTrackID = track?.id || null;
+  audioMetadataTrackID = null;
+  audio.src = track?.fileUrl || "";
+}
+
+function currentPlaybackDuration(track = currentTrack()) {
+  const storedDuration = Number(track?.duration) || 0;
+  if (!track || audioMetadataTrackID !== track.id) return storedDuration;
+  if (isInstalledVideoTrack(track) && storedDuration > 0) return storedDuration;
+  return Number(audio.duration) || storedDuration;
 }
 
 function syncFullPlayerTitleMarquee() {
@@ -4509,14 +5722,28 @@ function setInstalledVideoSourceGeometry(sourceRect, targetRect) {
   const stage = $(".installed-video-stage");
   const sourceArtwork = $("#fullPlayerArtwork");
   const sourceStyle = getComputedStyle(sourceArtwork);
+  const targetStyle = getComputedStyle(stage);
+  const targetWidth = Math.max(targetRect.width, 1);
+  const targetHeight = Math.max(targetRect.height, 1);
+  const sourceWidth = Math.max(sourceRect.width, 1);
+  const sourceHeight = Math.max(sourceRect.height, 1);
+  const sourceScaleX = sourceWidth / targetWidth;
+  const sourceScaleY = sourceHeight / targetHeight;
+  const sourceRadius = Number.parseFloat(sourceStyle.borderTopLeftRadius) || 22;
   stage.style.setProperty("--video-source-left", `${sourceRect.left}px`);
   stage.style.setProperty("--video-source-top", `${sourceRect.top}px`);
-  stage.style.setProperty("--video-source-width", `${Math.max(sourceRect.width, 1)}px`);
-  stage.style.setProperty("--video-source-height", `${Math.max(sourceRect.height, 1)}px`);
+  stage.style.setProperty("--video-source-width", `${sourceWidth}px`);
+  stage.style.setProperty("--video-source-height", `${sourceHeight}px`);
   stage.style.setProperty("--video-target-left", `${targetRect.left}px`);
   stage.style.setProperty("--video-target-top", `${targetRect.top}px`);
-  stage.style.setProperty("--video-target-width", `${Math.max(targetRect.width, 1)}px`);
-  stage.style.setProperty("--video-target-height", `${Math.max(targetRect.height, 1)}px`);
+  stage.style.setProperty("--video-target-width", `${targetWidth}px`);
+  stage.style.setProperty("--video-target-height", `${targetHeight}px`);
+  stage.style.setProperty("--video-source-translate-x", `${sourceRect.left - targetRect.left}px`);
+  stage.style.setProperty("--video-source-translate-y", `${sourceRect.top - targetRect.top}px`);
+  stage.style.setProperty("--video-source-scale-x", String(sourceScaleX));
+  stage.style.setProperty("--video-source-scale-y", String(sourceScaleY));
+  stage.style.setProperty("--video-source-radius-x", `${sourceRadius / sourceScaleX}px`);
+  stage.style.setProperty("--video-source-radius-y", `${sourceRadius / sourceScaleY}px`);
   stage.style.setProperty("--video-source-radius", sourceStyle.borderRadius || "22px");
   stage.style.setProperty("--video-source-border-color", sourceStyle.borderColor || "#a678ff80");
   stage.style.setProperty("--video-source-shadow", sourceStyle.boxShadow || "none");
@@ -4525,13 +5752,251 @@ function setInstalledVideoSourceGeometry(sourceRect, targetRect) {
   transitionArtwork.style.background = sourceStyle.background;
   transitionArtwork.style.color = sourceStyle.color;
   transitionArtwork.style.fontSize = sourceStyle.fontSize;
+
+  return {
+    source: {
+      transform: `translate3d(${sourceRect.left - targetRect.left}px, ${sourceRect.top - targetRect.top}px, 0) scale(${sourceScaleX}, ${sourceScaleY})`,
+      borderRadius: `${sourceRadius / sourceScaleX}px / ${sourceRadius / sourceScaleY}px`,
+    },
+    target: {
+      transform: "translate3d(0, 0, 0) scale(1, 1)",
+      borderRadius: targetStyle.borderRadius,
+    },
+    targetRect: {
+      top: targetRect.top,
+      left: targetRect.left,
+      width: targetWidth,
+      height: targetHeight,
+    },
+  };
+}
+
+function installedVideoStageGeometry() {
+  const style = getComputedStyle($(".installed-video-stage"));
+  return {
+    transform: style.transform === "none" ? "translate3d(0, 0, 0) scale(1, 1)" : style.transform,
+    borderRadius: style.borderRadius,
+  };
+}
+
+function applyInstalledVideoStageGeometry(geometry) {
+  const style = $(".installed-video-stage").style;
+  style.transform = geometry.transform;
+  style.borderRadius = geometry.borderRadius;
+}
+
+function clearInstalledVideoStageGeometry() {
+  const style = $(".installed-video-stage").style;
+  style.removeProperty("transform");
+  style.removeProperty("border-radius");
+}
+
+function cancelInstalledVideoGeometryAnimation() {
+  if (!installedVideoGeometryAnimation) return;
+  installedVideoGeometryAnimation.cancel();
+  installedVideoGeometryAnimation = null;
+}
+
+function animateInstalledVideoStage(from, to, onFinish) {
+  cancelInstalledVideoGeometryAnimation();
+  applyInstalledVideoStageGeometry(to);
+  const duration = installedVideoAnimationDuration(INSTALLED_VIDEO_TRANSITION_MS);
+  if (duration <= 0) {
+    onFinish();
+    return;
+  }
+
+  const animation = $(".installed-video-stage").animate([from, to], {
+    duration,
+    easing: "cubic-bezier(.25, .1, .25, 1)",
+    fill: "both",
+  });
+  installedVideoGeometryAnimation = animation;
+  animation.onfinish = () => {
+    if (installedVideoGeometryAnimation !== animation) return;
+    installedVideoGeometryAnimation = null;
+    animation.cancel();
+    onFinish();
+  };
+}
+
+function installedVideoTrack() {
+  return installedVideoSession
+    ? state.tracks.find((track) => track.id === installedVideoSession.trackID) || null
+    : null;
+}
+
+function installedVideoBounds(track = installedVideoTrack()) {
+  const storedDuration = Number(track?.duration) || 0;
+  const duration = storedDuration || Number(installedVideoPlayer.duration) || 0;
+  const range = track ? playbackRangeForTrack(state, track) : null;
+  return {
+    start: range?.startSeconds ?? 0,
+    end: range?.endSeconds ?? duration,
+    duration,
+  };
+}
+
+function syncInstalledVideoVolume() {
+  const value = normalizedVolume(state.volume);
+  installedVideoPlayer.volume = playbackGainForVolume(value);
+  const input = $("#installedVideoVolume");
+  input.value = String(value);
+  input.setAttribute("aria-valuetext", `${Math.round(value * 100)} percent`);
+  paintRange(input);
+}
+
+function syncInstalledVideoProgress() {
+  const { start, end, duration } = installedVideoBounds();
+  const current = Math.max(start, Math.min(Number(installedVideoPlayer.currentTime) || 0, end || duration));
+  const span = Math.max(0, end - start);
+  const seek = $("#installedVideoSeek");
+  seek.value = span > 0 ? String(Math.round((current - start) / span * 1000)) : "0";
+  seek.setAttribute("aria-valuetext", `${formatTime(current)} of ${formatTime(end || duration)}`);
+  $("#installedVideoElapsed").textContent = formatTime(current);
+  $("#installedVideoDuration").textContent = formatTime(end || duration);
+  paintRange(seek);
+}
+
+function syncInstalledVideoTransport() {
+  const playing = !installedVideoPlayer.paused && !installedVideoPlayer.ended;
+  const toggleButton = $("#installedVideoToggle");
+  toggleButton.innerHTML = playing ? playbackPauseIcon : playbackPlayIcon;
+  toggleButton.setAttribute("aria-label", playing ? "Pause" : "Play");
+  toggleButton.title = playing ? "Pause" : "Play";
+  $("#installedVideoDialog").classList.toggle("video-paused", !playing);
+  $("#installedVideoRepeat").classList.toggle("active", repeat);
+  $("#installedVideoRepeat").setAttribute("aria-pressed", String(repeat));
+  syncInstalledVideoVolume();
+  syncInstalledVideoProgress();
+}
+
+function hideInstalledVideoControls() {
+  if (installedVideoControlsTimer) {
+    clearTimeout(installedVideoControlsTimer);
+    installedVideoControlsTimer = null;
+  }
+  const controls = $("#installedVideoControls");
+  if (installedVideoPlayer.paused || controls.matches(":focus-within")) return;
+  $("#installedVideoDialog").classList.remove("video-controls-visible");
+}
+
+function showInstalledVideoControls({ keepVisible = false } = {}) {
+  if (installedVideoControlsTimer) clearTimeout(installedVideoControlsTimer);
+  installedVideoControlsTimer = null;
+  $("#installedVideoDialog").classList.add("video-controls-visible");
+  if (!keepVisible && !installedVideoPlayer.paused) {
+    installedVideoControlsTimer = setTimeout(hideInstalledVideoControls, INSTALLED_VIDEO_CONTROLS_TIMEOUT_MS);
+  }
 }
 
 function startInstalledVideoPlayback() {
-  if (!installedVideoSession?.metadataReady) return;
+  const session = installedVideoSession;
+  const track = installedVideoTrack();
+  if (!session?.metadataReady || session.closing || !track) return;
+  const audioNeedsHandoff = !session.videoOwnsPlayback
+    && session.trackID === currentID
+    && !audio.paused
+    && !audio.ended;
+  if (audioNeedsHandoff) {
+    const audioTime = clippedPlaybackPosition(audio.currentTime, track);
+    if (Math.abs(installedVideoPlayer.currentTime - audioTime) > 0.02) {
+      installedVideoPlayer.currentTime = audioTime;
+    }
+  }
+  session.waitingForAudioHandoff = audioNeedsHandoff;
+  installedVideoPlayer.muted = audioNeedsHandoff;
   void installedVideoPlayer.play().catch((error) => {
+    installedVideoPlayer.muted = false;
+    if (installedVideoSession === session) session.waitingForAudioHandoff = false;
+    showInstalledVideoControls({ keepVisible: true });
     showNotice(error?.message ? `Could not play this video: ${error.message}` : "Resonance could not play this video.");
   });
+}
+
+function updateInstalledVideoTime() {
+  const session = installedVideoSession;
+  const track = installedVideoTrack();
+  if (!session || !track || session.closing) return;
+  if (!session.videoOwnsPlayback) {
+    syncInstalledVideoProgress();
+    return;
+  }
+  const { end } = installedVideoBounds(track);
+  if (end > 0 && installedVideoPlayer.currentTime + 0.02 >= end) {
+    installedVideoPlayer.pause();
+    handleInstalledVideoEnded();
+    return;
+  }
+  state.position = Number(installedVideoPlayer.currentTime) || 0;
+  updateListeningSession();
+  schedulePlaybackProgressSave();
+  syncInstalledVideoProgress();
+}
+
+function installedVideoPlaybackStarted() {
+  syncInstalledVideoTransport();
+  showInstalledVideoControls();
+  updateChrome();
+}
+
+function installedVideoPlaybackPlaying() {
+  const session = installedVideoSession;
+  if (!session || session.closing) return;
+  if (!session.videoOwnsPlayback) {
+    session.videoOwnsPlayback = true;
+    if (session.waitingForAudioHandoff && !audio.paused) audio.pause();
+  }
+  session.waitingForAudioHandoff = false;
+  installedVideoPlayer.muted = false;
+  beginListeningSession();
+  syncInstalledVideoTransport();
+  updateChrome();
+}
+
+function installedVideoPlaybackPaused() {
+  updateListeningSession();
+  scheduleListeningHistorySync();
+  syncInstalledVideoTransport();
+  if (!installedVideoSession?.closing) showInstalledVideoControls({ keepVisible: true });
+  updateChrome();
+}
+
+function configureInstalledVideoSource(track, startTime) {
+  const dialog = $("#installedVideoDialog");
+  if (!installedVideoSession || !isInstalledVideoTrack(track)) return;
+  installedVideoSession.trackID = track.id;
+  installedVideoSession.videoOwnsPlayback = false;
+  installedVideoSession.waitingForAudioHandoff = false;
+  installedVideoSession.metadataReady = false;
+  installedVideoSession.handlingEnd = false;
+  $("#installedVideoArtwork").innerHTML = track.artwork
+    ? squareArtworkImageMarkup(track.artwork)
+    : '<span aria-hidden="true">♪</span>';
+  $("#installedVideoTitle").textContent = track.title || "Untitled";
+  $("#installedVideoArtist").textContent = track.artist || "Unknown Artist";
+  installedVideoPlayer.src = track.fileUrl;
+  installedVideoPlayer.playbackRate = Number(state.playbackRate) || 1;
+  syncInstalledVideoVolume();
+  installedVideoPlayer.onloadedmetadata = () => {
+    if (installedVideoSession?.trackID !== track.id) return;
+    const { start, end, duration } = installedVideoBounds(track);
+    const requested = Number.isFinite(Number(startTime)) ? Number(startTime) : start;
+    installedVideoPlayer.currentTime = Math.max(start, Math.min(requested, Math.max((end || duration) - 0.05, start)));
+    installedVideoSession.metadataReady = true;
+    syncInstalledVideoTransport();
+    if (dialog.classList.contains("video-revealed")) startInstalledVideoPlayback();
+  };
+  installedVideoPlayer.onerror = () => {
+    showInstalledVideoControls({ keepVisible: true });
+    showNotice("Resonance could not play this installed video.");
+  };
+  installedVideoPlayer.ontimeupdate = updateInstalledVideoTime;
+  installedVideoPlayer.onplay = installedVideoPlaybackStarted;
+  installedVideoPlayer.onplaying = installedVideoPlaybackPlaying;
+  installedVideoPlayer.onpause = installedVideoPlaybackPaused;
+  installedVideoPlayer.onended = handleInstalledVideoEnded;
+  installedVideoPlayer.load();
 }
 
 function openInstalledVideo(track = currentTrack()) {
@@ -4539,67 +6004,155 @@ function openInstalledVideo(track = currentTrack()) {
   const dialog = $("#installedVideoDialog");
   if (dialog.open) return;
 
-  const resumeAudioOnClose = track.id === currentID && !audio.paused;
   const startTime = track.id === currentID
     ? Math.max(0, Number(audio.currentTime) || Number(state.position) || 0)
     : 0;
-  if (!audio.paused) audio.pause();
   const sourceRect = $("#fullPlayerArtwork").getBoundingClientRect();
-  $("#installedVideoArtwork").innerHTML = $("#fullPlayerArtwork").innerHTML;
-  installedVideoPlayer.src = track.fileUrl;
-  installedVideoPlayer.onloadedmetadata = () => {
-    const duration = Number(installedVideoPlayer.duration) || Number(track.duration) || 0;
-    installedVideoPlayer.currentTime = duration > 0
-      ? Math.min(startTime, Math.max(duration - 0.05, 0))
-      : startTime;
-    if (installedVideoSession?.trackID === track.id) {
-      installedVideoSession.metadataReady = true;
-    }
-    if (dialog.classList.contains("video-revealed")) startInstalledVideoPlayback();
-  };
-  installedVideoPlayer.onerror = () => {
-    showNotice("Resonance could not play this installed video.");
-  };
-  if (installedVideoTransitionTimer) {
-    clearTimeout(installedVideoTransitionTimer);
-    installedVideoTransitionTimer = null;
-  }
-  dialog.classList.remove("video-expanded", "video-revealed", "video-closing");
+  if (installedVideoTransitionTimer) clearTimeout(installedVideoTransitionTimer);
+  cancelInstalledVideoGeometryAnimation();
+  clearInstalledVideoStageGeometry();
+  if (installedVideoChromeTimer) clearTimeout(installedVideoChromeTimer);
+  if (installedVideoArtworkTimer) clearTimeout(installedVideoArtworkTimer);
+  if (installedVideoControlsTimer) clearTimeout(installedVideoControlsTimer);
+  installedVideoTransitionTimer = null;
+  installedVideoChromeTimer = null;
+  installedVideoArtworkTimer = null;
+  installedVideoControlsTimer = null;
+  dialog.classList.remove(
+    "video-expanded",
+    "video-revealed",
+    "video-closing",
+    "video-artwork-restored",
+    "video-paused",
+    "video-controls-visible",
+  );
   dialog.showModal();
   const targetRect = $(".installed-video-stage").getBoundingClientRect();
+  const geometry = setInstalledVideoSourceGeometry(sourceRect, targetRect);
   installedVideoSession = {
     trackID: track.id,
-    resumeAudioOnClose,
+    resumeAudioOnClose: false,
+    videoOwnsPlayback: false,
+    waitingForAudioHandoff: false,
     metadataReady: false,
     closing: false,
+    handlingEnd: false,
+    geometry,
   };
-  setInstalledVideoSourceGeometry(sourceRect, targetRect);
+  configureInstalledVideoSource(track, startTime);
+  applyInstalledVideoStageGeometry(geometry.source);
   dialog.classList.add("video-active", "video-from-art");
   $("#nowPlayingDialog").classList.add("video-active");
   void $(".installed-video-stage").offsetWidth;
-  installedVideoPlayer.load();
-  requestAnimationFrame(() => {
+  installedVideoTransitionTimer = setTimeout(() => {
+    installedVideoTransitionTimer = null;
     if (!installedVideoSession || installedVideoSession.closing) return;
     dialog.classList.remove("video-from-art");
-    dialog.classList.add("video-expanded");
-    installedVideoTransitionTimer = setTimeout(() => {
-      installedVideoTransitionTimer = null;
-      if (!installedVideoSession || installedVideoSession.closing) return;
-      dialog.classList.add("video-revealed");
-      startInstalledVideoPlayback();
+    dialog.classList.add("video-expanded", "video-revealed");
+    startInstalledVideoPlayback();
+    const session = installedVideoSession;
+    animateInstalledVideoStage(geometry.source, geometry.target, () => {
+      if (installedVideoSession !== session || session.closing) return;
+      showInstalledVideoControls();
       $("#closeInstalledVideo").focus();
-    }, installedVideoAnimationDuration(INSTALLED_VIDEO_TRANSITION_MS));
-  });
+    });
+  }, installedVideoAnimationDuration(INSTALLED_VIDEO_LEAD_IN_MS));
 }
 
-function finishInstalledVideoClose({ session, videoEnded, videoTime }) {
+function playInstalledVideoTrack(track, { recordHistory = true } = {}) {
+  if (!isInstalledVideoTrack(track) || !installedVideoSession) return;
+  play(track, null, { recordHistory, autoplay: false });
+  configureInstalledVideoSource(track, playbackRangeForTrack(state, track)?.startSeconds ?? 0);
+  showInstalledVideoControls();
+}
+
+function selectInstalledVideoTarget(track, { recordHistory = true } = {}) {
+  if (!track) return;
+  if (isInstalledVideoTrack(track)) {
+    playInstalledVideoTrack(track, { recordHistory });
+    return;
+  }
+  play(track, null, { recordHistory });
+  closeInstalledVideo({ resumePlayback: false });
+}
+
+function advanceInstalledVideo(direction = 1) {
+  const tracks = activePlaybackTracks();
+  const index = nextIndex(tracks, currentID, direction);
+  if (index < 0) return false;
+  selectInstalledVideoTarget(tracks[index], { recordHistory: direction > 0 });
+  return true;
+}
+
+function previousInstalledVideo() {
+  const { start } = installedVideoBounds();
+  if (installedVideoPlayer.currentTime > start + 3) {
+    installedVideoPlayer.currentTime = start;
+    state.position = start;
+    syncInstalledVideoProgress();
+    return;
+  }
+  const previousID = history.pop();
+  const previousTrack = previousID && state.tracks.find((track) =>
+    track.id === previousID && trackBelongsToActiveProfile(state, track));
+  if (previousTrack) selectInstalledVideoTarget(previousTrack, { recordHistory: false });
+  else advanceInstalledVideo(-1);
+}
+
+function toggleInstalledVideoPlayback() {
+  if (!installedVideoSession?.metadataReady) return;
+  if (installedVideoPlayer.paused || installedVideoPlayer.ended) {
+    if (installedVideoPlayer.ended) {
+      const { start } = installedVideoBounds();
+      installedVideoPlayer.currentTime = start;
+      state.position = start;
+    }
+    startInstalledVideoPlayback();
+  } else installedVideoPlayer.pause();
+}
+
+function handleInstalledVideoEnded() {
+  const session = installedVideoSession;
+  const track = installedVideoTrack();
+  if (!session || !track || session.closing || session.handlingEnd) return;
+  session.handlingEnd = true;
+  updateListeningSession();
+  scheduleListeningHistorySync();
+  if (repeat) {
+    const { start } = installedVideoBounds(track);
+    installedVideoPlayer.currentTime = start;
+    state.position = start;
+    session.handlingEnd = false;
+    startInstalledVideoPlayback();
+    return;
+  }
+  if (!advanceInstalledVideo(1)) {
+    session.handlingEnd = false;
+    updateChrome();
+  }
+}
+
+function finishInstalledVideoClose({ session }) {
   const dialog = $("#installedVideoDialog");
+  cancelInstalledVideoGeometryAnimation();
   installedVideoPlayer.onloadedmetadata = null;
   installedVideoPlayer.onerror = null;
+  installedVideoPlayer.ontimeupdate = null;
+  installedVideoPlayer.onplay = null;
+  installedVideoPlayer.onplaying = null;
+  installedVideoPlayer.onpause = null;
+  installedVideoPlayer.onended = null;
   installedVideoPlayer.removeAttribute("src");
   installedVideoPlayer.load();
+  installedVideoPlayer.muted = false;
   installedVideoSession = null;
   installedVideoTransitionTimer = null;
+  if (installedVideoChromeTimer) clearTimeout(installedVideoChromeTimer);
+  installedVideoChromeTimer = null;
+  if (installedVideoArtworkTimer) clearTimeout(installedVideoArtworkTimer);
+  installedVideoArtworkTimer = null;
+  if (installedVideoControlsTimer) clearTimeout(installedVideoControlsTimer);
+  installedVideoControlsTimer = null;
   if (dialog.open) dialog.close();
   dialog.classList.remove(
     "video-active",
@@ -4607,32 +6160,61 @@ function finishInstalledVideoClose({ session, videoEnded, videoTime }) {
     "video-expanded",
     "video-revealed",
     "video-closing",
+    "video-artwork-restored",
+    "video-controls-visible",
+    "video-paused",
   );
   $("#nowPlayingDialog").classList.remove("video-active");
   $("#installedVideoArtwork").replaceChildren();
   $("#installedVideoArtwork").removeAttribute("style");
+  clearInstalledVideoStageGeometry();
 
-  const track = session && state.tracks.find((item) => item.id === session.trackID);
-  if (track && track.id === currentID && Number.isFinite(videoTime)) {
-    const position = clippedPlaybackPosition(videoTime, track);
-    state.position = position;
-    pendingRestorePosition = position;
-    if (audio.currentSrc || audio.src) {
-      try {
-        audio.currentTime = position;
-      } catch {
-        // pendingRestorePosition applies the handoff once the audio source is seekable.
-      }
-    }
-    persistInBackground();
-  }
-  if (session?.resumeAudioOnClose && !videoEnded && track?.id === currentID) {
-    void requestPlayback();
-  }
+  audio.muted = false;
   updateChrome();
 }
 
-function closeInstalledVideo() {
+function handOffInstalledVideoToAudio(session, { videoTime, shouldPlay }) {
+  const track = state.tracks.find((item) => item.id === session.trackID);
+  if (!session.videoOwnsPlayback || !track || track.id !== currentID || !Number.isFinite(videoTime)) return false;
+  const position = clippedPlaybackPosition(videoTime, track);
+  state.position = position;
+  pendingRestorePosition = position;
+  if (audio.currentSrc || audio.src) {
+    try {
+      audio.currentTime = position;
+    } catch {
+      // pendingRestorePosition applies the handoff once the audio source is seekable.
+    }
+  }
+  persistInBackground();
+  session.waitingForAudioHandoff = false;
+  if (!shouldPlay) {
+    session.videoOwnsPlayback = false;
+    return false;
+  }
+
+  audio.muted = true;
+  const completeHandoff = () => {
+    installedVideoPlayer.muted = true;
+    session.videoOwnsPlayback = false;
+    audio.muted = false;
+    updateChrome();
+  };
+  audio.addEventListener("playing", completeHandoff, { once: true });
+  void audio.play().catch((error) => {
+    audio.removeEventListener("playing", completeHandoff);
+    installedVideoPlayer.pause();
+    session.videoOwnsPlayback = false;
+    audio.muted = false;
+    updateChrome();
+    if (error?.name !== "AbortError") {
+      showNotice(error?.message ? `Could not resume this song: ${error.message}` : "Resonance could not resume this song.");
+    }
+  });
+  return true;
+}
+
+function closeInstalledVideo({ resumePlayback = null } = {}) {
   const dialog = $("#installedVideoDialog");
   const session = installedVideoSession;
   if (!dialog.open || !session || session.closing) return;
@@ -4640,31 +6222,59 @@ function closeInstalledVideo() {
 
   const videoEnded = installedVideoPlayer.ended;
   const videoTime = Number(installedVideoPlayer.currentTime);
-  installedVideoPlayer.pause();
+  session.resumeAudioOnClose = resumePlayback ?? (!installedVideoPlayer.paused && !videoEnded);
+  const audioHandoffPending = handOffInstalledVideoToAudio(session, {
+    videoTime,
+    shouldPlay: session.resumeAudioOnClose,
+  });
+  if (!audioHandoffPending) installedVideoPlayer.pause();
   if (installedVideoTransitionTimer) {
     clearTimeout(installedVideoTransitionTimer);
     installedVideoTransitionTimer = null;
   }
-  const revealDuration = dialog.classList.contains("video-revealed")
-    ? installedVideoAnimationDuration(INSTALLED_VIDEO_REVEAL_MS)
-    : 0;
-  dialog.classList.remove("video-revealed");
-  installedVideoTransitionTimer = setTimeout(
-    () => {
-      const sourceRect = $("#fullPlayerArtwork").getBoundingClientRect();
-      setInstalledVideoSourceGeometry(
-        sourceRect,
-        $(".installed-video-stage").getBoundingClientRect(),
-      );
-      dialog.classList.remove("video-active", "video-from-art", "video-expanded");
-      dialog.classList.add("video-closing");
-      installedVideoTransitionTimer = setTimeout(
-        () => finishInstalledVideoClose({ session, videoEnded, videoTime }),
-        installedVideoAnimationDuration(INSTALLED_VIDEO_TRANSITION_MS),
-      );
-    },
-    revealDuration,
+  if (installedVideoChromeTimer) {
+    clearTimeout(installedVideoChromeTimer);
+    installedVideoChromeTimer = null;
+  }
+  if (installedVideoControlsTimer) {
+    clearTimeout(installedVideoControlsTimer);
+    installedVideoControlsTimer = null;
+  }
+  if (installedVideoArtworkTimer) {
+    clearTimeout(installedVideoArtworkTimer);
+    installedVideoArtworkTimer = null;
+  }
+  const sourceRect = $("#fullPlayerArtwork").getBoundingClientRect();
+  const currentGeometry = installedVideoStageGeometry();
+  const geometry = setInstalledVideoSourceGeometry(
+    sourceRect,
+    session.geometry?.targetRect || $(".installed-video-stage").getBoundingClientRect(),
   );
+  session.geometry = geometry;
+  dialog.classList.remove(
+    "video-active",
+    "video-from-art",
+    "video-expanded",
+    "video-controls-visible",
+    "video-paused",
+  );
+  dialog.classList.add("video-revealed", "video-closing");
+  const geometryDuration = installedVideoAnimationDuration(INSTALLED_VIDEO_TRANSITION_MS);
+  installedVideoArtworkTimer = setTimeout(() => {
+    installedVideoArtworkTimer = null;
+    if (installedVideoSession !== session || !session.closing) return;
+    dialog.classList.add("video-artwork-restored");
+  }, Math.max(geometryDuration - installedVideoAnimationDuration(INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS), 0));
+  installedVideoChromeTimer = setTimeout(() => {
+    installedVideoChromeTimer = null;
+    if (installedVideoSession !== session || !session.closing) return;
+    $("#nowPlayingDialog").classList.remove("video-active");
+    syncFullPlayerTitleMarquee();
+  }, Math.max(geometryDuration - installedVideoAnimationDuration(INSTALLED_VIDEO_CHROME_RESTORE_LEAD_MS), 0));
+  animateInstalledVideoStage(currentGeometry, geometry.source, () => {
+    if (installedVideoSession !== session || !session.closing) return;
+    finishInstalledVideoClose({ session });
+  });
 }
 
 function renderFullPlayer() {
@@ -4689,9 +6299,11 @@ function renderFullPlayer() {
   backdropNode.innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : "";
   const favorite = $("#fullPlayerFavorite");
   favorite.classList.toggle("active", liked);
+  favorite.disabled = Boolean(track.transientStream);
   favorite.setAttribute("aria-pressed", String(liked));
   favorite.setAttribute("aria-label", liked ? "Remove current song from Liked Songs" : "Add current song to Liked Songs");
   favorite.title = liked ? "Remove from Liked Songs" : "Add to Liked Songs";
+  $("#fullPlayerMore").disabled = Boolean(track.transientStream);
   $("#fullPlayerShuffle").classList.toggle("active", shuffle);
   $("#fullPlayerShuffle").setAttribute("aria-pressed", String(shuffle));
   $("#fullPlayerRepeat").classList.toggle("active", repeat);
@@ -4759,8 +6371,9 @@ function closeNowPlaying() {
 
 function updateChrome() {
   const track = currentTrack();
-  const playing = track && !audio.paused;
+  const playing = track && playbackIsActive();
   const liked = Boolean(track && state.favorites.includes(track.id));
+  const transientStream = Boolean(track?.transientStream);
   $("#bottomTitle").textContent = track?.title || "Nothing playing";
   $("#bottomMeta").textContent = track ? `${track.artist} / ${playing ? "Now playing" : "Paused"}` : "Local library";
   $(".mini-art").innerHTML = track?.artwork ? squareArtworkImageMarkup(track.artwork) : "♪";
@@ -4773,7 +6386,7 @@ function updateChrome() {
   const collectionPlaying = playing && isCurrentCollectionPlayback();
   if (collectionButton) collectionButton.innerHTML = `<span class="button-icon">${collectionPlaying ? playbackPauseIcon : playbackPlayIcon}</span><span>${collectionPlaying ? "Pause" : "Play"}</span>`;
   $("#favoriteCurrent").textContent = liked ? "♥" : "♡";
-  $("#favoriteCurrent").disabled = !track;
+  $("#favoriteCurrent").disabled = !track || Boolean(track.transientStream);
   $("#favoriteCurrent").setAttribute("aria-pressed", String(liked));
   $("#favoriteCurrent").setAttribute("aria-label", liked ? "Remove current song from Liked Songs" : "Add current song to Liked Songs");
   $("#favoriteCurrent").title = liked ? "Remove from Liked Songs" : "Add to Liked Songs";
@@ -4782,6 +6395,17 @@ function updateChrome() {
   $("#shuffle").setAttribute("aria-pressed", String(shuffle));
   $("#repeat").setAttribute("aria-pressed", String(repeat));
   $("#heroShuffle")?.setAttribute("aria-pressed", String(shuffle));
+  document.querySelectorAll("[data-action=next], [data-action=previous]").forEach((button) => {
+    button.disabled = transientStream;
+    button.title = transientStream ? "Unavailable for one-song server playback" : button.dataset.action === "next" ? "Next" : "Previous";
+    button.setAttribute("aria-label", button.title);
+  });
+  for (const button of [$("#shuffle"), $("#fullPlayerShuffle"), $("#heroShuffle")].filter(Boolean)) {
+    button.disabled = transientStream;
+    button.title = transientStream ? "Unavailable for one-song server playback" : "Shuffle";
+    button.setAttribute("aria-label", button.title);
+  }
+  if ($("#installedVideoDialog").open) syncInstalledVideoTransport();
   renderFullPlayer();
   bindSquareArtworkImages();
 }
@@ -4816,7 +6440,38 @@ document.querySelectorAll("[data-action=next]").forEach((button) => button.oncli
 document.querySelectorAll("[data-action=previous]").forEach((button) => button.onclick = previous);
 $("#openNowPlaying").onclick = openNowPlaying;
 $("#closeNowPlaying").onclick = closeNowPlaying;
-$("#closeInstalledVideo").onclick = closeInstalledVideo;
+$("#closeInstalledVideo").onclick = () => closeInstalledVideo();
+$("#installedVideoToggle").onclick = toggleInstalledVideoPlayback;
+$("#installedVideoPrevious").onclick = previousInstalledVideo;
+$("#installedVideoNext").onclick = () => advanceInstalledVideo(1);
+$("#installedVideoRepeat").onclick = () => {
+  repeat = !repeat;
+  state.repeat = repeat;
+  persistInBackground();
+  syncInstalledVideoTransport();
+  updateChrome();
+  showInstalledVideoControls();
+};
+$("#installedVideoSeek").oninput = (event) => {
+  const { start, end } = installedVideoBounds();
+  if (end > start) {
+    installedVideoPlayer.currentTime = start + (end - start) * Number(event.target.value) / 1000;
+    state.position = installedVideoPlayer.currentTime;
+  }
+  syncInstalledVideoProgress();
+  showInstalledVideoControls();
+};
+const installedVideoStage = $(".installed-video-stage");
+installedVideoStage.onpointermove = () => showInstalledVideoControls();
+installedVideoStage.onpointerenter = () => showInstalledVideoControls();
+installedVideoStage.onpointerleave = () => {
+  if (!installedVideoPlayer.paused) {
+    if (installedVideoControlsTimer) clearTimeout(installedVideoControlsTimer);
+    installedVideoControlsTimer = setTimeout(hideInstalledVideoControls, 450);
+  }
+};
+$("#installedVideoControls").onpointerenter = () => showInstalledVideoControls({ keepVisible: true });
+$("#installedVideoControls").onpointerleave = () => showInstalledVideoControls();
 $("#installedVideoDialog").addEventListener("cancel", (event) => {
   event.preventDefault();
   closeInstalledVideo();
@@ -4851,17 +6506,27 @@ $("#fullPlayerMore").onclick = (event) => currentID && openTrackContextMenu(even
 });
 $("#fullPlayerQueueToggle").onclick = () => setFullPlayerQueueVisible($("#fullPlayerQueuePanel").hidden);
 $("#closeFullPlayerQueue").onclick = () => setFullPlayerQueueVisible(false);
-document.querySelectorAll("[data-full-player-queue-tab]").forEach((button) => {
+const fullPlayerQueueTabs = [...document.querySelectorAll("[data-full-player-queue-tab]")];
+fullPlayerQueueTabs.forEach((button) => {
   button.onclick = () => {
     fullPlayerQueueTab = button.dataset.fullPlayerQueueTab;
     renderFullPlayerQueue();
   };
+  button.onkeydown = (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const currentIndex = fullPlayerQueueTabs.indexOf(button);
+    const nextIndex = event.key === "Home" ? 0
+      : event.key === "End" ? fullPlayerQueueTabs.length - 1
+        : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + fullPlayerQueueTabs.length) % fullPlayerQueueTabs.length;
+    const next = fullPlayerQueueTabs[nextIndex];
+    fullPlayerQueueTab = next.dataset.fullPlayerQueueTab;
+    renderFullPlayerQueue();
+    next.focus();
+  };
 });
 $("#fullPlayerShuffle").onclick = () => {
-  shuffle = !shuffle;
-  state.shuffle = shuffle;
-  persistInBackground();
-  updateChrome();
+  setShuffleEnabled(!shuffle);
 };
 $("#fullPlayerRepeat").onclick = () => {
   repeat = !repeat;
@@ -4975,6 +6640,7 @@ $("#localImportSource").onkeydown = (event) => {
   void resolveLinkImport();
 };
 $("#localImportSource").oninput = () => {
+  localImportInteractionGeneration += 1;
   localImportResolvedSourceKey = null;
   if (localImportResolution || !$("#localImportError").hidden) {
     void stopLocalImportPreview({ release: true, resumeMain: true });
@@ -4988,8 +6654,13 @@ $("#localImportSource").oninput = () => {
   normalizeLocalImportMediaKindForSource();
   scheduleLocalImportResolution();
 };
+$("#localImportSync").onchange = () => {
+  localImportInteractionGeneration += 1;
+  updateLocalImportConfirmLabel();
+};
 document.querySelectorAll('input[name="localImportMediaKind"]').forEach((input) => {
   input.onchange = () => {
+    localImportInteractionGeneration += 1;
     normalizeLocalImportMediaKindForSource();
     if (localImportResolution || !$("#localImportError").hidden) {
       void stopLocalImportPreview({ release: true, resumeMain: true });
@@ -5073,7 +6744,7 @@ $("#newSyncProfile").onclick = async () => {
   try {
     const profile = await api.createProfile({
       baseURL: $("#serverURL")?.value.trim() || state.serverURL,
-      token: $("#serverToken")?.value || serverToken,
+      token: $("#serverToken").value,
       name: name.trim(),
     });
     state.syncProfiles = [...state.syncProfiles, profile];
@@ -5085,9 +6756,23 @@ $("#newSyncProfile").onclick = async () => {
 $("#serverSettingsForm").onsubmit = async (event) => {
   event.preventDefault();
   serverAutoAttempted = true;
-  await saveServerForm();
-  $("#serverSettingsDialog").close();
-  if (section === "server") await serverAction("catalog");
+  try {
+    await saveServerForm();
+    $("#serverSettingsDialog").close();
+    if (!serverToken.trim()) {
+      serverConnected = false;
+      replaceServerCatalog([]);
+      serverConnectionText = serverAdminToken.trim()
+        ? "Upload ready • catalog sync off"
+        : "Saved • catalog sync off";
+      if (section === "server") renderServer();
+      showNotice(serverConnectionText, "status");
+    } else if (section === "server") {
+      await serverAction("catalog");
+    }
+  } catch (error) {
+    showNotice(error.message || "The server settings could not be saved.");
+  }
 };
 
 async function finishProfileSelection(profile) {
@@ -5239,8 +6924,14 @@ $("#search").oninput = () => {
 };
 $("#searchSortButton").onclick = () => {
   const sort = $("#searchSort");
-  const open = sort.classList.toggle("open");
-  $("#searchSortButton").setAttribute("aria-expanded", String(open));
+  if (sort.classList.contains("open")) closeSearchSort({ restoreFocus: true });
+  else openSearchSort();
+};
+$("#searchSortButton").onkeydown = (event) => {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const direction = event.key === "Home" ? "first" : event.key === "End" ? "last" : event.key === "ArrowDown" ? 1 : -1;
+  openSearchSort(direction);
 };
 $("#searchSortMenu").onclick = (event) => {
   const scopeOption = event.target.closest("[data-search-scope]");
@@ -5262,6 +6953,18 @@ $("#searchSortMenu").onclick = (event) => {
   updateTopSearch();
   closeSearchSort();
 };
+$("#searchSortMenu").onkeydown = (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeSearchSort({ restoreFocus: true });
+  } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+    event.preventDefault();
+    const direction = event.key === "Home" ? "first" : event.key === "End" ? "last" : event.key === "ArrowDown" ? 1 : -1;
+    focusSearchSortOption(direction);
+  } else if (event.key === "Tab") {
+    closeSearchSort();
+  }
+};
 $("#favoriteCurrent").onclick = () => currentID && toggleFavorite(currentID);
 const playerTrackContextTarget = $(".player-track");
 playerTrackContextTarget.tabIndex = 0;
@@ -5276,7 +6979,7 @@ playerTrackContextTarget.onkeydown = (event) => {
     openTrackContextMenu(event, currentID, { playbackTracks: activePlaybackTracks(), playlistID: activePlaybackPlaylistID });
   }
 };
-$("#shuffle").onclick = () => { shuffle = !shuffle; state.shuffle = shuffle; persistInBackground(); updateChrome(); };
+$("#shuffle").onclick = () => setShuffleEnabled(!shuffle);
 $("#repeat").onclick = () => { repeat = !repeat; state.repeat = repeat; persistInBackground(); updateChrome(); };
 function paintRange(input) {
   const minimum = Number(input.min) || 0;
@@ -5284,63 +6987,66 @@ function paintRange(input) {
   const progress = maximum > minimum ? ((Number(input.value) - minimum) / (maximum - minimum)) * 100 : 0;
   input.style.setProperty("--range-progress", `${Math.max(0, Math.min(100, progress))}%`);
 }
-$("#volume").oninput = async (event) => {
-  state.volume = normalizedVolume(event.target.value);
-  audio.volume = playbackGainForVolume(state.volume);
+
+function setPlaybackVolume(value, { shouldPersist = true } = {}) {
+  state.volume = normalizedVolume(value);
+  const gain = playbackGainForVolume(state.volume);
+  audio.volume = gain;
+  installedVideoPlayer.volume = gain;
   const percent = Math.round(state.volume * 100);
   $("#volumeText").textContent = `${percent}%`;
-  event.target.setAttribute("aria-valuetext", `${percent} percent`);
-  paintRange(event.target);
-  $("#fullPlayerVolume").value = String(state.volume);
-  $("#fullPlayerVolume").setAttribute("aria-valuetext", `${percent} percent`);
-  paintRange($("#fullPlayerVolume"));
-  await persist();
-};
-$("#fullPlayerVolume").oninput = async (event) => {
-  state.volume = normalizedVolume(event.target.value);
-  audio.volume = playbackGainForVolume(state.volume);
-  const percent = Math.round(state.volume * 100);
-  event.target.setAttribute("aria-valuetext", `${percent} percent`);
-  paintRange(event.target);
-  $("#volume").value = String(state.volume);
-  $("#volumeText").textContent = `${percent}%`;
-  $("#volume").setAttribute("aria-valuetext", `${percent} percent`);
-  paintRange($("#volume"));
-  await persist();
+  [$("#volume"), $("#fullPlayerVolume"), $("#installedVideoVolume")].forEach((input) => {
+    input.value = String(state.volume);
+    input.setAttribute("aria-valuetext", `${percent} percent`);
+    paintRange(input);
+  });
+  if (shouldPersist) persistInBackground({ refreshSidebar: false });
+}
+
+$("#volume").oninput = (event) => setPlaybackVolume(event.target.value);
+$("#fullPlayerVolume").oninput = (event) => setPlaybackVolume(event.target.value);
+$("#installedVideoVolume").oninput = (event) => {
+  setPlaybackVolume(event.target.value);
+  showInstalledVideoControls();
 };
 $("#speed").onchange = (event) => {
   audio.playbackRate = Number(event.target.value);
+  installedVideoPlayer.playbackRate = audio.playbackRate;
   state.playbackRate = audio.playbackRate;
   setCustomSelectValue($("#fullPlayerSpeed"), audio.playbackRate);
   persistInBackground();
 };
 $("#fullPlayerSpeed").onchange = (event) => {
   audio.playbackRate = Number(event.target.value);
+  installedVideoPlayer.playbackRate = audio.playbackRate;
   state.playbackRate = audio.playbackRate;
   setCustomSelectValue($("#speed"), audio.playbackRate);
   persistInBackground();
 };
 $("#seek").oninput = (event) => {
-  if (audio.duration) audio.currentTime = clippedPlaybackPosition(audio.duration * Number(event.target.value) / 1000);
-  event.target.value = audio.duration ? String(Math.round(audio.currentTime / audio.duration * 1000)) : "0";
-  event.target.setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(audio.duration)}`);
+  const duration = currentPlaybackDuration();
+  if (duration) audio.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
+  event.target.value = duration ? String(Math.round(audio.currentTime / duration * 1000)) : "0";
+  event.target.setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(duration)}`);
   paintRange(event.target);
 };
 $("#fullPlayerSeek").oninput = (event) => {
-  if (audio.duration) audio.currentTime = clippedPlaybackPosition(audio.duration * Number(event.target.value) / 1000);
-  event.target.value = audio.duration ? String(Math.round(audio.currentTime / audio.duration * 1000)) : "0";
+  const duration = currentPlaybackDuration();
+  if (duration) audio.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
+  event.target.value = duration ? String(Math.round(audio.currentTime / duration * 1000)) : "0";
   updateFullPlayerProgress();
   $("#seek").value = event.target.value;
-  $("#seek").setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(audio.duration)}`);
+  $("#seek").setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(duration)}`);
   paintRange($("#seek"));
 };
 audio.ontimeupdate = () => {
   if (pendingRestorePosition !== null) return;
   if (finishClipPlaybackIfNeeded()) return;
+  const duration = currentPlaybackDuration();
   $("#elapsed").textContent = formatTime(audio.currentTime);
-  $("#duration").textContent = formatTime(audio.duration);
-  $("#seek").value = audio.duration ? String(Math.round(audio.currentTime / audio.duration * 1000)) : "0";
-  $("#seek").setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(audio.duration)}`);
+  $("#duration").textContent = formatTime(duration);
+  $("#seek").value = duration ? String(Math.round(audio.currentTime / duration * 1000)) : "0";
+  $("#seek").setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(duration)}`);
   paintRange($("#seek"));
   updateFullPlayerProgress();
   state.position = audio.currentTime;
@@ -5367,26 +7073,37 @@ audio.onended = () => {
     state.position = range.startSeconds;
     void requestPlayback();
   } else if (repeat) play(currentTrack(), null, { recordHistory: false });
-  else move(1);
+  else if (!move(1) && currentTrack()?.transientStream) releaseActiveServerStream({ stopPlayback: true });
 };
 audio.onerror = () => {
+  const streamFailed = Boolean(currentTrack()?.transientStream);
+  if (streamFailed) releaseActiveServerStream({ stopPlayback: true });
   updateChrome();
-  showNotice("This song could not be played. The file may be missing, inaccessible, or unsupported.");
+  showNotice(streamFailed
+    ? "This song could not be streamed. Check the connection and signed server policy, then try again."
+    : "This song could not be played. The file may be missing, inaccessible, or unsupported.");
 };
 audio.onloadedmetadata = async () => {
-  const track = currentTrack();
-  if (pendingRestorePosition !== null) {
+  const track = playbackTrackByID(audioSourceTrackID);
+  if (!track) return;
+  audioMetadataTrackID = track.id;
+  if (track.id === currentID && pendingRestorePosition !== null) {
     if (Number.isFinite(audio.duration) && audio.duration > 0) {
-      audio.currentTime = clippedPlaybackPosition(Math.min(pendingRestorePosition, Math.max(0, audio.duration - 0.25)));
+      const duration = currentPlaybackDuration(track);
+      audio.currentTime = clippedPlaybackPosition(Math.min(pendingRestorePosition, Math.max(0, duration - 0.25)));
       state.position = audio.currentTime;
     }
     pendingRestorePosition = null;
   }
-  if (track && audio.duration && track.duration !== audio.duration) {
+  if (!track.transientStream && !isInstalledVideoTrack(track) && audio.duration && track.duration !== audio.duration) {
     track.duration = audio.duration;
     await persist();
     renderQueue();
+  } else if (track.transientStream && audio.duration && track.duration !== audio.duration) {
+    activeServerStream.track = Object.freeze({ ...track, duration: audio.duration });
+    renderQueue();
   }
+  if (track.id === currentID) updateFullPlayerProgress();
 };
 
 const libraryLoad = await api.loadLibrary();
@@ -5396,6 +7113,9 @@ let closeFlushStarted = false;
 api.onPrepareToClose(async () => {
   if (closeFlushStarted) return;
   closeFlushStarted = true;
+  if (clientConfigRenewalTimer) clearTimeout(clientConfigRenewalTimer);
+  clientConfigRenewalTimer = null;
+  releaseActiveServerStream({ stopPlayback: true });
   updateListeningSession();
   state.position = Number(audio.currentTime) || state.position || 0;
   try {
@@ -5409,31 +7129,35 @@ api.onPrepareToClose(async () => {
   }
 });
 ({ clientToken: serverToken = "", adminToken: serverAdminToken = "" } = await api.loadServerCredentials());
+serverToken = serverToken.trim();
+serverAdminToken = serverAdminToken.trim();
 const localImportCapabilities = await api.localImportCapabilities().catch(() => ({ enabled: false }));
 localImportAvailable = Boolean(localImportCapabilities?.enabled);
 shuffle = Boolean(state.shuffle); repeat = Boolean(state.repeat);
 state.volume = normalizedVolume(state.volume);
-$("#volume").value = state.volume;
-paintRange($("#volume"));
+setPlaybackVolume(state.volume, { shouldPersist: false });
 paintRange($("#seek"));
 setCustomSelectValue($("#speed"), state.playbackRate || 1);
 setCustomSelectValue($("#fullPlayerSpeed"), state.playbackRate || 1);
-$("#volumeText").textContent = `${Math.round(state.volume * 100)}%`;
-$("#volume").setAttribute("aria-valuetext", `${Math.round(state.volume * 100)} percent`);
 const initialVisibleTracks = tracksForActiveProfile(state);
-const restoredCurrentID = state.currentTrackID && initialVisibleTracks.some((track) => track.id === state.currentTrackID) ? state.currentTrackID : null;
-currentID = restoredCurrentID || initialVisibleTracks[0]?.id || null;
-activePlaybackQueueIDs = state.playbackQueueIDs.length
-  ? state.playbackQueueIDs.filter((id) => initialVisibleTracks.some((track) => track.id === id))
-  : initialVisibleTracks.map((track) => track.id);
+const restoredCurrentID = state.currentTrackID && initialVisibleTracks.some((track) =>
+  track.id === state.currentTrackID && track.available !== false) ? state.currentTrackID : null;
+currentID = restoredCurrentID || initialVisibleTracks.find((track) => track.available !== false)?.id || null;
+activePlaybackSourceQueueIDs = state.playbackSourceQueueIDs.length
+  ? state.playbackSourceQueueIDs.filter((id) => initialVisibleTracks.some((track) => track.id === id && track.available !== false))
+  : initialVisibleTracks.filter((track) => track.available !== false).map((track) => track.id);
+activePlaybackQueueIDs = shuffle && state.playbackQueueIDs.length
+  ? state.playbackQueueIDs.filter((id) => activePlaybackSourceQueueIDs.includes(id))
+  : [...activePlaybackSourceQueueIDs];
 activePlaybackPlaylistID = state.playbackPlaylistID;
 if (currentID && !activePlaybackQueueIDs.includes(currentID)) activePlaybackQueueIDs.unshift(currentID);
 state.playbackQueueIDs = [...activePlaybackQueueIDs];
+state.playbackSourceQueueIDs = [...activePlaybackSourceQueueIDs];
 if (currentID) {
   const track = currentTrack();
   pendingRestorePosition = restoredCurrentID ? Math.max(0, Number(state.position) || 0) : 0;
   if (!restoredCurrentID) state.position = 0;
-  audio.src = track.fileUrl;
+  setAudioSource(track);
   audio.volume = playbackGainForVolume(state.volume);
   audio.playbackRate = Number(state.playbackRate) || 1;
 }
@@ -5565,6 +7289,21 @@ $("#dismissUpdateAvailable").onclick = () => {
   $("#updateAvailableBadge").hidden = true;
 };
 render(); updateChrome();
+void refreshClientConfig().then(() => {
+  persistInBackground({ refreshSidebar: false });
+  if (section === "server") renderServer();
+});
+window.addEventListener("focus", () => {
+  const activeConfig = activeServerClientConfig(clientConfig);
+  const expiresSoon = activeConfig !== SAFE_CLIENT_CONFIG
+    && Date.parse(activeConfig.expires_at) - Date.now() <= 90_000;
+  if ((expiresSoon || activeConfig === SAFE_CLIENT_CONFIG) && (serverToken || serverAdminToken)) {
+    void refreshClientConfig({ force: true }).then(() => {
+      persistInBackground({ refreshSidebar: false });
+      if (section === "server") renderServer();
+    });
+  }
+});
 syncPlaylistsNow({ automatic: true });
 syncListeningHistoryNow();
 setInterval(() => syncPlaylistsNow({ automatic: true }), 60000);

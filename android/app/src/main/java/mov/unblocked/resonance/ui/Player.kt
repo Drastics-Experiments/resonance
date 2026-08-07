@@ -38,12 +38,14 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -77,7 +79,22 @@ fun MiniPlayer(
     modifier: Modifier = Modifier,
 ) {
     val track = state.currentTrack ?: return
-    val fraction = (state.playbackElapsedMs.toFloat() / state.playbackDurationMs).coerceIn(0f, 1f)
+    val singletonStream = state.isTransientPlayback
+    val fraction = state.playbackProgressFraction
+    val seekInput = if (state.canSeekPlayback) {
+        Modifier
+            .pointerInput(track.id) {
+                detectTapGestures { offset -> actions.seekToFraction(offset.x / size.width.coerceAtLeast(1)) }
+            }
+            .pointerInput(track.id) {
+                detectHorizontalDragGestures { change, _ ->
+                    change.consume()
+                    actions.seekToFraction(change.position.x / size.width.coerceAtLeast(1))
+                }
+            }
+    } else {
+        Modifier
+    }
     Column(
         modifier = modifier.fillMaxWidth().background(Color(0xFA050609)).clickable(onClick = onOpen).padding(top = 8.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
@@ -87,38 +104,59 @@ fun MiniPlayer(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Artwork(state.artworkPathsByTrackId[track.id] ?: track.artworkFilename, Modifier.size(46.dp))
+            if (singletonStream) {
+                RemoteArtwork(state.transientArtworkURL, state.serverUrl, Modifier.size(46.dp))
+            } else {
+                Artwork(state.artworkPathsByTrackId[track.id] ?: track.artworkFilename, Modifier.size(46.dp))
+            }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(track.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(track.artist, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f), maxLines = 1)
+                CompactPlaybackStatus(state.playbackStatus)
             }
-            IconButton(onClick = { actions.playPrevious() }) { Icon(Icons.Default.SkipPrevious, "Previous", tint = Accent) }
+            IconButton(
+                onClick = { actions.playPrevious() },
+                enabled = !singletonStream,
+            ) {
+                Icon(
+                    Icons.Default.SkipPrevious,
+                    "Previous",
+                    tint = if (singletonStream) Color.White.copy(alpha = .24f) else Accent,
+                )
+            }
             IconButton(
                 onClick = { actions.togglePlayPause() },
                 modifier = Modifier
                     .size(44.dp)
                     .background(RaisedSurface, CircleShape)
                     .border(1.dp, Accent.copy(alpha = .72f), CircleShape),
-            ) { Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "Pause" else "Play", tint = Color.White) }
-            IconButton(onClick = { actions.playNext() }) { Icon(Icons.Default.SkipNext, "Next", tint = Accent) }
+            ) {
+                if (state.playbackStatus == PlaybackUiStatus.Buffering) {
+                    CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                } else {
+                    Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "Pause" else "Play", tint = Color.White)
+                }
+            }
+            IconButton(
+                onClick = { actions.playNext() },
+                enabled = !singletonStream,
+            ) {
+                Icon(
+                    Icons.Default.SkipNext,
+                    "Next",
+                    tint = if (singletonStream) Color.White.copy(alpha = .24f) else Accent,
+                )
+            }
         }
         Box(
             Modifier
                 .fillMaxWidth()
                 .height(8.dp)
-                .pointerInput(track.id) {
-                    detectTapGestures { offset -> actions.seekToFraction(offset.x / size.width.coerceAtLeast(1)) }
-                }
-                .pointerInput(track.id) {
-                    detectHorizontalDragGestures { change, _ ->
-                        change.consume()
-                        actions.seekToFraction(change.position.x / size.width.coerceAtLeast(1))
-                    }
-                }
+                .then(seekInput)
                 .background(Color.White.copy(alpha = .13f)),
             contentAlignment = Alignment.CenterStart,
         ) {
-            Box(Modifier.fillMaxWidth(fraction).height(3.dp).background(Accent))
+            fraction?.let { Box(Modifier.fillMaxWidth(it).height(3.dp).background(Accent)) }
         }
     }
 }
@@ -131,9 +169,10 @@ fun NowPlayingScreen(
     modifier: Modifier = Modifier,
 ) {
     val track = state.currentTrack ?: return
+    val isServerStream = state.transientCurrentTrack?.id == track.id
     var dragOffset by remember { mutableFloatStateOf(0f) }
     var speedMenu by remember { mutableStateOf(false) }
-    val fraction = (state.playbackElapsedMs.toFloat() / state.playbackDurationMs).coerceIn(0f, 1f)
+    val fraction = state.playbackProgressFraction
     val listState = rememberLazyListState()
     val dismissThreshold = with(LocalDensity.current) { 110.dp.toPx() }
     val dismissConnection = remember(listState, dismissThreshold, onDismiss) {
@@ -189,11 +228,19 @@ fun NowPlayingScreen(
                 }
             }
             item {
-                Artwork(
-                    state.artworkPathsByTrackId[track.id] ?: track.artworkFilename,
-                    Modifier.fillMaxWidth().heightIn(max = 360.dp).aspectRatio(1f),
-                    showWaveform = true,
-                )
+                if (isServerStream) {
+                    RemoteArtwork(
+                        state.transientArtworkURL,
+                        state.serverUrl,
+                        Modifier.fillMaxWidth().heightIn(max = 360.dp).aspectRatio(1f),
+                    )
+                } else {
+                    Artwork(
+                        state.artworkPathsByTrackId[track.id] ?: track.artworkFilename,
+                        Modifier.fillMaxWidth().heightIn(max = 360.dp).aspectRatio(1f),
+                        showWaveform = true,
+                    )
+                }
             }
             item {
                 Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -202,24 +249,40 @@ fun NowPlayingScreen(
                         Text(track.artist, fontSize = 19.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .62f))
                         Text(track.album, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f))
                     }
-                    IconButton(onClick = { actions.toggleFavorite(track.id) }) {
-                        Icon(
-                            if (track.id in state.favoriteTrackIds) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                            "Favorite",
-                            tint = if (track.id in state.favoriteTrackIds) Accent else Color.White,
-                            modifier = Modifier.size(28.dp),
-                        )
+                    if (!isServerStream) {
+                        IconButton(onClick = { actions.toggleFavorite(track.id) }) {
+                            Icon(
+                                if (track.id in state.favoriteTrackIds) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                "Favorite",
+                                tint = if (track.id in state.favoriteTrackIds) Accent else Color.White,
+                                modifier = Modifier.size(28.dp),
+                            )
+                        }
                     }
                 }
             }
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    PlayerSeekBar(fraction = fraction, onSeek = actions::seekToFraction)
+                    PlayerSeekBar(fraction = fraction, enabled = state.canSeekPlayback, onSeek = actions::seekToFraction)
                     Row {
                         Text(durationText(state.playbackElapsedMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
                         Spacer(Modifier.weight(1f))
-                        Text("-${durationText((state.playbackDurationMs - state.playbackElapsedMs).coerceAtLeast(0))}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
+                        Text(
+                            state.playbackDurationMs
+                                ?.let { duration -> "-${durationText((duration - state.playbackElapsedMs).coerceAtLeast(0L))}" }
+                                ?: "--:--",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                        )
                     }
+                }
+            }
+            if (state.playbackStatus == PlaybackUiStatus.Buffering || state.playbackStatus is PlaybackUiStatus.Failed) {
+                item {
+                    PlaybackStatusNotice(
+                        status = state.playbackStatus,
+                        onRetry = actions::togglePlayPause,
+                    )
                 }
             }
             item {
@@ -228,7 +291,11 @@ fun NowPlayingScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceEvenly,
                 ) {
-                    IconButton(onClick = actions::playPrevious, modifier = Modifier.size(60.dp)) {
+                    IconButton(
+                        onClick = actions::playPrevious,
+                        enabled = !isServerStream,
+                        modifier = Modifier.size(60.dp),
+                    ) {
                         Icon(Icons.Default.SkipPrevious, "Previous", Modifier.size(35.dp))
                     }
                     IconButton(
@@ -237,8 +304,18 @@ fun NowPlayingScreen(
                             .size(76.dp)
                             .background(RaisedSurface, CircleShape)
                             .border(2.dp, Accent.copy(alpha = .72f), CircleShape),
-                    ) { Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "Pause" else "Play", tint = Color.White, modifier = Modifier.size(38.dp)) }
-                    IconButton(onClick = actions::playNext, modifier = Modifier.size(60.dp)) {
+                    ) {
+                        if (state.playbackStatus == PlaybackUiStatus.Buffering) {
+                            CircularProgressIndicator(Modifier.size(30.dp), color = Color.White, strokeWidth = 3.dp)
+                        } else {
+                            Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "Pause" else "Play", tint = Color.White, modifier = Modifier.size(38.dp))
+                        }
+                    }
+                    IconButton(
+                        onClick = actions::playNext,
+                        enabled = !isServerStream,
+                        modifier = Modifier.size(60.dp),
+                    ) {
                         Icon(Icons.Default.SkipNext, "Next", Modifier.size(35.dp))
                     }
                 }
@@ -272,8 +349,19 @@ fun NowPlayingScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceAround,
                 ) {
-                    IconButton(onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) }) {
-                        Icon(Icons.Default.Shuffle, "Shuffle", tint = if (state.shuffleEnabled) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                    IconButton(
+                        onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) },
+                        enabled = !isServerStream,
+                    ) {
+                        Icon(
+                            Icons.Default.Shuffle,
+                            "Shuffle",
+                            tint = when {
+                                isServerStream -> MaterialTheme.colorScheme.onSurface.copy(alpha = .24f)
+                                state.shuffleEnabled -> Accent
+                                else -> MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
+                            },
+                        )
                     }
                     Box {
                         IconButton(onClick = { speedMenu = true }) {
@@ -302,8 +390,15 @@ fun NowPlayingScreen(
                     DetailRow("Title", track.title)
                     DetailRow("Artist", track.artist)
                     DetailRow("Album", track.album)
-                    DetailRow("Duration", durationText(track.durationMs))
-                    DetailRow("Source", if (track.sourceServer == null) "Stored locally" else "Music server")
+                    DetailRow("Duration", track.durationMs.takeIf { it > 0L }?.let(::durationText) ?: "Unknown")
+                    DetailRow(
+                        "Source",
+                        when {
+                            isServerStream -> "Server stream • not stored"
+                            track.sourceServer == null -> "Stored locally"
+                            else -> "Music server"
+                        },
+                    )
                     track.sourceServer?.let { DetailRow("Server", it) }
                 }
             }
@@ -314,15 +409,14 @@ fun NowPlayingScreen(
 
 @Composable
 private fun PlayerSeekBar(
-    fraction: Float,
+    fraction: Float?,
+    enabled: Boolean,
     onSeek: (Float) -> Unit,
 ) {
-    val clampedFraction = fraction.coerceIn(0f, 1f)
+    val clampedFraction = fraction?.coerceIn(0f, 1f) ?: 0f
     val thumbDiameterPx = with(LocalDensity.current) { 20.dp.toPx() }
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(32.dp)
+    val seekInput = if (enabled) {
+        Modifier
             .pointerInput(Unit) {
                 detectTapGestures { offset -> onSeek(offset.x / size.width.coerceAtLeast(1)) }
             }
@@ -331,7 +425,15 @@ private fun PlayerSeekBar(
                     change.consume()
                     onSeek(change.position.x / size.width.coerceAtLeast(1))
                 }
-            },
+            }
+    } else {
+        Modifier
+    }
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(32.dp)
+            .then(seekInput),
         contentAlignment = Alignment.CenterStart,
     ) {
         Box(
@@ -348,17 +450,74 @@ private fun PlayerSeekBar(
                 .clip(CircleShape)
                 .background(Accent),
         )
-        Box(
-            Modifier
-                .offset {
-                    IntOffset(
-                        x = (clampedFraction * (constraints.maxWidth - thumbDiameterPx)).roundToInt(),
-                        y = 0,
+        if (enabled) {
+            Box(
+                Modifier
+                    .offset {
+                        IntOffset(
+                            x = (clampedFraction * (constraints.maxWidth - thumbDiameterPx)).roundToInt(),
+                            y = 0,
+                        )
+                    }
+                    .size(20.dp)
+                    .background(Color(0xFFD8D0FF), CircleShape),
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompactPlaybackStatus(status: PlaybackUiStatus) {
+    when (status) {
+        PlaybackUiStatus.Buffering -> Text(
+            "Buffering…",
+            fontSize = 10.sp,
+            color = Accent,
+            maxLines = 1,
+        )
+        is PlaybackUiStatus.Failed -> Text(
+            status.message,
+            fontSize = 10.sp,
+            color = Color(0xFFFF8A80),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        else -> Unit
+    }
+}
+
+@Composable
+private fun PlaybackStatusNotice(
+    status: PlaybackUiStatus,
+    onRetry: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = .06f))
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        when (status) {
+            PlaybackUiStatus.Buffering -> {
+                CircularProgressIndicator(Modifier.size(20.dp), color = Accent, strokeWidth = 2.dp)
+                Text("Buffering audio…", modifier = Modifier.weight(1f), fontSize = 13.sp)
+            }
+            is PlaybackUiStatus.Failed -> {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("Playback failed", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFFFF8A80))
+                    Text(
+                        status.message,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
                     )
                 }
-                .size(20.dp)
-                .background(Color(0xFFD8D0FF), CircleShape),
-        )
+                if (status.retryable) TextButton(onClick = onRetry) { Text("Retry") }
+            }
+            else -> Unit
+        }
     }
 }
 

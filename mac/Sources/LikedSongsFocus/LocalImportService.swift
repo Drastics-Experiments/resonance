@@ -132,21 +132,27 @@ actor LocalDeviceImportService {
         let score: Double?
         let confidence: String?
         let match: Match?
+        let actionable: Bool
+        let autoSelectable: Bool
+        let requiresReview: Bool
 
         enum CodingKeys: String, CodingKey {
-            case provider, title, artist, album, score, confidence, match
+            case provider, title, artist, album, score, confidence, match, actionable
             case sourceURL = "source_url"
             case videoID = "video_id"
             case durationSeconds = "duration_seconds"
             case thumbnailURL = "thumbnail_url"
+            case autoSelectable = "auto_selectable"
+            case requiresReview = "requires_review"
         }
+
     }
 
     private struct ServerResolveResponse: Decodable, Sendable {
-        let audioSources: [ServerAudioSourceMatch]?
+        let reviewCandidates: [ServerAudioSourceMatch]?
 
         enum CodingKeys: String, CodingKey {
-            case audioSources = "audio_sources"
+            case reviewCandidates = "review_candidates"
         }
     }
 
@@ -362,8 +368,20 @@ actor LocalDeviceImportService {
             let track = try await resolveSpotify(source)
             await progress(.init(stage: .searchingCandidates))
             async let candidateSearch = searchCandidates(for: track)
+            async let serverReviewSearch = serverReviewCandidates(
+                for: track,
+                configuration: serverConfiguration
+            )
             async let releaseSearch = searchDebridVaultReleases(for: track)
-            let (candidates, releases) = try await (candidateSearch, releaseSearch)
+            let (localCandidates, serverCandidates, releases) = try await (
+                candidateSearch,
+                serverReviewSearch,
+                releaseSearch
+            )
+            var seenVideoIDs = Set<String>()
+            let candidates = (localCandidates + serverCandidates).filter {
+                seenVideoIDs.insert($0.videoID).inserted
+            }
             guard !candidates.isEmpty || !releases.isEmpty else {
                 throw LocalImportError(
                     stage: .searchingCandidates,
@@ -371,7 +389,13 @@ actor LocalDeviceImportService {
                     message: "No close YouTube audio match or Debrid Vault release was found. Try a YouTube URL instead."
                 )
             }
-            return LocalImportResolution(kind: .spotify, track: track, candidates: candidates, releases: releases)
+            return LocalImportResolution(
+                kind: .spotify,
+                track: track,
+                candidates: candidates,
+                reviewCandidateVideoIDs: Set(serverCandidates.map(\.videoID)),
+                releases: releases
+            )
         }
 
         guard let videoID = try LocalImportURL.youtubeVideoID(source) else {
@@ -525,12 +549,18 @@ actor LocalDeviceImportService {
             if mediaMode == .video {
                 let asset = AVURLAsset(url: destination)
                 let videoTracks = try await asset.loadTracks(withMediaType: .video)
-                let loadedDuration = try await asset.load(.duration).seconds
-                guard !videoTracks.isEmpty, loadedDuration.isFinite, loadedDuration > 0 else {
+                let assetDuration = try await asset.load(.duration).seconds
+                guard !videoTracks.isEmpty, assetDuration.isFinite, assetDuration > 0 else {
                     try? fileManager.removeItem(at: destination)
                     throw LocalImportError(stage: .savingLocal, code: "INVALID_LOCAL_MEDIA", message: "The completed local video file is not playable.")
                 }
-                duration = loadedDuration
+                if let player = try? AVAudioPlayer(contentsOf: destination),
+                   player.duration.isFinite,
+                   player.duration > 0 {
+                    duration = player.duration
+                } else {
+                    duration = assetDuration
+                }
             } else {
                 guard let player = try? AVAudioPlayer(contentsOf: destination), player.duration > 0 else {
                     try? fileManager.removeItem(at: destination)
@@ -1002,16 +1032,10 @@ actor LocalDeviceImportService {
         for track: LocalImportSpotifyTrack,
         serverConfiguration: LocalImportServerConfiguration?
     ) async throws -> [LocalImportAudioSourceMatch] {
-        async let localMatches = localPlaylistCandidates(for: track)
-        async let serverMatch = serverPlaylistCandidate(
-            for: track,
-            configuration: serverConfiguration
-        )
-        let matches = try await (localMatches, serverMatch)
-        var seenVideoIDs = Set<String>()
-        return (matches.0 + [matches.1].compactMap { $0 }).filter { candidate in
-            seenVideoIDs.insert(candidate.videoID).inserted
-        }
+        // Server `review_candidates` are metadata-only matches. Playlist import
+        // does not yet provide per-item source review, so never auto-select them.
+        _ = serverConfiguration
+        return try await localPlaylistCandidates(for: track)
     }
 
     private func localPlaylistCandidates(
@@ -1027,25 +1051,29 @@ actor LocalDeviceImportService {
         }
     }
 
-    private func serverPlaylistCandidate(
+    private func serverReviewCandidates(
         for track: LocalImportSpotifyTrack,
         configuration: LocalImportServerConfiguration?
-    ) async throws -> LocalImportAudioSourceMatch? {
-        guard let configuration else { return nil }
+    ) async throws -> [LocalImportAudioSourceMatch] {
+        guard let configuration else { return [] }
         do {
-            return try await searchServerCandidate(for: track, configuration: configuration)
+            return try await searchServerReviewCandidates(for: track, configuration: configuration)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             if Task.isCancelled { throw CancellationError() }
-            return nil
+            return []
         }
     }
 
-    private func searchServerCandidate(
+    private func searchServerReviewCandidates(
         for track: LocalImportSpotifyTrack,
         configuration: LocalImportServerConfiguration
-    ) async throws -> LocalImportAudioSourceMatch? {
+    ) async throws -> [LocalImportAudioSourceMatch] {
+        guard configuration.clientContext.profileID == configuration.profileID,
+              configuration.clientContext.origin == ServerSongIdentity.normalizedOrigin(configuration.baseURL) else {
+            return []
+        }
         let endpoint = configuration.baseURL
             .appendingPathComponent("api", isDirectory: true)
             .appendingPathComponent("v1", isDirectory: true)
@@ -1057,6 +1085,11 @@ actor LocalDeviceImportService {
         request.timeoutInterval = 90
         request.setValue("Bearer \(configuration.adminToken)", forHTTPHeaderField: "Authorization")
         request.setValue(configuration.profileID, forHTTPHeaderField: "X-Resonance-Profile")
+        request.setValue(MacClientConfigContext.platform, forHTTPHeaderField: "X-Resonance-Client-Platform")
+        request.setValue(configuration.clientContext.appVersion, forHTTPHeaderField: "X-Resonance-App-Version")
+        request.setValue(String(configuration.clientContext.appBuild), forHTTPHeaderField: "X-Resonance-App-Build")
+        request.setValue(configuration.clientContext.cohortKey, forHTTPHeaderField: "X-Resonance-Cohort-Key")
+        request.setValue(MacClientConfigContext.protocolVersion, forHTTPHeaderField: "X-Resonance-Config-Protocol")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["source": track.sourceURL])
@@ -1064,15 +1097,26 @@ actor LocalDeviceImportService {
         let (data, response) = try await responseData(
             session: sessions.server,
             request: request,
-            limit: 1_024 * 1_024
+            limit: 1_024 * 1_024,
+            rejectRedirects: true
         )
         guard (200..<300).contains(response.statusCode),
-              response.url.map({ Self.sameOrigin($0, configuration.baseURL) }) == true else {
-            return nil
+              response.url.map({ Self.sameOrigin($0, configuration.baseURL) }) == true,
+              response.value(forHTTPHeaderField: "Content-Type")?
+                .lowercased()
+                .split(separator: ";", maxSplits: 1)
+                .first?
+                .trimmingCharacters(in: .whitespacesAndNewlines) == "application/json" else {
+            return []
         }
         let payload = try JSONDecoder().decode(ServerResolveResponse.self, from: data)
-        for source in payload.audioSources ?? [] {
-            guard let resolvedVideoID = try LocalImportURL.youtubeVideoID(source.sourceURL),
+        var candidates: [LocalImportAudioSourceMatch] = []
+        var seenVideoIDs = Set<String>()
+        for source in payload.reviewCandidates ?? [] {
+            guard source.actionable == false,
+                  source.autoSelectable == false,
+                  source.requiresReview == true,
+                  let resolvedVideoID = try LocalImportURL.youtubeVideoID(source.sourceURL),
                   source.videoID == nil || source.videoID == resolvedVideoID,
                   let score = source.score,
                   let details = source.match,
@@ -1082,6 +1126,7 @@ actor LocalDeviceImportService {
                   artistScore >= 0.28,
                   details.durationDeltaSeconds.map({ $0 <= 24 }) ?? true,
                   score >= 0.56,
+                  seenVideoIDs.insert(resolvedVideoID).inserted,
                   !source.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             let provider: LocalImportAudioSourceMatch.Provider
             switch source.provider {
@@ -1089,7 +1134,7 @@ actor LocalDeviceImportService {
             case "youtube": provider = .youtube
             default: continue
             }
-            return LocalImportAudioSourceMatch(
+            candidates.append(LocalImportAudioSourceMatch(
                 videoID: resolvedVideoID,
                 title: String(source.title.prefix(500)),
                 artist: source.artist.map { String($0.prefix(500)) },
@@ -1108,9 +1153,9 @@ actor LocalDeviceImportService {
                     duration: details.duration.map { min(max($0, 0), 1) },
                     durationDeltaSeconds: details.durationDeltaSeconds
                 )
-            )
+            ))
         }
-        return nil
+        return candidates
     }
 
     private static func sameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
@@ -1699,10 +1744,20 @@ actor LocalDeviceImportService {
     private func responseData(
         session: URLSession,
         request: URLRequest,
-        limit: Int
+        limit: Int,
+        rejectRedirects: Bool = false
     ) async throws -> (Data, HTTPURLResponse) {
         do {
-            let (bytes, rawResponse) = try await session.bytes(for: request)
+            let bytes: URLSession.AsyncBytes
+            let rawResponse: URLResponse
+            if rejectRedirects {
+                (bytes, rawResponse) = try await session.bytes(
+                    for: request,
+                    delegate: MacRejectRedirectDelegate()
+                )
+            } else {
+                (bytes, rawResponse) = try await session.bytes(for: request)
+            }
             guard let response = rawResponse as? HTTPURLResponse else {
                 throw LocalImportError(stage: .inspectingSource, code: "INVALID_PROVIDER_RESPONSE", message: "A provider returned an invalid response.")
             }
@@ -2006,9 +2061,10 @@ enum LocalImportMediaProcessor {
             )
         }
 
-        try compositionVideoTrack.insertTimeRange(videoTimeRange, of: sourceVideoTrack, at: .zero)
-        let audioDuration = CMTimeMinimum(videoTimeRange.duration, audioTimeRange.duration)
-        let trimmedAudioRange = CMTimeRange(start: audioTimeRange.start, duration: audioDuration)
+        let sharedDuration = CMTimeMinimum(videoTimeRange.duration, audioTimeRange.duration)
+        let trimmedVideoRange = CMTimeRange(start: videoTimeRange.start, duration: sharedDuration)
+        let trimmedAudioRange = CMTimeRange(start: audioTimeRange.start, duration: sharedDuration)
+        try compositionVideoTrack.insertTimeRange(trimmedVideoRange, of: sourceVideoTrack, at: .zero)
         try compositionAudioTrack.insertTimeRange(trimmedAudioRange, of: sourceAudioTrack, at: .zero)
         compositionVideoTrack.preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
         return composition
