@@ -50,6 +50,20 @@ final class MobileClientConfigurationTests: XCTestCase {
         XCTAssertFalse(userAgent.contains(" Mobile/"))
     }
 
+    func testProfilePicturesUseCanonicalPerProfileScopes() {
+        XCTAssertEqual(
+            MobileProfilePictureScope.contextKey(
+                serverURL: "https://MUSIC.example/library/",
+                profileID: "  "
+            ),
+            "https://music.example:443#profile=default"
+        )
+        XCTAssertNotEqual(
+            MobileProfilePictureScope.filename(serverURL: "https://music.example", profileID: "default"),
+            MobileProfilePictureScope.filename(serverURL: "https://music.example", profileID: "family")
+        )
+    }
+
     func testVerifierAcceptsExactDigestSignatureAndAudience() throws {
         let signed = try signedResponse()
         let result = try MobileClientConfigVerifier.verify(

@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -134,6 +135,8 @@ private struct LibraryView: View {
                         Spacer()
                         ProfileButton(
                             profileName: library.syncProfileName,
+                            profileID: library.syncProfileID,
+                            serverURL: library.serverURL,
                             onClipEditor: { presentedSheet = .clipEditor },
                             onConnection: { presentedSheet = .profile }
                         )
@@ -208,8 +211,13 @@ private enum LibrarySheet: String, Identifiable {
 
 private struct ProfileButton: View {
     let profileName: String
+    let profileID: String
+    let serverURL: String
     let onClipEditor: () -> Void
     let onConnection: () -> Void
+    @State private var selectedPicture: PhotosPickerItem?
+    @State private var pictureData: Data?
+    @State private var pictureError: String?
 
     private var displayName: String {
         let trimmed = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -220,27 +228,92 @@ private struct ProfileButton: View {
         String(displayName.prefix(1)).uppercased()
     }
 
+    private var pictureContext: String {
+        MobileProfilePictureScope.contextKey(serverURL: serverURL, profileID: profileID)
+    }
+
     var body: some View {
         Menu {
             Section(displayName) {
+                PhotosPicker(selection: $selectedPicture, matching: .images) {
+                    Label(
+                        pictureData == nil ? "Choose Profile Picture" : "Change Profile Picture",
+                        systemImage: "photo"
+                    )
+                }
+                if pictureData != nil {
+                    Button("Remove Picture", systemImage: "person.crop.circle.badge.minus", role: .destructive) {
+                        removePicture()
+                    }
+                }
                 Button("Clip Editor", systemImage: "waveform.path.ecg", action: onClipEditor)
             }
             Button("Profile & Connection", systemImage: "person.crop.circle", action: onConnection)
         } label: {
-            Text(initial)
-                    .font(.headline.weight(.bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 44, height: 44)
-                    .background(Color.violet, in: Circle())
-                    .overlay {
-                        Circle()
-                            .stroke(.white.opacity(0.18), lineWidth: 1)
-                    }
-                    .shadow(color: Color.violet.opacity(0.28), radius: 12, y: 5)
+            ZStack {
+                Circle().fill(Color.violet)
+                if let pictureData, let image = UIImage(data: pictureData) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Text(initial)
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(width: 44, height: 44)
+            .clipShape(Circle())
+            .overlay {
+                Circle()
+                    .stroke(.white.opacity(0.18), lineWidth: 1)
+            }
+            .shadow(color: Color.violet.opacity(0.28), radius: 12, y: 5)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(displayName) profile")
         .accessibilityHint("Opens profile tools")
+        .task(id: pictureContext) {
+            pictureData = MobileProfilePictureStore.load(
+                serverURL: serverURL,
+                profileID: profileID
+            )
+        }
+        .onChange(of: selectedPicture) { _, item in
+            guard let item else { return }
+            Task {
+                do {
+                    guard let sourceData = try await item.loadTransferable(type: Data.self) else {
+                        throw CocoaError(.fileReadCorruptFile)
+                    }
+                    pictureData = try MobileProfilePictureStore.save(
+                        sourceData,
+                        serverURL: serverURL,
+                        profileID: profileID
+                    )
+                } catch {
+                    pictureError = "Resonance could not use that profile picture. \(error.localizedDescription)"
+                }
+                selectedPicture = nil
+            }
+        }
+        .alert("Profile Picture", isPresented: Binding(
+            get: { pictureError != nil },
+            set: { if !$0 { pictureError = nil } }
+        )) {
+            Button("OK", role: .cancel) { pictureError = nil }
+        } message: {
+            Text(pictureError ?? "")
+        }
+    }
+
+    private func removePicture() {
+        do {
+            try MobileProfilePictureStore.remove(serverURL: serverURL, profileID: profileID)
+            pictureData = nil
+        } catch {
+            pictureError = "Resonance could not remove that profile picture. \(error.localizedDescription)"
+        }
     }
 }
 

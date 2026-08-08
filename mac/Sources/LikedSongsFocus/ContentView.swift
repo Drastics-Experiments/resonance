@@ -16,6 +16,8 @@ struct ContentView: View {
     @EnvironmentObject private var updateManager: UpdateManager
     @State private var dismissedUpdateAlert: MacUpdateIdentity?
     @State private var isNowPlayingPresented = false
+    @State private var miniVideoSession: InstalledVideoSession?
+    @State private var restoredVideoSession: InstalledVideoSession?
     @State private var showsLocalImport = false
 
     private var updateAlert: MacUpdateIdentity? {
@@ -53,7 +55,7 @@ struct ContentView: View {
 
                 PlayerBarView(
                     compact: width < 980,
-                    onOpenNowPlaying: { isNowPlayingPresented = true }
+                    onOpenNowPlaying: presentNowPlaying
                 )
                     .frame(height: 83)
             }
@@ -155,9 +157,26 @@ struct ContentView: View {
                 }
             }
             .animation(.easeOut(duration: 0.22), value: updateAlert)
+            .overlay(alignment: .bottomTrailing) {
+                if let miniVideoSession, !isNowPlayingPresented {
+                    InstalledVideoMiniPlayer(
+                        session: miniVideoSession,
+                        onExpand: { restoreVideo(miniVideoSession) },
+                        onClose: { dismissMiniVideo(miniVideoSession) }
+                    )
+                    .padding(.trailing, 18)
+                    .padding(.bottom, 101)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .zIndex(9)
+                }
+            }
             .overlay {
                 if isNowPlayingPresented {
-                    NowPlayingView(onDismiss: { isNowPlayingPresented = false })
+                    NowPlayingView(
+                        onDismiss: dismissNowPlaying,
+                        initialVideoSession: restoredVideoSession,
+                        onMinimizeVideo: minimizeVideo
+                    )
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                         .zIndex(10)
                 }
@@ -213,6 +232,38 @@ struct ContentView: View {
 
     private func dismissLocalImport() {
         showsLocalImport = false
+    }
+
+    private func presentNowPlaying() {
+        if let miniVideoSession {
+            restoreVideo(miniVideoSession)
+        } else {
+            restoredVideoSession = nil
+            isNowPlayingPresented = true
+        }
+    }
+
+    private func dismissNowPlaying() {
+        restoredVideoSession = nil
+        isNowPlayingPresented = false
+    }
+
+    private func minimizeVideo(_ session: InstalledVideoSession) {
+        restoredVideoSession = nil
+        miniVideoSession = session
+        isNowPlayingPresented = false
+    }
+
+    private func restoreVideo(_ session: InstalledVideoSession) {
+        restoredVideoSession = session
+        miniVideoSession = nil
+        isNowPlayingPresented = true
+    }
+
+    private func dismissMiniVideo(_ session: InstalledVideoSession) {
+        guard miniVideoSession?.id == session.id else { return }
+        session.player.pause()
+        miniVideoSession = nil
     }
 }
 

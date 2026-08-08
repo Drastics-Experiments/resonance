@@ -21,6 +21,8 @@ interface ResonanceActions {
     fun deleteTracksFromDevice(trackIds: Set<String>)
     fun saveClipRange(trackId: String, startMs: Long, endMs: Long)
     fun clearClipRange(trackId: String)
+    fun chooseProfilePicture()
+    fun removeProfilePicture()
     fun updateLinkImportSource(source: String)
     fun resolveLinkImport(source: String)
     fun selectLinkImportSearchResult(resultId: String)

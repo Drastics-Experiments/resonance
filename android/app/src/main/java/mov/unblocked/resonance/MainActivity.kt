@@ -33,6 +33,9 @@ class MainActivity : ComponentActivity() {
     private val uploadLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         viewModel.uploadUris(uris)
     }
+    private val profilePictureLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(viewModel::setProfilePicture)
+    }
     private val unknownSourceLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         val file = pendingUpdateFile ?: return@registerForActivityResult
         pendingUpdateFile = null
@@ -67,6 +70,9 @@ class MainActivity : ComponentActivity() {
             }
             LaunchedEffect(Unit) {
                 viewModel.uploadRequests.collect { uploadLauncher.launch(arrayOf("audio/*", "video/*")) }
+            }
+            LaunchedEffect(Unit) {
+                viewModel.profilePictureRequests.collect { profilePictureLauncher.launch(arrayOf("image/*")) }
             }
             ResonanceTheme {
                 ResonanceApp(

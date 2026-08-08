@@ -143,6 +143,7 @@ struct NowPlayingView: View {
     @EnvironmentObject private var model: PlayerModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let onDismiss: () -> Void
+    let onMinimizeVideo: (InstalledVideoSession) -> Void
     @State private var isQueuePresented = false
     @State private var isSpeedPickerPresented = false
     @State private var installedVideoSession: InstalledVideoSession?
@@ -151,6 +152,18 @@ struct NowPlayingView: View {
     @State private var isInstalledVideoArtworkRestored = false
     @State private var isClosingInstalledVideo = false
     @State private var isRestoringNowPlayingChrome = false
+
+    init(
+        onDismiss: @escaping () -> Void,
+        initialVideoSession: InstalledVideoSession? = nil,
+        onMinimizeVideo: @escaping (InstalledVideoSession) -> Void = { _ in }
+    ) {
+        self.onDismiss = onDismiss
+        self.onMinimizeVideo = onMinimizeVideo
+        _installedVideoSession = State(initialValue: initialVideoSession)
+        _isInstalledVideoExpanded = State(initialValue: initialVideoSession != nil)
+        _isInstalledVideoRevealed = State(initialValue: initialVideoSession != nil)
+    }
 
     private var isNowPlayingChromeVisible: Bool {
         installedVideoSession == nil || isRestoringNowPlayingChrome
@@ -199,6 +212,7 @@ struct NowPlayingView: View {
                         isVideoRevealed: isInstalledVideoRevealed,
                         isArtworkRestored: isInstalledVideoArtworkRestored,
                         isClosing: isClosingInstalledVideo,
+                        onMinimize: { minimizeInstalledVideo(installedVideoSession) },
                         onClose: { closeInstalledVideo(installedVideoSession) }
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -782,9 +796,24 @@ struct NowPlayingView: View {
         }
     }
 
+    private func minimizeInstalledVideo(_ session: InstalledVideoSession) {
+        guard installedVideoSession?.id == session.id,
+              !isClosingInstalledVideo else { return }
+        session.player.isMuted = true
+        session.player.volume = 0
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            installedVideoSession = nil
+            isInstalledVideoExpanded = false
+            isInstalledVideoRevealed = false
+        }
+        onMinimizeVideo(session)
+    }
+
 }
 
-private final class InstalledVideoSession: Identifiable {
+final class InstalledVideoSession: Identifiable {
     let id = UUID()
     let track: Track
     let player: AVPlayer
@@ -831,6 +860,7 @@ private struct InstalledVideoPlayerView: View {
     let isVideoRevealed: Bool
     let isArtworkRestored: Bool
     let isClosing: Bool
+    let onMinimize: () -> Void
     let onClose: () -> Void
     @State private var currentTime: TimeInterval = 0
     @State private var duration: TimeInterval = 0
@@ -973,6 +1003,26 @@ private struct InstalledVideoPlayerView: View {
             .padding(.leading, InstalledVideoLayoutPolicy.edgeInset + 16)
             .padding(.top, InstalledVideoLayoutPolicy.edgeInset + 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .opacity(isVideoRevealed && !isClosing ? 1 : 0)
+            .allowsHitTesting(isVideoRevealed && !isClosing)
+            .zIndex(4)
+
+            CircleIconButton(
+                systemImage: "pip.enter",
+                label: "Minimize Video",
+                size: 48,
+                symbolSize: 18,
+                background: Color.black.opacity(0.30),
+                hoverBackground: Color.white.opacity(0.10),
+                foreground: Color.white,
+                action: onMinimize
+            )
+            .overlay {
+                Circle().stroke(Color.white.opacity(0.24), lineWidth: 1)
+            }
+            .padding(.trailing, InstalledVideoLayoutPolicy.edgeInset + 16)
+            .padding(.top, InstalledVideoLayoutPolicy.edgeInset + 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             .opacity(isVideoRevealed && !isClosing ? 1 : 0)
             .allowsHitTesting(isVideoRevealed && !isClosing)
             .zIndex(4)
@@ -1128,6 +1178,118 @@ private struct InstalledVideoPlayerView: View {
         session.player.pause()
         model.next()
         onClose()
+    }
+}
+
+struct InstalledVideoMiniPlayer: View {
+    @EnvironmentObject private var model: PlayerModel
+    let session: InstalledVideoSession
+    let onExpand: () -> Void
+    let onClose: () -> Void
+    @State private var isPlaying = false
+
+    var body: some View {
+        ZStack {
+            AspectFitVideoPlayer(player: session.player)
+                .background(Color.black)
+
+            LinearGradient(
+                colors: [.clear, Color.black.opacity(0.82)],
+                startPoint: .center,
+                endPoint: .bottom
+            )
+            .allowsHitTesting(false)
+
+            HStack(spacing: 8) {
+                Spacer()
+                miniButton(symbol: "arrow.up.left.and.arrow.down.right", label: "Restore Video", action: onExpand)
+                miniButton(symbol: "xmark", label: "Close Video", action: onClose)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(session.track.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    Text(session.track.artist)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.white.opacity(0.72))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                miniButton(
+                    symbol: isPlaying ? "pause.fill" : "play.fill",
+                    label: isPlaying ? "Pause" : "Play",
+                    action: model.togglePlay
+                )
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        }
+        .frame(width: 360, height: 203)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.22), lineWidth: 1)
+        }
+        .shadow(color: Color.black.opacity(0.62), radius: 24, y: 12)
+        .foregroundStyle(Color.white)
+        .onAppear { synchronize(forceSeek: true) }
+        .onChange(of: model.isPlaying) { _, _ in synchronize(forceSeek: true) }
+        .onChange(of: model.playbackRate) { _, _ in synchronize(forceSeek: true) }
+        .onChange(of: model.currentTrackID) { _, trackID in
+            if trackID != session.track.id { onClose() }
+        }
+        .task(id: session.id) {
+            while !Task.isCancelled {
+                synchronize()
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Video mini-player for \(session.track.title)")
+    }
+
+    private func miniButton(symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .bold))
+                .frame(width: 30, height: 30)
+                .background(Color.black.opacity(0.58), in: Circle())
+                .overlay { Circle().stroke(Color.white.opacity(0.18), lineWidth: 1) }
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
+    }
+
+    private func synchronize(forceSeek: Bool = false) {
+        guard model.currentTrackID == session.track.id else {
+            session.player.pause()
+            isPlaying = false
+            return
+        }
+        session.player.isMuted = true
+        session.player.volume = 0
+        session.player.defaultRate = model.playbackRate
+        let videoTime = session.player.currentTime().seconds
+        if forceSeek || InstalledVideoSyncPolicy.shouldSeek(videoTime: videoTime, audioTime: model.position) {
+            session.player.seek(
+                to: CMTime(seconds: max(model.position, 0), preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+        }
+        isPlaying = model.isPlaying
+        if model.isPlaying {
+            if session.player.timeControlStatus == .paused {
+                session.player.playImmediately(atRate: model.playbackRate)
+            }
+        } else {
+            session.player.pause()
+        }
     }
 }
 
@@ -1322,7 +1484,7 @@ private struct InstalledVideoTransportButton: View {
     }
 }
 
-private struct AspectFitVideoPlayer: NSViewRepresentable {
+struct AspectFitVideoPlayer: NSViewRepresentable {
     let player: AVPlayer
 
     func makeNSView(context: Context) -> AspectFitPlayerContainerView {
@@ -1336,7 +1498,7 @@ private struct AspectFitVideoPlayer: NSViewRepresentable {
     }
 }
 
-private final class AspectFitPlayerContainerView: NSView {
+final class AspectFitPlayerContainerView: NSView {
     var player: AVPlayer? {
         get { playerLayer.player }
         set { playerLayer.player = newValue }

@@ -83,6 +83,11 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(htmlSource, /id="installedVideoPlayer"[^>]*\smuted(?:\s|>)/);
   assert.doesNotMatch(htmlSource, /id="installedVideoPlayer"[^>]*\scontrols(?:\s|>|=)/);
   assert.match(htmlSource, /id="installedVideoControls"[\s\S]+id="installedVideoSeek"[\s\S]+id="installedVideoPrevious"[\s\S]+id="installedVideoToggle"[\s\S]+id="installedVideoNext"[\s\S]+id="installedVideoRepeat"[\s\S]+id="installedVideoVolume"/);
+  assert.match(htmlSource, /id="minimizeInstalledVideo"[\s\S]+id="restoreInstalledVideo"[\s\S]+id="dismissMiniVideo"/);
+  assert.match(appSource, /function minimizeInstalledVideo\(\)[\s\S]+session\.mini = true[\s\S]+dialog\.show\(\)/);
+  assert.match(appSource, /function restoreInstalledVideo\(\)[\s\S]+session\?\.mini[\s\S]+dialog\.showModal\(\)/);
+  assert.match(appSource, /function hasBlockingDialog\(\)[\s\S]+#installedVideoDialog\.video-mini/);
+  assert.match(styleSource, /\.installed-video-dialog\.video-mini\s*\{[\s\S]+inset: auto 18px 101px auto[\s\S]+width: min\(390px/);
   assert.match(appSource, /function setInstalledVideoSourceGeometry\(sourceRect, targetRect\)[\s\S]+--video-source-translate-x[\s\S]+--video-source-scale-x[\s\S]+--video-source-radius-x[\s\S]+--video-source-border-color[\s\S]+--video-source-shadow/);
   assert.match(appSource, /INSTALLED_VIDEO_LEAD_IN_MS = 35[\s\S]+INSTALLED_VIDEO_TRANSITION_MS = 400[\s\S]+INSTALLED_VIDEO_REVEAL_MS = 140[\s\S]+INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS = 190[\s\S]+INSTALLED_VIDEO_CHROME_RESTORE_LEAD_MS = 120/);
   assert.match(appSource, /function openInstalledVideo\([\s\S]+video-from-art[\s\S]+video-expanded[\s\S]+video-revealed/);
@@ -108,6 +113,20 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(styleSource, /\.installed-video-stage video\s*\{[\s\S]*?object-fit: contain;[\s\S]*?object-position: center;/);
   assert.match(styleSource, /\.installed-video-controls\s*\{[\s\S]+bottom: 0[\s\S]+opacity: 0[\s\S]+pointer-events: none/);
   assert.match(styleSource, /\.installed-video-dialog\.video-revealed\.video-controls-visible \.installed-video-controls[\s\S]+\.installed-video-dialog\.video-revealed\.video-paused \.installed-video-controls[\s\S]+opacity: 1[\s\S]+pointer-events: auto/);
+});
+
+test("keeps profile pictures local to the active server profile", () => {
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const preloadSource = readFileSync(new URL("../preload.cjs", import.meta.url), "utf8");
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  assert.match(mainSource, /function profilePicturePath\(serverURL, profileID\)[\s\S]+normalizedServerOrigin\(serverURL\)[\s\S]+createHash\("sha256"\)/);
+  assert.match(mainSource, /ipcMain\.handle\("profile-picture:load"[\s\S]+ipcMain\.handle\("profile-picture:choose"[\s\S]+ipcMain\.handle\("profile-picture:remove"/);
+  assert.match(preloadSource, /loadProfilePicture[\s\S]+chooseProfilePicture[\s\S]+removeProfilePicture/);
+  assert.match(appSource, /function refreshProfilePicture\(\)[\s\S]+profilePictureGeneration[\s\S]+api\.loadProfilePicture/);
+  assert.match(htmlSource, /id="profileMenuManage"[\s\S]+id="profileSwitchPicture"[\s\S]+id="profileSwitchRemovePicture"/);
+  assert.match(appSource, /profileMenuManage"\)\.onclick = openProfileSwitcher[\s\S]+profileSwitchPicture"\)\.onclick = chooseActiveProfilePicture/);
+  assert.doesNotMatch(htmlSource, /id="profilePictureChoose"|id="profileSwitch"/);
 });
 
 test("classifies remote video as download-required without confusing audio MP4", () => {

@@ -200,6 +200,9 @@ let clipEditorPreviewLoading = false;
 let clipEditorPreviewRequest = 0;
 let clipBoundaryTrackID = null;
 let profileGeneration = 0;
+let profilePictureGeneration = 0;
+let profilePictureScope = "";
+let activeProfilePicture = null;
 let settingsPanel = "general";
 let settingsRecordingAction = null;
 let discordPresenceStatus = { state: "disabled", message: "Rich Presence is off.", applicationConfigured: false };
@@ -753,7 +756,35 @@ function clearPlaylistDragFloatingRow() {
   document.querySelectorAll(".track-row.dragging").forEach((row) => row.classList.remove("dragging"));
 }
 
+function profilePictureContext() {
+  return { serverURL: state.serverURL, profileID: activeProfileID() };
+}
+
+function paintProfileAvatar(element, initial) {
+  if (!element) return;
+  element.textContent = initial;
+  element.classList.toggle("profile-avatar-image", Boolean(activeProfilePicture));
+  if (activeProfilePicture) element.style.backgroundImage = `url(${JSON.stringify(activeProfilePicture)})`;
+  else element.style.removeProperty("background-image");
+}
+
+async function refreshProfilePicture() {
+  const context = profilePictureContext();
+  const scope = `${context.serverURL}#profile=${context.profileID}`;
+  const generation = ++profilePictureGeneration;
+  profilePictureScope = scope;
+  const picture = await api.loadProfilePicture(context).catch(() => null);
+  if (generation !== profilePictureGeneration || scope !== profilePictureScope) return;
+  activeProfilePicture = picture;
+  updateProfileControlView({ refreshPicture: false });
+  if ($("#profileSwitchDialog")?.open) updateProfileSwitchDialog({ resetQuery: false });
+}
+
 function updateProfileControl() {
+  updateProfileControlView();
+}
+
+function updateProfileControlView({ refreshPicture = true } = {}) {
   const control = $("#profileControl");
   const button = $("#profileButton");
   if (!control || !button) return;
@@ -762,9 +793,45 @@ function updateProfileControl() {
   button.title = `Profile: ${name}`;
   button.setAttribute("aria-label", `Open profile menu for ${name}`);
   const initial = Array.from(name)[0]?.toLocaleUpperCase() || "D";
-  $("#profileInitial").textContent = initial;
-  $("#profileMenuInitial").textContent = initial;
+  const nextScope = `${state.serverURL}#profile=${activeProfileID()}`;
+  if (nextScope !== profilePictureScope) {
+    profilePictureScope = nextScope;
+    activeProfilePicture = null;
+    if (refreshPicture) void refreshProfilePicture();
+  }
+  paintProfileAvatar($("#profileInitial"), initial);
+  paintProfileAvatar($("#profileMenuInitial"), initial);
   $("#profileMenuName").textContent = name;
+  $("#profileMenuManage").setAttribute("aria-label", `Manage ${name} profile`);
+}
+
+async function chooseActiveProfilePicture() {
+  const context = profilePictureContext();
+  closeProfileMenu();
+  try {
+    const picture = await api.chooseProfilePicture(context);
+    if (!picture) return;
+    profilePictureScope = `${context.serverURL}#profile=${context.profileID}`;
+    activeProfilePicture = picture;
+    updateProfileControlView({ refreshPicture: false });
+    updateProfileSwitchDialog({ resetQuery: false });
+  } catch (error) {
+    showNotice(friendlyIPCError(error, "Resonance could not use that profile picture."), "error");
+  }
+}
+
+async function removeActiveProfilePicture() {
+  const context = profilePictureContext();
+  closeProfileMenu();
+  try {
+    await api.removeProfilePicture(context);
+    profilePictureScope = `${context.serverURL}#profile=${context.profileID}`;
+    activeProfilePicture = null;
+    updateProfileControlView({ refreshPicture: false });
+    updateProfileSwitchDialog({ resetQuery: false });
+  } catch (error) {
+    showNotice(friendlyIPCError(error, "Resonance could not remove that profile picture."), "error");
+  }
 }
 
 function closeProfileMenu({ restoreFocus = false } = {}) {
@@ -3172,8 +3239,13 @@ function updateProfileSwitchDialog({ resetQuery = true } = {}) {
   const profile = activeProfile();
   const name = String(profile.name || "Default").trim() || "Default";
   const initial = Array.from(name)[0]?.toLocaleUpperCase() || "D";
-  $("#profileSwitchInitial").textContent = initial;
+  paintProfileAvatar($("#profileSwitchInitial"), initial);
   $("#profileSwitchCurrentName").textContent = name;
+  $("#profileSwitchPicture").title = activeProfilePicture
+    ? "Change profile picture"
+    : "Choose profile picture";
+  $("#profileSwitchPicture").setAttribute("aria-label", $("#profileSwitchPicture").title);
+  $("#profileSwitchRemovePicture").hidden = !activeProfilePicture;
   if (resetQuery) $("#profileSwitchQuery").value = name;
 }
 
@@ -6194,6 +6266,7 @@ function openInstalledVideo(track = currentTrack()) {
     "video-artwork-restored",
     "video-paused",
     "video-controls-visible",
+    "video-mini",
   );
   dialog.showModal();
   const targetRect = $(".installed-video-stage").getBoundingClientRect();
@@ -6202,6 +6275,7 @@ function openInstalledVideo(track = currentTrack()) {
     trackID: track.id,
     metadataReady: false,
     closing: false,
+    mini: false,
     geometry,
   };
   configureInstalledVideoSource(track, startTime);
@@ -6270,6 +6344,56 @@ function toggleInstalledVideoPlayback() {
   synchronizeInstalledVideoWithAudio({ forceSeek: true });
 }
 
+function minimizeInstalledVideo() {
+  const dialog = $("#installedVideoDialog");
+  const session = installedVideoSession;
+  if (!dialog.open || !session || session.closing || session.mini) return;
+  if (installedVideoTransitionTimer) clearTimeout(installedVideoTransitionTimer);
+  if (installedVideoChromeTimer) clearTimeout(installedVideoChromeTimer);
+  if (installedVideoArtworkTimer) clearTimeout(installedVideoArtworkTimer);
+  if (installedVideoControlsTimer) clearTimeout(installedVideoControlsTimer);
+  installedVideoTransitionTimer = null;
+  installedVideoChromeTimer = null;
+  installedVideoArtworkTimer = null;
+  installedVideoControlsTimer = null;
+  cancelInstalledVideoGeometryAnimation();
+  session.mini = true;
+  session.closing = false;
+  dialog.classList.remove(
+    "video-active",
+    "video-from-art",
+    "video-expanded",
+    "video-closing",
+    "video-artwork-restored",
+  );
+  dialog.classList.add("video-mini", "video-revealed", "video-controls-visible");
+  $("#nowPlayingDialog").classList.remove("video-active");
+  dialog.close();
+  finishNowPlayingClose();
+  dialog.show();
+  clearInstalledVideoStageGeometry();
+  synchronizeInstalledVideoWithAudio({ forceSeek: true });
+  showInstalledVideoControls();
+  requestAnimationFrame(() => $("#restoreInstalledVideo").focus());
+}
+
+function restoreInstalledVideo() {
+  const dialog = $("#installedVideoDialog");
+  const session = installedVideoSession;
+  if (!dialog.open || !session?.mini || session.closing) return;
+  dialog.close();
+  session.mini = false;
+  openNowPlaying();
+  dialog.classList.remove("video-mini", "video-closing", "video-artwork-restored");
+  dialog.classList.add("video-active", "video-expanded", "video-revealed", "video-controls-visible");
+  $("#nowPlayingDialog").classList.add("video-active");
+  clearInstalledVideoStageGeometry();
+  dialog.showModal();
+  synchronizeInstalledVideoWithAudio({ forceSeek: true });
+  showInstalledVideoControls();
+  requestAnimationFrame(() => $("#minimizeInstalledVideo").focus());
+}
+
 function finishInstalledVideoClose({ session }) {
   const dialog = $("#installedVideoDialog");
   cancelInstalledVideoGeometryAnimation();
@@ -6301,6 +6425,7 @@ function finishInstalledVideoClose({ session }) {
     "video-artwork-restored",
     "video-controls-visible",
     "video-paused",
+    "video-mini",
   );
   $("#nowPlayingDialog").classList.remove("video-active");
   $("#installedVideoArtwork").replaceChildren();
@@ -6314,6 +6439,12 @@ function closeInstalledVideo() {
   const dialog = $("#installedVideoDialog");
   const session = installedVideoSession;
   if (!dialog.open || !session || session.closing) return;
+  if (session.mini) {
+    session.closing = true;
+    installedVideoPlayer.pause();
+    finishInstalledVideoClose({ session });
+    return;
+  }
   session.closing = true;
 
   installedVideoPlayer.pause();
@@ -6533,9 +6664,15 @@ $("#navForward").onclick = () => { if (navigationIndex + 1 < navigationHistory.l
 document.querySelectorAll("[data-action=toggle]").forEach((button) => button.onclick = toggle);
 document.querySelectorAll("[data-action=next]").forEach((button) => button.onclick = () => move(1));
 document.querySelectorAll("[data-action=previous]").forEach((button) => button.onclick = previous);
-$("#openNowPlaying").onclick = openNowPlaying;
+$("#openNowPlaying").onclick = () => {
+  if (installedVideoSession?.mini) restoreInstalledVideo();
+  else openNowPlaying();
+};
 $("#closeNowPlaying").onclick = closeNowPlaying;
 $("#closeInstalledVideo").onclick = () => closeInstalledVideo();
+$("#minimizeInstalledVideo").onclick = minimizeInstalledVideo;
+$("#restoreInstalledVideo").onclick = restoreInstalledVideo;
+$("#dismissMiniVideo").onclick = () => closeInstalledVideo();
 $("#installedVideoToggle").onclick = toggleInstalledVideoPlayback;
 $("#installedVideoPrevious").onclick = previousInstalledVideo;
 $("#installedVideoNext").onclick = () => advanceInstalledVideo(1);
@@ -6637,7 +6774,9 @@ $("#fullPlayerRepeat").onclick = () => {
 };
 $("#newPlaylist").onclick = () => newPlaylist();
 $("#profileButton").onclick = toggleProfileMenu;
-$("#profileSwitch").onclick = openProfileSwitcher;
+$("#profileMenuManage").onclick = openProfileSwitcher;
+$("#profileSwitchPicture").onclick = chooseActiveProfilePicture;
+$("#profileSwitchRemovePicture").onclick = removeActiveProfilePicture;
 $("#profileHistory").onclick = openListeningHistory;
 $("#profileClipEditor").onclick = openClipEditor;
 $("#profileSettings").onclick = () => {
@@ -6983,6 +7122,11 @@ function keybindFromKeyboardEvent(event) {
   ].filter(Boolean).join("+");
 }
 
+function hasBlockingDialog() {
+  return [...document.querySelectorAll("dialog[open]")]
+    .some((dialog) => !dialog.matches("#installedVideoDialog.video-mini"));
+}
+
 document.addEventListener("keydown", (event) => {
   if (settingsRecordingAction) {
     event.preventDefault();
@@ -7006,7 +7150,7 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.defaultPrevented || event.repeat || event.isComposing) return;
-  if (document.querySelector("dialog[open]")) return;
+  if (hasBlockingDialog()) return;
   if (event.target instanceof Element && event.target.closest("input, textarea, select, button, [contenteditable=true], [role=menu], [role=listbox]")) return;
   const keybind = keybindFromKeyboardEvent(event);
   if (!keybind) return;
