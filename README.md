@@ -15,6 +15,30 @@ Resonance is a cross-platform music player. Platform implementations and their i
 | `installers/windows/` | Windows NSIS installer output and release documentation |
 | `installers/macos/` | macOS package installer, bootstrap installer, and release assets |
 
+## Git worktrees and development instances
+
+This directory is the primary Git checkout. Additional agent checkouts should be
+created with `git worktree`; each one remains attached to the same GitHub
+repository while keeping its branch and working files independent.
+
+The four root launch commands are worktree-aware:
+
+```text
+Launch macOS.command
+Launch Windows.command
+Launch iOS.command
+Launch Android.command
+```
+
+Each command verifies that it lives at a Git worktree root, derives a stable
+identity from that root's canonical path, and includes the readable directory
+name plus a short hash in the launched app name. Runtime paths, desktop app
+identity and state, mobile app IDs, simulator devices, and Android emulator IDs
+are scoped to that identity. Parallel agents can therefore identify and
+control their own Resonance window without replacing or terminating another
+worktree's instance. Each command prints the exact instance and app or device
+identity after a successful launch.
+
 ## Windows development
 
 ```powershell

@@ -13,9 +13,15 @@ struct PreviewRegressionTests {
     }
 
     @Test
-    func plaintextCredentialsAreLimitedToTheExactPreviewBundle() {
+    func plaintextCredentialsAreLimitedToPreviewBundles() {
         #expect(CredentialStorePolicy.usesPlaintextStore(
             bundleIdentifier: CredentialStorePolicy.previewBundleIdentifier
+        ))
+        #expect(CredentialStorePolicy.usesPlaintextStore(
+            bundleIdentifier: CredentialStorePolicy.previewBundleIdentifier + ".worktree.w0123456789ab"
+        ))
+        #expect(!CredentialStorePolicy.usesPlaintextStore(
+            bundleIdentifier: CredentialStorePolicy.previewBundleIdentifier + ".untrusted"
         ))
         #expect(!CredentialStorePolicy.usesPlaintextStore(
             bundleIdentifier: "com.gavindietrich.LikedSongsFocus"

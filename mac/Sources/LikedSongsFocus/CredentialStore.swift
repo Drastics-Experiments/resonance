@@ -11,7 +11,9 @@ enum CredentialStorePolicy {
     static let previewBundleIdentifier = "com.gavindietrich.ResonancePreview"
 
     static func usesPlaintextStore(bundleIdentifier: String?) -> Bool {
-        bundleIdentifier == previewBundleIdentifier
+        guard let bundleIdentifier else { return false }
+        return bundleIdentifier == previewBundleIdentifier
+            || bundleIdentifier.hasPrefix(previewBundleIdentifier + ".worktree.")
     }
 }
 

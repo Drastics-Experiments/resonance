@@ -3,11 +3,16 @@ set -euo pipefail
 
 RES_PROJECT_DIR="${0:A:h}"
 source "$RES_PROJECT_DIR/.launcher-terminal.zsh"
+res_prepare_worktree_identity "$RES_PROJECT_DIR"
 RES_APP_DIR="$RES_PROJECT_DIR"
-RES_LAUNCH_LABEL="mov.unblocked.resonance.dev.macos"
-RES_PREVIEW_APP="/private/tmp/Resonance Preview.app"
+RES_LAUNCH_LABEL="mov.unblocked.resonance.dev.macos.${RES_WORKTREE_HASH}"
+RES_PREVIEW_NAME="Resonance Preview [${RES_WORKTREE_LABEL}]"
+RES_PREVIEW_APP="$RES_LAUNCHER_ROOT/macos/Resonance-Preview-${RES_WORKTREE_ID}.app"
 RES_PREVIEW_EXECUTABLE="$RES_PREVIEW_APP/Contents/MacOS/LikedSongsFocus"
 RES_PREVIEW_PLIST="$RES_PREVIEW_APP/Contents/Info.plist"
+RES_PREVIEW_BUNDLE_ID="com.gavindietrich.ResonancePreview.worktree.w${RES_WORKTREE_HASH}"
+RES_SWIFT_SCRATCH_PATH="$RES_LAUNCHER_ROOT/macos-swift-build"
+RES_OLD_PREVIEW_EXECUTABLE="/private/tmp/Resonance Preview.app/Contents/MacOS/LikedSongsFocus"
 RES_LEGACY_PREVIEW_EXECUTABLE="/private/tmp/ResonancePreview.app/Contents/MacOS/LikedSongsFocus"
 RES_ICON_WORK_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/resonance-preview-icon.XXXXXX")"
 
@@ -18,8 +23,12 @@ trap 'cleanup; res_close_launcher_terminal' EXIT
 trap cleanup HUP INT TERM
 
 echo "Building the macOS development app…"
-/usr/bin/xcrun swift build --package-path "$RES_APP_DIR/mac" --product LikedSongsFocus
-RES_BIN_DIR="$(/usr/bin/xcrun swift build --package-path "$RES_APP_DIR/mac" --show-bin-path)"
+/usr/bin/xcrun swift build --package-path "$RES_APP_DIR/mac" \
+  --scratch-path "$RES_SWIFT_SCRATCH_PATH" \
+  --product LikedSongsFocus
+RES_BIN_DIR="$(/usr/bin/xcrun swift build --package-path "$RES_APP_DIR/mac" \
+  --scratch-path "$RES_SWIFT_SCRATCH_PATH" \
+  --show-bin-path)"
 RES_BINARY="$RES_BIN_DIR/LikedSongsFocus"
 
 [[ -x "$RES_BINARY" ]] || { echo "macOS build did not produce $RES_BINARY" >&2; exit 1; }
@@ -29,6 +38,7 @@ RES_BINARY="$RES_BIN_DIR/LikedSongsFocus"
 
 RES_OLD_PREVIEW_PIDS="$({
   /usr/bin/pgrep -f "^$RES_PREVIEW_EXECUTABLE$" || true
+  /usr/bin/pgrep -f "^$RES_OLD_PREVIEW_EXECUTABLE$" || true
   /usr/bin/pgrep -f "^$RES_LEGACY_PREVIEW_EXECUTABLE$" || true
 } | /usr/bin/sort -u)"
 if [[ -n "$RES_OLD_PREVIEW_PIDS" ]]; then
@@ -37,6 +47,7 @@ if [[ -n "$RES_OLD_PREVIEW_PIDS" ]]; then
   done
   for RES_ATTEMPT in {1..50}; do
     if ! /usr/bin/pgrep -f "^$RES_PREVIEW_EXECUTABLE$" >/dev/null \
+      && ! /usr/bin/pgrep -f "^$RES_OLD_PREVIEW_EXECUTABLE$" >/dev/null \
       && ! /usr/bin/pgrep -f "^$RES_LEGACY_PREVIEW_EXECUTABLE$" >/dev/null; then
       break
     fi
@@ -71,12 +82,12 @@ RES_APP_VERSION="$(/usr/bin/plutil -extract version raw "$RES_APP_DIR/release/ve
 RES_BUILD_NUMBER="$(/usr/bin/plutil -extract build raw "$RES_APP_DIR/release/version.json")"
 /usr/bin/plutil -create xml1 "$RES_PREVIEW_PLIST"
 /usr/bin/plutil -insert CFBundleDevelopmentRegion -string en "$RES_PREVIEW_PLIST"
-/usr/bin/plutil -insert CFBundleDisplayName -string "Resonance Preview" "$RES_PREVIEW_PLIST"
+/usr/bin/plutil -insert CFBundleDisplayName -string "$RES_PREVIEW_NAME" "$RES_PREVIEW_PLIST"
 /usr/bin/plutil -insert CFBundleExecutable -string LikedSongsFocus "$RES_PREVIEW_PLIST"
 /usr/bin/plutil -insert CFBundleIconFile -string AppIcon.icns "$RES_PREVIEW_PLIST"
-/usr/bin/plutil -insert CFBundleIdentifier -string com.gavindietrich.ResonancePreview "$RES_PREVIEW_PLIST"
+/usr/bin/plutil -insert CFBundleIdentifier -string "$RES_PREVIEW_BUNDLE_ID" "$RES_PREVIEW_PLIST"
 /usr/bin/plutil -insert CFBundleInfoDictionaryVersion -string 6.0 "$RES_PREVIEW_PLIST"
-/usr/bin/plutil -insert CFBundleName -string "Resonance Preview" "$RES_PREVIEW_PLIST"
+/usr/bin/plutil -insert CFBundleName -string "$RES_PREVIEW_NAME" "$RES_PREVIEW_PLIST"
 /usr/bin/plutil -insert CFBundlePackageType -string APPL "$RES_PREVIEW_PLIST"
 /usr/bin/plutil -insert CFBundleShortVersionString -string "$RES_APP_VERSION" "$RES_PREVIEW_PLIST"
 /usr/bin/plutil -insert CFBundleVersion -string "$RES_BUILD_NUMBER" "$RES_PREVIEW_PLIST"
@@ -88,11 +99,13 @@ RES_BUILD_NUMBER="$(/usr/bin/plutil -extract build raw "$RES_APP_DIR/release/ver
 /usr/bin/plutil -insert NSAppTransportSecurity.NSAllowsArbitraryLoads -bool YES "$RES_PREVIEW_PLIST"
 
 /usr/bin/codesign --force --deep --sign - "$RES_PREVIEW_APP"
-/usr/bin/open -n "$RES_PREVIEW_APP"
+/usr/bin/open -n "$RES_PREVIEW_APP" \
+  --env "RESONANCE_WORKTREE_ID=$RES_WORKTREE_ID" \
+  --env "RESONANCE_INSTANCE_NAME=$RES_PREVIEW_NAME"
 for RES_ATTEMPT in {1..50}; do
   /usr/bin/pgrep -f "^$RES_PREVIEW_EXECUTABLE$" >/dev/null && break
   sleep 0.1
 done
 /usr/bin/pgrep -f "^$RES_PREVIEW_EXECUTABLE$" >/dev/null \
   || { echo "macOS Preview app failed to launch." >&2; exit 1; }
-echo "macOS Resonance Preview launched from $RES_APP_DIR/mac"
+echo "$RES_PREVIEW_NAME launched from $RES_APP_DIR/mac"

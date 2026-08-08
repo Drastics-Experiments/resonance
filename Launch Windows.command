@@ -5,9 +5,11 @@ export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/us
 
 RES_PROJECT_DIR="${0:A:h}"
 source "$RES_PROJECT_DIR/.launcher-terminal.zsh"
+res_prepare_worktree_identity "$RES_PROJECT_DIR"
 RES_APP_DIR="$RES_PROJECT_DIR"
 RES_WINDOWS_DIR="$RES_APP_DIR/windows"
-RES_RUN_DIR="/private/tmp/resonance-dev-launchers-${UID}"
+RES_WINDOWS_INSTANCE_NAME="Resonance Windows [${RES_WORKTREE_LABEL}]"
+RES_RUN_DIR="$RES_LAUNCHER_ROOT/windows"
 RES_LOG_FILE="$RES_RUN_DIR/windows.log"
 RES_RESTART_LABELS=(
   mov.unblocked.resonance.dev.windows
@@ -50,11 +52,14 @@ if [[ "$RES_REMOVED_RESTART_JOB" == true ]]; then
 fi
 : >"$RES_LOG_FILE"
 /usr/bin/env -u ELECTRON_RUN_AS_NODE /usr/bin/open -n "$RES_ELECTRON_APP" \
-  -o "$RES_LOG_FILE" --stderr "$RES_LOG_FILE" --args "$RES_WINDOWS_DIR"
+  -o "$RES_LOG_FILE" --stderr "$RES_LOG_FILE" \
+  --env "RESONANCE_WORKTREE_ID=$RES_WORKTREE_ID" \
+  --env "RESONANCE_INSTANCE_NAME=$RES_WINDOWS_INSTANCE_NAME" \
+  --args "$RES_WINDOWS_DIR"
 for RES_ATTEMPT in {1..50}; do
   /usr/bin/pgrep -f "^$RES_ELECTRON_PROCESS_EXECUTABLE $RES_WINDOWS_DIR$" >/dev/null && break
   sleep 0.1
 done
 /usr/bin/pgrep -f "^$RES_ELECTRON_PROCESS_EXECUTABLE $RES_WINDOWS_DIR$" >/dev/null \
   || { echo "Windows app failed to launch. See $RES_LOG_FILE" >&2; exit 1; }
-echo "Windows Resonance launched from $RES_WINDOWS_DIR"
+echo "$RES_WINDOWS_INSTANCE_NAME launched from $RES_WINDOWS_DIR"

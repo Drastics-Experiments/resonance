@@ -521,6 +521,16 @@ test("avoids macOS Keychain access while persisting source Preview credentials l
   assert.match(mainSource, /function encryptedCredentialStorage\(\)[\s\S]+require\("electron"\)\.safeStorage/);
 });
 
+test("isolates and visibly names source Preview instances by Git worktree", () => {
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  assert.match(mainSource, /process\.env\.RESONANCE_WORKTREE_ID/);
+  assert.match(mainSource, /process\.env\.RESONANCE_INSTANCE_NAME/);
+  assert.match(mainSource, /app\.setPath\("userData"/);
+  assert.match(mainSource, /"Resonance Worktrees"/);
+  assert.match(mainSource, /title: resonanceApplicationName/);
+  assert.match(mainSource, /page-title-updated/);
+});
+
 test("uploads link imports even when the selected source is already saved locally", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   assert.match(appSource, /function localImportUploadConfigurationError/);
