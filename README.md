@@ -21,23 +21,40 @@ This directory is the primary Git checkout. Additional agent checkouts should be
 created with `git worktree`; each one remains attached to the same GitHub
 repository while keeping its branch and working files independent.
 
-The four root launch commands are worktree-aware:
+The root launch and test commands are worktree-aware:
 
 ```text
 Launch macOS.command
 Launch Windows.command
 Launch iOS.command
 Launch Android.command
+Test macOS.command
+Test Windows.command
+Test iOS.command
+Test Android.command
+Show Resonance Instances.command
 ```
 
 Each command verifies that it lives at a Git worktree root, derives a stable
 identity from that root's canonical path, and includes the readable directory
-name plus a short hash in the launched app name. Runtime paths, desktop app
-identity and state, mobile app IDs, simulator devices, and Android emulator IDs
-are scoped to that identity. Parallel agents can therefore identify and
-control their own Resonance window without replacing or terminating another
-worktree's instance. Each command prints the exact instance and app or device
-identity after a successful launch.
+name plus the first 12 digits of the path's SHA-256 hash in every instance name.
+The same worktree path always produces the same names and selectors; moving the
+worktree deliberately gives it a new identity. Runtime paths, desktop bundle
+IDs and state, mobile app IDs, simulator devices, Android emulator IDs, test
+terminal titles, and test parent-process names are all scoped to that identity.
+Parallel agents can therefore identify and control their own Resonance instance
+without replacing or terminating another worktree's instance.
+
+Run `Show Resonance Instances.command` (or its T3 command) to print the complete
+credential-free selector registry. It is also written to the deterministic path
+`/private/tmp/resonance-dev-launchers-<uid>/<worktree-id>/instances.json` and
+contains the exact app or window-owner name, bundle/application ID, runtime path,
+simulator or emulator name, and test process name for that worktree. Agents
+should resolve targets through this registry instead of guessing a PID, dynamic
+Simulator UUID, emulator serial, or generic `Electron` process.
+
+`Test iOS.command` uses its own `Resonance iOS Tests <worktree-id>` Simulator,
+so a test run cannot replace the normal `Launch iOS.command` Preview instance.
 
 ## Windows development
 

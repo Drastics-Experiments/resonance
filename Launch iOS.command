@@ -5,27 +5,16 @@ RES_PROJECT_DIR="${0:A:h}"
 source "$RES_PROJECT_DIR/.launcher-terminal.zsh"
 res_prepare_worktree_identity "$RES_PROJECT_DIR"
 RES_APP_DIR="$RES_PROJECT_DIR"
-RES_DERIVED_DATA="$RES_LAUNCHER_ROOT/ios-derived-data"
-RES_IOS_INSTANCE_NAME="Resonance iOS [${RES_WORKTREE_LABEL}]"
-RES_SIMULATOR_NAME="Resonance iOS ${RES_WORKTREE_LABEL}"
-RES_BUNDLE_ID="com.gavindietrich.LikedSongsMobile.worktree.w${RES_WORKTREE_HASH}"
+RES_DERIVED_DATA="$RES_IOS_DERIVED_DATA"
+RES_SIMULATOR_NAME="$RES_IOS_SIMULATOR_NAME"
+RES_BUNDLE_ID="$RES_IOS_BUNDLE_ID"
 
 trap res_close_launcher_terminal EXIT
+res_write_instance_registry
+res_set_terminal_title "$RES_IOS_INSTANCE_NAME"
 
-RES_DEVICE_ID="$(/usr/bin/xcrun simctl list devices available \
-  | awk -F '[()]' -v name="$RES_SIMULATOR_NAME" \
-    '$1 ~ "^[[:space:]]*" name "[[:space:]]*$" { print $2; exit }')"
-if [[ -z "$RES_DEVICE_ID" ]]; then
-  RES_DEVICE_TYPE="$(/usr/bin/xcrun simctl list devicetypes \
-    | awk -F '[()]' '/^iPhone 17[[:space:]]*\(/ { print $2; exit }')"
-  if [[ -z "$RES_DEVICE_TYPE" ]]; then
-    RES_DEVICE_TYPE="$(/usr/bin/xcrun simctl list devicetypes \
-      | awk -F '[()]' '/^iPhone / { print $2; exit }')"
-  fi
-  [[ -n "$RES_DEVICE_TYPE" ]] || { echo "No available iPhone Simulator device type was found." >&2; exit 1; }
-  RES_DEVICE_ID="$(/usr/bin/xcrun simctl create "$RES_SIMULATOR_NAME" "$RES_DEVICE_TYPE")"
-fi
-[[ -n "$RES_DEVICE_ID" ]] || { echo "No available iPhone Simulator was found." >&2; exit 1; }
+res_ensure_ios_simulator
+RES_DEVICE_ID="$RES_IOS_DEVICE_ID"
 
 /usr/bin/xcrun simctl boot "$RES_DEVICE_ID" 2>/dev/null || true
 /usr/bin/xcrun simctl bootstatus "$RES_DEVICE_ID" -b
@@ -56,3 +45,4 @@ RES_IOS_PLIST="$RES_IOS_APP/Info.plist"
 /usr/bin/xcrun simctl install "$RES_DEVICE_ID" "$RES_IOS_APP"
 /usr/bin/xcrun simctl launch "$RES_DEVICE_ID" "$RES_BUNDLE_ID"
 echo "$RES_IOS_INSTANCE_NAME launched in $RES_SIMULATOR_NAME ($RES_DEVICE_ID)"
+echo "Deterministic selectors: $RES_INSTANCE_REGISTRY"
