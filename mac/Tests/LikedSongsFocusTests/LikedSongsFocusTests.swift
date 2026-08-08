@@ -710,6 +710,30 @@ struct LikedSongsFocusTests {
     }
 
     @Test
+    func repeatingAudioStartsANewListeningHistoryPlayOnEveryLoop() async throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        await model.importLocalFiles(at: [glass])
+        let track = try #require(model.tracks.first)
+
+        model.toggleRepeat()
+        model.selectAndPlay(track)
+        try await Task.sleep(for: .milliseconds(2_050))
+        if model.isPlaying { model.togglePlay() }
+
+        #expect(model.listeningHistoryEntries.count >= 2)
+        #expect(ListeningHistoryPlayPolicy.qualifies(
+            try #require(model.listeningHistoryEntries.first),
+            track: track
+        ))
+    }
+
+    @Test
     func playbackUsesThePlayableAudioDurationInsteadOfStaleTrackMetadata() async throws {
         let (defaults, suite) = try defaults()
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -807,48 +831,6 @@ struct LikedSongsFocusTests {
         #expect(model.isPlaying)
         #expect(controller.lastSnapshot?.isPlaying == true)
         controller.handlers.pause()
-    }
-
-    @Test
-    func installedVideoOwnershipRoutesSystemPlaybackCommandsToAVPlayer() async throws {
-        let (defaults, suite) = try defaults()
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let controller = RecordingMacSystemPlaybackController()
-        let model = PlayerModel(
-            loadPersistedLibrary: false,
-            defaults: defaults,
-            persistServerCredentials: false,
-            systemPlaybackController: controller
-        )
-        await model.importLocalFiles(at: [glass])
-        let track = try #require(model.tracks.first)
-        model.selectAndPlay(track)
-
-        let videoPlayer = AVPlayer(url: glass)
-        videoPlayer.play()
-        model.beginInstalledVideoPlayback(videoPlayer, trackID: track.id)
-        controller.handlers.seek(0.25)
-        #expect(abs(model.position - 0.25) < 0.01)
-
-        controller.handlers.pause()
-        #expect(!model.isPlaying)
-        #expect(videoPlayer.rate == 0)
-        #expect(controller.lastSnapshot?.isPlaying == false)
-
-        controller.handlers.play()
-        #expect(model.isPlaying)
-        #expect(videoPlayer.rate > 0)
-        #expect(controller.lastSnapshot?.isPlaying == true)
-
-        controller.handlers.changeRate(1.5)
-        #expect(model.playbackRate == 1.5)
-        #expect(videoPlayer.defaultRate == 1.5)
-        model.endInstalledVideoPlayback(
-            videoPlayer,
-            trackID: track.id,
-            position: model.position,
-            resumeAudio: false
-        )
     }
 
     @Test

@@ -53,6 +53,29 @@ const { policyBlockedUploadEntries, serverUploadFilename } = require("./server-u
 const { readServerUploadResponse } = require("./server-upload-response.cjs");
 const windowsPackage = require("./package.json");
 
+function developmentInstanceMetadata() {
+  if (app.isPackaged) return null;
+  const worktreeID = String(process.env.RESONANCE_WORKTREE_ID || "").trim();
+  if (!/^[a-z0-9-]{1,80}$/.test(worktreeID)) return null;
+  const requestedName = String(process.env.RESONANCE_INSTANCE_NAME || "").trim();
+  const displayName = /^[A-Za-z0-9 ._\-\[\]]{1,100}$/.test(requestedName)
+    ? requestedName
+    : `Resonance Windows [${worktreeID}]`;
+  return { displayName, worktreeID };
+}
+
+const developmentInstance = developmentInstanceMetadata();
+const resonanceApplicationName = developmentInstance?.displayName || "Resonance";
+if (developmentInstance) {
+  app.setName(resonanceApplicationName);
+  app.setPath("userData", path.join(
+    app.getPath("appData"),
+    "Resonance Worktrees",
+    developmentInstance.worktreeID,
+    "windows",
+  ));
+}
+
 protocol.registerSchemesAsPrivileged([{
   scheme: SERVER_STREAM_SCHEME,
   privileges: {
@@ -756,7 +779,7 @@ function createWindow() {
     minWidth: 980,
     minHeight: 650,
     backgroundColor: "#07101c",
-    title: "Resonance",
+    title: resonanceApplicationName,
     icon: path.join(__dirname, "resonance.ico"),
     autoHideMenuBar: true,
     webPreferences: {
@@ -767,6 +790,10 @@ function createWindow() {
     },
   });
   mainWindow = window;
+  window.on("page-title-updated", (event) => {
+    event.preventDefault();
+    window.setTitle(resonanceApplicationName);
+  });
   window.resonanceCloseReady = false;
   window.resonanceCloseRequested = false;
   window.resonanceCloseTimer = null;

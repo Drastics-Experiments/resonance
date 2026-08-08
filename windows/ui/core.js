@@ -490,16 +490,25 @@ function listeningHistoryTrackSnapshot(state, entry) {
   const track = activeTracks.find((item) => item?.id === entry?.trackID)
     || (remoteID ? activeTracks.find((item) =>
       item?.remoteID === remoteID && (item.syncProfileID || "default") === profileID) : null);
+  const trackDuration = normalizedHistoryDuration(track?.duration);
+  const entryDuration = normalizedHistoryDuration(entry?.duration);
   return {
     id: track?.id || entry?.trackID,
     remoteID: track?.remoteID || remoteID,
     title: optionalHistoryText(track?.title) || optionalHistoryText(entry?.title) || "Unknown song",
     artist: optionalHistoryText(track?.artist) || optionalHistoryText(entry?.artist) || "Unknown artist",
     album: optionalHistoryText(track?.album) || optionalHistoryText(entry?.album) || "Unknown Album",
-    duration: normalizedHistoryDuration(track?.duration) ?? normalizedHistoryDuration(entry?.duration) ?? 0,
+    duration: trackDuration && trackDuration > 0 ? trackDuration : entryDuration ?? 0,
     artwork: track?.artwork || null,
     fileUrl: track?.fileUrl || null,
   };
+}
+
+export function listeningHistoryEntryQualifiesAsPlay(state, entry) {
+  const listenedSeconds = Number(entry?.listenedSeconds);
+  if (!Number.isFinite(listenedSeconds) || listenedSeconds <= 0) return false;
+  const duration = listeningHistoryTrackSnapshot(state, entry).duration;
+  return Number.isFinite(duration) && duration > 0 && listenedSeconds > duration * 0.1;
 }
 
 export function clipRangeKey(track) {
@@ -838,15 +847,16 @@ export function summarizeListeningHistory(state, dayCount = 30, now = new Date()
     const timestamp = Date.parse(entry.startedAt);
     if (!Number.isFinite(timestamp)) continue;
     const seconds = Math.max(0, Number(entry.listenedSeconds) || 0);
+    const qualifiesAsPlay = listeningHistoryEntryQualifiesAsPlay(state, entry);
     if (localDayKey(timestamp) === todayKey) {
       todaySeconds += seconds;
-      todayPlays += 1;
+      if (qualifiesAsPlay) todayPlays += 1;
     }
     const key = hourly ? hourKey(timestamp) : localDayKey(timestamp);
     const day = byKey.get(key);
     if (!day) continue;
     day.seconds += seconds;
-    day.plays += 1;
+    if (qualifiesAsPlay) day.plays += 1;
     if (entry.trackID) {
       const songKey = listeningHistorySongKey(entry);
       const snapshot = listeningHistoryTrackSnapshot(state, entry);
@@ -869,9 +879,9 @@ export function summarizeListeningHistory(state, dayCount = 30, now = new Date()
       const series = songSeries.get(songKey);
       const seriesDay = series.days[dayIndexByKey.get(key)];
       series.seconds += seconds;
-      series.plays += 1;
+      if (qualifiesAsPlay) series.plays += 1;
       seriesDay.seconds += seconds;
-      seriesDay.plays += 1;
+      if (qualifiesAsPlay) seriesDay.plays += 1;
     }
   }
   return {
@@ -899,8 +909,9 @@ export function summarizeListeningStats(state, now = new Date()) {
     const timestamp = Date.parse(entry.startedAt);
     if (!Number.isFinite(timestamp)) continue;
     const seconds = Math.max(0, Number(entry.listenedSeconds) || 0);
+    const qualifiesAsPlay = listeningHistoryEntryQualifiesAsPlay(state, entry);
     totalSeconds += seconds;
-    plays += 1;
+    if (qualifiesAsPlay) plays += 1;
     if (localDayKey(timestamp) === todayKey) todaySeconds += seconds;
     if (!entry.trackID) continue;
 
@@ -919,13 +930,13 @@ export function summarizeListeningStats(state, now = new Date()) {
       plays: 0,
     };
     song.seconds += seconds;
-    song.plays += 1;
+    if (qualifiesAsPlay) song.plays += 1;
     songs.set(songKey, song);
 
     const artist = snapshot.artist;
     const artistStats = artists.get(artist) || { artist, seconds: 0, plays: 0 };
     artistStats.seconds += seconds;
-    artistStats.plays += 1;
+    if (qualifiesAsPlay) artistStats.plays += 1;
     artists.set(artist, artistStats);
   }
 
@@ -1074,6 +1085,8 @@ export function filterTracks(tracks, query, mode = "all") {
     : [...tracks];
   if (mode === "audio") {
     filtered = filtered.filter((track) => /\.(aac|aif|aiff|alac|flac|m4a|m4b|mp3|ogg|opus|wav)$/i.test(String(track.filePath || "")));
+  } else if (mode === "video") {
+    filtered = filtered.filter(isInstalledVideoTrack);
   } else if (mode === "recent") {
     filtered.sort((left, right) => Date.parse(right.dateAdded || 0) - Date.parse(left.dateAdded || 0));
   }
@@ -1108,9 +1121,8 @@ export function shuffledTrackIDs(tracks, currentID = null, random = Math.random)
 export function nextIndex(tracks, currentID, direction = 1) {
   if (!tracks.length) return -1;
   const current = tracks.findIndex((track) => track.id === currentID);
-  if (current < 0) return direction >= 0 ? 0 : -1;
-  const next = current + (direction >= 0 ? 1 : -1);
-  return next >= 0 && next < tracks.length ? next : -1;
+  if (current < 0) return direction >= 0 ? 0 : tracks.length - 1;
+  return (current + (direction >= 0 ? 1 : -1) + tracks.length) % tracks.length;
 }
 
 export function tracksForPlaylist(state, playlistID) {

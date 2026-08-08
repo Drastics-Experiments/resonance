@@ -14,6 +14,7 @@ import {
   formatHistoryWindowLabel,
   formatTime,
   isInstalledVideoTrack,
+  listeningHistoryEntryQualifiesAsPlay,
   localImportCandidateCanAutoSelect,
   localImportOperationFingerprint,
   localImportOperationIsCurrent,
@@ -73,30 +74,31 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   assert.doesNotMatch(appSource, /ON DEVICE|fullPlayerMediaBadge/);
+  assert.match(appSource, /data-library-filter="video"[^>]*>Video<\/button>/);
   assert.doesNotMatch(htmlSource, /VIDEO • ON DEVICE|fullPlayerMediaBadge/);
   assert.match(htmlSource, /id="fullPlayerArtwork"[\s\S]+id="installedVideoArtwork"[\s\S]+id="installedVideoPlayer"/);
+  assert.match(htmlSource, /id="installedVideoPlayer"[^>]*\smuted(?:\s|>)/);
   assert.doesNotMatch(htmlSource, /id="installedVideoPlayer"[^>]*\scontrols(?:\s|>|=)/);
   assert.match(htmlSource, /id="installedVideoControls"[\s\S]+id="installedVideoSeek"[\s\S]+id="installedVideoPrevious"[\s\S]+id="installedVideoToggle"[\s\S]+id="installedVideoNext"[\s\S]+id="installedVideoRepeat"[\s\S]+id="installedVideoVolume"/);
   assert.match(appSource, /function setInstalledVideoSourceGeometry\(sourceRect, targetRect\)[\s\S]+--video-source-translate-x[\s\S]+--video-source-scale-x[\s\S]+--video-source-radius-x[\s\S]+--video-source-border-color[\s\S]+--video-source-shadow/);
   assert.match(appSource, /INSTALLED_VIDEO_LEAD_IN_MS = 35[\s\S]+INSTALLED_VIDEO_TRANSITION_MS = 400[\s\S]+INSTALLED_VIDEO_REVEAL_MS = 140[\s\S]+INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS = 190[\s\S]+INSTALLED_VIDEO_CHROME_RESTORE_LEAD_MS = 120/);
   assert.match(appSource, /function openInstalledVideo\([\s\S]+video-from-art[\s\S]+video-expanded[\s\S]+video-revealed/);
   assert.doesNotMatch(appSource, /function openInstalledVideo\([^]*?if \(!audio\.paused\) audio\.pause\(\)/);
-  assert.match(appSource, /function startInstalledVideoPlayback\(\)[\s\S]+audioNeedsHandoff[\s\S]+installedVideoPlayer\.muted = audioNeedsHandoff[\s\S]+installedVideoPlayer\.play/);
-  assert.match(appSource, /function installedVideoPlaybackPlaying\(\)[\s\S]+videoOwnsPlayback = true[\s\S]+audio\.pause\(\)[\s\S]+installedVideoPlayer\.muted = false/);
-  assert.match(appSource, /function animateInstalledVideoStage\(from, to, onFinish\)[\s\S]+\.animate\(\[from, to\],[\s\S]+duration,[\s\S]+cubic-bezier\(\.25, \.1, \.25, 1\)/);
-  assert.match(appSource, /dialog\.classList\.add\("video-expanded", "video-revealed"\);[\s\S]+startInstalledVideoPlayback\(\);[\s\S]+animateInstalledVideoStage\(geometry\.source, geometry\.target/);
-  assert.match(appSource, /function handOffInstalledVideoToAudio\([\s\S]+audio\.currentTime = position[\s\S]+audio\.addEventListener\("playing"[\s\S]+installedVideoPlayer\.pause\(\)/);
+  assert.match(appSource, /function synchronizeInstalledVideoWithAudio\([^)]*\)[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0[\s\S]+audio\.paused[\s\S]+installedVideoPlayer\.play/);
+  assert.match(appSource, /function installedVideoPlaybackPlaying\(\)[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0/);
+  assert.doesNotMatch(appSource, /videoOwnsPlayback|waitingForAudioHandoff|handOffInstalledVideoToAudio/);
+  assert.match(appSource, /function animateInstalledVideoStage\(from, to, onFinish\)[\s\S]+applyInstalledVideoStageGeometry\(from\)[\s\S]+\.animate\(\[from, to\],[\s\S]+applyInstalledVideoStageGeometry\(to\)[\s\S]+animation\.cancel\(\)/);
+  assert.match(appSource, /dialog\.classList\.add\("video-expanded", "video-revealed"\);[\s\S]+synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\);[\s\S]+animateInstalledVideoStage\(geometry\.source, geometry\.target/);
   assert.match(appSource, /function closeInstalledVideo\([^)]*\)[\s\S]+currentGeometry = installedVideoStageGeometry\(\)[\s\S]+classList\.add\("video-revealed", "video-closing"\)[\s\S]+syncFullPlayerTitleMarquee\(\)[\s\S]+animateInstalledVideoStage\(currentGeometry, geometry\.source[\s\S]+finishInstalledVideoClose/);
   assert.match(appSource, /installedVideoArtworkTimer = setTimeout\([\s\S]+classList\.add\("video-artwork-restored"\)[\s\S]+geometryDuration - installedVideoAnimationDuration\(INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS\)/);
-  assert.match(appSource, /const completeHandoff = \(\) => \{[\s\S]+installedVideoPlayer\.muted = true[\s\S]+audio\.muted = false/);
-  assert.match(appSource, /function handleInstalledVideoEnded\(\)[\s\S]+if \(repeat\)[\s\S]+startInstalledVideoPlayback\(\)[\s\S]+advanceInstalledVideo\(1\)/);
   assert.match(appSource, /function advanceInstalledVideo\(direction = 1\)[\s\S]+nextIndex\(tracks, currentID, direction\)[\s\S]+selectInstalledVideoTarget/);
-  assert.match(appSource, /installedVideoPlayer\.onended = handleInstalledVideoEnded/);
+  assert.match(appSource, /installedVideoPlayer\.onended = \(\) => synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\)/);
   assert.match(appSource, /installedVideoStage\.onpointermove = \(\) => showInstalledVideoControls\(\)/);
-  assert.match(appSource, /function setPlaybackVolume\([\s\S]+audio\.volume = gain[\s\S]+installedVideoPlayer\.volume = gain[\s\S]+installedVideoVolume/);
+  assert.match(appSource, /function setPlaybackVolume\([\s\S]+audio\.volume = gain[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0[\s\S]+installedVideoVolume/);
   assert.match(styleSource, /\.full-player-dialog\.video-active \.full-player-details[\s\S]+opacity: 0/);
   assert.doesNotMatch(styleSource, /\.installed-video-dialog\.video-from-art \.installed-video-stage/);
   assert.match(styleSource, /\.installed-video-stage\s*\{[\s\S]+will-change: transform, border-radius[\s\S]+transition: none/);
+  assert.match(styleSource, /\.installed-video-stage\s*\{[\s\S]+inset: clamp\(12px, 3\.4vw, 38px\)[\s\S]+width: auto[\s\S]+height: auto/);
   assert.match(styleSource, /\.installed-video-dialog\.video-revealed \.installed-video-stage video[\s\S]+opacity: 1/);
   assert.match(styleSource, /\.installed-video-artwork,[\s\S]+\.installed-video-stage video[\s\S]+transition: opacity 140ms ease/);
   assert.match(styleSource, /\.installed-video-dialog\.video-revealed\.video-artwork-restored \.installed-video-stage video[\s\S]+opacity: 0[\s\S]+\.installed-video-dialog\.video-revealed\.video-artwork-restored \.installed-video-artwork[\s\S]+opacity: 1/);
@@ -519,6 +521,16 @@ test("avoids macOS Keychain access while persisting source Preview credentials l
   assert.match(mainSource, /function persistServerCredentials\(credentialsValue\)[\s\S]+usesPreviewCredentialStore\(\)[\s\S]+writePreviewCredentials/);
   assert.match(mainSource, /server:credentials:save[\s\S]+persistServerCredentials\(credentialsValue\)/);
   assert.match(mainSource, /function encryptedCredentialStorage\(\)[\s\S]+require\("electron"\)\.safeStorage/);
+});
+
+test("isolates and visibly names source Preview instances by Git worktree", () => {
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  assert.match(mainSource, /process\.env\.RESONANCE_WORKTREE_ID/);
+  assert.match(mainSource, /process\.env\.RESONANCE_INSTANCE_NAME/);
+  assert.match(mainSource, /app\.setPath\("userData"/);
+  assert.match(mainSource, /"Resonance Worktrees"/);
+  assert.match(mainSource, /title: resonanceApplicationName/);
+  assert.match(mainSource, /page-title-updated/);
 });
 
 test("uploads link imports even when the selected source is already saved locally", () => {
@@ -1051,6 +1063,9 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /function openListeningHistory\(\)[\s\S]+listeningHistoryMode = "overall"[\s\S]+listeningHistoryWindowOffset = 0[\s\S]+ensureListeningHistorySelection\(\)/);
   assert.match(appSource, /function beginListeningSession\(\)/);
   assert.match(appSource, /entry\.listenedSeconds \+= delta/);
+  assert.match(appSource, /function finishListeningSessionForReplay\(\)[\s\S]+activeListeningEntryID = null/);
+  assert.match(appSource, /audio\.onended = \(\) => \{[\s\S]+if \(repeat\) \{[\s\S]+finishListeningSessionForReplay\(\)[\s\S]+requestPlayback\(\)/);
+  assert.match(appSource, /function pendingListeningHistoryBatches\(\)[\s\S]+listeningHistoryEntryQualifiesAsPlay\(state, entry\)/);
   assert.match(appSource, /api\.onPrepareToClose\(async \(\) =>[\s\S]+updateListeningSession\(\)[\s\S]+await persist\(\{ refreshSidebar: false \}\)[\s\S]+api\.readyToClose\(\)/);
   assert.match(preloadSource, /onPrepareToClose:[\s\S]+app:prepare-close/);
   assert.match(preloadSource, /readyToClose:[\s\S]+app:close-ready/);
@@ -1197,9 +1212,9 @@ test("summarizes persisted listening history by local day", () => {
     serverURL: "https://music.unblocked.mov",
     syncProfileID: "music-room",
     listeningHistory: [
-      { id: "first", trackID: "a", profileID: "music-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 8, 0, 0).toISOString(), listenedSeconds: 600 },
-      { id: "second", trackID: "b", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 29, 8, 0, 0).toISOString(), listenedSeconds: 300 },
-      { id: "old", trackID: "c", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 5, 1, 8, 0, 0).toISOString(), listenedSeconds: 900 },
+      { id: "first", trackID: "a", profileID: "music-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 8, 0, 0).toISOString(), listenedSeconds: 600, duration: 240 },
+      { id: "second", trackID: "b", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 29, 8, 0, 0).toISOString(), listenedSeconds: 300, duration: 240 },
+      { id: "old", trackID: "c", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 5, 1, 8, 0, 0).toISOString(), listenedSeconds: 900, duration: 240 },
     ],
   });
   const summary = summarizeListeningHistory(state, 7, now);
@@ -1229,6 +1244,33 @@ test("summarizes persisted listening history by local day", () => {
   const previousWindow = summarizeListeningHistory(state, 7, now, 1);
   assert.equal(previousWindow.days.at(-1).date.getDate(), 23);
   assert.equal(previousWindow.totalSeconds, 0);
+});
+
+test("counts a listening-history play only after more than ten percent", () => {
+  const now = new Date(2026, 6, 30, 12, 0, 0);
+  const base = {
+    serverURL: "https://music.unblocked.mov",
+    tracks: [{ id: "song", title: "Threshold", artist: "Test", duration: 200 }],
+  };
+  const entry = (id, listenedSeconds) => ({
+    id,
+    trackID: "song",
+    serverOrigin: base.serverURL,
+    startedAt: now.toISOString(),
+    listenedSeconds,
+    duration: 200,
+  });
+  const state = normalizeState({
+    ...base,
+    listeningHistory: [entry("below", 19.99), entry("exact", 20), entry("above", 20.01)],
+  });
+
+  assert.equal(listeningHistoryEntryQualifiesAsPlay(state, state.listeningHistory[0]), false);
+  assert.equal(listeningHistoryEntryQualifiesAsPlay(state, state.listeningHistory[1]), false);
+  assert.equal(listeningHistoryEntryQualifiesAsPlay(state, state.listeningHistory[2]), true);
+  assert.equal(summarizeListeningHistory(state, 1, now).plays, 1);
+  assert.equal(summarizeListeningStats(state, now).plays, 1);
+  assert.equal(summarizeListeningStats(state, now).totalSeconds, 60);
 });
 
 test("merges and displays server-only listening history snapshots", () => {
@@ -1294,9 +1336,9 @@ test("summarizes all-time listening stats independently of the graph window", ()
     serverURL: "https://music.unblocked.mov",
     syncProfileID: "alpha-room",
     tracks: [
-      { id: "a", title: "First", artist: "Alpha" },
-      { id: "b", title: "Second", artist: "Beta" },
-      { id: "c", title: "Other profile", artist: "Gamma" },
+      { id: "a", title: "First", artist: "Alpha", duration: 240 },
+      { id: "b", title: "Second", artist: "Beta", duration: 240 },
+      { id: "c", title: "Other profile", artist: "Gamma", duration: 240 },
     ],
     listeningHistory: [
       { trackID: "a", profileID: "alpha-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 29, 10, 0, 0).toISOString(), listenedSeconds: 120 },
@@ -1320,9 +1362,9 @@ test("summarizes one-day windows into calendar hours", () => {
   const state = normalizeState({
     serverURL: "https://music.unblocked.mov",
     listeningHistory: [
-      { id: "current-day", trackID: "a", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 11, 10, 0).toISOString(), listenedSeconds: 120 },
-      { id: "current-morning", trackID: "b", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 1, 30, 0).toISOString(), listenedSeconds: 180 },
-      { id: "previous-day", trackID: "c", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 29, 23, 15, 0).toISOString(), listenedSeconds: 300 },
+      { id: "current-day", trackID: "a", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 11, 10, 0).toISOString(), listenedSeconds: 120, duration: 240 },
+      { id: "current-morning", trackID: "b", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 1, 30, 0).toISOString(), listenedSeconds: 180, duration: 240 },
+      { id: "previous-day", trackID: "c", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 29, 23, 15, 0).toISOString(), listenedSeconds: 300, duration: 240 },
     ],
   });
   const summary = summarizeListeningHistory(state, 1, now);
@@ -1459,15 +1501,16 @@ test("normalizes Liked Songs from favorites only", () => {
 test("search, queue movement, playlists, and time formatting work", () => {
   const tracks = [
     { id: "a", title: "Glass", artist: "Local", album: "Sounds", filePath: "C:\\Music\\glass.mp3", dateAdded: "2026-01-01T00:00:00Z" },
-    { id: "b", title: "Ping", artist: "Server", album: "Remote", filePath: "C:\\Music\\ping.mp4", dateAdded: "2026-02-01T00:00:00Z" },
+    { id: "b", title: "Ping", artist: "Server", album: "Remote", filePath: "C:\\Music\\ping.mp4", fileUrl: "file:///C:/Music/ping.mp4", dateAdded: "2026-02-01T00:00:00Z" },
   ];
   assert.deepEqual(filterTracks(tracks, "remote").map((track) => track.id), ["b"]);
   assert.deepEqual(filterTracks(tracks, "glass.mp3").map((track) => track.id), ["a"]);
   assert.deepEqual(filterTracks(tracks, "", "audio").map((track) => track.id), ["a"]);
+  assert.deepEqual(filterTracks(tracks, "", "video").map((track) => track.id), ["b"]);
   assert.deepEqual(filterTracks(tracks, "", "recent").map((track) => track.id), ["b", "a"]);
   assert.equal(nextIndex(tracks, "a", 1), 1);
-  assert.equal(nextIndex(tracks, "a", -1), -1);
-  assert.equal(nextIndex(tracks, "b", 1), -1);
+  assert.equal(nextIndex(tracks, "a", -1), 1);
+  assert.equal(nextIndex(tracks, "b", 1), 0);
   assert.deepEqual(shuffledTrackIDs(tracks, "a", () => 0), ["a", "b"]);
   assert.equal(formatTime(222), "3:42");
   assert.equal(normalizedVolume(0), 0);
