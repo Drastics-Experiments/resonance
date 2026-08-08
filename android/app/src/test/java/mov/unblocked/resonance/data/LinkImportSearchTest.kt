@@ -15,6 +15,15 @@ class LinkImportSearchTest {
     }
 
     @Test
+    fun requestsDesktopProviderDocumentsForSearch() {
+        val userAgent = LinkImportSearchRequestPolicy.USER_AGENT
+        assertTrue(userAgent.contains("Macintosh"))
+        assertTrue(userAgent.contains("Chrome/"))
+        assertFalse(userAgent.contains("Android"))
+        assertFalse(userAgent.contains(" Mobile "))
+    }
+
+    @Test
     fun reviewedUploadAcceptsOnlySpotifyTracksAndIndividualYouTubeVideos() {
         assertTrue(
             LinkImportInput.isReviewedTrackLink(

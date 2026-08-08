@@ -161,6 +161,17 @@ struct LocalImportSearchTests {
         #expect(paths.contains("api-v2.soundcloud.com/search/tracks"))
         #expect(paths.contains("music.youtube.com/search"))
         #expect(paths.contains("www.youtube.com/results"))
+
+        let videoResult = try await LocalImportSearchEngine(sessions: .testing(session)).search(
+            "Test Song Test Artist",
+            mediaMode: .video
+        )
+        #expect(videoResult.results(for: .spotify).count == 1)
+        #expect(videoResult.results(for: .soundcloud).count == 1)
+        #expect(videoResult.results(for: .youtube).count == 1)
+        #expect(videoResult.results.allSatisfy { result in
+            result.candidates.allSatisfy { $0.sourceProvider != .soundcloud }
+        })
     }
 
     private func youtubeSearchHTML(videoID: String) throws -> String {

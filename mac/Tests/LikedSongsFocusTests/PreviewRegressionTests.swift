@@ -311,6 +311,30 @@ struct PreviewRegressionTests {
 
     @MainActor
     @Test
+    func linkImportKeepsVideoSelectedForPlainTextSearches() {
+        let suiteName = "LinkImportVideoSearchTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        let viewModel = MacLocalImportViewModel(model: model)
+
+        viewModel.source = "Test Song Test Artist"
+        viewModel.mediaMode = .video
+        viewModel.normalizeMediaModeForSource()
+        #expect(viewModel.mediaMode == .video)
+        #expect(viewModel.resolveButtonTitle == "Search Videos")
+
+        viewModel.source = "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8"
+        viewModel.normalizeMediaModeForSource()
+        #expect(viewModel.mediaMode == .audio)
+    }
+
+    @MainActor
+    @Test
     func linkImportUploadEligibilityNeedsAdminCredentialsButNotCatalogCredentials() {
         let suiteName = "LinkImportUploadEligibilityTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

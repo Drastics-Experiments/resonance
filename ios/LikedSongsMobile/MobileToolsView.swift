@@ -506,6 +506,34 @@ private func isVideoClipTrack(_ track: MobileTrack) -> Bool {
     )
 }
 
+enum MobileLocalImportSearchPolicy {
+    struct Preparation: Equatable {
+        let searchesProviders: Bool
+        let syncAfterImport: Bool
+        let usesReviewedServerMatch: Bool
+    }
+
+    static func prepare(
+        input: String,
+        explicitlyReviewedServerMatch: Bool,
+        syncAfterImport: Bool,
+        activeUploadMode: MobileUploadMode?
+    ) -> Preparation {
+        let searchesProviders = !LocalImportInput.looksLikeLink(input)
+        let requiresDeviceOnlySearch = searchesProviders
+            && !explicitlyReviewedServerMatch
+            && activeUploadMode != nil
+            && activeUploadMode != .localFile
+        let adjustedSync = requiresDeviceOnlySearch ? false : syncAfterImport
+        return Preparation(
+            searchesProviders: searchesProviders,
+            syncAfterImport: adjustedSync,
+            usesReviewedServerMatch: explicitlyReviewedServerMatch
+                || (adjustedSync && activeUploadMode == .reviewedMatch)
+        )
+    }
+}
+
 @MainActor
 private final class MobileLocalImportViewModel: ObservableObject {
     @Published var source = "" {
@@ -602,9 +630,15 @@ private final class MobileLocalImportViewModel: ObservableObject {
         completedTrack = nil
         completedSummary = nil
         batchCurrentTitle = nil
-        let usesReviewedServerMatch = reviewedServerMatch
-            || (syncAfterImport && library.activeUploadMode == .reviewedMatch)
-        let searchesProviders = !LocalImportInput.looksLikeLink(value)
+        let preparation = MobileLocalImportSearchPolicy.prepare(
+            input: value,
+            explicitlyReviewedServerMatch: reviewedServerMatch,
+            syncAfterImport: syncAfterImport,
+            activeUploadMode: library.activeUploadMode
+        )
+        syncAfterImport = preparation.syncAfterImport
+        let usesReviewedServerMatch = preparation.usesReviewedServerMatch
+        let searchesProviders = preparation.searchesProviders
         if usesReviewedServerMatch, searchesProviders {
             error = LocalImportError(
                 stage: .resolvingMetadata,

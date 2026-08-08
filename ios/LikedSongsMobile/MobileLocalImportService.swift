@@ -38,11 +38,16 @@ struct LocalImportSessions: @unchecked Sendable {
     let artwork: URLSession
 
     static func production() -> LocalImportSessions {
-        func session(validator: @escaping @Sendable (URL) -> Bool) -> URLSession {
+        func session(
+            acceptsCookies: Bool = false,
+            validator: @escaping @Sendable (URL) -> Bool
+        ) -> URLSession {
             let configuration = URLSessionConfiguration.ephemeral
             configuration.urlCache = nil
-            configuration.httpCookieStorage = nil
-            configuration.httpShouldSetCookies = false
+            if !acceptsCookies {
+                configuration.httpCookieStorage = nil
+                configuration.httpShouldSetCookies = false
+            }
             configuration.timeoutIntervalForRequest = 45
             configuration.timeoutIntervalForResource = 180
             return URLSession(configuration: configuration, delegate: LocalImportRedirectDelegate(validator: validator), delegateQueue: nil)
@@ -51,8 +56,10 @@ struct LocalImportSessions: @unchecked Sendable {
             spotify: session { url in
                 (try? LocalImportURL.spotifySource(url.absoluteString)) != nil
             },
-            soundcloud: session { LocalImportURL.isSoundCloudRequest($0) },
-            youtube: session { LocalImportURL.isYouTubeDocument($0) },
+            soundcloud: session(acceptsCookies: true) { LocalImportURL.isSoundCloudRequest($0) },
+            // Provider search uses short-lived anonymous cookies to keep
+            // consecutive YouTube documents from degrading into empty results.
+            youtube: session(acceptsCookies: true) { LocalImportURL.isYouTubeDocument($0) },
             debridVault: session { LocalImportURL.isDebridVaultDocument($0) },
             googleVideo: session { LocalImportURL.isGoogleVideo($0) },
             artwork: session { url in

@@ -106,6 +106,12 @@ class LinkImportException(
     override val message: String,
 ) : Exception(message)
 
+internal object LinkImportSearchRequestPolicy {
+    const val USER_AGENT =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+}
+
 class LinkImportService(context: Context) {
     private data class SpotifyPlaylistResolution(
         val info: LinkImportPlaylist,
@@ -746,7 +752,11 @@ class LinkImportService(context: Context) {
         val connection = open(
             url,
             "GET",
-            mapOf("Accept" to accept, "Accept-Language" to "en-US,en;q=0.8", "User-Agent" to webAgent),
+            mapOf(
+                "Accept" to accept,
+                "Accept-Language" to "en-US,en;q=0.8",
+                "User-Agent" to LinkImportSearchRequestPolicy.USER_AGENT,
+            ),
         )
         try {
             val status = connection.responseCode

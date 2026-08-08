@@ -260,7 +260,7 @@ final class MacLocalImportViewModel: ObservableObject {
     var resolveButtonTitle: String {
         if !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            !LocalImportInput.looksLikeLink(source) {
-            return "Search Music"
+            return mediaMode == .video ? "Search Videos" : "Search Music"
         }
         return mediaMode == .video ? "Find Video" : "Find Audio"
     }
@@ -355,9 +355,7 @@ final class MacLocalImportViewModel: ObservableObject {
     }
 
     func normalizeMediaModeForSource() {
-        let value = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        let textSearch = !value.isEmpty && !LocalImportInput.looksLikeLink(value)
-        if (textSearch || LocalImportURL.isSpotify(source) || LocalImportURL.isSoundCloud(source)), mediaMode == .video {
+        if (LocalImportURL.isSpotify(source) || LocalImportURL.isSoundCloud(source)), mediaMode == .video {
             mediaMode = .audio
         }
     }
@@ -395,7 +393,10 @@ final class MacLocalImportViewModel: ObservableObject {
             guard let self else { return }
             do {
                 if searchesProviders {
-                    let response = try await service.search(query: value)
+                    let response = try await service.search(
+                        query: value,
+                        mediaMode: requestedMode
+                    )
                     try Task.checkCancellation()
                     searchResponse = response
                     guard let first = response.results.first else {
@@ -1353,7 +1354,7 @@ struct MacLocalImportSheet: View {
                     .tracking(1.0)
                     .foregroundStyle(Color.appMuted)
                 Spacer()
-                Text("\(response.results.count) previewable")
+                Text("\(response.results.count) \(viewModel.mediaMode == .video ? "downloadable" : "previewable")")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Color.appViolet)
             }
@@ -1374,7 +1375,7 @@ struct MacLocalImportSheet: View {
                     .padding(.horizontal, 3)
 
                     if results.isEmpty {
-                        Text("No previewable results.")
+                        Text(viewModel.mediaMode == .video ? "No downloadable videos." : "No previewable results.")
                             .font(.system(size: 9))
                             .foregroundStyle(Color.appMuted)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2018,9 +2019,11 @@ struct MacLocalImportSheet: View {
         case .idle: ("Ready", "Paste a supported link, or enter a song, artist, or album to search.", "link", Color.appViolet)
         case .resolvingMetadata: ("Resolving metadata", "This link lookup runs directly from your Mac.", "magnifyingglass", Color.appViolet)
         case .searchingCandidates: (
-            !LocalImportInput.looksLikeLink(viewModel.source) ? "Searching music platforms" : "Searching audio sources",
             !LocalImportInput.looksLikeLink(viewModel.source)
-                ? "Querying Spotify, SoundCloud, and YouTube for previewable results."
+                ? (viewModel.mediaMode == .video ? "Searching videos" : "Searching music platforms")
+                : "Searching audio sources",
+            !LocalImportInput.looksLikeLink(viewModel.source)
+                ? "Querying Spotify, SoundCloud, and YouTube for \(viewModel.mediaMode == .video ? "downloadable videos" : "previewable results")."
                 : viewModel.isPlaylist ? "Matching each public playlist track to a direct or alternate audio source." : "Finding direct and alternate audio sources.",
             "waveform.badge.magnifyingglass",
             Color.appViolet
