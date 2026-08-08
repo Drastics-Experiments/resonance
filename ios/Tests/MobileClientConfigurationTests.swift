@@ -8,6 +8,20 @@ final class MobileClientConfigurationTests: XCTestCase {
     private let cohortKey = "AAECAwQFBgcICQoLDA0ODw"
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    func testProfilePicturesUseCanonicalPerProfileScopes() {
+        XCTAssertEqual(
+            MobileProfilePictureScope.contextKey(
+                serverURL: "https://MUSIC.example/library/",
+                profileID: "  "
+            ),
+            "https://music.example:443#profile=default"
+        )
+        XCTAssertNotEqual(
+            MobileProfilePictureScope.filename(serverURL: "https://music.example", profileID: "default"),
+            MobileProfilePictureScope.filename(serverURL: "https://music.example", profileID: "family")
+        )
+    }
+
     func testVerifierAcceptsExactDigestSignatureAndAudience() throws {
         let signed = try signedResponse()
         let result = try MobileClientConfigVerifier.verify(

@@ -130,6 +130,7 @@ data class ResonanceUiState(
     val playlistSyncDetail: String = "Idle",
     val syncProfileId: String = "default",
     val syncProfiles: List<SyncProfile> = listOf(SyncProfile("default", "Default", true)),
+    val profilePicturePath: String? = null,
     val availableStorageBytes: Long = 0,
     val errorMessage: String? = null,
     val linkImport: LinkImportUiState = LinkImportUiState(),

@@ -6,6 +6,26 @@ import Testing
 @Suite("Resonance Preview regressions")
 struct PreviewRegressionTests {
     @Test
+    func profilePicturesAreScopedToTheCanonicalServerAndProfile() {
+        let defaultScope = ProfilePictureScope.contextKey(
+            serverURL: "https://MUSIC.example/library/",
+            profileID: "  "
+        )
+        #expect(defaultScope == "https://music.example#profile=default")
+        #expect(ProfilePictureScope.contextKey(
+            serverURL: "https://music.example/another-path",
+            profileID: "family"
+        ) == "https://music.example#profile=family")
+        let filename = ProfilePictureScope.filename(
+            serverURL: "https://music.example",
+            profileID: "family"
+        )
+        #expect(filename.count == 68)
+        #expect(filename.hasSuffix(".jpg"))
+        #expect(filename.dropLast(4).allSatisfy { $0.isHexDigit && !$0.isUppercase })
+    }
+
+    @Test
     func nativeMenuCommandsUseStableNotificationRoutes() {
         #expect(Notification.Name.focusMusicSearch.rawValue == "focusMusicSearch")
         #expect(Notification.Name.newMusicPlaylist.rawValue == "newMusicPlaylist")

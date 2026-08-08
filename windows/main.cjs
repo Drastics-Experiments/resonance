@@ -103,6 +103,7 @@ protectDetachedOutput(process.stderr);
 const AUDIO_EXTENSIONS = new Set([".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".wav"]);
 const SERVER_ARTWORK_TYPES = new Set(["image/avif", "image/gif", "image/jpeg", "image/png", "image/webp"]);
 const MAX_SERVER_ARTWORK_BYTES = 8 * 1024 * 1024;
+const MAX_PROFILE_PICTURE_SOURCE_BYTES = 32 * 1024 * 1024;
 const MAX_LOCAL_IMPORT_UPLOAD_BYTES = 256 * 1024 * 1024;
 const MAX_LOCAL_IMPORT_PREVIEW_BYTES = 32 * 1024 * 1024;
 const AUTOMATIC_UPDATE_CHECK_DELAY_MS = 10_000;
@@ -376,6 +377,7 @@ function applicationPaths() {
     uploadRetriesBackup: path.join(root, "server-upload-retries.json.backup"),
     clientConfigState: path.join(root, "client-config-state.json"),
     clientConfigStateBackup: path.join(root, "client-config-state.json.backup"),
+    profilePictures: path.join(root, "ProfilePictures"),
     local: path.join(root, "LocalMusic"),
     remote: path.join(root, "ServerCache"),
   };
@@ -651,8 +653,39 @@ function safeListeningHistory(value) {
 
 async function ensureDirectories() {
   const paths = applicationPaths();
-  await Promise.all([fs.mkdir(paths.local, { recursive: true }), fs.mkdir(paths.remote, { recursive: true })]);
+  await Promise.all([
+    fs.mkdir(paths.local, { recursive: true }),
+    fs.mkdir(paths.remote, { recursive: true }),
+    fs.mkdir(paths.profilePictures, { recursive: true }),
+  ]);
   return paths;
+}
+
+function profilePicturePath(serverURL, profileID) {
+  const serverOrigin = normalizedServerOrigin(serverURL);
+  const profile = String(profileID || "default").trim() || "default";
+  if (!serverOrigin || profile.length > 128 || /[\u0000-\u001f\u007f]/.test(profile)) {
+    throw new Error("Choose a valid profile before changing its picture.");
+  }
+  const digest = createHash("sha256")
+    .update(`${serverOrigin}#profile=${profile}`, "utf8")
+    .digest("hex");
+  return path.join(applicationPaths().profilePictures, `${digest}.jpg`);
+}
+
+function normalizedProfilePicture(image) {
+  if (!image || image.isEmpty()) throw new Error("The selected file is not a supported picture.");
+  const size = image.getSize();
+  const side = Math.min(size.width, size.height);
+  if (!Number.isSafeInteger(side) || side < 1) throw new Error("The selected picture is empty.");
+  const square = image.crop({
+    x: Math.floor((size.width - side) / 2),
+    y: Math.floor((size.height - side) / 2),
+    width: side,
+    height: side,
+  });
+  const target = Math.min(side, 512);
+  return square.resize({ width: target, height: target, quality: "best" }).toJPEG(88);
 }
 
 async function cleanupLocalImportTemporaryFiles() {
@@ -1203,6 +1236,41 @@ ipcMain.handle("library:import", async () => {
     tracks.push(await enrichedTrack(destination, { size: information.size }));
   }
   return tracks;
+});
+
+ipcMain.handle("profile-picture:load", async (_event, { serverURL, profileID } = {}) => {
+  const destination = profilePicturePath(serverURL, profileID);
+  try {
+    const image = nativeImage.createFromPath(destination);
+    return image.isEmpty() ? null : image.toDataURL();
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle("profile-picture:choose", async (_event, { serverURL, profileID } = {}) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Choose a profile picture",
+    properties: ["openFile"],
+    filters: [{ name: "Pictures", extensions: ["avif", "gif", "jpeg", "jpg", "png", "webp"] }],
+  });
+  if (result.canceled || result.filePaths.length !== 1) return null;
+  const source = result.filePaths[0];
+  const information = await fs.stat(source);
+  if (!information.isFile() || information.size > MAX_PROFILE_PICTURE_SOURCE_BYTES) {
+    throw new Error("Profile pictures must be smaller than 32 MB.");
+  }
+  const bytes = normalizedProfilePicture(nativeImage.createFromPath(source));
+  const paths = await ensureDirectories();
+  const destination = profilePicturePath(serverURL, profileID);
+  if (path.dirname(destination) !== paths.profilePictures) throw new Error("Invalid profile-picture destination.");
+  await atomicWriteFile(destination, bytes);
+  return nativeImage.createFromBuffer(bytes).toDataURL();
+});
+
+ipcMain.handle("profile-picture:remove", async (_event, { serverURL, profileID } = {}) => {
+  await fs.rm(profilePicturePath(serverURL, profileID), { force: true });
+  return true;
 });
 
 ipcMain.handle("local-import:capabilities", () => ({

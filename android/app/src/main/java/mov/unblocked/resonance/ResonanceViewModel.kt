@@ -22,6 +22,7 @@ import java.util.UUID
 import java.util.concurrent.Future
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +32,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import mov.unblocked.resonance.data.CredentialStore
 import mov.unblocked.resonance.data.ClipRange
 import mov.unblocked.resonance.data.CatalogRequestSnapshot
@@ -74,6 +76,7 @@ import mov.unblocked.resonance.data.ServerUploadTransportPolicy
 import mov.unblocked.resonance.data.SourceImportMetadata
 import mov.unblocked.resonance.data.SourceImportPolicy
 import mov.unblocked.resonance.data.StoredLibrary
+import mov.unblocked.resonance.data.ProfilePictureStore
 import mov.unblocked.resonance.data.Track
 import mov.unblocked.resonance.playback.PlaybackService
 import mov.unblocked.resonance.playback.DownloadPolicy
@@ -110,6 +113,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private val linkImportService = LinkImportService(context)
     private val credentials = CredentialStore(context)
     private val clientConfigStore = ClientConfigStore(context)
+    private val profilePictureStore = ProfilePictureStore(context)
     private val preferences = context.getSharedPreferences("resonance.playback", 0)
     private val mutableState = MutableStateFlow(
         ResonanceUiState(
@@ -128,6 +132,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     val importRequests = mutableImportRequests.asSharedFlow()
     private val mutableUploadRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val uploadRequests = mutableUploadRequests.asSharedFlow()
+    private val mutableProfilePictureRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val profilePictureRequests = mutableProfilePictureRequests.asSharedFlow()
 
     private var library = StoredLibrary(serverURL = credentials.serverURL)
     private var controllerFuture: Future<MediaController>? = null
@@ -159,6 +165,41 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun dismissError() {
         mutableState.value = mutableState.value.copy(errorMessage = null)
+    }
+
+    override fun chooseProfilePicture() {
+        mutableProfilePictureRequests.tryEmit(Unit)
+    }
+
+    fun setProfilePicture(uri: Uri) {
+        val serverURL = library.serverURL
+        val profileID = library.syncProfileID
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    profilePictureStore.save(uri, serverURL, profileID)
+                }
+            }.onSuccess { path ->
+                if (library.serverURL == serverURL && library.syncProfileID == profileID) {
+                    mutableState.value = mutableState.value.copy(profilePicturePath = path)
+                }
+            }.onFailure { error ->
+                mutableState.value = mutableState.value.copy(
+                    errorMessage = error.message ?: "Resonance could not use that profile picture.",
+                )
+            }
+        }
+    }
+
+    override fun removeProfilePicture() {
+        val serverURL = library.serverURL
+        val profileID = library.syncProfileID
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { profilePictureStore.remove(serverURL, profileID) }
+            if (library.serverURL == serverURL && library.syncProfileID == profileID) {
+                mutableState.value = mutableState.value.copy(profilePicturePath = null)
+            }
+        }
     }
 
     init {
@@ -2956,6 +2997,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             serverAdminKey = credentials.adminToken,
             syncProfileId = library.syncProfileID,
             syncProfiles = library.syncProfiles,
+            profilePicturePath = profilePictureStore.existingPath(
+                library.serverURL,
+                library.syncProfileID,
+            ),
         )
     }
 

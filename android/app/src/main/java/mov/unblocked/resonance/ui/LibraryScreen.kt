@@ -1,5 +1,6 @@
 package mov.unblocked.resonance.ui
 
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardActions
@@ -20,10 +21,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.AddAPhoto
+import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -47,6 +51,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -90,6 +96,7 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                 }
                 ProfileButton(
                     state = state,
+                    actions = actions,
                     onConnection = { connectionOpen = true },
                     onClipEditor = { clipEditorOpen = true },
                 )
@@ -188,11 +195,17 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
 @Composable
 private fun ProfileButton(
     state: ResonanceUiState,
+    actions: ResonanceActions,
     onConnection: () -> Unit,
     onClipEditor: () -> Unit,
 ) {
     val profileName = activeSyncProfileName(state)
     var expanded by remember { mutableStateOf(false) }
+    val profileBitmap = remember(state.profilePicturePath) {
+        state.profilePicturePath
+            ?.takeIf(String::isNotBlank)
+            ?.let { path -> runCatching { BitmapFactory.decodeFile(path)?.asImageBitmap() }.getOrNull() }
+    }
     Box {
         IconButton(
             onClick = { expanded = true },
@@ -203,15 +216,42 @@ private fun ProfileButton(
                     contentDescription = "Profile: $profileName. Open profile tools"
                 },
         ) {
-            Text(
-                text = syncProfileInitial(profileName),
-                color = Color.White,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.clearAndSetSemantics { },
-            )
+            if (profileBitmap != null) {
+                Image(
+                    bitmap = profileBitmap,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clearAndSetSemantics { },
+                )
+            } else {
+                Text(
+                    text = syncProfileInitial(profileName),
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.clearAndSetSemantics { },
+                )
+            }
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text(if (profileBitmap == null) "Choose Profile Picture" else "Change Profile Picture") },
+                leadingIcon = { Icon(Icons.Default.AddAPhoto, null) },
+                onClick = {
+                    expanded = false
+                    actions.chooseProfilePicture()
+                },
+            )
+            if (profileBitmap != null) {
+                DropdownMenuItem(
+                    text = { Text("Remove Picture") },
+                    leadingIcon = { Icon(Icons.Default.PersonRemove, null) },
+                    onClick = {
+                        expanded = false
+                        actions.removeProfilePicture()
+                    },
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Clip Editor") },
                 leadingIcon = { Icon(Icons.Default.GraphicEq, null) },
