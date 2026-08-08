@@ -33,7 +33,6 @@ export function createEmptyState() {
     appPreferences: {
       runInBackground: false,
       discordRichPresence: false,
-      discordApplicationID: "",
       keybinds: {
         togglePlayback: "Space",
         previousTrack: "Ctrl+ArrowLeft",
@@ -66,9 +65,6 @@ export function normalizedAppPreferences(value) {
   return {
     runInBackground: Boolean(preferences.runInBackground),
     discordRichPresence: Boolean(preferences.discordRichPresence),
-    discordApplicationID: /^\d{15,22}$/.test(String(preferences.discordApplicationID || "").trim())
-      ? String(preferences.discordApplicationID).trim()
-      : "",
     keybinds: Object.fromEntries(Object.entries(DEFAULT_KEYBINDS).map(([action, fallback]) => [
       action,
       normalizedKeybind(keybinds[action], fallback),

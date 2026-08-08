@@ -110,8 +110,6 @@ struct MacSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var recorder = MacShortcutRecorder()
     @State private var panel: Panel = .general
-    @State private var applicationIDDraft = ""
-    @State private var applicationIDError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -204,7 +202,6 @@ struct MacSettingsSheet: View {
             )
         )
         .preferredColorScheme(.dark)
-        .onAppear { applicationIDDraft = preferences.discordApplicationID }
         .onDisappear { recorder.cancel() }
     }
 
@@ -224,40 +221,12 @@ struct MacSettingsSheet: View {
                         symbol: "bubble.left.and.bubble.right",
                         title: "Discord Rich Presence",
                         detail: preferences.discordStatus.message,
-                        isOn: $preferences.discordRichPresence
+                        isOn: Binding(
+                            get: { preferences.discordStatus.applicationConfigured && preferences.discordRichPresence },
+                            set: { preferences.discordRichPresence = $0 }
+                        ),
+                        isEnabled: preferences.discordStatus.applicationConfigured
                     )
-                    Rectangle().fill(Color.appLine).frame(height: 1)
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Discord Application ID")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(Color.appInk)
-                                Text("The public ID used by Discord desktop IPC.")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(Color.appMuted)
-                            }
-                            Spacer()
-                        }
-                        HStack(spacing: 8) {
-                            TextField("Paste the Resonance Application ID", text: $applicationIDDraft)
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 10, design: .monospaced))
-                                .padding(.horizontal, 11)
-                                .frame(height: 34)
-                                .background(Color.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                .overlay { RoundedRectangle(cornerRadius: 8).stroke(applicationIDError == nil ? Color.appLine : Color.appAccent) }
-                                .onSubmit(saveApplicationID)
-                            Button("Save", action: saveApplicationID)
-                                .buttonStyle(.bordered)
-                        }
-                        if let applicationIDError {
-                            Text(applicationIDError)
-                                .font(.system(size: 9))
-                                .foregroundStyle(Color.appAccent)
-                        }
-                    }
-                    .padding(14)
                 }
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
@@ -333,7 +302,8 @@ struct MacSettingsSheet: View {
         symbol: String,
         title: String,
         detail: String,
-        isOn: Binding<Bool>
+        isOn: Binding<Bool>,
+        isEnabled: Bool = true
     ) -> some View {
         HStack(spacing: 13) {
             Image(systemName: symbol)
@@ -350,19 +320,12 @@ struct MacSettingsSheet: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .tint(Color.appViolet)
+                .disabled(!isEnabled)
         }
         .padding(.horizontal, 14)
         .frame(minHeight: 64)
     }
 
-    private func saveApplicationID() {
-        if preferences.setDiscordApplicationID(applicationIDDraft) {
-            applicationIDDraft = preferences.discordApplicationID
-            applicationIDError = nil
-        } else {
-            applicationIDError = "Enter the numeric Discord Application ID."
-        }
-    }
 }
 
 private struct SidebarNavigationRow: View {

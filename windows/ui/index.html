@@ -323,6 +323,17 @@
     </form>
   </dialog>
   <dialog id="localImportDialog" class="local-import-dialog" aria-labelledby="localImportTitle">
+    <nav id="localImportProviderPill" class="local-import-provider-pill" aria-label="Import sources">
+      <button type="button" data-local-import-provider="youtube" aria-label="YouTube" aria-pressed="true" title="YouTube">
+        <svg class="provider-youtube" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="7" width="26" height="18" rx="6"/><path d="m13 11.5 8 4.5-8 4.5z"/></svg>
+      </button>
+      <button type="button" data-local-import-provider="spotify" aria-label="Spotify" aria-pressed="false" title="Spotify">
+        <svg class="provider-spotify" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13"/><path d="M9 12.5c5.4-1.5 10.8-.9 15.1 1.4M10 17c4.5-1.2 9.2-.7 12.9 1.2M11.2 21c3.4-.8 7-.4 9.8.9"/></svg>
+      </button>
+      <button type="button" data-local-import-provider="soundcloud" aria-label="SoundCloud" aria-pressed="false" title="SoundCloud">
+        <svg class="provider-soundcloud" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 18v3m3-6v8m3-10v11m3-13v14m3-16v16m2 0h7.5a4.5 4.5 0 0 0 .2-9 7 7 0 0 0-13.7-1.8"/></svg>
+      </button>
+    </nav>
     <section class="local-import-panel">
       <header>
         <div class="local-import-heading">
@@ -332,9 +343,9 @@
         <div class="local-import-header-actions">
           <fieldset id="localImportMediaKind" class="local-import-media-kind">
             <legend>Download type</legend>
-            <div role="radiogroup" aria-label="YouTube download type">
-              <label><input type="radio" name="localImportMediaKind" value="audio" checked><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l10-2v12M9 10l10-2M6 20a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm10-2a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/></svg>Audio</span></label>
-              <label><input type="radio" name="localImportMediaKind" value="video"><span><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>Video</span></label>
+            <div role="radiogroup" aria-label="Import media type">
+              <label title="Audio"><input type="radio" name="localImportMediaKind" value="audio" aria-label="Audio" checked><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l10-2v12M9 10l10-2M6 20a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm10-2a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/></svg></span></label>
+              <label title="Video"><input type="radio" name="localImportMediaKind" value="video" aria-label="Video"><span><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></svg></span></label>
             </div>
           </fieldset>
           <button id="closeLocalImport" class="history-close" type="button" title="Close" aria-label="Close local import">×</button>

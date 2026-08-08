@@ -874,7 +874,6 @@ function safeAppPreferences(value) {
   return {
     runInBackground: Boolean(preferences.runInBackground),
     discordRichPresence: Boolean(preferences.discordRichPresence),
-    discordApplicationID: validDiscordApplicationID(preferences.discordApplicationID),
     keybinds: Object.fromEntries(Object.entries(defaults).map(([action, fallback]) => {
       const candidate = typeof keybinds[action] === "string" ? keybinds[action].trim().slice(0, 80) : "";
       return [action, candidate || fallback];
@@ -923,7 +922,7 @@ ipcMain.handle("app:preferences:update", (_event, value) => {
   }
   discordRPC.configure({
     enabled: runtimeAppPreferences.discordRichPresence,
-    applicationID: runtimeAppPreferences.discordApplicationID || bundledDiscordApplicationID,
+    applicationID: bundledDiscordApplicationID,
   });
   return runtimeAppPreferences;
 });

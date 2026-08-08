@@ -180,10 +180,16 @@ let localImportResolvedSourceKey = null;
 let localImportInteractionGeneration = 0;
 let localImportBatchContext = null;
 let localImportServerUploadMode = null;
+let localImportProviderFocus = "youtube";
 let availableWindowsUpdateVersion = null;
 let dismissedWindowsUpdateVersion = null;
 let windowsUpdateReady = false;
 const LOCAL_IMPORT_AUTO_RESOLVE_DELAY = 450;
+const LOCAL_IMPORT_PROVIDER_ORDER = Object.freeze([
+  ["youtube", "YouTube"],
+  ["spotify", "Spotify"],
+  ["soundcloud", "SoundCloud"],
+]);
 let clipEditorStartSeconds = 0;
 let clipEditorEndSeconds = 30;
 let clipEditorPreviewEndSeconds = 0;
@@ -3337,10 +3343,9 @@ function renderSettings() {
               </label>
               <label class="settings-row" for="settingsDiscordPresence">
                 <span class="settings-row-icon discord" aria-hidden="true">${settingsIcons.discord}</span>
-                <span class="settings-row-copy"><strong>Discord Rich Presence</strong><small id="settingsDiscordStatus">${escapeHTML(discordPresenceStatus.message || "Share the current song and playback state on Discord.")}</small></span>
-                <span class="settings-toggle"><input id="settingsDiscordPresence" type="checkbox" ${preferences.discordRichPresence ? "checked" : ""}><span aria-hidden="true"></span></span>
+                <span class="settings-row-copy"><strong>Discord Rich Presence</strong><small id="settingsDiscordStatus">${escapeHTML(discordPresenceStatus.message || "Show Resonance playback on your signed-in Discord profile.")}</small></span>
+                <span class="settings-toggle"><input id="settingsDiscordPresence" type="checkbox" ${preferences.discordRichPresence && discordPresenceStatus.applicationConfigured ? "checked" : ""} ${discordPresenceStatus.applicationConfigured ? "" : "disabled"}><span aria-hidden="true"></span></span>
               </label>
-              <label class="settings-discord-configuration" for="settingsDiscordApplicationID"><span><strong>Discord Application ID</strong><small>Public application ID used by the Discord desktop IPC connection.</small></span><input id="settingsDiscordApplicationID" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="22" value="${escapeHTML(preferences.discordApplicationID || "")}" placeholder="Paste the Resonance Application ID"></label>
             </div>
             <div class="settings-section-heading compact"><span>APP</span><p>Existing Resonance connection and update tools.</p></div>
             <div class="settings-group">
@@ -3389,27 +3394,6 @@ function renderSettings() {
     await updateAppPreference("discordRichPresence", discordPresence.checked);
     scheduleDiscordPresenceUpdate();
   };
-  const discordApplicationID = $("#settingsDiscordApplicationID");
-  if (discordApplicationID) {
-    const saveDiscordApplicationID = async () => {
-      const candidate = discordApplicationID.value.trim();
-      if (candidate && !/^\d{15,22}$/.test(candidate)) {
-        discordApplicationID.setCustomValidity("Enter the numeric Discord Application ID.");
-        discordApplicationID.reportValidity();
-        return;
-      }
-      discordApplicationID.setCustomValidity("");
-      await updateAppPreference("discordApplicationID", candidate);
-      scheduleDiscordPresenceUpdate();
-    };
-    discordApplicationID.onchange = saveDiscordApplicationID;
-    discordApplicationID.onkeydown = (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        void saveDiscordApplicationID();
-      }
-    };
-  }
   document.querySelectorAll("[data-keybind-action]").forEach((button) => {
     button.onclick = () => {
       settingsRecordingAction = button.dataset.keybindAction;
@@ -3468,7 +3452,7 @@ function scheduleDiscordPresenceUpdate() {
     discordPresenceSyncTimer = null;
     discordPresenceStatus = await api.updateDiscordPresence(discordPresenceActivity()).catch(() => discordPresenceStatus);
     const status = $("#settingsDiscordStatus");
-    if (status) status.textContent = discordPresenceStatus.message || "Share the current song and playback state on Discord.";
+    if (status) status.textContent = discordPresenceStatus.message || "Show Resonance playback on your signed-in Discord profile.";
   }, 80);
 }
 
@@ -3911,6 +3895,25 @@ function setLocalImportStage(value = { stage: "idle" }) {
   $("#localImportDialog").classList.toggle("expanded", stage !== "idle");
 }
 
+function setLocalImportProviderFocus(provider, { scroll = false } = {}) {
+  if (!LOCAL_IMPORT_PROVIDER_ORDER.some(([candidate]) => candidate === provider)) return;
+  localImportProviderFocus = provider;
+  document.querySelectorAll("[data-local-import-provider]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.localImportProvider === provider));
+  });
+  if (scroll) {
+    document.querySelector(`[data-search-provider="${provider}"]`)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+}
+
+function localImportProviderForSource(value) {
+  const source = String(value || "").toLowerCase();
+  if (source.includes("spotify.com")) return "spotify";
+  if (source.includes("soundcloud.com") || source.includes("on.soundcloud.com")) return "soundcloud";
+  if (source.includes("youtube.com") || source.includes("youtu.be")) return "youtube";
+  return null;
+}
+
 function showLocalImportError(error) {
   const node = $("#localImportError");
   const stage = String(error?.stage || "failed").replaceAll("_", " ");
@@ -4128,6 +4131,8 @@ function resetLocalImport() {
   setLocalImportStage({ stage: "idle" });
   updateLocalImportMediaKindUI();
   $("#localImportMediaKind").hidden = false;
+  $("#localImportProviderPill").hidden = false;
+  setLocalImportProviderFocus("youtube");
   $("#chooseLocalFiles").hidden = false;
   $("#localImportTitle").textContent = "Import from Link";
   $("#localImportSource").placeholder = "Link or music search";
@@ -4142,6 +4147,7 @@ function openLocalImport({ serverUploadMode = null } = {}) {
       ? "YouTube song link or music search…"
       : "Canonical YouTube song link…";
     $("#localImportMediaKind").hidden = true;
+    $("#localImportProviderPill").hidden = true;
     $("#chooseLocalFiles").hidden = true;
   }
   $("#localImportSource").value = "";
@@ -4582,7 +4588,7 @@ function renderLocalImportResolution() {
   void renderLocalImportArtwork(track, candidates, mediaKind);
   $("#localImportTrackTitle").textContent = track.title || "Untitled";
   $("#localImportTrackMeta").textContent = searchResults
-    ? [track.artist, "Spotify • SoundCloud • YouTube"].filter(Boolean).join(" • ")
+    ? [track.artist, "YouTube • Spotify • SoundCloud"].filter(Boolean).join(" • ")
     : playlist
     ? [track.artist, `${candidates.length} available video${candidates.length === 1 ? "" : "s"}`, localImportResolution.playlist?.unavailableCount ? `${localImportResolution.playlist.unavailableCount} unavailable` : null].filter(Boolean).join(" • ")
     : [track.artist, track.album, track.durationSeconds ? formatTime(track.durationSeconds) : null]
@@ -4601,12 +4607,12 @@ function renderLocalImportResolution() {
     ${showPreviews ? `<button class="local-import-preview-button" type="button" data-local-import-preview="${index}" aria-label="Preview ${escapeHTML(candidate.title || "source")}" aria-pressed="false" title="${localImportCandidateCanPreview(candidate) ? "Preview source" : "Preview unavailable for this source"}" ${localImportCandidateCanPreview(candidate) ? "" : "disabled"}><svg class="preview-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg><svg class="preview-pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M16 6v12"/></svg></button>` : ""}
   </label>`;
   if (searchResults) {
-    const providerNames = { spotify: "Spotify", soundcloud: "SoundCloud", youtube: "YouTube" };
-    $("#localImportCandidates").innerHTML = Object.entries(providerNames).map(([provider, name]) => {
+    $("#localImportCandidates").innerHTML = LOCAL_IMPORT_PROVIDER_ORDER.map(([provider, name]) => {
       const rows = candidates.map((candidate, index) => ({ candidate, index }))
         .filter(({ candidate }) => candidate.searchProvider === provider);
       return `<section class="local-import-search-provider" data-search-provider="${provider}"><h3><span>${name}</span><small>${rows.length} result${rows.length === 1 ? "" : "s"}</small></h3>${rows.length ? rows.map(({ candidate, index }) => candidateMarkup(candidate, index)).join("") : '<p>No previewable results.</p>'}</section>`;
     }).join("");
+    setLocalImportProviderFocus(localImportProviderFocus);
   } else {
     $("#localImportCandidates").innerHTML = candidates.map(candidateMarkup).join("");
   }
@@ -6843,6 +6849,8 @@ $("#localImportSource").oninput = () => {
     setLocalImportStage({ stage: "idle" });
   }
   normalizeLocalImportMediaKindForSource();
+  const sourceProvider = localImportProviderForSource($("#localImportSource").value);
+  if (sourceProvider) setLocalImportProviderFocus(sourceProvider);
   scheduleLocalImportResolution();
 };
 $("#localImportSync").onchange = () => {
@@ -6866,6 +6874,9 @@ document.querySelectorAll('input[name="localImportMediaKind"]').forEach((input) 
     updateLocalImportMediaKindUI();
     scheduleLocalImportResolution({ immediate: true });
   };
+});
+document.querySelectorAll("[data-local-import-provider]").forEach((button) => {
+  button.onclick = () => setLocalImportProviderFocus(button.dataset.localImportProvider, { scroll: true });
 });
 $("#localImportDialog").onclick = (event) => {
   if (event.target === $("#localImportDialog") && !localImportRunning) $("#localImportDialog").close();
@@ -7349,7 +7360,7 @@ audio.onloadedmetadata = async () => {
 api.onDiscordPresenceStatus((status) => {
   discordPresenceStatus = status || discordPresenceStatus;
   const statusCopy = $("#settingsDiscordStatus");
-  if (statusCopy) statusCopy.textContent = discordPresenceStatus.message || "Share the current song and playback state on Discord.";
+  if (statusCopy) statusCopy.textContent = discordPresenceStatus.message || "Show Resonance playback on your signed-in Discord profile.";
 });
 discordPresenceStatus = await api.getDiscordPresenceStatus().catch(() => discordPresenceStatus);
 const libraryLoad = await api.loadLibrary();

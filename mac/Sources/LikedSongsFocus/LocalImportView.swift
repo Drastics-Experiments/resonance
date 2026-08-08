@@ -74,6 +74,14 @@ enum LocalImportCandidateFallbackPolicy {
     }
 }
 
+enum MacLocalImportChrome {
+    static let providerOrder: [LocalImportSearchProvider] = [.youtube, .spotify, .soundcloud]
+
+    static func mediaIcon(for mode: LocalImportMediaMode) -> String {
+        mode == .video ? "play.rectangle.fill" : "music.note"
+    }
+}
+
 @MainActor
 final class MacLocalImportViewModel: ObservableObject {
     @Published var source = "" {
@@ -1053,12 +1061,14 @@ enum LocalImportPresentationPolicy {
 }
 
 struct MacLocalImportSheet: View {
-    @Environment(\.dismiss) private var dismiss
     @ObservedObject private var viewModel: MacLocalImportViewModel
+    private let onDismiss: () -> Void
     @FocusState private var sourceFocused: Bool
+    @State private var selectedProvider: LocalImportSearchProvider = .youtube
 
-    init(viewModel: MacLocalImportViewModel) {
+    init(viewModel: MacLocalImportViewModel, onDismiss: @escaping () -> Void = {}) {
         self.viewModel = viewModel
+        self.onDismiss = onDismiss
     }
 
     private var expandedContent: Bool {
@@ -1075,6 +1085,36 @@ struct MacLocalImportSheet: View {
     }
 
     var body: some View {
+        ScrollViewReader { proxy in
+            HStack(alignment: .top, spacing: 14) {
+                providerPill { provider in
+                    selectedProvider = provider
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        proxy.scrollTo(provider, anchor: .top)
+                    }
+                }
+                .padding(.top, 55)
+
+                importerPanel
+            }
+            .frame(width: 690, height: sheetHeight, alignment: .top)
+        }
+        .preferredColorScheme(.dark)
+        .animation(.easeInOut(duration: 0.2), value: sheetHeight)
+        .onExitCommand {
+            viewModel.cancel()
+            onDismiss()
+        }
+        .onAppear { sourceFocused = true }
+        .onDisappear {
+            viewModel.stopPreview()
+            if !viewModel.continuesAfterSheetDismissal {
+                viewModel.cancel()
+            }
+        }
+    }
+
+    private var importerPanel: some View {
         VStack(spacing: 0) {
             header
 
@@ -1124,13 +1164,82 @@ struct MacLocalImportSheet: View {
                 endRadius: 430
             )
         )
-        .preferredColorScheme(.dark)
-        .animation(.easeInOut(duration: 0.2), value: sheetHeight)
-        .onAppear { sourceFocused = true }
-        .onDisappear {
-            viewModel.stopPreview()
-            if !viewModel.continuesAfterSheetDismissal {
-                viewModel.cancel()
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .shadow(color: .black.opacity(0.72), radius: 30, y: 18)
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.white.opacity(0.10))
+        }
+    }
+
+    private func providerPill(onSelect: @escaping (LocalImportSearchProvider) -> Void) -> some View {
+        VStack(spacing: 4) {
+            ForEach(MacLocalImportChrome.providerOrder) { provider in
+                Button {
+                    onSelect(provider)
+                } label: {
+                    providerMark(provider)
+                        .frame(width: 40, height: 44)
+                        .background(
+                            selectedProvider == provider ? Color.appViolet.opacity(0.18) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(selectedProvider == provider ? Color.appViolet.opacity(0.72) : Color.clear)
+                        }
+                        .shadow(color: selectedProvider == provider ? Color.appViolet.opacity(0.30) : Color.clear, radius: 10)
+                }
+                .buttonStyle(.plain)
+                .help(provider.displayName)
+                .accessibilityLabel(provider.displayName)
+                .accessibilityAddTraits(selectedProvider == provider ? .isSelected : [])
+            }
+        }
+        .padding(7)
+        .frame(width: 54)
+        .background(Color.appSurfaceRaised.opacity(0.96), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.appViolet.opacity(0.38))
+        }
+        .shadow(color: .black.opacity(0.55), radius: 26, y: 14)
+    }
+
+    @ViewBuilder
+    private func providerMark(_ provider: LocalImportSearchProvider) -> some View {
+        switch provider {
+        case .youtube:
+            ZStack {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color(red: 1, green: 0.12, blue: 0.12))
+                    .frame(width: 26, height: 18)
+                Image(systemName: "play.fill")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+                    .offset(x: 1)
+            }
+        case .spotify:
+            ZStack {
+                Circle()
+                    .fill(Color(red: 0.12, green: 0.84, blue: 0.37))
+                    .frame(width: 27, height: 27)
+                Image(systemName: "wave.3.right")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color.black.opacity(0.82))
+                    .rotationEffect(.degrees(-90))
+            }
+        case .soundcloud:
+            HStack(spacing: 1.2) {
+                ForEach([8.0, 14.0, 20.0, 16.0, 10.0], id: \.self) { height in
+                    Capsule()
+                        .fill(Color(red: 1, green: 0.34, blue: 0.08))
+                        .frame(width: 2.3, height: height)
+                }
+                Image(systemName: "cloud.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color(red: 1, green: 0.34, blue: 0.08))
+                    .offset(x: -2)
             }
         }
     }
@@ -1156,12 +1265,14 @@ struct MacLocalImportSheet: View {
             HStack(spacing: 6) {
                 Picker("Download format", selection: $viewModel.mediaMode) {
                     ForEach(LocalImportMediaMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+                        Label(mode.title, systemImage: MacLocalImportChrome.mediaIcon(for: mode))
+                            .labelStyle(.iconOnly)
+                            .tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 148)
+                .frame(width: 108)
                 .disabled(viewModel.isRunning)
                 .onChange(of: viewModel.mediaMode) { _, _ in
                     viewModel.normalizeMediaModeForSource()
@@ -1170,7 +1281,7 @@ struct MacLocalImportSheet: View {
 
                 Button {
                     viewModel.cancel()
-                    dismiss()
+                    onDismiss()
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .bold))
@@ -1207,6 +1318,9 @@ struct MacLocalImportSheet: View {
                     .disabled(viewModel.isRunning)
                     .onChange(of: viewModel.source) { _, _ in
                         viewModel.normalizeMediaModeForSource()
+                        if let provider = providerForSource(viewModel.source) {
+                            selectedProvider = provider
+                        }
                     }
 
                 Button(action: viewModel.resolve) {
@@ -1244,7 +1358,7 @@ struct MacLocalImportSheet: View {
                     .foregroundStyle(Color.appViolet)
             }
 
-            ForEach(LocalImportSearchProvider.allCases) { provider in
+            ForEach(MacLocalImportChrome.providerOrder) { provider in
                 let results = viewModel.searchResults(for: provider)
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -1276,10 +1390,19 @@ struct MacLocalImportSheet: View {
                         }
                     }
                 }
+                .id(provider)
             }
 
             previewErrorNotice
         }
+    }
+
+    private func providerForSource(_ value: String) -> LocalImportSearchProvider? {
+        let source = value.lowercased()
+        if source.contains("spotify.com") { return .spotify }
+        if source.contains("soundcloud.com") || source.contains("on.soundcloud.com") { return .soundcloud }
+        if source.contains("youtube.com") || source.contains("youtu.be") { return .youtube }
+        return nil
     }
 
     private func searchResultRow(_ result: LocalImportSearchResult) -> some View {
@@ -1865,7 +1988,7 @@ struct MacLocalImportSheet: View {
                 } else {
                     Button {
                         if viewModel.importSelected() {
-                            dismiss()
+                            onDismiss()
                         }
                     } label: {
                         Image(systemName: "arrow.down.to.line")
@@ -1879,7 +2002,7 @@ struct MacLocalImportSheet: View {
                         .accessibilityLabel(viewModel.isPlaylist ? "Import Selected Playlist Songs" : viewModel.mediaMode == .video ? "Download Video" : "Save Audio on This Mac")
                 }
             } else if viewModel.stage == .complete || viewModel.completedTrack != nil {
-                Button("Done") { dismiss() }
+                Button("Done") { onDismiss() }
                     .buttonStyle(.borderedProminent)
                     .tint(Color.appViolet)
             }

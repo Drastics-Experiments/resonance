@@ -100,7 +100,7 @@ class DiscordRPCClient {
     }
     if (!nextApplicationID) {
       this.disconnect({ clear: true });
-      this.setStatus("configuration-required", "Add the Resonance Discord Application ID to connect.");
+      this.setStatus("configuration-required", "Rich Presence is unavailable in this development build.");
       return this.status();
     }
     if (connectionChanged || !this.socket) this.connect();

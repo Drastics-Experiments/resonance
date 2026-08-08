@@ -575,10 +575,12 @@ test("adds focused keybinds, Discord presence, close-to-tray settings, custom sc
   const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
   const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
   const preloadSource = readFileSync(new URL("../preload.cjs", import.meta.url), "utf8");
+  const discordSource = readFileSync(new URL("../discord-rpc.cjs", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   const defaults = normalizedAppPreferences({});
   assert.equal(defaults.runInBackground, false);
   assert.equal(defaults.discordRichPresence, false);
+  assert.equal(Object.hasOwn(defaults, "discordApplicationID"), false);
   assert.equal(defaults.keybinds.togglePlayback, "Space");
   assert.deepEqual(normalizedAppPreferences({
     runInBackground: 1,
@@ -591,11 +593,15 @@ test("adds focused keybinds, Discord presence, close-to-tray settings, custom sc
     keybinds: { ...defaults.keybinds, togglePlayback: "Ctrl+K" },
   });
   assert.match(appSource, /id="settingsRunInBackground"[\s\S]+id="settingsDiscordPresence"/);
+  assert.doesNotMatch(appSource, /settingsDiscordApplicationID|Paste the Resonance Application ID/);
+  assert.match(appSource, /signed-in Discord profile/);
   assert.match(appSource, /data-keybind-action="\$\{action\}"/);
   assert.match(appSource, /function keybindFromKeyboardEvent\(event\)[\s\S]+settingsRecordingAction/);
   assert.match(preloadSource, /updateAppPreferences:[\s\S]+app:preferences:update/);
   assert.match(preloadSource, /updateDiscordPresence:[\s\S]+app:discord-presence:update/);
   assert.match(mainSource, /new DiscordRPCClient[\s\S]+discordRPC\.configure/);
+  assert.match(mainSource, /applicationID: bundledDiscordApplicationID/);
+  assert.doesNotMatch(discordSource, /botToken|Authorization|\bBot\s/);
   assert.match(mainSource, /runtimeAppPreferences\.runInBackground[\s\S]+window\.hide\(\)[\s\S]+ensureBackgroundTray\(\)/);
   assert.match(mainSource, /new Tray[\s\S]+Open Resonance[\s\S]+Quit Resonance/);
   assert.match(styleSource, /\*::\-webkit-scrollbar[\s\S]+\*::\-webkit-scrollbar-thumb/);
@@ -953,6 +959,8 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(htmlSource, /id="localImportSource"/);
   assert.doesNotMatch(htmlSource, /id="resolveLocalImport"|>Find (?:audio|video)</);
   assert.match(htmlSource, /id="localImportMediaKind"[\s\S]+value="audio"[\s\S]+value="video"/);
+  assert.match(htmlSource, /id="localImportProviderPill"[\s\S]+data-local-import-provider="youtube"[\s\S]+data-local-import-provider="spotify"[\s\S]+data-local-import-provider="soundcloud"/);
+  assert.doesNotMatch(htmlSource, /<\/svg>(?:Audio|Video)<\/span>/);
   assert.match(htmlSource, /<header>[\s\S]+id="localImportMediaKind"[\s\S]+id="closeLocalImport"[\s\S]+<\/header>/);
   assert.doesNotMatch(htmlSource, /MP4 with audio/);
   assert.match(htmlSource, /id="localImportCandidates"/);
@@ -989,7 +997,8 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(mainSource, /resolveYouTubeAudio\(source, controller\.signal\)/);
   assert.match(mainSource, /downloadResolvedAudio\(resolved, filePath, controller\.signal\)/);
   assert.match(mainSource, /ipcMain\.handle\("local-import:preview:cancel"/);
-  assert.match(appSource, /\$\("#localImportStage"\)\.dataset\.stage = value\.stage \|\| "idle"/);
+  assert.match(appSource, /const stage = value\.stage \|\| "idle";[\s\S]+\$\("#localImportStage"\)\.dataset\.stage = stage/);
+  assert.match(appSource, /\$\("#localImportDialog"\)\.classList\.toggle\("expanded", stage !== "idle"\)/);
   assert.doesNotMatch(appSource, /node\.hidden = stage === "idle"/);
   assert.match(appSource, /function confirmLinkImport\(\)/);
   assert.match(appSource, /updateLocalImportTransfer\(\{ stage: "inspecting_source" \}\);[\s\S]+\$\("#localImportDialog"\)\.close\(\)/);
@@ -1049,7 +1058,18 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.doesNotMatch(appSource, /id="storageLinkImport"/);
   assert.doesNotMatch(appSource, /id="storageImport"/);
   assert.match(styleSource, /\.local-import-dialog\s*\{/);
+  assert.match(styleSource, /html\s*\{[\s\S]*?overflow: hidden/);
+  assert.match(styleSource, /\.local-import-dialog\s*\{[\s\S]*?position: fixed/);
+  assert.doesNotMatch(styleSource, /\.local-import-dialog\s*\{[\s\S]{0,160}?position: relative/);
+  assert.match(styleSource, /\.local-import-dialog:not\(\.expanded\)\s*\{[\s\S]*?height: 280px/);
+  assert.match(styleSource, /\.local-import-dialog\.expanded\s*\{[\s\S]*?height: min\(600px, calc\(100vh - 64px\)\)/);
+  assert.match(styleSource, /\.local-import-dialog\.expanded \.local-import-panel\s*\{\s*height: 100%/);
+  assert.match(styleSource, /\.local-import-resolved fieldset\s*\{[\s\S]*?flex: 1 1 auto[\s\S]*?overflow: hidden/);
+  assert.match(styleSource, /\.local-import-candidates\.search-results\s*\{[\s\S]*?height: 100%[\s\S]*?overscroll-behavior: contain/);
+  assert.match(appSource, /LOCAL_IMPORT_PROVIDER_ORDER = Object\.freeze\(\[\s*\["youtube", "YouTube"\],[\s\S]*?\["spotify", "Spotify"\],[\s\S]*?\["soundcloud", "SoundCloud"\]/);
   assert.match(styleSource, /\.local-import-media-kind\s*\{/);
+  assert.match(styleSource, /\.local-import-provider-pill\s*\{[\s\S]*?left: -74px/);
+  assert.match(appSource, /function setLocalImportProviderFocus[\s\S]+data-search-provider/);
   assert.match(styleSource, /\.local-import-sync input:checked\s*\{/);
   assert.match(styleSource, /\.local-import-preview-button\s*\{/);
   assert.match(styleSource, /\.local-import-preview-button\.playing/);

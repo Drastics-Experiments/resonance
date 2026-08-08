@@ -16,6 +16,7 @@ struct ContentView: View {
     @EnvironmentObject private var updateManager: UpdateManager
     @State private var dismissedUpdateAlert: MacUpdateIdentity?
     @State private var isNowPlayingPresented = false
+    @State private var showsLocalImport = false
 
     private var updateAlert: MacUpdateIdentity? {
         MacUpdateAlertState.visibleUpdate(
@@ -163,6 +164,27 @@ struct ContentView: View {
             }
             .animation(.spring(response: 0.38, dampingFraction: 0.9), value: isNowPlayingPresented)
         }
+        .overlay {
+            if showsLocalImport {
+                ZStack {
+                    Color.black.opacity(0.72)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture { dismissLocalImport() }
+
+                    MacLocalImportSheet(
+                        viewModel: localImportModel,
+                        onDismiss: dismissLocalImport
+                    )
+                }
+                .transition(.opacity)
+                .zIndex(100)
+            }
+        }
+        .animation(.easeInOut(duration: 0.18), value: showsLocalImport)
+        .onReceive(NotificationCenter.default.publisher(for: .importMusicFromLink)) { _ in
+            presentLocalImport()
+        }
         .environmentObject(model.playbackPositionState)
         .background {
             ZStack {
@@ -180,6 +202,17 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .ignoresSafeArea(.container, edges: .top)
         .task { await updateManager.automaticCheck() }
+    }
+
+    private func presentLocalImport() {
+        if !localImportModel.isRunning {
+            localImportModel.reset()
+        }
+        showsLocalImport = true
+    }
+
+    private func dismissLocalImport() {
+        showsLocalImport = false
     }
 }
 

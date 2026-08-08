@@ -31,6 +31,13 @@ struct PreviewRegressionTests {
         #expect(header.length == frame.count - 8)
     }
 
+    @Test
+    func linkImporterChromeUsesProviderRailAndIconOnlyMediaModes() {
+        #expect(MacLocalImportChrome.providerOrder == [.youtube, .spotify, .soundcloud])
+        #expect(MacLocalImportChrome.mediaIcon(for: .audio) == "music.note")
+        #expect(MacLocalImportChrome.mediaIcon(for: .video) == "play.rectangle.fill")
+    }
+
     @MainActor
     @Test
     func macDesktopPreferencesPersistBackgroundPresenceAndKeybinds() throws {
@@ -41,13 +48,19 @@ struct PreviewRegressionTests {
 
         preferences.runInBackground = true
         preferences.discordRichPresence = true
-        #expect(preferences.setDiscordApplicationID("123456789012345678"))
         preferences.setKeybind("⌘⇧P", for: .togglePlayback)
 
         #expect(defaults.bool(forKey: MacDesktopPreferenceKeys.runInBackground))
         #expect(defaults.bool(forKey: MacDesktopPreferenceKeys.discordRichPresence))
-        #expect(defaults.string(forKey: MacDesktopPreferenceKeys.discordApplicationID) == "123456789012345678")
         #expect(preferences.keybinds[.togglePlayback] == "⌘⇧P")
+        #expect(MacDesktopPreferences.configuredDiscordApplicationID(
+            environment: ["RESONANCE_DISCORD_CLIENT_ID": "123456789012345678"],
+            bundleValue: nil
+        ) == "123456789012345678")
+        #expect(MacDesktopPreferences.configuredDiscordApplicationID(
+            environment: [:],
+            bundleValue: "223456789012345678"
+        ) == "223456789012345678")
         preferences.stop()
     }
 

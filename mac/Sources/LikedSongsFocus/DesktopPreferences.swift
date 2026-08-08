@@ -6,7 +6,6 @@ import Network
 enum MacDesktopPreferenceKeys {
     static let runInBackground = "LikedSongsFocus.desktop.runInBackground.v1"
     static let discordRichPresence = "LikedSongsFocus.desktop.discordRichPresence.v1"
-    static let discordApplicationID = "LikedSongsFocus.desktop.discordApplicationID.v1"
     static let keybinds = "LikedSongsFocus.desktop.keybinds.v1"
 }
 
@@ -119,7 +118,7 @@ final class MacDiscordRPCClient: @unchecked Sendable {
                 publish(.disabled, "Rich Presence is off.")
             } else if validatedID.isEmpty {
                 disconnect(clear: true)
-                publish(.configurationRequired, "Add the Resonance Discord Application ID to connect.")
+                publish(.configurationRequired, "Rich Presence is unavailable in this development build.")
             } else if changed || connection == nil {
                 connect()
             }
@@ -354,7 +353,6 @@ final class MacDesktopPreferences: ObservableObject {
             reconfigureDiscord()
         }
     }
-    @Published private(set) var discordApplicationID: String
     @Published private(set) var keybinds: [MacShortcutAction: String]
     @Published private(set) var discordStatus = DiscordPresenceStatus(
         state: .disabled,
@@ -374,7 +372,6 @@ final class MacDesktopPreferences: ObservableObject {
         self.defaults = defaults
         runInBackground = defaults.bool(forKey: MacDesktopPreferenceKeys.runInBackground)
         discordRichPresence = defaults.bool(forKey: MacDesktopPreferenceKeys.discordRichPresence)
-        discordApplicationID = defaults.string(forKey: MacDesktopPreferenceKeys.discordApplicationID) ?? ""
         if let data = defaults.data(forKey: MacDesktopPreferenceKeys.keybinds),
            let stored = try? JSONDecoder().decode([String: String].self, from: data) {
             keybinds = Self.defaultKeybinds.reduce(into: [:]) { result, entry in
@@ -404,16 +401,6 @@ final class MacDesktopPreferences: ObservableObject {
         .store(in: &cancellables)
         installShortcutMonitor()
         publishDiscordActivity(from: model)
-    }
-
-    func setDiscordApplicationID(_ value: String) -> Bool {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.isEmpty || MacDiscordRPCClient.validApplicationID(trimmed) != nil else { return false }
-        discordApplicationID = trimmed
-        defaults.set(trimmed, forKey: MacDesktopPreferenceKeys.discordApplicationID)
-        reconfigureDiscord()
-        if let model { publishDiscordActivity(from: model) }
-        return true
     }
 
     func setKeybind(_ value: String, for action: MacShortcutAction) {
@@ -458,10 +445,21 @@ final class MacDesktopPreferences: ObservableObject {
         return prefix + key
     }
 
+    static func configuredDiscordApplicationID(
+        environment: [String: String],
+        bundleValue: String?
+    ) -> String {
+        if let environment = MacDiscordRPCClient.validApplicationID(environment["RESONANCE_DISCORD_CLIENT_ID"]) {
+            return environment
+        }
+        return MacDiscordRPCClient.validApplicationID(bundleValue) ?? ""
+    }
+
     private var effectiveDiscordApplicationID: String {
-        if let stored = MacDiscordRPCClient.validApplicationID(discordApplicationID) { return stored }
-        if let environment = MacDiscordRPCClient.validApplicationID(ProcessInfo.processInfo.environment["RESONANCE_DISCORD_CLIENT_ID"]) { return environment }
-        return MacDiscordRPCClient.validApplicationID(Bundle.main.object(forInfoDictionaryKey: "ResonanceDiscordApplicationID") as? String) ?? ""
+        Self.configuredDiscordApplicationID(
+            environment: ProcessInfo.processInfo.environment,
+            bundleValue: Bundle.main.object(forInfoDictionaryKey: "ResonanceDiscordApplicationID") as? String
+        )
     }
 
     private func reconfigureDiscord() {
