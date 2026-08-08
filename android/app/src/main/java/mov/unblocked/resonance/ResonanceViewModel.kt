@@ -3188,4 +3188,4 @@ internal fun normalizeProfileName(value: String): String =
 private class StaleServerProfileException : IllegalStateException("Server profile changed during synchronization")
 
 internal fun repeatModeFor(enabled: Boolean): Int =
-    if (enabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+    if (enabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_ALL
