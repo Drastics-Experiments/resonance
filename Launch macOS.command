@@ -6,15 +6,17 @@ source "$RES_PROJECT_DIR/.launcher-terminal.zsh"
 res_prepare_worktree_identity "$RES_PROJECT_DIR"
 RES_APP_DIR="$RES_PROJECT_DIR"
 RES_LAUNCH_LABEL="mov.unblocked.resonance.dev.macos.${RES_WORKTREE_HASH}"
-RES_PREVIEW_NAME="Resonance Preview [${RES_WORKTREE_LABEL}]"
-RES_PREVIEW_APP="$RES_LAUNCHER_ROOT/macos/Resonance-Preview-${RES_WORKTREE_ID}.app"
-RES_PREVIEW_EXECUTABLE="$RES_PREVIEW_APP/Contents/MacOS/LikedSongsFocus"
+RES_PREVIEW_NAME="$RES_MACOS_INSTANCE_NAME"
+RES_PREVIEW_APP="$RES_MACOS_APP"
+RES_PREVIEW_EXECUTABLE="$RES_MACOS_EXECUTABLE"
 RES_PREVIEW_PLIST="$RES_PREVIEW_APP/Contents/Info.plist"
-RES_PREVIEW_BUNDLE_ID="com.gavindietrich.ResonancePreview.worktree.w${RES_WORKTREE_HASH}"
+RES_PREVIEW_BUNDLE_ID="$RES_MACOS_BUNDLE_ID"
 RES_SWIFT_SCRATCH_PATH="$RES_LAUNCHER_ROOT/macos-swift-build"
 RES_OLD_PREVIEW_EXECUTABLE="/private/tmp/Resonance Preview.app/Contents/MacOS/LikedSongsFocus"
 RES_LEGACY_PREVIEW_EXECUTABLE="/private/tmp/ResonancePreview.app/Contents/MacOS/LikedSongsFocus"
 RES_ICON_WORK_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/resonance-preview-icon.XXXXXX")"
+res_write_instance_registry
+res_set_terminal_title "$RES_MACOS_INSTANCE_NAME"
 
 cleanup() {
   /bin/rm -rf "$RES_ICON_WORK_DIR"
@@ -109,3 +111,4 @@ done
 /usr/bin/pgrep -f "^$RES_PREVIEW_EXECUTABLE$" >/dev/null \
   || { echo "macOS Preview app failed to launch." >&2; exit 1; }
 echo "$RES_PREVIEW_NAME launched from $RES_APP_DIR/mac"
+echo "Deterministic selectors: $RES_INSTANCE_REGISTRY"

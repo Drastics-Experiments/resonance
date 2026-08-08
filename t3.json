@@ -9,7 +9,7 @@
     },
     {
       "name": "Test Windows",
-      "command": "cd windows && corepack pnpm test",
+      "command": "zsh './Test Windows.command'",
       "icon": "test"
     },
     {
@@ -19,7 +19,7 @@
     },
     {
       "name": "Test macOS",
-      "command": "mac/scripts/test.sh",
+      "command": "zsh './Test macOS.command'",
       "icon": "test"
     },
     {
@@ -28,13 +28,23 @@
       "icon": "play"
     },
     {
+      "name": "Test iOS",
+      "command": "zsh './Test iOS.command'",
+      "icon": "test"
+    },
+    {
       "name": "Launch Android Emulator",
       "command": "zsh './Launch Android.command'",
       "icon": "play"
     },
     {
       "name": "Test Android",
-      "command": "cd android && ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug",
+      "command": "zsh './Test Android.command'",
+      "icon": "test"
+    },
+    {
+      "name": "Show Resonance Instance Names",
+      "command": "zsh './Show Resonance Instances.command'",
       "icon": "test"
     }
   ]

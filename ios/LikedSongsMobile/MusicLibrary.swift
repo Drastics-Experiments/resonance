@@ -1856,21 +1856,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             return
         }
         if shuffleEnabled {
-            guard queue.count > 1,
-                  let nextTrack = queue.filter({ $0.id != currentTrackID }).randomElement() else {
-                completePlaybackAtQueueEnd()
-                return
-            }
+            let nextTrack = queue.filter({ $0.id != currentTrackID }).randomElement() ?? queue[0]
             startPlayback(nextTrack)
             return
         }
 
-        guard let index = queue.firstIndex(where: { $0.id == currentTrackID }),
-              queue.indices.contains(index + 1) else {
-            completePlaybackAtQueueEnd()
-            return
-        }
-        startPlayback(queue[index + 1])
+        let index = queue.firstIndex(where: { $0.id == currentTrackID }) ?? -1
+        guard let nextIndex = MobileQueueCompletionPolicy.nextIndex(
+            count: queue.count,
+            currentIndex: index
+        ) else { return }
+        startPlayback(queue[nextIndex])
     }
 
     private func completePlaybackAtQueueEnd() {

@@ -426,6 +426,13 @@ final class MobileTransferFailurePersistenceTests: XCTestCase {
 }
 
 final class MobileLibraryNormalizationTests: XCTestCase {
+    func testPlaybackCompletionWrapsTheLastQueueItemToTheFirst() {
+        XCTAssertEqual(MobileQueueCompletionPolicy.nextIndex(count: 3, currentIndex: 2), 0)
+        XCTAssertEqual(MobileQueueCompletionPolicy.nextIndex(count: 3, currentIndex: 0), 1)
+        XCTAssertEqual(MobileQueueCompletionPolicy.nextIndex(count: 1, currentIndex: 0), 0)
+        XCTAssertNil(MobileQueueCompletionPolicy.nextIndex(count: 0, currentIndex: 0))
+    }
+
     func testRepairsDuplicateTrackPlaylistAndCompoundRemoteIdentifiers() throws {
         let duplicateTrackID = UUID()
         let duplicatePlaylistID = UUID()

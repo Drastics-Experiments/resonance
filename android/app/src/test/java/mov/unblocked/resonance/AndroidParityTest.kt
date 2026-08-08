@@ -14,8 +14,8 @@ class AndroidParityTest {
     }
 
     @Test
-    fun repeatOffStopsAtTheEndOfTheQueue() {
-        assertEquals(Player.REPEAT_MODE_OFF, repeatModeFor(false))
+    fun repeatOffWrapsAtTheEndOfTheQueue() {
+        assertEquals(Player.REPEAT_MODE_ALL, repeatModeFor(false))
         assertEquals(Player.REPEAT_MODE_ONE, repeatModeFor(true))
     }
 

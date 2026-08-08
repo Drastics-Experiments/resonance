@@ -11,12 +11,11 @@ RES_JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 RES_ADB="$RES_ANDROID_SDK/platform-tools/adb"
 RES_EMULATOR="$RES_ANDROID_SDK/emulator/emulator"
 RES_AVD="Resonance_API_36"
-RES_ANDROID_INSTANCE_NAME="Resonance Android [${RES_WORKTREE_LABEL}]"
-RES_APPLICATION_ID="mov.unblocked.resonance.worktree.w${RES_WORKTREE_HASH}"
-RES_ANDROID_AVD_ID="Resonance_${RES_WORKTREE_ID}"
+RES_APPLICATION_ID="$RES_ANDROID_APPLICATION_ID"
+RES_ANDROID_AVD_ID="$RES_ANDROID_EMULATOR_ID"
 RES_RUN_DIR="$RES_LAUNCHER_ROOT/android"
 RES_EMULATOR_LOG="$RES_RUN_DIR/android-emulator.log"
-RES_ONESHOT_LABEL="codex.resonance-emulator.oneshot.${RES_WORKTREE_HASH}"
+RES_ONESHOT_LABEL="$RES_ANDROID_LAUNCHD_LABEL"
 RES_EMULATOR_PLIST="$RES_RUN_DIR/$RES_ONESHOT_LABEL.plist"
 RES_RESTART_LABELS=(
   codex.resonance-emulator
@@ -25,6 +24,8 @@ RES_RESTART_LABELS=(
 )
 
 trap res_close_launcher_terminal EXIT
+res_write_instance_registry
+res_set_terminal_title "$RES_ANDROID_INSTANCE_NAME"
 
 res_android_serial_for_id() {
   local res_candidate_serial
@@ -105,3 +106,4 @@ RES_APK="$RES_ANDROID_DIR/app/build/outputs/apk/debug/app-debug.apk"
 "$RES_ADB" -s "$RES_SERIAL" shell am force-stop "$RES_APPLICATION_ID"
 "$RES_ADB" -s "$RES_SERIAL" shell am start -n "$RES_APPLICATION_ID/mov.unblocked.resonance.MainActivity"
 echo "$RES_ANDROID_INSTANCE_NAME launched on $RES_ANDROID_AVD_ID ($RES_SERIAL)"
+echo "Deterministic selectors: $RES_INSTANCE_REGISTRY"

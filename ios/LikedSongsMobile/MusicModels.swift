@@ -885,6 +885,13 @@ enum MobileCollectionNormalization {
     }
 }
 
+enum MobileQueueCompletionPolicy {
+    static func nextIndex(count: Int, currentIndex: Int) -> Int? {
+        guard count > 0 else { return nil }
+        return (max(currentIndex, -1) + 1) % count
+    }
+}
+
 struct MobilePlaybackRestoreResult: Equatable {
     let queue: [UUID]
     let playlistID: UUID?

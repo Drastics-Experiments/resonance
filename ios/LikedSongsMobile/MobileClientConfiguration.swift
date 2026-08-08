@@ -563,13 +563,30 @@ final class MobileTransferAuthorization: @unchecked Sendable {
 
     private let lock = NSLock()
     private let expiresAt: Date?
+    private let expiryTimer: DispatchSourceTimer?
     private var valid: Bool
     private var handlers: [UUID: RevocationHandler] = [:]
 
     init(expiresAt: Date?, now: Date = .now) {
         self.expiresAt = expiresAt
         valid = expiresAt.map { now < $0 } ?? true
-        if valid { scheduleExpiryCheck(now: now) }
+        if valid, expiresAt != nil {
+            expiryTimer = DispatchSource.makeTimerSource(
+                queue: DispatchQueue(label: "mov.unblocked.resonance.ios.transfer-authorization")
+            )
+        } else {
+            expiryTimer = nil
+        }
+        expiryTimer?.setEventHandler { [weak self] in
+            self?.expireIfNeeded()
+        }
+        scheduleExpiryCheck(now: now)
+        expiryTimer?.resume()
+    }
+
+    deinit {
+        expiryTimer?.setEventHandler {}
+        expiryTimer?.cancel()
     }
 
     func isAuthorized(at now: Date = .now) -> Bool {
@@ -621,13 +638,18 @@ final class MobileTransferAuthorization: @unchecked Sendable {
     }
 
     private func scheduleExpiryCheck(now: Date) {
-        guard let expiresAt else { return }
-        let delay = max(expiresAt.timeIntervalSince(now), 0.001)
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self else { return }
-            if self.isAuthorized() {
-                self.scheduleExpiryCheck(now: .now)
-            }
+        guard let expiresAt, let expiryTimer else { return }
+        let remaining = max(expiresAt.timeIntervalSince(now), 0)
+        let nanoseconds = max(Int(remaining * 1_000_000_000), 1)
+        expiryTimer.schedule(
+            deadline: .now() + .nanoseconds(nanoseconds),
+            leeway: .milliseconds(10)
+        )
+    }
+
+    private func expireIfNeeded() {
+        if isAuthorized() {
+            scheduleExpiryCheck(now: .now)
         }
     }
 }

@@ -194,22 +194,10 @@ struct PreviewRegressionTests {
     }
 
     @Test
-    func fullscreenVideoStaysMutedUntilItTakesPlaybackFromAudio() {
-        #expect(InstalledVideoAudioHandoffPolicy.videoGain(
-            volume: 0.8,
-            audioWasPlayingOnOpen: true,
-            videoOwnsPlayback: false
-        ) == 0)
-        #expect(InstalledVideoAudioHandoffPolicy.videoGain(
-            volume: 0.8,
-            audioWasPlayingOnOpen: true,
-            videoOwnsPlayback: true
-        ) == PlaybackVolumePolicy.gain(for: 0.8))
-        #expect(InstalledVideoAudioHandoffPolicy.videoGain(
-            volume: 0.8,
-            audioWasPlayingOnOpen: false,
-            videoOwnsPlayback: false
-        ) == PlaybackVolumePolicy.gain(for: 0.8))
+    func fullscreenVideoUsesTheAudioTimelineAsItsOnlyPlaybackAuthority() {
+        #expect(!InstalledVideoSyncPolicy.shouldSeek(videoTime: 10, audioTime: 10.1))
+        #expect(InstalledVideoSyncPolicy.shouldSeek(videoTime: 10, audioTime: 10.2))
+        #expect(InstalledVideoSyncPolicy.shouldSeek(videoTime: .nan, audioTime: 10))
     }
 
     @Test
@@ -746,6 +734,37 @@ struct PreviewRegressionTests {
         #expect(serverOnlyStats.topArtist == "Remote Artist")
         #expect(serverOnlyStats.songRanking.first?.track.album == "Remote Album")
         #expect(serverOnlyStats.songRanking.first?.seconds == 120)
+    }
+
+    @Test
+    func listeningHistoryRequiresMoreThanTenPercentForEachPlay() {
+        let track = Track(
+            title: "Threshold",
+            artist: "Test",
+            album: "Album",
+            duration: 200,
+            artwork: .midnight
+        )
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let entries = [19.99, 20, 20.01].map { seconds in
+            ListeningHistoryEntry(
+                trackID: track.id,
+                startedAt: now,
+                listenedSeconds: seconds,
+                duration: track.duration
+            )
+        }
+
+        #expect(!ListeningHistoryPlayPolicy.qualifies(entries[0], track: track))
+        #expect(!ListeningHistoryPlayPolicy.qualifies(entries[1], track: track))
+        #expect(ListeningHistoryPlayPolicy.qualifies(entries[2], track: track))
+        #expect(ListeningHistoryStatsSummary(entries: entries, tracks: [track]).plays == 1)
+        #expect(ListeningHistoryCalendarSummary(
+            entries: entries,
+            tracks: [track],
+            dayCount: 1,
+            now: now
+        ).plays == 1)
     }
 
     @Test

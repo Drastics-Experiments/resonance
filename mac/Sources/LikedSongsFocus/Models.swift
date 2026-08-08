@@ -447,6 +447,20 @@ enum ListeningHistoryRetentionPolicy {
     }
 }
 
+enum ListeningHistoryPlayPolicy {
+    static let minimumListenedFraction = 0.10
+
+    static func qualifies(_ entry: ListeningHistoryEntry, track: Track? = nil) -> Bool {
+        guard entry.listenedSeconds.isFinite, entry.listenedSeconds > 0 else { return false }
+        let trackDuration = track?.duration ?? 0
+        let duration = trackDuration.isFinite && trackDuration > 0
+            ? trackDuration
+            : (entry.duration ?? 0)
+        guard duration.isFinite, duration > 0 else { return false }
+        return entry.listenedSeconds > duration * minimumListenedFraction
+    }
+}
+
 enum ListeningHistoryTrackResolver {
     static func identity(for entry: ListeningHistoryEntry) -> String {
         let origin = entry.serverOrigin ?? "local"
@@ -635,9 +649,15 @@ struct ListeningHistoryCalendarSummary: Hashable {
             let seconds = entry.listenedSeconds.isFinite
                 ? max(0, entry.listenedSeconds)
                 : 0
+            let track = ListeningHistoryTrackResolver.track(
+                for: entry,
+                tracksByID: tracksByID,
+                tracksByRemoteIdentity: tracksByRemoteIdentity
+            )
+            let qualifiesAsPlay = ListeningHistoryPlayPolicy.qualifies(entry, track: track)
             if calendar.isDate(entry.startedAt, inSameDayAs: now) {
                 todayListeningSeconds += seconds
-                todayListeningPlays += 1
+                if qualifiesAsPlay { todayListeningPlays += 1 }
             }
 
             let entryDate: Date
@@ -651,13 +671,8 @@ struct ListeningHistoryCalendarSummary: Hashable {
             }
             guard let dayIndex = dayIndexByDate[entryDate] else { continue }
             dailyHistory[dayIndex].seconds += seconds
-            dailyHistory[dayIndex].plays += 1
+            if qualifiesAsPlay { dailyHistory[dayIndex].plays += 1 }
             let identity = ListeningHistoryTrackResolver.identity(for: entry)
-            let track = ListeningHistoryTrackResolver.track(
-                for: entry,
-                tracksByID: tracksByID,
-                tracksByRemoteIdentity: tracksByRemoteIdentity
-            )
             activeTrackIDs.insert(identity)
 
             var series = seriesByTrackID[identity] ?? (
@@ -669,9 +684,9 @@ struct ListeningHistoryCalendarSummary: Hashable {
                 }
             )
             series.seconds += seconds
-            series.plays += 1
+            if qualifiesAsPlay { series.plays += 1 }
             series.days[dayIndex].seconds += seconds
-            series.days[dayIndex].plays += 1
+            if qualifiesAsPlay { series.days[dayIndex].plays += 1 }
             seriesByTrackID[identity] = series
         }
 
@@ -748,7 +763,6 @@ struct ListeningHistoryStatsSummary: Hashable {
                 ? max(0, entry.listenedSeconds)
                 : 0
             total += seconds
-            playCount += 1
 
             let identity = ListeningHistoryTrackResolver.identity(for: entry)
             let track = ListeningHistoryTrackResolver.track(
@@ -756,16 +770,18 @@ struct ListeningHistoryStatsSummary: Hashable {
                 tracksByID: tracksByID,
                 tracksByRemoteIdentity: tracksByRemoteIdentity
             )
+            let qualifiesAsPlay = ListeningHistoryPlayPolicy.qualifies(entry, track: track)
+            if qualifiesAsPlay { playCount += 1 }
             var song = songsByID[identity] ?? (track: track, seconds: 0, plays: 0)
             song.seconds += seconds
-            song.plays += 1
+            if qualifiesAsPlay { song.plays += 1 }
             songsByID[identity] = song
 
             let rawArtist = track.artist.trimmingCharacters(in: .whitespacesAndNewlines)
             let artistName = rawArtist.isEmpty ? "Unknown artist" : rawArtist
             var artist = artistsByName[artistName] ?? (seconds: 0, plays: 0)
             artist.seconds += seconds
-            artist.plays += 1
+            if qualifiesAsPlay { artist.plays += 1 }
             artistsByName[artistName] = artist
         }
 

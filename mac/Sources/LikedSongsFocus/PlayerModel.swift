@@ -281,7 +281,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published var volume: Double = 0.78 {
         didSet {
             audioPlayer?.volume = PlaybackVolumePolicy.gain(for: volume)
-            installedVideoPlayer?.volume = PlaybackVolumePolicy.gain(for: volume)
             remoteStreamPlayer?.volume = PlaybackVolumePolicy.gain(for: volume)
             defaults.set(volume, forKey: Self.volumeKey)
         }
@@ -516,8 +515,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private let systemPlaybackController: (any MacSystemPlaybackControlling)?
     private var audioPlayer: AVAudioPlayer?
     private var loadedAudioTrackID: UUID?
-    private var installedVideoPlayer: AVPlayer?
-    private var installedVideoTrackID: UUID?
     private var remoteStreamPlayer: AVPlayer?
     private var remoteStreamTrack: Track?
     private var remoteStreamSongID: String?
@@ -910,10 +907,19 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 remoteSongID: remoteID
             )] = track
         }
-        let listeningHistory = activeProfileListeningHistoryEntries
+        let scopedHistory = activeProfileListeningHistoryEntries
             .filter { $0.id != activeListeningEntryID }
+        let listeningHistory = scopedHistory
+            .filter { entry in
+                let track = ListeningHistoryTrackResolver.track(
+                    for: entry,
+                    tracksByID: tracksByID,
+                    tracksByRemoteIdentity: tracksByRemoteIdentity
+                )
+                return ListeningHistoryPlayPolicy.qualifies(entry, track: track)
+            }
             .sorted { $0.startedAt > $1.startedAt }
-        if !listeningHistory.isEmpty {
+        if !scopedHistory.isEmpty {
             return listeningHistory.map {
                 ListeningHistoryTrackResolver.track(
                     for: $0,
@@ -1669,6 +1675,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
               remoteStreamPlayer?.currentItem === item else { return }
         updateListeningSession(flush: true)
         if repeatEnabled, let player = remoteStreamPlayer {
+            endListeningSession()
             player.seek(to: .zero)
             position = 0
             player.playImmediately(atRate: playbackRate)
@@ -2336,17 +2343,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             publishSystemPlayback()
             return
         }
-        if installedVideoTrackID == track.id, let installedVideoPlayer {
-            if playbackDuration > 0, position >= playbackDuration - 0.05 {
-                seekToTime(0)
-            }
-            installedVideoPlayer.playImmediately(atRate: playbackRate)
-            isPlaying = true
-            beginListeningSession(for: track)
-            startPlaybackTimer()
-            publishSystemPlayback()
-            return
-        }
         ensurePlaybackContext(containing: track.id)
         if currentTrackID != track.id {
             startTrack(track.id, preservingShuffleQueue: false)
@@ -2550,7 +2546,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     func toggleRepeat() {
         repeatEnabled.toggle()
-        audioPlayer?.numberOfLoops = repeatEnabled ? -1 : 0
+        audioPlayer?.numberOfLoops = 0
         publishSystemPlayback()
     }
 
@@ -2558,10 +2554,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         playbackRate = rate
         audioPlayer?.enableRate = true
         audioPlayer?.rate = rate
-        installedVideoPlayer?.defaultRate = rate
-        if installedVideoPlayer?.timeControlStatus == .playing {
-            installedVideoPlayer?.rate = rate
-        }
         remoteStreamPlayer?.defaultRate = rate
         if remoteStreamPlayer?.timeControlStatus == .playing {
             remoteStreamPlayer?.rate = rate
@@ -2583,13 +2575,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         position = safeTime.clamped(to: 0...max(duration, 0))
         if loadedAudioTrackID == track.id {
             audioPlayer?.currentTime = position
-        }
-        if installedVideoTrackID == track.id, let installedVideoPlayer {
-            installedVideoPlayer.seek(
-                to: CMTime(seconds: position, preferredTimescale: 600),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
-            )
         }
         if remoteStreamTrack?.id == track.id, let remoteStreamPlayer {
             remoteStreamPlayer.seek(
@@ -2941,10 +2926,23 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         guard player === audioPlayer else { return }
-        updateListeningSession()
+        updateListeningSession(flush: true)
         position = playbackDuration > 0 ? playbackDuration : player.duration
         isPlaying = false
         stopPlaybackTimer()
+        if repeatEnabled, let track = currentTrack {
+            endListeningSession()
+            position = 0
+            player.currentTime = 0
+            isPlaying = player.play()
+            if isPlaying {
+                beginListeningSession(for: track)
+                startPlaybackTimer()
+            }
+            persistPlaybackPosition()
+            publishSystemPlayback()
+            return
+        }
         publishSystemPlayback()
         next()
     }
@@ -2955,73 +2953,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         isPlaying = false
         stopPlaybackTimer()
         systemPlaybackController?.publish(nil)
-    }
-
-    func beginInstalledVideoPlayback(_ player: AVPlayer, trackID: UUID) {
-        guard currentTrackID == trackID, let track = currentTrack else { return }
-        updateListeningSession(flush: true)
-        audioPlayer?.pause()
-        stopPlaybackTimer()
-        installedVideoPlayer = player
-        installedVideoTrackID = trackID
-        player.volume = PlaybackVolumePolicy.gain(for: volume)
-        player.defaultRate = playbackRate
-        let currentTime = player.currentTime().seconds
-        position = currentTime.isFinite ? max(currentTime, 0) : position
-            isPlaying = true
-        lastListeningPosition = position
-        if isPlaying {
-            beginListeningSession(for: track)
-            startPlaybackTimer()
-        }
-        publishSystemPlayback()
-    }
-
-    func updateInstalledVideoPlayback(
-        _ player: AVPlayer,
-        trackID: UUID,
-        position: TimeInterval,
-        duration: TimeInterval,
-        isPlaying: Bool
-    ) {
-        guard installedVideoPlayer === player,
-              installedVideoTrackID == trackID,
-              currentTrackID == trackID else { return }
-        let safeDuration = duration.isFinite ? max(duration, 0) : 0
-        let safePosition = position.isFinite ? max(position, 0) : 0
-        if safeDuration > 0 { playbackDuration = safeDuration }
-        self.position = playbackDuration > 0 ? min(safePosition, playbackDuration) : safePosition
-        let stateChanged = self.isPlaying != isPlaying
-        self.isPlaying = isPlaying
-        updateListeningSession()
-        if stateChanged { publishSystemPlayback() }
-    }
-
-    func endInstalledVideoPlayback(
-        _ player: AVPlayer,
-        trackID: UUID,
-        position: TimeInterval,
-        resumeAudio: Bool
-    ) {
-        guard installedVideoPlayer === player, installedVideoTrackID == trackID else { return }
-        updateListeningSession(flush: true)
-        player.pause()
-        installedVideoPlayer = nil
-        installedVideoTrackID = nil
-        stopPlaybackTimer()
-        let safePosition = position.isFinite ? max(position, 0) : 0
-        self.position = playbackDuration > 0 ? min(safePosition, playbackDuration) : safePosition
-        audioPlayer?.currentTime = self.position
-        isPlaying = false
-        persistPlaybackPosition()
-        guard resumeAudio,
-              currentTrackID == trackID,
-              playbackDuration <= 0 || self.position < playbackDuration - 0.25,
-              let track = currentTrack else {
-            publishSystemPlayback()
-            return
-        }
-        beginPlayback(of: track, resuming: true)
     }
 
     private func configureSystemPlaybackHandlers() {
@@ -3070,7 +3001,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         guard let systemPlaybackController else { return }
         guard let track = currentTrack,
               loadedAudioTrackID == track.id
-                || installedVideoTrackID == track.id
                 || remoteStreamTrack?.id == track.id else {
             systemPlaybackController.publish(nil)
             return
@@ -3152,7 +3082,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             }
             player.delegate = self
             player.volume = PlaybackVolumePolicy.gain(for: volume)
-            player.numberOfLoops = repeatEnabled ? -1 : 0
+            player.numberOfLoops = 0
             player.enableRate = true
             player.rate = playbackRate
             player.prepareToPlay()
@@ -3193,10 +3123,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             remoteStreamPlayer.pause()
             let currentTime = remoteStreamPlayer.currentTime().seconds
             position = currentTime.isFinite ? max(currentTime, 0) : position
-        } else if installedVideoTrackID == currentTrackID, let installedVideoPlayer {
-            installedVideoPlayer.pause()
-            let currentTime = installedVideoPlayer.currentTime().seconds
-            position = currentTime.isFinite ? max(currentTime, 0) : position
         } else {
             audioPlayer?.pause()
             position = audioPlayer?.currentTime ?? position
@@ -3236,9 +3162,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             remoteShuffledSongIDs.removeAll()
             remoteHistorySongIDs.removeAll()
         }
-        installedVideoPlayer?.pause()
-        installedVideoPlayer = nil
-        installedVideoTrackID = nil
         audioPlayer?.stop()
         audioPlayer = nil
         loadedAudioTrackID = nil
@@ -3255,10 +3178,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 if self.remoteStreamTrack?.id == self.currentTrackID,
                    let remoteStreamPlayer = self.remoteStreamPlayer {
                     let currentTime = remoteStreamPlayer.currentTime().seconds
-                    if currentTime.isFinite { self.position = max(currentTime, 0) }
-                } else if self.installedVideoTrackID == self.currentTrackID,
-                   let installedVideoPlayer = self.installedVideoPlayer {
-                    let currentTime = installedVideoPlayer.currentTime().seconds
                     if currentTime.isFinite { self.position = max(currentTime, 0) }
                 } else {
                     self.position = self.audioPlayer?.currentTime ?? self.position
@@ -3414,10 +3333,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var currentPlaybackPosition: TimeInterval {
         if remoteStreamTrack?.id == currentTrackID, let remoteStreamPlayer {
             let currentTime = remoteStreamPlayer.currentTime().seconds
-            if currentTime.isFinite { return max(currentTime, 0) }
-        }
-        if installedVideoTrackID == currentTrackID, let installedVideoPlayer {
-            let currentTime = installedVideoPlayer.currentTime().seconds
             if currentTime.isFinite { return max(currentTime, 0) }
         }
         return audioPlayer?.currentTime ?? position
@@ -4030,7 +3945,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             let localEntries = listeningHistoryEntries.filter {
                 $0.originatedOnThisDevice != false
                     && $0.listenedSeconds.isFinite
-                    && $0.listenedSeconds > 0
+                    && ListeningHistoryPlayPolicy.qualifies($0, track: tracksByID[$0.trackID])
                     && $0.serverOrigin == activeOrigin
             }
             let profileIDs = Set(localEntries.map { $0.syncProfileID ?? "default" })

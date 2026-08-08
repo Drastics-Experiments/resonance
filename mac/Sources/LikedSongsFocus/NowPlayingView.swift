@@ -130,15 +130,12 @@ enum InstalledVideoControlsPolicy {
     }
 }
 
-enum InstalledVideoAudioHandoffPolicy {
-    static func videoGain(
-        volume: Double,
-        audioWasPlayingOnOpen: Bool,
-        videoOwnsPlayback: Bool
-    ) -> Float {
-        audioWasPlayingOnOpen && !videoOwnsPlayback
-            ? 0
-            : PlaybackVolumePolicy.gain(for: volume)
+enum InstalledVideoSyncPolicy {
+    static let seekTolerance: TimeInterval = 0.12
+
+    static func shouldSeek(videoTime: TimeInterval, audioTime: TimeInterval) -> Bool {
+        guard videoTime.isFinite, audioTime.isFinite else { return true }
+        return abs(videoTime - audioTime) > seekTolerance
     }
 }
 
@@ -202,9 +199,6 @@ struct NowPlayingView: View {
                         isVideoRevealed: isInstalledVideoRevealed,
                         isArtworkRestored: isInstalledVideoArtworkRestored,
                         isClosing: isClosingInstalledVideo,
-                        onPlaybackStarted: {
-                            handOffAudioToInstalledVideo(installedVideoSession)
-                        },
                         onClose: { closeInstalledVideo(installedVideoSession) }
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -668,10 +662,11 @@ struct NowPlayingView: View {
 
     private func openInstalledVideo(_ track: Track) {
         guard let url = track.installedVideoURL else { return }
-        let audioWasPlaying = model.isPlaying
         isQueuePresented = false
 
         let player = AVPlayer(url: url)
+        player.isMuted = true
+        player.volume = 0
         let playbackDuration = model.playbackDuration > 0
             ? model.playbackDuration
             : track.duration
@@ -685,8 +680,7 @@ struct NowPlayingView: View {
         }
         let session = InstalledVideoSession(
             track: track,
-            player: player,
-            audioWasPlayingOnOpen: audioWasPlaying
+            player: player
         )
         isClosingInstalledVideo = false
         isRestoringNowPlayingChrome = false
@@ -723,36 +717,23 @@ struct NowPlayingView: View {
                 toleranceBefore: .zero,
                 toleranceAfter: .zero
             )
-            player.playImmediately(atRate: model.playbackRate)
+            player.isMuted = true
+            player.volume = 0
+            if model.isPlaying {
+                player.playImmediately(atRate: model.playbackRate)
+            } else {
+                player.pause()
+            }
         }
-    }
-
-    private func handOffAudioToInstalledVideo(_ session: InstalledVideoSession) {
-        guard installedVideoSession?.id == session.id,
-              !isClosingInstalledVideo,
-              !session.ownsPlayback else { return }
-        session.ownsPlayback = true
-        // PlayerModel pauses the primary audio player before it unmutes and adopts
-        // this AVPlayer, keeping the handoff continuous without a double-audio burst.
-        model.beginInstalledVideoPlayback(session.player, trackID: session.track.id)
     }
 
     private func closeInstalledVideo(_ session: InstalledVideoSession) {
         guard installedVideoSession?.id == session.id,
               !isClosingInstalledVideo else { return }
         isClosingInstalledVideo = true
-        let currentTime = session.player.currentTime().seconds
-        let videoWasPlaying = session.player.timeControlStatus == .playing
+        session.player.isMuted = true
         session.player.volume = 0
-        if session.ownsPlayback {
-            model.endInstalledVideoPlayback(
-                session.player,
-                trackID: session.track.id,
-                position: currentTime,
-                resumeAudio: videoWasPlaying
-            )
-            session.ownsPlayback = false
-        }
+        session.player.pause()
         withAnimation(reduceMotion ? nil : InstalledVideoLayoutPolicy.geometryAnimation) {
             isInstalledVideoExpanded = false
         }
@@ -807,13 +788,10 @@ private final class InstalledVideoSession: Identifiable {
     let id = UUID()
     let track: Track
     let player: AVPlayer
-    let audioWasPlayingOnOpen: Bool
-    var ownsPlayback = false
 
-    init(track: Track, player: AVPlayer, audioWasPlayingOnOpen: Bool) {
+    init(track: Track, player: AVPlayer) {
         self.track = track
         self.player = player
-        self.audioWasPlayingOnOpen = audioWasPlayingOnOpen
     }
 }
 
@@ -853,7 +831,6 @@ private struct InstalledVideoPlayerView: View {
     let isVideoRevealed: Bool
     let isArtworkRestored: Bool
     let isClosing: Bool
-    let onPlaybackStarted: () -> Void
     let onClose: () -> Void
     @State private var currentTime: TimeInterval = 0
     @State private var duration: TimeInterval = 0
@@ -1004,21 +981,11 @@ private struct InstalledVideoPlayerView: View {
         .clipped()
         .foregroundStyle(Color.appInk)
         .onAppear {
-            session.player.volume = InstalledVideoAudioHandoffPolicy.videoGain(
-                volume: model.volume,
-                audioWasPlayingOnOpen: session.audioWasPlayingOnOpen,
-                videoOwnsPlayback: session.ownsPlayback
-            )
+            session.player.isMuted = true
+            session.player.volume = 0
             session.player.defaultRate = model.playbackRate
             refreshPlaybackState()
             showControls()
-        }
-        .onChange(of: model.volume) { _, volume in
-            session.player.volume = InstalledVideoAudioHandoffPolicy.videoGain(
-                volume: volume,
-                audioWasPlayingOnOpen: session.audioWasPlayingOnOpen,
-                videoOwnsPlayback: session.ownsPlayback
-            )
         }
         .onChange(of: model.playbackRate) { _, rate in
             session.player.defaultRate = rate
@@ -1026,22 +993,18 @@ private struct InstalledVideoPlayerView: View {
                 session.player.rate = rate
             }
         }
+        .onChange(of: model.isPlaying) { _, _ in
+            synchronizeVideoWithAudio(forceSeek: true)
+        }
+        .onChange(of: model.currentTrackID) { _, trackID in
+            if trackID != session.track.id { onClose() }
+        }
         .onChange(of: isPlaying) { _, playing in
             if playing {
                 showControls()
             } else {
                 showControls(keepVisible: true)
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(
-            for: .AVPlayerItemDidPlayToEndTime,
-            object: session.player.currentItem
-        )) { _ in
-            handlePlaybackEnded()
-        }
-        .onReceive(session.player.publisher(for: \.timeControlStatus)) { status in
-            guard status == .playing else { return }
-            onPlaybackStarted()
         }
         .task(id: session.id) {
             while !Task.isCancelled {
@@ -1052,21 +1015,13 @@ private struct InstalledVideoPlayerView: View {
         .onDisappear {
             controlsHideTask?.cancel()
             session.player.pause()
-            if session.ownsPlayback {
-                model.endInstalledVideoPlayback(
-                    session.player,
-                    trackID: session.track.id,
-                    position: currentTime,
-                    resumeAudio: false
-                )
-                session.ownsPlayback = false
-            }
         }
     }
 
     private func refreshPlaybackState() {
-        let nextTime = session.player.currentTime().seconds
-        currentTime = nextTime.isFinite ? max(nextTime, 0) : 0
+        currentTime = model.currentTrackID == session.track.id
+            ? max(model.position, 0)
+            : 0
 
         let playbackDuration = model.currentTrackID == session.track.id
             ? model.playbackDuration
@@ -1079,19 +1034,35 @@ private struct InstalledVideoPlayerView: View {
         } else {
             duration = max(session.track.duration, 0)
         }
-        isPlaying = session.player.timeControlStatus == .playing
-        if session.ownsPlayback {
-            model.updateInstalledVideoPlayback(
-                session.player,
-                trackID: session.track.id,
-                position: currentTime,
-                duration: duration,
-                isPlaying: isPlaying
+        isPlaying = model.currentTrackID == session.track.id && model.isPlaying
+        synchronizeVideoWithAudio()
+    }
+
+    private func synchronizeVideoWithAudio(forceSeek: Bool = false) {
+        guard model.currentTrackID == session.track.id else {
+            session.player.pause()
+            return
+        }
+        session.player.isMuted = true
+        session.player.volume = 0
+        session.player.defaultRate = model.playbackRate
+        let videoTime = session.player.currentTime().seconds
+        if forceSeek || InstalledVideoSyncPolicy.shouldSeek(
+            videoTime: videoTime,
+            audioTime: model.position
+        ) {
+            session.player.seek(
+                to: CMTime(seconds: max(model.position, 0), preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
             )
         }
-        if isPlaying, duration > 0, currentTime >= duration - 0.02 {
+        if model.isPlaying, isVideoRevealed, !isClosing {
+            if session.player.timeControlStatus == .paused {
+                session.player.playImmediately(atRate: model.playbackRate)
+            }
+        } else {
             session.player.pause()
-            handlePlaybackEnded()
         }
     }
 
@@ -1132,44 +1103,23 @@ private struct InstalledVideoPlayerView: View {
             toleranceBefore: .zero,
             toleranceAfter: .zero
         )
-        if session.ownsPlayback { model.seekToTime(time) }
+        model.seekToTime(time)
         showControls()
     }
 
     private func togglePlayback() {
-        if session.ownsPlayback {
-            model.togglePlay()
-            refreshPlaybackState()
-            if model.isPlaying { showControls() }
-            else { showControls(keepVisible: true) }
-            return
-        }
-        if isPlaying {
-            session.player.pause()
-            isPlaying = false
-            showControls(keepVisible: true)
-            return
-        }
-        if duration > 0, currentTime >= duration - 0.05 {
-            seek(to: 0)
-        }
-        session.player.playImmediately(atRate: model.playbackRate)
-        isPlaying = true
-        showControls()
+        model.togglePlay()
+        refreshPlaybackState()
+        if model.isPlaying { showControls() }
+        else { showControls(keepVisible: true) }
     }
 
     private func previous() {
         if currentTime > 3 {
             seek(to: 0)
-            if isPlaying {
-                session.player.playImmediately(atRate: model.playbackRate)
-            }
             return
         }
         session.player.pause()
-        if model.currentTrackID == session.track.id {
-            model.seek(to: 0)
-        }
         model.previous()
         onClose()
     }
@@ -1178,17 +1128,6 @@ private struct InstalledVideoPlayerView: View {
         session.player.pause()
         model.next()
         onClose()
-    }
-
-    private func handlePlaybackEnded() {
-        if model.repeatEnabled {
-            seek(to: 0)
-            session.player.playImmediately(atRate: model.playbackRate)
-            isPlaying = true
-            showControls()
-        } else {
-            next()
-        }
     }
 }
 
