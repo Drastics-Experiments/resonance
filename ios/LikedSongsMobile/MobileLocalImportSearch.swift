@@ -41,6 +41,12 @@ struct LocalImportSearchResponse: Hashable, Sendable {
     }
 }
 
+enum MobileLocalImportSearchRequestPolicy {
+    static let webUserAgent =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) "
+        + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+}
+
 enum LocalImportInput {
     static func looksLikeLink(_ value: String) -> Bool {
         let input = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -344,7 +350,7 @@ struct LocalImportSearchEngine: Sendable {
         var request = URLRequest(url: url)
         request.setValue(accept, forHTTPHeaderField: "Accept")
         request.setValue("en-US,en;q=0.8", forHTTPHeaderField: "Accept-Language")
-        request.setValue(Self.webUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(MobileLocalImportSearchRequestPolicy.webUserAgent, forHTTPHeaderField: "User-Agent")
         return request
     }
 
@@ -374,8 +380,4 @@ struct LocalImportSearchEngine: Sendable {
         }
         return data
     }
-
-    private static let webUserAgent =
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) "
-        + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1"
 }

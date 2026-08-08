@@ -1017,7 +1017,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /function localImportSourceIsReady\(value\)/);
   assert.match(appSource, /function scheduleLocalImportResolution/);
   assert.match(appSource, /function localImportInputIsLink\(value\)/);
-  assert.match(mainSource, /!looksLikeLink\(input\)[\s\S]+searchAllPlatforms\(input, controller\.signal\)/);
+  assert.match(mainSource, /!looksLikeLink\(input\)[\s\S]+searchAllPlatforms\(input, controller\.signal, fetch, \{ mediaKind \}\)/);
   assert.match(packageSource, /"local-search\.cjs"/);
   assert.match(appSource, /\$\("#localImportSource"\)\.oninput = \(\) => \{[\s\S]+scheduleLocalImportResolution\(\)/);
   assert.doesNotMatch(appSource, /\$\("#resolveLocalImport"\)/);
