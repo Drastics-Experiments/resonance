@@ -30,6 +30,49 @@ export function createEmptyState() {
     listeningHistory: [],
     serverUploadManifests: [],
     serverTransferPreferences: {},
+    appPreferences: {
+      runInBackground: false,
+      discordRichPresence: false,
+      discordApplicationID: "",
+      keybinds: {
+        togglePlayback: "Space",
+        previousTrack: "Ctrl+ArrowLeft",
+        nextTrack: "Ctrl+ArrowRight",
+        volumeDown: "Ctrl+ArrowDown",
+        volumeUp: "Ctrl+ArrowUp",
+      },
+    },
+  };
+}
+
+const DEFAULT_KEYBINDS = Object.freeze({
+  togglePlayback: "Space",
+  previousTrack: "Ctrl+ArrowLeft",
+  nextTrack: "Ctrl+ArrowRight",
+  volumeDown: "Ctrl+ArrowDown",
+  volumeUp: "Ctrl+ArrowUp",
+});
+
+function normalizedKeybind(value, fallback) {
+  const candidate = typeof value === "string" ? value.trim().slice(0, 80) : "";
+  return candidate || fallback;
+}
+
+export function normalizedAppPreferences(value) {
+  const preferences = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const keybinds = preferences.keybinds && typeof preferences.keybinds === "object" && !Array.isArray(preferences.keybinds)
+    ? preferences.keybinds
+    : {};
+  return {
+    runInBackground: Boolean(preferences.runInBackground),
+    discordRichPresence: Boolean(preferences.discordRichPresence),
+    discordApplicationID: /^\d{15,22}$/.test(String(preferences.discordApplicationID || "").trim())
+      ? String(preferences.discordApplicationID).trim()
+      : "",
+    keybinds: Object.fromEntries(Object.entries(DEFAULT_KEYBINDS).map(([action, fallback]) => [
+      action,
+      normalizedKeybind(keybinds[action], fallback),
+    ])),
   };
 }
 
@@ -720,6 +763,7 @@ export function normalizeState(value) {
     .filter(Boolean)
     .slice(-20);
   state.serverTransferPreferences = normalizedServerTransferPreferences(state.serverTransferPreferences);
+  state.appPreferences = normalizedAppPreferences(state.appPreferences);
   state.tracks = state.tracks.map((track) => track?.remoteID ? {
     ...track,
     // A source-less legacy remote record has ambiguous ownership. Keep it

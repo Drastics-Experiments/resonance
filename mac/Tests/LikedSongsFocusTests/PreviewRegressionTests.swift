@@ -10,12 +10,57 @@ struct PreviewRegressionTests {
         #expect(Notification.Name.focusMusicSearch.rawValue == "focusMusicSearch")
         #expect(Notification.Name.newMusicPlaylist.rawValue == "newMusicPlaylist")
         #expect(Notification.Name.focusMusicSearch != .newMusicPlaylist)
+        #expect(Notification.Name.openResonanceSettings.rawValue == "openResonanceSettings")
     }
 
     @Test
-    func plaintextCredentialsAreLimitedToTheExactPreviewBundle() {
+    func discordIPCUsesValidatedApplicationIDsAndDocumentedSocketPaths() throws {
+        #expect(MacDiscordRPCClient.validApplicationID(" 123456789012345678 ") == "123456789012345678")
+        #expect(MacDiscordRPCClient.validApplicationID("not-an-id") == nil)
+        #expect(MacDiscordRPCClient.socketPaths(environment: ["TMPDIR": "/private/tmp/resonance-test"]).prefix(2) == [
+            "/private/tmp/resonance-test/discord-ipc-0",
+            "/private/tmp/resonance-test/discord-ipc-1",
+        ])
+
+        let frame = try #require(DiscordIPCFrame.encode(
+            opcode: 0,
+            payload: ["v": 1, "client_id": "123456789012345678"]
+        ))
+        let header = try #require(DiscordIPCFrame.decodeHeader(frame))
+        #expect(header.opcode == 0)
+        #expect(header.length == frame.count - 8)
+    }
+
+    @MainActor
+    @Test
+    func macDesktopPreferencesPersistBackgroundPresenceAndKeybinds() throws {
+        let suiteName = "PreviewRegressionTests.desktop.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let preferences = MacDesktopPreferences(defaults: defaults)
+
+        preferences.runInBackground = true
+        preferences.discordRichPresence = true
+        #expect(preferences.setDiscordApplicationID("123456789012345678"))
+        preferences.setKeybind("⌘⇧P", for: .togglePlayback)
+
+        #expect(defaults.bool(forKey: MacDesktopPreferenceKeys.runInBackground))
+        #expect(defaults.bool(forKey: MacDesktopPreferenceKeys.discordRichPresence))
+        #expect(defaults.string(forKey: MacDesktopPreferenceKeys.discordApplicationID) == "123456789012345678")
+        #expect(preferences.keybinds[.togglePlayback] == "⌘⇧P")
+        preferences.stop()
+    }
+
+    @Test
+    func plaintextCredentialsAreLimitedToPreviewBundles() {
         #expect(CredentialStorePolicy.usesPlaintextStore(
             bundleIdentifier: CredentialStorePolicy.previewBundleIdentifier
+        ))
+        #expect(CredentialStorePolicy.usesPlaintextStore(
+            bundleIdentifier: CredentialStorePolicy.previewBundleIdentifier + ".worktree.w0123456789ab"
+        ))
+        #expect(!CredentialStorePolicy.usesPlaintextStore(
+            bundleIdentifier: CredentialStorePolicy.previewBundleIdentifier + ".untrusted"
         ))
         #expect(!CredentialStorePolicy.usesPlaintextStore(
             bundleIdentifier: "com.gavindietrich.LikedSongsFocus"

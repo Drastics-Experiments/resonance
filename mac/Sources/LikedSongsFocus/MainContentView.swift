@@ -1168,6 +1168,7 @@ private struct MacProfileMenu: View {
         case switchProfile
         case listeningHistory
         case clipEditor
+        case settings
 
         var id: String { rawValue }
     }
@@ -1175,7 +1176,6 @@ private struct MacProfileMenu: View {
     @State private var isShowingProfileMenu = false
     @State private var presentedSheet: PresentedSheet?
     @EnvironmentObject private var model: PlayerModel
-    @Environment(\.openSettings) private var openSettings
 
     private var profileName: String {
         let name = model.activeSyncProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1248,7 +1248,7 @@ private struct MacProfileMenu: View {
 
                     Button {
                         isShowingProfileMenu = false
-                        openSettings()
+                        presentedSheet = .settings
                     } label: {
                         ProfilePopoverRow(symbol: "gearshape", title: "Settings")
                     }
@@ -1268,7 +1268,13 @@ private struct MacProfileMenu: View {
                 MacListeningHistorySheet()
             case .clipEditor:
                 MacClipEditorSheet()
+            case .settings:
+                MacSettingsSheet()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openResonanceSettings)) { _ in
+            isShowingProfileMenu = false
+            presentedSheet = .settings
         }
     }
 }
@@ -3443,6 +3449,7 @@ private struct TrackAreaView: View {
     @State private var draggedTrackID: UUID?
     @State private var dragOffset: CGFloat = 0
     @State private var dropPreviewIndex: Int?
+    @State private var isShowingImportChooser = false
 
     private var reorderablePlaylistID: UUID? {
         guard model.section == .playlists,
@@ -3483,7 +3490,9 @@ private struct TrackAreaView: View {
                             }
                             .buttonStyle(PressableScaleStyle())
                         } else if model.section != .playlists {
-                            Button(action: model.importLocalFiles) {
+                            Button {
+                                isShowingImportChooser.toggle()
+                            } label: {
                                 Label("Add Music", systemImage: "plus")
                                     .font(.system(size: 12, weight: .bold))
                                     .padding(.horizontal, 18)
@@ -3492,6 +3501,22 @@ private struct TrackAreaView: View {
                                     .clipShape(Capsule())
                             }
                             .buttonStyle(PressableScaleStyle())
+                            .help("Choose how to import music")
+                            .popover(isPresented: $isShowingImportChooser, arrowEdge: .top) {
+                                MacImportChooser(
+                                    linkImportEnabled: LocalImportFeature.isEnabled,
+                                    onImportLink: {
+                                        isShowingImportChooser = false
+                                        DispatchQueue.main.async {
+                                            NotificationCenter.default.post(name: .importMusicFromLink, object: nil)
+                                        }
+                                    },
+                                    onImportFiles: {
+                                        isShowingImportChooser = false
+                                        DispatchQueue.main.async { model.importLocalFiles() }
+                                    }
+                                )
+                            }
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -4681,4 +4706,5 @@ extension Notification.Name {
     static let focusMusicSearch = Notification.Name("focusMusicSearch")
     static let newMusicPlaylist = Notification.Name("newMusicPlaylist")
     static let importMusicFromLink = Notification.Name("importMusicFromLink")
+    static let openResonanceSettings = Notification.Name("openResonanceSettings")
 }

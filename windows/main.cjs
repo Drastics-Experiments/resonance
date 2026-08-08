@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, protocol, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, shell, Tray } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { createHash, createHmac, randomBytes, randomUUID } = require("node:crypto");
 const { createReadStream } = require("node:fs");
@@ -6,6 +6,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { crashSafeReplace, crashSafeReplaceMirrored, readPrimaryOrBackup } = require("./crash-safe-file.cjs");
+const { DiscordRPCClient, validDiscordApplicationID } = require("./discord-rpc.cjs");
 const {
   cachedConfigMeetsRevisionFloor,
   clientConfigRevisionFloor,
@@ -52,6 +53,29 @@ const { downloadResolvedAudio, resolveYouTubeAudio } = require("./local-youtube.
 const { policyBlockedUploadEntries, serverUploadFilename } = require("./server-upload.cjs");
 const { readServerUploadResponse } = require("./server-upload-response.cjs");
 const windowsPackage = require("./package.json");
+
+function developmentInstanceMetadata() {
+  if (app.isPackaged) return null;
+  const worktreeID = String(process.env.RESONANCE_WORKTREE_ID || "").trim();
+  if (!/^[a-z0-9-]{1,80}$/.test(worktreeID)) return null;
+  const requestedName = String(process.env.RESONANCE_INSTANCE_NAME || "").trim();
+  const displayName = /^[A-Za-z0-9 ._\-\[\]]{1,100}$/.test(requestedName)
+    ? requestedName
+    : `Resonance Windows [${worktreeID}]`;
+  return { displayName, worktreeID };
+}
+
+const developmentInstance = developmentInstanceMetadata();
+const resonanceApplicationName = developmentInstance?.displayName || "Resonance";
+if (developmentInstance) {
+  app.setName(resonanceApplicationName);
+  app.setPath("userData", path.join(
+    app.getPath("appData"),
+    "Resonance Worktrees",
+    developmentInstance.worktreeID,
+    "windows",
+  ));
+}
 
 protocol.registerSchemesAsPrivileged([{
   scheme: SERVER_STREAM_SCHEME,
@@ -102,6 +126,9 @@ if (!Number.isSafeInteger(WINDOWS_APP_BUILD) || WINDOWS_APP_BUILD < 1) {
 
 let mainWindow;
 let applicationQuitRequested = false;
+let backgroundTray = null;
+let runtimeAppPreferences = { runInBackground: false, discordRichPresence: false };
+let currentDiscordPresenceStatus = { state: "disabled", message: "Rich Presence is off.", applicationConfigured: false };
 const activeServerTransfers = new Map();
 const activeLocalImports = new Map();
 const activeLocalImportPreviews = new Map();
@@ -124,6 +151,18 @@ let currentWindowsUpdateStatus = { type: "idle" };
 let windowsUpdateCheckPromise = null;
 let automaticUpdateCheckTimer = null;
 let automaticUpdateCheckInterval = null;
+
+const bundledDiscordApplicationID = validDiscordApplicationID(
+  process.env.RESONANCE_DISCORD_CLIENT_ID || windowsPackage.resonanceDiscordApplicationID,
+);
+const discordRPC = new DiscordRPCClient({
+  onStatus(status) {
+    currentDiscordPresenceStatus = status;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("app:discord-presence:status", status);
+    }
+  },
+});
 
 async function atomicWriteFile(destination, data, options = "utf8") {
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
@@ -756,7 +795,7 @@ function createWindow() {
     minWidth: 980,
     minHeight: 650,
     backgroundColor: "#07101c",
-    title: "Resonance",
+    title: resonanceApplicationName,
     icon: path.join(__dirname, "resonance.ico"),
     autoHideMenuBar: true,
     webPreferences: {
@@ -767,6 +806,10 @@ function createWindow() {
     },
   });
   mainWindow = window;
+  window.on("page-title-updated", (event) => {
+    event.preventDefault();
+    window.setTitle(resonanceApplicationName);
+  });
   window.resonanceCloseReady = false;
   window.resonanceCloseRequested = false;
   window.resonanceCloseTimer = null;
@@ -782,6 +825,12 @@ function createWindow() {
     rendererCredentialEpochs.delete(windowWebContentsID);
   });
   window.on("close", (event) => {
+    if (runtimeAppPreferences.runInBackground && !applicationQuitRequested) {
+      event.preventDefault();
+      window.hide();
+      ensureBackgroundTray();
+      return;
+    }
     if (window.resonanceCloseReady || window.isDestroyed()) return;
     event.preventDefault();
     if (window.resonanceCloseRequested) return;
@@ -810,8 +859,89 @@ ipcMain.on("app:close-ready", (event) => {
   else window.close();
 });
 
+function safeAppPreferences(value) {
+  const preferences = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const keybinds = preferences.keybinds && typeof preferences.keybinds === "object" && !Array.isArray(preferences.keybinds)
+    ? preferences.keybinds
+    : {};
+  const defaults = {
+    togglePlayback: "Space",
+    previousTrack: "Ctrl+ArrowLeft",
+    nextTrack: "Ctrl+ArrowRight",
+    volumeDown: "Ctrl+ArrowDown",
+    volumeUp: "Ctrl+ArrowUp",
+  };
+  return {
+    runInBackground: Boolean(preferences.runInBackground),
+    discordRichPresence: Boolean(preferences.discordRichPresence),
+    discordApplicationID: validDiscordApplicationID(preferences.discordApplicationID),
+    keybinds: Object.fromEntries(Object.entries(defaults).map(([action, fallback]) => {
+      const candidate = typeof keybinds[action] === "string" ? keybinds[action].trim().slice(0, 80) : "";
+      return [action, candidate || fallback];
+    })),
+  };
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function ensureBackgroundTray() {
+  if (backgroundTray || !app.isReady()) return backgroundTray;
+  const trayIcon = process.platform === "darwin"
+    ? nativeImage.createFromNamedImage("NSImageNameAudioOutputVolumeHighTemplate")
+    : path.join(__dirname, "resonance.ico");
+  backgroundTray = new Tray(trayIcon);
+  backgroundTray.setToolTip("Resonance");
+  backgroundTray.setContextMenu(Menu.buildFromTemplate([
+    { label: "Open Resonance", click: showMainWindow },
+    { type: "separator" },
+    {
+      label: "Quit Resonance",
+      click: () => {
+        applicationQuitRequested = true;
+        app.quit();
+      },
+    },
+  ]));
+  backgroundTray.on("click", showMainWindow);
+  return backgroundTray;
+}
+
+ipcMain.handle("app:preferences:update", (_event, value) => {
+  runtimeAppPreferences = safeAppPreferences(value);
+  if (runtimeAppPreferences.runInBackground) ensureBackgroundTray();
+  else if (backgroundTray) {
+    backgroundTray.destroy();
+    backgroundTray = null;
+  }
+  discordRPC.configure({
+    enabled: runtimeAppPreferences.discordRichPresence,
+    applicationID: runtimeAppPreferences.discordApplicationID || bundledDiscordApplicationID,
+  });
+  return runtimeAppPreferences;
+});
+
+ipcMain.handle("app:discord-presence:update", (_event, value) => {
+  discordRPC.setActivity(value);
+  return currentDiscordPresenceStatus;
+});
+
+ipcMain.handle("app:discord-presence:status", () => currentDiscordPresenceStatus);
+
 app.on("before-quit", () => {
   applicationQuitRequested = true;
+  discordRPC.destroy();
+  if (backgroundTray) {
+    backgroundTray.destroy();
+    backgroundTray = null;
+  }
   revokeAllServerStreams();
   if (automaticUpdateCheckTimer) clearTimeout(automaticUpdateCheckTimer);
   if (automaticUpdateCheckInterval) clearInterval(automaticUpdateCheckInterval);
@@ -823,10 +953,7 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
 app.on("second-instance", () => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
+  showMainWindow();
 });
 
 app.whenReady().then(async () => {
@@ -991,6 +1118,7 @@ ipcMain.handle("library:save", async (_event, state) => {
       .filter((entry) => typeof entry.trackID !== "string" || !entry.trackID.startsWith("stream:")),
     serverUploadManifests: safeServerUploadManifests(state.serverUploadManifests),
     serverTransferPreferences: safeServerTransferPreferences(state.serverTransferPreferences),
+    appPreferences: safeAppPreferences(state.appPreferences),
   };
   const save = librarySaveQueue
     .catch(() => {})

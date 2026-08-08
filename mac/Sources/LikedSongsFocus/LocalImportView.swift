@@ -1061,6 +1061,19 @@ struct MacLocalImportSheet: View {
         self.viewModel = viewModel
     }
 
+    private var expandedContent: Bool {
+        viewModel.searchResponse != nil
+            || viewModel.resolution != nil
+            || viewModel.error != nil
+            || viewModel.showsStageCard
+    }
+
+    private var sheetHeight: CGFloat {
+        if viewModel.searchResponse != nil || viewModel.resolution != nil { return 560 }
+        if expandedContent { return 420 }
+        return 310
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -1102,9 +1115,17 @@ struct MacLocalImportSheet: View {
             Divider().overlay(Color.appLine)
             footer
         }
-        .frame(width: 680, height: 650)
-        .background(Color.appBackground)
+        .frame(width: 620, height: sheetHeight)
+        .background(
+            RadialGradient(
+                colors: [Color.appViolet.opacity(0.12), Color.appBackground],
+                center: .topTrailing,
+                startRadius: 0,
+                endRadius: 430
+            )
+        )
         .preferredColorScheme(.dark)
+        .animation(.easeInOut(duration: 0.2), value: sheetHeight)
         .onAppear { sourceFocused = true }
         .onDisappear {
             viewModel.stopPreview()
@@ -1116,8 +1137,19 @@ struct MacLocalImportSheet: View {
 
     private var header: some View {
         HStack(spacing: 14) {
-            Text("Import from Link")
-                .font(.system(size: 20, weight: .bold, design: .rounded))
+            Image(systemName: "sparkles")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(Color.appViolet)
+                .frame(width: 36, height: 36)
+                .background(Color.appViolet.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Import from Link")
+                    .font(.system(size: 21, weight: .bold, design: .rounded))
+                Text("Search for a track or paste a link to get started.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.appMuted)
+            }
 
             Spacer()
 
@@ -1129,7 +1161,7 @@ struct MacLocalImportSheet: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 160)
+                .frame(width: 148)
                 .disabled(viewModel.isRunning)
                 .onChange(of: viewModel.mediaMode) { _, _ in
                     viewModel.normalizeMediaModeForSource()
@@ -1150,8 +1182,8 @@ struct MacLocalImportSheet: View {
             }
             .fixedSize(horizontal: true, vertical: false)
         }
-        .padding(.horizontal, 22)
-        .frame(height: 62)
+        .padding(.horizontal, 20)
+        .frame(height: 76)
         .background(Color.appSurfaceRaised.opacity(0.82))
     }
 
@@ -1165,7 +1197,7 @@ struct MacLocalImportSheet: View {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(Color.appMuted)
-                TextField("Song, artist, album, or supported link", text: $viewModel.source)
+                TextField("Link or music search", text: $viewModel.source)
                     .textFieldStyle(.plain)
                     .focused($sourceFocused)
                     .submitLabel(.search)
@@ -1191,9 +1223,10 @@ struct MacLocalImportSheet: View {
                     .accessibilityLabel(viewModel.resolveButtonTitle)
             }
             .padding(.horizontal, 14)
-            .frame(height: 48)
-            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.appLine) }
+            .frame(height: 50)
+            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(Color.appViolet.opacity(0.52)) }
+            .shadow(color: Color.appViolet.opacity(0.12), radius: 12)
 
         }
     }
@@ -1851,8 +1884,8 @@ struct MacLocalImportSheet: View {
                     .tint(Color.appViolet)
             }
         }
-        .padding(.horizontal, 22)
-        .frame(height: 66)
+        .padding(.horizontal, 20)
+        .frame(height: 64)
         .background(Color.appSurfaceRaised.opacity(0.82))
     }
 

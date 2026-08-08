@@ -97,77 +97,271 @@ struct SidebarView: View {
     }
 }
 
-struct MusicSettingsView: View {
-    @EnvironmentObject private var model: PlayerModel
+struct MacSettingsSheet: View {
+    private enum Panel: String, CaseIterable, Identifiable {
+        case general = "General"
+        case keybinds = "Keybinds"
+
+        var id: String { rawValue }
+        var symbol: String { self == .general ? "gearshape" : "keyboard" }
+    }
+
+    @EnvironmentObject private var preferences: MacDesktopPreferences
     @Environment(\.dismiss) private var dismiss
-
-    private var shuffleBinding: Binding<Bool> {
-        Binding(
-            get: { model.shuffleEnabled },
-            set: { newValue in
-                if newValue != model.shuffleEnabled { model.toggleShuffle() }
-            }
-        )
-    }
-
-    private var repeatBinding: Binding<Bool> {
-        Binding(
-            get: { model.repeatEnabled },
-            set: { newValue in
-                if newValue != model.repeatEnabled { model.toggleRepeat() }
-            }
-        )
-    }
+    @StateObject private var recorder = MacShortcutRecorder()
+    @State private var panel: Panel = .general
+    @State private var applicationIDDraft = ""
+    @State private var applicationIDError: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            HStack {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Music Settings")
-                        .font(.system(size: 22, weight: .bold))
-                    Text("Playback and local library")
-                        .font(.system(size: 11))
+                    Text("Settings")
+                        .font(.system(size: 26, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.appInk)
+                    Text("Manage how Resonance behaves on this Mac.")
+                        .font(.system(size: 10))
                         .foregroundStyle(Color.appMuted)
                 }
                 Spacer()
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
-            }
-
-            GroupBox("Playback") {
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack {
-                        Image(systemName: "speaker.wave.2.fill")
-                        Slider(value: $model.volume, in: 0...1)
-                            .tint(Color.appAccent)
-                        Text("\(Int(model.volume * 100))%")
-                            .monospacedDigit()
-                            .frame(width: 38, alignment: .trailing)
-                    }
-                    Toggle("Shuffle", isOn: shuffleBinding)
-                    Toggle("Repeat current track", isOn: repeatBinding)
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.appMuted)
+                        .frame(width: 32, height: 32)
+                        .background(Color.white.opacity(0.06), in: Circle())
                 }
-                .padding(8)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close settings")
             }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 18)
 
-            GroupBox("Local Library") {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("\(model.tracks.count) \(model.tracks.count == 1 ? "song" : "songs")")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text("\(model.customPlaylists.count) custom \(model.customPlaylists.count == 1 ? "playlist" : "playlists")")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color.appMuted)
+            Rectangle().fill(Color.appLine).frame(height: 1)
+
+            HStack(spacing: 0) {
+                VStack(spacing: 7) {
+                    ForEach(Panel.allCases) { candidate in
+                        Button {
+                            recorder.cancel()
+                            panel = candidate
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: candidate.symbol)
+                                    .font(.system(size: 14, weight: .medium))
+                                    .frame(width: 18)
+                                Text(candidate.rawValue)
+                                    .font(.system(size: 12, weight: .semibold))
+                                Spacer()
+                            }
+                            .foregroundStyle(panel == candidate ? Color.white : Color.appMuted)
+                            .padding(.horizontal, 13)
+                            .frame(height: 44)
+                            .background(panel == candidate ? Color.appViolet.opacity(0.22) : Color.clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .stroke(panel == candidate ? Color.appViolet.opacity(0.8) : Color.clear)
+                            }
+                        }
+                        .buttonStyle(.plain)
                     }
                     Spacer()
-                    Button("Add Music…") { model.importLocalFiles() }
                 }
-                .padding(8)
+                .padding(14)
+                .frame(width: 176)
+                .background(Color.black.opacity(0.13))
+
+                Rectangle().fill(Color.appLine).frame(width: 1)
+
+                Group {
+                    if panel == .general { generalPanel }
+                    else { keybindPanel }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
+
+            Rectangle().fill(Color.appLine).frame(height: 1)
+
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.appViolet)
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 22)
+            .frame(height: 62)
+            .background(Color.appSurfaceRaised.opacity(0.55))
         }
-        .padding(24)
-        .frame(width: 430, height: 360)
-        .background(Color.appPanel)
+        .frame(width: 760, height: 520)
+        .background(
+            RadialGradient(
+                colors: [Color.appViolet.opacity(0.14), Color.appPanel],
+                center: .topTrailing,
+                startRadius: 0,
+                endRadius: 460
+            )
+        )
+        .preferredColorScheme(.dark)
+        .onAppear { applicationIDDraft = preferences.discordApplicationID }
+        .onDisappear { recorder.cancel() }
+    }
+
+    private var generalPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                settingsHeading("MAC", detail: "Desktop behavior and connected services.")
+                VStack(spacing: 0) {
+                    settingsToggleRow(
+                        symbol: "macwindow.on.rectangle",
+                        title: "Running in the background",
+                        detail: "Keep playback active after the last Resonance window closes.",
+                        isOn: $preferences.runInBackground
+                    )
+                    Rectangle().fill(Color.appLine).frame(height: 1)
+                    settingsToggleRow(
+                        symbol: "bubble.left.and.bubble.right",
+                        title: "Discord Rich Presence",
+                        detail: preferences.discordStatus.message,
+                        isOn: $preferences.discordRichPresence
+                    )
+                    Rectangle().fill(Color.appLine).frame(height: 1)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Discord Application ID")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Color.appInk)
+                                Text("The public ID used by Discord desktop IPC.")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Color.appMuted)
+                            }
+                            Spacer()
+                        }
+                        HStack(spacing: 8) {
+                            TextField("Paste the Resonance Application ID", text: $applicationIDDraft)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 10, design: .monospaced))
+                                .padding(.horizontal, 11)
+                                .frame(height: 34)
+                                .background(Color.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .overlay { RoundedRectangle(cornerRadius: 8).stroke(applicationIDError == nil ? Color.appLine : Color.appAccent) }
+                                .onSubmit(saveApplicationID)
+                            Button("Save", action: saveApplicationID)
+                                .buttonStyle(.bordered)
+                        }
+                        if let applicationIDError {
+                            Text(applicationIDError)
+                                .font(.system(size: 9))
+                                .foregroundStyle(Color.appAccent)
+                        }
+                    }
+                    .padding(14)
+                }
+                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
+            }
+            .padding(22)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private var keybindPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top) {
+                    settingsHeading("PLAYBACK", detail: "Choose a shortcut, then press its new key combination.")
+                    Spacer()
+                    Button("Reset defaults", action: preferences.resetKeybinds)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+
+                VStack(spacing: 0) {
+                    ForEach(Array(MacShortcutAction.allCases.enumerated()), id: \.element.id) { index, action in
+                        HStack(spacing: 13) {
+                            Image(systemName: action == .togglePlayback ? "playpause" : action == .previousTrack ? "backward.end" : action == .nextTrack ? "forward.end" : action == .volumeDown ? "speaker.minus" : "speaker.plus")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(Color.appViolet)
+                                .frame(width: 34, height: 34)
+                                .background(Color.appViolet.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(action.title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.appInk)
+                                Text(action.detail).font(.system(size: 9)).foregroundStyle(Color.appMuted)
+                            }
+                            Spacer()
+                            Button {
+                                recorder.start(action) { shortcut in preferences.setKeybind(shortcut, for: action) }
+                            } label: {
+                                Text(recorder.recordingAction == action ? "Press keys…" : preferences.keybinds[action, default: "—"])
+                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                    .frame(minWidth: 92)
+                                    .frame(height: 31)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(recorder.recordingAction == action ? Color.appViolet : Color.appMuted)
+                        }
+                        .padding(.horizontal, 14)
+                        .frame(height: 63)
+                        if index < MacShortcutAction.allCases.count - 1 {
+                            Rectangle().fill(Color.appLine).frame(height: 1)
+                        }
+                    }
+                }
+                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
+            }
+            .padding(22)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private func settingsHeading(_ eyebrow: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(eyebrow)
+                .font(.system(size: 9, weight: .bold))
+                .tracking(1.7)
+                .foregroundStyle(Color.appViolet)
+            Text(detail)
+                .font(.system(size: 10))
+                .foregroundStyle(Color.appMuted)
+        }
+    }
+
+    private func settingsToggleRow(
+        symbol: String,
+        title: String,
+        detail: String,
+        isOn: Binding<Bool>
+    ) -> some View {
+        HStack(spacing: 13) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.appViolet)
+                .frame(width: 36, height: 36)
+                .background(Color.appViolet.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.appInk)
+                Text(detail).font(.system(size: 9)).foregroundStyle(Color.appMuted).lineLimit(2)
+            }
+            Spacer()
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(Color.appViolet)
+        }
+        .padding(.horizontal, 14)
+        .frame(minHeight: 64)
+    }
+
+    private func saveApplicationID() {
+        if preferences.setDiscordApplicationID(applicationIDDraft) {
+            applicationIDDraft = preferences.discordApplicationID
+            applicationIDError = nil
+        } else {
+            applicationIDError = "Enter the numeric Discord Application ID."
+        }
     }
 }
 

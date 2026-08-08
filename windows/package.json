@@ -42,6 +42,7 @@
       "local-youtube.cjs",
       "library-paths.cjs",
       "crash-safe-file.cjs",
+      "discord-rpc.cjs",
       "download-file.cjs",
       "policy-lease.cjs",
       "filename-policy.cjs",

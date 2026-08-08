@@ -3,9 +3,11 @@ import SwiftUI
 
 @main
 struct LikedSongsFocusApp: App {
+    @NSApplicationDelegateAdaptor(ResonanceAppDelegate.self) private var appDelegate
     @StateObject private var model: PlayerModel
     @StateObject private var localImportModel: MacLocalImportViewModel
     @StateObject private var updateManager = UpdateManager()
+    @StateObject private var desktopPreferences = MacDesktopPreferences()
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -22,10 +24,15 @@ struct LikedSongsFocusApp: App {
                 .environmentObject(model)
                 .environmentObject(localImportModel)
                 .environmentObject(updateManager)
+                .environmentObject(desktopPreferences)
                 .background(WindowConfigurator())
                 .task {
+                    desktopPreferences.bind(to: model)
                     await model.refreshClientConfigurationNow()
                     await model.runAutomaticPlaylistSync()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    desktopPreferences.stop()
                 }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
@@ -50,6 +57,11 @@ struct LikedSongsFocusApp: App {
                 Button("Add Music…") { model.importLocalFiles() }
                     .keyboardShortcut("o", modifiers: [.command])
 
+                Button("Import from Link…") {
+                    NotificationCenter.default.post(name: .importMusicFromLink, object: nil)
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+
                 Button("New Playlist…") {
                     NotificationCenter.default.post(name: .newMusicPlaylist, object: nil)
                 }
@@ -61,13 +73,19 @@ struct LikedSongsFocusApp: App {
                 Button("Previous Track") { model.previous() }
                 Button("Next Track") { model.next() }
             }
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    NotificationCenter.default.post(name: .openResonanceSettings, object: nil)
+                }
+                .keyboardShortcut(",", modifiers: [.command])
+            }
         }
+    }
+}
 
-        Settings {
-            MusicSettingsView()
-                .environmentObject(model)
-                .environmentObject(updateManager)
-        }
+final class ResonanceAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        !UserDefaults.standard.bool(forKey: MacDesktopPreferenceKeys.runInBackground)
     }
 }
 

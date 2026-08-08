@@ -26,6 +26,7 @@ import {
   nextIndex,
   niceChartMaximum,
   normalizeServerUploadManifest,
+  normalizedAppPreferences,
   normalizedVolume,
   playbackGainForVolume,
   normalizeState,
@@ -191,7 +192,32 @@ let clipEditorPreviewLoading = false;
 let clipEditorPreviewRequest = 0;
 let clipBoundaryTrackID = null;
 let profileGeneration = 0;
+let settingsPanel = "general";
+let settingsRecordingAction = null;
+let discordPresenceStatus = { state: "disabled", message: "Rich Presence is off.", applicationConfigured: false };
+let discordPresenceSyncTimer = null;
 const activeProfileID = () => state.syncProfileID || "default";
+
+const settingsKeybindActions = Object.freeze({
+  togglePlayback: { label: "Play / pause", description: "Toggle playback from anywhere in Resonance." },
+  previousTrack: { label: "Previous track", description: "Return to the previous song in the queue." },
+  nextTrack: { label: "Next track", description: "Advance to the next song in the queue." },
+  volumeDown: { label: "Volume down", description: "Lower playback volume by five percent." },
+  volumeUp: { label: "Volume up", description: "Raise playback volume by five percent." },
+});
+
+function settingsIcon(pathMarkup) {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">${pathMarkup}</svg>`;
+}
+
+const settingsIcons = Object.freeze({
+  general: settingsIcon('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.07.07-2.76 2.76-.07-.07a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.1 1.65V21h-3.8v-.1A1.8 1.8 0 0 0 9 19.25a1.8 1.8 0 0 0-2 .36l-.07.07-2.76-2.76.07-.07a1.8 1.8 0 0 0 .36-2A1.8 1.8 0 0 0 2.95 13H3v-3.8h-.05A1.8 1.8 0 0 0 4.6 8a1.8 1.8 0 0 0-.36-2l-.07-.07 2.76-2.76.07.07a1.8 1.8 0 0 0 2 .36A1.8 1.8 0 0 0 10.1 2H14v.05A1.8 1.8 0 0 0 15 3.7a1.8 1.8 0 0 0 2-.36l.07-.07 2.76 2.76-.07.07a1.8 1.8 0 0 0-.36 2A1.8 1.8 0 0 0 21.05 9H21v4h.05A1.8 1.8 0 0 0 19.4 15Z"/>'),
+  keybinds: settingsIcon('<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h.01M11 14h6M18 10h.01"/>'),
+  tools: settingsIcon('<path d="M14.7 6.3a4 4 0 0 0-5 5L3.5 17.5 6.5 20.5l6.2-6.2a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/>'),
+  background: settingsIcon('<path d="M4 7h16v11H4z"/><path d="M8 7V4h8v3M8 21h8"/>'),
+  discord: settingsIcon('<path d="M7.5 7.4A11 11 0 0 1 12 6.5a11 11 0 0 1 4.5.9c1.1 1.5 2 4.4 2 6.4-1.3 1.6-2.6 2.2-4 2.6l-1-1.3M16.5 7.4l.9-1.7M7.5 7.4l-.9-1.7M10 13h.01M14 13h.01M9.5 15.1c1.7.7 3.3.7 5 0"/>'),
+  update: settingsIcon('<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/>'),
+});
 
 const serverUploadModeOptions = Object.freeze({
   local_file: "Local files",
@@ -3279,23 +3305,171 @@ async function saveServerForm() {
 }
 
 function renderSettings() {
-  updateTopSearch();
   const profile = activeProfile();
   const track = currentTrack();
-  content.innerHTML = `<div class="page settings-page">
-    <span class="eyebrow">RESONANCE</span><h1>Settings</h1><p>Manage this device, your music server, playback tools, and updates.</p>
-    <div class="settings-grid">
-      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">${serverDeviceIcon}</span><div><h2>Music Server</h2><p>${serverConnected ? "Connected" : "Not connected"} · ${escapeHTML(profile.name || "Default")}</p><small>${escapeHTML(state.serverURL || "No server configured")}</small></div><button id="settingsServer" class="secondary" type="button">Connection settings</button></section>
-      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">${historyClockIcon}</span><div><h2>Listening & clips</h2><p>${track ? escapeHTML(track.title) : "Nothing selected"}</p><small>${Math.round(state.volume * 100)}% volume · ${audio.playbackRate || 1}× speed</small></div><div class="settings-card-actions"><button id="settingsHistory" class="secondary" type="button">Listening History</button><button id="settingsClipEditor" class="secondary" type="button" ${track && !track.transientStream ? "" : "disabled"}>Clip Editor</button></div></section>
-      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">♪</span><div><h2>Local storage</h2><p>${tracksForActiveProfile(state).length} songs on this profile</p><small>Manage imports, downloads, and local files.</small></div><button id="settingsStorage" class="secondary" type="button">Manage storage</button></section>
-      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">↻</span><div><h2>Updates</h2><p id="settingsUpdateStatus">${escapeHTML($("#updateStatus").textContent || "Automatic in-app updates")}</p><small>Installed builds update through the GitHub release feed.</small></div><button id="settingsCheckUpdates" class="secondary" type="button">Check now</button></section>
+  state.appPreferences = normalizedAppPreferences(state.appPreferences);
+  const preferences = state.appPreferences;
+  const keybindRows = Object.entries(settingsKeybindActions).map(([action, metadata]) => {
+    const recording = settingsRecordingAction === action;
+    return `<div class="settings-row settings-keybind-row">
+      <span class="settings-row-icon" aria-hidden="true">${settingsIcons.keybinds}</span>
+      <span class="settings-row-copy"><strong>${metadata.label}</strong><small>${metadata.description}</small></span>
+      <button class="settings-keybind${recording ? " recording" : ""}" type="button" data-keybind-action="${action}" aria-label="Change ${metadata.label} keybind"><kbd>${recording ? "Press keys…" : escapeHTML(preferences.keybinds[action])}</kbd></button>
+    </div>`;
+  }).join("");
+  const settingsRoot = $("#settingsDialogContent");
+  settingsRoot.innerHTML = `<div class="settings-heading"><div><span class="eyebrow">RESONANCE</span><h1 id="settingsDialogTitle">Settings</h1><p>Manage how Resonance behaves on this Windows device.</p></div><button id="closeSettings" class="history-close" type="button" aria-label="Close settings">×</button></div>
+    <div class="settings-shell">
+      <nav class="settings-nav" aria-label="Settings sections">
+        <button class="${settingsPanel === "general" ? "active" : ""}" type="button" data-settings-panel="general" aria-current="${settingsPanel === "general" ? "page" : "false"}">${settingsIcons.general}<span>General</span></button>
+        <button class="${settingsPanel === "keybinds" ? "active" : ""}" type="button" data-settings-panel="keybinds" aria-current="${settingsPanel === "keybinds" ? "page" : "false"}">${settingsIcons.keybinds}<span>Keybinds</span></button>
+        <button class="${settingsPanel === "tools" ? "active" : ""}" type="button" data-settings-panel="tools" aria-current="${settingsPanel === "tools" ? "page" : "false"}">${settingsIcons.tools}<span>Library & tools</span></button>
+      </nav>
+      <div class="settings-content">
+        <section class="settings-panel" data-settings-content="general" ${settingsPanel === "general" ? "" : "hidden"}>
+          <div class="settings-section-heading"><span>WINDOWS</span><p>Control desktop behavior and connected services.</p></div>
+          <div class="settings-grid">
+            <div class="settings-group">
+              <label class="settings-row" for="settingsRunInBackground">
+                <span class="settings-row-icon" aria-hidden="true">${settingsIcons.background}</span>
+                <span class="settings-row-copy"><strong>Running in the background</strong><small>Keep playback active in the system tray when the window closes.</small></span>
+                <span class="settings-toggle"><input id="settingsRunInBackground" type="checkbox" ${preferences.runInBackground ? "checked" : ""}><span aria-hidden="true"></span></span>
+              </label>
+              <label class="settings-row" for="settingsDiscordPresence">
+                <span class="settings-row-icon discord" aria-hidden="true">${settingsIcons.discord}</span>
+                <span class="settings-row-copy"><strong>Discord Rich Presence</strong><small id="settingsDiscordStatus">${escapeHTML(discordPresenceStatus.message || "Share the current song and playback state on Discord.")}</small></span>
+                <span class="settings-toggle"><input id="settingsDiscordPresence" type="checkbox" ${preferences.discordRichPresence ? "checked" : ""}><span aria-hidden="true"></span></span>
+              </label>
+              <label class="settings-discord-configuration" for="settingsDiscordApplicationID"><span><strong>Discord Application ID</strong><small>Public application ID used by the Discord desktop IPC connection.</small></span><input id="settingsDiscordApplicationID" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="22" value="${escapeHTML(preferences.discordApplicationID || "")}" placeholder="Paste the Resonance Application ID"></label>
+            </div>
+            <div class="settings-section-heading compact"><span>APP</span><p>Existing Resonance connection and update tools.</p></div>
+            <div class="settings-group">
+              <div class="settings-row">
+                <span class="settings-row-icon" aria-hidden="true">${serverDeviceIcon}</span>
+                <span class="settings-row-copy"><strong>Music Server</strong><small>${serverConnected ? "Connected" : "Not connected"} · ${escapeHTML(profile.name || "Default")} · ${escapeHTML(state.serverURL || "No server configured")}</small></span>
+                <button id="settingsServer" class="settings-row-action" type="button">Configure</button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-row-icon" aria-hidden="true">${settingsIcons.update}</span>
+                <span class="settings-row-copy"><strong>Updates</strong><small id="settingsUpdateStatus">${escapeHTML($("#updateStatus").textContent || "Automatic in-app updates")}</small></span>
+                <button id="settingsCheckUpdates" class="settings-row-action" type="button">Check now</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="settings-panel" data-settings-content="keybinds" ${settingsPanel === "keybinds" ? "" : "hidden"}>
+          <div class="settings-panel-title"><div><span class="eyebrow">PLAYBACK</span><h2>Keybinds</h2><p>Choose a shortcut, then press the new key combination. These work while Resonance is focused.</p></div><button id="resetSettingsKeybinds" class="settings-row-action" type="button">Reset defaults</button></div>
+          <div class="settings-group settings-keybinds">${keybindRows}</div>
+        </section>
+        <section class="settings-panel" data-settings-content="tools" ${settingsPanel === "tools" ? "" : "hidden"}>
+          <div class="settings-panel-title"><div><span class="eyebrow">LIBRARY</span><h2>Library & tools</h2><p>Open the existing tools without changing their behavior.</p></div></div>
+          <div class="settings-group">
+            <div class="settings-row"><span class="settings-row-icon" aria-hidden="true">${historyClockIcon}</span><span class="settings-row-copy"><strong>Listening History</strong><small>Review this profile’s recent playback.</small></span><button id="settingsHistory" class="settings-row-action" type="button">Open</button></div>
+            <div class="settings-row"><span class="settings-row-icon" aria-hidden="true">${settingsIcons.tools}</span><span class="settings-row-copy"><strong>Clip Editor</strong><small>${track ? `Edit the playback range for ${escapeHTML(track.title)}.` : "Choose a song before opening the clip editor."}</small></span><button id="settingsClipEditor" class="settings-row-action" type="button" ${track && !track.transientStream ? "" : "disabled"}>Open</button></div>
+            <div class="settings-row"><span class="settings-row-icon storage" aria-hidden="true">♪</span><span class="settings-row-copy"><strong>Local storage</strong><small>${tracksForActiveProfile(state).length} songs on this profile.</small></span><button id="settingsStorage" class="settings-row-action" type="button">Manage</button></div>
+          </div>
+        </section>
+      </div>
     </div>
-  </div>`;
-  $("#settingsServer").onclick = openServerSettings;
-  $("#settingsHistory").onclick = openListeningHistory;
-  $("#settingsClipEditor").onclick = openClipEditor;
-  $("#settingsStorage").onclick = () => navigate("storage");
-  $("#settingsCheckUpdates").onclick = checkForUpdates;
+    <footer class="settings-footer"><button id="doneSettings" class="primary" type="button">Done</button></footer>`;
+  const closeSettings = () => $("#settingsDialog").close();
+  $("#closeSettings").onclick = closeSettings;
+  $("#doneSettings").onclick = closeSettings;
+  document.querySelectorAll("[data-settings-panel]").forEach((button) => {
+    button.onclick = () => {
+      settingsPanel = button.dataset.settingsPanel;
+      settingsRecordingAction = null;
+      renderSettings();
+    };
+  });
+  const runInBackground = $("#settingsRunInBackground");
+  if (runInBackground) runInBackground.onchange = () => updateAppPreference("runInBackground", runInBackground.checked);
+  const discordPresence = $("#settingsDiscordPresence");
+  if (discordPresence) discordPresence.onchange = async () => {
+    await updateAppPreference("discordRichPresence", discordPresence.checked);
+    scheduleDiscordPresenceUpdate();
+  };
+  const discordApplicationID = $("#settingsDiscordApplicationID");
+  if (discordApplicationID) {
+    const saveDiscordApplicationID = async () => {
+      const candidate = discordApplicationID.value.trim();
+      if (candidate && !/^\d{15,22}$/.test(candidate)) {
+        discordApplicationID.setCustomValidity("Enter the numeric Discord Application ID.");
+        discordApplicationID.reportValidity();
+        return;
+      }
+      discordApplicationID.setCustomValidity("");
+      await updateAppPreference("discordApplicationID", candidate);
+      scheduleDiscordPresenceUpdate();
+    };
+    discordApplicationID.onchange = saveDiscordApplicationID;
+    discordApplicationID.onkeydown = (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void saveDiscordApplicationID();
+      }
+    };
+  }
+  document.querySelectorAll("[data-keybind-action]").forEach((button) => {
+    button.onclick = () => {
+      settingsRecordingAction = button.dataset.keybindAction;
+      renderSettings();
+      requestAnimationFrame(() => document.querySelector(`[data-keybind-action="${settingsRecordingAction}"]`)?.focus());
+    };
+  });
+  const resetKeybinds = $("#resetSettingsKeybinds");
+  if (resetKeybinds) resetKeybinds.onclick = () => {
+    state.appPreferences.keybinds = normalizedAppPreferences({}).keybinds;
+    settingsRecordingAction = null;
+    persistInBackground({ refreshSidebar: false });
+    renderSettings();
+  };
+  if ($("#settingsServer")) $("#settingsServer").onclick = () => { closeSettings(); void openServerSettings(); };
+  if ($("#settingsHistory")) $("#settingsHistory").onclick = () => { closeSettings(); openListeningHistory(); };
+  if ($("#settingsClipEditor")) $("#settingsClipEditor").onclick = () => { closeSettings(); openClipEditor(); };
+  if ($("#settingsStorage")) $("#settingsStorage").onclick = () => { closeSettings(); navigate("storage"); };
+  if ($("#settingsCheckUpdates")) $("#settingsCheckUpdates").onclick = checkForUpdates;
+}
+
+async function updateAppPreference(key, value) {
+  state.appPreferences = normalizedAppPreferences({
+    ...state.appPreferences,
+    [key]: value,
+  });
+  persistInBackground({ refreshSidebar: false });
+  await api.updateAppPreferences(state.appPreferences).catch(() => undefined);
+}
+
+function openSettings() {
+  closeProfileMenu();
+  settingsPanel = "general";
+  settingsRecordingAction = null;
+  renderSettings();
+  $("#settingsDialog").showModal();
+}
+
+function discordPresenceActivity() {
+  const track = currentTrack();
+  if (!track || !state.appPreferences?.discordRichPresence) return null;
+  const media = activePlaybackMedia();
+  return {
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    playing: playbackIsActive(),
+    position: Number(media?.currentTime) || state.position || 0,
+    duration: currentPlaybackDuration(track),
+  };
+}
+
+function scheduleDiscordPresenceUpdate() {
+  if (discordPresenceSyncTimer) clearTimeout(discordPresenceSyncTimer);
+  discordPresenceSyncTimer = setTimeout(async () => {
+    discordPresenceSyncTimer = null;
+    discordPresenceStatus = await api.updateDiscordPresence(discordPresenceActivity()).catch(() => discordPresenceStatus);
+    const status = $("#settingsDiscordStatus");
+    if (status) status.textContent = discordPresenceStatus.message || "Share the current song and playback state on Discord.";
+  }, 80);
 }
 
 function render() {
@@ -3303,7 +3477,7 @@ function render() {
   else if (section === "playlists") renderPlaylists();
   else if (section === "storage") renderStorage();
   else if (section === "server") renderServer();
-  else renderSettings();
+  else renderLibrary();
   renderSidebar();
   renderQueue();
   $("#navBack").disabled = navigationIndex === 0;
@@ -3732,7 +3906,9 @@ async function importAudio() {
 }
 
 function setLocalImportStage(value = { stage: "idle" }) {
-  $("#localImportStage").dataset.stage = value.stage || "idle";
+  const stage = value.stage || "idle";
+  $("#localImportStage").dataset.stage = stage;
+  $("#localImportDialog").classList.toggle("expanded", stage !== "idle");
 }
 
 function showLocalImportError(error) {
@@ -3793,6 +3969,7 @@ function requireCurrentLocalImportOperation(snapshot) {
 
 function setLocalImportOperationLocked(locked) {
   $("#localImportSource").disabled = locked;
+  $("#searchLocalImport").disabled = locked;
   $("#chooseLocalFiles").disabled = locked;
   setLocalImportMediaKindDisabled(locked);
   document.querySelectorAll('input[name="localImportCandidate"], input[name="localImportPlaylistItem"]').forEach((input) => {
@@ -3935,6 +4112,7 @@ function resetLocalImport() {
   if (audioKind) audioKind.checked = true;
   setLocalImportMediaKindDisabled(false);
   $("#localImportSource").disabled = false;
+  $("#searchLocalImport").disabled = false;
   $("#localImportSource").removeAttribute("aria-busy");
   $("#localImportSource").closest(".local-import-source").classList.remove("searching");
   $("#localImportResolved").hidden = true;
@@ -3951,8 +4129,8 @@ function resetLocalImport() {
   updateLocalImportMediaKindUI();
   $("#localImportMediaKind").hidden = false;
   $("#chooseLocalFiles").hidden = false;
-  $("#localImportTitle").textContent = "Import from link";
-  $("#localImportSource").placeholder = "Song, artist, album, or supported link…";
+  $("#localImportTitle").textContent = "Import from Link";
+  $("#localImportSource").placeholder = "Link or music search";
 }
 
 function openLocalImport({ serverUploadMode = null } = {}) {
@@ -4398,6 +4576,8 @@ function renderLocalImportResolution() {
   const selectedKind = document.querySelector(`input[name="localImportMediaKind"][value="${mediaKind}"]`);
   if (selectedKind) selectedKind.checked = true;
   $("#localImportResolved").hidden = false;
+  $("#localImportResolved").classList.toggle("is-search-results", searchResults);
+  $("#localImportResolved").classList.toggle("is-playlist", playlist);
   $("#localImportSyncRow").hidden = Boolean(localImportServerUploadMode);
   void renderLocalImportArtwork(track, candidates, mediaKind);
   $("#localImportTrackTitle").textContent = track.title || "Untitled";
@@ -4407,7 +4587,10 @@ function renderLocalImportResolution() {
     ? [track.artist, `${candidates.length} available video${candidates.length === 1 ? "" : "s"}`, localImportResolution.playlist?.unavailableCount ? `${localImportResolution.playlist.unavailableCount} unavailable` : null].filter(Boolean).join(" • ")
     : [track.artist, track.album, track.durationSeconds ? formatTime(track.durationSeconds) : null]
     .filter(Boolean).join(" • ");
-  $("#localImportCandidateLegend").textContent = searchResults ? "Choose a result to import or preview" : playlist ? "Choose playlist songs to import" : "Choose the source to import";
+  $("#localImportCandidateLegend").textContent = searchResults ? "Search results" : playlist ? "Choose playlist songs to import" : "Choose the source to import";
+  $("#localImportResultSummary").textContent = searchResults
+    ? `${candidates.filter(localImportCandidateCanPreview).length} previewable`
+    : playlist ? `${candidates.length} available` : `${candidates.length} source${candidates.length === 1 ? "" : "s"}`;
   $("#localImportCandidates").classList.toggle("playlist", playlist);
   $("#localImportCandidates").classList.toggle("search-results", searchResults);
   const candidateMarkup = (candidate, index) => `<label class="local-import-candidate${playlist ? " playlist-item" : ""}${searchResults ? " search-result" : ""}">
@@ -6408,6 +6591,7 @@ function updateChrome() {
   if ($("#installedVideoDialog").open) syncInstalledVideoTransport();
   renderFullPlayer();
   bindSquareArtworkImages();
+  scheduleDiscordPresenceUpdate();
 }
 
 function setActiveNav() { document.querySelectorAll(".nav").forEach((button) => button.classList.toggle("active", button.dataset.section === section)); }
@@ -6497,6 +6681,10 @@ $("#nowPlayingDialog").addEventListener("close", () => {
   $("#fullPlayerQueueToggle").setAttribute("aria-expanded", "false");
   $("#openNowPlaying").focus();
 });
+$("#settingsDialog").addEventListener("close", () => {
+  settingsRecordingAction = null;
+  $("#profileButton")?.focus();
+});
 $("#fullPlayerFavorite").onclick = () => currentID && toggleFavorite(currentID);
 $("#fullPlayerMore").onclick = (event) => currentID && openTrackContextMenu(event, currentID, {
   playbackTracks: activePlaybackTracks(),
@@ -6540,8 +6728,7 @@ $("#profileSwitch").onclick = openProfileSwitcher;
 $("#profileHistory").onclick = openListeningHistory;
 $("#profileClipEditor").onclick = openClipEditor;
 $("#profileSettings").onclick = () => {
-  closeProfileMenu();
-  navigate("settings");
+  openSettings();
 };
 $("#dismissServerTransfer").onclick = cancelServerTransfer;
 $("#dismissAppNotice").onclick = dismissNotice;
@@ -6636,6 +6823,10 @@ $("#chooseLocalFiles").onclick = async () => {
 $("#localImportSource").onkeydown = (event) => {
   if (event.key !== "Enter") return;
   event.preventDefault();
+  clearLocalImportAutoResolve();
+  void resolveLinkImport();
+};
+$("#searchLocalImport").onclick = () => {
   clearLocalImportAutoResolve();
   void resolveLinkImport();
 };
@@ -6860,6 +7051,56 @@ $("#profileSwitchForm").onsubmit = async (event) => {
   }
 };
 $("#profileSwitchQuery").oninput = () => updateProfileSwitchActions();
+function keybindFromKeyboardEvent(event) {
+  if (["Control", "Alt", "Shift", "Meta"].includes(event.key)) return null;
+  let key = event.code === "Space" ? "Space" : event.key;
+  if (key === " ") key = "Space";
+  if (key.length === 1) key = key.toUpperCase();
+  return [
+    event.ctrlKey ? "Ctrl" : null,
+    event.altKey ? "Alt" : null,
+    event.shiftKey ? "Shift" : null,
+    event.metaKey ? "Meta" : null,
+    key,
+  ].filter(Boolean).join("+");
+}
+
+document.addEventListener("keydown", (event) => {
+  if (settingsRecordingAction) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (event.key === "Escape") {
+      settingsRecordingAction = null;
+      renderSettings();
+      return;
+    }
+    const keybind = keybindFromKeyboardEvent(event);
+    if (!keybind) return;
+    const duplicate = Object.entries(state.appPreferences.keybinds).find(([action, value]) => action !== settingsRecordingAction && value === keybind);
+    if (duplicate) {
+      showNotice(`${keybind} is already assigned to ${settingsKeybindActions[duplicate[0]].label}.`);
+      return;
+    }
+    state.appPreferences.keybinds[settingsRecordingAction] = keybind;
+    settingsRecordingAction = null;
+    persistInBackground({ refreshSidebar: false });
+    renderSettings();
+    return;
+  }
+  if (event.defaultPrevented || event.repeat || event.isComposing) return;
+  if (document.querySelector("dialog[open]")) return;
+  if (event.target instanceof Element && event.target.closest("input, textarea, select, button, [contenteditable=true], [role=menu], [role=listbox]")) return;
+  const keybind = keybindFromKeyboardEvent(event);
+  if (!keybind) return;
+  const action = Object.entries(state.appPreferences?.keybinds || {}).find(([, value]) => value === keybind)?.[0];
+  if (!action) return;
+  event.preventDefault();
+  if (action === "togglePlayback") toggle();
+  else if (action === "previousTrack") previous();
+  else if (action === "nextTrack") move(1);
+  else if (action === "volumeDown") setPlaybackVolume(state.volume - .05);
+  else if (action === "volumeUp") setPlaybackVolume(state.volume + .05);
+});
 document.addEventListener("click", (event) => {
   if (!$("#profileControl")?.contains(event.target)) closeProfileMenu();
 });
@@ -6994,7 +7235,6 @@ function setPlaybackVolume(value, { shouldPersist = true } = {}) {
   audio.volume = gain;
   installedVideoPlayer.volume = gain;
   const percent = Math.round(state.volume * 100);
-  $("#volumeText").textContent = `${percent}%`;
   [$("#volume"), $("#fullPlayerVolume"), $("#installedVideoVolume")].forEach((input) => {
     input.value = String(state.volume);
     input.setAttribute("aria-valuetext", `${percent} percent`);
@@ -7106,9 +7346,17 @@ audio.onloadedmetadata = async () => {
   if (track.id === currentID) updateFullPlayerProgress();
 };
 
+api.onDiscordPresenceStatus((status) => {
+  discordPresenceStatus = status || discordPresenceStatus;
+  const statusCopy = $("#settingsDiscordStatus");
+  if (statusCopy) statusCopy.textContent = discordPresenceStatus.message || "Share the current song and playback state on Discord.";
+});
+discordPresenceStatus = await api.getDiscordPresenceStatus().catch(() => discordPresenceStatus);
 const libraryLoad = await api.loadLibrary();
 const loadedState = libraryLoad && Object.hasOwn(libraryLoad, "state") ? libraryLoad.state : libraryLoad;
 state = normalizeState(loadedState);
+await api.updateAppPreferences(state.appPreferences).catch(() => undefined);
+scheduleDiscordPresenceUpdate();
 let closeFlushStarted = false;
 api.onPrepareToClose(async () => {
   if (closeFlushStarted) return;

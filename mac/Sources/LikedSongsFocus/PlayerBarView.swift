@@ -79,12 +79,9 @@ struct PlayerBarView: View {
                         .font(.system(size: 11))
                     StableVolumeSlider(value: $model.volume)
                         .frame(width: 104)
-                    Text("\(Int(model.volume * 100))%")
-                        .font(.system(size: 10))
-                        .frame(width: 32, alignment: .trailing)
                 }
                 .foregroundStyle(Color(hex: 0xA1A8B7))
-                .frame(width: 250, alignment: .trailing)
+                .frame(width: 208, alignment: .trailing)
             }
         }
         .padding(.horizontal, 18)

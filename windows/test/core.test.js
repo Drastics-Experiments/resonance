@@ -25,6 +25,7 @@ import {
   mergeUploadedSongsIntoCatalog,
   nextIndex,
   niceChartMaximum,
+  normalizedAppPreferences,
   normalizedVolume,
   playbackGainForVolume,
   normalizeState,
@@ -521,6 +522,16 @@ test("avoids macOS Keychain access while persisting source Preview credentials l
   assert.match(mainSource, /function encryptedCredentialStorage\(\)[\s\S]+require\("electron"\)\.safeStorage/);
 });
 
+test("isolates and visibly names source Preview instances by Git worktree", () => {
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  assert.match(mainSource, /process\.env\.RESONANCE_WORKTREE_ID/);
+  assert.match(mainSource, /process\.env\.RESONANCE_INSTANCE_NAME/);
+  assert.match(mainSource, /app\.setPath\("userData"/);
+  assert.match(mainSource, /"Resonance Worktrees"/);
+  assert.match(mainSource, /title: resonanceApplicationName/);
+  assert.match(mainSource, /page-title-updated/);
+});
+
 test("uploads link imports even when the selected source is already saved locally", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   assert.match(appSource, /function localImportUploadConfigurationError/);
@@ -548,11 +559,48 @@ test("switches to or creates server profiles and falls back to Default", () => {
   assert.match(appSource, /confirmProfileSwitch"\)\.disabled = busy \|\| !connected \|\| !query \|\| current\?\.id === activeProfileID\(\)/);
   assert.match(appSource, /track\.id === currentID \? toggle\(\) : play\(track, tracks, \{ playlistID: null \}\)/);
   assert.match(appSource, /function updateProfileControl\(\)[\s\S]+control\.hidden = false/);
-  assert.match(appSource, /function renderSettings\(\)[\s\S]+id="settingsServer"[\s\S]+id="settingsHistory"[\s\S]+id="settingsStorage"[\s\S]+id="settingsCheckUpdates"/);
+  for (const id of ["settingsServer", "settingsHistory", "settingsStorage", "settingsCheckUpdates"]) {
+    assert.match(appSource, new RegExp(`id="${id}"`));
+  }
   assert.doesNotMatch(appSource, /Under construction/);
-  assert.match(appSource, /#profileSettings"\)\.onclick = \(\) =>[\s\S]+navigate\("settings"\)/);
+  assert.match(htmlSource, /id="settingsDialog"[^>]+settings-dialog/);
+  assert.match(appSource, /#profileSettings"\)\.onclick = \(\) =>[\s\S]+openSettings\(\)/);
+  assert.doesNotMatch(appSource, /navigate\("settings"\)/);
   assert.doesNotMatch(appSource, /#profileSettings"\)\.onclick = [\s\S]{0,160}openServerSettings/);
   assert.match(styleSource, /\.settings-grid\s*\{/);
+});
+
+test("adds focused keybinds, Discord presence, close-to-tray settings, custom scrollbars, and no volume percentage", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const preloadSource = readFileSync(new URL("../preload.cjs", import.meta.url), "utf8");
+  const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
+  const defaults = normalizedAppPreferences({});
+  assert.equal(defaults.runInBackground, false);
+  assert.equal(defaults.discordRichPresence, false);
+  assert.equal(defaults.keybinds.togglePlayback, "Space");
+  assert.deepEqual(normalizedAppPreferences({
+    runInBackground: 1,
+    discordRichPresence: "yes",
+    keybinds: { togglePlayback: " Ctrl+K ", volumeUp: "" },
+  }), {
+    ...defaults,
+    runInBackground: true,
+    discordRichPresence: true,
+    keybinds: { ...defaults.keybinds, togglePlayback: "Ctrl+K" },
+  });
+  assert.match(appSource, /id="settingsRunInBackground"[\s\S]+id="settingsDiscordPresence"/);
+  assert.match(appSource, /data-keybind-action="\$\{action\}"/);
+  assert.match(appSource, /function keybindFromKeyboardEvent\(event\)[\s\S]+settingsRecordingAction/);
+  assert.match(preloadSource, /updateAppPreferences:[\s\S]+app:preferences:update/);
+  assert.match(preloadSource, /updateDiscordPresence:[\s\S]+app:discord-presence:update/);
+  assert.match(mainSource, /new DiscordRPCClient[\s\S]+discordRPC\.configure/);
+  assert.match(mainSource, /runtimeAppPreferences\.runInBackground[\s\S]+window\.hide\(\)[\s\S]+ensureBackgroundTray\(\)/);
+  assert.match(mainSource, /new Tray[\s\S]+Open Resonance[\s\S]+Quit Resonance/);
+  assert.match(styleSource, /\*::\-webkit-scrollbar[\s\S]+\*::\-webkit-scrollbar-thumb/);
+  assert.doesNotMatch(htmlSource, /id="volumeText"/);
+  assert.doesNotMatch(appSource, /#volumeText/);
 });
 
 test("stores profile-menu clip ranges as playback metadata without exporting files", () => {
@@ -897,7 +945,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(preloadSource, /uploadLocalImport:[\s\S]+local-import:upload/);
   assert.match(preloadSource, /onLocalImportProgress:[\s\S]+local-import:progress/);
   assert.match(htmlSource, /id="localImportDialog"/);
-  assert.match(htmlSource, /id="localImportTitle">Import from link/);
+  assert.match(htmlSource, /id="localImportTitle">Import from Link/);
   assert.doesNotMatch(htmlSource, /Spotify tracks are matched against/);
   assert.match(htmlSource, /id="localImportStage"[^>]*hidden/);
   assert.doesNotMatch(htmlSource, /Choose a source|Confirm the match before/);

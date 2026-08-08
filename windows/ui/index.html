@@ -76,9 +76,12 @@
     <footer class="playerbar">
       <div class="player-track"><button id="openNowPlaying" class="player-track-summary" type="button" aria-label="Open Now Playing" disabled><span class="mini-art" aria-hidden="true">♪</span><span><strong id="bottomTitle">Nothing playing</strong><small id="bottomMeta">Local library</small></span></button><button id="favoriteCurrent" title="Add to Liked Songs" aria-label="Add current song to Liked Songs" aria-pressed="false">♡</button></div>
       <div class="transport"><div><button id="shuffle" title="Shuffle" aria-label="Shuffle" aria-pressed="false"><svg class="shuffle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h2.5a5 5 0 0 1 4 2l5 7a5 5 0 0 0 4 2H21"/><path d="m17 13 4 4-4 4"/><path d="M3 18h2.5a5 5 0 0 0 4-2l5-7a5 5 0 0 1 4-2H21"/><path d="m17 3 4 4-4 4"/></svg></button><button data-action="previous" title="Previous" aria-label="Previous"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14"/><path class="icon-fill" d="m18 6-9 6 9 6z"/></svg></button><button class="play-main" data-action="toggle" title="Play" aria-label="Play"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="M8 5v14l11-7z"/></svg></button><button data-action="next" title="Next" aria-label="Next"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="m6 6 9 6-9 6z"/><path d="M18 5v14"/></svg></button><button id="repeat" title="Repeat current song" aria-label="Repeat current song" aria-pressed="false"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="m7 22-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg></button></div><div class="timeline"><span id="elapsed">0:00</span><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Playback position" aria-valuetext="0:00 of 0:00"><span id="duration">0:00</span></div></div>
-      <div class="volume"><div id="speed" data-custom-select data-value="1" data-custom-select-width="154" aria-label="Playback speed"></div><span aria-hidden="true">🔊</span><input id="volume" type="range" min="0" max="1" step="0.01" value="0.78" aria-label="Volume" aria-valuetext="78 percent"><span id="volumeText">78%</span></div>
+      <div class="volume"><div id="speed" data-custom-select data-value="1" data-custom-select-width="154" aria-label="Playback speed"></div><span aria-hidden="true">🔊</span><input id="volume" type="range" min="0" max="1" step="0.01" value="0.78" aria-label="Volume" aria-valuetext="78 percent"></div>
     </footer>
   </div>
+  <dialog id="settingsDialog" class="settings-dialog" aria-labelledby="settingsDialogTitle">
+    <section id="settingsDialogContent" class="settings-modal"></section>
+  </dialog>
   <dialog id="nowPlayingDialog" class="full-player-dialog" aria-labelledby="fullPlayerHeading">
     <section class="full-player-shell">
       <div id="fullPlayerBackdrop" class="full-player-backdrop" aria-hidden="true"></div>
@@ -240,6 +243,7 @@
           <label for="clipEditorEndInput"><small>END</small><input id="clipEditorEndInput" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="8" value="0:00" aria-label="Clip end time"></label>
         </div>
         <div class="clip-editor-transport" aria-label="Preview playback controls">
+          <span class="clip-editor-transport-label"><strong>Preview playback</strong><small>Listen and scrub through only the selected range.</small></span>
           <button id="previewClipRange" class="clip-editor-preview" type="button" aria-pressed="false" aria-label="Play preview" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg><span>Preview</span></button>
           <time id="clipEditorPreviewCurrent">0:00</time>
           <input id="clipEditorPreviewSeek" type="range" min="0" max="1000" value="0" aria-label="Preview position" aria-valuetext="0:00 of 0:00" disabled>
@@ -321,13 +325,16 @@
   <dialog id="localImportDialog" class="local-import-dialog" aria-labelledby="localImportTitle">
     <section class="local-import-panel">
       <header>
-        <h2 id="localImportTitle">Import from link</h2>
+        <div class="local-import-heading">
+          <span class="local-import-spark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 2 1.8 5.2L19 9l-5.2 1.8L12 16l-1.8-5.2L5 9l5.2-1.8z"/><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg></span>
+          <span><h2 id="localImportTitle">Import from Link</h2><p>Search for a track or paste a supported link to get started.</p></span>
+        </div>
         <div class="local-import-header-actions">
           <fieldset id="localImportMediaKind" class="local-import-media-kind">
             <legend>Download type</legend>
             <div role="radiogroup" aria-label="YouTube download type">
-              <label><input type="radio" name="localImportMediaKind" value="audio" checked><span>Audio</span></label>
-              <label><input type="radio" name="localImportMediaKind" value="video"><span>Video</span></label>
+              <label><input type="radio" name="localImportMediaKind" value="audio" checked><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l10-2v12M9 10l10-2M6 20a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm10-2a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/></svg>Audio</span></label>
+              <label><input type="radio" name="localImportMediaKind" value="video"><span><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>Video</span></label>
             </div>
           </fieldset>
           <button id="closeLocalImport" class="history-close" type="button" title="Close" aria-label="Close local import">×</button>
@@ -335,20 +342,22 @@
       </header>
       <div id="localImportStage" hidden aria-hidden="true"></div>
       <label class="local-import-source" for="localImportSource">
-        <span>Link or music search</span>
+        <span class="sr-only">Link or music search</span>
         <div>
-          <input id="localImportSource" type="search" autocomplete="off" spellcheck="false" placeholder="Song, artist, album, or supported link…" required>
+          <svg class="local-import-search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg>
+          <input id="localImportSource" type="search" autocomplete="off" spellcheck="false" placeholder="Link or music search" required>
           <span class="local-import-source-spinner" aria-hidden="true"></span>
+          <button id="searchLocalImport" type="button" aria-label="Search links and music"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg></button>
         </div>
         <small>Supported links are inspected directly. Plain text searches Spotify, SoundCloud, and YouTube only after you press Enter.</small>
       </label>
       <div id="localImportResolved" class="local-import-resolved" hidden>
         <div class="local-import-track"><span class="local-import-art" aria-hidden="true">♪</span><span><strong id="localImportTrackTitle"></strong><small id="localImportTrackMeta"></small></span></div>
-        <fieldset><legend id="localImportCandidateLegend">Choose the source to import</legend><div id="localImportCandidates" class="local-import-candidates"></div></fieldset>
+        <fieldset><div class="local-import-results-heading"><legend id="localImportCandidateLegend">Choose the source to import</legend><span id="localImportResultSummary"></span></div><div id="localImportCandidates" class="local-import-candidates"></div></fieldset>
       </div>
       <div id="localImportError" class="local-import-error" role="alert" hidden></div>
       <footer>
-        <label id="localImportSyncRow" class="local-import-sync" hidden><input id="localImportSync" type="checkbox"><span>Upload to server</span></label>
+        <label id="localImportSyncRow" class="local-import-sync" hidden><span class="local-import-sync-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 18H5a4 4 0 0 1 0-8 7 7 0 0 1 13.5-1.8A4.5 4.5 0 0 1 19 17h-2"/><path d="m9 14 3-3 3 3M12 11v9"/></svg></span><span class="local-import-sync-copy"><strong>Upload to server</strong><small>Save the imported media to your connected server.</small></span><input id="localImportSync" type="checkbox"><span class="local-import-sync-toggle" aria-hidden="true"></span></label>
         <button id="cancelLocalImport" class="secondary" type="button" hidden>Cancel import</button>
         <button id="chooseLocalFiles" class="secondary local-import-icon-action" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h6l2-2h8v13H4z"/></svg><span>Choose files instead</span></button>
         <button id="confirmLocalImport" class="primary local-import-icon-action" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg><span>Import selected</span></button>
