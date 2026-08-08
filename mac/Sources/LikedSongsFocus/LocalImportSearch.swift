@@ -118,7 +118,10 @@ struct LocalImportSearchEngine: Sendable {
         self.sessions = sessions
     }
 
-    func search(_ value: String) async throws -> LocalImportSearchResponse {
+    func search(
+        _ value: String,
+        mediaMode: LocalImportMediaMode = .audio
+    ) async throws -> LocalImportSearchResponse {
         let query = value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
@@ -148,7 +151,10 @@ struct LocalImportSearchEngine: Sendable {
         }
         let soundCloud = soundCloudTracks.compactMap { soundCloudTrack -> LocalImportSearchResult? in
             let alternatives = matchedCandidates(for: soundCloudTrack.metadata, from: youtubeCandidates)
-            let candidates = [soundCloudTrack.directCandidate].compactMap { $0 } + alternatives
+            let directCandidates = mediaMode == .audio
+                ? [soundCloudTrack.directCandidate].compactMap { $0 }
+                : []
+            let candidates = directCandidates + alternatives
             guard !candidates.isEmpty else { return nil }
             return LocalImportSearchResult(provider: .soundcloud, track: soundCloudTrack.metadata, candidates: uniqueCandidates(candidates))
         }

@@ -217,8 +217,9 @@ function resultCandidate(provider, track, candidates) {
   };
 }
 
-async function searchAllPlatforms(value, signal, fetchImpl = fetch) {
+async function searchAllPlatforms(value, signal, fetchImpl = fetch, options = {}) {
   const query = cleanText(value, MAX_QUERY_LENGTH);
+  const mediaKind = options?.mediaKind === "video" ? "video" : "audio";
   if (!query) throw searchError("MISSING_SEARCH_QUERY", "Enter a song, artist, or album to search.");
   if (looksLikeLink(value)) throw searchError("SEARCH_QUERY_IS_LINK", "Links are inspected directly instead of being sent to music search providers.");
   const settled = await Promise.allSettled([
@@ -237,7 +238,9 @@ async function searchAllPlatforms(value, signal, fetchImpl = fetch) {
   const soundcloud = soundCloudTracks.map((soundCloudTrack) => {
     const track = { ...soundCloudTrack };
     delete track.directlyImportable;
-    const direct = soundCloudTrack.directlyImportable ? directSoundCloudCandidate(soundCloudTrack) : null;
+    const direct = mediaKind === "audio" && soundCloudTrack.directlyImportable
+      ? directSoundCloudCandidate(soundCloudTrack)
+      : null;
     const alternatives = matchedCandidates(track, youtubeTracks);
     return resultCandidate("soundcloud", track, direct ? [direct, ...alternatives] : alternatives);
   }).filter(Boolean);
@@ -267,7 +270,7 @@ async function searchAllPlatforms(value, signal, fetchImpl = fetch) {
   const unavailableProviders = SEARCH_PROVIDERS.filter((provider, index) => settled[index].status === "rejected");
   return {
     kind: "search_results",
-    mediaKind: "audio",
+    mediaKind,
     query,
     providerCounts,
     unavailableProviders,
@@ -276,7 +279,7 @@ async function searchAllPlatforms(value, signal, fetchImpl = fetch) {
       type: "search",
       trackID: query,
       title: `Results for “${query}”`,
-      artist: `${candidates.length} previewable result${candidates.length === 1 ? "" : "s"}`,
+      artist: `${candidates.length} ${mediaKind === "video" ? "downloadable video" : "previewable result"}${candidates.length === 1 ? "" : "s"}`,
       album: "Spotify • SoundCloud • YouTube",
       trackNumber: null,
       durationSeconds: null,

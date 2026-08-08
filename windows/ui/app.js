@@ -3873,8 +3873,8 @@ function normalizeLocalImportMediaKindForSource() {
   const source = $("#localImportSource").value.trim();
   let hostname = "";
   try { hostname = new URL(source).hostname.toLowerCase(); }
-  catch { /* Plain-text searches are audio-only. */ }
-  const audioOnly = Boolean(source) && !localImportInputIsLink(source) || [
+  catch { /* A plain-text query can search for either audio or video. */ }
+  const audioOnly = [
     "open.spotify.com", "www.open.spotify.com", "spotify.link", "www.spotify.link",
     "soundcloud.com", "www.soundcloud.com", "m.soundcloud.com", "on.soundcloud.com",
   ].includes(hostname);
@@ -4001,7 +4001,9 @@ function localImportCandidateDetails(candidate) {
       metadata.artist || "Unknown artist",
       metadata.album,
       metadata.durationSeconds ? formatTime(metadata.durationSeconds) : null,
-      previewProvider !== resultProvider ? `Preview via ${previewProvider}` : null,
+      previewProvider !== resultProvider
+        ? `${localImportResolution?.mediaKind === "video" ? "Video" : "Preview"} via ${previewProvider}`
+        : null,
     ];
   }
   if (localImportResolution?.kind?.endsWith("_playlist")) {
@@ -4422,7 +4424,8 @@ function renderLocalImportResolution() {
     $("#localImportCandidates").innerHTML = Object.entries(providerNames).map(([provider, name]) => {
       const rows = candidates.map((candidate, index) => ({ candidate, index }))
         .filter(({ candidate }) => candidate.searchProvider === provider);
-      return `<section class="local-import-search-provider" data-search-provider="${provider}"><h3><span>${name}</span><small>${rows.length} result${rows.length === 1 ? "" : "s"}</small></h3>${rows.length ? rows.map(({ candidate, index }) => candidateMarkup(candidate, index)).join("") : '<p>No previewable results.</p>'}</section>`;
+      const emptyCopy = mediaKind === "video" ? "No downloadable videos." : "No previewable results.";
+      return `<section class="local-import-search-provider" data-search-provider="${provider}"><h3><span>${name}</span><small>${rows.length} result${rows.length === 1 ? "" : "s"}</small></h3>${rows.length ? rows.map(({ candidate, index }) => candidateMarkup(candidate, index)).join("") : `<p>${emptyCopy}</p>`}</section>`;
     }).join("");
   } else {
     $("#localImportCandidates").innerHTML = candidates.map(candidateMarkup).join("");

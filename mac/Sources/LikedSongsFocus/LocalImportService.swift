@@ -216,10 +216,16 @@ actor LocalDeviceImportService {
         }
     }
 
-    func search(query: String) async throws -> LocalImportSearchResponse {
+    func search(
+        query: String,
+        mediaMode: LocalImportMediaMode = .audio
+    ) async throws -> LocalImportSearchResponse {
         try Task.checkCancellation()
         try await prepareDirectories()
-        return try await LocalImportSearchEngine(sessions: sessions).search(query)
+        return try await LocalImportSearchEngine(sessions: sessions).search(
+            query,
+            mediaMode: mediaMode
+        )
     }
 
     func resolve(

@@ -8,6 +8,48 @@ final class MobileClientConfigurationTests: XCTestCase {
     private let cohortKey = "AAECAwQFBgcICQoLDA0ODw"
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    func testOrdinaryTextSearchFallsBackToDeviceOnlyForServerLinkModes() {
+        for mode in [MobileUploadMode.serverSourceLink, .reviewedMatch] {
+            let preparation = MobileLocalImportSearchPolicy.prepare(
+                input: "Test Song Test Artist",
+                explicitlyReviewedServerMatch: false,
+                syncAfterImport: true,
+                activeUploadMode: mode
+            )
+            XCTAssertTrue(preparation.searchesProviders)
+            XCTAssertFalse(preparation.syncAfterImport)
+            XCTAssertFalse(preparation.usesReviewedServerMatch)
+        }
+
+        let explicitReview = MobileLocalImportSearchPolicy.prepare(
+            input: "Test Song Test Artist",
+            explicitlyReviewedServerMatch: true,
+            syncAfterImport: true,
+            activeUploadMode: .reviewedMatch
+        )
+        XCTAssertTrue(explicitReview.searchesProviders)
+        XCTAssertTrue(explicitReview.syncAfterImport)
+        XCTAssertTrue(explicitReview.usesReviewedServerMatch)
+
+        let reviewedLink = MobileLocalImportSearchPolicy.prepare(
+            input: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            explicitlyReviewedServerMatch: false,
+            syncAfterImport: true,
+            activeUploadMode: .reviewedMatch
+        )
+        XCTAssertFalse(reviewedLink.searchesProviders)
+        XCTAssertTrue(reviewedLink.syncAfterImport)
+        XCTAssertTrue(reviewedLink.usesReviewedServerMatch)
+    }
+
+    func testLocalImportSearchRequestsDesktopProviderDocuments() {
+        let userAgent = MobileLocalImportSearchRequestPolicy.webUserAgent
+        XCTAssertTrue(userAgent.contains("Macintosh"))
+        XCTAssertTrue(userAgent.contains("Chrome/"))
+        XCTAssertFalse(userAgent.contains("iPhone"))
+        XCTAssertFalse(userAgent.contains(" Mobile/"))
+    }
+
     func testVerifierAcceptsExactDigestSignatureAndAudience() throws {
         let signed = try signedResponse()
         let result = try MobileClientConfigVerifier.verify(

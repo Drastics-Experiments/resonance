@@ -108,4 +108,14 @@ test("queries Spotify, SoundCloud, and YouTube and returns previewable grouped r
   assert.equal(requested.includes("api-v2.soundcloud.com/search/tracks"), true);
   assert.equal(requested.includes("music.youtube.com/search"), true);
   assert.equal(requested.includes("www.youtube.com/results"), true);
+
+  const video = await searchAllPlatforms(
+    "Test Song Test Artist",
+    new AbortController().signal,
+    fetchImpl,
+    { mediaKind: "video" },
+  );
+  assert.equal(video.mediaKind, "video");
+  assert.equal(video.candidates.length, 3);
+  assert.equal(video.candidates.every((candidate) => candidate.sourceProvider !== "soundcloud"), true);
 });

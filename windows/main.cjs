@@ -1167,7 +1167,7 @@ ipcMain.handle("local-import:resolve", async (event, { source, mediaKind, baseUR
     const sourceWarnings = [];
     const input = String(source || "").trim();
     const result = !looksLikeLink(input)
-      ? await searchAllPlatforms(input, controller.signal)
+      ? await searchAllPlatforms(input, controller.signal, fetch, { mediaKind })
       : await resolveLocalImportSource(input, controller.signal, publish, {
       searchYouTubeAudioSources: async (track, signal) => {
         const reviewedSearch = (async () => {
