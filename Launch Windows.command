@@ -35,6 +35,14 @@ if [[ ! -x "$RES_ELECTRON_SOURCE_EXECUTABLE" ]]; then
   cd "$RES_WINDOWS_DIR"
   "$RES_COREPACK" pnpm install --frozen-lockfile
 fi
+if [[ ! -x "$RES_ELECTRON_SOURCE_EXECUTABLE" ]]; then
+  # pnpm can report an existing worktree install as up to date even when
+  # Electron's downloaded app payload is missing. Re-run Electron's own
+  # idempotent installer so the launcher repairs that partial local install.
+  echo "Repairing the Electron development runtime…"
+  cd "$RES_WINDOWS_DIR"
+  "$RES_COREPACK" pnpm exec install-electron
+fi
 [[ -x "$RES_ELECTRON_SOURCE_EXECUTABLE" ]] \
   || { echo "Electron was not installed at $RES_ELECTRON_SOURCE_APP" >&2; exit 1; }
 
