@@ -2132,6 +2132,7 @@ async function playRemoteStream(song) {
       album: song.album || "Server Library",
       duration: duration > 0 ? duration : 0,
       artwork: typeof song.artwork === "string" && song.artwork.startsWith("data:") ? song.artwork : null,
+      artworkURL: song.artwork_url || song.artworkURL || null,
       filePath: null,
       fileUrl: streamURL,
       available: true,
@@ -3435,7 +3436,7 @@ function openSettings() {
 
 function discordPresenceActivity() {
   const track = currentTrack();
-  if (!track || !state.appPreferences?.discordRichPresence) return null;
+  if (!track || !state.appPreferences?.discordRichPresence || !playbackIsActive()) return null;
   const media = activePlaybackMedia();
   return {
     title: track.title,
@@ -3444,6 +3445,7 @@ function discordPresenceActivity() {
     playing: playbackIsActive(),
     position: Number(media?.currentTime) || state.position || 0,
     duration: currentPlaybackDuration(track),
+    artworkURL: track.artworkURL || null,
   };
 }
 

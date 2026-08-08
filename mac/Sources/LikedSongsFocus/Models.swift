@@ -219,6 +219,7 @@ struct Track: Identifiable, Hashable, Codable {
     var kind: SongFilter
     var artwork: ArtworkStyle
     var artworkData: Data?
+    var artworkURL: String?
     var fileURL: URL?
     var remoteID: String?
     var sourceServer: String?
@@ -237,6 +238,7 @@ struct Track: Identifiable, Hashable, Codable {
         kind: SongFilter = .audio,
         artwork: ArtworkStyle,
         artworkData: Data? = nil,
+        artworkURL: String? = nil,
         fileURL: URL? = nil,
         remoteID: String? = nil,
         sourceServer: String? = nil,
@@ -254,6 +256,7 @@ struct Track: Identifiable, Hashable, Codable {
         self.kind = kind
         self.artwork = artwork
         self.artworkData = artworkData
+        self.artworkURL = artworkURL
         self.fileURL = fileURL
         self.remoteID = remoteID
         self.sourceServer = sourceServer

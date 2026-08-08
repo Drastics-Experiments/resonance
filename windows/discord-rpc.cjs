@@ -6,6 +6,7 @@ const DISCORD_FRAME = 1;
 const DISCORD_CLOSE = 2;
 const DISCORD_PING = 3;
 const DISCORD_PONG = 4;
+const DISCORD_ARTWORK_HOST = /(^|\.)((spotifycdn\.com)|(scdn\.co)|(sndcdn\.com)|(ytimg\.com)|(ggpht\.com))$/i;
 
 function validDiscordApplicationID(value) {
   const candidate = String(value || "").trim();
@@ -38,25 +39,43 @@ function encodeDiscordFrame(opcode, payload) {
   return frame;
 }
 
+function discordArtworkURL(value) {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    if (url.hostname.toLowerCase() === "i.ytimg.com") url.hostname = "img.youtube.com";
+    const result = url.href;
+    const knownHost = DISCORD_ARTWORK_HOST.test(url.hostname) || url.hostname.toLowerCase() === "img.youtube.com";
+    if (url.protocol !== "https:" || url.username || url.password || !knownHost) return null;
+    return result.length <= 300 ? result : null;
+  } catch {
+    return null;
+  }
+}
+
 function sanitizeDiscordActivity(value, nowSeconds = Math.floor(Date.now() / 1000)) {
   if (!value || typeof value !== "object") return null;
   const title = String(value.title || "").trim().slice(0, 128);
-  if (!title) return null;
+  if (!title || !value.playing) return null;
   const artist = String(value.artist || "").trim().slice(0, 120);
   const album = String(value.album || "").trim().slice(0, 120);
-  const playing = Boolean(value.playing);
   const position = Math.max(0, Number(value.position) || 0);
   const duration = Math.max(0, Number(value.duration) || 0);
-  const stateParts = [artist ? `by ${artist}` : "", !playing ? "Paused" : ""].filter(Boolean);
   const activity = {
     type: 2,
     details: title,
-    state: (stateParts.join(" · ") || album || "Listening in Resonance").slice(0, 128),
+    state: (artist ? `by ${artist}` : album || "Listening in Resonance").slice(0, 128),
     instance: false,
   };
-  if (playing && duration > 0 && position < duration) {
+  if (duration > 0 && position < duration) {
     const start = Math.max(1, Math.floor(nowSeconds - position));
     activity.timestamps = { start, end: Math.max(start + 1, Math.floor(start + duration)) };
+  }
+  const artworkURL = discordArtworkURL(value.artworkURL);
+  if (artworkURL) {
+    activity.assets = {
+      large_image: artworkURL,
+    };
   }
   return activity;
 }
@@ -234,6 +253,7 @@ class DiscordRPCClient {
 
 module.exports = {
   DiscordRPCClient,
+  discordArtworkURL,
   discordIPCPaths,
   encodeDiscordFrame,
   sanitizeDiscordActivity,

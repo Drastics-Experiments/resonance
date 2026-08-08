@@ -32,6 +32,51 @@ struct PreviewRegressionTests {
     }
 
     @Test
+    func discordPresenceClearsWhilePausedAndUsesTrustedAlbumArtwork() throws {
+        let paused = DiscordPresencePayload(
+            title: "Night Drive",
+            artist: "Resonance",
+            album: "After Dark",
+            playing: false,
+            position: 12,
+            duration: 180,
+            artworkURL: "https://i.scdn.co/image/cover"
+        )
+        #expect(paused.rpcActivity(now: 1_000) == nil)
+
+        let playing = DiscordPresencePayload(
+            title: "Night Drive",
+            artist: "Resonance",
+            album: "After Dark",
+            playing: true,
+            position: 12,
+            duration: 180,
+            artworkURL: "https://i.scdn.co/image/cover"
+        )
+        let activity = try #require(playing.rpcActivity(now: 1_000))
+        let assets = try #require(activity["assets"] as? [String: String])
+        let timestamps = try #require(activity["timestamps"] as? [String: Int])
+        #expect(assets["large_image"] == "https://i.scdn.co/image/cover")
+        #expect(assets["large_text"] == nil)
+        #expect(timestamps["start"] == 988)
+        #expect(timestamps["end"] == 1_168)
+        #expect(DiscordArtworkAsset.externalURL(from: "https://attacker.example/cover.jpg") == nil)
+        #expect(DiscordArtworkAsset.externalURL(
+            from: "https://i.ytimg.com/vi/jNQXAC9IVRw/maxresdefault.jpg"
+        ) == "https://img.youtube.com/vi/jNQXAC9IVRw/maxresdefault.jpg")
+
+        let legacyYouTubeTrack = Track(
+            title: "Video Song",
+            artist: "Uploader",
+            album: "Imported",
+            duration: 60,
+            artwork: .midnight,
+            sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+        )
+        #expect(DiscordArtworkAsset.externalURL(for: legacyYouTubeTrack) == "https://img.youtube.com/vi/jNQXAC9IVRw/maxresdefault.jpg")
+    }
+
+    @Test
     func linkImporterChromeUsesProviderRailAndIconOnlyMediaModes() {
         #expect(MacLocalImportChrome.providerOrder == [.youtube, .spotify, .soundcloud])
         #expect(MacLocalImportChrome.mediaIcon(for: .audio) == "music.note")
@@ -61,6 +106,10 @@ struct PreviewRegressionTests {
             environment: [:],
             bundleValue: "223456789012345678"
         ) == "223456789012345678")
+        #expect(MacDesktopPreferences.configuredDiscordApplicationID(
+            environment: [:],
+            bundleValue: nil
+        ) == "1535574125395841154")
         preferences.stop()
     }
 

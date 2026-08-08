@@ -1510,6 +1510,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             duration: song.durationSeconds ?? 0,
             kind: song.kind,
             artwork: ArtworkStyle.allCases[artworkIndex],
+            artworkURL: song.artworkURL,
             remoteID: song.id,
             sourceServer: ServerSongIdentity.normalizedOrigin(base),
             syncProfileID: syncProfileID
@@ -1995,6 +1996,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         kind: remote.kind,
                         artwork: existingIndex.map { tracks[$0].artwork } ?? ArtworkStyle.allCases[tracks.count % ArtworkStyle.allCases.count],
                         artworkData: metadata.artworkData,
+                        artworkURL: remote.artworkURL ?? existingIndex.flatMap { tracks[$0].artworkURL },
                         fileURL: destination,
                         remoteID: remote.id,
                         sourceServer: ServerSongIdentity.normalizedOrigin(base),
@@ -2652,6 +2654,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             kind: imported.mediaMode == .video ? .video : .audio,
             artwork: styles[tracks.count % styles.count],
             artworkData: imported.artworkData,
+            artworkURL: imported.metadata.artworkURL,
             fileURL: imported.fileURL.standardizedFileURL,
             remoteID: nil,
             sourceServer: nil,
@@ -2725,6 +2728,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 kind: .audio,
                 artwork: source.artwork,
                 artworkData: source.artworkData,
+                artworkURL: source.artworkURL,
                 fileURL: destination.standardizedFileURL,
                 dateAdded: .now
             )

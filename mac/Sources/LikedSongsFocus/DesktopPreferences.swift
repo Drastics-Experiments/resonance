@@ -62,6 +62,61 @@ struct DiscordPresencePayload {
     let playing: Bool
     let position: TimeInterval
     let duration: TimeInterval
+    let artworkURL: String?
+
+    func rpcActivity(now: TimeInterval = Date().timeIntervalSince1970) -> [String: Any]? {
+        guard playing else { return nil }
+        let trimmedArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAlbum = album.trimmingCharacters(in: .whitespacesAndNewlines)
+        var value: [String: Any] = [
+            "type": 2,
+            "details": String(title.prefix(128)),
+            "state": String((trimmedArtist.isEmpty
+                ? (trimmedAlbum.isEmpty ? "Listening in Resonance" : trimmedAlbum)
+                : "by \(trimmedArtist)").prefix(128)),
+            "instance": false,
+        ]
+        if duration > 0, position < duration {
+            let start = max(1, Int(now - max(position, 0)))
+            value["timestamps"] = ["start": start, "end": max(start + 1, start + Int(duration))]
+        }
+        if let artworkURL = DiscordArtworkAsset.externalURL(from: artworkURL) {
+            value["assets"] = [
+                "large_image": artworkURL,
+            ]
+        }
+        return value
+    }
+}
+
+enum DiscordArtworkAsset {
+    static func externalURL(from value: String?) -> String? {
+        var url = LocalImportURL.spotifyArtwork(value)
+            ?? LocalImportURL.soundCloudArtwork(value)
+        if url == nil, let youtubeURL = LocalImportURL.youtubeArtwork(value) {
+            var components = URLComponents(url: youtubeURL, resolvingAgainstBaseURL: false)
+            if components?.host?.lowercased() == "i.ytimg.com" {
+                components?.host = "img.youtube.com"
+            }
+            url = components?.url
+        }
+        if url == nil, let value, let components = URLComponents(string: value),
+           components.scheme?.lowercased() == "https",
+           components.user == nil,
+           components.password == nil,
+           components.host?.lowercased() == "img.youtube.com" {
+            url = components.url
+        }
+        guard let result = url?.absoluteString, !result.isEmpty, result.count <= 300 else { return nil }
+        return result
+    }
+
+    static func externalURL(for track: Track) -> String? {
+        if let artworkURL = externalURL(from: track.artworkURL) { return artworkURL }
+        guard let sourceURL = track.sourceURL,
+              let videoID = try? LocalImportURL.youtubeVideoID(sourceURL) else { return nil }
+        return externalURL(from: "https://img.youtube.com/vi/\(videoID)/maxresdefault.jpg")
+    }
 }
 
 enum DiscordIPCFrame {
@@ -276,19 +331,7 @@ final class MacDiscordRPCClient: @unchecked Sendable {
     private func sendActivity() {
         guard ready else { return }
         let activityValue: Any
-        if let activity {
-            var value: [String: Any] = [
-                "type": 2,
-                "details": String(activity.title.prefix(128)),
-                "state": String((activity.artist.isEmpty ? activity.album : "by \(activity.artist)").prefix(128)),
-                "instance": false,
-            ]
-            if !activity.playing {
-                value["state"] = String("Paused · \(value["state"] as? String ?? "Resonance")".prefix(128))
-            } else if activity.duration > 0, activity.position < activity.duration {
-                let start = max(1, Int(Date().timeIntervalSince1970 - max(activity.position, 0)))
-                value["timestamps"] = ["start": start, "end": max(start + 1, start + Int(activity.duration))]
-            }
+        if let value = activity?.rpcActivity() {
             activityValue = value
         } else {
             activityValue = NSNull()
@@ -336,6 +379,8 @@ final class MacDiscordRPCClient: @unchecked Sendable {
 
 @MainActor
 final class MacDesktopPreferences: ObservableObject {
+    static let bundledDiscordApplicationID = "1535574125395841154"
+
     static let defaultKeybinds: [MacShortcutAction: String] = [
         .togglePlayback: "Space",
         .previousTrack: "⌥←",
@@ -452,7 +497,10 @@ final class MacDesktopPreferences: ObservableObject {
         if let environment = MacDiscordRPCClient.validApplicationID(environment["RESONANCE_DISCORD_CLIENT_ID"]) {
             return environment
         }
-        return MacDiscordRPCClient.validApplicationID(bundleValue) ?? ""
+        if let bundle = MacDiscordRPCClient.validApplicationID(bundleValue) {
+            return bundle
+        }
+        return bundledDiscordApplicationID
     }
 
     private var effectiveDiscordApplicationID: String {
@@ -467,7 +515,7 @@ final class MacDesktopPreferences: ObservableObject {
     }
 
     private func publishDiscordActivity(from model: PlayerModel) {
-        guard discordRichPresence, let track = model.currentTrack else {
+        guard discordRichPresence, model.isPlaying, let track = model.currentTrack else {
             discordRPC.update(nil)
             return
         }
@@ -477,7 +525,8 @@ final class MacDesktopPreferences: ObservableObject {
             album: track.album,
             playing: model.isPlaying,
             position: model.position,
-            duration: model.playbackDuration > 0 ? model.playbackDuration : track.duration
+            duration: model.playbackDuration > 0 ? model.playbackDuration : track.duration,
+            artworkURL: DiscordArtworkAsset.externalURL(for: track)
         ))
     }
 

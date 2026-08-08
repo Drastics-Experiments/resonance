@@ -44,9 +44,9 @@ const {
 } = require("./server-stream.cjs");
 const { catalogSHA256, normalizeServerBaseURL } = require("./server-policy.cjs");
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
-const { LocalImportError, searchYouTubeAudioSources } = require("./local-import-core.cjs");
+const { LocalImportError, searchYouTubeAudioSources, youtubeVideoID } = require("./local-import-core.cjs");
 const { importFileBackedSource, searchFileBackedSources } = require("./local-debrid.cjs");
-const { artworkFileDataURL, fetchArtwork, importConfirmedSource, resolveLocalImportSource } = require("./local-import-platform.cjs");
+const { artworkFileDataURL, fetchArtwork, importConfirmedSource, resolveLocalImportSource, safeArtworkURL } = require("./local-import-platform.cjs");
 const { looksLikeLink, searchAllPlatforms } = require("./local-search.cjs");
 const { downloadResolvedSoundCloudAudio, isSoundCloudURL, resolveSoundCloudAudio } = require("./local-soundcloud.cjs");
 const { downloadResolvedAudio, resolveYouTubeAudio } = require("./local-youtube.cjs");
@@ -690,6 +690,21 @@ function publicTrack(filePath, details = {}) {
   const sourceIdentities = normalizeSourceIdentities(details.sourceIdentities, sourceIdentity
     ? [sourceIdentity, ...(sourceIdentity.aliases || [])]
     : []);
+  let artworkURL = safeArtworkURL(details.artworkURL)?.href || null;
+  if (!artworkURL) {
+    const sourcePages = [details.sourceURL, sourceIdentity?.sourcePageURL, ...sourceIdentities.map((identity) => identity.sourcePageURL)];
+    for (const sourcePage of sourcePages) {
+      try {
+        const videoID = sourcePage ? youtubeVideoID(sourcePage) : null;
+        if (videoID) {
+          artworkURL = `https://img.youtube.com/vi/${videoID}/maxresdefault.jpg`;
+          break;
+        }
+      } catch {
+        // Source provenance is optional and must not make a stored track unloadable.
+      }
+    }
+  }
   const storedPath = typeof filePath === "string" ? filePath : "";
   return {
     id: details.id || randomUUID(),
@@ -698,6 +713,7 @@ function publicTrack(filePath, details = {}) {
     album: details.album || "Unknown Album",
     duration: Number(details.duration) || 0,
     artwork: details.artwork || null,
+    artworkURL,
     size: Number(details.size) || 0,
     filePath: storedPath,
     fileUrl: storedPath ? pathToFileURL(storedPath).href : null,
@@ -1389,6 +1405,7 @@ ipcMain.handle("local-import:start-external", async (event, value = {}) => {
       artist: result.metadata.artist,
       album: result.metadata.album,
       artwork: result.artwork || null,
+      artworkURL: result.metadata.artworkURL,
       size: result.size,
       sourceURL: result.sourceURL,
       sourceIdentity: result.sourceIdentity || value.sourceIdentity,
@@ -1436,6 +1453,7 @@ ipcMain.handle("local-import:start", async (event, value = {}) => {
       artist: result.metadata.artist,
       album: result.metadata.album,
       artwork: result.artwork || null,
+      artworkURL: result.metadata.artworkURL,
       size: result.size,
       sourceURL: result.sourceURL,
       sourceIdentity: result.sourceIdentity || value.sourceIdentity,
@@ -2715,6 +2733,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
         title: song.title || path.basename(remoteName, path.extname(remoteName)),
         artist: song.artist || "Unknown Artist",
         album: song.album || "Server Library",
+        artworkURL: song.artwork_url || song.artworkURL || null,
         remoteID: song.id,
         sourceServer: base.origin,
         syncProfileID: profileID || "default",

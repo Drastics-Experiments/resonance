@@ -59,10 +59,12 @@ import metadata from "../metadata.cjs";
 import libraryPaths from "../library-paths.cjs";
 import serverDownload from "../server-download.cjs";
 import updaterFeed from "../updater-feed.cjs";
+import discordRPC from "../discord-rpc.cjs";
 
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = updaterFeed;
 const { isManagedLibraryFile } = libraryPaths;
 const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload } = serverDownload;
+const { discordArtworkURL, sanitizeDiscordActivity } = discordRPC;
 
 test("uses a custom fullscreen video player with queue, repeat, controls, and shared volume", () => {
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.mp4", fileUrl: "file:///C:/Music/clip.mp4" }), true);
@@ -576,6 +578,7 @@ test("adds focused keybinds, Discord presence, close-to-tray settings, custom sc
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
   const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const packageMetadata = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const preloadSource = readFileSync(new URL("../preload.cjs", import.meta.url), "utf8");
   const discordSource = readFileSync(new URL("../discord-rpc.cjs", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
@@ -603,12 +606,44 @@ test("adds focused keybinds, Discord presence, close-to-tray settings, custom sc
   assert.match(preloadSource, /updateDiscordPresence:[\s\S]+app:discord-presence:update/);
   assert.match(mainSource, /new DiscordRPCClient[\s\S]+discordRPC\.configure/);
   assert.match(mainSource, /applicationID: bundledDiscordApplicationID/);
+  assert.equal(packageMetadata.resonanceDiscordApplicationID, "1535574125395841154");
   assert.doesNotMatch(discordSource, /botToken|Authorization|\bBot\s/);
   assert.match(mainSource, /runtimeAppPreferences\.runInBackground[\s\S]+window\.hide\(\)[\s\S]+ensureBackgroundTray\(\)/);
   assert.match(mainSource, /new Tray[\s\S]+Open Resonance[\s\S]+Quit Resonance/);
   assert.match(styleSource, /\*::\-webkit-scrollbar[\s\S]+\*::\-webkit-scrollbar-thumb/);
   assert.doesNotMatch(htmlSource, /id="volumeText"/);
   assert.doesNotMatch(appSource, /#volumeText/);
+});
+
+test("clears Discord presence while paused and sends trusted album artwork", () => {
+  const base = {
+    title: "Night Drive",
+    artist: "Resonance",
+    album: "After Dark",
+    position: 12,
+    duration: 180,
+    artworkURL: "https://i.scdn.co/image/cover",
+  };
+  assert.equal(sanitizeDiscordActivity({ ...base, playing: false }, 1_000), null);
+  assert.deepEqual(sanitizeDiscordActivity({ ...base, playing: true }, 1_000), {
+    type: 2,
+    details: "Night Drive",
+    state: "by Resonance",
+    instance: false,
+    timestamps: { start: 988, end: 1_168 },
+    assets: {
+      large_image: "https://i.scdn.co/image/cover",
+    },
+  });
+  assert.equal(discordArtworkURL("https://attacker.example/cover.jpg"), null);
+  assert.equal(
+    discordArtworkURL("https://i.ytimg.com/vi/example/maxresdefault.jpg"),
+    "https://img.youtube.com/vi/example/maxresdefault.jpg",
+  );
+  assert.equal(discordArtworkURL(`https://i.ytimg.com/${"x".repeat(301)}`), null);
+
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  assert.match(appSource, /discordPresenceActivity\(\)[\s\S]+!playbackIsActive\(\)[\s\S]+artworkURL: track\.artworkURL \|\| null/);
 });
 
 test("stores profile-menu clip ranges as playback metadata without exporting files", () => {
