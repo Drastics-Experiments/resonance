@@ -386,6 +386,7 @@ actor LocalDeviceImportService {
                 metadata: metadata,
                 duration: player.duration,
                 artworkData: artwork,
+                downloadSourceURL: resolved.streamingURL,
                 sourceSHA256: sourceHash,
                 contentSHA256: contentHash
             ))
@@ -470,6 +471,7 @@ actor LocalDeviceImportService {
                 metadata: metadata,
                 duration: player.duration,
                 artworkData: artwork,
+                downloadSourceURL: stream.streamingURL,
                 sourceSHA256: sourceHash,
                 contentSHA256: contentHash
             ))

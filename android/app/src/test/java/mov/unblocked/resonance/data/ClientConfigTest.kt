@@ -170,14 +170,14 @@ class ClientConfigTest {
         )
         assertEquals(listOf(ServerDownloadMode.StreamOnly), remote.availableDownloadModes)
         assertEquals(
-            ServerUploadTransport.RawVerifiedFile,
+            ServerUploadTransport.PreservedSourceLink,
             ServerUploadTransportPolicy.transportFor(ServerUploadMode.ReviewedMatch),
         )
         assertEquals(
-            ServerUploadTransport.CanonicalSourcePage,
+            ServerUploadTransport.PreservedSourceLink,
             ServerUploadTransportPolicy.transportFor(ServerUploadMode.ServerSourceLink),
         )
-        assertFalse(ServerUploadTransportPolicy.allowsLinkDerivedServerUpload(ServerUploadMode.LocalFile))
+        assertTrue(ServerUploadTransportPolicy.allowsLinkDerivedServerUpload(ServerUploadMode.LocalFile))
         assertTrue(ServerUploadTransportPolicy.allowsLinkDerivedServerUpload(ServerUploadMode.ReviewedMatch))
         val reviewedWithoutRawUpload = ClientConfigVerifier.verify(
             signedEnvelope(

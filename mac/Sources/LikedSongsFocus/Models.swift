@@ -225,6 +225,7 @@ struct Track: Identifiable, Hashable, Codable {
     var sourceServer: String?
     var syncProfileID: String?
     var sourceURL: String?
+    var downloadSourceURL: String?
     var sourceSHA256: String?
     var contentSHA256: String?
     var dateAdded: Date
@@ -244,6 +245,7 @@ struct Track: Identifiable, Hashable, Codable {
         sourceServer: String? = nil,
         syncProfileID: String? = nil,
         sourceURL: String? = nil,
+        downloadSourceURL: String? = nil,
         sourceSHA256: String? = nil,
         contentSHA256: String? = nil,
         dateAdded: Date = .now
@@ -262,6 +264,7 @@ struct Track: Identifiable, Hashable, Codable {
         self.sourceServer = sourceServer
         self.syncProfileID = syncProfileID
         self.sourceURL = sourceURL
+        self.downloadSourceURL = downloadSourceURL
         self.sourceSHA256 = sourceSHA256
         self.contentSHA256 = contentSHA256
         self.dateAdded = dateAdded
@@ -1026,6 +1029,7 @@ struct RemoteSong: Identifiable, Hashable, Decodable {
     let downloadURL: String
     let streamURL: String
     let contentSHA256: String?
+    let sourceURL: String?
 
     enum CodingKeys: String, CodingKey {
         case id, filename, name, title, artist, album, size, duration, artwork
@@ -1037,6 +1041,7 @@ struct RemoteSong: Identifiable, Hashable, Decodable {
         case downloadURL = "download_url"
         case streamURL = "stream_url"
         case contentSHA256 = "content_sha256"
+        case sourceURL = "source_url"
     }
 
     init(from decoder: Decoder) throws {
@@ -1064,6 +1069,7 @@ struct RemoteSong: Identifiable, Hashable, Decodable {
         downloadURL = try values.decode(String.self, forKey: .downloadURL)
         streamURL = try values.decode(String.self, forKey: .streamURL)
         contentSHA256 = try values.decodeIfPresent(String.self, forKey: .contentSHA256)
+        sourceURL = try values.decodeIfPresent(String.self, forKey: .sourceURL)
     }
 
     var kind: SongFilter {

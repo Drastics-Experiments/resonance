@@ -206,6 +206,7 @@ struct LocalImportedAudio: Hashable, Sendable {
     let metadata: LocalImportMetadata
     let duration: TimeInterval
     let artworkData: Data?
+    var downloadSourceURL: URL? = nil
     let sourceSHA256: String
     let contentSHA256: String
 }

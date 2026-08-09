@@ -113,7 +113,6 @@ import kotlinx.coroutines.withContext
 import mov.unblocked.resonance.data.LinkImportStage
 import mov.unblocked.resonance.data.LinkImportInput
 import mov.unblocked.resonance.data.ServerUploadMode
-import mov.unblocked.resonance.data.SourceImportPolicy
 import mov.unblocked.resonance.data.LinkImportKind
 import mov.unblocked.resonance.data.LinkImportSearchProvider
 import mov.unblocked.resonance.data.LinkImportSearchResponse
@@ -1454,36 +1453,31 @@ fun LinkImportDialog(
 ) {
     var source by remember { mutableStateOf(state.linkImport.requestedSource.orEmpty()) }
     val canUploadReviewedLink = state.hasServerUploadCredentials &&
-        state.serverUploadMode in setOf(
-            ServerUploadMode.ServerSourceLink,
-            ServerUploadMode.ReviewedMatch,
-        )
+        state.serverUploadMode != null
     var uploadAfterImport by rememberSaveable { mutableStateOf(false) }
     val focus = LocalFocusManager.current
     val clipboard = LocalClipboardManager.current
     val importState = state.linkImport
     val reviewedMatchPolicyBound = importState.resolution?.reviewedMatchPolicyBound == true
     val uploadInputAccepted = when (state.serverUploadMode) {
-        ServerUploadMode.ServerSourceLink -> runCatching {
-            SourceImportPolicy.canonicalYouTubePageURL(source)
-        }.isSuccess
+        ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink -> source.isNotBlank()
         ServerUploadMode.ReviewedMatch -> LinkImportInput.isReviewedTrackLink(source)
-        else -> false
+        null -> false
     }
     val modeSubtitle = when (state.serverUploadMode) {
-        ServerUploadMode.ServerSourceLink ->
-            "For server upload, paste the exact https://www.youtube.com/watch?v=… page. Searches and other links stay device-only."
+        ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink ->
+            "Resonance downloads locally first and registers only the preserved direct media link with the server."
         ServerUploadMode.ReviewedMatch ->
             "For server upload, paste one full Spotify track or individual YouTube video link. Search text and SoundCloud stay device-only."
         else -> "Search Spotify, SoundCloud, and YouTube, or inspect a supported link directly."
     }
     val inputLabel = when (state.serverUploadMode) {
-        ServerUploadMode.ServerSourceLink -> "Exact YouTube page or device-only search"
+        ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink -> "Search or link"
         ServerUploadMode.ReviewedMatch -> "Spotify/YouTube track link or device-only search"
         else -> "Search or link"
     }
     val inputPlaceholder = when (state.serverUploadMode) {
-        ServerUploadMode.ServerSourceLink -> "https://www.youtube.com/watch?v=…"
+        ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink -> "Song, artist, album, or link"
         ServerUploadMode.ReviewedMatch -> "Spotify track or YouTube video link"
         else -> "Song, artist, album, or link"
     }
@@ -1553,24 +1547,22 @@ fun LinkImportDialog(
                                 Text(
                                     if (canUploadReviewedLink) {
                                         if (reviewedMatchPolicyBound) {
-                                            "Choose one server-ranked candidate explicitly. The exact selected audio is downloaded, verified, then uploaded as local bytes; hidden fallbacks are disabled."
+                                            "Choose one server-ranked candidate explicitly. It is downloaded and verified locally, then its preserved direct source link is registered."
                                         } else if (!uploadInputAccepted) {
                                             when (state.serverUploadMode) {
-                                                ServerUploadMode.ServerSourceLink ->
-                                                    "Server upload is off until this is the exact canonical YouTube watch page. Generic searches, SoundCloud, Spotify, shortened links, and playlists remain device-only."
+                                                ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink ->
+                                                    "Enter a search or supported link before enabling server registration."
                                                 ServerUploadMode.ReviewedMatch ->
                                                     "Server upload is off until this is one full Spotify track or individual YouTube video link. Generic search, SoundCloud, and playlists remain device-only."
-                                                else -> "Server upload is unavailable for this input."
                                             }
                                         } else when (state.serverUploadMode) {
-                                            ServerUploadMode.ServerSourceLink ->
-                                                "The original YouTube page is sent to the active server profile; no provider playback URL is stored."
+                                            ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink ->
+                                                "Only the direct media URL preserved by the local download is registered with the active server profile."
                                             ServerUploadMode.ReviewedMatch ->
-                                                "After you review the match, its verified local bytes upload to the active server profile."
-                                            else -> "Server upload is unavailable for link-derived audio."
+                                                "After review, the preserved direct media URL is registered with the active server profile."
                                         }
                                     } else {
-                                        "Choose Source link or Reviewed match in Server settings, or keep this import only on this device."
+                                        "Choose an enabled upload mode in Server settings, or keep this import only on this device."
                                     },
                                     fontSize = 12.sp,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),

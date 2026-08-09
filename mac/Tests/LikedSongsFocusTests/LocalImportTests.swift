@@ -888,6 +888,7 @@ struct LocalImportTests {
         let player = try AVAudioPlayer(contentsOf: imported.fileURL)
         #expect(player.duration > 0)
         #expect(imported.metadata.title == "Local Test Audio")
+        #expect(imported.downloadSourceURL?.absoluteString == "https://rr1.example.googlevideo.com/videoplayback")
         #expect(!FileManager.default.fileExists(atPath: abandoned.path))
         #expect(stages.contains(.downloading))
         #expect(stages.contains(.processing))
@@ -1017,6 +1018,7 @@ struct LocalImportTests {
         }
 
         #expect(imported.mediaMode == .video)
+        #expect(imported.downloadSourceURL?.absoluteString == "https://rr1.example.googlevideo.com/videoplayback")
         #expect(imported.fileURL.pathExtension == "mp4")
         #expect(imported.duration > 0)
         #expect(FileManager.default.fileExists(atPath: imported.fileURL.path))
@@ -1031,6 +1033,7 @@ struct LocalImportTests {
         let track = model.insertLocalImportedAudio(imported)
         #expect(track.kind == .video)
         #expect(track.fileURL == imported.fileURL)
+        #expect(track.downloadSourceURL == "https://rr1.example.googlevideo.com/videoplayback")
     }
 
     @Test
@@ -1142,6 +1145,7 @@ struct LocalImportTests {
 
         let asset = AVURLAsset(url: imported.fileURL)
         #expect(imported.mediaMode == .video)
+        #expect(imported.downloadSourceURL == nil)
         #expect(imported.fileURL.pathExtension == "mp4")
         #expect(!(try await asset.loadTracks(withMediaType: .video)).isEmpty)
         #expect(!(try await asset.loadTracks(withMediaType: .audio)).isEmpty)
@@ -1274,10 +1278,6 @@ struct LocalImportTests {
         }
         let localFile = root.appendingPathComponent("Local Upload.m4a")
         try FileManager.default.copyItem(at: m4a, to: localFile)
-        let uploadSize = try #require(
-            localFile.resourceValues(forKeys: [.fileSizeKey]).fileSize
-        )
-
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [LocalImportMockURLProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -1293,10 +1293,11 @@ struct LocalImportTests {
             #expect(request.value(forHTTPHeaderField: "X-Resonance-Profile") == "profile-b")
             if request.httpMethod == "PUT", url.path == "/api/v1/admin/songs" {
                 #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer admin-token")
-                #expect(request.value(forHTTPHeaderField: "Content-Type") == "audio/mp4")
-                #expect(request.value(forHTTPHeaderField: "Content-Length") == String(uploadSize))
-                let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
-                #expect(query?.first(where: { $0.name == "filename" })?.value == "Local Upload.m4a")
+                #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
+                let body = try localImportRequestBody(request)
+                let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                #expect(object["source_url"] as? String == "https://media.example/local-upload.m4a")
+                #expect(object["filename"] as? String == "Local Upload.m4a")
                 let data = Data(#"{"id":"uploaded-audio","filename":"Local Upload.m4a","title":"Local Upload","artist":"Device","album":"Only","size":1,"modified_at":"2026-08-03T00:00:00Z","content_type":"audio/mp4","duration_seconds":4,"artwork_url":null,"download_url":"/api/v1/songs/uploaded-audio/file","stream_url":"/api/v1/songs/uploaded-audio/stream"}"#.utf8)
                 return (HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!, data)
             }
@@ -1328,6 +1329,7 @@ struct LocalImportTests {
             metadata: .init(title: "Local Upload", artist: "Device", album: "Only", artworkURL: nil, sourceURL: "https://youtu.be/\(videoID)"),
             duration: 4,
             artworkData: nil,
+            downloadSourceURL: URL(string: "https://media.example/local-upload.m4a"),
             sourceSHA256: "upload-source-hash",
             contentSHA256: "upload-content-hash"
         ))
@@ -1349,6 +1351,7 @@ struct LocalImportTests {
             metadata: .init(title: "Failed Upload", artist: "Device", album: "Only", artworkURL: nil, sourceURL: "https://youtu.be/failure-upload"),
             duration: 4,
             artworkData: nil,
+            downloadSourceURL: URL(string: "https://media.example/failed-upload.m4a"),
             sourceSHA256: "failed-upload-source-hash",
             contentSHA256: "failed-upload-content-hash"
         ))
@@ -1601,7 +1604,7 @@ struct LocalImportTests {
     }
 
     @Test
-    func optionalVideoUploadUsesVideoContentTypeAndActiveProfile() async throws {
+    func optionalVideoUploadRegistersPreservedSourceLinkForActiveProfile() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("LocalVideoUpload-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer {
@@ -1632,10 +1635,11 @@ struct LocalImportTests {
                 #expect(request.value(forHTTPHeaderField: "X-Resonance-Client-Platform") == "macos")
                 #expect(request.value(forHTTPHeaderField: "X-Resonance-Config-Protocol") == "1")
                 #expect(!(request.value(forHTTPHeaderField: "X-Resonance-Cohort-Key") ?? "").isEmpty)
-                #expect(request.value(forHTTPHeaderField: "Content-Type") == "video/mp4")
-                #expect(request.value(forHTTPHeaderField: "Content-Length") == String(uploadSize))
-                let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
-                #expect(query?.first(where: { $0.name == "filename" })?.value == "Local Video Upload.mp4")
+                #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
+                let body = try localImportRequestBody(request)
+                let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                #expect(object["source_url"] as? String == "https://media.example/local-video-upload.mp4")
+                #expect(object["filename"] as? String == "Local Video Upload.mp4")
                 let data = Data(#"""
                 {
                   "id":"uploaded-video",
@@ -1682,6 +1686,7 @@ struct LocalImportTests {
             metadata: .init(title: "Local Video Upload", artist: "Device", album: "Only", artworkURL: nil, sourceURL: "https://youtu.be/\(videoID)"),
             duration: 1,
             artworkData: nil,
+            downloadSourceURL: URL(string: "https://media.example/local-video-upload.mp4"),
             sourceSHA256: "video-upload-source-hash",
             contentSHA256: "video-upload-content-hash",
             mediaMode: .video

@@ -115,6 +115,7 @@ class LibraryRepository(
                     fallbackAlbum = download.metadata.album ?: "Imported",
                     fallbackDurationMs = download.durationMs,
                     fallbackArtwork = download.artwork,
+                    downloadSourceURL = download.downloadSourceURL,
                     sourceSHA256 = download.sourceSHA256,
                     contentSHA256 = download.contentSHA256,
                 )
@@ -151,6 +152,7 @@ class LibraryRepository(
                 remoteID = song.id,
                 sourceServer = sourceServer,
                 syncProfileID = syncProfileID,
+                downloadSourceURL = song.sourceURL,
                 fallbackArtwork = fallbackArtwork,
                 contentSHA256 = verifiedContentSHA256,
             )
@@ -325,6 +327,7 @@ class LibraryRepository(
         remoteID: String? = null,
         sourceServer: String? = null,
         syncProfileID: String? = null,
+        downloadSourceURL: String? = null,
         fallbackArtwork: ByteArray? = null,
         fallbackDurationMs: Long = 0L,
         sourceSHA256: String? = null,
@@ -346,6 +349,7 @@ class LibraryRepository(
                 remoteID = remoteID,
                 sourceServer = sourceServer,
                 syncProfileID = syncProfileID,
+                downloadSourceURL = downloadSourceURL,
                 artworkFilename = artworkFilename,
                 artworkScanComplete = true,
                 sourceSHA256 = sourceSHA256,

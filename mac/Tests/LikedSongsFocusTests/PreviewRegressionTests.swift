@@ -393,6 +393,7 @@ struct PreviewRegressionTests {
                   "modified_at": "2026-07-30T00:00:00Z",
                   "content_type": "audio/mpeg",
                   "duration_seconds": 259.265,
+                  "source_url": "https://media.example/catalog-song.mp3?token=preserved",
                   "artwork_url": "https://music.example.com/api/v1/songs/catalog-song/artwork?signature=signed",
                   "download_url": "/api/v1/songs/catalog-song/file",
                   "stream_url": "/api/v1/songs/catalog-song/stream"
@@ -404,6 +405,7 @@ struct PreviewRegressionTests {
         #expect(song.durationSeconds == 259.265)
         #expect(song.durationText == "4:19")
         #expect(song.artworkURL?.contains("/artwork?") == true)
+        #expect(song.sourceURL == "https://media.example/catalog-song.mp3?token=preserved")
     }
 
     @Test

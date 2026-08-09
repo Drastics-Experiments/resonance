@@ -418,6 +418,36 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             case duplicateOf = "duplicate_of"
         }
     }
+    private struct SourceLinkUploadDocument: Encodable {
+        struct Metadata: Encodable {
+            let title: String
+            let artist: String
+            let album: String
+            let durationSeconds: TimeInterval?
+
+            enum CodingKeys: String, CodingKey {
+                case title, artist, album
+                case durationSeconds = "duration_seconds"
+            }
+        }
+
+        let schemaVersion = 1
+        let sourceURL: String
+        let filename: String
+        let metadata: Metadata
+
+        enum CodingKeys: String, CodingKey {
+            case filename, metadata
+            case schemaVersion = "schema_version"
+            case sourceURL = "source_url"
+        }
+    }
+
+    private struct SourceLinkRequiredError: LocalizedError {
+        var errorDescription: String? {
+            "Only songs downloaded from a preserved source link can be uploaded. Download this song from its link again first."
+        }
+    }
     private struct SourceImportResponse: Decodable {
         let schemaVersion: Int
         let status: String
@@ -1700,6 +1730,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 album: imported.metadata.album ?? "Imported",
                 duration: imported.duration,
                 relativePath: filename,
+                downloadSourceURL: imported.downloadSourceURL?.absoluteString,
                 artworkFilename: saveArtwork(imported.artworkData, for: id),
                 artworkScanComplete: true,
                 sourceSHA256: imported.sourceSHA256,
@@ -2510,6 +2541,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                             remoteID: song.id,
                             sourceServer: baseURL.absoluteString,
                             syncProfileID: syncProfileID,
+                            downloadSourceURL: song.sourceURL,
                             artworkFilename: saveArtwork(artworkData, for: trackID),
                             artworkScanComplete: true,
                             contentSHA256: downloaded.sha256
@@ -3296,7 +3328,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     func uploadFiles(_ urls: [URL]) async {
         guard activeUploadMode == .localFile else {
-            uploadDetail = "Choose Local file upload mode first"
+            uploadDetail = "Choose Preserved source link upload mode first"
             return
         }
         guard !isUploadTransferBusy else { return }
@@ -3324,18 +3356,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             do {
                 let uploadFilename = MobileServerUploadNaming.filename(for: source)
                 uploadDetail = "Uploading \(completed + 1) of \(urls.count) • \(uploadFilename)"
-                if let managedTrack = MobileManagedTrackUploadPolicy.managedTrack(
+                guard let managedTrack = MobileManagedTrackUploadPolicy.managedTrack(
                     matching: source,
                     tracks: tracks,
                     musicDirectory: musicDirectory
-                ) {
-                    try MobileRemoteAssociationPolicy.validateAdoption(
-                        track: managedTrack,
-                        targetContext: uploadContext
-                    )
-                }
+                ) else { throw SourceLinkRequiredError() }
+                try MobileRemoteAssociationPolicy.validateAdoption(
+                    track: managedTrack,
+                    targetContext: uploadContext
+                )
                 let uploadedSong = try await uploadServerFile(
-                    source,
+                    managedTrack,
                     to: baseURL,
                     profileID: uploadProfileID
                 )
@@ -3486,7 +3517,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         reviewedMatchLease: MobileReviewedMatchLease? = nil
     ) async throws -> Bool {
         let uploadMode = activeUploadMode
-        guard uploadMode == .localFile || uploadMode == .reviewedMatch else {
+        guard uploadMode == .localFile || uploadMode == .serverSourceLink || uploadMode == .reviewedMatch else {
             throw URLError(.dataNotAllowed)
         }
         if uploadMode == .reviewedMatch {
@@ -3535,9 +3566,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             return false
         }
         let uploadedSong = try await uploadServerFile(
-            fileURL(for: currentTrack),
+            currentTrack,
             to: baseURL,
-            title: currentTrack.title,
             profileID: uploadProfileID,
             reviewedMatchLease: reviewedMatchLease
         )
@@ -3578,7 +3608,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private func uploadDownloadedSongsMissingFromServer(trackIDs: Set<UUID>?) async {
         guard activeUploadMode == .localFile else {
-            uploadDetail = "Choose Local file upload mode first"
+            uploadDetail = "Choose Preserved source link upload mode first"
             serverMessage = uploadDetail
             return
         }
@@ -3648,9 +3678,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                             try await Task.sleep(for: .milliseconds(attempt == 2 ? 400 : 1_200))
                         }
                         uploadedSong = try await uploadServerFile(
-                            source,
+                            track,
                             to: baseURL,
-                            title: track.title,
                             profileID: uploadProfileID
                         )
                         break
@@ -3713,13 +3742,14 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func uploadServerFile(
-        _ source: URL,
+        _ track: MobileTrack,
         to baseURL: URL,
-        title: String? = nil,
         profileID: String,
         reviewedMatchLease: MobileReviewedMatchLease? = nil
     ) async throws -> MobileRemoteSong {
-        let requiredMode: MobileUploadMode = reviewedMatchLease == nil ? .localFile : .reviewedMatch
+        let requiredMode: MobileUploadMode = reviewedMatchLease == nil
+            ? (activeUploadMode ?? .localFile)
+            : .reviewedMatch
         guard let uploadLease = captureRawUploadLease(
             mode: requiredMode,
             baseURL: baseURL,
@@ -3738,26 +3768,30 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             throw MobileTransferPolicyChangedError.changed
         }
 
-        let values = try source.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-        guard values.isRegularFile == true, (values.fileSize ?? 0) > 0 else {
-            throw URLError(.fileDoesNotExist)
-        }
-        var components = URLComponents(
-            url: baseURL.appendingPathComponent("api/v1/admin/songs"),
-            resolvingAgainstBaseURL: false
-        )
-        components?.queryItems = [
-            URLQueryItem(name: "filename", value: MobileServerUploadNaming.filename(for: source, title: title))
-        ]
-        guard let url = components?.url else { throw URLError(.badURL) }
+        guard let rawSource = track.downloadSourceURL,
+              let sourceURL = URL(string: rawSource),
+              sourceURL.scheme?.lowercased() == "https",
+              sourceURL.user == nil,
+              sourceURL.password == nil else { throw SourceLinkRequiredError() }
+        let url = baseURL.appendingPathComponent("api/v1/admin/songs")
+        guard MobileSameOriginPolicy.matches(url, baseURL) else { throw URLError(.badURL) }
+        let source = fileURL(for: track)
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
-        request.timeoutInterval = 600
+        request.timeoutInterval = 90
+        request.httpBody = try JSONEncoder().encode(SourceLinkUploadDocument(
+            sourceURL: sourceURL.absoluteString,
+            filename: MobileServerUploadNaming.filename(for: source, title: track.title),
+            metadata: .init(
+                title: track.title,
+                artist: track.artist,
+                album: track.album,
+                durationSeconds: track.duration > 0 ? track.duration : nil
+            )
+        ))
         request.setValue("Bearer \(serverAdminToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(
-            UTType(filenameExtension: source.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
-            forHTTPHeaderField: "Content-Type"
-        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let reviewedMatchLease {
             guard reviewedMatchLease.profileID == profileID,
                   MobileClientConfigOrigin.normalized(baseURL) == reviewedMatchLease.origin,
@@ -3774,10 +3808,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         if let reviewedMatchLease, !isReviewedMatchLeaseCurrent(reviewedMatchLease) {
             throw MobileTransferPolicyChangedError.changed
         }
-        let (data, response) = try await sameOriginUpload(
+        let (data, response) = try await sameOriginData(
             for: request,
-            fromFile: source,
-            origin: baseURL
+            origin: baseURL,
+            maximumBytes: 2 * 1_024 * 1_024
         )
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         if http.statusCode == 201,

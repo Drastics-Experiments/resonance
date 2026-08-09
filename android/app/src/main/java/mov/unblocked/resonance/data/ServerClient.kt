@@ -16,7 +16,6 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
-import java.net.URLConnection
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
@@ -206,43 +205,45 @@ class ServerClient(
     )
 
     suspend fun upload(
-        file: File,
-        title: String? = null,
+        track: Track,
+        sourceFilename: String,
         authorize: () -> Unit,
     ): RemoteUpload = withContext(Dispatchers.IO) {
-        require(file.isFile) { "Upload file does not exist: ${file.name}" }
-        val uploadFilename = ServerUploadNaming.filename(file.name, title)
-        val encodedFilename = URLEncoder.encode(uploadFilename, Charsets.UTF_8.name())
-            .replace("+", "%20")
-        authorize()
-        val connection = open(
-            url = endpoint("/api/v1/admin/songs?filename=$encodedFilename"),
-            method = "PUT",
-            token = requireAdminToken(),
-        ).apply {
-            doOutput = true
-            connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = UPLOAD_TIMEOUT_MS
-            setRequestProperty(
-                "Content-Type",
-                URLConnection.guessContentTypeFromName(file.name) ?: "application/octet-stream",
+        val sourceURL = track.downloadSourceURL?.trim()?.takeIf(String::isNotEmpty)
+            ?: throw IllegalStateException(
+                "Only songs downloaded from a preserved source link can be uploaded. Download this song from its link again first.",
             )
-            setFixedLengthStreamingMode(file.length())
-            applyClientContextHeaders(requireInstallationCohortKey())
+        val sourceURI = runCatching { URI(sourceURL) }.getOrNull()
+        require(sourceURI?.scheme.equals("https", ignoreCase = true) && sourceURI?.rawUserInfo == null) {
+            "The preserved source link must be a public HTTPS URL without credentials"
         }
-        try {
-            file.inputStream().use { input ->
-                connection.outputStream.use { output -> input.copyTo(output, BUFFER_SIZE) }
-            }
-            val response = connection.response()
-            requireStatus(response, setOf(HttpURLConnection.HTTP_CREATED, HttpURLConnection.HTTP_CONFLICT))
-            if (response.status == HttpURLConnection.HTTP_CONFLICT) {
-                json.decodeFromString<DuplicateRemoteUpload>(response.body.toString(Charsets.UTF_8)).duplicateOf
-            } else {
-                json.decodeFromString<RemoteUpload>(response.body.toString(Charsets.UTF_8))
-            }
-        } finally {
-            connection.disconnect()
+        val uploadFilename = ServerUploadNaming.filename(sourceFilename, track.title)
+        val payload = SourceLinkUploadRequest(
+            sourceURL = sourceURL,
+            filename = uploadFilename,
+            metadata = SourceLinkUploadMetadata(
+                title = track.title,
+                artist = track.artist,
+                album = track.album,
+                durationSeconds = track.durationMs.takeIf { it > 0L }?.div(1_000.0),
+            ),
+        )
+        authorize()
+        val response = request(
+            method = "PUT",
+            url = endpoint("/api/v1/admin/songs"),
+            token = requireAdminToken(),
+            body = json.encodeToString(payload).toByteArray(Charsets.UTF_8),
+            contentType = "application/json",
+            accept = "application/json",
+            requestHeaders = clientContextHeaders(requireInstallationCohortKey()),
+            maxResponseBytes = MAX_SOURCE_IMPORT_RESPONSE_BYTES,
+        )
+        requireStatus(response, setOf(HttpURLConnection.HTTP_CREATED, HttpURLConnection.HTTP_CONFLICT))
+        if (response.status == HttpURLConnection.HTTP_CONFLICT) {
+            json.decodeFromString<DuplicateRemoteUpload>(response.body.toString(Charsets.UTF_8)).duplicateOf
+        } else {
+            json.decodeFromString<RemoteUpload>(response.body.toString(Charsets.UTF_8))
         }
     }
 
@@ -775,7 +776,6 @@ class ServerClient(
         private const val CONNECT_TIMEOUT_MS = 20_000
         private const val REQUEST_TIMEOUT_MS = 60_000
         private const val DOWNLOAD_TIMEOUT_MS = 120_000
-        private const val UPLOAD_TIMEOUT_MS = 600_000
         private const val CLIENT_CONFIG_TIMEOUT_MS = 15_000
         private const val MAX_ERROR_BYTES = 64 * 1_024
         private const val MAX_SOURCE_IMPORT_RESPONSE_BYTES = 256 * 1_024
@@ -1084,6 +1084,22 @@ data class RemoteUpload(
     val id: String,
     val filename: String = "",
     val size: Long,
+)
+
+@Serializable
+private data class SourceLinkUploadRequest(
+    @SerialName("schema_version") val schemaVersion: Int = 1,
+    @SerialName("source_url") val sourceURL: String,
+    val filename: String,
+    val metadata: SourceLinkUploadMetadata,
+)
+
+@Serializable
+private data class SourceLinkUploadMetadata(
+    val title: String,
+    val artist: String,
+    val album: String,
+    @SerialName("duration_seconds") val durationSeconds: Double? = null,
 )
 
 sealed interface ClientConfigFetchResult {

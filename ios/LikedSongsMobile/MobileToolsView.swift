@@ -1313,8 +1313,7 @@ enum MobileLocalImportSearchPolicy {
         let searchesProviders = !LocalImportInput.looksLikeLink(input)
         let requiresDeviceOnlySearch = searchesProviders
             && !explicitlyReviewedServerMatch
-            && activeUploadMode != nil
-            && activeUploadMode != .localFile
+            && activeUploadMode == .reviewedMatch
         let adjustedSync = requiresDeviceOnlySearch ? false : syncAfterImport
         return Preparation(
             searchesProviders: searchesProviders,
@@ -2167,7 +2166,7 @@ struct MobileLocalImportSheet: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text("Reviewed server upload")
                                     .font(.subheadline.weight(.semibold))
-                                Text("Select exactly one server-reviewed audio candidate. Resonance downloads and verifies that candidate locally before uploading its bytes.")
+                                Text("Select exactly one server-reviewed audio candidate. Resonance downloads and verifies it locally, then registers the preserved direct source link.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -2180,7 +2179,7 @@ struct MobileLocalImportSheet: View {
                                     Text("Upload after downloading")
                                         .font(.subheadline.weight(.semibold))
                                     Text(library.canUploadLocalImports
-                                         ? "Downloads every selected song first, then uploads missing songs to \(library.syncProfileName)."
+                                         ? "Downloads every selected song first, then registers each preserved direct source link with \(library.syncProfileName)."
                                          : "Sign in with an administrator account, or turn this off for a local-only import.")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)

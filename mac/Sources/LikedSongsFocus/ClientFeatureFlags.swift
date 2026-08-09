@@ -27,20 +27,20 @@ enum MacUploadMode: String, CaseIterable, Codable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .localFile: "Local file"
-        case .serverSourceLink: "Server source link"
-        case .reviewedMatch: "Reviewed match"
+        case .localFile: "Preserved source link"
+        case .serverSourceLink: "Preserved source link"
+        case .reviewedMatch: "Reviewed source link"
         }
     }
 
     var detail: String {
         switch self {
         case .localFile:
-            "Upload verified media bytes from this Mac."
+            "Register the direct source link preserved when this Mac downloaded the song."
         case .serverSourceLink:
-            "Send the original source page to Resonance for server-side import."
+            "Register the direct source link preserved after downloading the song."
         case .reviewedMatch:
-            "Review a matched source before saving locally and uploading."
+            "Review a matched source, save it locally, and register its preserved link."
         }
     }
 }

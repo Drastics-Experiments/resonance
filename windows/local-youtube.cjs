@@ -636,6 +636,7 @@ async function downloadYouTubeAudio(source, destination, signal, onProgress, fet
   const resolved = await resolveYouTubeAudio(source, signal, fetchImpl);
   return {
     preview: (({ streamingURL, streamingHeaders, ...preview }) => preview)(resolved),
+    mediaSourceURL: resolved.streamingURL,
     download: await downloadResolvedAudio(resolved, destination, signal, onProgress, fetchImpl),
   };
 }
@@ -666,10 +667,15 @@ async function downloadYouTubeVideo(source, destination, signal, onProgress, fet
       (completed) => onProgress?.(resolved.videoStream.contentLength + completed, resolved.contentLength),
       fetchImpl,
     );
-    return { preview, separateStreams: { video: videoDownload, audio: audioDownload } };
+    return {
+      preview,
+      mediaSourceURL: null,
+      separateStreams: { video: videoDownload, audio: audioDownload },
+    };
   }
   return {
     preview,
+    mediaSourceURL: resolved.streamingURL,
     download: await downloadResolvedVideo(resolved, destination, signal, onProgress, fetchImpl),
   };
 }
