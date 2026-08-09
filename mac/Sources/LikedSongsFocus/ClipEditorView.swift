@@ -299,9 +299,7 @@ struct MacClipEditorSheet: View {
 
     private var topBar: some View {
         ZStack {
-            Text("My Clip")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(Color.appInk)
+            trackSelectionMenu
 
             HStack {
                 Button(action: dismissWithoutSaving) {
@@ -357,6 +355,40 @@ struct MacClipEditorSheet: View {
         }
         .frame(height: 44)
         .padding(.horizontal, 10)
+    }
+
+    private var trackSelectionMenu: some View {
+        Menu {
+            ForEach(editableTracks) { track in
+                Button { chooseTrack(track) } label: {
+                    if track.id == selectedTrackID {
+                        Label("\(track.title) — \(track.artist)", systemImage: "checkmark")
+                    } else {
+                        Text("\(track.title) — \(track.artist)")
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Text(selectedTrack?.title ?? "Choose a song")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.appMuted)
+            }
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundStyle(Color.appInk)
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(maxWidth: 380)
+        .disabled(editableTracks.isEmpty)
+        .accessibilityLabel("Select a song to clip")
+        .help("Select another song")
     }
 
     private var emptyState: some View {
@@ -440,9 +472,6 @@ struct MacClipEditorSheet: View {
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(Color.appInk.opacity(0.88))
                         .lineLimit(1)
-                    Text("[Visualizer]")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(Color(hex: 0xB56AFF))
                 }
                 .padding(.top, 8)
             }
@@ -533,33 +562,6 @@ struct MacClipEditorSheet: View {
     private var settingsPopover: some View {
         VStack(alignment: .leading, spacing: 14) {
             popoverHeader(eyebrow: "CLIP SETTINGS", title: "Fine tune your clip") { showsSettings = false }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("SONG").font(.system(size: 9, weight: .bold)).tracking(1.1).foregroundStyle(Color.appMuted)
-                Menu {
-                    ForEach(editableTracks) { track in
-                        Button { chooseTrack(track) } label: {
-                            if track.id == selectedTrackID {
-                                Label("\(track.title) — \(track.artist)", systemImage: "checkmark")
-                            } else {
-                                Text("\(track.title) — \(track.artist)")
-                            }
-                        }
-                    }
-                } label: {
-                    HStack {
-                        Text(selectedTrack.map { "\($0.title) — \($0.artist)" } ?? "Choose a song").lineLimit(1)
-                        Spacer()
-                        Image(systemName: "chevron.up.chevron.down")
-                    }
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.appInk)
-                    .padding(.horizontal, 11)
-                    .frame(height: 40)
-                    .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
-                }
-                .menuStyle(.borderlessButton)
-            }
-
             HStack(spacing: 8) {
                 ClipTimeControl(label: "Start", value: $startTime, range: 0...max(endTime - ClipRangePolicy.minimumDuration, 0))
                 ClipTimeControl(label: "End", value: $endTime, range: min(startTime + ClipRangePolicy.minimumDuration, selectedDuration)...selectedDuration)
@@ -743,121 +745,100 @@ struct MacClipEditorSheet: View {
     }
 }
 
-private struct CinematicClipVisualizer: View {
+private struct CinematicClipVisualizer: NSViewRepresentable {
     let samples: [Double]
     let spectrumAnalyzer: ClipLiveSpectrumAnalyzer
     let isPlaying: Bool
-    @State private var liveLevels = [Double](repeating: 0, count: ClipLiveSpectrumAnalyzer.barCount)
 
-    var body: some View {
-        GeometryReader { proxy in
-            let renderedLevels = isPlaying ? liveLevels : samples
-            Canvas { context, size in
-                let barCount = ClipLiveSpectrumAnalyzer.barCount
-                let spacing: CGFloat = 2
-                let width = max((size.width - spacing * CGFloat(barCount - 1)) / CGFloat(barCount), 2)
-                var bars = Path()
-                for index in 0..<barCount {
-                    let progress = Double(index) / Double(max(barCount - 1, 1))
-                    let level = sampledLevel(in: renderedLevels, at: progress)
-                    let percentage = isPlaying
-                        ? max(5, min(100, 7 + level * 93))
-                        : 10 + Double(Int((max(0.04, min(1, level)) * 86).rounded()))
-                    let height = size.height * percentage / 100
-                    let rect = CGRect(
-                        x: CGFloat(index) * (width + spacing),
-                        y: size.height - height,
-                        width: width,
-                        height: height
-                    )
-                    bars.addPath(topRoundedBar(in: rect, radius: width / 2))
-                }
-                context.fill(
-                    bars,
-                    with: .linearGradient(
-                        Gradient(stops: [
-                            .init(color: Color(hex: 0x4E1A95), location: 0),
-                            .init(color: Color(hex: 0xBC5DF8), location: 0.72),
-                            .init(color: Color(hex: 0x7140D4), location: 1),
-                        ]),
-                        startPoint: CGPoint(x: 0, y: size.height),
-                        endPoint: CGPoint(x: 0, y: 0)
-                    )
-                )
-            }
-            .padding(.horizontal, 4)
-            .padding(.top, proxy.size.height * 0.12)
-            .opacity(0.92)
-            .background {
-                ClipVisualizerFrameClock(isActive: isPlaying) {
-                    liveLevels = spectrumAnalyzer.snapshot()
-                }
-            }
-        }
-        .allowsHitTesting(false)
-    }
-
-    private func sampledLevel(in levels: [Double], at normalizedPosition: Double) -> Double {
-        guard !levels.isEmpty else { return 0.08 }
-        let position = min(max(normalizedPosition, 0), 1) * Double(levels.count - 1)
-        let lower = Int(position.rounded(.down))
-        let upper = min(lower + 1, levels.count - 1)
-        let fraction = position - Double(lower)
-        return max(0, min(1, levels[lower] * (1 - fraction) + levels[upper] * fraction))
-    }
-
-    private func topRoundedBar(in rect: CGRect, radius: CGFloat) -> Path {
-        let radius = min(radius, rect.width / 2, rect.height / 2)
-        var path = Path()
-        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + radius))
-        path.addQuadCurve(
-            to: CGPoint(x: rect.minX + radius, y: rect.minY),
-            control: CGPoint(x: rect.minX, y: rect.minY)
-        )
-        path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.minY))
-        path.addQuadCurve(
-            to: CGPoint(x: rect.maxX, y: rect.minY + radius),
-            control: CGPoint(x: rect.maxX, y: rect.minY)
-        )
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        path.closeSubpath()
-        return path
-    }
-}
-
-private struct ClipVisualizerFrameClock: NSViewRepresentable {
-    let isActive: Bool
-    let onFrame: () -> Void
-
-    func makeNSView(context: Context) -> ClipVisualizerFrameClockView {
-        let view = ClipVisualizerFrameClockView()
-        view.isActive = isActive
-        view.onFrame = onFrame
+    func makeNSView(context: Context) -> ClipSpectrumVisualizerView {
+        let view = ClipSpectrumVisualizerView()
+        view.update(samples: samples, spectrumAnalyzer: spectrumAnalyzer, isPlaying: isPlaying)
         return view
     }
 
-    func updateNSView(_ nsView: ClipVisualizerFrameClockView, context: Context) {
-        nsView.isActive = isActive
-        nsView.onFrame = onFrame
+    func updateNSView(_ nsView: ClipSpectrumVisualizerView, context: Context) {
+        nsView.update(samples: samples, spectrumAnalyzer: spectrumAnalyzer, isPlaying: isPlaying)
     }
 
-    static func dismantleNSView(_ nsView: ClipVisualizerFrameClockView, coordinator: ()) {
+    static func dismantleNSView(_ nsView: ClipSpectrumVisualizerView, coordinator: ()) {
         nsView.stop()
-        nsView.onFrame = nil
     }
 }
 
 @MainActor
-private final class ClipVisualizerFrameClockView: NSView {
+private final class ClipSpectrumVisualizerView: NSView {
     static let frameRate: Float = 60
+    private static let horizontalInset: CGFloat = 4
+    private static let topInsetFraction: CGFloat = 0.12
+    private static let spacing: CGFloat = 2
 
-    var onFrame: (() -> Void)?
-    var isActive = false {
-        didSet { displayLink?.isPaused = !isActive }
+    private let gradientLayer = CAGradientLayer()
+    private let barsLayer = CAShapeLayer()
+    private var displayLink: CADisplayLink?
+    private var spectrumAnalyzer: ClipLiveSpectrumAnalyzer?
+    private var sourceSamples: [Double] = []
+    private var staticLevels = [Double](repeating: 0.08, count: ClipLiveSpectrumAnalyzer.barCount)
+    private var displayedLevels = [Double](repeating: 0, count: ClipLiveSpectrumAnalyzer.barCount)
+    private var isPlaying = false
+    private var previousFrameTimestamp: CFTimeInterval?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer = gradientLayer
+        gradientLayer.colors = [
+            NSColor(red: 0.31, green: 0.10, blue: 0.58, alpha: 1).cgColor,
+            NSColor(red: 0.74, green: 0.36, blue: 0.97, alpha: 1).cgColor,
+            NSColor(red: 0.44, green: 0.25, blue: 0.83, alpha: 1).cgColor,
+        ]
+        gradientLayer.locations = [0, 0.72, 1]
+        gradientLayer.startPoint = CGPoint(x: 0.5, y: 1)
+        gradientLayer.endPoint = CGPoint(x: 0.5, y: 0)
+        gradientLayer.opacity = 0.92
+        gradientLayer.mask = barsLayer
+        barsLayer.fillColor = NSColor.black.cgColor
     }
 
-    private var displayLink: CADisplayLink?
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isFlipped: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        barsLayer.frame = bounds
+        renderBars()
+        CATransaction.commit()
+    }
+
+    func update(
+        samples: [Double],
+        spectrumAnalyzer: ClipLiveSpectrumAnalyzer,
+        isPlaying: Bool
+    ) {
+        self.spectrumAnalyzer = spectrumAnalyzer
+        if sourceSamples != samples {
+            sourceSamples = samples
+            staticLevels = resampledLevels(from: samples)
+        }
+
+        if self.isPlaying != isPlaying {
+            self.isPlaying = isPlaying
+            previousFrameTimestamp = nil
+            displayedLevels = isPlaying ? spectrumAnalyzer.snapshot() : staticLevels
+        } else if !isPlaying {
+            displayedLevels = staticLevels
+        }
+
+        displayLink?.isPaused = !isPlaying
+        renderBarsWithoutAnimation()
+        if window != nil { startIfNeeded() }
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -871,6 +852,7 @@ private final class ClipVisualizerFrameClockView: NSView {
     func stop() {
         displayLink?.invalidate()
         displayLink = nil
+        previousFrameTimestamp = nil
     }
 
     private func startIfNeeded() {
@@ -881,13 +863,94 @@ private final class ClipVisualizerFrameClockView: NSView {
             maximum: Self.frameRate,
             preferred: Self.frameRate
         )
-        displayLink.isPaused = !isActive
+        displayLink.isPaused = !isPlaying
         displayLink.add(to: .main, forMode: .common)
         self.displayLink = displayLink
     }
 
     @objc private func renderFrame(_ displayLink: CADisplayLink) {
-        onFrame?()
+        guard isPlaying, let spectrumAnalyzer else { return }
+        let timestamp = displayLink.timestamp
+        let elapsed = previousFrameTimestamp.map { timestamp - $0 } ?? (1 / Double(Self.frameRate))
+        previousFrameTimestamp = timestamp
+        let frameDuration = min(max(elapsed, 1 / 240), 1 / 15)
+        let targetLevels = spectrumAnalyzer.snapshot()
+
+        for index in displayedLevels.indices {
+            let target = index < targetLevels.count ? targetLevels[index] : 0
+            let responseTime = target >= displayedLevels[index] ? 0.015 : 0.07
+            let blend = 1 - exp(-frameDuration / responseTime)
+            displayedLevels[index] += (target - displayedLevels[index]) * blend
+        }
+        renderBarsWithoutAnimation()
+    }
+
+    private func resampledLevels(from samples: [Double]) -> [Double] {
+        guard !samples.isEmpty else {
+            return [Double](repeating: 0.08, count: ClipLiveSpectrumAnalyzer.barCount)
+        }
+        return (0..<ClipLiveSpectrumAnalyzer.barCount).map { index in
+            let progress = Double(index) / Double(max(ClipLiveSpectrumAnalyzer.barCount - 1, 1))
+            let position = progress * Double(samples.count - 1)
+            let lower = Int(position.rounded(.down))
+            let upper = min(lower + 1, samples.count - 1)
+            let fraction = position - Double(lower)
+            return max(0, min(1, samples[lower] * (1 - fraction) + samples[upper] * fraction))
+        }
+    }
+
+    private func renderBarsWithoutAnimation() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        renderBars()
+        CATransaction.commit()
+    }
+
+    private func renderBars() {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let barCount = ClipLiveSpectrumAnalyzer.barCount
+        let contentWidth = max(bounds.width - Self.horizontalInset * 2, 1)
+        let barWidth = max(
+            (contentWidth - Self.spacing * CGFloat(barCount - 1)) / CGFloat(barCount),
+            2
+        )
+        let drawableHeight = bounds.height * (1 - Self.topInsetFraction)
+        let path = CGMutablePath()
+
+        for index in 0..<barCount {
+            let level = index < displayedLevels.count ? displayedLevels[index] : 0
+            let percentage = isPlaying
+                ? max(5, min(100, 7 + level * 93))
+                : 10 + Double(Int((max(0.04, min(1, level)) * 86).rounded()))
+            let height = drawableHeight * percentage / 100
+            let rect = CGRect(
+                x: Self.horizontalInset + CGFloat(index) * (barWidth + Self.spacing),
+                y: 0,
+                width: barWidth,
+                height: height
+            )
+            path.addPath(topRoundedBarPath(in: rect, radius: barWidth / 2))
+        }
+        barsLayer.path = path
+    }
+
+    private func topRoundedBarPath(in rect: CGRect, radius: CGFloat) -> CGPath {
+        let radius = min(radius, rect.width / 2, rect.height / 2)
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - radius))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX - radius, y: rect.maxY),
+            control: CGPoint(x: rect.maxX, y: rect.maxY)
+        )
+        path.addLine(to: CGPoint(x: rect.minX + radius, y: rect.maxY))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX, y: rect.maxY - radius),
+            control: CGPoint(x: rect.minX, y: rect.maxY)
+        )
+        path.closeSubpath()
+        return path
     }
 }
 

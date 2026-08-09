@@ -238,7 +238,10 @@
     <section class="clip-editor-panel">
       <header class="clip-editor-topbar">
         <button id="closeClipEditor" class="clip-editor-done" type="button">Done</button>
-        <h2 id="clipEditorTitle">My Clip</h2>
+        <div class="clip-editor-title-picker">
+          <h2 id="clipEditorTitle" class="sr-only">Clip Editor</h2>
+          <div id="clipEditorTrack" data-custom-select data-custom-select-width="320" aria-label="Select a song to clip"></div>
+        </div>
         <div class="clip-editor-top-actions">
           <button id="saveClipRange" class="clip-editor-save" type="button" disabled>Save</button>
           <button id="clipEditorHelpButton" class="clip-editor-icon-button" type="button" aria-label="Clip editor help" aria-expanded="false" aria-controls="clipEditorHelp">?</button>
@@ -251,11 +254,12 @@
       <div id="clipEditorWorkspace" class="clip-editor-workspace">
         <section id="clipEditorStage" class="clip-editor-stage" aria-label="Clip preview">
           <div id="clipEditorAudioStage" class="clip-editor-audio-stage">
-            <div id="clipEditorStageVisualizer" class="clip-editor-stage-visualizer" aria-hidden="true"></div>
+            <div id="clipEditorStageVisualizer" class="clip-editor-stage-visualizer" aria-hidden="true">
+              <canvas id="clipEditorStageVisualizerCanvas"></canvas>
+            </div>
             <span id="clipEditorArtwork" class="clip-editor-artwork" aria-hidden="true">♪</span>
             <strong id="clipEditorTrackTitle">Nothing selected</strong>
-            <span id="clipEditorTrackMeta">Choose a song in settings</span>
-            <em>[Visualizer]</em>
+            <span id="clipEditorTrackMeta">Choose a song from the title menu</span>
           </div>
           <div id="clipEditorVideoFrame" class="clip-editor-video-frame" hidden>
             <video id="clipEditorPreview" preload="metadata" playsinline></video>
@@ -286,7 +290,6 @@
       <span id="clipEditorStatus" class="clip-editor-status" role="status">The song file is never changed.</span>
       <aside id="clipEditorSettings" class="clip-editor-popover clip-editor-settings" hidden>
         <header><div><span class="eyebrow">CLIP SETTINGS</span><strong>Fine tune your clip</strong></div><button id="closeClipEditorSettings" type="button" aria-label="Close clip settings">×</button></header>
-        <div class="clip-editor-song"><span>Song</span><div id="clipEditorTrack" data-custom-select aria-label="Song to clip"></div></div>
         <div class="clip-editor-track">
           <span class="clip-editor-settings-artwork" aria-hidden="true">♪</span>
           <span><strong>Playback range</strong><small>Drag the yellow handles or enter exact times.</small></span>

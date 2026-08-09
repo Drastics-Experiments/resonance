@@ -43,8 +43,11 @@ final class ClipLiveSpectrumAnalyzer: @unchecked Sendable {
     private let transform: vDSP.DiscreteFourierTransform<Float>
     private let window: [Float]
     private let levelsLock = NSLock()
+    private let pendingSamplesLock = NSLock()
     private var smoothedMagnitudes = [Double](repeating: 0, count: sampleCount / 2)
     private var latestLevels = [Double](repeating: 0, count: barCount)
+    private var pendingSamples: [Float]?
+    private var isAnalysisScheduled = false
 
     init() {
         transform = try! vDSP.DiscreteFourierTransform(
@@ -75,7 +78,14 @@ final class ClipLiveSpectrumAnalyzer: @unchecked Sendable {
             }
             samples[Self.sampleCount - copiedFrames + frame] = mixedSample / Float(channelCount)
         }
-        queue.async { [self] in analyze(samples) }
+        pendingSamplesLock.lock()
+        pendingSamples = samples
+        let shouldScheduleAnalysis = !isAnalysisScheduled
+        isAnalysisScheduled = true
+        pendingSamplesLock.unlock()
+
+        guard shouldScheduleAnalysis else { return }
+        queue.async { [self] in analyzePendingSamples() }
     }
 
     func snapshot() -> [Double] {
@@ -90,6 +100,21 @@ final class ClipLiveSpectrumAnalyzer: @unchecked Sendable {
             levelsLock.lock()
             latestLevels = [Double](repeating: 0, count: Self.barCount)
             levelsLock.unlock()
+        }
+    }
+
+    private func analyzePendingSamples() {
+        while true {
+            pendingSamplesLock.lock()
+            guard let samples = pendingSamples else {
+                isAnalysisScheduled = false
+                pendingSamplesLock.unlock()
+                return
+            }
+            pendingSamples = nil
+            pendingSamplesLock.unlock()
+
+            analyze(samples)
         }
     }
 

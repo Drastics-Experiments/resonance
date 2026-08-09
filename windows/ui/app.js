@@ -67,6 +67,8 @@ import {
 const api = window.likedSongs;
 const audio = document.querySelector("#audio");
 const clipEditorPreviewAudio = document.querySelector("#clipEditorPreview");
+const clipEditorVisualizerCanvas = document.querySelector("#clipEditorStageVisualizerCanvas");
+const clipEditorVisualizerContext = clipEditorVisualizerCanvas.getContext("2d", { alpha: true, desynchronized: true });
 const installedVideoPlayer = document.querySelector("#installedVideoPlayer");
 const localImportPreviewAudio = document.querySelector("#localImportPreview");
 const content = document.querySelector("#content");
@@ -207,6 +209,14 @@ let clipEditorPreviewRequest = 0;
 let clipEditorWaveformRequest = 0;
 let clipEditorVideoFrameRequest = 0;
 let clipEditorVisualizerFrame = 0;
+const CLIP_EDITOR_VISUALIZER_BAR_COUNT = 112;
+let clipEditorVisualizerPreviousTimestamp = 0;
+let clipEditorVisualizerBinRanges = null;
+let clipEditorVisualizerStaticLevels = new Float32Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT).fill(.08);
+let clipEditorVisualizerDisplayedLevels = new Float32Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT);
+let clipEditorVisualizerTargetLevels = new Float32Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT);
+let clipEditorVisualizerGradient = null;
+let clipEditorVisualizerGradientSize = "";
 let clipEditorAudioContext = null;
 let clipEditorAudioSource = null;
 let clipEditorAnalyser = null;
@@ -476,7 +486,7 @@ function refreshCustomSelect(control) {
   if (!controller) return;
   const selectedOption = controller.options.find((option) => option.value === controller.currentValue) || controller.options[0];
   if (selectedOption) controller.currentValue = selectedOption.value;
-  controller.value.textContent = selectedOption?.label || "Choose…";
+  controller.value.textContent = selectedOption?.triggerLabel || selectedOption?.label || "Choose…";
   controller.trigger.disabled = controller.disabled || !controller.options.length;
   controller.root.classList.toggle("disabled", controller.trigger.disabled);
   controller.root.dataset.value = controller.currentValue;
@@ -508,6 +518,7 @@ function setCustomSelectOptions(control, options, selectedValue = control?.value
   controller.options = (Array.isArray(options) ? options : []).map((option) => ({
     value: String(option?.value ?? ""),
     label: String(option?.label ?? option?.value ?? ""),
+    triggerLabel: String(option?.triggerLabel ?? ""),
     disabled: Boolean(option?.disabled),
   }));
   const requestedValue = String(selectedValue ?? "");
@@ -974,9 +985,9 @@ function clipEditorTrackIsVideo(track = clipEditorTrack()) {
 }
 
 function clipEditorWaveBars(levels = []) {
-  return Array.from({ length: 112 }, (_, index) => {
+  return Array.from({ length: CLIP_EDITOR_VISUALIZER_BAR_COUNT }, (_, index) => {
     const sourceIndex = levels.length > 1
-      ? Math.min(levels.length - 1, Math.round(index / 111 * (levels.length - 1)))
+      ? Math.min(levels.length - 1, Math.round(index / (CLIP_EDITOR_VISUALIZER_BAR_COUNT - 1) * (levels.length - 1)))
       : 0;
     const level = Number.isFinite(levels[sourceIndex]) ? levels[sourceIndex] : .08;
     const height = 10 + Math.round(Math.max(.04, Math.min(1, level)) * 86);
@@ -984,10 +995,80 @@ function clipEditorWaveBars(levels = []) {
   }).join("");
 }
 
+function sampledClipEditorVisualizerLevels(levels = []) {
+  const sampled = new Float32Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT);
+  for (let index = 0; index < sampled.length; index += 1) {
+    const sourceIndex = levels.length > 1
+      ? Math.min(levels.length - 1, Math.round(index / (sampled.length - 1) * (levels.length - 1)))
+      : 0;
+    sampled[index] = Number.isFinite(levels[sourceIndex])
+      ? Math.max(0, Math.min(1, levels[sourceIndex]))
+      : .08;
+  }
+  return sampled;
+}
+
+function drawClipEditorStageVisualizer(levels, { live = false } = {}) {
+  const canvas = clipEditorVisualizerCanvas;
+  const width = Math.max(0, canvas.clientWidth);
+  const height = Math.max(0, canvas.clientHeight);
+  if (!width || !height) return;
+
+  const pixelRatio = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+  const pixelWidth = Math.max(1, Math.round(width * pixelRatio));
+  const pixelHeight = Math.max(1, Math.round(height * pixelRatio));
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+    clipEditorVisualizerGradient = null;
+    clipEditorVisualizerGradientSize = "";
+  }
+
+  const context = clipEditorVisualizerContext;
+  if (!context) return;
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, width, height);
+  const gradientSize = `${pixelWidth}x${pixelHeight}`;
+  if (!clipEditorVisualizerGradient || clipEditorVisualizerGradientSize !== gradientSize) {
+    clipEditorVisualizerGradient = context.createLinearGradient(0, height, 0, 0);
+    clipEditorVisualizerGradient.addColorStop(0, "#4e1a95");
+    clipEditorVisualizerGradient.addColorStop(.72, "#bc5df8");
+    clipEditorVisualizerGradient.addColorStop(1, "#7140d4");
+    clipEditorVisualizerGradientSize = gradientSize;
+  }
+
+  const gap = 2;
+  const barWidth = Math.max((width - gap * (CLIP_EDITOR_VISUALIZER_BAR_COUNT - 1)) / CLIP_EDITOR_VISUALIZER_BAR_COUNT, 2);
+  context.beginPath();
+  for (let index = 0; index < CLIP_EDITOR_VISUALIZER_BAR_COUNT; index += 1) {
+    const level = Number.isFinite(levels[index]) ? levels[index] : 0;
+    const percentage = live
+      ? Math.max(5, Math.min(100, 7 + level * 93))
+      : 10 + Math.round(Math.max(.04, Math.min(1, level)) * 86);
+    const barHeight = height * percentage / 100;
+    const x = index * (barWidth + gap);
+    const top = height - barHeight;
+    const radius = Math.min(barWidth / 2, barHeight / 2);
+    context.moveTo(x, height);
+    context.lineTo(x, top + radius);
+    context.quadraticCurveTo(x, top, x + radius, top);
+    context.lineTo(x + barWidth - radius, top);
+    context.quadraticCurveTo(x + barWidth, top, x + barWidth, top + radius);
+    context.lineTo(x + barWidth, height);
+    context.closePath();
+  }
+  context.fillStyle = clipEditorVisualizerGradient;
+  context.fill();
+}
+
 function renderClipEditorWaveform(levels = []) {
   const bars = clipEditorWaveBars(levels);
   $("#clipEditorWaveBars").innerHTML = bars;
-  $("#clipEditorStageVisualizer").innerHTML = bars;
+  clipEditorVisualizerStaticLevels = sampledClipEditorVisualizerLevels(levels);
+  if (clipEditorPreviewAudio.paused || clipEditorPreviewAudio.ended) {
+    clipEditorVisualizerDisplayedLevels.set(clipEditorVisualizerStaticLevels);
+    drawClipEditorStageVisualizer(clipEditorVisualizerStaticLevels);
+  }
   updateClipEditorRange();
 }
 
@@ -1135,21 +1216,47 @@ async function ensureClipEditorLiveVisualizer() {
 }
 
 function animateClipEditorVisualizer() {
-  cancelAnimationFrame(clipEditorVisualizerFrame);
-  const draw = () => {
+  if (clipEditorVisualizerFrame) cancelAnimationFrame(clipEditorVisualizerFrame);
+  clipEditorVisualizerPreviousTimestamp = 0;
+  const draw = (timestamp) => {
     if (clipEditorPreviewAudio.paused || clipEditorPreviewAudio.ended || !clipEditorAnalyser || !clipEditorAnalyserData) {
       clipEditorVisualizerFrame = 0;
       return;
     }
     clipEditorAnalyser.getByteFrequencyData(clipEditorAnalyserData);
-    const bars = [...$("#clipEditorStageVisualizer").children];
-    bars.forEach((bar, index) => {
-      const low = Math.floor(index / bars.length * clipEditorAnalyserData.length * .72);
-      const high = Math.max(low + 1, Math.floor((index + 1) / bars.length * clipEditorAnalyserData.length * .72));
+    if (clipEditorVisualizerBinRanges?.dataLength !== clipEditorAnalyserData.length) {
+      const usableBins = Math.max(1, Math.floor(clipEditorAnalyserData.length * .72));
+      const lower = new Uint16Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT);
+      const upper = new Uint16Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT);
+      for (let index = 0; index < CLIP_EDITOR_VISUALIZER_BAR_COUNT; index += 1) {
+        lower[index] = Math.floor(index / CLIP_EDITOR_VISUALIZER_BAR_COUNT * usableBins);
+        upper[index] = Math.max(lower[index] + 1, Math.floor((index + 1) / CLIP_EDITOR_VISUALIZER_BAR_COUNT * usableBins));
+      }
+      clipEditorVisualizerBinRanges = { dataLength: clipEditorAnalyserData.length, lower, upper };
+    }
+
+    for (let index = 0; index < CLIP_EDITOR_VISUALIZER_BAR_COUNT; index += 1) {
+      const low = clipEditorVisualizerBinRanges.lower[index];
+      const high = clipEditorVisualizerBinRanges.upper[index];
       let energy = 0;
       for (let bin = low; bin < high; bin += 1) energy = Math.max(energy, clipEditorAnalyserData[bin]);
-      bar.style.height = `${Math.max(5, Math.min(100, 7 + energy / 255 * 93))}%`;
-    });
+      clipEditorVisualizerTargetLevels[index] = energy / 255;
+    }
+
+    if (!clipEditorVisualizerPreviousTimestamp) {
+      clipEditorVisualizerDisplayedLevels.set(clipEditorVisualizerTargetLevels);
+    } else {
+      const elapsed = Math.min(Math.max((timestamp - clipEditorVisualizerPreviousTimestamp) / 1000, 1 / 240), 1 / 15);
+      for (let index = 0; index < CLIP_EDITOR_VISUALIZER_BAR_COUNT; index += 1) {
+        const current = clipEditorVisualizerDisplayedLevels[index];
+        const target = clipEditorVisualizerTargetLevels[index];
+        const responseTime = target >= current ? .015 : .07;
+        const blend = 1 - Math.exp(-elapsed / responseTime);
+        clipEditorVisualizerDisplayedLevels[index] = current + (target - current) * blend;
+      }
+    }
+    clipEditorVisualizerPreviousTimestamp = timestamp;
+    drawClipEditorStageVisualizer(clipEditorVisualizerDisplayedLevels, { live: true });
     clipEditorVisualizerFrame = requestAnimationFrame(draw);
   };
   clipEditorVisualizerFrame = requestAnimationFrame(draw);
@@ -1371,6 +1478,11 @@ function syncClipRangePreviewButton() {
     cancelAnimationFrame(clipEditorVisualizerFrame);
     clipEditorVisualizerFrame = 0;
   }
+  if (!playing) {
+    clipEditorVisualizerPreviousTimestamp = 0;
+    clipEditorVisualizerDisplayedLevels.set(clipEditorVisualizerStaticLevels);
+    drawClipEditorStageVisualizer(clipEditorVisualizerStaticLevels);
+  }
   button.setAttribute("aria-pressed", String(playing));
   button.setAttribute("aria-label", playing ? "Pause preview" : "Play preview");
   button.disabled = clipEditorPreviewLoading || !clipEditorTrack()?.fileUrl;
@@ -1538,6 +1650,7 @@ function openClipEditor() {
   setCustomSelectOptions(select, visibleTracks.map((track) => ({
     value: track.id,
     label: `${track.title} — ${track.artist || "Unknown Artist"}`,
+    triggerLabel: track.title || "Unknown title",
   })), preferredTrack?.id);
   renderClipEditorTrack({ resetRange: true });
   $("#clipEditorSettings").hidden = true;
@@ -1547,7 +1660,10 @@ function openClipEditor() {
   $("#clipEditorDialog").classList.remove("preview-expanded");
   $("#clipEditorExpand").setAttribute("aria-pressed", "false");
   $("#clipEditorDialog").showModal();
-  requestAnimationFrame(() => (preferredTrack ? $("#previewClipRange") : $("#saveClipRange"))?.focus());
+  requestAnimationFrame(() => {
+    drawClipEditorStageVisualizer(clipEditorVisualizerStaticLevels);
+    (preferredTrack ? $("#previewClipRange") : $("#saveClipRange"))?.focus();
+  });
 }
 
 async function saveClipRange() {
@@ -1612,7 +1728,7 @@ function toggleClipEditorPopover(name) {
   help.hidden = !openHelp;
   $("#clipEditorSettingsButton").setAttribute("aria-expanded", String(openSettings));
   $("#clipEditorHelpButton").setAttribute("aria-expanded", String(openHelp));
-  if (openSettings) requestAnimationFrame(() => customSelectControllers.get($("#clipEditorTrack"))?.trigger?.focus());
+  if (openSettings) requestAnimationFrame(() => $("#clipEditorStartInput").focus());
   if (openHelp) requestAnimationFrame(() => $("#closeClipEditorHelp").focus());
 }
 
@@ -7388,6 +7504,12 @@ $("#clipEditorDialog").onclick = (event) => {
   }
 };
 $("#clipEditorDialog").oncancel = () => { void stopClipRangePreview(); };
+const clipEditorVisualizerResizeObserver = new ResizeObserver(() => {
+  if (clipEditorPreviewAudio.paused || clipEditorPreviewAudio.ended) {
+    drawClipEditorStageVisualizer(clipEditorVisualizerStaticLevels);
+  }
+});
+clipEditorVisualizerResizeObserver.observe(clipEditorVisualizerCanvas);
 $("#clipEditorWaveform").onpointerdown = (event) => {
   if (event.target.closest(".clip-editor-handle")) return;
   const seconds = clipEditorSecondsAtPointer(event);

@@ -702,6 +702,10 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   assert.match(htmlSource, /id="profileClipEditor"[\s\S]+Clip Editor/);
   assert.match(htmlSource, /id="clipEditorDialog"[\s\S]+id="clipEditorTrack"[\s\S]+id="clipEditorStartInput"[^>]+type="text"[\s\S]+id="clipEditorEndInput"[^>]+type="text"/);
+  assert.match(htmlSource, /class="clip-editor-title-picker"[\s\S]+id="clipEditorTitle"[\s\S]+id="clipEditorTrack"/);
+  assert.doesNotMatch(htmlSource, />My Clip<|\[Visualizer\]/);
+  assert.match(appSource, /triggerLabel: track\.title \|\| "Unknown title"/);
+  assert.match(styleSource, /\.clip-editor-title-picker \.resonance-select-trigger\s*\{/);
   assert.match(htmlSource, /id="clipEditorStartHandle"[^>]+role="slider"[\s\S]+id="clipEditorEndHandle"[^>]+role="slider"/);
   assert.doesNotMatch(htmlSource, /id="clipEditor(?:Start|End)" type="range"/);
   assert.match(htmlSource, /id="saveClipRange"[^>]+disabled/);
@@ -742,7 +746,13 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   assert.match(appSource, /event\.preventDefault\(\);[\s\S]+handle\.focus\(\);[\s\S]+handle\.setPointerCapture/);
   assert.match(appSource, /waveform\.getBoundingClientRect\(\)/);
   assert.doesNotMatch(styleSource, /\.clip-editor-ranges\s*\{/);
-  assert.match(appSource, /Array\.from\(\{ length: 112 \}/);
+  assert.match(appSource, /CLIP_EDITOR_VISUALIZER_BAR_COUNT = 112/);
+  assert.match(htmlSource, /id="clipEditorStageVisualizerCanvas"/);
+  assert.match(appSource, /getContext\("2d", \{ alpha: true, desynchronized: true \}\)/);
+  assert.match(appSource, /drawClipEditorStageVisualizer\(clipEditorVisualizerDisplayedLevels, \{ live: true \}\)/);
+  assert.match(appSource, /clipEditorVisualizerDisplayedLevels\.set\(clipEditorVisualizerStaticLevels\)/);
+  assert.doesNotMatch(appSource, /bar\.style\.height/);
+  assert.doesNotMatch(appSource, /clipEditorStageVisualizer"\)\.children/);
   assert.match(appSource, /const defaultStart = duration > 60 \? 15 : 0/);
   assert.match(appSource, /defaultStart \+ 45/);
   assert.match(appSource, /bar\.classList\.toggle\("selected"/);
@@ -759,6 +769,8 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   assert.doesNotMatch(styleSource, /\.clip-editor-stage-visualizer::after/);
   assert.doesNotMatch(styleSource, /\.clip-editor-stage-visualizer\s*\{[^}]*mask-image/);
   assert.doesNotMatch(styleSource, /\.clip-editor-stage-visualizer i\s*\{[^}]*box-shadow/);
+  assert.match(styleSource, /\.clip-editor-stage-visualizer\s*\{[^}]*contain: layout paint style/);
+  assert.match(styleSource, /\.clip-editor-stage-visualizer canvas\s*\{/);
 });
 
 test("keeps reviewed Windows empty, selection, filter, and metadata states truthful", () => {
