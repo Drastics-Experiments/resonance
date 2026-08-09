@@ -139,6 +139,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         var remoteLikedSongIDs: Set<String>?
         var dirtyRemoteLikeSongIDs: Set<String>?
         var likesDirty: Bool?
+        var clipRanges: [String: ClipRange]?
+        var dirtyClipRangeKeys: Set<String>?
+        var deletedClipRangeKeys: Set<String>?
     }
 
     private enum StoredLibraryLoadResult {
@@ -543,7 +546,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private let defaults: UserDefaults
     private let networkSession: URLSession
     private let serverCacheRoot: URL?
-    private let clipLibraryRoot: URL?
     private let shouldPersistServerCredentials: Bool
     nonisolated private static let persistenceCoordinator = PersistenceCoordinator()
     private let listeningHistoryDeviceID: String
@@ -593,6 +595,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var remoteLikedSongIDs: Set<String> = []
     private var dirtyRemoteLikeSongIDs: Set<String> = []
     private var likesDirty = false
+    private var clipRanges: [String: ClipRange] = [:]
+    private var dirtyClipRangeKeys: Set<String> = []
+    private var deletedClipRangeKeys: Set<String> = []
+    private var clipRangeMutationGeneration: UInt64 = 0
     private var serverCatalogRequestGeneration: UInt64 = 0
     private var serverUploadMutationGeneration: UInt64 = 0
     private var serverCatalogUploadMutations: [ServerCatalogUploadMutation] = []
@@ -607,7 +613,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         defaults: UserDefaults = .standard,
         networkSession: URLSession = .shared,
         serverCacheRoot: URL? = nil,
-        clipLibraryRoot: URL? = nil,
         persistServerCredentials: Bool = true,
         systemPlaybackController: (any MacSystemPlaybackControlling)? = nil
     ) {
@@ -615,7 +620,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         self.defaults = defaults
         self.networkSession = networkSession
         self.serverCacheRoot = serverCacheRoot
-        self.clipLibraryRoot = clipLibraryRoot
         self.shouldPersistServerCredentials = persistServerCredentials
         self.systemPlaybackController = systemPlaybackController
         if let storedDeviceID = defaults.string(forKey: Self.listeningHistoryDeviceIDKey),
@@ -751,6 +755,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             })
         }
         likesDirty = !dirtyRemoteLikeSongIDs.isEmpty
+        clipRanges = stored?.clipRanges ?? [:]
+        dirtyClipRangeKeys = stored?.dirtyClipRangeKeys ?? []
+        deletedClipRangeKeys = stored?.deletedClipRangeKeys ?? []
 
         super.init()
 
@@ -760,6 +767,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         repeatEnabled = defaults.bool(forKey: Self.repeatKey)
         position = defaults.double(forKey: Self.positionKey)
         playbackDuration = max(currentTrack?.duration ?? 0, 0)
+        if let currentTrack {
+            let bounds = playbackBounds(for: currentTrack, duration: playbackDuration)
+            position = min(max(position, bounds.start), bounds.end)
+        }
         playbackPositionState.update(to: position)
         historyTrackIDs = (defaults.stringArray(forKey: Self.historyKey) ?? [])
             .compactMap(UUID.init(uuidString:))
@@ -1060,6 +1071,45 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         persistLibrary()
         schedulePlaylistSync()
         return playlist
+    }
+
+    func clipRange(for track: Track) -> ClipRange? {
+        clipRanges[clipRangeKey(for: track)]
+    }
+
+    func saveClipRange(for track: Track, start: TimeInterval, end: TimeInterval) {
+        guard let normalized = try? ClipRangePolicy.normalized(
+            start: start,
+            end: end,
+            sourceDuration: track.duration
+        ) else { return }
+        let bounds = ClipPlaybackPolicy.Bounds(start: normalized.lowerBound, end: normalized.upperBound)
+        let key = clipRangeKey(for: track)
+        clipRanges[key] = ClipRange(startSeconds: bounds.start, endSeconds: bounds.end)
+        clipRangeMutationGeneration &+= 1
+        if track.remoteID != nil {
+            dirtyClipRangeKeys.insert(key)
+            deletedClipRangeKeys.remove(key)
+        }
+        if currentTrackID == track.id, position < bounds.start || position >= bounds.end {
+            seekToTime(bounds.start)
+        }
+        persistLibrary()
+        schedulePlaylistSync()
+        publishSystemPlayback()
+    }
+
+    func clearClipRange(for track: Track) {
+        let key = clipRangeKey(for: track)
+        guard clipRanges.removeValue(forKey: key) != nil else { return }
+        clipRangeMutationGeneration &+= 1
+        if track.remoteID != nil {
+            dirtyClipRangeKeys.insert(key)
+            deletedClipRangeKeys.insert(key)
+        }
+        persistLibrary()
+        schedulePlaylistSync()
+        publishSystemPlayback()
     }
 
     func deletePlaylist(_ playlist: Playlist) {
@@ -1554,7 +1604,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         remoteStreamSongID = song.id
         remoteStreamAuthorizationLease = authorizationLease
         currentTrackID = track.id
-        position = 0
+        position = playbackBounds(for: track).start
         playbackDuration = max(track.duration, 0)
         let generation = remoteStreamLoadGeneration
         let profileID = syncProfileID
@@ -1665,6 +1715,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 }
             }
             remoteStreamPreparationTask = nil
+            let bounds = playbackBounds(for: track, duration: playbackDuration)
+            position = min(max(position, bounds.start), bounds.end)
+            await player.seek(
+                to: CMTime(seconds: position, preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
             player.playImmediately(atRate: playbackRate)
             isPlaying = true
             beginListeningSession(for: track)
@@ -1709,24 +1766,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private func remoteStreamDidFinish(item: AVPlayerItem, generation: UInt64) {
         guard generation == remoteStreamLoadGeneration,
               remoteStreamPlayer?.currentItem === item else { return }
-        updateListeningSession(flush: true)
-        if repeatEnabled, let player = remoteStreamPlayer {
-            endListeningSession()
-            player.seek(to: .zero)
-            position = 0
-            playbackDiscontinuities.send(0)
-            player.playImmediately(atRate: playbackRate)
-            isPlaying = true
-            if let track = currentTrack { beginListeningSession(for: track) }
-            startPlaybackTimer()
-            publishSystemPlayback()
-            return
-        }
-        position = playbackDuration
-        isPlaying = false
-        stopPlaybackTimer()
-        publishSystemPlayback()
-        next()
+        finishCurrentPlaybackRange()
     }
 
     private func remoteStreamDidFail(
@@ -2370,9 +2410,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         guard let track = currentTrack ?? tracks.first else { return }
         if remoteStreamTrack?.id == track.id {
             guard let remoteStreamPlayer else { return }
-            if playbackDuration > 0, position >= playbackDuration - 0.05 {
-                remoteStreamPlayer.seek(to: .zero)
-                position = 0
+            let bounds = playbackBounds(for: track, duration: playbackDuration)
+            if position >= bounds.end - 0.05 || position < bounds.start {
+                remoteStreamPlayer.seek(
+                    to: CMTime(seconds: bounds.start, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                )
+                position = bounds.start
             }
             remoteStreamPlayer.playImmediately(atRate: playbackRate)
             isPlaying = true
@@ -2602,7 +2647,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     func seek(to fraction: Double) {
         guard let track = currentTrack else { return }
         let duration = playbackDuration > 0 ? playbackDuration : track.duration
-        seekToTime(duration * fraction.clamped(to: 0...1))
+        seekToTime(ClipPlaybackPolicy.position(
+            fraction: fraction,
+            within: playbackBounds(for: track, duration: duration)
+        ))
     }
 
     func seekToTime(_ requestedTime: TimeInterval) {
@@ -2610,7 +2658,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         updateListeningSession()
         let safeTime = requestedTime.isFinite ? requestedTime : 0
         let duration = playbackDuration > 0 ? playbackDuration : track.duration
-        position = safeTime.clamped(to: 0...max(duration, 0))
+        let bounds = playbackBounds(for: track, duration: duration)
+        position = safeTime.clamped(to: bounds.start...bounds.end)
         if loadedAudioTrackID == track.id {
             audioPlayer?.currentTime = position
         }
@@ -2718,66 +2767,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         tracks[index].artworkData = artworkData
         persistLibrary()
         return tracks[index]
-    }
-
-    @discardableResult
-    func createClip(
-        from trackID: UUID,
-        startTime: TimeInterval,
-        endTime: TimeInterval,
-        title rawTitle: String
-    ) async throws -> Track {
-        guard let source = tracks.first(where: { $0.id == trackID }),
-              let sourceURL = source.fileURL,
-              FileManager.default.fileExists(atPath: sourceURL.path) else {
-            throw ClipEditorError.missingSource
-        }
-        let range = try ClipRangePolicy.normalized(
-            start: startTime,
-            end: endTime,
-            sourceDuration: source.duration
-        )
-        let trimmedTitle = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        let title = trimmedTitle.isEmpty ? "\(source.title) Clip" : trimmedTitle
-        let directory = try clipDirectory()
-        let destination = directory.appendingPathComponent(
-            "\(Self.safeClipFilenameStem(title))-\(UUID().uuidString.prefix(8)).m4a",
-            isDirectory: false
-        )
-
-        do {
-            try await ClipAudioProcessor.exportM4AClip(
-                input: sourceURL,
-                output: destination,
-                range: range,
-                title: title,
-                artist: source.artist,
-                album: source.album,
-                artwork: source.artworkData
-            )
-            let player = try AVAudioPlayer(contentsOf: destination)
-            guard player.duration > 0 else { throw ClipEditorError.exportFailed("The exported file is empty.") }
-            let clip = Track(
-                title: title,
-                artist: source.artist,
-                album: source.album,
-                duration: player.duration,
-                kind: .audio,
-                artwork: source.artwork,
-                artworkData: source.artworkData,
-                artworkURL: source.artworkURL,
-                fileURL: destination.standardizedFileURL,
-                dateAdded: .now
-            )
-            tracks.append(clip)
-            if currentTrackID == nil { currentTrackID = clip.id }
-            persistLibrary()
-            reconcileShuffleOrderIfNeeded()
-            return clip
-        } catch {
-            try? FileManager.default.removeItem(at: destination)
-            throw error
-        }
     }
 
     @discardableResult
@@ -2967,26 +2956,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         guard player === audioPlayer else { return }
-        updateListeningSession(flush: true)
-        position = playbackDuration > 0 ? playbackDuration : player.duration
-        isPlaying = false
-        stopPlaybackTimer()
-        if repeatEnabled, let track = currentTrack {
-            endListeningSession()
-            position = 0
-            player.currentTime = 0
-            playbackDiscontinuities.send(0)
-            isPlaying = player.play()
-            if isPlaying {
-                beginListeningSession(for: track)
-                startPlaybackTimer()
-            }
-            persistPlaybackPosition()
-            publishSystemPlayback()
-            return
-        }
-        publishSystemPlayback()
-        next()
+        finishCurrentPlaybackRange()
     }
 
     func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
@@ -3105,7 +3075,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         if recordingHistory { recordCurrentTrackInHistory(whenSwitchingTo: track.id) }
         stopCurrentPlayback()
         currentTrackID = track.id
-        position = 0
+        position = playbackBounds(for: track).start
         persistPlaybackPosition()
         if shuffleEnabled, !preservingShuffleQueue { rebuildShuffleOrder() }
         beginPlayback(of: track)
@@ -3134,8 +3104,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
         synchronizePlaybackDuration(for: track, playerDuration: audioPlayer?.duration)
 
-        if !resuming { audioPlayer?.currentTime = 0 }
-        if playbackDuration > 0, position >= playbackDuration { position = 0 }
+        let bounds = playbackBounds(for: track, duration: playbackDuration)
+        if !resuming || position < bounds.start || position >= bounds.end { position = bounds.start }
         audioPlayer?.currentTime = position
         isPlaying = audioPlayer?.play() ?? false
         if isPlaying {
@@ -3212,6 +3182,46 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         systemPlaybackController?.publish(nil)
     }
 
+    private func finishCurrentPlaybackRange() {
+        guard let track = currentTrack else { return }
+        let bounds = playbackBounds(for: track, duration: playbackDuration)
+        updateListeningSession(flush: true)
+        position = bounds.end
+
+        if repeatEnabled {
+            endListeningSession()
+            position = bounds.start
+            if remoteStreamTrack?.id == track.id, let remoteStreamPlayer {
+                remoteStreamPlayer.seek(
+                    to: CMTime(seconds: bounds.start, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                )
+                remoteStreamPlayer.playImmediately(atRate: playbackRate)
+                isPlaying = true
+            } else if let audioPlayer {
+                audioPlayer.currentTime = bounds.start
+                isPlaying = audioPlayer.play()
+            }
+            playbackDiscontinuities.send(bounds.start)
+            if isPlaying {
+                beginListeningSession(for: track)
+                startPlaybackTimer()
+            }
+            persistPlaybackPosition()
+            publishSystemPlayback()
+            return
+        }
+
+        remoteStreamPlayer?.pause()
+        audioPlayer?.pause()
+        isPlaying = false
+        stopPlaybackTimer()
+        persistPlaybackPosition()
+        publishSystemPlayback()
+        next()
+    }
+
     private func startPlaybackTimer() {
         stopPlaybackTimer()
         let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
@@ -3223,6 +3233,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     if currentTime.isFinite { self.position = max(currentTime, 0) }
                 } else {
                     self.position = self.audioPlayer?.currentTime ?? self.position
+                }
+                if let track = self.currentTrack,
+                   ClipPlaybackPolicy.reachedEnd(
+                    position: self.position,
+                    bounds: self.playbackBounds(for: track, duration: self.playbackDuration)
+                   ) {
+                    self.finishCurrentPlaybackRange()
+                    return
                 }
                 self.updateListeningSession()
                 self.persistPlaybackPositionIfNeeded()
@@ -3407,7 +3425,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             syncProfileName: activeSyncProfileName,
             remoteLikedSongIDs: remoteLikedSongIDs,
             dirtyRemoteLikeSongIDs: dirtyRemoteLikeSongIDs,
-            likesDirty: likesDirty
+            likesDirty: likesDirty,
+            clipRanges: clipRanges,
+            dirtyClipRangeKeys: dirtyClipRangeKeys,
+            deletedClipRangeKeys: deletedClipRangeKeys
         )
         persist(stored, key: Self.libraryKey)
     }
@@ -3909,6 +3930,37 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         return ServerSongIdentity(serverURL: base, profileID: syncProfileID, songID: songID)
     }
 
+    private func clipRangeKey(for track: Track) -> String {
+        if let identity = track.remoteIdentity { return clipRangeKey(identity: identity) }
+        return "local:\(track.id.uuidString.lowercased())"
+    }
+
+    private func clipRangeKey(identity: ServerSongIdentity) -> String {
+        "origin=\(identity.origin)|profile=\(identity.profileID)|remote:\(identity.songID)"
+    }
+
+    private func clipRangeKey(remoteID: String) -> String {
+        guard let identity = activeRemoteIdentity(songID: remoteID) else {
+            return "unscoped|profile=\(syncProfileID)|remote:\(remoteID)"
+        }
+        return clipRangeKey(identity: identity)
+    }
+
+    private func isActiveProfileClipKey(_ key: String) -> Bool {
+        guard let base = try? normalizedServerURL(),
+              let origin = ServerSongIdentity.normalizedOrigin(base) else { return false }
+        return key.hasPrefix("origin=\(origin)|profile=\(syncProfileID)|remote:")
+    }
+
+    private func remoteSongID(fromClipKey key: String) -> String? {
+        guard let marker = key.range(of: "|remote:"), !key[marker.upperBound...].isEmpty else { return nil }
+        return String(key[marker.upperBound...])
+    }
+
+    private func playbackBounds(for track: Track, duration: TimeInterval? = nil) -> ClipPlaybackPolicy.Bounds {
+        ClipPlaybackPolicy.bounds(range: clipRange(for: track), duration: duration ?? track.duration)
+    }
+
     private func activeRemoteTrack(songID: String) -> Track? {
         guard let identity = activeRemoteIdentity(songID: songID) else { return nil }
         return tracks.first { $0.remoteIdentity == identity }
@@ -4322,6 +4374,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 let submittedGeneration = playlistMutationGeneration
                 let submittedDirtyIDs = dirtyPlaylistIDs
                 let submittedDeletedIDs = deletedPlaylistIDs
+                let submittedClipGeneration = clipRangeMutationGeneration
+                let submittedDirtyClipKeys = dirtyClipRangeKeys.filter(isActiveProfileClipKey)
                 switch try await putRemotePlaylists(merge.document, base: base) {
                 case .updated(let updated):
                     guard playlistSyncContextMatches(serverKey: serverKey, token: syncToken) else {
@@ -4329,10 +4383,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         playlistSyncPending = true
                         return
                     }
-                    if playlistMutationGeneration == submittedGeneration {
+                    if playlistMutationGeneration == submittedGeneration,
+                       clipRangeMutationGeneration == submittedClipGeneration {
                         dirtyPlaylistIDs.subtract(submittedDirtyIDs)
                         deletedPlaylistIDs.subtract(submittedDeletedIDs)
                         likesDirty = false
+                        dirtyClipRangeKeys.subtract(submittedDirtyClipKeys)
+                        deletedClipRangeKeys.subtract(submittedDirtyClipKeys)
                         applyRemotePlaylists(updated)
                         playlistSyncStatus = "Synced \(updated.playlists.count) playlist\(updated.playlists.count == 1 ? "" : "s")"
                     } else {
@@ -4342,7 +4399,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         applyRemotePlaylists(
                             updated,
                             preservingLocalIDs: dirtyPlaylistIDs,
-                            preservingLocalLikes: likesDirty
+                            preservingLocalLikes: likesDirty,
+                            preservingLocalClipKeys: dirtyClipRangeKeys
                         )
                         playlistSyncStatus = "Playlist changes pending sync…"
                         playlistSyncPending = true
@@ -4460,14 +4518,37 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             likedSongIDs = remote.likedSongIDs
         }
 
+        var remoteClipRanges = remote.clipRanges.reduce(into: [String: ClipRange]()) { result, payload in
+            result[payload.songID] = ClipRange(
+                startSeconds: payload.startSeconds,
+                endSeconds: payload.endSeconds
+            )
+        }
+        let activeDirtyClipKeys = dirtyClipRangeKeys.filter(isActiveProfileClipKey)
+        for key in activeDirtyClipKeys {
+            guard let remoteID = remoteSongID(fromClipKey: key) else { continue }
+            if deletedClipRangeKeys.contains(key) {
+                remoteClipRanges.removeValue(forKey: remoteID)
+            } else if let range = clipRanges[key] {
+                remoteClipRanges[remoteID] = range
+            }
+        }
+
         return (
             RemotePlaylistsDocument(
                 profileID: syncProfileID,
                 revision: remote.revision,
                 playlists: merged,
-                likedSongIDs: likedSongIDs
+                likedSongIDs: likedSongIDs,
+                clipRanges: remoteClipRanges.map {
+                    RemoteClipRange(
+                        songID: $0.key,
+                        startSeconds: $0.value.startSeconds,
+                        endSeconds: $0.value.endSeconds
+                    )
+                }
             ),
-            needsUpload
+            needsUpload || !activeDirtyClipKeys.isEmpty
         )
     }
 
@@ -4495,7 +4576,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private func applyRemotePlaylists(
         _ document: RemotePlaylistsDocument,
         preservingLocalIDs: Set<UUID> = [],
-        preservingLocalLikes: Bool = false
+        preservingLocalLikes: Bool = false,
+        preservingLocalClipKeys: Set<String> = []
     ) {
         let existing = Dictionary(uniqueKeysWithValues: playlists.filter { !$0.isSystem }.map { ($0.id, $0) })
         let systemPlaylists = playlists.filter(\.isSystem)
@@ -4552,6 +4634,21 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 orderedFavorites.append(trackID)
             }
             playlists[likedIndex].trackIDs = orderedFavorites
+        }
+
+        let activePreservedClipKeys = preservingLocalClipKeys.filter(isActiveProfileClipKey)
+        clipRanges = clipRanges.filter { key, _ in
+            !isActiveProfileClipKey(key) || activePreservedClipKeys.contains(key)
+        }
+        for payload in document.clipRanges {
+            let key = clipRangeKey(remoteID: payload.songID)
+            guard !activePreservedClipKeys.contains(key),
+                  !deletedClipRangeKeys.contains(key),
+                  payload.endSeconds - payload.startSeconds >= ClipRangePolicy.minimumDuration else { continue }
+            clipRanges[key] = ClipRange(
+                startSeconds: payload.startSeconds,
+                endSeconds: payload.endSeconds
+            )
         }
 
         playlistRevision = document.revision
@@ -5062,29 +5159,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             .appendingPathComponent(safeName, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
-    }
-
-    private func clipDirectory() throws -> URL {
-        let directory: URL
-        if let clipLibraryRoot {
-            directory = clipLibraryRoot
-        } else {
-            directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("Liked Songs", isDirectory: true)
-                .appendingPathComponent("Clips", isDirectory: true)
-        }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
-    }
-
-    private static func safeClipFilenameStem(_ title: String) -> String {
-        let allowed = title.map { character in
-            character.isLetter || character.isNumber || character == " " || character == "-" || character == "_"
-                ? character
-                : "-"
-        }
-        let stem = String(allowed.prefix(80)).trimmingCharacters(in: .whitespacesAndNewlines)
-        return stem.isEmpty ? "Clip" : stem
     }
 
     private static var credentialStoreURL: URL {

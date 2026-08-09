@@ -1,9 +1,18 @@
 package mov.unblocked.resonance.ui
 
+import android.graphics.Bitmap
+import android.media.AudioFormat
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,6 +39,11 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -58,24 +72,31 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.preferredFrameRate
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -85,7 +106,10 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import java.io.File
+import java.nio.ByteOrder
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import mov.unblocked.resonance.data.LinkImportStage
 import mov.unblocked.resonance.data.LinkImportInput
 import mov.unblocked.resonance.data.ServerUploadMode
@@ -101,6 +125,825 @@ import mov.unblocked.resonance.playback.PlaybackVolumePolicy
 
 @Composable
 fun ClipEditorDialog(
+    state: ResonanceUiState,
+    actions: ResonanceActions,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val focus = LocalFocusManager.current
+    var selectedTrackId by remember { mutableStateOf(state.currentTrackId ?: state.tracks.firstOrNull()?.id) }
+    val selectedTrack = state.tracks.firstOrNull { it.id == selectedTrackId }
+    var startMs by remember { mutableLongStateOf(0L) }
+    var endMs by remember { mutableLongStateOf(selectedTrack?.durationMs?.takeIf { it > 0L } ?: 0L) }
+    var startText by remember { mutableStateOf("0:00") }
+    var endText by remember { mutableStateOf(selectedTrack?.durationMs?.let(::clipTime) ?: "0:00") }
+    var trackMenu by remember { mutableStateOf(false) }
+    var previewing by remember { mutableStateOf(false) }
+    var previewPositionMs by remember { mutableLongStateOf(0L) }
+    var resumeMainAfterPreview by remember { mutableStateOf(false) }
+    var settingsOpen by remember { mutableStateOf(false) }
+    var helpOpen by remember { mutableStateOf(false) }
+    var previewExpanded by remember { mutableStateOf(false) }
+    var waveformSamples by remember { mutableStateOf<List<Float>>(emptyList()) }
+    var videoFrames by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
+    var savedStartMs by remember { mutableLongStateOf(0L) }
+    var savedEndMs by remember { mutableLongStateOf(0L) }
+    var saveMessage by remember { mutableStateOf<String?>(null) }
+    val previewPlayer = remember { ExoPlayer.Builder(context).build() }
+
+    fun updateTexts() {
+        startText = clipTime(startMs)
+        endText = clipTime(endMs)
+    }
+
+    fun resetRange(track: Track?) {
+        if (track == null || track.durationMs <= 0L) {
+            startMs = 0L
+            endMs = 0L
+            previewPositionMs = 0L
+            startText = "--:--"
+            endText = "--:--"
+            return
+        }
+        val saved = state.clipRangesByTrackId[track.id]
+        val defaultStart = if (track.durationMs > 60_000) 15_000L else 0L
+        startMs = saved?.startMs ?: defaultStart
+        endMs = saved?.endMs ?: minOf(track.durationMs, defaultStart + 45_000L)
+        savedStartMs = saved?.startMs ?: 0L
+        savedEndMs = saved?.endMs ?: track.durationMs
+        if (endMs - startMs < 250) {
+            startMs = 0
+            endMs = track.durationMs
+        }
+        previewPositionMs = startMs
+        saveMessage = null
+        updateTexts()
+    }
+
+    fun stopPreview(resumeMain: Boolean = true) {
+        previewPlayer.pause()
+        previewing = false
+        if (resumeMain && resumeMainAfterPreview) actions.togglePlayPause()
+        resumeMainAfterPreview = false
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            previewPlayer.release()
+            if (resumeMainAfterPreview) actions.togglePlayPause()
+        }
+    }
+    LaunchedEffect(state.volume) {
+        previewPlayer.volume = PlaybackVolumePolicy.gainForSlider(state.volume)
+    }
+    LaunchedEffect(selectedTrackId) {
+        stopPreview()
+        resetRange(selectedTrack)
+        val path = selectedTrack?.let { state.trackFilePathsById[it.id] }
+        waveformSamples = emptyList()
+        videoFrames = emptyList()
+        if (path != null) {
+            previewPlayer.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(path))))
+            previewPlayer.prepare()
+            previewPlayer.seekTo(startMs)
+            if (selectedTrack?.let(::isVideoClipTrack) == true) {
+                videoFrames = extractAndroidClipVideoFrames(path, selectedTrack.durationMs)
+            } else {
+                waveformSamples = extractAndroidClipWaveform(path)
+            }
+        } else {
+            previewPlayer.clearMediaItems()
+        }
+    }
+    LaunchedEffect(previewing, endMs) {
+        while (previewing) {
+            previewPositionMs = previewPlayer.currentPosition.coerceIn(startMs, endMs)
+            if (previewPlayer.playbackState == Player.STATE_ENDED || previewPlayer.currentPosition + 20 >= endMs) {
+                if (previewPlayer.currentPosition + 20 >= endMs) previewPositionMs = endMs
+                stopPreview()
+                break
+            }
+            delay(50)
+        }
+    }
+
+    Dialog(
+        onDismissRequest = {
+            stopPreview()
+            onDismiss()
+        },
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF03040A).copy(alpha = .92f))
+                .padding(horizontal = 8.dp, vertical = 10.dp),
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = Color(0xFF080910),
+                shape = RoundedCornerShape(18.dp),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = .08f)),
+                tonalElevation = 8.dp,
+            ) {
+                Column(Modifier.fillMaxSize()) {
+                    CinematicClipHeader(
+                        saveEnabled = selectedTrack?.durationMs?.let { it >= 250 } == true
+                            && (startMs != savedStartMs || endMs != savedEndMs),
+                        onDone = {
+                            focus.clearFocus()
+                            stopPreview()
+                            onDismiss()
+                        },
+                        onSave = {
+                            val track = selectedTrack ?: return@CinematicClipHeader
+                            focus.clearFocus()
+                            stopPreview()
+                            if (startMs <= 0L && endMs >= track.durationMs) {
+                                actions.clearClipRange(track.id)
+                                savedStartMs = 0L
+                                savedEndMs = track.durationMs
+                                saveMessage = "Saved full-song playback for ${activeSyncProfileName(state)}."
+                            } else {
+                                actions.saveClipRange(track.id, startMs, endMs)
+                                savedStartMs = startMs
+                                savedEndMs = endMs
+                                saveMessage = "Saved ${clipTime(startMs)}–${clipTime(endMs)} for ${activeSyncProfileName(state)}."
+                            }
+                        },
+                        onHelp = { helpOpen = !helpOpen; settingsOpen = false },
+                        onSettings = { settingsOpen = !settingsOpen; helpOpen = false },
+                    )
+
+                    if (selectedTrack == null) {
+                        ToolEmpty(
+                            "No songs to edit",
+                            "Import or download a song, then return to create a playback range.",
+                        )
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            if (selectedTrack.durationMs <= 0L) {
+                                Text(
+                                    "Resonance couldn't read this song's duration. Re-import it or repair its metadata before setting a clip range.",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
+                                    fontSize = 13.sp,
+                                )
+                            } else {
+                                CinematicClipStage(
+                                    track = selectedTrack,
+                                    artworkPath = state.artworkPathsByTrackId[selectedTrack.id],
+                                    player = previewPlayer,
+                                    waveformSamples = waveformSamples,
+                                    isPlaying = previewing,
+                                    expanded = previewExpanded,
+                                    positionMs = previewPositionMs,
+                                    endMs = endMs,
+                                    enabled = state.trackFilePathsById[selectedTrack.id] != null,
+                                    onToggle = {
+                                        if (previewing) {
+                                            stopPreview()
+                                        } else {
+                                            resumeMainAfterPreview = state.isPlaying
+                                            if (state.isPlaying) actions.togglePlayPause()
+                                            if (previewPositionMs !in startMs until endMs) {
+                                                previewPositionMs = startMs
+                                                previewPlayer.seekTo(startMs)
+                                            }
+                                            previewPlayer.play()
+                                            previewing = true
+                                        }
+                                    },
+                                    onSkipStart = {
+                                        previewPositionMs = startMs
+                                        previewPlayer.seekTo(startMs)
+                                    },
+                                    onSkipEnd = {
+                                        previewPositionMs = (endMs - 10).coerceAtLeast(startMs)
+                                        previewPlayer.seekTo(previewPositionMs)
+                                    },
+                                    onExpand = { previewExpanded = !previewExpanded },
+                                )
+
+                                if (!previewExpanded) {
+                                    CinematicClipTimeline(
+                                        track = selectedTrack,
+                                        waveformSamples = waveformSamples,
+                                        videoFrames = videoFrames,
+                                        startMs = startMs,
+                                        endMs = endMs,
+                                        playheadMs = previewPositionMs,
+                                        onRangeChange = { start, end ->
+                                            stopPreview()
+                                            startMs = start
+                                            endMs = end
+                                            previewPositionMs = start
+                                            previewPlayer.seekTo(start)
+                                            updateTexts()
+                                            saveMessage = null
+                                        },
+                                        onSeek = { position ->
+                                            previewPositionMs = position
+                                            previewPlayer.seekTo(position)
+                                        },
+                                    )
+                                }
+
+                                Text(
+                                    saveMessage ?: "Unsaved changes are discarded by Done. The original media file is never changed.",
+                                    modifier = Modifier.padding(horizontal = 3.dp, vertical = 2.dp),
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .54f),
+                                    fontSize = 10.sp,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (settingsOpen && selectedTrack != null) {
+                CinematicClipOverlay(onOutsideClick = { settingsOpen = false }) {
+                    Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
+                        CinematicOverlayHeader("CLIP SETTINGS", "Fine tune your clip") { settingsOpen = false }
+                        Eyebrow("Song")
+                        Box {
+                            OutlinedButton(onClick = { trackMenu = true }, modifier = Modifier.fillMaxWidth()) {
+                                Text(selectedTrack.title + " — " + selectedTrack.artist, maxLines = 1)
+                            }
+                            DropdownMenu(expanded = trackMenu, onDismissRequest = { trackMenu = false }) {
+                                state.tracks.forEach { track ->
+                                    DropdownMenuItem(
+                                        text = { Text(track.title + " — " + track.artist) },
+                                        onClick = { selectedTrackId = track.id; trackMenu = false },
+                                    )
+                                }
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            ClipTimeField(
+                                "START",
+                                startText,
+                                { startText = it },
+                                {
+                                    parseClipTime(startText)?.let {
+                                        stopPreview()
+                                        startMs = it.coerceIn(0, (endMs - 250).coerceAtLeast(0))
+                                        previewPositionMs = startMs
+                                        previewPlayer.seekTo(startMs)
+                                    }
+                                    updateTexts()
+                                    saveMessage = null
+                                },
+                                Modifier.weight(1f),
+                            )
+                            ClipTimeField(
+                                "END",
+                                endText,
+                                { endText = it },
+                                {
+                                    parseClipTime(endText)?.let {
+                                        stopPreview()
+                                        endMs = it.coerceIn(startMs + 250, selectedTrack.durationMs)
+                                        previewPositionMs = startMs
+                                        previewPlayer.seekTo(startMs)
+                                    }
+                                    updateTexts()
+                                    saveMessage = null
+                                },
+                                Modifier.weight(1f),
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column {
+                                Eyebrow("Clip Length")
+                                Text(clipTime(endMs - startMs), color = Color(0xFFB56AFF), fontWeight = FontWeight.Bold)
+                            }
+                            Spacer(Modifier.weight(1f))
+                            OutlinedButton(onClick = {
+                                stopPreview()
+                                startMs = 0
+                                endMs = selectedTrack.durationMs
+                                previewPositionMs = startMs
+                                previewPlayer.seekTo(startMs)
+                                updateTexts()
+                                saveMessage = null
+                            }) { Text("Use Full Song") }
+                        }
+                    }
+                }
+            }
+
+            if (helpOpen) {
+                CinematicClipOverlay(onOutsideClick = { helpOpen = false }) {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        CinematicOverlayHeader("HOW IT WORKS", "Create your perfect playback range") { helpOpen = false }
+                        Text(
+                            "Drag the yellow handles to choose a range. Tap the waveform to scrub, then use the center controls to preview exactly what will play.",
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
+                            fontSize = 13.sp,
+                        )
+                        Text(
+                            "Save updates playback for the active profile without changing the media file. Done closes the editor and discards anything not saved.",
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
+                            fontSize = 13.sp,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CinematicClipHeader(
+    saveEnabled: Boolean,
+    onDone: () -> Unit,
+    onSave: () -> Unit,
+    onHelp: () -> Unit,
+    onSettings: () -> Unit,
+) {
+    Box(Modifier.fillMaxWidth().height(50.dp).padding(horizontal = 8.dp)) {
+        TextButton(onClick = onDone, modifier = Modifier.align(Alignment.CenterStart)) {
+            Text("Done", color = Color.White, fontWeight = FontWeight.Bold)
+        }
+        Text("My Clip", modifier = Modifier.align(Alignment.Center), color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+        Row(modifier = Modifier.align(Alignment.CenterEnd), verticalAlignment = Alignment.CenterVertically) {
+            Button(
+                onClick = onSave,
+                enabled = saveEnabled,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7942DF)),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 13.dp, vertical = 0.dp),
+                modifier = Modifier.height(34.dp),
+            ) { Text("Save", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
+            IconButton(onClick = onHelp) {
+                Surface(shape = RoundedCornerShape(999.dp), color = Color.Transparent, border = BorderStroke(1.5.dp, Color.White.copy(alpha = .9f))) {
+                    Text("?", modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp), color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
+            IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, contentDescription = "Clip settings", tint = Color.White) }
+        }
+    }
+}
+
+@Composable
+private fun CinematicClipStage(
+    track: Track,
+    artworkPath: String?,
+    player: ExoPlayer,
+    waveformSamples: List<Float>,
+    isPlaying: Boolean,
+    expanded: Boolean,
+    positionMs: Long,
+    endMs: Long,
+    enabled: Boolean,
+    onToggle: () -> Unit,
+    onSkipStart: () -> Unit,
+    onSkipEnd: () -> Unit,
+    onExpand: () -> Unit,
+) {
+    Surface(
+        color = Color(0xFF090A10),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = .09f)),
+    ) {
+        Column {
+            if (isVideoClipTrack(track)) {
+                Box(Modifier.fillMaxWidth().height(if (expanded) 500.dp else 230.dp)) {
+                    ClipVideoPreview(player, isPlaying, track.title)
+                }
+            } else {
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(if (expanded) 500.dp else 230.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CinematicAndroidVisualizer(
+                        samples = waveformSamples,
+                        isPlaying = isPlaying,
+                        positionMs = positionMs,
+                        durationMs = track.durationMs,
+                        player = player,
+                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Artwork(
+                            path = artworkPath,
+                            modifier = Modifier.size(if (expanded) 176.dp else 116.dp).clip(RoundedCornerShape(if (expanded) 24.dp else 17.dp)),
+                        )
+                        Text(track.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = if (expanded) 23.sp else 18.sp, maxLines = 1)
+                        Text(track.artist, color = Color.White.copy(alpha = .86f), fontSize = if (expanded) 17.sp else 14.sp, maxLines = 1)
+                        Text("[Visualizer]", color = Color(0xFFB56AFF), fontSize = 14.sp)
+                    }
+                }
+            }
+            Box(
+                modifier = Modifier.fillMaxWidth().height(54.dp).background(Color(0xFF0D0E15)).padding(horizontal = 14.dp),
+            ) {
+                Row(modifier = Modifier.align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
+                    Text(clipTime(positionMs), color = Color(0xFFAC75FF), fontSize = 11.sp)
+                    Text("  /  ", color = Color.White.copy(alpha = .35f), fontSize = 11.sp)
+                    Text(clipTime(endMs), color = Color.White, fontSize = 11.sp)
+                }
+                Row(modifier = Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onSkipStart, enabled = enabled) { Icon(Icons.Default.SkipPrevious, contentDescription = "Go to clip start", tint = Color.White) }
+                    IconButton(onClick = onToggle, enabled = enabled) { Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = if (isPlaying) "Pause preview" else "Play preview", tint = Color.White, modifier = Modifier.size(30.dp)) }
+                    IconButton(onClick = onSkipEnd, enabled = enabled) { Icon(Icons.Default.SkipNext, contentDescription = "Go to clip end", tint = Color.White) }
+                }
+                IconButton(onClick = onExpand, modifier = Modifier.align(Alignment.CenterEnd)) {
+                    Icon(if (expanded) Icons.Default.FullscreenExit else Icons.Default.Fullscreen, contentDescription = if (expanded) "Show timeline" else "Expand preview", tint = Color.White)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CinematicAndroidVisualizer(
+    samples: List<Float>,
+    isPlaying: Boolean,
+    positionMs: Long,
+    durationMs: Long,
+    player: ExoPlayer,
+) {
+    var livePositionMs by remember(player) { mutableLongStateOf(positionMs) }
+
+    LaunchedEffect(isPlaying, player, durationMs) {
+        if (!isPlaying) {
+            livePositionMs = positionMs
+            return@LaunchedEffect
+        }
+        var lastRenderNanos = Long.MIN_VALUE
+        val renderIntervalNanos = 1_000_000_000L / 60L
+        while (true) {
+            withFrameNanos { frameTimeNanos ->
+                if (lastRenderNanos == Long.MIN_VALUE || frameTimeNanos - lastRenderNanos >= renderIntervalNanos) {
+                    livePositionMs = player.currentPosition.coerceIn(0L, durationMs)
+                    lastRenderNanos = frameTimeNanos
+                }
+            }
+        }
+    }
+    LaunchedEffect(positionMs, isPlaying) {
+        if (!isPlaying) livePositionMs = positionMs
+    }
+
+    Canvas(
+        modifier = Modifier
+            .fillMaxSize()
+            .preferredFrameRate(60f)
+            .background(Brush.radialGradient(listOf(Color(0xFF2C1647), Color.Black))),
+    ) {
+        val barCount = 96
+        val gap = 1.5.dp.toPx()
+        val width = (size.width - gap * (barCount - 1)) / barCount
+        val renderedPositionMs = if (isPlaying) livePositionMs else positionMs
+        val progress = if (durationMs > 0) renderedPositionMs.toFloat() / durationMs else 0f
+        repeat(barCount) { index ->
+            val barProgress = index.toFloat() / (barCount - 1)
+            val samplePosition = if (isPlaying) {
+                (progress + (barProgress - .3f) * .24f).coerceIn(0f, 1f)
+            } else {
+                barProgress
+            }
+            val level = sampledAndroidClipLevel(samples, samplePosition)
+            val height = (size.height * .72f * level).coerceAtLeast(5f)
+            drawRoundRect(
+                color = Color(0xFF8D43D8).copy(alpha = .76f),
+                topLeft = Offset(index * (width + gap), size.height - height),
+                size = androidx.compose.ui.geometry.Size(width.coerceAtLeast(1f), height),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(width / 2),
+            )
+        }
+    }
+}
+
+@Composable
+private fun CinematicClipTimeline(
+    track: Track,
+    waveformSamples: List<Float>,
+    videoFrames: List<Bitmap>,
+    startMs: Long,
+    endMs: Long,
+    playheadMs: Long,
+    onRangeChange: (Long, Long) -> Unit,
+    onSeek: (Long) -> Unit,
+) {
+    Surface(
+        color = Color.White.copy(alpha = .035f),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = .09f)),
+    ) {
+        Column {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 5.dp)) {
+                repeat(6) { index ->
+                    Text(clipTime(track.durationMs * index / 5), color = Color.White.copy(alpha = .58f), fontSize = 9.sp)
+                    if (index < 5) Spacer(Modifier.weight(1f))
+                }
+            }
+            Canvas(Modifier.fillMaxWidth().height(12.dp).padding(horizontal = 8.dp)) {
+                repeat(31) { index ->
+                    val x = size.width * index / 30
+                    drawRect(Color.White.copy(alpha = if (index % 6 == 0) .4f else .2f), topLeft = Offset(x, 0f), size = androidx.compose.ui.geometry.Size(1.dp.toPx(), if (index % 6 == 0) size.height else size.height * .58f))
+                }
+            }
+            CinematicAndroidWaveform(track, waveformSamples, videoFrames, startMs, endMs, playheadMs, onRangeChange, onSeek)
+        }
+    }
+}
+
+@Composable
+private fun CinematicAndroidWaveform(
+    track: Track,
+    waveformSamples: List<Float>,
+    videoFrames: List<Bitmap>,
+    startMs: Long,
+    endMs: Long,
+    playheadMs: Long,
+    onRangeChange: (Long, Long) -> Unit,
+    onSeek: (Long) -> Unit,
+) {
+    var draggingStart by remember { mutableStateOf(true) }
+    val duration = track.durationMs.coerceAtLeast(250)
+    val levels = remember(waveformSamples) {
+        List(92) { index -> sampledAndroidClipLevel(waveformSamples, index / 91f) }
+    }
+    val frameImages = remember(videoFrames) { videoFrames.map(Bitmap::asImageBitmap) }
+    val currentStart by rememberUpdatedState(startMs)
+    val currentEnd by rememberUpdatedState(endMs)
+    val currentOnRangeChange by rememberUpdatedState(onRangeChange)
+    val currentOnSeek by rememberUpdatedState(onSeek)
+    Canvas(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(88.dp)
+            .semantics { contentDescription = "Clip waveform with yellow draggable handles" }
+            .pointerInput(track.id, duration) {
+                detectTapGestures { offset ->
+                    val value = (offset.x / size.width.coerceAtLeast(1) * duration).toLong().coerceIn(currentStart, currentEnd)
+                    currentOnSeek(value)
+                }
+            }
+            .pointerInput(track.id, duration) {
+                detectDragGestures(
+                    onDragStart = { offset ->
+                        val startX = size.width * currentStart.toFloat() / duration
+                        val endX = size.width * currentEnd.toFloat() / duration
+                        draggingStart = kotlin.math.abs(offset.x - startX) <= kotlin.math.abs(offset.x - endX)
+                    },
+                ) { change, _ ->
+                    change.consume()
+                    val value = (change.position.x / size.width.coerceAtLeast(1) * duration).toLong().coerceIn(0, duration)
+                    if (draggingStart) currentOnRangeChange(value.coerceAtMost(currentEnd - 250), currentEnd)
+                    else currentOnRangeChange(currentStart, value.coerceAtLeast(currentStart + 250))
+                }
+            },
+    ) {
+        val startX = size.width * startMs / duration.toFloat()
+        val endX = size.width * endMs / duration.toFloat()
+        if (frameImages.isNotEmpty()) {
+            val frameWidth = size.width / frameImages.size
+            frameImages.forEachIndexed { index, image ->
+                drawImage(
+                    image = image,
+                    dstOffset = IntOffset((index * frameWidth).toInt(), 0),
+                    dstSize = IntSize((frameWidth + 1).toInt(), size.height.toInt()),
+                )
+            }
+            drawRect(Color.Black.copy(alpha = .62f), size = androidx.compose.ui.geometry.Size(startX.coerceAtLeast(0f), size.height))
+            drawRect(
+                Color.Black.copy(alpha = .62f),
+                topLeft = Offset(endX, 0f),
+                size = androidx.compose.ui.geometry.Size((size.width - endX).coerceAtLeast(0f), size.height),
+            )
+        }
+        drawRect(Color(0xFF7130AF).copy(alpha = .14f), topLeft = Offset(startX, 0f), size = androidx.compose.ui.geometry.Size((endX - startX).coerceAtLeast(0f), size.height))
+        if (frameImages.isEmpty()) {
+            val gap = 1.dp.toPx()
+            val barWidth = (size.width - gap * (levels.size - 1)) / levels.size
+            levels.forEachIndexed { index, level ->
+                val ratio = (index + .5f) / levels.size
+                val selected = ratio >= startMs.toFloat() / duration && ratio <= endMs.toFloat() / duration
+                val height = size.height * (.16f + .56f * level)
+                drawRect(
+                    color = if (selected) Color(0xFF934ADD) else Color.White.copy(alpha = .25f),
+                    topLeft = Offset(index * (barWidth + gap), (size.height - height) / 2),
+                    size = androidx.compose.ui.geometry.Size(barWidth.coerceAtLeast(1f), height),
+                )
+            }
+        }
+        drawRect(Color(0xFFFFD329), topLeft = Offset(startX, 0f), size = androidx.compose.ui.geometry.Size((endX - startX).coerceAtLeast(0f), 2.dp.toPx()))
+        drawRect(Color(0xFFFFD329), topLeft = Offset(startX, size.height - 2.dp.toPx()), size = androidx.compose.ui.geometry.Size((endX - startX).coerceAtLeast(0f), 2.dp.toPx()))
+        drawCinematicHandle(startX, true)
+        drawCinematicHandle(endX, false)
+        val playheadX = size.width * playheadMs.coerceIn(0, duration) / duration.toFloat()
+        drawRect(Color.White, topLeft = Offset(playheadX, 0f), size = androidx.compose.ui.geometry.Size(1.5.dp.toPx(), size.height))
+    }
+}
+
+private suspend fun extractAndroidClipVideoFrames(
+    path: String,
+    durationMs: Long,
+    count: Int = 12,
+): List<Bitmap> = withContext(Dispatchers.IO) {
+    if (durationMs <= 0L || count <= 0) return@withContext emptyList()
+    val retriever = MediaMetadataRetriever()
+    try {
+        retriever.setDataSource(path)
+        (0 until count).mapNotNull { index ->
+            val timeUs = durationMs * 1_000L * (index * 2L + 1L) / (count * 2L)
+            val frame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?: return@mapNotNull null
+            val scaled = Bitmap.createScaledBitmap(frame, 240, 135, true)
+            if (scaled !== frame) frame.recycle()
+            scaled
+        }
+    } catch (_: Exception) {
+        emptyList()
+    } finally {
+        retriever.release()
+    }
+}
+
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCinematicHandle(x: Float, pointsRight: Boolean) {
+    val handleWidth = 26.dp.toPx()
+    val left = (x - handleWidth / 2).coerceIn(0f, size.width - handleWidth)
+    drawRoundRect(
+        color = Color(0xFFFFD329),
+        topLeft = Offset(left, 0f),
+        size = androidx.compose.ui.geometry.Size(handleWidth, size.height),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(10.dp.toPx()),
+    )
+    val centerX = left + handleWidth / 2
+    val path = Path().apply {
+        if (pointsRight) {
+            moveTo(centerX - 3.dp.toPx(), size.height / 2 - 6.dp.toPx())
+            lineTo(centerX + 4.dp.toPx(), size.height / 2)
+            lineTo(centerX - 3.dp.toPx(), size.height / 2 + 6.dp.toPx())
+        } else {
+            moveTo(centerX + 3.dp.toPx(), size.height / 2 - 6.dp.toPx())
+            lineTo(centerX - 4.dp.toPx(), size.height / 2)
+            lineTo(centerX + 3.dp.toPx(), size.height / 2 + 6.dp.toPx())
+        }
+        close()
+    }
+    drawPath(path, Color.Black.copy(alpha = .8f))
+}
+
+@Composable
+private fun CinematicClipOverlay(
+    onOutsideClick: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = .52f)).clickable(onClick = onOutsideClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().padding(18.dp).clickable {},
+            color = Color(0xF511121B),
+            shape = RoundedCornerShape(20.dp),
+            border = BorderStroke(1.dp, Color.White.copy(alpha = .12f)),
+            tonalElevation = 12.dp,
+        ) {
+            Box(Modifier.padding(18.dp)) { content() }
+        }
+    }
+}
+
+@Composable
+private fun CinematicOverlayHeader(eyebrow: String, title: String, onClose: () -> Unit) {
+    Row(verticalAlignment = Alignment.Top) {
+        Column {
+            Eyebrow(eyebrow)
+            Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+        Spacer(Modifier.weight(1f))
+        IconButton(onClick = onClose) { Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White) }
+    }
+}
+
+private fun waveformLevels(seedText: String, count: Int): List<Float> {
+    var seed = seedText.hashCode().toLong().and(0xffffffffL).coerceAtLeast(1L)
+    var previous = .58f
+    return List(count) { index ->
+        seed = (seed * 1_664_525 + 1_013_904_223).and(0xffffffffL)
+        val noise = seed.toFloat() / 0xffffffffL.toFloat()
+        previous = previous * .54f + noise * .46f
+        val envelope = .58f + kotlin.math.sin(index * .083f) * .16f + kotlin.math.sin(index * .029f) * .11f
+        (previous * .62f + envelope * .38f).coerceIn(.12f, 1f)
+    }
+}
+
+private fun sampledAndroidClipLevel(samples: List<Float>, normalizedPosition: Float): Float {
+    if (samples.isEmpty()) return .08f
+    val position = normalizedPosition.coerceIn(0f, 1f) * (samples.size - 1)
+    val lower = position.toInt().coerceIn(samples.indices)
+    val upper = (lower + 1).coerceAtMost(samples.lastIndex)
+    val fraction = position - lower
+    return (samples[lower] * (1 - fraction) + samples[upper] * fraction).coerceAtLeast(.04f)
+}
+
+private suspend fun extractAndroidClipWaveform(path: String, count: Int = 192): List<Float> = withContext(Dispatchers.IO) {
+    if (count <= 0) return@withContext emptyList()
+    val extractor = MediaExtractor()
+    var codec: MediaCodec? = null
+    try {
+        extractor.setDataSource(path)
+        val trackIndex = (0 until extractor.trackCount).firstOrNull { index ->
+            extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+        } ?: return@withContext emptyList()
+        val inputFormat = extractor.getTrackFormat(trackIndex)
+        val mime = inputFormat.getString(MediaFormat.KEY_MIME) ?: return@withContext emptyList()
+        val durationUs = inputFormat.getLong(MediaFormat.KEY_DURATION).coerceAtLeast(1L)
+        extractor.selectTrack(trackIndex)
+        val decoder = MediaCodec.createDecoderByType(mime).also {
+            it.configure(inputFormat, null, null, 0)
+            it.start()
+        }
+        codec = decoder
+
+        val peaks = FloatArray(count)
+        val info = MediaCodec.BufferInfo()
+        var inputFinished = false
+        var outputFinished = false
+        var pcmEncoding = AudioFormat.ENCODING_PCM_16BIT
+        while (!outputFinished) {
+            if (!inputFinished) {
+                val inputIndex = decoder.dequeueInputBuffer(10_000)
+                if (inputIndex >= 0) {
+                    val inputBuffer = decoder.getInputBuffer(inputIndex)
+                    val sampleSize = inputBuffer?.let { extractor.readSampleData(it, 0) } ?: -1
+                    if (sampleSize < 0) {
+                        decoder.queueInputBuffer(inputIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        inputFinished = true
+                    } else {
+                        decoder.queueInputBuffer(inputIndex, 0, sampleSize, extractor.sampleTime, 0)
+                        extractor.advance()
+                    }
+                }
+            }
+
+            when (val outputIndex = decoder.dequeueOutputBuffer(info, 10_000)) {
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    val outputFormat = decoder.outputFormat
+                    if (outputFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                        pcmEncoding = outputFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
+                    }
+                }
+                MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
+                else -> if (outputIndex >= 0) {
+                    val outputBuffer = decoder.getOutputBuffer(outputIndex)
+                    if (outputBuffer != null && info.size > 0) {
+                        val data = outputBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+                        data.position(info.offset)
+                        data.limit((info.offset + info.size).coerceAtMost(data.capacity()))
+                        val slice = data.slice().order(ByteOrder.LITTLE_ENDIAN)
+                        var peak = 0f
+                        if (pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT) {
+                            val values = slice.asFloatBuffer()
+                            while (values.hasRemaining()) peak = maxOf(peak, kotlin.math.abs(values.get()).coerceAtMost(1f))
+                        } else {
+                            val values = slice.asShortBuffer()
+                            while (values.hasRemaining()) {
+                                peak = maxOf(peak, kotlin.math.abs(values.get().toInt()) / Short.MAX_VALUE.toFloat())
+                            }
+                        }
+                        val bin = (info.presentationTimeUs.toDouble() / durationUs * count)
+                            .toInt()
+                            .coerceIn(0, count - 1)
+                        peaks[bin] = maxOf(peaks[bin], peak)
+                    }
+                    outputFinished = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                    decoder.releaseOutputBuffer(outputIndex, false)
+                }
+            }
+        }
+
+        var last = 0f
+        for (index in peaks.indices) {
+            if (peaks[index] > 0f) last = peaks[index] else if (last > 0f) peaks[index] = last
+        }
+        last = 0f
+        for (index in peaks.indices.reversed()) {
+            if (peaks[index] > 0f) last = peaks[index] else if (last > 0f) peaks[index] = last
+        }
+        val maximum = peaks.maxOrNull()?.takeIf { it > 0f } ?: return@withContext emptyList()
+        peaks.map { kotlin.math.sqrt((it / maximum).coerceIn(0f, 1f)).coerceAtLeast(.04f) }
+    } catch (_: Exception) {
+        emptyList()
+    } finally {
+        runCatching { codec?.stop() }
+        codec?.release()
+        extractor.release()
+    }
+}
+
+@Composable
+private fun LegacyClipEditorDialog(
     state: ResonanceUiState,
     actions: ResonanceActions,
     onDismiss: () -> Unit,
@@ -1095,13 +1938,17 @@ private fun ToolHeader(title: String, subtitle: String, onDismiss: () -> Unit) {
 @Composable
 private fun ToolEmpty(title: String, detail: String) {
     Column(
-        Modifier.fillMaxWidth().padding(vertical = 64.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 64.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = Violet)
         Text(title, fontWeight = FontWeight.Bold)
-        Text(detail, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
+        Text(
+            detail,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+            textAlign = TextAlign.Center,
+        )
     }
 }
 

@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("likedSongs", {
   loadLibrary: () => ipcRenderer.invoke("library:load"),
   saveLibrary: (state) => ipcRenderer.invoke("library:save", state),
+  videoFrames: (value) => ipcRenderer.invoke("library:video-frames", value),
   onPrepareToClose: (callback) => ipcRenderer.on("app:prepare-close", () => callback()),
   readyToClose: () => ipcRenderer.send("app:close-ready"),
   updateAppPreferences: (preferences) => ipcRenderer.invoke("app:preferences:update", preferences),

@@ -236,45 +236,74 @@
   </dialog>
   <dialog id="clipEditorDialog" class="clip-editor-dialog" aria-labelledby="clipEditorTitle">
     <section class="clip-editor-panel">
-      <header>
-        <div><span class="eyebrow">PLAYBACK TOOLS</span><h2 id="clipEditorTitle">Clip Editor</h2><p>Choose the part of this song that should play for the current profile.</p></div>
-        <button id="closeClipEditor" class="history-close" type="button" title="Close" aria-label="Close clip editor">×</button>
+      <header class="clip-editor-topbar">
+        <button id="closeClipEditor" class="clip-editor-done" type="button">Done</button>
+        <h2 id="clipEditorTitle">My Clip</h2>
+        <div class="clip-editor-top-actions">
+          <button id="saveClipRange" class="clip-editor-save" type="button" disabled>Save</button>
+          <button id="clipEditorHelpButton" class="clip-editor-icon-button" type="button" aria-label="Clip editor help" aria-expanded="false" aria-controls="clipEditorHelp">?</button>
+          <button id="clipEditorSettingsButton" class="clip-editor-icon-button" type="button" aria-label="Clip settings" aria-expanded="false" aria-controls="clipEditorSettings">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.2a3.8 3.8 0 1 0 0 7.6 3.8 3.8 0 0 0 0-7.6Z"/><path d="M19.1 13.5a7.5 7.5 0 0 0 0-3l2-1.5-2-3.4-2.4 1a8 8 0 0 0-2.6-1.5L13.8 2h-3.9l-.4 3.1a8 8 0 0 0-2.6 1.5l-2.4-1-2 3.4 2 1.5a7.5 7.5 0 0 0 0 3l-2 1.5 2 3.4 2.4-1a8 8 0 0 0 2.6 1.5l.4 3.1h3.9l.4-3.1a8 8 0 0 0 2.6-1.5l2.4 1 2-3.4-2.1-1.5Z"/></svg>
+          </button>
+        </div>
       </header>
       <div id="clipEditorEmpty" class="clip-editor-empty" hidden><strong>No songs to edit yet</strong><span>Import or download a song, then come back to set its playback range.</span></div>
       <div id="clipEditorWorkspace" class="clip-editor-workspace">
+        <section id="clipEditorStage" class="clip-editor-stage" aria-label="Clip preview">
+          <div id="clipEditorAudioStage" class="clip-editor-audio-stage">
+            <div id="clipEditorStageVisualizer" class="clip-editor-stage-visualizer" aria-hidden="true"></div>
+            <span id="clipEditorArtwork" class="clip-editor-artwork" aria-hidden="true">♪</span>
+            <strong id="clipEditorTrackTitle">Nothing selected</strong>
+            <span id="clipEditorTrackMeta">Choose a song in settings</span>
+            <em>[Visualizer]</em>
+          </div>
+          <div id="clipEditorVideoFrame" class="clip-editor-video-frame" hidden>
+            <video id="clipEditorPreview" preload="metadata" playsinline></video>
+            <span class="clip-editor-video-label" aria-hidden="true">VIDEO PREVIEW</span>
+          </div>
+          <div class="clip-editor-transport" aria-label="Preview playback controls">
+            <span class="clip-editor-transport-time"><time id="clipEditorPreviewCurrent">0:00</time><input id="clipEditorPreviewSeek" class="clip-editor-accessible-seek" type="range" min="0" max="1000" value="0" aria-label="Preview position" aria-valuetext="0:00 of 0:00" disabled><b>/</b><time id="clipEditorPreviewEnd">0:00</time></span>
+            <div class="clip-editor-transport-buttons">
+              <button id="clipEditorSkipStart" type="button" aria-label="Go to clip start"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14M18 6l-9 6 9 6V6Z"/></svg></button>
+              <button id="previewClipRange" class="clip-editor-preview" type="button" aria-pressed="false" aria-label="Play preview" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg><span>Preview</span></button>
+              <button id="clipEditorSkipEnd" type="button" aria-label="Go to clip end"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M6 6l9 6-9 6V6Z"/></svg></button>
+            </div>
+            <button id="clipEditorExpand" class="clip-editor-expand" type="button" aria-label="Expand preview" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg></button>
+          </div>
+        </section>
+        <section class="clip-editor-timeline" aria-label="Clip timeline">
+          <div id="clipEditorRuler" class="clip-editor-ruler" aria-hidden="true"></div>
+          <div id="clipEditorWaveform" class="clip-editor-waveform" role="group" aria-label="Clip range">
+            <div id="clipEditorVideoFrames" class="clip-editor-video-frames" aria-hidden="true" hidden></div>
+            <div id="clipEditorWaveBars" class="clip-editor-wave-bars" aria-hidden="true"></div>
+            <span class="clip-editor-selection" aria-hidden="true"></span>
+            <span id="clipEditorPlayhead" class="clip-editor-playhead" aria-hidden="true"></span>
+            <button id="clipEditorStartHandle" class="clip-editor-handle clip-editor-handle-start" type="button" role="slider" aria-label="Clip start" aria-orientation="horizontal"><span aria-hidden="true"><svg viewBox="0 0 8 12" focusable="false"><path d="m2 2 4 4-4 4"></path></svg></span></button>
+            <button id="clipEditorEndHandle" class="clip-editor-handle clip-editor-handle-end" type="button" role="slider" aria-label="Clip end" aria-orientation="horizontal"><span aria-hidden="true"><svg viewBox="0 0 8 12" focusable="false"><path d="m6 2-4 4 4 4"></path></svg></span></button>
+          </div>
+        </section>
+      </div>
+      <span id="clipEditorStatus" class="clip-editor-status" role="status">The song file is never changed.</span>
+      <aside id="clipEditorSettings" class="clip-editor-popover clip-editor-settings" hidden>
+        <header><div><span class="eyebrow">CLIP SETTINGS</span><strong>Fine tune your clip</strong></div><button id="closeClipEditorSettings" type="button" aria-label="Close clip settings">×</button></header>
         <div class="clip-editor-song"><span>Song</span><div id="clipEditorTrack" data-custom-select aria-label="Song to clip"></div></div>
         <div class="clip-editor-track">
-          <span id="clipEditorArtwork" class="clip-editor-artwork" aria-hidden="true">♪</span>
-          <span><strong id="clipEditorTrackTitle">Nothing selected</strong><small id="clipEditorTrackMeta">Choose a song above</small></span>
+          <span class="clip-editor-settings-artwork" aria-hidden="true">♪</span>
+          <span><strong>Playback range</strong><small>Drag the yellow handles or enter exact times.</small></span>
           <time id="clipEditorTrackDuration">0:00</time>
-        </div>
-        <div id="clipEditorVideoFrame" class="clip-editor-video-frame" hidden>
-          <video id="clipEditorPreview" preload="metadata" playsinline></video>
-          <span class="clip-editor-video-label" aria-hidden="true">VIDEO PREVIEW</span>
-        </div>
-        <div id="clipEditorWaveform" class="clip-editor-waveform" role="group" aria-label="Clip range">
-          <div id="clipEditorWaveBars" class="clip-editor-wave-bars" aria-hidden="true"></div>
-          <span class="clip-editor-selection" aria-hidden="true"></span>
-          <button id="clipEditorStartHandle" class="clip-editor-handle clip-editor-handle-start" type="button" role="slider" aria-label="Clip start" aria-orientation="horizontal"><span aria-hidden="true"><svg viewBox="0 0 8 12" focusable="false"><path d="m2 2 4 4-4 4"></path></svg></span></button>
-          <button id="clipEditorEndHandle" class="clip-editor-handle clip-editor-handle-end" type="button" role="slider" aria-label="Clip end" aria-orientation="horizontal"><span aria-hidden="true"><svg viewBox="0 0 8 12" focusable="false"><path d="m6 2-4 4 4 4"></path></svg></span></button>
         </div>
         <div class="clip-editor-selection-summary" aria-live="polite">
           <label for="clipEditorStartInput"><small>START</small><input id="clipEditorStartInput" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="8" value="0:00" aria-label="Clip start time"></label>
           <span class="clip-editor-selection-length"><small>CLIP LENGTH</small><strong id="clipEditorLengthLabel">0:00</strong></span>
           <label for="clipEditorEndInput"><small>END</small><input id="clipEditorEndInput" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="8" value="0:00" aria-label="Clip end time"></label>
         </div>
-        <div class="clip-editor-transport" aria-label="Preview playback controls">
-          <span class="clip-editor-transport-label"><strong>Preview playback</strong><small>Listen and scrub through only the selected range.</small></span>
-          <button id="previewClipRange" class="clip-editor-preview" type="button" aria-pressed="false" aria-label="Play preview" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg><span>Preview</span></button>
-          <time id="clipEditorPreviewCurrent">0:00</time>
-          <input id="clipEditorPreviewSeek" type="range" min="0" max="1000" value="0" aria-label="Preview position" aria-valuetext="0:00 of 0:00" disabled>
-          <time id="clipEditorPreviewEnd">0:00</time>
-        </div>
-      </div>
-      <footer>
-        <span id="clipEditorStatus" role="status">The song file is never changed.</span>
-        <div class="clip-editor-actions"><button id="clearClipRange" class="secondary" type="button" hidden>Use full song</button><button id="saveClipRange" class="primary" type="button" disabled>Save range</button></div>
-      </footer>
+        <button id="clearClipRange" class="secondary" type="button" hidden>Use full song</button>
+      </aside>
+      <aside id="clipEditorHelp" class="clip-editor-popover clip-editor-help" hidden>
+        <header><div><span class="eyebrow">HOW IT WORKS</span><strong>Create your perfect playback range</strong></div><button id="closeClipEditorHelp" type="button" aria-label="Close clip editor help">×</button></header>
+        <p>Drag the yellow handles to choose a range. Click the waveform to scrub, then use the center controls to preview exactly what will play.</p>
+        <p><strong>Save</strong> updates playback for this profile without changing the media file. <strong>Done</strong> closes the editor and discards changes that were not saved.</p>
+      </aside>
     </section>
   </dialog>
   <dialog id="listeningHistoryDialog" class="listening-history-dialog" aria-labelledby="listeningHistoryTitle">

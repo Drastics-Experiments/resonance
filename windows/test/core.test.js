@@ -684,15 +684,24 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   assert.match(htmlSource, /id="clipEditorStartHandle"[^>]+role="slider"[\s\S]+id="clipEditorEndHandle"[^>]+role="slider"/);
   assert.doesNotMatch(htmlSource, /id="clipEditor(?:Start|End)" type="range"/);
   assert.match(htmlSource, /id="saveClipRange"[^>]+disabled/);
+  assert.match(htmlSource, /id="closeClipEditor"[^>]*>Done<\/button>[\s\S]+id="saveClipRange"[^>]*>Save<\/button>/);
   assert.match(htmlSource, /id="previewClipRange"[^>]+aria-pressed="false"[^>]+disabled[\s\S]+>Preview</);
   assert.match(htmlSource, /<video id="clipEditorPreview"[^>]+preload="metadata"[^>]+playsinline/);
   assert.match(htmlSource, /id="clipEditorVideoFrame"[^>]+hidden[\s\S]+VIDEO PREVIEW/);
+  assert.match(htmlSource, /id="clipEditorVideoFrames"[^>]+hidden/);
   assert.match(htmlSource, /id="clipEditorPreviewCurrent"[\s\S]+id="clipEditorPreviewSeek"[^>]+type="range"[\s\S]+id="clipEditorPreviewEnd"/);
   assert.match(htmlSource, /id="clearClipRange"[^>]*>Use full song/);
   assert.match(htmlSource, /id="clipEditorStatus"[^>]+role="status"/);
   assert.match(appSource, /function openClipEditor\(\)[\s\S]+clipEditorDialog[\s\S]+showModal\(\)/);
   assert.match(appSource, /async function saveClipRange\(\)[\s\S]+setClipRangeForTrack\(state, track/);
   assert.match(appSource, /#saveClipRange"\)\.onclick = saveClipRange/);
+  const saveFunctionSource = appSource.slice(appSource.indexOf("async function saveClipRange()"), appSource.indexOf("function clearClipRange()"));
+  assert.doesNotMatch(saveFunctionSource, /clipEditorDialog[\s\S]*\.close\(\)/);
+  assert.match(appSource, /#closeClipEditor"\)\.onclick = \(\) => \{ void stopClipRangePreview\(\)\.then\(\(\) => \$\("#clipEditorDialog"\)\.close\(\)\); \};/);
+  assert.match(appSource, /async function loadClipEditorVideoFrames\(track, count = 12\)[\s\S]+drawImage[\s\S]+toDataURL\("image\/jpeg"/);
+  assert.match(appSource, /api\.videoFrames\(\{[\s\S]+filePath: track\.filePath[\s\S]+duration: clipEditorDuration\(track\)/);
+  assert.match(preloadSource, /videoFrames: \(value\) => ipcRenderer\.invoke\("library:video-frames", value\)/);
+  assert.match(mainSource, /ipcMain\.handle\("library:video-frames"[\s\S]+isManagedLibraryFile\(filePath, managedRoots\)[\s\S]+captureVideoFrame/);
   assert.match(appSource, /function finishClipPlaybackIfNeeded\(\)/);
   assert.match(appSource, /currentPlaybackDuration\(\)[\s\S]{0,180}clippedPlaybackPosition\(duration \* Number/);
   assert.match(appSource, /async function toggleClipRangePreview\(\)[\s\S]+prepareClipRangePreviewMedia\(track\)[\s\S]+clipEditorPreviewAudio\.play\(\)/);
@@ -722,8 +731,13 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   assert.match(styleSource, /\.clip-editor-waveform\s*\{/);
   assert.match(styleSource, /\.clip-editor-wave-bars i\.selected\s*\{/);
   assert.match(styleSource, /\.clip-editor-video-frame\s*\{[\s\S]+object-fit: contain/);
+  assert.match(styleSource, /\.clip-editor-video-frames\s*\{[\s\S]+grid-template-columns/);
+  assert.match(styleSource, /\.clip-editor-wave-bars\[hidden\]\s*\{\s*display: none/);
   assert.match(styleSource, /\.clip-editor-transport\s*\{[\s\S]+grid-template-columns: auto 42px minmax\(0, 1fr\) 42px/);
   assert.match(styleSource, /\.clip-editor-preview\.playing\s*\{/);
+  assert.doesNotMatch(styleSource, /\.clip-editor-stage-visualizer::after/);
+  assert.doesNotMatch(styleSource, /\.clip-editor-stage-visualizer\s*\{[^}]*mask-image/);
+  assert.doesNotMatch(styleSource, /\.clip-editor-stage-visualizer i\s*\{[^}]*box-shadow/);
 });
 
 test("keeps reviewed Windows empty, selection, filter, and metadata states truthful", () => {

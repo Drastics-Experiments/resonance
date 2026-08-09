@@ -202,6 +202,15 @@ let clipEditorPreviewEndSeconds = 0;
 let clipEditorPreviewInterruptedPlayback = false;
 let clipEditorPreviewLoading = false;
 let clipEditorPreviewRequest = 0;
+let clipEditorWaveformRequest = 0;
+let clipEditorVideoFrameRequest = 0;
+let clipEditorVisualizerFrame = 0;
+let clipEditorAudioContext = null;
+let clipEditorAudioSource = null;
+let clipEditorAnalyser = null;
+let clipEditorAnalyserData = null;
+let clipEditorSavedStartSeconds = 0;
+let clipEditorSavedEndSeconds = 0;
 let clipBoundaryTrackID = null;
 let profileGeneration = 0;
 let profilePictureGeneration = 0;
@@ -952,22 +961,194 @@ function clipEditorTrackIsVideo(track = clipEditorTrack()) {
   return /\.(?:mp4|mov|m4v|webm)$/i.test(source);
 }
 
-function clipEditorWaveBars(track) {
-  const seed = Array.from(`${track?.id || "resonance"}${track?.title || "clip"}`)
-    .reduce((total, character) => total + character.codePointAt(0), 0);
-  const phase = (seed % 31) / 6;
-  let randomState = seed || 1;
-  let previousAmplitude = .58;
+function clipEditorWaveBars(levels = []) {
   return Array.from({ length: 112 }, (_, index) => {
-    randomState = (randomState * 1664525 + 1013904223) >>> 0;
-    const noise = randomState / 0xffffffff;
-    previousAmplitude = previousAmplitude * .54 + noise * .46;
-    const envelope = .58
-      + Math.sin(index * .083 + phase) * .16
-      + Math.sin(index * .029 + phase * .41) * .11;
-    const amplitude = previousAmplitude * .62 + envelope * .38;
-    const height = 22 + Math.round(Math.max(.12, Math.min(1, amplitude)) * 74);
-    return `<i class="wave-level-${Math.max(2, Math.min(9, Math.round(height / 10)))}"></i>`;
+    const sourceIndex = levels.length > 1
+      ? Math.min(levels.length - 1, Math.round(index / 111 * (levels.length - 1)))
+      : 0;
+    const level = Number.isFinite(levels[sourceIndex]) ? levels[sourceIndex] : .08;
+    const height = 10 + Math.round(Math.max(.04, Math.min(1, level)) * 86);
+    return `<i style="height:${height}%"></i>`;
+  }).join("");
+}
+
+function renderClipEditorWaveform(levels = []) {
+  const bars = clipEditorWaveBars(levels);
+  $("#clipEditorWaveBars").innerHTML = bars;
+  $("#clipEditorStageVisualizer").innerHTML = bars;
+  updateClipEditorRange();
+}
+
+function waitForClipEditorVideoEvent(video, eventName, timeout = 4_000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Video frame loading timed out."));
+    }, timeout);
+    const cleanup = () => {
+      clearTimeout(timer);
+      video.removeEventListener(eventName, finished);
+      video.removeEventListener("error", failed);
+    };
+    const finished = () => { cleanup(); resolve(); };
+    const failed = () => { cleanup(); reject(new Error("Video frames could not be loaded.")); };
+    video.addEventListener(eventName, finished, { once: true });
+    video.addEventListener("error", failed, { once: true });
+  });
+}
+
+async function loadClipEditorVideoFrames(track, count = 12) {
+  const request = ++clipEditorVideoFrameRequest;
+  const strip = $("#clipEditorVideoFrames");
+  strip.innerHTML = "";
+  if (!track?.fileUrl || !clipEditorTrackIsVideo(track)) return;
+  if (track.filePath && typeof api.videoFrames === "function") {
+    try {
+      const frames = await api.videoFrames({
+        filePath: track.filePath,
+        duration: clipEditorDuration(track),
+        count,
+      });
+      if (request !== clipEditorVideoFrameRequest || clipEditorTrack()?.id !== track.id) return;
+      if (Array.isArray(frames) && frames.length) {
+        strip.innerHTML = frames.map((source) => `<img src="${source}" alt="">`).join("");
+        updateClipEditorRange();
+        return;
+      }
+    } catch {
+      // The browser fallback below still works for media sources that permit
+      // pixel reads from the renderer's origin.
+    }
+  }
+  const video = document.createElement("video");
+  video.preload = "auto";
+  video.muted = true;
+  video.playsInline = true;
+  video.src = track.fileUrl;
+  try {
+    if (video.readyState < 1) {
+      video.load();
+      await waitForClipEditorVideoEvent(video, "loadedmetadata");
+    }
+    const duration = Number.isFinite(video.duration) && video.duration > 0
+      ? video.duration
+      : clipEditorDuration(track);
+    const frames = [];
+    const canvas = document.createElement("canvas");
+    canvas.width = 240;
+    canvas.height = 135;
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) return;
+    for (let index = 0; index < count; index += 1) {
+      if (request !== clipEditorVideoFrameRequest) return;
+      const target = Math.min(Math.max(duration * (index + .5) / count, 0), Math.max(duration - .02, 0));
+      if (Math.abs(video.currentTime - target) > .015) {
+        video.currentTime = target;
+        await waitForClipEditorVideoEvent(video, "seeked");
+      }
+      context.fillStyle = "#000";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      const scale = Math.max(canvas.width / Math.max(video.videoWidth, 1), canvas.height / Math.max(video.videoHeight, 1));
+      const width = video.videoWidth * scale;
+      const height = video.videoHeight * scale;
+      context.drawImage(video, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+      frames.push(canvas.toDataURL("image/jpeg", .72));
+    }
+    if (request !== clipEditorVideoFrameRequest || clipEditorTrack()?.id !== track.id) return;
+    strip.innerHTML = frames.map((source) => `<img src="${source}" alt="">`).join("");
+    updateClipEditorRange();
+  } catch {
+    if (request === clipEditorVideoFrameRequest) strip.innerHTML = "";
+  } finally {
+    video.removeAttribute("src");
+    video.load();
+  }
+}
+
+async function loadClipEditorWaveform(track) {
+  const request = ++clipEditorWaveformRequest;
+  if (!track?.fileUrl) return;
+  try {
+    const response = await fetch(track.fileUrl);
+    if (!response.ok) throw new Error("Could not read audio bytes.");
+    const bytes = await response.arrayBuffer();
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) throw new Error("Audio analysis is unavailable.");
+    const context = new AudioContextClass();
+    const buffer = await context.decodeAudioData(bytes.slice(0));
+    const levels = Array.from({ length: 224 }, (_, index) => {
+      const start = Math.floor(index / 224 * buffer.length);
+      const end = Math.max(start + 1, Math.floor((index + 1) / 224 * buffer.length));
+      let peak = 0;
+      for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+        const samples = buffer.getChannelData(channel);
+        const stride = Math.max(1, Math.floor((end - start) / 96));
+        for (let sample = start; sample < end; sample += stride) peak = Math.max(peak, Math.abs(samples[sample] || 0));
+      }
+      return Math.sqrt(peak);
+    });
+    await context.close().catch(() => {});
+    if (request !== clipEditorWaveformRequest || clipEditorTrack()?.id !== track.id) return;
+    const maximum = Math.max(...levels, .0001);
+    renderClipEditorWaveform(levels.map((level) => Math.max(.035, level / maximum)));
+  } catch {
+    // The live analyser below still renders actual audio during playback when
+    // a custom media protocol cannot be fetched by Web Audio.
+  }
+}
+
+async function ensureClipEditorLiveVisualizer() {
+  if (clipEditorAnalyser) {
+    if (clipEditorAudioContext?.state === "suspended") await clipEditorAudioContext.resume();
+    return true;
+  }
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return false;
+  try {
+    clipEditorAudioContext = new AudioContextClass();
+    clipEditorAudioSource = clipEditorAudioContext.createMediaElementSource(clipEditorPreviewAudio);
+    clipEditorAnalyser = clipEditorAudioContext.createAnalyser();
+    clipEditorAnalyser.fftSize = 512;
+    clipEditorAnalyser.smoothingTimeConstant = .72;
+    clipEditorAnalyserData = new Uint8Array(clipEditorAnalyser.frequencyBinCount);
+    clipEditorAudioSource.connect(clipEditorAnalyser);
+    clipEditorAnalyser.connect(clipEditorAudioContext.destination);
+    await clipEditorAudioContext.resume();
+    return true;
+  } catch {
+    clipEditorAnalyser = null;
+    clipEditorAnalyserData = null;
+    return false;
+  }
+}
+
+function animateClipEditorVisualizer() {
+  cancelAnimationFrame(clipEditorVisualizerFrame);
+  const draw = () => {
+    if (clipEditorPreviewAudio.paused || clipEditorPreviewAudio.ended || !clipEditorAnalyser || !clipEditorAnalyserData) {
+      clipEditorVisualizerFrame = 0;
+      return;
+    }
+    clipEditorAnalyser.getByteFrequencyData(clipEditorAnalyserData);
+    const bars = [...$("#clipEditorStageVisualizer").children];
+    bars.forEach((bar, index) => {
+      const low = Math.floor(index / bars.length * clipEditorAnalyserData.length * .72);
+      const high = Math.max(low + 1, Math.floor((index + 1) / bars.length * clipEditorAnalyserData.length * .72));
+      let energy = 0;
+      for (let bin = low; bin < high; bin += 1) energy = Math.max(energy, clipEditorAnalyserData[bin]);
+      bar.style.height = `${Math.max(5, Math.min(100, 7 + energy / 255 * 93))}%`;
+    });
+    clipEditorVisualizerFrame = requestAnimationFrame(draw);
+  };
+  clipEditorVisualizerFrame = requestAnimationFrame(draw);
+}
+
+function renderClipEditorRuler(duration) {
+  const ruler = $("#clipEditorRuler");
+  const intervals = duration <= 30 ? 6 : duration <= 90 ? 6 : duration <= 300 ? 5 : 6;
+  ruler.innerHTML = Array.from({ length: intervals + 1 }, (_, index) => {
+    const seconds = Math.round(duration * index / intervals);
+    return `<span style="left:${index / intervals * 100}%">${escapeHTML(formatTime(seconds))}</span>`;
   }).join("");
 }
 
@@ -1040,6 +1221,7 @@ function bindClipEditorHandle(boundary) {
   handle.onpointerup = finishDrag;
   handle.onpointercancel = finishDrag;
   handle.onkeydown = (event) => {
+    if (event.ctrlKey || event.altKey || event.metaKey) return;
     const duration = clipEditorDuration();
     const increment = event.shiftKey ? 5 : 1;
     let value = boundary === "start" ? clipEditorStartSeconds : clipEditorEndSeconds;
@@ -1070,6 +1252,7 @@ function updateClipEditorRange() {
   waveform.style.setProperty("--clip-selection-start", `${startRatio * 100}%`);
   waveform.style.setProperty("--clip-selection-end", `${endRatio * 100}%`);
   waveform.style.setProperty("--clip-selection-width", `${(endRatio - startRatio) * 100}%`);
+  renderClipEditorRuler(duration);
   const startHandle = $("#clipEditorStartHandle");
   const endHandle = $("#clipEditorEndHandle");
   startHandle.setAttribute("aria-valuemin", "0");
@@ -1085,8 +1268,24 @@ function updateClipEditorRange() {
     const position = (index + .5) / bars.length;
     bar.classList.toggle("selected", position >= startRatio && position <= endRatio);
   });
+  [...$("#clipEditorVideoFrames").children].forEach((frame, index, frames) => {
+    const position = (index + .5) / frames.length;
+    frame.classList.toggle("selected", position >= startRatio && position <= endRatio);
+  });
   clipEditorPreviewEndSeconds = end;
   syncClipRangePreviewTransport();
+  syncClipEditorSaveButton();
+}
+
+function clipEditorHasUnsavedChanges() {
+  return Math.abs(clipEditorStartSeconds - clipEditorSavedStartSeconds) > .001
+    || Math.abs(clipEditorEndSeconds - clipEditorSavedEndSeconds) > .001;
+}
+
+function syncClipEditorSaveButton() {
+  const button = $("#saveClipRange");
+  const track = clipEditorTrack();
+  button.disabled = !track || !clipEditorHasUnsavedChanges();
 }
 
 function renderClipEditorTrack({ resetRange = false } = {}) {
@@ -1095,11 +1294,12 @@ function renderClipEditorTrack({ resetRange = false } = {}) {
   const empty = $("#clipEditorEmpty");
   workspace.hidden = !track;
   empty.hidden = Boolean(track);
-  $("#saveClipRange").disabled = !track;
   $("#previewClipRange").disabled = !track?.fileUrl;
   if (!track) {
     $("#clearClipRange").hidden = true;
     $("#clipEditorVideoFrame").hidden = true;
+    $("#clipEditorVideoFrames").hidden = true;
+    $("#clipEditorWaveBars").hidden = false;
     $("#clipEditorStatus").textContent = "Import or download a song before setting a clip range.";
     syncClipRangePreviewTransport();
     return;
@@ -1109,8 +1309,20 @@ function renderClipEditorTrack({ resetRange = false } = {}) {
   $("#clipEditorTrackMeta").textContent = `${track.artist || "Unknown Artist"} · ${displayAlbum(track)}`;
   $("#clipEditorTrackDuration").textContent = formatTime(duration);
   $("#clipEditorArtwork").innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : "♪";
-  $("#clipEditorWaveBars").innerHTML = clipEditorWaveBars(track);
-  $("#clipEditorVideoFrame").hidden = !clipEditorTrackIsVideo(track);
+  $(".clip-editor-settings-artwork").innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : "♪";
+  renderClipEditorWaveform();
+  const isVideo = clipEditorTrackIsVideo(track);
+  $("#clipEditorVideoFrame").hidden = !isVideo;
+  $("#clipEditorAudioStage").hidden = isVideo;
+  $("#clipEditorVideoFrames").hidden = !isVideo;
+  $("#clipEditorWaveBars").hidden = isVideo;
+  if (isVideo) {
+    clipEditorWaveformRequest += 1;
+    void loadClipEditorVideoFrames(track);
+  } else {
+    clipEditorVideoFrameRequest += 1;
+    void loadClipEditorWaveform(track);
+  }
   clipEditorPreviewAudio.poster = track.artwork || "";
   if (track.artwork) {
     const trackID = track.id;
@@ -1123,6 +1335,8 @@ function renderClipEditorTrack({ resetRange = false } = {}) {
     const defaultStart = duration > 60 ? 15 : 0;
     clipEditorStartSeconds = savedRange?.startSeconds ?? defaultStart;
     clipEditorEndSeconds = savedRange?.endSeconds ?? Math.min(duration, defaultStart + 45);
+    clipEditorSavedStartSeconds = savedRange?.startSeconds ?? 0;
+    clipEditorSavedEndSeconds = savedRange?.endSeconds ?? duration;
   }
   updateClipEditorRange();
   const savedRange = playbackRangeForTrack(state, track);
@@ -1139,6 +1353,12 @@ function syncClipRangePreviewButton() {
   const button = $("#previewClipRange");
   const playing = !clipEditorPreviewAudio.paused && !clipEditorPreviewAudio.ended;
   button.classList.toggle("playing", playing);
+  $("#clipEditorStageVisualizer").classList.toggle("playing", playing);
+  if (playing) animateClipEditorVisualizer();
+  else if (clipEditorVisualizerFrame) {
+    cancelAnimationFrame(clipEditorVisualizerFrame);
+    clipEditorVisualizerFrame = 0;
+  }
   button.setAttribute("aria-pressed", String(playing));
   button.setAttribute("aria-label", playing ? "Pause preview" : "Play preview");
   button.disabled = clipEditorPreviewLoading || !clipEditorTrack()?.fileUrl;
@@ -1164,6 +1384,8 @@ function syncClipRangePreviewTransport() {
   seek.setAttribute("aria-valuetext", `${formatTime(position)} of ${formatTime(end)}`);
   $("#clipEditorPreviewCurrent").textContent = formatTime(position);
   $("#clipEditorPreviewEnd").textContent = formatTime(end);
+  const duration = clipEditorDuration(track);
+  $("#clipEditorWaveform").style.setProperty("--clip-playhead", `${Math.max(0, Math.min(1, position / duration)) * 100}%`);
 }
 
 function waitForClipRangePreviewMetadata() {
@@ -1240,6 +1462,7 @@ async function toggleClipRangePreview() {
   }
   const track = clipEditorTrack();
   if (!track?.fileUrl) return;
+  void ensureClipEditorLiveVisualizer();
   const request = ++clipEditorPreviewRequest;
   clipEditorPreviewLoading = true;
   syncClipRangePreviewButton();
@@ -1270,6 +1493,31 @@ async function toggleClipRangePreview() {
   }
 }
 
+async function stepClipEditorTrack(direction) {
+  const tracks = tracksForActiveProfile(state);
+  if (!tracks.length) return;
+  const currentIndex = Math.max(0, tracks.findIndex((track) => track.id === clipEditorTrack()?.id));
+  const nextIndex = (currentIndex + direction + tracks.length) % tracks.length;
+  await stopClipRangePreview();
+  setCustomSelectValue($("#clipEditorTrack"), tracks[nextIndex].id);
+  renderClipEditorTrack({ resetRange: true });
+}
+
+function handleClipEditorKeybind(action) {
+  if (!$("#clipEditorDialog").open) return false;
+  if (action === "togglePlayback") void toggleClipRangePreview();
+  else if (action === "previousTrack") void stepClipEditorTrack(-1);
+  else if (action === "nextTrack") void stepClipEditorTrack(1);
+  else if (action === "volumeDown") {
+    setPlaybackVolume(state.volume - .05);
+    clipEditorPreviewAudio.volume = playbackGainForVolume(state.volume);
+  } else if (action === "volumeUp") {
+    setPlaybackVolume(state.volume + .05);
+    clipEditorPreviewAudio.volume = playbackGainForVolume(state.volume);
+  } else return false;
+  return true;
+}
+
 function openClipEditor() {
   closeProfileMenu();
   const select = $("#clipEditorTrack");
@@ -1280,8 +1528,14 @@ function openClipEditor() {
     label: `${track.title} — ${track.artist || "Unknown Artist"}`,
   })), preferredTrack?.id);
   renderClipEditorTrack({ resetRange: true });
+  $("#clipEditorSettings").hidden = true;
+  $("#clipEditorHelp").hidden = true;
+  $("#clipEditorSettingsButton").setAttribute("aria-expanded", "false");
+  $("#clipEditorHelpButton").setAttribute("aria-expanded", "false");
+  $("#clipEditorDialog").classList.remove("preview-expanded");
+  $("#clipEditorExpand").setAttribute("aria-pressed", "false");
   $("#clipEditorDialog").showModal();
-  requestAnimationFrame(() => (preferredTrack ? customSelectControllers.get(select)?.trigger : $("#closeClipEditor"))?.focus());
+  requestAnimationFrame(() => (preferredTrack ? $("#previewClipRange") : $("#saveClipRange"))?.focus());
 }
 
 async function saveClipRange() {
@@ -1293,8 +1547,12 @@ async function saveClipRange() {
   button.disabled = true;
   button.textContent = "Saving…";
   try {
-    const range = setClipRangeForTrack(state, track, clipEditorStartSeconds, clipEditorEndSeconds);
-    if (!range) throw new Error("Choose a valid clip range.");
+    const duration = clipEditorDuration(track);
+    const usesFullSong = clipEditorStartSeconds <= .001 && clipEditorEndSeconds >= duration - .001;
+    const range = usesFullSong
+      ? (removeClipRangeForTrack(state, track), { startSeconds: 0, endSeconds: duration })
+      : setClipRangeForTrack(state, track, clipEditorStartSeconds, clipEditorEndSeconds);
+    if (!range) throw new Error("Choose a valid playback range.");
     clipRangeMutationGeneration += 1;
     if (currentID === track.id && (audio.currentTime < range.startSeconds || audio.currentTime >= range.endSeconds)) {
       audio.currentTime = range.startSeconds;
@@ -1302,31 +1560,58 @@ async function saveClipRange() {
     }
     await persist();
     if (track.remoteID) schedulePlaylistSync();
-    $("#clearClipRange").hidden = false;
+    clipEditorSavedStartSeconds = range.startSeconds;
+    clipEditorSavedEndSeconds = range.endSeconds;
+    $("#clearClipRange").hidden = usesFullSong;
     const profileName = state.syncProfiles.find((profile) => profile.id === activeProfileID())?.name || activeProfileID();
     status.textContent = track.remoteID
       ? `Saved for ${profileName}. Syncing this range to the server…`
       : `Saved for ${profileName} on this device. Upload the song to sync its range.`;
-    showNotice(`Playback for “${track.title}” is now limited to ${formatTime(range.startSeconds)}–${formatTime(range.endSeconds)}.`, "status");
+    showNotice(usesFullSong
+      ? `“${track.title}” now plays in full.`
+      : `Playback for “${track.title}” is now limited to ${formatTime(range.startSeconds)}–${formatTime(range.endSeconds)}.`, "status");
+    syncClipEditorSaveButton();
   } catch (error) {
     status.textContent = error.message || "Resonance could not save this clip range.";
   } finally {
-    button.disabled = false;
-    button.textContent = "Save range";
+    button.textContent = "Save";
+    syncClipEditorSaveButton();
   }
+}
+
+async function seekClipEditorPreview(seconds) {
+  const track = clipEditorTrack();
+  if (!track?.fileUrl) return;
+  try {
+    await prepareClipRangePreviewMedia(track);
+    clipEditorPreviewAudio.currentTime = Math.max(clipEditorStartSeconds, Math.min(seconds, clipEditorEndSeconds));
+    syncClipRangePreviewTransport();
+  } catch (error) {
+    $("#clipEditorStatus").textContent = error?.message || "Resonance could not seek this clip.";
+  }
+}
+
+function toggleClipEditorPopover(name) {
+  const settings = $("#clipEditorSettings");
+  const help = $("#clipEditorHelp");
+  const openSettings = name === "settings" && settings.hidden;
+  const openHelp = name === "help" && help.hidden;
+  settings.hidden = !openSettings;
+  help.hidden = !openHelp;
+  $("#clipEditorSettingsButton").setAttribute("aria-expanded", String(openSettings));
+  $("#clipEditorHelpButton").setAttribute("aria-expanded", String(openHelp));
+  if (openSettings) requestAnimationFrame(() => customSelectControllers.get($("#clipEditorTrack"))?.trigger?.focus());
+  if (openHelp) requestAnimationFrame(() => $("#closeClipEditorHelp").focus());
 }
 
 async function clearClipRange() {
   const track = clipEditorTrack();
-  if (!track || !removeClipRangeForTrack(state, track)) return;
+  if (!track) return;
   await stopClipRangePreview();
-  clipRangeMutationGeneration += 1;
-  await persist();
-  if (track.remoteID) schedulePlaylistSync();
   clipEditorStartSeconds = 0;
   clipEditorEndSeconds = clipEditorDuration(track);
   renderClipEditorTrack();
-  $("#clipEditorStatus").textContent = "This profile now plays the full song. The song file is unchanged.";
+  $("#clipEditorStatus").textContent = "Full-song playback is selected. Press Save to apply it.";
 }
 
 function listeningHistoryMetric(icon, tone, value, suffix, label) {
@@ -6901,10 +7186,21 @@ $("#dismissAppNotice").onclick = dismissNotice;
 $("#cancelPlaylist").onclick = () => { pendingPlaylistTrackID = null; $("#playlistDialog").close(); };
 $("#playlistName").oninput = () => { $("#createPlaylist").disabled = !$("#playlistName").value.trim(); };
 $("#closeAddSongs").onclick = () => $("#addSongsDialog").close();
-$("#closeClipEditor").onclick = async () => { await stopClipRangePreview(); $("#clipEditorDialog").close(); };
 $("#previewClipRange").onclick = toggleClipRangePreview;
 $("#saveClipRange").onclick = saveClipRange;
+$("#closeClipEditor").onclick = () => { void stopClipRangePreview().then(() => $("#clipEditorDialog").close()); };
 $("#clearClipRange").onclick = clearClipRange;
+$("#clipEditorSettingsButton").onclick = () => toggleClipEditorPopover("settings");
+$("#clipEditorHelpButton").onclick = () => toggleClipEditorPopover("help");
+$("#closeClipEditorSettings").onclick = () => toggleClipEditorPopover("settings");
+$("#closeClipEditorHelp").onclick = () => toggleClipEditorPopover("help");
+$("#clipEditorSkipStart").onclick = () => { void seekClipEditorPreview(clipEditorStartSeconds); };
+$("#clipEditorSkipEnd").onclick = () => { void seekClipEditorPreview(clipEditorEndSeconds - .01); };
+$("#clipEditorExpand").onclick = () => {
+  const expanded = $("#clipEditorDialog").classList.toggle("preview-expanded");
+  $("#clipEditorExpand").setAttribute("aria-pressed", String(expanded));
+  $("#clipEditorExpand").setAttribute("aria-label", expanded ? "Show clip timeline" : "Expand preview");
+};
 $("#clipEditorTrack").onchange = async () => { await stopClipRangePreview(); renderClipEditorTrack({ resetRange: true }); };
 bindClipEditorHandle("start");
 bindClipEditorHandle("end");
@@ -6927,6 +7223,12 @@ $("#clipEditorDialog").onclick = (event) => {
   if (event.target === $("#clipEditorDialog")) {
     void stopClipRangePreview().then(() => $("#clipEditorDialog").close());
   }
+};
+$("#clipEditorDialog").oncancel = () => { void stopClipRangePreview(); };
+$("#clipEditorWaveform").onpointerdown = (event) => {
+  if (event.target.closest(".clip-editor-handle")) return;
+  const seconds = clipEditorSecondsAtPointer(event);
+  void seekClipEditorPreview(Math.max(clipEditorStartSeconds, Math.min(seconds, clipEditorEndSeconds)));
 };
 clipEditorPreviewAudio.onplay = syncClipRangePreviewButton;
 clipEditorPreviewAudio.onpause = () => {
@@ -7263,8 +7565,22 @@ document.addEventListener("keydown", (event) => {
     renderSettings();
     return;
   }
-  if (event.defaultPrevented || event.repeat || event.isComposing) return;
-  if (hasBlockingDialog()) return;
+  if (event.repeat || event.isComposing) return;
+  const clipEditorOpen = $("#clipEditorDialog")?.open;
+  const isTextEntry = event.target instanceof Element
+    && Boolean(event.target.closest("input:not([type=range]), textarea, select, [contenteditable=true], [role=menu], [role=listbox]"));
+  if (clipEditorOpen && !isTextEntry) {
+    const keybind = keybindFromKeyboardEvent(event);
+    const action = keybind
+      ? Object.entries(state.appPreferences?.keybinds || {}).find(([, value]) => value === keybind)?.[0]
+      : null;
+    if (action && handleClipEditorKeybind(action)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+    return;
+  }
+  if (event.defaultPrevented || hasBlockingDialog()) return;
   if (event.target instanceof Element && event.target.closest("input, textarea, select, button, [contenteditable=true], [role=menu], [role=listbox]")) return;
   const keybind = keybindFromKeyboardEvent(event);
   if (!keybind) return;

@@ -1,25 +1,15 @@
+import AppKit
+import Accelerate
 import AVFoundation
 import Foundation
 
 enum ClipEditorError: LocalizedError {
-    case missingSource
     case invalidRange
-    case missingAudio
-    case exportUnavailable
-    case exportFailed(String)
 
     var errorDescription: String? {
         switch self {
-        case .missingSource:
-            "The source file is no longer available on this Mac."
         case .invalidRange:
             "Choose a clip that is at least 0.25 seconds long."
-        case .missingAudio:
-            "The selected file does not contain an audio track."
-        case .exportUnavailable:
-            "This file cannot be converted into an M4A clip."
-        case .exportFailed(let message):
-            "The clip could not be created: \(message)"
         }
     }
 }
@@ -44,79 +34,99 @@ struct ClipRangePolicy {
     }
 }
 
-enum ClipAudioProcessor {
-    private final class ExportSessionBox: @unchecked Sendable {
-        let value: AVAssetExportSession
+final class ClipLiveSpectrumAnalyzer: @unchecked Sendable {
+    static let barCount = 112
+    private static let sampleCount = 512
+    private static let smoothing = 0.72
 
-        init(_ value: AVAssetExportSession) {
-            self.value = value
-        }
-    }
+    private let queue = DispatchQueue(label: "Resonance.ClipLiveSpectrum", qos: .userInteractive)
+    private let transform: vDSP.DiscreteFourierTransform<Float>
+    private let window: [Float]
+    private let levelsLock = NSLock()
+    private var smoothedMagnitudes = [Double](repeating: 0, count: sampleCount / 2)
+    private var latestLevels = [Double](repeating: 0, count: barCount)
 
-    static func exportM4AClip(
-        input: URL,
-        output: URL,
-        range: ClosedRange<TimeInterval>,
-        title: String,
-        artist: String,
-        album: String,
-        artwork: Data?
-    ) async throws {
-        let asset = AVURLAsset(url: input)
-        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
-        guard !audioTracks.isEmpty else { throw ClipEditorError.missingAudio }
-        guard let exporter = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A),
-              exporter.supportedFileTypes.contains(.m4a) else {
-            throw ClipEditorError.exportUnavailable
-        }
-
-        var metadata = [
-            metadataItem(.commonIdentifierTitle, value: title as NSString),
-            metadataItem(.commonIdentifierArtist, value: artist as NSString),
-            metadataItem(.commonIdentifierAlbumName, value: album as NSString),
-        ]
-        if let artwork {
-            metadata.append(metadataItem(.commonIdentifierArtwork, value: artwork as NSData))
-        }
-
-        exporter.metadata = metadata
-        exporter.shouldOptimizeForNetworkUse = true
-        exporter.timeRange = CMTimeRange(
-            start: CMTime(seconds: range.lowerBound, preferredTimescale: 44_100),
-            duration: CMTime(seconds: range.upperBound - range.lowerBound, preferredTimescale: 44_100)
+    init() {
+        transform = try! vDSP.DiscreteFourierTransform(
+            count: Self.sampleCount,
+            direction: .forward,
+            transformType: .complexComplex,
+            ofType: Float.self
         )
-
-        let box = ExportSessionBox(exporter)
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                box.value.outputURL = output
-                box.value.outputFileType = .m4a
-                box.value.exportAsynchronously {
-                    switch box.value.status {
-                    case .completed:
-                        continuation.resume()
-                    case .cancelled:
-                        continuation.resume(throwing: CancellationError())
-                    default:
-                        continuation.resume(throwing: ClipEditorError.exportFailed(
-                            box.value.error?.localizedDescription ?? "Unknown export error"
-                        ))
-                    }
-                }
-            }
-        } onCancel: {
-            box.value.cancelExport()
+        window = (0..<Self.sampleCount).map { index in
+            let phase = 2 * .pi * Float(index) / Float(Self.sampleCount)
+            return 0.42 - 0.5 * cos(phase) + 0.08 * cos(2 * phase)
         }
     }
 
-    private static func metadataItem(
-        _ identifier: AVMetadataIdentifier,
-        value: NSCopying & NSObjectProtocol
-    ) -> AVMetadataItem {
-        let item = AVMutableMetadataItem()
-        item.identifier = identifier
-        item.value = value
-        return item.copy() as! AVMetadataItem
+    func consume(_ buffer: AVAudioPCMBuffer) {
+        guard let channels = buffer.floatChannelData,
+              buffer.frameLength > 0,
+              buffer.format.channelCount > 0 else { return }
+        let availableFrames = Int(buffer.frameLength)
+        let copiedFrames = min(availableFrames, Self.sampleCount)
+        let sourceStart = availableFrames - copiedFrames
+        let channelCount = Int(buffer.format.channelCount)
+        var samples = [Float](repeating: 0, count: Self.sampleCount)
+        for frame in 0..<copiedFrames {
+            var mixedSample: Float = 0
+            for channel in 0..<channelCount {
+                mixedSample += channels[channel][sourceStart + frame]
+            }
+            samples[Self.sampleCount - copiedFrames + frame] = mixedSample / Float(channelCount)
+        }
+        queue.async { [self] in analyze(samples) }
+    }
+
+    func snapshot() -> [Double] {
+        levelsLock.lock()
+        defer { levelsLock.unlock() }
+        return latestLevels
+    }
+
+    func reset() {
+        queue.async { [self] in
+            smoothedMagnitudes = [Double](repeating: 0, count: Self.sampleCount / 2)
+            levelsLock.lock()
+            latestLevels = [Double](repeating: 0, count: Self.barCount)
+            levelsLock.unlock()
+        }
+    }
+
+    private func analyze(_ samples: [Float]) {
+        var windowed = samples
+        for index in windowed.indices { windowed[index] *= window[index] }
+        let imaginary = [Float](repeating: 0, count: Self.sampleCount)
+        let spectrum = transform.transform(real: windowed, imaginary: imaginary)
+        let usableBinCount = Int(Double(Self.sampleCount / 2) * 0.72)
+        var normalizedBins = [Double](repeating: 0, count: Self.sampleCount / 2)
+
+        for bin in normalizedBins.indices {
+            let magnitude = Double(hypot(spectrum.real[bin], spectrum.imaginary[bin]))
+                / Double(Self.sampleCount / 2)
+            smoothedMagnitudes[bin] = smoothedMagnitudes[bin] * Self.smoothing
+                + magnitude * (1 - Self.smoothing)
+            let decibels = 20 * log10(max(smoothedMagnitudes[bin], 0.000_000_1))
+            let normalized = min(max((decibels + 100) / 70, 0), 1)
+            normalizedBins[bin] = Double(Int(normalized * 255)) / 255
+        }
+
+        var levels = [Double](repeating: 0, count: Self.barCount)
+        for bar in 0..<Self.barCount {
+            let lowerBin = Int(Double(bar) / Double(Self.barCount) * Double(usableBinCount))
+            let upperBin = max(
+                lowerBin + 1,
+                Int(Double(bar + 1) / Double(Self.barCount) * Double(usableBinCount))
+            )
+            var energy = 0.0
+            for bin in lowerBin..<min(upperBin, usableBinCount) {
+                energy = max(energy, normalizedBins[bin])
+            }
+            levels[bar] = energy
+        }
+        levelsLock.lock()
+        latestLevels = levels
+        levelsLock.unlock()
     }
 }
 
@@ -198,10 +208,29 @@ enum ClipWaveformSampler {
     }
 
     private static func fallback(count: Int) -> [Double] {
-        (0..<count).map { index in
-            let primary = abs(sin(Double(index) * 0.31))
-            let secondary = abs(cos(Double(index) * 0.13))
-            return 0.18 + (primary * 0.48) + (secondary * 0.20)
-        }
+        [Double](repeating: 0.08, count: count)
+    }
+}
+
+enum ClipVideoFrameSampler {
+    static func frames(for url: URL, duration: TimeInterval, count: Int = 12) async -> [NSImage] {
+        guard duration.isFinite, duration > 0, count > 0 else { return [] }
+        let encodedFrames = await Task.detached(priority: .userInitiated) { () -> [Data] in
+            let asset = AVURLAsset(url: url)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 360, height: 203)
+            generator.requestedTimeToleranceBefore = CMTime(seconds: 0.25, preferredTimescale: 600)
+            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.25, preferredTimescale: 600)
+            return (0..<count).compactMap { index in
+                guard !Task.isCancelled else { return nil }
+                let seconds = duration * (Double(index) + 0.5) / Double(count)
+                let time = CMTime(seconds: seconds, preferredTimescale: 600)
+                guard let image = try? generator.copyCGImage(at: time, actualTime: nil) else { return nil }
+                let representation = NSBitmapImageRep(cgImage: image)
+                return representation.representation(using: .jpeg, properties: [.compressionFactor: 0.72])
+            }
+        }.value
+        return encodedFrames.compactMap(NSImage.init(data:))
     }
 }

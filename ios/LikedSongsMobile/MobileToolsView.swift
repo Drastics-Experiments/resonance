@@ -1,5 +1,6 @@
 import AVFoundation
 import AVKit
+import QuartzCore
 import SwiftUI
 import UIKit
 
@@ -99,7 +100,797 @@ private final class MobileClipPreviewPlayer: ObservableObject {
     }
 }
 
+private enum MobileClipWaveformSampler {
+    static func samples(for url: URL, count: Int = 192) async -> [Double] {
+        guard count > 0 else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            let asset = AVURLAsset(url: url)
+            guard let duration = try? await asset.load(.duration),
+                  duration.seconds.isFinite,
+                  duration.seconds > 0,
+                  let track = try? await asset.loadTracks(withMediaType: .audio).first,
+                  let reader = try? AVAssetReader(asset: asset) else {
+                return []
+            }
+            let output = AVAssetReaderTrackOutput(
+                track: track,
+                outputSettings: [
+                    AVFormatIDKey: kAudioFormatLinearPCM,
+                    AVLinearPCMBitDepthKey: 16,
+                    AVLinearPCMIsBigEndianKey: false,
+                    AVLinearPCMIsFloatKey: false,
+                    AVLinearPCMIsNonInterleaved: false,
+                ]
+            )
+            output.alwaysCopiesSampleData = false
+            guard reader.canAdd(output) else { return [] }
+            reader.add(output)
+            guard reader.startReading() else { return [] }
+
+            var peaks = [Double](repeating: 0, count: count)
+            while reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
+                guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
+                let byteCount = CMBlockBufferGetDataLength(dataBuffer)
+                guard byteCount >= MemoryLayout<Int16>.size else { continue }
+                var bytes = [UInt8](repeating: 0, count: byteCount)
+                let status = bytes.withUnsafeMutableBytes { buffer in
+                    CMBlockBufferCopyDataBytes(
+                        dataBuffer,
+                        atOffset: 0,
+                        dataLength: byteCount,
+                        destination: buffer.baseAddress!
+                    )
+                }
+                guard status == kCMBlockBufferNoErr else { continue }
+                var peak = 0.0
+                bytes.withUnsafeBytes { buffer in
+                    for value in buffer.bindMemory(to: Int16.self) {
+                        peak = max(peak, min(Double(abs(Int(value))) / Double(Int16.max), 1))
+                    }
+                }
+                let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+                guard timestamp.isFinite else { continue }
+                let index = min(max(Int(timestamp / duration.seconds * Double(count)), 0), count - 1)
+                peaks[index] = max(peaks[index], peak)
+            }
+            guard let maximum = peaks.max(), maximum > 0 else { return [] }
+            fillEmptySamples(&peaks)
+            return peaks.map { max(0.04, sqrt($0 / maximum)) }
+        }.value
+    }
+
+    private static func fillEmptySamples(_ samples: inout [Double]) {
+        var last = 0.0
+        for index in samples.indices {
+            if samples[index] > 0 { last = samples[index] }
+            else if last > 0 { samples[index] = last }
+        }
+        last = 0
+        for index in samples.indices.reversed() {
+            if samples[index] > 0 { last = samples[index] }
+            else if last > 0 { samples[index] = last }
+        }
+    }
+}
+
+private enum MobileClipVideoFrameSampler {
+    static func frames(for url: URL, duration: TimeInterval, count: Int = 12) async -> [UIImage] {
+        guard duration.isFinite, duration > 0, count > 0 else { return [] }
+        let encodedFrames = await Task.detached(priority: .userInitiated) { () -> [Data] in
+            let asset = AVURLAsset(url: url)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 320, height: 180)
+            generator.requestedTimeToleranceBefore = CMTime(seconds: 0.25, preferredTimescale: 600)
+            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.25, preferredTimescale: 600)
+            return (0..<count).compactMap { index in
+                guard !Task.isCancelled else { return nil }
+                let seconds = duration * (Double(index) + 0.5) / Double(count)
+                let time = CMTime(seconds: seconds, preferredTimescale: 600)
+                guard let image = try? generator.copyCGImage(at: time, actualTime: nil) else { return nil }
+                return UIImage(cgImage: image).jpegData(compressionQuality: 0.72)
+            }
+        }.value
+        return encodedFrames.compactMap(UIImage.init(data:))
+    }
+}
+
 struct MobileClipEditorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var library: MusicLibrary
+    @StateObject private var preview = MobileClipPreviewPlayer()
+    @State private var selectedTrackID: UUID?
+    @State private var startSeconds: TimeInterval = 0
+    @State private var endSeconds: TimeInterval = 1
+    @State private var startText = "0:00"
+    @State private var endText = "0:01"
+    @State private var wasPlayingBeforePreview = false
+    @State private var showsSettings = false
+    @State private var showsHelp = false
+    @State private var previewExpanded = false
+    @State private var waveformSamples: [Double] = []
+    @State private var videoFrames: [UIImage] = []
+    @State private var savedStartSeconds: TimeInterval = 0
+    @State private var savedEndSeconds: TimeInterval = 0
+    @State private var saveConfirmation: String?
+    @FocusState private var focusedBoundary: ClipBoundary?
+
+    private enum ClipBoundary: Hashable { case start, end }
+
+    private var tracks: [MobileTrack] { library.tracksForActiveProfile }
+    private var selectedTrack: MobileTrack? {
+        guard let selectedTrackID else { return nil }
+        return tracks.first { $0.id == selectedTrackID } ?? library.tracks.first { $0.id == selectedTrackID }
+    }
+
+    var body: some View {
+        ZStack {
+            Color(hex: 0x080910).ignoresSafeArea()
+
+            VStack(spacing: 10) {
+                topBar
+                if let track = selectedTrack {
+                    ScrollView {
+                        VStack(spacing: 12) {
+                            previewStage(track)
+                            if !previewExpanded { timeline(track) }
+                            Text(saveConfirmation ?? "Unsaved changes are discarded by Done. The original media file is never changed.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 18)
+                    }
+                    .scrollIndicators(.hidden)
+                } else {
+                    ContentUnavailableView(
+                        "No songs to edit",
+                        systemImage: "waveform",
+                        description: Text("Import or download a song, then return to create a playback range.")
+                    )
+                }
+            }
+
+            if showsSettings { settingsOverlay }
+            if showsHelp { helpOverlay }
+        }
+        .onAppear {
+            selectedTrackID = library.currentTrack?.id ?? tracks.first?.id
+            resetRange()
+        }
+        .onChange(of: selectedTrackID) {
+            stopPreview(resumeMain: true)
+            preview.clear()
+            resetRange()
+        }
+        .task(id: selectedTrackID) { await loadWaveform() }
+        .onChange(of: preview.isPlaying) { wasPlaying, isPlaying in
+            if wasPlaying, !isPlaying, wasPlayingBeforePreview {
+                wasPlayingBeforePreview = false
+                library.resumePlayback()
+            }
+        }
+        .onDisappear {
+            stopPreview(resumeMain: true)
+            preview.clear()
+        }
+    }
+
+    private var topBar: some View {
+        ZStack {
+            Text("My Clip").font(.headline.weight(.semibold)).foregroundStyle(.white)
+            HStack {
+                Button("Done", action: dismissWithoutSaving)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.white)
+                Spacer()
+                HStack(spacing: 12) {
+                    Button("Save", action: saveRange)
+                        .font(.subheadline.weight(.bold))
+                        .padding(.horizontal, 13)
+                        .frame(height: 32)
+                        .background(hasUnsavedChanges ? Color(hex: 0x7942DF) : Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
+                        .foregroundStyle(hasUnsavedChanges ? Color.white : Color.white.opacity(0.35))
+                        .disabled(!hasUnsavedChanges || selectedTrack == nil || (selectedTrack?.duration ?? 0) < 0.25)
+                    Button {
+                        showsHelp.toggle()
+                        showsSettings = false
+                    } label: {
+                        Image(systemName: "questionmark")
+                            .font(.callout.bold())
+                            .frame(width: 28, height: 28)
+                            .overlay(Circle().stroke(.white.opacity(0.9), lineWidth: 1.4))
+                    }
+                    Button {
+                        showsSettings.toggle()
+                        showsHelp = false
+                    } label: {
+                        Image(systemName: "gearshape").font(.title3)
+                    }
+                }
+                .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(height: 42)
+        .padding(.horizontal, 16)
+    }
+
+    private func previewStage(_ track: MobileTrack) -> some View {
+        VStack(spacing: 0) {
+            ZStack {
+                if isVideoClipTrack(track) {
+                    MobileClipVideoPlayer(player: preview.player)
+                        .aspectRatio(16 / 9, contentMode: .fit)
+                    if !preview.isPlaying {
+                        Image(systemName: "play.fill")
+                            .font(.title3.bold())
+                            .foregroundStyle(.white)
+                            .frame(width: 52, height: 52)
+                            .background(.black.opacity(0.58), in: Circle())
+                            .allowsHitTesting(false)
+                    }
+                } else {
+                    MobileCinematicVisualizer(
+                        samples: waveformSamples,
+                        isPlaying: preview.isPlaying,
+                        position: preview.position,
+                        duration: track.duration,
+                        player: preview.player
+                    )
+                        .overlay {
+                            VStack(spacing: 7) {
+                                TrackArtwork(track: track, fallbackSymbol: "music.note")
+                                    .frame(width: previewExpanded ? 176 : 116, height: previewExpanded ? 176 : 116)
+                                    .clipShape(RoundedRectangle(cornerRadius: previewExpanded ? 24 : 17, style: .continuous))
+                                    .shadow(color: .black.opacity(0.62), radius: 22, y: 13)
+                                Text(track.title)
+                                    .font((previewExpanded ? Font.title2 : .headline).bold())
+                                    .lineLimit(1)
+                                Text(track.artist)
+                                    .font(previewExpanded ? .headline : .subheadline)
+                                    .foregroundStyle(.white.opacity(0.86))
+                                    .lineLimit(1)
+                                Text("[Visualizer]")
+                                    .font(.subheadline)
+                                    .foregroundStyle(Color(hex: 0xB56AFF))
+                            }
+                            .padding(14)
+                        }
+                }
+            }
+            .frame(minHeight: previewExpanded ? 500 : 232)
+            .contentShape(Rectangle())
+            .onTapGesture { togglePreview() }
+
+            previewTransport(track)
+        }
+        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.09), lineWidth: 1) }
+    }
+
+    private func previewTransport(_ track: MobileTrack) -> some View {
+        ZStack {
+            HStack(spacing: 6) {
+                Text(formatTime(preview.position)).foregroundStyle(Color(hex: 0xAC75FF))
+                Text("/").foregroundStyle(.secondary)
+                Text(formatTime(endSeconds)).foregroundStyle(.white)
+                Spacer()
+                Button { previewExpanded.toggle() } label: {
+                    Image(systemName: previewExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .frame(width: 32, height: 32)
+                }
+            }
+            .font(.caption.monospacedDigit())
+
+            HStack(spacing: 22) {
+                Button { preview.seek(to: startSeconds) } label: { Image(systemName: "backward.end.fill") }
+                Button { togglePreview() } label: {
+                    Image(systemName: preview.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.title3.bold())
+                        .frame(width: 38, height: 38)
+                }
+                Button { preview.seek(to: max(startSeconds, endSeconds - 0.01)) } label: { Image(systemName: "forward.end.fill") }
+            }
+            .disabled(library.fileURL(for: track).path.isEmpty)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 14)
+        .frame(height: 58)
+        .background(Color(hex: 0x0D0E15).opacity(0.97))
+        .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.08)).frame(height: 1) }
+    }
+
+    private func timeline(_ track: MobileTrack) -> some View {
+        VStack(spacing: 0) {
+            MobileClipRuler(duration: track.duration).frame(height: 34)
+            MobileCinematicWaveform(
+                track: track,
+                samples: waveformSamples,
+                videoFrames: videoFrames,
+                startSeconds: $startSeconds,
+                endSeconds: $endSeconds,
+                playhead: preview.position,
+                onChange: {
+                    stopPreview(resumeMain: true)
+                    updateTexts()
+                    preview.updateRange(start: startSeconds, end: endSeconds)
+                    saveConfirmation = nil
+                },
+                onSeek: { preview.seek(to: $0) }
+            )
+            .frame(height: 92)
+        }
+        .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.09), lineWidth: 1) }
+    }
+
+    private var settingsOverlay: some View {
+        overlayScrim {
+            VStack(alignment: .leading, spacing: 14) {
+                overlayHeader("CLIP SETTINGS", "Fine tune your clip") { showsSettings = false }
+                Text("SONG").eyebrow()
+                Picker("Song", selection: $selectedTrackID) {
+                    ForEach(tracks) { track in
+                        Text("\(track.title) — \(track.artist)").tag(Optional(track.id))
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(11)
+                .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+
+                HStack(spacing: 10) {
+                    exactTimeField("START", text: $startText, boundary: .start)
+                    exactTimeField("END", text: $endText, boundary: .end)
+                }
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("CLIP LENGTH").eyebrow()
+                        Text(formatTime(max(endSeconds - startSeconds, 0)))
+                            .font(.headline.monospacedDigit())
+                            .foregroundStyle(Color(hex: 0xB56AFF))
+                    }
+                    Spacer()
+                    if let track = selectedTrack {
+                        Button("Use Full Song") {
+                            stopPreview(resumeMain: true)
+                            startSeconds = 0
+                            endSeconds = track.duration
+                            updateTexts()
+                            preview.updateRange(start: startSeconds, end: endSeconds)
+                            saveConfirmation = nil
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+        }
+    }
+
+    private var helpOverlay: some View {
+        overlayScrim {
+            VStack(alignment: .leading, spacing: 13) {
+                overlayHeader("HOW IT WORKS", "Create your perfect playback range") { showsHelp = false }
+                Text("Drag the yellow handles to choose a range. Tap the waveform to scrub, then use the center controls to preview exactly what will play.")
+                Text("**Save** updates playback for the active profile without changing the media file. **Done** closes the editor and discards anything not saved.")
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func overlayScrim<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ZStack {
+            Color.black.opacity(0.5).ignoresSafeArea().onTapGesture { showsSettings = false; showsHelp = false }
+            content()
+                .padding(18)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .background(Color(hex: 0x11121B).opacity(0.94), in: RoundedRectangle(cornerRadius: 20))
+                .overlay { RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.12), lineWidth: 1) }
+                .padding(20)
+        }
+    }
+
+    private func overlayHeader(_ eyebrow: String, _ title: String, close: @escaping () -> Void) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(eyebrow).eyebrow()
+                Text(title).font(.headline)
+            }
+            Spacer()
+            Button(action: close) { Image(systemName: "xmark").frame(width: 28, height: 28).background(.white.opacity(0.08), in: Circle()) }
+                .buttonStyle(.plain)
+        }
+    }
+
+    private func exactTimeField(_ label: String, text: Binding<String>, boundary: ClipBoundary) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label).eyebrow()
+            TextField(label, text: text)
+                .focused($focusedBoundary, equals: boundary)
+                .keyboardType(.numbersAndPunctuation)
+                .font(.headline.monospacedDigit())
+                .padding(10)
+                .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
+                .onSubmit { commit(boundary) }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func togglePreview() {
+        guard let track = selectedTrack else { return }
+        if preview.isPlaying {
+            stopPreview(resumeMain: true)
+        } else {
+            wasPlayingBeforePreview = library.isPlaying
+            if wasPlayingBeforePreview { library.pausePlayback() }
+            if preview.player == nil {
+                preview.prepare(url: library.fileURL(for: track), start: startSeconds, end: endSeconds, volume: library.volume)
+            }
+            preview.toggle()
+        }
+    }
+
+    private func commit(_ boundary: ClipBoundary) {
+        let value = boundary == .start ? startText : endText
+        guard let seconds = parseTime(value), let track = selectedTrack else { updateTexts(); return }
+        stopPreview(resumeMain: true)
+        if boundary == .start {
+            startSeconds = min(max(seconds, 0), max(endSeconds - 0.25, 0))
+        } else {
+            endSeconds = min(max(seconds, startSeconds + 0.25), track.duration)
+        }
+        updateTexts()
+        preview.updateRange(start: startSeconds, end: endSeconds)
+        saveConfirmation = nil
+    }
+
+    private func resetRange() {
+        guard let track = selectedTrack else { return }
+        let saved = library.clipRange(for: track)
+        let defaultStart: TimeInterval = track.duration > 60 ? 15 : 0
+        startSeconds = saved?.startSeconds ?? defaultStart
+        endSeconds = saved?.endSeconds ?? min(track.duration, defaultStart + 45)
+        savedStartSeconds = saved?.startSeconds ?? 0
+        savedEndSeconds = saved?.endSeconds ?? track.duration
+        if endSeconds - startSeconds < 0.25 { startSeconds = 0; endSeconds = max(track.duration, 0.25) }
+        saveConfirmation = nil
+        updateTexts()
+        preview.prepare(url: library.fileURL(for: track), start: startSeconds, end: endSeconds, volume: library.volume)
+    }
+
+    private func loadWaveform() async {
+        guard let track = selectedTrack else {
+            waveformSamples = []
+            videoFrames = []
+            return
+        }
+        let trackID = track.id
+        waveformSamples = []
+        videoFrames = []
+        let url = library.fileURL(for: track)
+        if isVideoClipTrack(track) {
+            let frames = await MobileClipVideoFrameSampler.frames(for: url, duration: track.duration)
+            guard !Task.isCancelled, selectedTrackID == trackID else { return }
+            videoFrames = frames
+            return
+        }
+        let samples = await MobileClipWaveformSampler.samples(for: url)
+        guard !Task.isCancelled, selectedTrackID == trackID else { return }
+        waveformSamples = samples
+    }
+
+    private func updateTexts() {
+        startText = formatTime(startSeconds)
+        endText = formatTime(endSeconds)
+    }
+
+    private func stopPreview(resumeMain: Bool) {
+        let shouldResume = resumeMain && wasPlayingBeforePreview
+        wasPlayingBeforePreview = false
+        preview.pause()
+        if shouldResume { library.resumePlayback() }
+    }
+
+    private var hasUnsavedChanges: Bool {
+        abs(startSeconds - savedStartSeconds) > 0.001 || abs(endSeconds - savedEndSeconds) > 0.001
+    }
+
+    private func dismissWithoutSaving() {
+        focusedBoundary = nil
+        stopPreview(resumeMain: true)
+        dismiss()
+    }
+
+    private func saveRange() {
+        guard let track = selectedTrack, track.duration >= 0.25 else { return }
+        focusedBoundary = nil
+        commit(.start)
+        commit(.end)
+        stopPreview(resumeMain: true)
+        if startSeconds <= 0.001, endSeconds >= track.duration - 0.001 {
+            library.clearClipRange(for: track)
+            savedStartSeconds = 0
+            savedEndSeconds = track.duration
+            saveConfirmation = "Saved full-song playback for \(library.syncProfileName)."
+        } else {
+            library.saveClipRange(for: track, start: startSeconds, end: endSeconds)
+            savedStartSeconds = startSeconds
+            savedEndSeconds = endSeconds
+            saveConfirmation = "Saved \(formatTime(startSeconds))–\(formatTime(endSeconds)) for \(library.syncProfileName)."
+        }
+    }
+}
+
+private struct MobileCinematicVisualizer: View {
+    let samples: [Double]
+    let isPlaying: Bool
+    let position: TimeInterval
+    let duration: TimeInterval
+    let player: AVPlayer?
+    @State private var livePosition: TimeInterval?
+
+    var body: some View {
+        GeometryReader { _ in
+            let count = 96
+            let renderedPosition = isPlaying ? livePosition ?? position : position
+            let progress = duration > 0 ? min(max(renderedPosition / duration, 0), 1) : 0
+            Canvas { context, size in
+                let spacing: CGFloat = 1.5
+                let width = max((size.width - spacing * CGFloat(count - 1)) / CGFloat(count), 1)
+                var bars = Path()
+                for index in 0..<count {
+                    let barProgress = Double(index) / Double(count - 1)
+                    let samplePosition = isPlaying
+                        ? min(max(progress + (barProgress - 0.30) * 0.24, 0), 1)
+                        : barProgress
+                    let level = mobileSampledClipLevel(samples, at: samplePosition)
+                    let height = max(4, size.height * 0.72 * level)
+                    let rect = CGRect(
+                        x: CGFloat(index) * (width + spacing),
+                        y: size.height - height,
+                        width: width,
+                        height: height
+                    )
+                    bars.addPath(Path(roundedRect: rect, cornerRadius: width / 2))
+                }
+                context.fill(
+                    bars,
+                    with: .linearGradient(
+                        Gradient(colors: [Color(hex: 0x4D1B91), Color(hex: 0xB456EF)]),
+                        startPoint: CGPoint(x: 0, y: size.height),
+                        endPoint: .zero
+                    )
+                )
+            }
+            .mask(LinearGradient(colors: [.clear, .black, .black, .clear], startPoint: .top, endPoint: .bottom))
+            .background {
+                MobileClipVisualizerFrameClock(isActive: isPlaying) {
+                    let current = player?.currentTime().seconds ?? position
+                    if current.isFinite {
+                        livePosition = min(max(current, 0), duration)
+                    }
+                }
+            }
+        }
+        .background(RadialGradient(colors: [Color(hex: 0x2C1647), .black], center: .center, startRadius: 8, endRadius: 380))
+        .onChange(of: isPlaying) { _, playing in
+            if !playing { livePosition = nil }
+        }
+    }
+}
+
+private struct MobileClipVisualizerFrameClock: UIViewRepresentable {
+    let isActive: Bool
+    let onFrame: () -> Void
+
+    func makeUIView(context: Context) -> MobileClipVisualizerFrameClockView {
+        let view = MobileClipVisualizerFrameClockView()
+        view.isActive = isActive
+        view.onFrame = onFrame
+        return view
+    }
+
+    func updateUIView(_ uiView: MobileClipVisualizerFrameClockView, context: Context) {
+        uiView.isActive = isActive
+        uiView.onFrame = onFrame
+    }
+
+    static func dismantleUIView(_ uiView: MobileClipVisualizerFrameClockView, coordinator: ()) {
+        uiView.stop()
+        uiView.onFrame = nil
+    }
+}
+
+@MainActor
+private final class MobileClipVisualizerFrameClockView: UIView {
+    static let frameRate: Float = 60
+
+    var onFrame: (() -> Void)?
+    var isActive = false {
+        didSet { displayLink?.isPaused = !isActive }
+    }
+
+    private var displayLink: CADisplayLink?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard window != nil else {
+            stop()
+            return
+        }
+        startIfNeeded()
+    }
+
+    func stop() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    private func startIfNeeded() {
+        guard displayLink == nil else { return }
+        let displayLink = CADisplayLink(target: self, selector: #selector(renderFrame(_:)))
+        displayLink.preferredFrameRateRange = CAFrameRateRange(
+            minimum: Self.frameRate,
+            maximum: Self.frameRate,
+            preferred: Self.frameRate
+        )
+        displayLink.isPaused = !isActive
+        displayLink.add(to: .main, forMode: .common)
+        self.displayLink = displayLink
+    }
+
+    @objc private func renderFrame(_ displayLink: CADisplayLink) {
+        onFrame?()
+    }
+}
+
+private struct MobileClipRuler: View {
+    let duration: TimeInterval
+    var body: some View {
+        VStack(spacing: 3) {
+            HStack {
+                ForEach(0...5, id: \.self) { index in
+                    Text(formatTime(duration * Double(index) / 5))
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    if index < 5 { Spacer() }
+                }
+            }
+            HStack(spacing: 0) {
+                ForEach(0..<31, id: \.self) { index in
+                    Rectangle().fill(.white.opacity(index % 6 == 0 ? 0.4 : 0.2)).frame(maxWidth: .infinity).frame(height: index % 6 == 0 ? 13 : 8)
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 5)
+    }
+}
+
+private struct MobileCinematicWaveform: View {
+    let track: MobileTrack
+    let samples: [Double]
+    let videoFrames: [UIImage]
+    @Binding var startSeconds: TimeInterval
+    @Binding var endSeconds: TimeInterval
+    let playhead: TimeInterval
+    let onChange: () -> Void
+    let onSeek: (TimeInterval) -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = max(geometry.size.width, 1)
+            let duration = max(track.duration, 0.25)
+            let startRatio = startSeconds / duration
+            let endRatio = endSeconds / duration
+            let startX = width * startRatio
+            let endX = width * endRatio
+            let levels = (0..<92).map { index in
+                mobileSampledClipLevel(samples, at: Double(index) / 91)
+            }
+            ZStack {
+                if !videoFrames.isEmpty {
+                    HStack(spacing: 1) {
+                        ForEach(Array(videoFrames.enumerated()), id: \.offset) { _, frame in
+                            Image(uiImage: frame)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: width / CGFloat(max(videoFrames.count, 1)), height: geometry.size.height)
+                                .clipped()
+                        }
+                    }
+                    .allowsHitTesting(false)
+
+                    Rectangle().fill(.black.opacity(0.62))
+                        .frame(width: max(startX, 0), height: geometry.size.height)
+                        .position(x: max(startX, 0) / 2, y: geometry.size.height / 2)
+                    Rectangle().fill(.black.opacity(0.62))
+                        .frame(width: max(width - endX, 0), height: geometry.size.height)
+                        .position(x: endX + max(width - endX, 0) / 2, y: geometry.size.height / 2)
+                }
+
+                Rectangle().fill(Color(hex: 0x7130AF).opacity(0.14))
+                    .frame(width: max(width * (endRatio - startRatio), 0))
+                    .position(x: width * (startRatio + endRatio) / 2, y: geometry.size.height / 2)
+
+                if videoFrames.isEmpty {
+                    HStack(alignment: .center, spacing: 1) {
+                        ForEach(Array(levels.enumerated()), id: \.offset) { index, level in
+                            let ratio = (Double(index) + 0.5) / Double(levels.count)
+                            Rectangle()
+                                .fill(ratio >= startRatio && ratio <= endRatio ? Color(hex: 0x934ADD) : .white.opacity(0.25))
+                                .frame(maxWidth: .infinity)
+                                .frame(height: max(9, geometry.size.height * (0.16 + 0.72 * level)))
+                        }
+                    }
+                    .allowsHitTesting(false)
+                }
+
+                Rectangle().fill(Color(hex: 0xFFD329)).frame(width: max(width * (endRatio - startRatio), 0), height: 2).position(x: width * (startRatio + endRatio) / 2, y: 1)
+                Rectangle().fill(Color(hex: 0xFFD329)).frame(width: max(width * (endRatio - startRatio), 0), height: 2).position(x: width * (startRatio + endRatio) / 2, y: geometry.size.height - 1)
+
+                Rectangle().fill(.white).frame(width: 1.5).position(x: width * min(max(playhead / duration, 0), 1), y: geometry.size.height / 2)
+
+                mobileHandle(symbol: "chevron.right", x: min(max(width * startRatio, 13), width - 13), height: geometry.size.height)
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("mobile-cinematic-waveform")).onChanged {
+                        startSeconds = min(max(Double($0.location.x / width) * duration, 0), endSeconds - 0.25)
+                        onChange()
+                    })
+                mobileHandle(symbol: "chevron.left", x: min(max(width * endRatio, 13), width - 13), height: geometry.size.height)
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("mobile-cinematic-waveform")).onChanged {
+                        endSeconds = max(min(Double($0.location.x / width) * duration, duration), startSeconds + 0.25)
+                        onChange()
+                    })
+            }
+            .coordinateSpace(name: "mobile-cinematic-waveform")
+            .contentShape(Rectangle())
+            .simultaneousGesture(SpatialTapGesture(coordinateSpace: .named("mobile-cinematic-waveform")).onEnded {
+                onSeek(min(max(Double($0.location.x / width) * duration, startSeconds), endSeconds))
+            })
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(videoFrames.isEmpty ? "Clip waveform" : "Video frame timeline")
+    }
+
+    private func mobileHandle(symbol: String, x: CGFloat, height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(LinearGradient(colors: [Color(hex: 0xFFC91D), Color(hex: 0xFFE044)], startPoint: .leading, endPoint: .trailing))
+            .frame(width: 26, height: height)
+            .overlay(Image(systemName: symbol).font(.caption2.bold()).foregroundStyle(.black.opacity(0.82)))
+            .position(x: x, y: height / 2)
+            .shadow(color: Color(hex: 0xFFD329).opacity(0.3), radius: 8)
+    }
+}
+
+private func mobileSampledClipLevel(_ samples: [Double], at normalizedPosition: Double) -> Double {
+    guard !samples.isEmpty else { return 0.08 }
+    let position = min(max(normalizedPosition, 0), 1) * Double(samples.count - 1)
+    let lower = Int(position.rounded(.down))
+    let upper = min(lower + 1, samples.count - 1)
+    let fraction = position - Double(lower)
+    return max(0.04, samples[lower] * (1 - fraction) + samples[upper] * fraction)
+}
+
+private func mobileClipLevels(seed: String, count: Int) -> [Double] {
+    var state = UInt64(abs(seed.hashValue)) | 1
+    var previous = 0.58
+    return (0..<count).map { index in
+        state = state &* 1_664_525 &+ 1_013_904_223
+        let noise = Double(state & 0xffff) / Double(0xffff)
+        previous = previous * 0.54 + noise * 0.46
+        let envelope = 0.58 + sin(Double(index) * 0.083) * 0.16 + sin(Double(index) * 0.029) * 0.11
+        return min(max(previous * 0.62 + envelope * 0.38, 0.12), 1)
+    }
+}
+
+private struct LegacyMobileClipEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @StateObject private var preview = MobileClipPreviewPlayer()
