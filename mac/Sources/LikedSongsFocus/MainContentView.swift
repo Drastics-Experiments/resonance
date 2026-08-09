@@ -796,9 +796,9 @@ private struct PlaylistsOverviewView: View {
                     ForEach(model.playlists) { playlist in
                         Button { model.selectPlaylist(playlist) } label: {
                             HStack(spacing: 12) {
-                                MiniArtwork(
-                                    style: playlist.artwork,
-                                    symbol: playlist.isSystem ? "heart.fill" : "music.note",
+                                PlaylistArtworkView(
+                                    playlist: playlist,
+                                    tracks: model.tracks,
                                     size: 58,
                                     cornerRadius: 9
                                 )
@@ -3259,15 +3259,26 @@ private struct CollectionHeroView: View {
                 )
 
                 HStack(spacing: proxy.size.width < 620 ? 24 : 32) {
-                    ArtworkView(
-                        style: model.collectionArtwork,
-                        symbol: symbol,
-                        symbolSize: proxy.size.width < 550 ? 54 : 70,
-                        cornerRadius: 9,
-                        glow: true
-                    )
-                    .aspectRatio(1, contentMode: .fit)
-                    .frame(width: proxy.size.width < 550 ? 202 : 232)
+                    Group {
+                        if model.section == .playlists, let playlist = model.selectedPlaylist {
+                            PlaylistArtworkView(
+                                playlist: playlist,
+                                tracks: model.tracks,
+                                size: proxy.size.width < 550 ? 202 : 232,
+                                cornerRadius: 9
+                            )
+                        } else {
+                            ArtworkView(
+                                style: model.collectionArtwork,
+                                symbol: symbol,
+                                symbolSize: proxy.size.width < 550 ? 54 : 70,
+                                cornerRadius: 9,
+                                glow: true
+                            )
+                            .aspectRatio(1, contentMode: .fit)
+                            .frame(width: proxy.size.width < 550 ? 202 : 232)
+                        }
+                    }
                     .shadow(color: Color(hex: 0x1F1B6F).opacity(0.42), radius: 28, y: 18)
 
                     VStack(alignment: .leading, spacing: 0) {

@@ -35,6 +35,7 @@ import {
   persistentPlaybackIDs,
   physicalStorageClassForTrack,
   planMissingDownloadedUploads,
+  playlistArtworkTrackIDs,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
   reconcileUploadedTrack,
@@ -2592,6 +2593,22 @@ function artwork(track, { animateLoading = false } = {}) {
   </div>`;
 }
 
+function playlistArtworkMarkup(playlist, { className = "playlist-art", tagName = "div" } = {}) {
+  const trackIDs = playlistArtworkTrackIDs(playlist);
+  const classes = `playlist-artwork ${className}`;
+  if (!trackIDs.length) {
+    return `<${tagName} class="${classes} playlist-artwork-fallback" aria-hidden="true">${playlist?.isSystem ? "♥" : "♪"}</${tagName}>`;
+  }
+
+  const tracksByID = new Map(state.tracks.map((track) => [track.id, track]));
+  const cells = Array.from({ length: 4 }, (_, index) => {
+    const source = tracksByID.get(trackIDs[index])?.artwork;
+    const canRenderImage = typeof source === "string" && source && !/^https?:/i.test(source);
+    return `<span class="playlist-artwork-cell">${canRenderImage ? squareArtworkImageMarkup(source) : "♪"}</span>`;
+  }).join("");
+  return `<${tagName} class="${classes} playlist-artwork-collage" aria-hidden="true">${cells}</${tagName}>`;
+}
+
 function displayAlbum(track) {
   const album = String(track?.album || "").trim();
   return !album || album.toLocaleLowerCase() === "imported" ? "Unknown Album" : album;
@@ -2685,7 +2702,7 @@ function renderLibrary() {
   const emptyLibraryTitle = hasLibraryFilter ? "No matching songs" : selectedPlaylistID ? "This playlist is empty" : "No songs yet";
   const emptyLibraryHelp = hasLibraryFilter ? "Try another search or filter." : selectedPlaylistID ? "Like songs or add them from your Library." : "Import audio files or connect your music server.";
   const collectionHeader = selectedPlaylistID
-    ? `<div class="hero"><div class="hero-art">≋</div><div><span class="eyebrow">PLAYLIST</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions"><button class="primary playlist-play" id="playCollection" ${tracks.length ? "" : "disabled"}><span class="button-icon">${collectionPlaying ? playbackPauseIcon : playbackPlayIcon}</span><span>${collectionPlaying ? "Pause" : "Play"}</span></button>${playlistCapsule}</div></div></div>`
+    ? `<div class="hero">${playlistArtworkMarkup(selectedPlaylist, { className: "hero-art" })}<div><span class="eyebrow">PLAYLIST</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions"><button class="primary playlist-play" id="playCollection" ${tracks.length ? "" : "disabled"}><span class="button-icon">${collectionPlaying ? playbackPauseIcon : playbackPlayIcon}</span><span>${collectionPlaying ? "Pause" : "Play"}</span></button>${playlistCapsule}</div></div></div>`
     : libraryFilters;
   content.innerHTML = `<div class="collection-scroll">${collectionHeader}
     ${recentTracks.length ? `<section class="recently-added" aria-labelledby="recentlyAddedTitle"><div class="section-heading"><div><span class="eyebrow">FRESH TO YOUR LIBRARY</span><h2 id="recentlyAddedTitle">Recently Added</h2></div><span>${recentTracks.length} newest</span></div><div class="recent-track-list">${recentTracks.map(recentTrackItem).join("")}</div></section>` : ""}
@@ -2750,7 +2767,7 @@ function renderLibrary() {
 function renderPlaylists() {
   updateTopSearch();
   const playlists = filterPlaylists(state.playlists, tracksForActiveProfile(state), playlistQuery);
-  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10"><div class="playlist-art">${playlist.isSystem ? "♥" : "♪"}</div><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
+  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10">${playlistArtworkMarkup(playlist)}<div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
   $("#pageNewPlaylist").onclick = () => newPlaylist();
   $("#pageSyncPlaylists").onclick = () => syncPlaylistsNow();
   document.querySelectorAll("[data-open-playlist]").forEach((button) => {
@@ -6004,7 +6021,7 @@ function newPlaylist(trackID = null) {
 
 function renderSidebar() {
   normalizeState(state);
-  $("#sidebarPlaylists").innerHTML = state.playlists.map((playlist) => `<button data-side-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10"><span>${playlist.isSystem ? "♥" : "♪"}</span><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div></button>`).join("");
+  $("#sidebarPlaylists").innerHTML = state.playlists.map((playlist) => `<button data-side-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10">${playlistArtworkMarkup(playlist, { className: "playlist-sidebar-art", tagName: "span" })}<div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div></button>`).join("");
   document.querySelectorAll("[data-side-playlist]").forEach((button) => {
     button.onclick = () => navigate("library", button.dataset.sidePlaylist);
     button.oncontextmenu = (event) => openPlaylistContextMenu(event, button.dataset.sidePlaylist);

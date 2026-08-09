@@ -44,6 +44,11 @@ export function createEmptyState() {
   };
 }
 
+export function playlistArtworkTrackIDs(playlist) {
+  if (!playlist || playlist.isSystem || !Array.isArray(playlist.trackIDs)) return [];
+  return playlist.trackIDs.slice(0, 4);
+}
+
 const DEFAULT_KEYBINDS = Object.freeze({
   togglePlayback: "Space",
   previousTrack: "Ctrl+ArrowLeft",

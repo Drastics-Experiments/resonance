@@ -119,6 +119,71 @@ fun Artwork(
 }
 
 @Composable
+fun PlaylistArtwork(
+    playlist: Playlist,
+    state: ResonanceUiState,
+    modifier: Modifier = Modifier,
+) {
+    val artworkTrackIDs = playlist.automaticArtworkTrackIDs
+    if (playlist.isSystem || artworkTrackIDs.isEmpty()) {
+        Artwork(null, modifier)
+        return
+    }
+
+    val tracksByID = remember(state.tracks) { state.tracks.associateBy(Track::id) }
+    val artworkPaths = artworkTrackIDs.map { trackID ->
+        val track = tracksByID[trackID]
+        track?.let { state.artworkPathsByTrackId[it.id] ?: it.artworkFilename }
+    } + List((4 - artworkTrackIDs.size).coerceAtLeast(0)) { null }
+
+    Column(
+        modifier = modifier
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(12.dp)),
+    ) {
+        Row(Modifier.weight(1f)) {
+            PlaylistArtworkCell(artworkPaths[0], Modifier.weight(1f).fillMaxSize())
+            PlaylistArtworkCell(artworkPaths[1], Modifier.weight(1f).fillMaxSize())
+        }
+        Row(Modifier.weight(1f)) {
+            PlaylistArtworkCell(artworkPaths[2], Modifier.weight(1f).fillMaxSize())
+            PlaylistArtworkCell(artworkPaths[3], Modifier.weight(1f).fillMaxSize())
+        }
+    }
+}
+
+@Composable
+private fun PlaylistArtworkCell(path: String?, modifier: Modifier) {
+    val bitmap = remember(path) {
+        path?.takeIf { it.isNotBlank() }?.let {
+            runCatching { BitmapFactory.decodeFile(it)?.asImageBitmap() }.getOrNull()
+        }
+    }
+    Box(
+        modifier = modifier.background(
+            Brush.linearGradient(listOf(Violet, Color(0xFF874BFF), Color(0xFFB079FF))),
+        ),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Default.MusicNote,
+                contentDescription = null,
+                tint = Color.White.copy(alpha = .94f),
+                modifier = Modifier.size(14.dp),
+            )
+        }
+    }
+}
+
+@Composable
 fun RemoteArtwork(
     artworkURL: String?,
     serverURL: String,

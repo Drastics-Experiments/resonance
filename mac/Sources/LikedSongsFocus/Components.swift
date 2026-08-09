@@ -292,6 +292,78 @@ struct MiniArtwork: View {
     }
 }
 
+struct PlaylistArtworkView: View {
+    let playlist: Playlist
+    let tracks: [Track]
+    var size: CGFloat = 39
+    var cornerRadius: CGFloat = 6
+
+    private var artworkTracks: [Track?] {
+        let tracksByID = Dictionary(
+            tracks.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let trackIDs = playlist.automaticArtworkTrackIDs
+        return (0..<4).map { index in
+            guard trackIDs.indices.contains(index) else { return nil }
+            return tracksByID[trackIDs[index]]
+        }
+    }
+
+    var body: some View {
+        Group {
+            if playlist.isSystem || playlist.automaticArtworkTrackIDs.isEmpty {
+                ArtworkView(
+                    style: playlist.artwork,
+                    symbol: playlist.isSystem ? "heart.fill" : "music.note",
+                    symbolSize: max(9, size * 0.28),
+                    cornerRadius: cornerRadius,
+                    glow: false
+                )
+            } else {
+                GeometryReader { proxy in
+                    let cellSize = CGSize(width: proxy.size.width / 2, height: proxy.size.height / 2)
+                    VStack(spacing: 0) {
+                        HStack(spacing: 0) {
+                            artworkCell(artworkTracks[0], size: cellSize)
+                            artworkCell(artworkTracks[1], size: cellSize)
+                        }
+                        HStack(spacing: 0) {
+                            artworkCell(artworkTracks[2], size: cellSize)
+                            artworkCell(artworkTracks[3], size: cellSize)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+        }
+    }
+
+    @ViewBuilder
+    private func artworkCell(_ track: Track?, size: CGSize) -> some View {
+        if let track {
+            TrackArtworkView(track: track, symbolSize: max(7, size.width * 0.28), cornerRadius: 0)
+                .frame(width: size.width, height: size.height)
+                .clipped()
+        } else {
+            ArtworkView(
+                style: playlist.artwork,
+                symbol: "music.note",
+                symbolSize: max(7, size.width * 0.28),
+                cornerRadius: 0,
+                glow: false
+            )
+            .frame(width: size.width, height: size.height)
+            .clipped()
+        }
+    }
+}
+
 struct TrackArtworkView: View {
     let track: Track
     var symbol: String = "music.note"

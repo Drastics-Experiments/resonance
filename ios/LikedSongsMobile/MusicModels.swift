@@ -578,6 +578,10 @@ struct MobilePlaylist: Identifiable, Codable, Hashable {
         self.isSystem = isSystem
         self.remoteSongIDs = remoteSongIDs
     }
+
+    var automaticArtworkTrackIDs: [UUID] {
+        isSystem ? [] : Array(trackIDs.prefix(4))
+    }
 }
 
 struct MobileRemotePlaylist: Codable, Hashable, Identifiable {

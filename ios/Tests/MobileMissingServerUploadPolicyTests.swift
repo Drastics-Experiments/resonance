@@ -2,6 +2,17 @@ import Foundation
 import XCTest
 @testable import Resonance
 
+final class MobilePlaylistArtworkPolicyTests: XCTestCase {
+    func testUsesOnlyTheFirstFourCustomPlaylistTracks() {
+        let trackIDs = (0..<5).map { _ in UUID() }
+        let playlist = MobilePlaylist(name: "Mix", trackIDs: trackIDs)
+        let likedSongs = MobilePlaylist(name: "Liked Songs", trackIDs: trackIDs, isSystem: true)
+
+        XCTAssertEqual(playlist.automaticArtworkTrackIDs, Array(trackIDs.prefix(4)))
+        XCTAssertTrue(likedSongs.automaticArtworkTrackIDs.isEmpty)
+    }
+}
+
 final class MobileServerEndpointPolicyTests: XCTestCase {
     func testRequiresHTTPSOutsideLoopback() throws {
         let secure = try MobileServerEndpointPolicy.resolve(" HTTPS://Music.Example.test/root/ ")
