@@ -37,6 +37,34 @@ object PlaylistSyncMutationPolicy {
     }
 }
 
+object PlaylistOrderPolicy {
+    fun <T> merge(
+        previous: List<T>,
+        ordered: List<T>,
+        preserving: List<T>,
+    ): List<T> {
+        val previous = previous.distinct()
+        val ordered = ordered.distinct()
+        val orderedSet = ordered.toSet()
+        val preservedSet = preserving.distinct().filterTo(mutableSetOf()) {
+            it in previous && it !in orderedSet
+        }
+        val merged = mutableListOf<T>()
+        var orderedIndex = 0
+
+        previous.forEach { previousItem ->
+            if (previousItem in preservedSet) {
+                merged += previousItem
+            } else if (orderedIndex < ordered.size) {
+                merged += ordered[orderedIndex]
+                orderedIndex += 1
+            }
+        }
+        merged += ordered.drop(orderedIndex)
+        return merged.distinct()
+    }
+}
+
 data class ServerProfileContext(
     val serverURL: String,
     val profileID: String,

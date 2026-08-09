@@ -1,3 +1,4 @@
+import AVFoundation
 import AppKit
 import Foundation
 import Testing
@@ -263,10 +264,58 @@ struct PreviewRegressionTests {
     }
 
     @Test
-    func fullscreenVideoUsesTheAudioTimelineAsItsOnlyPlaybackAuthority() {
-        #expect(!InstalledVideoSyncPolicy.shouldSeek(videoTime: 10, audioTime: 10.1))
-        #expect(InstalledVideoSyncPolicy.shouldSeek(videoTime: 10, audioTime: 10.2))
-        #expect(InstalledVideoSyncPolicy.shouldSeek(videoTime: .nan, audioTime: 10))
+    func installedVideoArtworkBadgeAppearsForHoverAndKeyboardFocus() {
+        #expect(!InstalledVideoLaunchBadgePolicy.isVisible(
+            hasVideo: false,
+            isHovered: true,
+            isFocused: true
+        ))
+        #expect(InstalledVideoLaunchBadgePolicy.isVisible(
+            hasVideo: true,
+            isHovered: true,
+            isFocused: false
+        ))
+        #expect(InstalledVideoLaunchBadgePolicy.isVisible(
+            hasVideo: true,
+            isHovered: false,
+            isFocused: true
+        ))
+        #expect(!InstalledVideoLaunchBadgePolicy.isVisible(
+            hasVideo: true,
+            isHovered: false,
+            isFocused: false
+        ))
+        #expect(InstalledVideoLaunchBadgePolicy.size(for: 200) == 44)
+        #expect(abs(InstalledVideoLaunchBadgePolicy.size(for: 486) - 58.32) < 0.001)
+        #expect(InstalledVideoLaunchBadgePolicy.size(for: 700) == 62)
+    }
+
+    @MainActor
+    @Test
+    func fullscreenVideoUsesNativeClippingAndSuspendsTheBlurredArtworkBackdrop() {
+        #expect(InstalledVideoRenderingPolicy.showsArtworkBackdrop(
+            hasVideoSession: false,
+            isRestoringChrome: false
+        ))
+        #expect(!InstalledVideoRenderingPolicy.showsArtworkBackdrop(
+            hasVideoSession: true,
+            isRestoringChrome: false
+        ))
+        #expect(InstalledVideoRenderingPolicy.showsArtworkBackdrop(
+            hasVideoSession: true,
+            isRestoringChrome: true
+        ))
+
+        let playerView = AspectFitPlayerContainerView(frame: .zero)
+        playerView.cornerRadius = InstalledVideoLayoutPolicy.videoCornerRadius
+        #expect(playerView.layer is AVPlayerLayer)
+        #expect(playerView.layer?.cornerRadius == InstalledVideoLayoutPolicy.videoCornerRadius)
+        #expect(playerView.layer?.masksToBounds == true)
+    }
+
+    @Test
+    func fullscreenVideoDoesNotContinuouslySeekAgainstTheSampledAudioClock() {
+        #expect(!InstalledVideoSyncPolicy.continuouslyPollsAudioClock)
     }
 
     @Test

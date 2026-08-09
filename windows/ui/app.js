@@ -38,6 +38,7 @@ import {
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
   reconcileUploadedTrack,
+  reorderPlaylistTrackIDs,
   resolveServerTransferModes,
   removeClipRangeForTrack,
   resolveSyncProfile,
@@ -91,6 +92,7 @@ let activePlaybackSourceQueueIDs = [];
 let activePlaybackPlaylistID = null;
 let pendingRestorePosition = null;
 let playbackProgressTimer = null;
+let playbackProgressAnimationFrame = null;
 let activeListeningEntryID = null;
 let lastListeningPosition = 0;
 let lastPersistedListeningSeconds = 0;
@@ -167,6 +169,8 @@ let draggingPlaylistTargetID = null;
 let draggingPlaylistInsertAfter = false;
 let playlistDragPreviewKey = "";
 let playlistDragFloatingRow = null;
+let playlistPointerDrag = null;
+let suppressPlaylistRowClickUntil = 0;
 let localImportAvailable = false;
 let localImportResolution = null;
 let localImportRunning = false;
@@ -754,6 +758,83 @@ function clearPlaylistDragFloatingRow() {
   playlistDragFloatingRow?.remove();
   playlistDragFloatingRow = null;
   document.querySelectorAll(".track-row.dragging").forEach((row) => row.classList.remove("dragging"));
+}
+
+function startPlaylistDragPreview(row, trackTable) {
+  draggingPlaylistTrackID = row.dataset.track;
+  draggingPlaylistTargetID = null;
+  draggingPlaylistInsertAfter = false;
+  clearPlaylistDragPreview();
+  clearPlaylistDragFloatingRow();
+  row.classList.add("dragging");
+  const floatingRow = row.cloneNode(true);
+  floatingRow.classList.remove("playlist-draggable", "dragging", "drag-preview-up", "drag-preview-down");
+  floatingRow.classList.add("playlist-drag-floating");
+  floatingRow.removeAttribute("data-track");
+  floatingRow.removeAttribute("data-playlist-draggable");
+  floatingRow.removeAttribute("aria-label");
+  floatingRow.removeAttribute("aria-keyshortcuts");
+  floatingRow.removeAttribute("tabindex");
+  floatingRow.setAttribute("aria-hidden", "true");
+  floatingRow.style.top = `${row.offsetTop}px`;
+  floatingRow.style.left = `${row.offsetLeft}px`;
+  floatingRow.style.width = `${row.offsetWidth}px`;
+  floatingRow.style.height = `${row.offsetHeight}px`;
+  floatingRow.style.setProperty("--playlist-drag-source-offset", "0px");
+  trackTable?.append(floatingRow);
+  playlistDragFloatingRow = floatingRow;
+}
+
+function updatePlaylistDragPreview(targetRow, clientY) {
+  if (!draggingPlaylistTrackID || draggingPlaylistTrackID === targetRow?.dataset.track) return;
+  const insertBefore = clientY < targetRow.getBoundingClientRect().top + targetRow.offsetHeight / 2;
+  const previewKey = `${targetRow.dataset.track}:${insertBefore ? "before" : "after"}`;
+  draggingPlaylistTargetID = targetRow.dataset.track;
+  draggingPlaylistInsertAfter = !insertBefore;
+  if (previewKey === playlistDragPreviewKey) return;
+  clearPlaylistDragPreview();
+  playlistDragPreviewKey = previewKey;
+  const rows = [...document.querySelectorAll("[data-playlist-draggable]")];
+  const sourceIndex = rows.findIndex((item) => item.dataset.track === draggingPlaylistTrackID);
+  const targetIndex = rows.indexOf(targetRow);
+  if (sourceIndex < 0 || targetIndex < 0) return;
+  const destinationIndex = targetIndex + (draggingPlaylistInsertAfter ? 1 : 0) - (sourceIndex < targetIndex ? 1 : 0);
+  const endIndex = sourceIndex < targetIndex ? targetIndex - (draggingPlaylistInsertAfter ? 0 : 1) : sourceIndex - 1;
+  const startIndex = sourceIndex < targetIndex ? sourceIndex + 1 : targetIndex + (draggingPlaylistInsertAfter ? 1 : 0);
+  const previewClass = sourceIndex < targetIndex ? "drag-preview-up" : "drag-preview-down";
+  const sourceRow = rows[sourceIndex];
+  const adjacentRow = rows[sourceIndex + 1] || rows[sourceIndex - 1];
+  const rowPitch = adjacentRow ? Math.abs(adjacentRow.offsetTop - sourceRow.offsetTop) : sourceRow.offsetHeight;
+  const destinationTop = rows[destinationIndex]?.offsetTop ?? sourceRow.offsetTop;
+  playlistDragFloatingRow?.style.setProperty("--playlist-drag-source-offset", `${destinationTop - sourceRow.offsetTop}px`);
+  for (let index = startIndex; index <= endIndex; index += 1) {
+    rows[index].classList.add(previewClass);
+    rows[index].style.setProperty("--playlist-drag-offset", `${rowPitch}px`);
+  }
+}
+
+function clearPlaylistPointerDrag() {
+  playlistPointerDrag = null;
+  draggingPlaylistTrackID = null;
+  draggingPlaylistTargetID = null;
+  draggingPlaylistInsertAfter = false;
+  clearPlaylistDragFloatingRow();
+  clearPlaylistDragPreview();
+}
+
+async function commitPlaylistTrackReorder(sourceID, targetID, insertAfter) {
+  const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
+  if (!playlist) return false;
+  const reordered = reorderPlaylistTrackIDs(playlist.trackIDs, sourceID, targetID, insertAfter);
+  if (reordered.every((trackID, index) => trackID === playlist.trackIDs[index])) return false;
+  playlist.trackIDs = reordered;
+  updatePlaylistRemoteSongIDs(state, playlist);
+  markPlaylistDirty(playlist);
+  if (activePlaybackPlaylistID === playlist.id) setPlaybackContext(tracksForPlaylist(state, playlist.id), playlist.id);
+  renderLibrary();
+  await persist();
+  schedulePlaylistSync();
+  return true;
 }
 
 function profilePictureContext() {
@@ -2549,7 +2630,7 @@ function trackRow(track, index) {
     : `Play ${track.title || "Untitled"} by ${track.artist || "Unknown artist"}`;
   const reorderLabel = editablePlaylist ? ". Press Alt+Up or Alt+Down to reorder" : "";
   const draggableAttributes = editablePlaylist
-    ? ` draggable="true" data-playlist-draggable="true" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Shift+F10"`
+    ? ` data-playlist-draggable="true" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Shift+F10"`
     : ` aria-keyshortcuts="Enter Space Shift+F10"`;
   return `<div class="track-row ${track.id === currentID ? "playing" : ""}${editablePlaylist ? " playlist-draggable" : ""}${unavailable ? " unavailable" : ""}" data-track="${escapeHTML(track.id)}" tabindex="0" aria-label="${escapeHTML(actionLabel + reorderLabel)}" aria-disabled="${unavailable}"${draggableAttributes}>
     <span class="track-number" title="${track.id === currentID && !audio.paused ? "Now playing" : `Track ${index + 1}`}">${track.id === currentID && !audio.paused ? nowPlayingIcon : index + 1}</span>${artwork(track)}
@@ -3546,44 +3627,12 @@ function render() {
 
 function bindTrackRows(playbackTracks = playlistTracks()) {
   const trackTable = document.querySelector(".track-table");
-  if (trackTable) {
-    trackTable.ondragover = (event) => {
-      if (!draggingPlaylistTrackID) return;
-      event.preventDefault();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-    };
-    trackTable.ondrop = async (event) => {
-      if (!draggingPlaylistTrackID || !draggingPlaylistTargetID) return;
-      event.preventDefault();
-      const sourceID = draggingPlaylistTrackID;
-      const targetID = draggingPlaylistTargetID;
-      const insertAfter = draggingPlaylistInsertAfter;
-      clearPlaylistDragFloatingRow();
-      draggingPlaylistTrackID = null;
-      draggingPlaylistTargetID = null;
-      draggingPlaylistInsertAfter = false;
-      clearPlaylistDragPreview();
-      const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
-      if (!playlist || sourceID === targetID) return;
-      const sourceIndex = playlist.trackIDs.indexOf(sourceID);
-      if (sourceIndex < 0) return;
-      playlist.trackIDs.splice(sourceIndex, 1);
-      const destinationIndex = playlist.trackIDs.indexOf(targetID);
-      if (destinationIndex < 0) {
-        playlist.trackIDs.splice(sourceIndex, 0, sourceID);
-        return;
-      }
-      playlist.trackIDs.splice(destinationIndex + (insertAfter ? 1 : 0), 0, sourceID);
-      updatePlaylistRemoteSongIDs(state, playlist);
-      markPlaylistDirty(playlist);
-      if (activePlaybackPlaylistID === playlist.id) setPlaybackContext(tracksForPlaylist(state, playlist.id), playlist.id);
-      await persist();
-      schedulePlaylistSync();
-      renderLibrary();
-    };
-  }
   document.querySelectorAll("[data-track]").forEach((row) => {
     row.onclick = (event) => {
+      if (performance.now() < suppressPlaylistRowClickUntil) {
+        event.preventDefault();
+        return;
+      }
       if (event.target.closest("button, select, input, a")) return;
       play(state.tracks.find((track) => track.id === row.dataset.track), playbackTracks, { playlistID: selectedPlaylistID });
     };
@@ -3607,82 +3656,92 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       const from = playlist.trackIDs.indexOf(row.dataset.track);
       const to = from + (event.key === "ArrowUp" ? -1 : 1);
       if (from < 0 || to < 0 || to >= playlist.trackIDs.length) return;
-      const [trackID] = playlist.trackIDs.splice(from, 1);
-      playlist.trackIDs.splice(to, 0, trackID);
-      updatePlaylistRemoteSongIDs(state, playlist);
-      markPlaylistDirty(playlist);
-      if (activePlaybackPlaylistID === playlist.id) setPlaybackContext(tracksForPlaylist(state, playlist.id), playlist.id);
-      await persist();
-      schedulePlaylistSync();
-      renderLibrary();
+      const trackID = row.dataset.track;
+      const targetID = playlist.trackIDs[to];
+      await commitPlaylistTrackReorder(trackID, targetID, event.key === "ArrowDown");
       document.querySelector(`[data-track="${CSS.escape(trackID)}"]`)?.focus();
     };
     if (row.dataset.playlistDraggable === "true") {
-      row.ondragstart = (event) => {
-        draggingPlaylistTrackID = row.dataset.track;
-        draggingPlaylistTargetID = null;
-        draggingPlaylistInsertAfter = false;
-        clearPlaylistDragPreview();
-        clearPlaylistDragFloatingRow();
-        row.classList.add("dragging");
-        const floatingRow = row.cloneNode(true);
-        floatingRow.classList.remove("playlist-draggable", "dragging", "drag-preview-up", "drag-preview-down");
-        floatingRow.classList.add("playlist-drag-floating");
-        floatingRow.removeAttribute("draggable");
-        floatingRow.removeAttribute("data-track");
-        floatingRow.removeAttribute("data-playlist-draggable");
-        floatingRow.removeAttribute("aria-label");
-        floatingRow.removeAttribute("aria-keyshortcuts");
-        floatingRow.removeAttribute("tabindex");
-        floatingRow.setAttribute("aria-hidden", "true");
-        floatingRow.style.top = `${row.offsetTop}px`;
-        floatingRow.style.left = `${row.offsetLeft}px`;
-        floatingRow.style.width = `${row.offsetWidth}px`;
-        floatingRow.style.height = `${row.offsetHeight}px`;
-        floatingRow.style.setProperty("--playlist-drag-source-offset", "0px");
-        trackTable?.append(floatingRow);
-        playlistDragFloatingRow = floatingRow;
-        if (event.dataTransfer) {
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", row.dataset.track);
+      const handlePlaylistMouseMove = (event) => {
+        const drag = playlistPointerDrag;
+        if (!drag || drag.input !== "mouse" || drag.sourceID !== row.dataset.track) return;
+        if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+        if (!drag.active) {
+          drag.active = true;
+          startPlaylistDragPreview(row, trackTable);
         }
-      };
-      row.ondragover = (event) => {
-        if (!draggingPlaylistTrackID || draggingPlaylistTrackID === row.dataset.track) return;
         event.preventDefault();
-        if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-        const insertBefore = event.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2;
-        const previewKey = `${row.dataset.track}:${insertBefore ? "before" : "after"}`;
-        draggingPlaylistTargetID = row.dataset.track;
-        draggingPlaylistInsertAfter = !insertBefore;
-        if (previewKey === playlistDragPreviewKey) return;
-        clearPlaylistDragPreview();
-        playlistDragPreviewKey = previewKey;
-        const rows = [...document.querySelectorAll("[data-playlist-draggable]")];
-        const sourceIndex = rows.findIndex((item) => item.dataset.track === draggingPlaylistTrackID);
-        const targetIndex = rows.indexOf(row);
-        if (sourceIndex < 0 || targetIndex < 0) return;
-        const destinationIndex = targetIndex + (draggingPlaylistInsertAfter ? 1 : 0) - (sourceIndex < targetIndex ? 1 : 0);
-        const endIndex = sourceIndex < targetIndex ? targetIndex - (draggingPlaylistInsertAfter ? 0 : 1) : sourceIndex - 1;
-        const startIndex = sourceIndex < targetIndex ? sourceIndex + 1 : targetIndex + (draggingPlaylistInsertAfter ? 1 : 0);
-        const previewClass = sourceIndex < targetIndex ? "drag-preview-up" : "drag-preview-down";
-        const sourceRow = rows[sourceIndex];
-        const adjacentRow = rows[sourceIndex + 1] || rows[sourceIndex - 1];
-        const rowPitch = adjacentRow ? Math.abs(adjacentRow.offsetTop - sourceRow.offsetTop) : sourceRow.offsetHeight;
-        const offset = `${rowPitch}px`;
-        const destinationTop = rows[destinationIndex]?.offsetTop ?? sourceRow.offsetTop;
-        playlistDragFloatingRow?.style.setProperty("--playlist-drag-source-offset", `${destinationTop - sourceRow.offsetTop}px`);
-        for (let index = startIndex; index <= endIndex; index += 1) {
-          rows[index].classList.add(previewClass);
-          rows[index].style.setProperty("--playlist-drag-offset", offset);
-        }
+        const targetRow = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-playlist-draggable]");
+        updatePlaylistDragPreview(targetRow, event.clientY);
       };
-      row.ondragend = () => {
-        draggingPlaylistTrackID = null;
-        draggingPlaylistTargetID = null;
-        draggingPlaylistInsertAfter = false;
-        clearPlaylistDragFloatingRow();
-        clearPlaylistDragPreview();
+      const handlePlaylistMouseUp = (event) => {
+        const drag = playlistPointerDrag;
+        if (!drag || drag.input !== "mouse" || drag.sourceID !== row.dataset.track) return;
+        if (drag.active) {
+          const targetRow = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-playlist-draggable]");
+          updatePlaylistDragPreview(targetRow, event.clientY);
+        }
+        const targetID = draggingPlaylistTargetID;
+        const insertAfter = draggingPlaylistInsertAfter;
+        document.removeEventListener("mousemove", handlePlaylistMouseMove);
+        document.removeEventListener("mouseup", handlePlaylistMouseUp);
+        clearPlaylistPointerDrag();
+        if (!drag.active) return;
+        event.preventDefault();
+        suppressPlaylistRowClickUntil = performance.now() + 300;
+        if (targetID) void commitPlaylistTrackReorder(drag.sourceID, targetID, insertAfter).catch(() => {});
+      };
+      row.onmousedown = (event) => {
+        if (event.button !== 0 || event.target.closest("button, select, input, a")) return;
+        playlistPointerDrag = {
+          input: "mouse",
+          sourceID: row.dataset.track,
+          startX: event.clientX,
+          startY: event.clientY,
+          active: false,
+        };
+        document.addEventListener("mousemove", handlePlaylistMouseMove);
+        document.addEventListener("mouseup", handlePlaylistMouseUp);
+      };
+      row.onpointerdown = (event) => {
+        if (event.pointerType === "mouse" || !event.isPrimary || event.button !== 0 || event.target.closest("button, select, input, a")) return;
+        playlistPointerDrag = {
+          input: "pointer",
+          pointerID: event.pointerId,
+          sourceID: row.dataset.track,
+          startX: event.clientX,
+          startY: event.clientY,
+          active: false,
+        };
+        row.setPointerCapture(event.pointerId);
+      };
+      row.onpointermove = (event) => {
+        const drag = playlistPointerDrag;
+        if (!drag || drag.pointerID !== event.pointerId || drag.sourceID !== row.dataset.track) return;
+        if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+        if (!drag.active) {
+          drag.active = true;
+          startPlaylistDragPreview(row, trackTable);
+        }
+        event.preventDefault();
+        const targetRow = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-playlist-draggable]");
+        updatePlaylistDragPreview(targetRow, event.clientY);
+      };
+      row.onpointerup = (event) => {
+        const drag = playlistPointerDrag;
+        if (!drag || drag.pointerID !== event.pointerId || drag.sourceID !== row.dataset.track) return;
+        const targetID = draggingPlaylistTargetID;
+        const insertAfter = draggingPlaylistInsertAfter;
+        if (row.hasPointerCapture(event.pointerId)) row.releasePointerCapture(event.pointerId);
+        clearPlaylistPointerDrag();
+        if (!drag.active) return;
+        event.preventDefault();
+        suppressPlaylistRowClickUntil = performance.now() + 300;
+        if (targetID) void commitPlaylistTrackReorder(drag.sourceID, targetID, insertAfter).catch(() => {});
+      };
+      row.onpointercancel = clearPlaylistPointerDrag;
+      row.onlostpointercapture = () => {
+        if (playlistPointerDrag?.sourceID === row.dataset.track) clearPlaylistPointerDrag();
       };
     }
   });
@@ -5932,6 +5991,36 @@ function updateFullPlayerProgress() {
   paintRange(seek);
 }
 
+function updatePlaybackProgressUI() {
+  const elapsed = Number(audio.currentTime) || 0;
+  const duration = currentPlaybackDuration();
+  $("#elapsed").textContent = formatTime(elapsed);
+  $("#duration").textContent = formatTime(duration);
+  $("#seek").value = duration ? String(Math.round(elapsed / duration * 1000)) : "0";
+  $("#seek").setAttribute("aria-valuetext", `${formatTime(elapsed)} of ${formatTime(duration)}`);
+  paintRange($("#seek"));
+  updateFullPlayerProgress();
+}
+
+function stopPlaybackProgressAnimation() {
+  if (!playbackProgressAnimationFrame) return;
+  cancelAnimationFrame(playbackProgressAnimationFrame);
+  playbackProgressAnimationFrame = null;
+}
+
+function animatePlaybackProgress() {
+  playbackProgressAnimationFrame = null;
+  updatePlaybackProgressUI();
+  if (!audio.paused && !audio.ended) {
+    playbackProgressAnimationFrame = requestAnimationFrame(animatePlaybackProgress);
+  }
+}
+
+function startPlaybackProgressAnimation() {
+  if (playbackProgressAnimationFrame || audio.paused || audio.ended) return;
+  playbackProgressAnimationFrame = requestAnimationFrame(animatePlaybackProgress);
+}
+
 function setAudioSource(track) {
   audioSourceTrackID = track?.id || null;
   audioMetadataTrackID = null;
@@ -6053,19 +6142,24 @@ function cancelInstalledVideoGeometryAnimation() {
   if (!installedVideoGeometryAnimation) return;
   installedVideoGeometryAnimation.cancel();
   installedVideoGeometryAnimation = null;
+  $(".installed-video-stage").classList.remove("video-geometry-animating");
 }
 
 function animateInstalledVideoStage(from, to, onFinish) {
   cancelInstalledVideoGeometryAnimation();
+  const stage = $(".installed-video-stage");
+  stage.classList.add("video-geometry-animating");
   applyInstalledVideoStageGeometry(from);
   const duration = installedVideoAnimationDuration(INSTALLED_VIDEO_TRANSITION_MS);
   if (duration <= 0) {
     applyInstalledVideoStageGeometry(to);
+    if (to.transform === "translate3d(0, 0, 0) scale(1, 1)") clearInstalledVideoStageGeometry();
+    stage.classList.remove("video-geometry-animating");
     onFinish();
     return;
   }
 
-  const animation = $(".installed-video-stage").animate([from, to], {
+  const animation = stage.animate([from, to], {
     duration,
     easing: "cubic-bezier(.25, .1, .25, 1)",
     fill: "both",
@@ -6076,6 +6170,8 @@ function animateInstalledVideoStage(from, to, onFinish) {
     installedVideoGeometryAnimation = null;
     applyInstalledVideoStageGeometry(to);
     animation.cancel();
+    if (to.transform === "translate3d(0, 0, 0) scale(1, 1)") clearInstalledVideoStageGeometry();
+    stage.classList.remove("video-geometry-animating");
     onFinish();
   };
 }
@@ -6518,8 +6614,15 @@ function renderFullPlayer() {
   const releaseYear = Number(track.year || track.releaseYear) || null;
   $("#fullPlayerAlbum").textContent = [displayAlbum(track), releaseYear].filter(Boolean).join(" • ");
   const artworkNode = $("#fullPlayerArtwork");
-  artworkNode.innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : '<span aria-hidden="true">♪</span>';
-  artworkNode.setAttribute("aria-label", `Artwork for ${track.title || "current song"}`);
+  const artworkContentNode = $("#fullPlayerArtworkContent");
+  artworkContentNode.innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : '<span aria-hidden="true">♪</span>';
+  artworkContentNode.setAttribute("aria-label", `Artwork for ${track.title || "current song"}`);
+  const videoLaunch = $("#fullPlayerVideoLaunch");
+  const videoAvailable = isInstalledVideoTrack(track);
+  artworkNode.classList.toggle("video-available", videoAvailable);
+  videoLaunch.hidden = !videoAvailable;
+  videoLaunch.disabled = !videoAvailable;
+  videoLaunch.setAttribute("aria-label", `Watch video for ${track.title || "current song"}`);
   const backdropNode = $("#fullPlayerBackdrop");
   backdropNode.innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : "";
   const favorite = $("#fullPlayerFavorite");
@@ -6636,6 +6739,20 @@ function updateChrome() {
   scheduleDiscordPresenceUpdate();
 }
 
+function syncRepeatControls() {
+  for (const button of [$("#repeat"), $("#fullPlayerRepeat"), $("#installedVideoRepeat")].filter(Boolean)) {
+    button.classList.toggle("active", repeat);
+    button.setAttribute("aria-pressed", String(repeat));
+  }
+}
+
+function setRepeatEnabled(value) {
+  repeat = Boolean(value);
+  state.repeat = repeat;
+  persistInBackground({ refreshSidebar: false });
+  syncRepeatControls();
+}
+
 function setActiveNav() { document.querySelectorAll(".nav").forEach((button) => button.classList.toggle("active", button.dataset.section === section)); }
 
 function applyNavigation(location) {
@@ -6669,6 +6786,10 @@ $("#openNowPlaying").onclick = () => {
   else openNowPlaying();
 };
 $("#closeNowPlaying").onclick = closeNowPlaying;
+$("#fullPlayerVideoLaunch").onclick = () => {
+  const track = currentTrack();
+  if (isInstalledVideoTrack(track)) openInstalledVideo(track);
+};
 $("#closeInstalledVideo").onclick = () => closeInstalledVideo();
 $("#minimizeInstalledVideo").onclick = minimizeInstalledVideo;
 $("#restoreInstalledVideo").onclick = restoreInstalledVideo;
@@ -6677,11 +6798,7 @@ $("#installedVideoToggle").onclick = toggleInstalledVideoPlayback;
 $("#installedVideoPrevious").onclick = previousInstalledVideo;
 $("#installedVideoNext").onclick = () => advanceInstalledVideo(1);
 $("#installedVideoRepeat").onclick = () => {
-  repeat = !repeat;
-  state.repeat = repeat;
-  persistInBackground();
-  syncInstalledVideoTransport();
-  updateChrome();
+  setRepeatEnabled(!repeat);
   showInstalledVideoControls();
 };
 $("#installedVideoSeek").oninput = (event) => {
@@ -6767,10 +6884,7 @@ $("#fullPlayerShuffle").onclick = () => {
   setShuffleEnabled(!shuffle);
 };
 $("#fullPlayerRepeat").onclick = () => {
-  repeat = !repeat;
-  state.repeat = repeat;
-  persistInBackground();
-  updateChrome();
+  setRepeatEnabled(!repeat);
 };
 $("#newPlaylist").onclick = () => newPlaylist();
 $("#profileButton").onclick = toggleProfileMenu;
@@ -7283,7 +7397,7 @@ playerTrackContextTarget.onkeydown = (event) => {
   }
 };
 $("#shuffle").onclick = () => setShuffleEnabled(!shuffle);
-$("#repeat").onclick = () => { repeat = !repeat; state.repeat = repeat; persistInBackground(); updateChrome(); };
+$("#repeat").onclick = () => setRepeatEnabled(!repeat);
 function paintRange(input) {
   const minimum = Number(input.min) || 0;
   const maximum = Number(input.max) || 100;
@@ -7345,13 +7459,7 @@ $("#fullPlayerSeek").oninput = (event) => {
 audio.ontimeupdate = () => {
   if (pendingRestorePosition !== null) return;
   if (finishClipPlaybackIfNeeded()) return;
-  const duration = currentPlaybackDuration();
-  $("#elapsed").textContent = formatTime(audio.currentTime);
-  $("#duration").textContent = formatTime(duration);
-  $("#seek").value = duration ? String(Math.round(audio.currentTime / duration * 1000)) : "0";
-  $("#seek").setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(duration)}`);
-  paintRange($("#seek"));
-  updateFullPlayerProgress();
+  updatePlaybackProgressUI();
   state.position = audio.currentTime;
   updateListeningSession();
   schedulePlaybackProgressSave();
@@ -7359,11 +7467,14 @@ audio.ontimeupdate = () => {
 };
 audio.onplay = () => {
   beginListeningSession();
+  startPlaybackProgressAnimation();
   synchronizeInstalledVideoWithAudio({ forceSeek: true });
   updateChrome();
   renderQueue();
 };
 audio.onpause = () => {
+  stopPlaybackProgressAnimation();
+  updatePlaybackProgressUI();
   updateListeningSession();
   scheduleListeningHistorySync();
   synchronizeInstalledVideoWithAudio({ forceSeek: true });
@@ -7375,6 +7486,8 @@ audio.onpause = () => {
   persistInBackground({ refreshSidebar: false });
 };
 audio.onended = () => {
+  stopPlaybackProgressAnimation();
+  updatePlaybackProgressUI();
   updateListeningSession();
   scheduleListeningHistorySync();
   const range = activeClipRange();
@@ -7392,6 +7505,7 @@ audio.onended = () => {
   }
 };
 audio.onerror = () => {
+  stopPlaybackProgressAnimation();
   const streamFailed = Boolean(currentTrack()?.transientStream);
   if (streamFailed) releaseActiveServerStream({ stopPlayback: true });
   updateChrome();

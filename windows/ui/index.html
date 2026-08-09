@@ -100,7 +100,12 @@
         </div>
       </header>
       <div class="full-player-layout">
-        <div id="fullPlayerArtwork" class="full-player-artwork" aria-label="Current song artwork" role="img"><span aria-hidden="true">♪</span></div>
+        <div id="fullPlayerArtwork" class="full-player-artwork">
+          <span id="fullPlayerArtworkContent" class="full-player-artwork-content" aria-label="Current song artwork" role="img"><span aria-hidden="true">♪</span></span>
+          <button id="fullPlayerVideoLaunch" class="full-player-video-launch" type="button" title="Watch Video" aria-label="Watch video for current song" hidden disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+          </button>
+        </div>
         <div class="full-player-details">
           <div class="full-player-copy">
             <h2 id="fullPlayerTitle" aria-label="Nothing playing"><span id="fullPlayerTitleText">Nothing playing</span></h2>

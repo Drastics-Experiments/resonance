@@ -433,6 +433,25 @@ final class MobileLibraryNormalizationTests: XCTestCase {
         XCTAssertNil(MobileQueueCompletionPolicy.nextIndex(count: 0, currentIndex: 0))
     }
 
+    func testPlaylistOrderMergeKeepsDeviceOnlyAndUnresolvedItemsInStableSlots() {
+        XCTAssertEqual(
+            MobilePlaylistOrderPolicy.merge(
+                previous: ["remote-a", "local", "remote-b"],
+                ordered: ["remote-b", "remote-c", "remote-a"],
+                preserving: ["local"]
+            ),
+            ["remote-b", "local", "remote-c", "remote-a"]
+        )
+        XCTAssertEqual(
+            MobilePlaylistOrderPolicy.merge(
+                previous: ["remote-a", "unresolved", "remote-b"],
+                ordered: ["remote-b", "remote-a"],
+                preserving: ["unresolved"]
+            ),
+            ["remote-b", "unresolved", "remote-a"]
+        )
+    }
+
     func testRepairsDuplicateTrackPlaylistAndCompoundRemoteIdentifiers() throws {
         let duplicateTrackID = UUID()
         let duplicatePlaylistID = UUID()

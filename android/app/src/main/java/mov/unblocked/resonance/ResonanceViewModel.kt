@@ -58,6 +58,7 @@ import mov.unblocked.resonance.data.LibraryRepository
 import mov.unblocked.resonance.data.Playlist
 import mov.unblocked.resonance.data.PlaylistPutResult
 import mov.unblocked.resonance.data.PlaylistMutationSnapshot
+import mov.unblocked.resonance.data.PlaylistOrderPolicy
 import mov.unblocked.resonance.data.PlaylistSyncMutationPolicy
 import mov.unblocked.resonance.data.ProfileLibraryStatePolicy
 import mov.unblocked.resonance.data.RemotePlaylist
@@ -2780,11 +2781,18 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun remotePlaylist(playlist: Playlist): RemotePlaylist {
-        val songIds = playlist.trackIDs.mapNotNull { id ->
+        val ordered = playlist.trackIDs.mapNotNull { id ->
             library.tracks.firstOrNull { it.id == id && trackBelongsToActiveContext(it) }?.remoteID
-        }.distinct().toMutableList()
-        playlist.remoteSongIDs.orEmpty().filterNot(songIds::contains).forEach(songIds::add)
-        return RemotePlaylist(playlist.id.lowercase(), playlist.name, songIds)
+        }.distinct()
+        val previous = playlist.remoteSongIDs.orEmpty()
+        val unresolved = previous.filter { remoteId ->
+            library.tracks.none { trackBelongsToActiveContext(it) && it.remoteID == remoteId }
+        }
+        return RemotePlaylist(
+            playlist.id.lowercase(),
+            playlist.name,
+            PlaylistOrderPolicy.merge(previous, ordered, unresolved),
+        )
     }
 
     private suspend fun applyRemotePlaylists(document: RemotePlaylistsDocument) {
@@ -2797,7 +2805,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             val downloaded = remote.songIDs.mapNotNull { remoteId ->
                 library.tracks.firstOrNull { trackBelongsToActiveContext(it) && it.remoteID == remoteId }?.id
             }
-            Playlist(remote.id, remote.name, (downloaded + localOnly).distinct(), false, remote.songIDs)
+            Playlist(
+                remote.id,
+                remote.name,
+                PlaylistOrderPolicy.merge(existing[remote.id]?.trackIDs.orEmpty(), downloaded, localOnly),
+                false,
+                remote.songIDs,
+            )
         }
         val mergedLikedSongIDs = document.likedSongIDs.toMutableSet()
         val intendedLikedSongIDs = library.remoteLikedSongIDs.orEmpty()
@@ -2838,7 +2852,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         RemoteTrackIdentityPolicy.matches(it, value.serverURL, value.syncProfileID, remoteId)
                     }?.id
                 }
-                playlist.copy(trackIDs = (downloaded + localOnly).distinct())
+                playlist.copy(trackIDs = PlaylistOrderPolicy.merge(playlist.trackIDs, downloaded, localOnly))
             }
         },
     )
@@ -2940,7 +2954,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val ordered = playlist.trackIDs.mapNotNull { id ->
             library.tracks.firstOrNull { it.id == id && trackBelongsToActiveContext(it) }?.remoteID
         }.distinct()
-        return playlist.copy(remoteSongIDs = (ordered + unresolved).distinct())
+        return playlist.copy(remoteSongIDs = PlaylistOrderPolicy.merge(
+            playlist.remoteSongIDs.orEmpty(),
+            ordered,
+            unresolved,
+        ))
     }
 
     private fun normalizeLiked(value: StoredLibrary): StoredLibrary {

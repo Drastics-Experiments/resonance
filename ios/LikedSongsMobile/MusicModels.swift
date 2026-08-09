@@ -885,6 +885,40 @@ enum MobileCollectionNormalization {
     }
 }
 
+enum MobilePlaylistOrderPolicy {
+    static func merge<Element: Hashable>(
+        previous: [Element],
+        ordered: [Element],
+        preserving preserved: [Element]
+    ) -> [Element] {
+        let previous = unique(previous)
+        let ordered = unique(ordered)
+        let previousSet = Set(previous)
+        let orderedSet = Set(ordered)
+        let preservedSet = Set(unique(preserved).filter {
+            previousSet.contains($0) && !orderedSet.contains($0)
+        })
+        var merged: [Element] = []
+        var orderedIndex = ordered.startIndex
+
+        for previousItem in previous {
+            if preservedSet.contains(previousItem) {
+                merged.append(previousItem)
+            } else if orderedIndex < ordered.endIndex {
+                merged.append(ordered[orderedIndex])
+                ordered.formIndex(after: &orderedIndex)
+            }
+        }
+        merged.append(contentsOf: ordered[orderedIndex...])
+        return unique(merged)
+    }
+
+    private static func unique<Element: Hashable>(_ values: [Element]) -> [Element] {
+        var seen = Set<Element>()
+        return values.filter { seen.insert($0).inserted }
+    }
+}
+
 enum MobileQueueCompletionPolicy {
     static func nextIndex(count: Int, currentIndex: Int) -> Int? {
         guard count > 0 else { return nil }

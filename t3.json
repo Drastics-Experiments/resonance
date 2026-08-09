@@ -4,47 +4,47 @@
   "scripts": [
     {
       "name": "Launch Windows Preview",
-      "command": "zsh './Launch Windows.command'",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_launch_windows \"$PWD\"'",
       "icon": "play"
     },
     {
       "name": "Test Windows",
-      "command": "zsh './Test Windows.command'",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_test_windows \"$PWD\"'",
       "icon": "test"
     },
     {
       "name": "Launch macOS Preview",
-      "command": "zsh './Launch macOS.command'",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_launch_macos \"$PWD\"'",
       "icon": "play"
     },
     {
       "name": "Test macOS",
-      "command": "zsh './Test macOS.command'",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_test_macos \"$PWD\"'",
       "icon": "test"
     },
     {
       "name": "Launch iOS Simulator",
-      "command": "zsh './Launch iOS.command'",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_launch_ios \"$PWD\"'",
       "icon": "play"
     },
     {
       "name": "Test iOS",
-      "command": "zsh './Test iOS.command'",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_test_ios \"$PWD\"'",
       "icon": "test"
     },
     {
       "name": "Launch Android Emulator",
-      "command": "zsh './Launch Android.command'",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_launch_android \"$PWD\"'",
       "icon": "play"
     },
     {
       "name": "Test Android",
-      "command": "zsh './Test Android.command'",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_test_android \"$PWD\"'",
       "icon": "test"
     },
     {
       "name": "Show Resonance Instance Names",
-      "command": "zsh './Show Resonance Instances.command'",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_show_instances \"$PWD\"'",
       "icon": "test"
     }
   ]

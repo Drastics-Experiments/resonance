@@ -1171,6 +1171,37 @@ export function tracksForPlaylist(state, playlistID) {
   return playlist.trackIDs.map((id) => state.tracks.find((track) => track.id === id)).filter(Boolean);
 }
 
+export function reorderPlaylistTrackIDs(trackIDs, sourceID, targetID, insertAfter = false) {
+  const reordered = Array.isArray(trackIDs) ? [...trackIDs] : [];
+  const sourceIndex = reordered.indexOf(sourceID);
+  if (sourceIndex < 0 || sourceID === targetID || !reordered.includes(targetID)) return reordered;
+  reordered.splice(sourceIndex, 1);
+  const targetIndex = reordered.indexOf(targetID);
+  reordered.splice(targetIndex + (insertAfter ? 1 : 0), 0, sourceID);
+  return reordered;
+}
+
+export function mergePlaylistOrderWithPreservedItems(previousIDs, orderedIDs, preservedIDs) {
+  const previous = unique(Array.isArray(previousIDs) ? previousIDs : []);
+  const ordered = unique(Array.isArray(orderedIDs) ? orderedIDs : []);
+  const orderedSet = new Set(ordered);
+  const preserved = new Set(unique(Array.isArray(preservedIDs) ? preservedIDs : [])
+    .filter((id) => previous.includes(id) && !orderedSet.has(id)));
+  const merged = [];
+  let orderedIndex = 0;
+
+  for (const previousID of previous) {
+    if (preserved.has(previousID)) {
+      merged.push(previousID);
+    } else if (orderedIndex < ordered.length) {
+      merged.push(ordered[orderedIndex]);
+      orderedIndex += 1;
+    }
+  }
+  merged.push(...ordered.slice(orderedIndex));
+  return unique(merged);
+}
+
 function uploadedRemoteSong(value) {
   if (!value || typeof value !== "object") return null;
   return value.duplicate_of || value.duplicateOf || value.song || value;
@@ -1574,7 +1605,11 @@ export function updatePlaylistRemoteSongIDs(state, playlist) {
   const downloaded = playlist.trackIDs
     .map((trackID) => state.tracks.find((track) => track.id === trackID && trackBelongsToActiveProfile(state, track))?.remoteID)
     .filter(Boolean);
-  playlist.remoteSongIDs = unique([...downloaded, ...unresolved]);
+  playlist.remoteSongIDs = mergePlaylistOrderWithPreservedItems(
+    playlist.remoteSongIDs,
+    downloaded,
+    unresolved,
+  );
   return playlist;
 }
 
@@ -1587,7 +1622,11 @@ export function hydrateRemotePlaylistTracks(state) {
     const downloaded = playlist.remoteSongIDs
       .map((remoteID) => state.tracks.find((track) => track.remoteID === remoteID && trackBelongsToActiveProfile(state, track))?.id)
       .filter(Boolean);
-    playlist.trackIDs = unique([...downloaded, ...localOnly]);
+    playlist.trackIDs = mergePlaylistOrderWithPreservedItems(
+      playlist.trackIDs,
+      downloaded,
+      localOnly,
+    );
   }
   return state;
 }
@@ -1710,7 +1749,11 @@ export function applyRemotePlaylistDocument(state, document, options = {}) {
     return [{
       id,
       name: remote.name,
-      trackIDs: unique([...downloaded, ...localOnly]),
+      trackIDs: mergePlaylistOrderWithPreservedItems(
+        previous?.trackIDs,
+        downloaded,
+        localOnly,
+      ),
       remoteSongIDs,
       isSystem: false,
     }];

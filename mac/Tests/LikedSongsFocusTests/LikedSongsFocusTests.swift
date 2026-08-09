@@ -692,15 +692,23 @@ struct LikedSongsFocusTests {
         let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
         await model.importLocalFiles(at: [hero])
         let track = try #require(model.tracks.first)
+        var playbackDiscontinuities: [TimeInterval] = []
+        let playbackDiscontinuityObserver = model.playbackDiscontinuities.sink {
+            playbackDiscontinuities.append($0)
+        }
+        defer { playbackDiscontinuityObserver.cancel() }
 
         model.selectAndPlay(track)
         #expect(model.isPlaying)
         try await Task.sleep(for: .milliseconds(300))
+        #expect(playbackDiscontinuities.isEmpty)
         #expect(model.listeningHistoryEntries.count == 1)
         #expect(model.listeningHistoryEntries.first?.trackID == track.id)
         #expect(model.listeningHistoryEntries.first?.syncProfileID == "default")
         model.seek(to: 0.5)
         #expect(abs(model.position - track.duration * 0.5) < 0.02)
+        #expect(playbackDiscontinuities.count == 1)
+        #expect(abs((playbackDiscontinuities.first ?? 0) - model.position) < 0.001)
         model.togglePlay()
         #expect(!model.isPlaying)
         #expect((model.listeningHistoryEntries.first?.listenedSeconds ?? 0) > 0)
@@ -962,6 +970,20 @@ struct LikedSongsFocusTests {
     }
 
     @Test
+    func playlistOrderMergeKeepsDeviceOnlyAndUnresolvedItemsInStableSlots() {
+        #expect(PlaylistOrderPolicy.merge(
+            previous: ["remote-a", "local", "remote-b"],
+            ordered: ["remote-b", "remote-c", "remote-a"],
+            preserving: ["local"]
+        ) == ["remote-b", "local", "remote-c", "remote-a"])
+        #expect(PlaylistOrderPolicy.merge(
+            previous: ["remote-a", "unresolved", "remote-b"],
+            ordered: ["remote-b", "remote-a"],
+            preserving: ["unresolved"]
+        ) == ["remote-b", "unresolved", "remote-a"])
+    }
+
+    @Test
     func playbackControlsKeepTheirQueueAfterNavigationAndFiltering() async throws {
         let (defaults, suite) = try defaults()
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -1141,9 +1163,11 @@ struct LikedSongsFocusTests {
         )
         let first = Track(title: "First", artist: "Artist", album: "Album", duration: 1, artwork: .electric, fileURL: glass, remoteID: firstRemoteID, sourceServer: "https://music.test", syncProfileID: "default")
         let second = Track(title: "Second", artist: "Artist", album: "Album", duration: 1, artwork: .golden, fileURL: ping, remoteID: secondRemoteID, sourceServer: "https://music.test", syncProfileID: "default")
-        model.tracks = [first, second]
+        let localOnly = Track(title: "Local", artist: "Artist", album: "Album", duration: 1, artwork: .softFocus, fileURL: hero)
+        model.tracks = [first, localOnly, second]
         let playlist = try #require(model.createPlaylist(named: "Synced Order"))
         model.addTrack(second, to: playlist)
+        model.addTrack(localOnly, to: model.playlists.first { $0.id == playlist.id }!)
         model.addTrack(first, to: model.playlists.first { $0.id == playlist.id }!)
 
         var uploadedDocument: RemotePlaylistsDocument?
@@ -1173,6 +1197,7 @@ struct LikedSongsFocusTests {
         #expect(uploadedDocument?.revision == 0)
         #expect(uploadedDocument?.playlists.first?.name == "Synced Order")
         #expect(uploadedDocument?.playlists.first?.songIDs == [secondRemoteID, firstRemoteID])
+        #expect(model.customPlaylists.first?.trackIDs == [second.id, localOnly.id, first.id])
         #expect(model.playlistSyncStatus == "Synced 1 playlist")
     }
 

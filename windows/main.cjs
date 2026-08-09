@@ -164,6 +164,10 @@ const discordRPC = new DiscordRPCClient({
     }
   },
 });
+currentDiscordPresenceStatus = discordRPC.configure({
+  enabled: false,
+  applicationID: bundledDiscordApplicationID,
+});
 
 async function atomicWriteFile(destination, data, options = "utf8") {
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
@@ -969,7 +973,7 @@ ipcMain.handle("app:preferences:update", (_event, value) => {
     backgroundTray.destroy();
     backgroundTray = null;
   }
-  discordRPC.configure({
+  currentDiscordPresenceStatus = discordRPC.configure({
     enabled: runtimeAppPreferences.discordRichPresence,
     applicationID: bundledDiscordApplicationID,
   });
@@ -977,11 +981,11 @@ ipcMain.handle("app:preferences:update", (_event, value) => {
 });
 
 ipcMain.handle("app:discord-presence:update", (_event, value) => {
-  discordRPC.setActivity(value);
+  currentDiscordPresenceStatus = discordRPC.setActivity(value);
   return currentDiscordPresenceStatus;
 });
 
-ipcMain.handle("app:discord-presence:status", () => currentDiscordPresenceStatus);
+ipcMain.handle("app:discord-presence:status", () => discordRPC.status());
 
 app.on("before-quit", () => {
   applicationQuitRequested = true;

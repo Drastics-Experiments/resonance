@@ -6,6 +6,40 @@ import Darwin
 import Foundation
 import UniformTypeIdentifiers
 
+enum PlaylistOrderPolicy {
+    static func merge<Element: Hashable>(
+        previous: [Element],
+        ordered: [Element],
+        preserving preserved: [Element]
+    ) -> [Element] {
+        let previous = unique(previous)
+        let ordered = unique(ordered)
+        let previousSet = Set(previous)
+        let orderedSet = Set(ordered)
+        let preservedSet = Set(unique(preserved).filter {
+            previousSet.contains($0) && !orderedSet.contains($0)
+        })
+        var merged: [Element] = []
+        var orderedIndex = ordered.startIndex
+
+        for previousItem in previous {
+            if preservedSet.contains(previousItem) {
+                merged.append(previousItem)
+            } else if orderedIndex < ordered.endIndex {
+                merged.append(ordered[orderedIndex])
+                ordered.formIndex(after: &orderedIndex)
+            }
+        }
+        merged.append(contentsOf: ordered[orderedIndex...])
+        return unique(merged)
+    }
+
+    private static func unique<Element: Hashable>(_ values: [Element]) -> [Element] {
+        var seen = Set<Element>()
+        return values.filter { seen.insert($0).inserted }
+    }
+}
+
 @MainActor
 final class PlaybackPositionState: ObservableObject {
     @Published private(set) var position: TimeInterval
@@ -275,6 +309,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published var isPlaying = false
     @Published private(set) var playbackDuration: TimeInterval = 0
     let playbackPositionState = PlaybackPositionState()
+    let playbackDiscontinuities = PassthroughSubject<TimeInterval, Never>()
     var position: TimeInterval = 0 {
         didSet { playbackPositionState.update(to: position) }
     }
@@ -1679,6 +1714,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             endListeningSession()
             player.seek(to: .zero)
             position = 0
+            playbackDiscontinuities.send(0)
             player.playImmediately(atRate: playbackRate)
             isPlaying = true
             if let track = currentTrack { beginListeningSession(for: track) }
@@ -2585,6 +2621,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 toleranceAfter: .zero
             )
         }
+        playbackDiscontinuities.send(position)
         lastListeningPosition = position
         persistPlaybackPosition()
         publishSystemPlayback()
@@ -2938,6 +2975,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             endListeningSession()
             position = 0
             player.currentTime = 0
+            playbackDiscontinuities.send(0)
             isPlaying = player.play()
             if isPlaying {
                 beginListeningSession(for: track)
@@ -4442,9 +4480,15 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                   !songIDs.contains(remoteID) else { continue }
             songIDs.append(remoteID)
         }
-        for remoteID in playlist.remoteSongIDs ?? [] where !songIDs.contains(remoteID) {
-            songIDs.append(remoteID)
+        let previousRemoteSongIDs = playlist.remoteSongIDs ?? []
+        let unresolvedRemoteSongIDs = previousRemoteSongIDs.filter { remoteID in
+            activeRemoteTrack(songID: remoteID) == nil
         }
+        songIDs = PlaylistOrderPolicy.merge(
+            previous: previousRemoteSongIDs,
+            ordered: songIDs,
+            preserving: unresolvedRemoteSongIDs
+        )
         return RemotePlaylist(id: playlist.id, name: playlist.name, songIDs: songIDs)
     }
 
@@ -4465,15 +4509,18 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             let localOnlyTrackIDs = existing[remote.id]?.trackIDs.filter { trackID in
                 tracks.first(where: { $0.id == trackID })?.remoteID == nil
             } ?? []
-            var downloadedTrackIDs = remote.songIDs.compactMap { remoteID in
+            let downloadedTrackIDs = remote.songIDs.compactMap { remoteID in
                 activeRemoteTrack(songID: remoteID)?.id
             }
-            downloadedTrackIDs.append(contentsOf: localOnlyTrackIDs.filter { !downloadedTrackIDs.contains($0) })
             return Playlist(
                 id: remote.id,
                 name: remote.name,
                 artwork: existing[remote.id]?.artwork ?? styles[offset % styles.count],
-                trackIDs: downloadedTrackIDs,
+                trackIDs: PlaylistOrderPolicy.merge(
+                    previous: existing[remote.id]?.trackIDs ?? [],
+                    ordered: downloadedTrackIDs,
+                    preserving: localOnlyTrackIDs
+                ),
                 remoteSongIDs: remote.songIDs
             )
         }
@@ -4523,11 +4570,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             let localOnlyTrackIDs = playlists[index].trackIDs.filter { trackID in
                 tracks.first(where: { $0.id == trackID })?.remoteID == nil
             }
-            var hydrated = remoteSongIDs.compactMap { remoteID in
+            let hydrated = remoteSongIDs.compactMap { remoteID in
                 activeRemoteTrack(songID: remoteID)?.id
             }
-            hydrated.append(contentsOf: localOnlyTrackIDs.filter { !hydrated.contains($0) })
-            playlists[index].trackIDs = hydrated
+            playlists[index].trackIDs = PlaylistOrderPolicy.merge(
+                previous: playlists[index].trackIDs,
+                ordered: hydrated,
+                preserving: localOnlyTrackIDs
+            )
         }
     }
 
@@ -4536,14 +4586,17 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         let previouslyUnresolved = (playlists[index].remoteSongIDs ?? []).filter { remoteID in
             activeRemoteTrack(songID: remoteID) == nil
         }
-        var ordered: [String] = playlists[index].trackIDs.compactMap { trackID in
+        let ordered: [String] = playlists[index].trackIDs.compactMap { trackID in
             guard let track = tracks.first(where: { $0.id == trackID }),
                   let remoteID = track.remoteID,
                   track.remoteIdentity == activeRemoteIdentity(songID: remoteID) else { return nil }
             return remoteID
         }
-        ordered.append(contentsOf: previouslyUnresolved.filter { !ordered.contains($0) })
-        playlists[index].remoteSongIDs = ordered
+        playlists[index].remoteSongIDs = PlaylistOrderPolicy.merge(
+            previous: playlists[index].remoteSongIDs ?? [],
+            ordered: ordered,
+            preserving: previouslyUnresolved
+        )
     }
 
     private func markPlaylistDirty(_ playlistID: UUID) {

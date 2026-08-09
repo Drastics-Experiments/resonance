@@ -20,6 +20,7 @@ import {
   localImportOperationIsCurrent,
   localImportNeedsServerContext,
   mergeListeningHistoryDocument,
+  mergePlaylistOrderWithPreservedItems,
   mergePlaylistDocument,
   mergeSyncedTracks,
   mergeTrackSourceIdentity,
@@ -37,6 +38,7 @@ import {
   serverSongMetadataMatches,
   reconcileServerBackedTrackDuplicates,
   reconcileUploadedTrack,
+  reorderPlaylistTrackIDs,
   removeClipRangeForTrack,
   restoreProfileState,
   resolveSyncProfile,
@@ -80,6 +82,10 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(appSource, /data-library-filter="video"[^>]*>Video<\/button>/);
   assert.doesNotMatch(htmlSource, /VIDEO • ON DEVICE|fullPlayerMediaBadge/);
   assert.match(htmlSource, /id="fullPlayerArtwork"[\s\S]+id="installedVideoArtwork"[\s\S]+id="installedVideoPlayer"/);
+  assert.match(htmlSource, /id="fullPlayerArtworkContent"[\s\S]+id="fullPlayerVideoLaunch"[^>]+hidden disabled/);
+  assert.match(appSource, /const videoAvailable = isInstalledVideoTrack\(track\)[\s\S]+classList\.toggle\("video-available", videoAvailable\)[\s\S]+videoLaunch\.hidden = !videoAvailable/);
+  assert.match(appSource, /#fullPlayerVideoLaunch"\)\.onclick = \(\) => \{[\s\S]+openInstalledVideo\(track\)/);
+  assert.match(styleSource, /\.full-player-artwork\.video-available:hover \.full-player-video-launch[\s\S]+opacity: 1/);
   assert.match(htmlSource, /id="installedVideoPlayer"[^>]*\smuted(?:\s|>)/);
   assert.doesNotMatch(htmlSource, /id="installedVideoPlayer"[^>]*\scontrols(?:\s|>|=)/);
   assert.match(htmlSource, /id="installedVideoControls"[\s\S]+id="installedVideoSeek"[\s\S]+id="installedVideoPrevious"[\s\S]+id="installedVideoToggle"[\s\S]+id="installedVideoNext"[\s\S]+id="installedVideoRepeat"[\s\S]+id="installedVideoVolume"/);
@@ -95,7 +101,7 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(appSource, /function synchronizeInstalledVideoWithAudio\([^)]*\)[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0[\s\S]+audio\.paused[\s\S]+installedVideoPlayer\.play/);
   assert.match(appSource, /function installedVideoPlaybackPlaying\(\)[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0/);
   assert.doesNotMatch(appSource, /videoOwnsPlayback|waitingForAudioHandoff|handOffInstalledVideoToAudio/);
-  assert.match(appSource, /function animateInstalledVideoStage\(from, to, onFinish\)[\s\S]+applyInstalledVideoStageGeometry\(from\)[\s\S]+\.animate\(\[from, to\],[\s\S]+applyInstalledVideoStageGeometry\(to\)[\s\S]+animation\.cancel\(\)/);
+  assert.match(appSource, /function animateInstalledVideoStage\(from, to, onFinish\)[\s\S]+classList\.add\("video-geometry-animating"\)[\s\S]+applyInstalledVideoStageGeometry\(from\)[\s\S]+\.animate\(\[from, to\],[\s\S]+animation\.cancel\(\)[\s\S]+clearInstalledVideoStageGeometry\(\)[\s\S]+classList\.remove\("video-geometry-animating"\)/);
   assert.match(appSource, /dialog\.classList\.add\("video-expanded", "video-revealed"\);[\s\S]+synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\);[\s\S]+animateInstalledVideoStage\(geometry\.source, geometry\.target/);
   assert.match(appSource, /function closeInstalledVideo\([^)]*\)[\s\S]+currentGeometry = installedVideoStageGeometry\(\)[\s\S]+classList\.add\("video-revealed", "video-closing"\)[\s\S]+syncFullPlayerTitleMarquee\(\)[\s\S]+animateInstalledVideoStage\(currentGeometry, geometry\.source[\s\S]+finishInstalledVideoClose/);
   assert.match(appSource, /installedVideoArtworkTimer = setTimeout\([\s\S]+classList\.add\("video-artwork-restored"\)[\s\S]+geometryDuration - installedVideoAnimationDuration\(INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS\)/);
@@ -105,7 +111,9 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(appSource, /function setPlaybackVolume\([\s\S]+audio\.volume = gain[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0[\s\S]+installedVideoVolume/);
   assert.match(styleSource, /\.full-player-dialog\.video-active \.full-player-details[\s\S]+opacity: 0/);
   assert.doesNotMatch(styleSource, /\.installed-video-dialog\.video-from-art \.installed-video-stage/);
-  assert.match(styleSource, /\.installed-video-stage\s*\{[\s\S]+will-change: transform, border-radius[\s\S]+transition: none/);
+  assert.match(styleSource, /\.installed-video-stage\s*\{[\s\S]+transform: none[\s\S]+will-change: auto[\s\S]+transition: none/);
+  assert.match(styleSource, /\.installed-video-stage\.video-geometry-animating\s*\{[\s\S]+will-change: transform, border-radius/);
+  assert.match(styleSource, /\.full-player-dialog\.video-active \.full-player-backdrop,[\s\S]+\.full-player-dialog\.video-active \.full-player-shade[\s\S]+visibility: hidden/);
   assert.match(styleSource, /\.installed-video-stage\s*\{[\s\S]+inset: clamp\(12px, 3\.4vw, 38px\)[\s\S]+width: auto[\s\S]+height: auto/);
   assert.match(styleSource, /\.installed-video-dialog\.video-revealed \.installed-video-stage video[\s\S]+opacity: 1/);
   assert.match(styleSource, /\.installed-video-artwork,[\s\S]+\.installed-video-stage video[\s\S]+transition: opacity 140ms ease/);
@@ -878,8 +886,9 @@ test("hides inline playlist row buttons while preserving drag and context contro
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   assert.match(appSource, /data-playlist-draggable="true"/);
-  assert.match(appSource, /trackTable\.ondrop\s*=\s*async/);
-  assert.match(appSource, /row\.ondragstart\s*=/);
+  assert.match(appSource, /row\.onpointerdown\s*=/);
+  assert.match(appSource, /row\.onpointerup\s*=/);
+  assert.doesNotMatch(appSource, /row\.ondragstart\s*=/);
   assert.match(appSource, /drag-preview-up/);
   assert.doesNotMatch(appSource, /data-reorder-track/);
   assert.doesNotMatch(appSource, /data-remove-playlist-track/);
@@ -2080,6 +2089,46 @@ test("merges dirty local playlists over the server without deleting unrelated pl
   assert.deepEqual(merge.document.playlists[1].song_ids, ["a".repeat(24)]);
 });
 
+test("reorders playlist tracks before or after a drop target", () => {
+  const original = ["one", "two", "three", "four"];
+  assert.deepEqual(reorderPlaylistTrackIDs(original, "four", "one"), ["four", "one", "two", "three"]);
+  assert.deepEqual(reorderPlaylistTrackIDs(original, "one", "three", true), ["two", "three", "one", "four"]);
+  assert.deepEqual(reorderPlaylistTrackIDs(original, "two", "missing"), original);
+  assert.deepEqual(original, ["one", "two", "three", "four"]);
+
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  assert.match(appSource, /row\.onmousedown = \(event\) => \{[\s\S]+document\.addEventListener\("mousemove", handlePlaylistMouseMove\)/);
+  assert.match(appSource, /handlePlaylistMouseUp[\s\S]+commitPlaylistTrackReorder/);
+  assert.match(appSource, /row\.onpointerdown = \(event\) => \{[\s\S]+setPointerCapture/);
+  assert.match(appSource, /row\.onpointermove = \(event\) => \{[\s\S]+document\.elementFromPoint/);
+  assert.match(appSource, /function commitPlaylistTrackReorder[\s\S]+renderLibrary\(\);[\s\S]+await persist\(\)/);
+  assert.doesNotMatch(appSource, /draggable="true" data-playlist-draggable/);
+});
+
+test("merges server playlist order without moving Windows-only items out of their slots", () => {
+  assert.deepEqual(
+    mergePlaylistOrderWithPreservedItems(
+      ["remote-a", "local-one", "remote-b", "local-two"],
+      ["remote-b", "remote-c", "remote-a"],
+      ["local-one", "local-two"],
+    ),
+    ["remote-b", "local-one", "remote-c", "local-two", "remote-a"],
+  );
+  assert.deepEqual(
+    mergePlaylistOrderWithPreservedItems(["local-only"], ["downloaded-a"], ["local-only"]),
+    ["local-only", "downloaded-a"],
+  );
+});
+
+test("animates playback progress independently of media timeupdate events", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  assert.match(appSource, /function animatePlaybackProgress\(\)[\s\S]+updatePlaybackProgressUI\(\)[\s\S]+requestAnimationFrame\(animatePlaybackProgress\)/);
+  assert.match(appSource, /audio\.onplay = \(\) => \{[\s\S]+startPlaybackProgressAnimation\(\)/);
+  assert.match(appSource, /audio\.onpause = \(\) => \{[\s\S]+stopPlaybackProgressAnimation\(\)/);
+  assert.match(appSource, /function setRepeatEnabled\(value\)[\s\S]+syncRepeatControls\(\)/);
+  assert.doesNotMatch(appSource, /#fullPlayerRepeat"\)\.onclick = \(\) => \{[\s\S]{0,160}updateChrome\(\)/);
+});
+
 test("merges and applies profile clip ranges without overwriting newer local edits", () => {
   const track = { id: "downloaded", remoteID: "song-a", duration: 180 };
   const state = normalizeState({ ...createEmptyState(), tracks: [track] });
@@ -2138,11 +2187,41 @@ test("applies remote ordering, preserves local-only songs, and hydrates later do
     playlists: [{ id: playlistID.toUpperCase(), name: "Shared", song_ids: [secondRemoteID, firstRemoteID] }],
   });
   assert.equal(state.playlistRevision, 7);
-  assert.deepEqual(state.playlists[1].trackIDs, ["downloaded-a", "local-only"]);
+  assert.deepEqual(state.playlists[1].trackIDs, ["local-only", "downloaded-a"]);
   assert.deepEqual(state.playlists[1].remoteSongIDs, [secondRemoteID, firstRemoteID]);
 
   mergeSyncedTracks(state, { downloaded: [{ id: "downloaded-b", remoteID: secondRemoteID, sourceServer: state.serverURL, syncProfileID: "default" }], replacedTrackIDs: [] });
-  assert.deepEqual(state.playlists[1].trackIDs, ["downloaded-b", "downloaded-a", "local-only"]);
+  assert.deepEqual(state.playlists[1].trackIDs, ["local-only", "downloaded-b", "downloaded-a"]);
+});
+
+test("remote playlist reordering preserves local-only and unresolved-song slots", () => {
+  const playlistID = "12345678-1234-abcd-9876-abcdef123456";
+  const firstRemoteID = "a".repeat(24);
+  const unresolvedRemoteID = "b".repeat(24);
+  const secondRemoteID = "c".repeat(24);
+  const state = createEmptyState();
+  state.tracks = [
+    { id: "downloaded-a", remoteID: firstRemoteID, sourceServer: state.serverURL, syncProfileID: "default" },
+    { id: "local-only", remoteID: null },
+    { id: "downloaded-c", remoteID: secondRemoteID, sourceServer: state.serverURL, syncProfileID: "default" },
+  ];
+  state.playlists.push({
+    id: playlistID,
+    name: "Mixed order",
+    trackIDs: ["downloaded-a", "local-only", "downloaded-c"],
+    remoteSongIDs: [firstRemoteID, unresolvedRemoteID, secondRemoteID],
+    isSystem: false,
+  });
+
+  applyRemotePlaylistDocument(state, {
+    revision: 8,
+    playlists: [{ id: playlistID, name: "Mixed order", song_ids: [secondRemoteID, unresolvedRemoteID, firstRemoteID] }],
+  });
+  assert.deepEqual(state.playlists[1].trackIDs, ["downloaded-c", "local-only", "downloaded-a"]);
+
+  state.playlists[1].trackIDs = ["downloaded-a", "local-only", "downloaded-c"];
+  updatePlaylistRemoteSongIDs(state, state.playlists[1]);
+  assert.deepEqual(state.playlists[1].remoteSongIDs, [firstRemoteID, unresolvedRemoteID, secondRemoteID]);
 });
 
 test("deletions remove only the matching known server playlist", () => {

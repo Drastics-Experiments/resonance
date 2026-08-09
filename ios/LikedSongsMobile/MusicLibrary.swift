@@ -4016,9 +4016,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                   !songIDs.contains(remoteID) else { continue }
             songIDs.append(remoteID)
         }
-        for remoteID in playlist.remoteSongIDs ?? [] where !songIDs.contains(remoteID) {
-            songIDs.append(remoteID)
+        let previousRemoteSongIDs = playlist.remoteSongIDs ?? []
+        let unresolvedRemoteSongIDs = previousRemoteSongIDs.filter { remoteID in
+            guard let activeServerContext else { return true }
+            let identity = MobileRemoteIdentity(context: activeServerContext, remoteID: remoteID)
+            return !tracks.contains { $0.remoteIdentity() == identity }
         }
+        songIDs = MobilePlaylistOrderPolicy.merge(
+            previous: previousRemoteSongIDs,
+            ordered: songIDs,
+            preserving: unresolvedRemoteSongIDs
+        )
         return MobileRemotePlaylist(id: playlist.id, name: playlist.name, songIDs: songIDs)
     }
 
@@ -4037,12 +4045,14 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 let identity = MobileRemoteIdentity(context: activeServerContext, remoteID: remoteID)
                 return tracks.first(where: { $0.remoteIdentity() == identity })?.id
             }
-            var combined = downloadedTrackIDs
-            combined.append(contentsOf: localOnlyTrackIDs.filter { !combined.contains($0) })
             return MobilePlaylist(
                 id: remote.id,
                 name: remote.name,
-                trackIDs: combined,
+                trackIDs: MobilePlaylistOrderPolicy.merge(
+                    previous: existing[remote.id]?.trackIDs ?? [],
+                    ordered: downloadedTrackIDs,
+                    preserving: localOnlyTrackIDs
+                ),
                 remoteSongIDs: remote.songIDs
             )
         }
@@ -4083,12 +4093,15 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             let localOnlyTrackIDs = playlists[index].trackIDs.filter { trackID in
                 tracks.first(where: { $0.id == trackID })?.remoteID == nil
             }
-            var hydrated: [UUID] = remoteSongIDs.compactMap { remoteID -> UUID? in
+            let hydrated: [UUID] = remoteSongIDs.compactMap { remoteID -> UUID? in
                 let identity = MobileRemoteIdentity(context: activeServerContext, remoteID: remoteID)
                 return tracks.first(where: { $0.remoteIdentity() == identity })?.id
             }
-            hydrated.append(contentsOf: localOnlyTrackIDs.filter { !hydrated.contains($0) })
-            playlists[index].trackIDs = hydrated
+            playlists[index].trackIDs = MobilePlaylistOrderPolicy.merge(
+                previous: playlists[index].trackIDs,
+                ordered: hydrated,
+                preserving: localOnlyTrackIDs
+            )
         }
     }
 
@@ -4113,13 +4126,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             let identity = MobileRemoteIdentity(context: activeServerContext, remoteID: remoteID)
             return !tracks.contains { $0.remoteIdentity() == identity }
         }
-        var ordered: [String] = playlists[index].trackIDs.compactMap { trackID -> String? in
+        let ordered: [String] = playlists[index].trackIDs.compactMap { trackID -> String? in
             guard let track = tracks.first(where: { $0.id == trackID }),
                   belongsToActiveServerContext(track) else { return nil }
             return track.remoteID
         }
-        ordered.append(contentsOf: previouslyUnresolved.filter { !ordered.contains($0) })
-        playlists[index].remoteSongIDs = ordered
+        playlists[index].remoteSongIDs = MobilePlaylistOrderPolicy.merge(
+            previous: playlists[index].remoteSongIDs ?? [],
+            ordered: ordered,
+            preserving: previouslyUnresolved
+        )
     }
 
     private func schedulePlaylistSync() {

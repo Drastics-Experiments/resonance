@@ -94,6 +94,7 @@ class DiscordRPCClient {
     this.reconnectTimer = null;
     this.generation = 0;
     this.currentStatus = { state: "disabled", message: "Rich Presence is off." };
+    this.lastPublishedStatus = null;
   }
 
   status() {
@@ -101,9 +102,14 @@ class DiscordRPCClient {
   }
 
   setStatus(state, message) {
-    if (this.currentStatus.state === state && this.currentStatus.message === message) return;
     this.currentStatus = { state, message };
-    this.onStatus(this.status());
+    const nextStatus = this.status();
+    if (this.lastPublishedStatus
+      && this.lastPublishedStatus.state === nextStatus.state
+      && this.lastPublishedStatus.message === nextStatus.message
+      && this.lastPublishedStatus.applicationConfigured === nextStatus.applicationConfigured) return;
+    this.lastPublishedStatus = nextStatus;
+    this.onStatus(nextStatus);
   }
 
   configure({ enabled, applicationID } = {}) {

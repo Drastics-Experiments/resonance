@@ -2,11 +2,38 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  DiscordRPCClient,
   discordIPCPaths,
   encodeDiscordFrame,
   sanitizeDiscordActivity,
   validDiscordApplicationID,
 } = require("../discord-rpc.cjs");
+
+test("reports the bundled application as configured while Rich Presence is off", () => {
+  const statuses = [];
+  const client = new DiscordRPCClient({ onStatus: (status) => statuses.push(status) });
+  const status = client.configure({
+    enabled: false,
+    applicationID: "1535574125395841154",
+  });
+
+  assert.deepEqual(status, {
+    state: "disabled",
+    message: "Rich Presence is off.",
+    applicationConfigured: true,
+  });
+  assert.deepEqual(statuses, [status]);
+});
+
+test("publishes configuration changes even when the visible state and message are unchanged", () => {
+  const statuses = [];
+  const client = new DiscordRPCClient({ onStatus: (status) => statuses.push(status) });
+
+  client.configure({ enabled: false, applicationID: "1535574125395841154" });
+  client.configure({ enabled: false, applicationID: "" });
+
+  assert.deepEqual(statuses.map((status) => status.applicationConfigured), [true, false]);
+});
 
 test("validates public Discord application IDs", () => {
   assert.equal(validDiscordApplicationID(" 123456789012345678 "), "123456789012345678");

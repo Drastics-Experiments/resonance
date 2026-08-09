@@ -115,6 +115,23 @@ enum InstalledVideoLayoutPolicy {
     }
 }
 
+enum InstalledVideoLaunchBadgePolicy {
+    static let minimumSize: CGFloat = 44
+    static let maximumSize: CGFloat = 62
+
+    static func size(for artworkSize: CGFloat) -> CGFloat {
+        min(max(artworkSize * 0.12, minimumSize), maximumSize)
+    }
+
+    static func inset(for artworkSize: CGFloat) -> CGFloat {
+        min(max(artworkSize * 0.045, 14), 24)
+    }
+
+    static func isVisible(hasVideo: Bool, isHovered: Bool, isFocused: Bool) -> Bool {
+        hasVideo && (isHovered || isFocused)
+    }
+}
+
 enum InstalledVideoControlsPolicy {
     static let autoHideDelay: TimeInterval = 2.2
     static let pointerExitDelay: TimeInterval = 0.45
@@ -131,11 +148,12 @@ enum InstalledVideoControlsPolicy {
 }
 
 enum InstalledVideoSyncPolicy {
-    static let seekTolerance: TimeInterval = 0.12
+    static let continuouslyPollsAudioClock = false
+}
 
-    static func shouldSeek(videoTime: TimeInterval, audioTime: TimeInterval) -> Bool {
-        guard videoTime.isFinite, audioTime.isFinite else { return true }
-        return abs(videoTime - audioTime) > seekTolerance
+enum InstalledVideoRenderingPolicy {
+    static func showsArtworkBackdrop(hasVideoSession: Bool, isRestoringChrome: Bool) -> Bool {
+        !hasVideoSession || isRestoringChrome
     }
 }
 
@@ -172,7 +190,14 @@ struct NowPlayingView: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack {
-                nowPlayingBackground
+                if InstalledVideoRenderingPolicy.showsArtworkBackdrop(
+                    hasVideoSession: installedVideoSession != nil,
+                    isRestoringChrome: isRestoringNowPlayingChrome
+                ) {
+                    nowPlayingBackground
+                } else {
+                    Color(hex: 0x010207).ignoresSafeArea()
+                }
 
                 VStack(spacing: 0) {
                     topBar
@@ -325,16 +350,11 @@ struct NowPlayingView: View {
         HStack(alignment: .top, spacing: metrics.columnSpacing) {
             Group {
                 if isNowPlayingChromeVisible {
-                    InstalledVideoTransitionArtwork(
+                    InstalledVideoLaunchArtwork(
                         track: track,
-                        cornerRadius: 22,
-                        symbolSize: metrics.artworkSize * 0.22
+                        artworkSize: metrics.artworkSize,
+                        onPlayVideo: { openInstalledVideo(track) }
                     )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .stroke(Color.appAccent.opacity(0.42), lineWidth: 1)
-                    }
-                    .shadow(color: Color.appAccent.opacity(0.24), radius: 34, y: 15)
                 } else {
                     Color.clear
                 }
@@ -681,17 +701,6 @@ struct NowPlayingView: View {
         let player = AVPlayer(url: url)
         player.isMuted = true
         player.volume = 0
-        let playbackDuration = model.playbackDuration > 0
-            ? model.playbackDuration
-            : track.duration
-        let startTime = min(max(model.position, 0), max(playbackDuration, 0))
-        if startTime > 0 {
-            player.seek(
-                to: CMTime(seconds: startTime, preferredTimescale: 600),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
-            )
-        }
         let session = InstalledVideoSession(
             track: track,
             player: player
@@ -851,6 +860,75 @@ private struct InstalledVideoTransitionArtwork: View {
     }
 }
 
+private struct InstalledVideoLaunchArtwork: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let track: Track
+    let artworkSize: CGFloat
+    let onPlayVideo: () -> Void
+    @State private var isHovered = false
+    @FocusState private var isVideoButtonFocused: Bool
+
+    private var hasVideo: Bool {
+        track.installedVideoURL != nil
+    }
+
+    private var isBadgeVisible: Bool {
+        InstalledVideoLaunchBadgePolicy.isVisible(
+            hasVideo: hasVideo,
+            isHovered: isHovered,
+            isFocused: isVideoButtonFocused
+        )
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            InstalledVideoTransitionArtwork(
+                track: track,
+                cornerRadius: InstalledVideoLayoutPolicy.artworkCornerRadius,
+                symbolSize: artworkSize * 0.22
+            )
+            .overlay {
+                RoundedRectangle(
+                    cornerRadius: InstalledVideoLayoutPolicy.artworkCornerRadius,
+                    style: .continuous
+                )
+                .stroke(Color.appAccent.opacity(0.42), lineWidth: 1)
+            }
+            .shadow(color: Color.appAccent.opacity(0.24), radius: 34, y: 15)
+
+            if hasVideo {
+                let badgeSize = InstalledVideoLaunchBadgePolicy.size(for: artworkSize)
+                Button(action: onPlayVideo) {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: badgeSize * 0.36, weight: .bold))
+                        .foregroundStyle(Color.white)
+                        .offset(x: 1)
+                        .frame(width: badgeSize, height: badgeSize)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .background(Color.black.opacity(0.42), in: Circle())
+                        .overlay {
+                            Circle().stroke(Color.white.opacity(0.40), lineWidth: 1)
+                        }
+                        .shadow(color: Color.black.opacity(0.58), radius: 14, y: 5)
+                }
+                .buttonStyle(PressableScaleStyle())
+                .focused($isVideoButtonFocused)
+                .opacity(isBadgeVisible ? 1 : 0)
+                .scaleEffect(isBadgeVisible ? 1 : 0.88)
+                .padding(InstalledVideoLaunchBadgePolicy.inset(for: artworkSize))
+                .help("Watch Video")
+                .accessibilityLabel("Watch video for \(track.title)")
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .animation(
+            reduceMotion ? nil : .easeOut(duration: 0.16),
+            value: isBadgeVisible
+        )
+    }
+}
+
 private struct InstalledVideoPlayerView: View {
     @EnvironmentObject private var model: PlayerModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -862,9 +940,6 @@ private struct InstalledVideoPlayerView: View {
     let isClosing: Bool
     let onMinimize: () -> Void
     let onClose: () -> Void
-    @State private var currentTime: TimeInterval = 0
-    @State private var duration: TimeInterval = 0
-    @State private var isPlaying = false
     @State private var controlsVisible = true
     @State private var controlsAreHovered = false
     @State private var controlsHideTask: Task<Void, Never>?
@@ -889,6 +964,17 @@ private struct InstalledVideoPlayerView: View {
         isExpanded ? Color.black.opacity(0.72) : Color.appAccent.opacity(0.24)
     }
 
+    private var playbackDuration: TimeInterval {
+        if model.currentTrackID == session.track.id, model.playbackDuration > 0 {
+            return model.playbackDuration
+        }
+        let itemDuration = session.player.currentItem?.duration.seconds ?? 0
+        if itemDuration.isFinite, itemDuration > 0 {
+            return itemDuration
+        }
+        return max(session.track.duration, 0)
+    }
+
     var body: some View {
         let surfaceFrame = surfaceFrame(in: viewportSize)
 
@@ -906,7 +992,18 @@ private struct InstalledVideoPlayerView: View {
             .opacity(isExpanded ? 1 : 0)
 
             ZStack {
-                AspectFitVideoPlayer(player: session.player)
+                RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous)
+                    .fill(Color.black)
+                    .shadow(
+                        color: surfaceShadowColor,
+                        radius: isExpanded ? 36 : 34,
+                        y: isExpanded ? 18 : 15
+                    )
+
+                AspectFitVideoPlayer(
+                    player: session.player,
+                    cornerRadius: surfaceCornerRadius
+                )
                     .opacity(isVideoRevealed && !isArtworkRestored ? 1 : 0)
                     .allowsHitTesting(isVideoRevealed && !isClosing)
 
@@ -916,19 +1013,12 @@ private struct InstalledVideoPlayerView: View {
                     symbolSize: min(viewportSize.width, viewportSize.height) * 0.18
                 )
                 .opacity(isVideoRevealed && !isArtworkRestored ? 0 : 1)
-            }
-            .frame(width: surfaceFrame.width, height: surfaceFrame.height)
-            .background(Color.black)
-            .clipShape(RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous))
-            .overlay {
+
                 RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous)
                     .stroke(surfaceBorderColor, lineWidth: 1)
+                    .allowsHitTesting(false)
             }
-            .shadow(
-                color: surfaceShadowColor,
-                radius: isExpanded ? 36 : 34,
-                y: isExpanded ? 18 : 15
-            )
+            .frame(width: surfaceFrame.width, height: surfaceFrame.height)
             .position(x: surfaceFrame.midX, y: surfaceFrame.midY)
             .zIndex(1)
 
@@ -951,9 +1041,8 @@ private struct InstalledVideoPlayerView: View {
 
             InstalledVideoControlsOverlay(
                 track: session.track,
-                currentTime: currentTime,
-                duration: duration,
-                isPlaying: isPlaying,
+                duration: playbackDuration,
+                isPlaying: model.isPlaying,
                 repeatEnabled: model.repeatEnabled,
                 volume: $model.volume,
                 isCompact: surfaceFrame.width < 760,
@@ -967,16 +1056,18 @@ private struct InstalledVideoPlayerView: View {
             .clipShape(RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous))
             .position(x: surfaceFrame.midX, y: surfaceFrame.midY)
             .opacity(
-                isVideoRevealed && !isClosing && (controlsVisible || !isPlaying)
+                isVideoRevealed && !isClosing && (controlsVisible || !model.isPlaying)
                     ? 1
                     : 0
             )
-            .offset(y: controlsVisible || !isPlaying ? 0 : 12)
-            .allowsHitTesting(isVideoRevealed && !isClosing && (controlsVisible || !isPlaying))
+            .offset(y: controlsVisible || !model.isPlaying ? 0 : 12)
+            .allowsHitTesting(
+                isVideoRevealed && !isClosing && (controlsVisible || !model.isPlaying)
+            )
             .zIndex(3)
             .animation(
                 reduceMotion ? nil : .easeOut(duration: 0.20),
-                value: controlsVisible || !isPlaying
+                value: controlsVisible || !model.isPlaying
             )
             .onHover { hovering in
                 controlsAreHovered = hovering
@@ -1034,33 +1125,30 @@ private struct InstalledVideoPlayerView: View {
             session.player.isMuted = true
             session.player.volume = 0
             session.player.defaultRate = model.playbackRate
-            refreshPlaybackState()
+            applyAudioPlaybackState()
             showControls()
         }
         .onChange(of: model.playbackRate) { _, rate in
             session.player.defaultRate = rate
-            if isPlaying {
+            if model.isPlaying {
                 session.player.rate = rate
             }
         }
         .onChange(of: model.isPlaying) { _, _ in
-            synchronizeVideoWithAudio(forceSeek: true)
+            applyAudioPlaybackState(seekToAudioClock: true)
         }
         .onChange(of: model.currentTrackID) { _, trackID in
             if trackID != session.track.id { onClose() }
         }
-        .onChange(of: isPlaying) { _, playing in
+        .onChange(of: model.isPlaying) { _, playing in
             if playing {
                 showControls()
             } else {
                 showControls(keepVisible: true)
             }
         }
-        .task(id: session.id) {
-            while !Task.isCancelled {
-                refreshPlaybackState()
-                try? await Task.sleep(for: .milliseconds(150))
-            }
+        .onReceive(model.playbackDiscontinuities) { position in
+            seekVideo(to: position)
         }
         .onDisappear {
             controlsHideTask?.cancel()
@@ -1068,27 +1156,7 @@ private struct InstalledVideoPlayerView: View {
         }
     }
 
-    private func refreshPlaybackState() {
-        currentTime = model.currentTrackID == session.track.id
-            ? max(model.position, 0)
-            : 0
-
-        let playbackDuration = model.currentTrackID == session.track.id
-            ? model.playbackDuration
-            : session.track.duration
-        let itemDuration = session.player.currentItem?.duration.seconds ?? 0
-        if playbackDuration.isFinite, playbackDuration > 0 {
-            duration = playbackDuration
-        } else if itemDuration.isFinite, itemDuration > 0 {
-            duration = itemDuration
-        } else {
-            duration = max(session.track.duration, 0)
-        }
-        isPlaying = model.currentTrackID == session.track.id && model.isPlaying
-        synchronizeVideoWithAudio()
-    }
-
-    private func synchronizeVideoWithAudio(forceSeek: Bool = false) {
+    private func applyAudioPlaybackState(seekToAudioClock: Bool = false) {
         guard model.currentTrackID == session.track.id else {
             session.player.pause()
             return
@@ -1096,17 +1164,7 @@ private struct InstalledVideoPlayerView: View {
         session.player.isMuted = true
         session.player.volume = 0
         session.player.defaultRate = model.playbackRate
-        let videoTime = session.player.currentTime().seconds
-        if forceSeek || InstalledVideoSyncPolicy.shouldSeek(
-            videoTime: videoTime,
-            audioTime: model.position
-        ) {
-            session.player.seek(
-                to: CMTime(seconds: max(model.position, 0), preferredTimescale: 600),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
-            )
-        }
+        if seekToAudioClock { seekVideo(to: model.position) }
         if model.isPlaying, isVideoRevealed, !isClosing {
             if session.player.timeControlStatus == .paused {
                 session.player.playImmediately(atRate: model.playbackRate)
@@ -1116,19 +1174,28 @@ private struct InstalledVideoPlayerView: View {
         }
     }
 
+    private func seekVideo(to time: TimeInterval) {
+        guard time.isFinite else { return }
+        session.player.seek(
+            to: CMTime(seconds: max(time, 0), preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+    }
+
     private func showControls(keepVisible: Bool = false) {
         controlsHideTask?.cancel()
         controlsHideTask = nil
         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
             controlsVisible = true
         }
-        guard !keepVisible, !controlsAreHovered, isPlaying else { return }
+        guard !keepVisible, !controlsAreHovered, model.isPlaying else { return }
         scheduleControlsHide(after: InstalledVideoControlsPolicy.autoHideDelay)
     }
 
     private func scheduleControlsHide(after delay: TimeInterval) {
         controlsHideTask?.cancel()
-        guard isPlaying, !controlsAreHovered else { return }
+        guard model.isPlaying, !controlsAreHovered else { return }
         controlsHideTask = Task { @MainActor in
             do {
                 try await Task.sleep(for: .seconds(delay))
@@ -1145,13 +1212,7 @@ private struct InstalledVideoPlayerView: View {
     private func seek(to progress: Double) {
         let time = InstalledVideoControlsPolicy.seekTime(
             progress: progress,
-            duration: duration
-        )
-        currentTime = time
-        session.player.seek(
-            to: CMTime(seconds: time, preferredTimescale: 600),
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
+            duration: playbackDuration
         )
         model.seekToTime(time)
         showControls()
@@ -1159,13 +1220,13 @@ private struct InstalledVideoPlayerView: View {
 
     private func togglePlayback() {
         model.togglePlay()
-        refreshPlaybackState()
+        applyAudioPlaybackState()
         if model.isPlaying { showControls() }
         else { showControls(keepVisible: true) }
     }
 
     private func previous() {
-        if currentTime > 3 {
+        if model.position > 3 {
             seek(to: 0)
             return
         }
@@ -1236,17 +1297,16 @@ struct InstalledVideoMiniPlayer: View {
         }
         .shadow(color: Color.black.opacity(0.62), radius: 24, y: 12)
         .foregroundStyle(Color.white)
-        .onAppear { synchronize(forceSeek: true) }
-        .onChange(of: model.isPlaying) { _, _ in synchronize(forceSeek: true) }
-        .onChange(of: model.playbackRate) { _, _ in synchronize(forceSeek: true) }
+        .onAppear { applyAudioPlaybackState() }
+        .onChange(of: model.isPlaying) { _, _ in
+            applyAudioPlaybackState(seekToAudioClock: true)
+        }
+        .onChange(of: model.playbackRate) { _, _ in applyAudioPlaybackState() }
         .onChange(of: model.currentTrackID) { _, trackID in
             if trackID != session.track.id { onClose() }
         }
-        .task(id: session.id) {
-            while !Task.isCancelled {
-                synchronize()
-                try? await Task.sleep(for: .milliseconds(150))
-            }
+        .onReceive(model.playbackDiscontinuities) { position in
+            seekVideo(to: position)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Video mini-player for \(session.track.title)")
@@ -1265,7 +1325,7 @@ struct InstalledVideoMiniPlayer: View {
         .accessibilityLabel(label)
     }
 
-    private func synchronize(forceSeek: Bool = false) {
+    private func applyAudioPlaybackState(seekToAudioClock: Bool = false) {
         guard model.currentTrackID == session.track.id else {
             session.player.pause()
             isPlaying = false
@@ -1274,14 +1334,7 @@ struct InstalledVideoMiniPlayer: View {
         session.player.isMuted = true
         session.player.volume = 0
         session.player.defaultRate = model.playbackRate
-        let videoTime = session.player.currentTime().seconds
-        if forceSeek || InstalledVideoSyncPolicy.shouldSeek(videoTime: videoTime, audioTime: model.position) {
-            session.player.seek(
-                to: CMTime(seconds: max(model.position, 0), preferredTimescale: 600),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
-            )
-        }
+        if seekToAudioClock { seekVideo(to: model.position) }
         isPlaying = model.isPlaying
         if model.isPlaying {
             if session.player.timeControlStatus == .paused {
@@ -1291,11 +1344,19 @@ struct InstalledVideoMiniPlayer: View {
             session.player.pause()
         }
     }
+
+    private func seekVideo(to time: TimeInterval) {
+        guard time.isFinite else { return }
+        session.player.seek(
+            to: CMTime(seconds: max(time, 0), preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+    }
 }
 
 private struct InstalledVideoControlsOverlay: View {
     let track: Track
-    let currentTime: TimeInterval
     let duration: TimeInterval
     let isPlaying: Bool
     let repeatEnabled: Bool
@@ -1306,10 +1367,6 @@ private struct InstalledVideoControlsOverlay: View {
     let onTogglePlayback: () -> Void
     let onNext: () -> Void
     let onToggleRepeat: () -> Void
-
-    private var progress: Double {
-        InstalledVideoControlsPolicy.progress(position: currentTime, duration: duration)
-    }
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -1338,21 +1395,7 @@ private struct InstalledVideoControlsOverlay: View {
                     .accessibilityElement(children: .combine)
                 }
 
-                HStack(spacing: 12) {
-                    Text(Track.timeText(currentTime))
-                        .frame(width: 48, alignment: .leading)
-                    ClickableProgress(
-                        progress: progress,
-                        activeColor: Color(hex: 0x9A5CFF),
-                        height: 4,
-                        onSeek: onSeek
-                    )
-                    Text(Track.timeText(duration))
-                        .frame(width: 48, alignment: .trailing)
-                }
-                .font(.system(size: 12, weight: .medium))
-                .monospacedDigit()
-                .foregroundStyle(Color(hex: 0xE8E2F2))
+                InstalledVideoTimeline(duration: duration, onSeek: onSeek)
 
                 if isCompact {
                     HStack(spacing: 14) {
@@ -1433,6 +1476,37 @@ private struct InstalledVideoControlsOverlay: View {
     }
 }
 
+private struct InstalledVideoTimeline: View {
+    @EnvironmentObject private var playbackPosition: PlaybackPositionState
+    let duration: TimeInterval
+    let onSeek: (Double) -> Void
+
+    private var progress: Double {
+        InstalledVideoControlsPolicy.progress(
+            position: playbackPosition.position,
+            duration: duration
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(Track.timeText(playbackPosition.position))
+                .frame(width: 48, alignment: .leading)
+            ClickableProgress(
+                progress: progress,
+                activeColor: Color(hex: 0x9A5CFF),
+                height: 4,
+                onSeek: onSeek
+            )
+            Text(Track.timeText(duration))
+                .frame(width: 48, alignment: .trailing)
+        }
+        .font(.system(size: 12, weight: .medium))
+        .monospacedDigit()
+        .foregroundStyle(Color(hex: 0xE8E2F2))
+    }
+}
+
 private struct InstalledVideoTransportButton: View {
     let systemImage: String
     let label: String
@@ -1486,15 +1560,18 @@ private struct InstalledVideoTransportButton: View {
 
 struct AspectFitVideoPlayer: NSViewRepresentable {
     let player: AVPlayer
+    var cornerRadius: CGFloat = 0
 
     func makeNSView(context: Context) -> AspectFitPlayerContainerView {
         let view = AspectFitPlayerContainerView()
         view.player = player
+        view.cornerRadius = cornerRadius
         return view
     }
 
     func updateNSView(_ view: AspectFitPlayerContainerView, context: Context) {
         view.player = player
+        view.cornerRadius = cornerRadius
     }
 }
 
@@ -1502,6 +1579,14 @@ final class AspectFitPlayerContainerView: NSView {
     var player: AVPlayer? {
         get { playerLayer.player }
         set { playerLayer.player = newValue }
+    }
+
+    var cornerRadius: CGFloat {
+        get { playerLayer.cornerRadius }
+        set {
+            playerLayer.cornerRadius = newValue
+            playerLayer.masksToBounds = newValue > 0
+        }
     }
 
     private var playerLayer: AVPlayerLayer {
