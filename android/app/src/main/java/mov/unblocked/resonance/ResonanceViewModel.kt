@@ -16,6 +16,10 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.clerk.api.Clerk
+import com.clerk.api.ClerkConfigurationOptions
+import com.clerk.api.network.serialization.ClerkResult
+import com.clerk.api.session.GetTokenOptions
 import java.io.File
 import java.time.Instant
 import java.util.UUID
@@ -30,10 +34,13 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import mov.unblocked.resonance.data.CredentialStore
+import mov.unblocked.resonance.data.AccountSession
 import mov.unblocked.resonance.data.ClipRange
 import mov.unblocked.resonance.data.CatalogRequestSnapshot
 import mov.unblocked.resonance.data.CatalogResponsePolicy
@@ -74,6 +81,8 @@ import mov.unblocked.resonance.data.ServerTransferModePolicy
 import mov.unblocked.resonance.data.ServerUploadMode
 import mov.unblocked.resonance.data.ServerUploadTransport
 import mov.unblocked.resonance.data.ServerUploadTransportPolicy
+import mov.unblocked.resonance.data.SocialAuthClient
+import mov.unblocked.resonance.data.NativeAuthConfiguration
 import mov.unblocked.resonance.data.SourceImportMetadata
 import mov.unblocked.resonance.data.SourceImportPolicy
 import mov.unblocked.resonance.data.StoredLibrary
@@ -93,6 +102,7 @@ import mov.unblocked.resonance.ui.ResonanceUiState
 import mov.unblocked.resonance.ui.LinkImportUiState
 import mov.unblocked.resonance.ui.PlaybackUiStatus
 import mov.unblocked.resonance.ui.invalidatedForSourceEdit
+import mov.unblocked.resonance.ui.activeSyncProfileName
 
 private data class ServerDownloadPolicySnapshot(
     val context: ServerProfileContext,
@@ -113,14 +123,17 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private val repository = LibraryRepository(context)
     private val linkImportService = LinkImportService(context)
     private val credentials = CredentialStore(context)
+    private var accountSession: AccountSession? = credentials.accountSession
     private val clientConfigStore = ClientConfigStore(context)
     private val profilePictureStore = ProfilePictureStore(context)
     private val preferences = context.getSharedPreferences("resonance.playback", 0)
     private val mutableState = MutableStateFlow(
         ResonanceUiState(
-            serverUrl = credentials.serverURL,
-            serverToken = credentials.clientToken,
-            serverAdminKey = credentials.adminToken,
+            serverUrl = accountSession?.baseURL ?: credentials.serverURL,
+            serverToken = accountSession?.accessToken ?: credentials.clientToken,
+            serverAdminKey = accountSession?.takeIf { it.role == "admin" }?.accessToken ?: credentials.adminToken,
+            accountEmail = accountSession?.email,
+            accountRole = accountSession?.role,
             shuffleEnabled = preferences.getBoolean("shuffle", false),
             repeatEnabled = preferences.getBoolean("repeat", false),
             playbackSpeed = preferences.getFloat("speed", 1f),
@@ -135,6 +148,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     val uploadRequests = mutableUploadRequests.asSharedFlow()
     private val mutableProfilePictureRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val profilePictureRequests = mutableProfilePictureRequests.asSharedFlow()
+    private val mutableAccountBrowserRequests = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val accountBrowserRequests = mutableAccountBrowserRequests.asSharedFlow()
 
     private var library = StoredLibrary(serverURL = credentials.serverURL)
     private var controllerFuture: Future<MediaController>? = null
@@ -163,9 +178,255 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private var streamLeaseExpiryJob: Job? = null
     private var pendingStreamRenewalMinimumExpiry: Instant? = null
     private var libraryLoaded = false
+    private var accountRefreshJob: Job? = null
+    private var isRefreshingAccountSession = false
+    private var nativeAuthServerURL: String? = null
 
     override fun dismissError() {
         mutableState.value = mutableState.value.copy(errorMessage = null)
+    }
+
+    override fun signInWithProvider(url: String, provider: String) {
+        if (mutableState.value.isSigningIn) return
+        mutableState.value = mutableState.value.copy(isSigningIn = true, serverMessage = "Opening account sign-in…")
+        viewModelScope.launch {
+            runCatching {
+                val (destination, pending) = SocialAuthClient(url).begin(provider)
+                credentials.pendingAccountSignIn = pending
+                mutableAccountBrowserRequests.emit(destination.toString())
+            }.onFailure { error ->
+                mutableState.value = mutableState.value.copy(
+                    isSigningIn = false,
+                    serverMessage = error.message ?: "Account sign-in could not be started.",
+                )
+            }
+        }
+    }
+
+    override fun startNativeAccountSignIn(url: String) {
+        if (mutableState.value.isSigningIn) return
+        mutableState.value = mutableState.value.copy(isSigningIn = true, serverMessage = "Preparing secure sign-in…")
+        viewModelScope.launch {
+            runCatching {
+                val client = SocialAuthClient(url)
+                val configuration = client.nativeConfiguration()
+                configureClerk(configuration)
+                nativeAuthServerURL = url
+            }.onSuccess {
+                mutableState.value = mutableState.value.copy(
+                    isSigningIn = false,
+                    isNativeAccountSignInOpen = true,
+                    serverMessage = "Choose a sign-in method",
+                )
+            }.onFailure { error ->
+                mutableState.value = mutableState.value.copy(
+                    isSigningIn = false,
+                    isNativeAccountSignInOpen = false,
+                    serverMessage = error.message ?: "Account sign-in could not be started.",
+                )
+            }
+        }
+    }
+
+    override fun dismissNativeAccountSignIn() {
+        nativeAuthServerURL = null
+        mutableState.value = mutableState.value.copy(
+            isNativeAccountSignInOpen = false,
+            isSigningIn = false,
+        )
+    }
+
+    override fun completeNativeAccountSignIn() {
+        val serverURL = nativeAuthServerURL ?: return
+        if (mutableState.value.isSigningIn) return
+        mutableState.value = mutableState.value.copy(isSigningIn = true, serverMessage = "Finishing sign-in…")
+        viewModelScope.launch {
+            runCatching { nativeAccountSession(serverURL, forceRefresh = false) }
+                .onSuccess { session ->
+                    nativeAuthServerURL = null
+                    acceptAccountSession(session)
+                }
+                .onFailure { error ->
+                    mutableState.value = mutableState.value.copy(
+                        isSigningIn = false,
+                        serverMessage = error.message ?: "Account sign-in could not be completed.",
+                    )
+                }
+        }
+    }
+
+    fun handleAccountCallback(uri: Uri?) {
+        if (uri?.scheme != "resonance" || uri.host != "auth" || uri.path != "/callback") return
+        val pending = credentials.pendingAccountSignIn
+        if (pending == null || uri.getQueryParameter("state") != pending.state) {
+            mutableState.value = mutableState.value.copy(
+                isSigningIn = false,
+                serverMessage = "The account sign-in callback was invalid or expired.",
+            )
+            return
+        }
+        credentials.pendingAccountSignIn = null
+        val providerError = uri.getQueryParameter("error_description") ?: uri.getQueryParameter("error")
+        val code = uri.getQueryParameter("code")
+        if (providerError != null || code.isNullOrBlank()) {
+            mutableState.value = mutableState.value.copy(
+                isSigningIn = false,
+                serverMessage = providerError ?: "The account sign-in callback was invalid or expired.",
+            )
+            return
+        }
+        viewModelScope.launch {
+            runCatching { SocialAuthClient(pending.baseURL).exchange(code, pending.state, pending) }
+                .onSuccess { session ->
+                    acceptAccountSession(session)
+                }
+                .onFailure { error ->
+                    mutableState.value = mutableState.value.copy(
+                        isSigningIn = false,
+                        serverMessage = error.message ?: "Account sign-in could not be completed.",
+                    )
+                }
+        }
+    }
+
+    override fun signOutAccount() {
+        val current = accountSession
+        accountSession = null
+        accountRefreshJob?.cancel()
+        accountRefreshJob = null
+        credentials.accountSession = null
+        credentials.pendingAccountSignIn = null
+        credentials.clearTokens()
+        mutableState.value = mutableState.value.copy(
+            serverToken = "",
+            serverAdminKey = "",
+            accountEmail = null,
+            accountRole = null,
+            isSigningIn = false,
+            isNativeAccountSignInOpen = false,
+            remoteSongs = emptyList(),
+            selectedRemoteSongIds = emptySet(),
+            serverMessage = "Signed out",
+        )
+        if (current != null) viewModelScope.launch {
+            if (current.usesNativeClerkSession) {
+                runCatching {
+                    configureClerk(SocialAuthClient(current.baseURL).nativeConfiguration())
+                    Clerk.auth.signOut()
+                }
+            } else {
+                SocialAuthClient(current.baseURL).signOut(current)
+            }
+        }
+    }
+
+    fun refreshAccountSessionIfNeeded() {
+        val current = accountSession ?: return
+        val refreshLead = if (current.usesNativeClerkSession) 15_000L else 5 * 60_000L
+        if (current.expiresAt > System.currentTimeMillis() + refreshLead) {
+            scheduleAccountRefresh(current)
+            return
+        }
+        if (isRefreshingAccountSession) return
+        isRefreshingAccountSession = true
+        viewModelScope.launch {
+            try {
+                val refreshed = if (current.usesNativeClerkSession) {
+                    nativeAccountSession(current.baseURL, forceRefresh = true)
+                } else {
+                    SocialAuthClient(current.baseURL).refresh(current)
+                }
+                if (accountSession != current) return@launch
+                accountSession = refreshed
+                credentials.accountSession = refreshed
+                applyAccountSession(refreshed)
+                refreshClientConfig()
+                scheduleAccountRefresh(refreshed)
+            } catch (error: Throwable) {
+                if (accountSession != current) return@launch
+                if (current.expiresAt <= System.currentTimeMillis()) {
+                    signOutAccount()
+                    mutableState.value = mutableState.value.copy(
+                        serverMessage = error.message ?: "Your account session expired. Please sign in again.",
+                    )
+                } else {
+                    accountRefreshJob?.cancel()
+                    accountRefreshJob = viewModelScope.launch {
+                        delay(60_000)
+                        refreshAccountSessionIfNeeded()
+                    }
+                }
+            } finally {
+                isRefreshingAccountSession = false
+            }
+        }
+    }
+
+    private fun applyAccountSession(session: AccountSession) {
+        mutableState.value = mutableState.value.copy(
+            serverUrl = session.baseURL,
+            serverToken = session.accessToken,
+            serverAdminKey = session.accessToken.takeIf { session.role == "admin" }.orEmpty(),
+            accountEmail = session.email,
+            accountRole = session.role,
+            isSigningIn = false,
+            isNativeAccountSignInOpen = false,
+            serverMessage = "Signed in as ${session.email}",
+        )
+    }
+
+    private fun scheduleAccountRefresh(session: AccountSession) {
+        accountRefreshJob?.cancel()
+        val refreshLead = if (session.usesNativeClerkSession) 15_000L else 5 * 60_000L
+        accountRefreshJob = viewModelScope.launch {
+            delay((session.expiresAt - System.currentTimeMillis() - refreshLead).coerceAtLeast(5_000))
+            refreshAccountSessionIfNeeded()
+        }
+    }
+
+    private fun acceptAccountSession(session: AccountSession) {
+        accountSession = session
+        credentials.accountSession = session
+        credentials.serverURL = session.baseURL
+        credentials.clearTokens()
+        applyAccountSession(session)
+        scheduleAccountRefresh(session)
+        saveServerConnection(
+            session.baseURL,
+            session.accessToken,
+            session.accessToken.takeIf { session.role == "admin" }.orEmpty(),
+            activeSyncProfileName(mutableState.value),
+        )
+    }
+
+    private suspend fun configureClerk(configuration: NativeAuthConfiguration) {
+        val options = ClerkConfigurationOptions(telemetryEnabled = false)
+        if (Clerk.publishableKey != null && Clerk.publishableKey != configuration.publishableKey) {
+            Clerk.switchConfiguration(context, configuration.publishableKey, options)
+        } else {
+            Clerk.initialize(context, configuration.publishableKey, options)
+        }
+        withTimeout(20_000) { Clerk.isInitialized.first { it } }
+    }
+
+    private suspend fun nativeAccountSession(serverURL: String, forceRefresh: Boolean): AccountSession {
+        val client = SocialAuthClient(serverURL)
+        val configuration = client.nativeConfiguration()
+        configureClerk(configuration)
+        val result = Clerk.auth.getToken(
+            GetTokenOptions(
+                template = configuration.tokenTemplate,
+                skipCache = forceRefresh,
+                expirationBuffer = 15,
+            ),
+        )
+        val token = when (result) {
+            is ClerkResult.Success -> result.value
+            is ClerkResult.Failure -> throw IllegalStateException(
+                result.throwable?.message ?: "Clerk could not create a Resonance session token.",
+            )
+        }
+        return client.accountSession(token)
     }
 
     override fun chooseProfilePicture() {
@@ -204,6 +465,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     init {
+        accountSession?.let {
+            credentials.serverURL = it.baseURL
+            credentials.clearTokens()
+            scheduleAccountRefresh(it)
+        }
         connectController()
         viewModelScope.launch {
             library = repository.load()
@@ -419,7 +685,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 linkImport = current.copy(
                     stage = LinkImportStage.Failed,
                     errorCode = "SERVER_UPLOAD_NOT_CONFIGURED",
-                    errorMessage = "Connect the music server and save the admin key, or turn off server upload.",
+                    errorMessage = "Sign in with an administrator account, or turn off server upload.",
                 ),
             )
             return false
@@ -1768,8 +2034,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun onServerScreenOpened() {
-        if (credentials.clientToken.isNotBlank()) refreshServer()
-        else if (credentials.adminToken.isNotBlank()) refreshClientConfig()
+        if (activeAccessToken().isNotBlank()) refreshServer()
+        else if (activeAdminToken().isNotBlank()) refreshClientConfig()
     }
 
     override fun refreshServer() {
@@ -1783,7 +2049,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             resetClientConfigForCurrentContext()
             return
         }
-        if (credentials.clientToken.isBlank() && credentials.adminToken.isBlank()) {
+        if (activeAccessToken().isBlank() && activeAdminToken().isBlank()) {
             resetClientConfigForCurrentContext()
             return
         }
@@ -1919,7 +2185,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             val renewed = leaseDecision != null && AuthenticatedStreamRegistry.renew(
                 id = activeStreamHandle?.id,
                 baseURL = serverClient(requireNotNull(context)).baseURL,
-                accessToken = credentials.clientToken,
+                accessToken = activeAccessToken(),
                 profileID = context.profileID,
                 cohortKey = clientConfigStore.cohortKey,
                 authorizationExpiresAt = requireNotNull(expiresAt),
@@ -2132,8 +2398,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             ServerClient.normalizeServerURL(credentials.serverURL) != normalized
         }.getOrDefault(true)
         val previousServerURL = credentials.serverURL
-        val previousAccessToken = credentials.clientToken
-        val previousAdminKey = credentials.adminToken
+        val previousAccessToken = accountSession?.accessToken ?: credentials.clientToken
+        val previousAdminKey = accountSession?.takeIf { it.role == "admin" }?.accessToken ?: credentials.adminToken
         val previousRemoteSongs = state.remoteSongs
         val previousSelection = state.selectedRemoteSongIds
         connectionGeneration += 1
@@ -2158,11 +2424,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 remoteSongs = if (serverChanged) emptyList() else mutableState.value.remoteSongs,
                 selectedRemoteSongIds = emptySet(),
                 isApplyingServerConnection = false,
-                serverMessage = if (adminKey.isBlank()) {
-                    "Saved • Add the admin key to upload and the access token to sync."
-                } else {
-                    "Upload ready • Add the access token to sync the catalog and profiles."
-                },
+                serverMessage = "Server saved • sign in to connect",
                 errorMessage = null,
             )
             resetClientConfigForCurrentContext()
@@ -2195,8 +2457,12 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 } ?: client.createProfile(normalizedProfileName)
                 val profiles = (response.profiles + profile).distinctBy { it.id }
                 credentials.serverURL = normalized
-                credentials.clientToken = accessToken
-                credentials.adminToken = adminKey
+                if (accountSession == null) {
+                    credentials.clientToken = accessToken
+                    credentials.adminToken = adminKey
+                } else {
+                    credentials.clearTokens()
+                }
                 library = library.copy(syncProfiles = profiles)
                 activateProfile(profile.id, normalized, currentAlreadyCaptured = true)
                 resetClientConfigForCurrentContext()
@@ -2208,8 +2474,12 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 .onFailure { error ->
                     credentials.serverURL = previousServerURL
-                    credentials.clientToken = previousAccessToken
-                    credentials.adminToken = previousAdminKey
+                    if (accountSession == null) {
+                        credentials.clientToken = previousAccessToken
+                        credentials.adminToken = previousAdminKey
+                    } else {
+                        credentials.clearTokens()
+                    }
                     library = previousLibrary
                     rebuildPlaybackQueueForActiveContext()
                     refreshLibraryState()
@@ -2443,7 +2713,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             AuthenticatedStreamRegistry.register(
                 baseURL = client.baseURL,
                 streamURL = song.streamURL,
-                accessToken = credentials.clientToken,
+                accessToken = activeAccessToken(),
                 profileID = streamContext.profileID,
                 cohortKey = clientConfigStore.cohortKey,
                 authorizationExpiresAt = authorizationExpiresAt,
@@ -2567,7 +2837,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 AuthenticatedStreamRegistry.renew(
                     id = handleID,
                     baseURL = client.baseURL,
-                    accessToken = credentials.clientToken,
+                    accessToken = activeAccessToken(),
                     profileID = streamContext.profileID,
                     cohortKey = clientConfigStore.cohortKey,
                     authorizationExpiresAt = authorizationExpiresAt,
@@ -2633,12 +2903,12 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun syncPlaylistsAutomatically() {
-        if (credentials.clientToken.isBlank()) return
+        if (activeAccessToken().isBlank()) return
         viewModelScope.launch { syncPlaylistsNow() }
     }
 
     private suspend fun syncPlaylistsNow() {
-        if (mutableState.value.isSyncingPlaylists || credentials.clientToken.isBlank()) return
+        if (mutableState.value.isSyncingPlaylists || activeAccessToken().isBlank()) return
         val syncContext = currentServerProfileContext() ?: return
         val syncClient = serverClient(syncContext)
         val serverKey = RemoteTrackIdentityPolicy.contextKey(syncContext.serverURL, syncContext.profileID)
@@ -3011,8 +3281,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             artworkPathsByTrackId = artwork,
             downloadedRemoteSongIds = visibleTracks.mapNotNullTo(mutableSetOf(), Track::remoteID),
             serverUrl = credentials.serverURL,
-            serverToken = credentials.clientToken,
-            serverAdminKey = credentials.adminToken,
+            serverToken = accountSession?.accessToken ?: credentials.clientToken,
+            serverAdminKey = accountSession?.takeIf { it.role == "admin" }?.accessToken ?: credentials.adminToken,
+            accountEmail = accountSession?.email,
+            accountRole = accountSession?.role,
             syncProfileId = library.syncProfileID,
             syncProfiles = library.syncProfiles,
             profilePicturePath = profilePictureStore.existingPath(
@@ -3198,18 +3470,25 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         return if (end - start >= 250L) ClipRange(start, end) else duration?.let { ClipRange(0L, it) }
     }
 
+    private fun activeAccessToken(): String = accountSession?.accessToken ?: credentials.clientToken
+
+    private fun activeAdminToken(): String = accountSession
+        ?.takeIf { it.role == "admin" }
+        ?.accessToken
+        ?: credentials.adminToken
+
     private fun serverClient() = ServerClient(
         credentials.serverURL,
-        credentials.clientToken,
-        credentials.adminToken,
+        activeAccessToken(),
+        activeAdminToken(),
         library.syncProfileID,
         clientConfigStore.cohortKey,
     )
 
     private fun serverClient(context: ServerProfileContext) = ServerClient(
         context.serverURL,
-        credentials.clientToken,
-        credentials.adminToken,
+        activeAccessToken(),
+        activeAdminToken(),
         context.profileID,
         clientConfigStore.cohortKey,
     )
@@ -3220,7 +3499,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun beginCatalogRequest(): Pair<CatalogRequestSnapshot, ServerClient>? {
-        if (credentials.clientToken.isBlank()) return null
+        if (activeAccessToken().isBlank()) return null
         val context = currentServerProfileContext() ?: return null
         catalogRequestGeneration += 1
         return CatalogRequestSnapshot(

@@ -47,7 +47,7 @@ internal object AuthenticatedStreamRegistry {
         authorizationExpiresAt: Instant,
         allowCleartextDevelopment: Boolean,
     ): AuthenticatedStreamHandle {
-        require(accessToken.isNotBlank()) { "Enter the access token to stream" }
+        require(accessToken.isNotBlank()) { "Sign in to stream" }
         require(profileID.isNotBlank()) { "The stream profile is missing" }
         require(cohortKey.isNotBlank()) { "The anonymous client cohort key is unavailable" }
         require(Instant.now().isBefore(authorizationExpiresAt)) { "The server stream policy has expired" }

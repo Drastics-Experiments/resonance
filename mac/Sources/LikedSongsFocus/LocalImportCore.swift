@@ -44,7 +44,7 @@ enum LocalImportTransferContextError: LocalizedError {
         case .serverBusy:
             "Wait for the current server transfer to finish."
         case .missingUploadConfiguration:
-            "Add a valid server URL and admin key before uploading."
+            "Sign in with a Resonance administrator account before uploading."
         case .uploadModeUnavailable:
             "The selected upload mode is disabled by the verified server configuration. Choose an available mode and try again."
         case .unsupportedSourceLink:

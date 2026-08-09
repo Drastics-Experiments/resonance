@@ -53,6 +53,15 @@ const { downloadResolvedSoundCloudAudio, isSoundCloudURL, resolveSoundCloudAudio
 const { downloadResolvedAudio, resolveYouTubeAudio } = require("./local-youtube.cjs");
 const { policyBlockedUploadEntries, serverUploadFilename } = require("./server-upload.cjs");
 const { readServerUploadResponse } = require("./server-upload-response.cjs");
+const {
+  authorizationURL,
+  createPKCE,
+  exchangeAuthCode,
+  fetchAuthConfiguration,
+  publicSession,
+  refreshAuthSession,
+  revokeAuthSession,
+} = require("./social-auth.cjs");
 const windowsPackage = require("./package.json");
 
 function developmentInstanceMetadata() {
@@ -139,6 +148,12 @@ const cachedLocalImportPreviews = new Map();
 const pendingExternalImports = new Map();
 let librarySaveQueue = Promise.resolve();
 let credentialSaveQueue = Promise.resolve();
+let accountSessionSaveQueue = Promise.resolve();
+let accountSession = null;
+let accountSessionGeneration = 0;
+let pendingAccountSignIn = null;
+let accountSessionRefreshTimer = null;
+let accountSessionRefreshInFlight = null;
 let serverUploadRetrySaveQueue = Promise.resolve();
 let serverUploadRetryLoadPromise = null;
 let clientConfigStateLoadPromise = null;
@@ -313,6 +328,191 @@ async function persistServerCredentials(credentialsValue) {
   await save;
 }
 
+function previewAccountSessionPath() {
+  return path.join(app.getPath("appData"), "Liked Songs", "account-session.json");
+}
+
+function canonicalStoredAccountSession(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const accessToken = canonicalCredentialToken(value.accessToken);
+  const refreshToken = canonicalCredentialToken(value.refreshToken);
+  const email = String(value.email || "").trim().toLowerCase();
+  const role = value.role === "admin" ? "admin" : value.role === "member" ? "member" : null;
+  const expiresAt = Number(value.expiresAt);
+  const baseURL = normalizeServerBaseURL(value.baseURL, { allowInsecureLoopback: !app.isPackaged }).origin;
+  if (!accessToken || !refreshToken || !email || !role || !Number.isFinite(expiresAt)) return null;
+  return { accessToken, refreshToken, email, role, expiresAt, baseURL };
+}
+
+async function readAccountSession() {
+  let rawValue = null;
+  if (usesPreviewCredentialStore()) {
+    try { rawValue = JSON.parse(await fs.readFile(previewAccountSessionPath(), "utf8")); }
+    catch { return null; }
+  } else {
+    const { accountSession: destination, accountSessionBackup } = await ensureDirectories();
+    const safeStorage = encryptedCredentialStorage();
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    try {
+      rawValue = (await readPrimaryOrBackup(destination, (encrypted) =>
+        JSON.parse(safeStorage.decryptString(encrypted)), { backupPath: accountSessionBackup })).value;
+    } catch {
+      return null;
+    }
+  }
+  try { return canonicalStoredAccountSession(rawValue); }
+  catch { return null; }
+}
+
+async function persistAccountSession(value) {
+  const session = canonicalStoredAccountSession(value);
+  if (!session) throw new Error("The account session is invalid.");
+  const save = accountSessionSaveQueue
+    .catch(() => {})
+    .then(async () => {
+      if (usesPreviewCredentialStore()) {
+        const destination = previewAccountSessionPath();
+        await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+        await atomicWriteFile(destination, JSON.stringify(session), { encoding: "utf8", mode: 0o600 });
+        await fs.chmod(destination, 0o600);
+        return;
+      }
+      const safeStorage = encryptedCredentialStorage();
+      if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows account encryption is unavailable.");
+      const { accountSession: destination, accountSessionBackup } = await ensureDirectories();
+      await crashSafeReplace(
+        destination,
+        safeStorage.encryptString(JSON.stringify(session)),
+        { backupPath: accountSessionBackup },
+      );
+    });
+  accountSessionSaveQueue = save;
+  await save;
+}
+
+async function clearPersistedAccountSession() {
+  accountSessionGeneration += 1;
+  accountSession = null;
+  if (accountSessionRefreshTimer) clearTimeout(accountSessionRefreshTimer);
+  accountSessionRefreshTimer = null;
+  const paths = applicationPaths();
+  const clear = accountSessionSaveQueue
+    .catch(() => {})
+    .then(() => Promise.all([
+      fs.rm(previewAccountSessionPath(), { force: true }).catch(() => undefined),
+      fs.rm(paths.accountSession, { force: true }).catch(() => undefined),
+      fs.rm(paths.accountSessionBackup, { force: true }).catch(() => undefined),
+    ]));
+  accountSessionSaveQueue = clear;
+  await clear;
+}
+
+async function purgeLegacyServerCredentials() {
+  const paths = applicationPaths();
+  await Promise.all([
+    fs.rm(previewCredentialStorePath(), { force: true }).catch(() => undefined),
+    fs.rm(paths.credentials, { force: true }).catch(() => undefined),
+    fs.rm(paths.credentialsBackup, { force: true }).catch(() => undefined),
+  ]);
+}
+
+function publishAccountSession(error = null) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("account:session-changed", {
+      session: publicSession(accountSession),
+      error: error ? String(error.message || error) : null,
+    });
+  }
+}
+
+function scheduleAccountSessionRefresh() {
+  if (accountSessionRefreshTimer) clearTimeout(accountSessionRefreshTimer);
+  accountSessionRefreshTimer = null;
+  if (!accountSession) return;
+  const delay = Math.max(5_000, Math.min(2_147_000_000, accountSession.expiresAt - Date.now() - 5 * 60_000));
+  accountSessionRefreshTimer = setTimeout(() => {
+    accountSessionRefreshTimer = null;
+    void refreshCurrentAccountSession().catch((error) => {
+      publishAccountSession(error);
+      if (accountSession && accountSession.expiresAt > Date.now()) {
+        accountSessionRefreshTimer = setTimeout(() => {
+          accountSessionRefreshTimer = null;
+          void refreshCurrentAccountSession().catch(publishAccountSession);
+        }, 60_000);
+        accountSessionRefreshTimer.unref?.();
+      }
+    });
+  }, delay);
+  accountSessionRefreshTimer.unref?.();
+}
+
+async function refreshCurrentAccountSession() {
+  if (!accountSession) return null;
+  if (accountSessionRefreshInFlight) return accountSessionRefreshInFlight;
+  const active = accountSession;
+  const generation = accountSessionGeneration;
+  const refresh = (async () => {
+    const configuration = await fetchAuthConfiguration(active.baseURL);
+    const refreshed = await refreshAuthSession(configuration, active);
+    if (accountSessionGeneration !== generation || accountSession !== active) {
+      return publicSession(accountSession);
+    }
+    await persistAccountSession(refreshed);
+    if (accountSessionGeneration !== generation || accountSession !== active) {
+      return publicSession(accountSession);
+    }
+    accountSession = refreshed;
+    scheduleAccountSessionRefresh();
+    publishAccountSession();
+    return publicSession(refreshed);
+  })();
+  accountSessionRefreshInFlight = refresh;
+  try {
+    return await refresh;
+  } finally {
+    if (accountSessionRefreshInFlight === refresh) accountSessionRefreshInFlight = null;
+  }
+}
+
+function authCallbackFromArguments(argumentsList) {
+  return (Array.isArray(argumentsList) ? argumentsList : [])
+    .find((value) => typeof value === "string" && value.startsWith("resonance://auth/callback"));
+}
+
+async function openAccountSignInBrowser(destination) {
+  await shell.openExternal(destination.href);
+}
+
+async function handleAccountAuthCallback(value) {
+  const pending = pendingAccountSignIn;
+  if (!pending || Date.now() - pending.startedAt > 10 * 60_000) {
+    pendingAccountSignIn = null;
+    throw new Error("The sign-in request expired. Please try again.");
+  }
+  const callback = new URL(value);
+  if (callback.protocol !== "resonance:" || callback.hostname !== "auth" || callback.pathname !== "/callback") {
+    throw new Error("The account callback is invalid.");
+  }
+  if (callback.searchParams.get("state") !== pending.state) {
+    throw new Error("The account sign-in state did not match. Please try again.");
+  }
+  pendingAccountSignIn = null;
+  const providerError = callback.searchParams.get("error_description") || callback.searchParams.get("error");
+  if (providerError) throw new Error(providerError);
+  const code = callback.searchParams.get("code");
+  accountSession = await exchangeAuthCode(
+    pending.configuration,
+    pending.baseURL,
+    code,
+    pending.verifier,
+  );
+  await persistAccountSession(accountSession);
+  await purgeLegacyServerCredentials();
+  scheduleAccountSessionRefresh();
+  publishAccountSession();
+  return publicSession(accountSession);
+}
+
 function localImportEnabled() {
   return process.env.RESONANCE_LOCAL_DEVICE_IMPORT !== "0";
 }
@@ -428,6 +628,8 @@ function applicationPaths() {
     state: path.join(root, "library.json"),
     credentials: path.join(root, "server-credentials.bin"),
     credentialsBackup: path.join(root, "server-credentials.bin.backup"),
+    accountSession: path.join(root, "account-session.bin"),
+    accountSessionBackup: path.join(root, "account-session.bin.backup"),
     uploadRetries: path.join(root, "server-upload-retries.json"),
     uploadRetriesBackup: path.join(root, "server-upload-retries.json.backup"),
     clientConfigState: path.join(root, "client-config-state.json"),
@@ -1050,13 +1252,32 @@ app.on("before-quit", () => {
   if (automaticUpdateCheckInterval) clearInterval(automaticUpdateCheckInterval);
   automaticUpdateCheckTimer = null;
   automaticUpdateCheckInterval = null;
+  if (accountSessionRefreshTimer) clearTimeout(accountSessionRefreshTimer);
+  accountSessionRefreshTimer = null;
+  pendingAccountSignIn = null;
 });
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
-app.on("second-instance", () => {
+if (process.platform === "win32") {
+  if (process.defaultApp && process.argv[1]) {
+    app.setAsDefaultProtocolClient("resonance", process.execPath, [path.resolve(process.argv[1])]);
+  } else {
+    app.setAsDefaultProtocolClient("resonance");
+  }
+}
+
+app.on("second-instance", (_event, commandLine) => {
   showMainWindow();
+  const callback = authCallbackFromArguments(commandLine);
+  if (callback) void handleAccountAuthCallback(callback).catch(publishAccountSession);
+});
+
+app.on("open-url", (event, value) => {
+  if (!String(value || "").startsWith("resonance://auth/callback")) return;
+  event.preventDefault();
+  void handleAccountAuthCallback(value).catch(publishAccountSession);
 });
 
 app.whenReady().then(async () => {
@@ -1066,6 +1287,8 @@ app.whenReady().then(async () => {
   protocol.handle(SERVER_STREAM_SCHEME, handleServerStreamRequest);
   createWindow();
   startAutomaticUpdateChecks();
+  const startupCallback = authCallbackFromArguments(process.argv);
+  if (startupCallback) void handleAccountAuthCallback(startupCallback).catch(publishAccountSession);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
@@ -1308,6 +1531,60 @@ ipcMain.handle("server:credentials:save", async (event, value) => {
     revokeServerStreamsForOwner(event.sender.id);
   }
   rendererCredentialFingerprints.set(event.sender.id, nextFingerprint);
+  return true;
+});
+
+ipcMain.handle("account:session:load", async () => {
+  if (!accountSession) accountSession = await readAccountSession();
+  if (!accountSession) return null;
+  if (accountSession.expiresAt <= Date.now() + 5 * 60_000) {
+    try { return await refreshCurrentAccountSession(); }
+    catch (error) {
+      if (accountSession.expiresAt <= Date.now()) {
+        await clearPersistedAccountSession();
+        publishAccountSession(error);
+        return null;
+      }
+    }
+  }
+  scheduleAccountSessionRefresh();
+  return publicSession(accountSession);
+});
+
+ipcMain.handle("account:sign-in", async (_event, value) => {
+  const baseURL = normalizeServerBaseURL(value?.baseURL, { allowInsecureLoopback: !app.isPackaged }).origin;
+  const configuration = await fetchAuthConfiguration(baseURL);
+  const provider = String(value?.provider || "").trim().toLowerCase();
+  const pkce = createPKCE();
+  const destination = authorizationURL(configuration, provider, pkce.challenge, pkce.state);
+  const pending = {
+    baseURL,
+    configuration,
+    verifier: pkce.verifier,
+    state: pkce.state,
+    startedAt: Date.now(),
+  };
+  pendingAccountSignIn = pending;
+  try {
+    await openAccountSignInBrowser(destination);
+  } catch (error) {
+    if (pendingAccountSignIn === pending) pendingAccountSignIn = null;
+    throw error;
+  }
+  return { started: true, provider };
+});
+
+ipcMain.handle("account:session:refresh", async () => refreshCurrentAccountSession());
+
+ipcMain.handle("account:sign-out", async () => {
+  const active = accountSession || await readAccountSession();
+  if (active) {
+    const configuration = await fetchAuthConfiguration(active.baseURL).catch(() => null);
+    if (configuration) await revokeAuthSession(configuration, active);
+  }
+  pendingAccountSignIn = null;
+  await clearPersistedAccountSession();
+  publishAccountSession();
   return true;
 });
 
@@ -1639,7 +1916,7 @@ ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profi
       throw new LocalImportError("syncing", "INVALID_LOCAL_FILE", "The local song cannot be uploaded because its size is invalid.");
     }
     if (!adminToken) {
-      throw new LocalImportError("syncing", "ADMIN_KEY_REQUIRED", "Add a server admin key before uploading this local song.");
+      throw new LocalImportError("syncing", "ADMIN_KEY_REQUIRED", "Sign in with an administrator account before uploading this local song.");
     }
     const base = normalizeBaseURL(baseURL);
     const requestedMode = mode === "reviewed_match" ? "reviewed_match" : "local_file";
@@ -2040,7 +2317,7 @@ ipcMain.handle("server:source-import", async (event, settings = {}) => {
   const adminToken = canonicalCredentialToken(settings.adminToken);
   const configToken = canonicalCredentialToken(settings.token || adminToken);
   const profileID = String(settings.profileID || "default");
-  if (!adminToken) throw new Error("Add the server admin key before importing a source link.");
+  if (!adminToken) throw new Error("Sign in with an administrator account before importing a source link.");
   if (!configToken) throw new Error("A server credential is required before importing a source link.");
   if (settings.mode !== "server_source_link") {
     throw new Error("The source-import endpoint is available only for server source-link mode.");
@@ -2129,7 +2406,7 @@ ipcMain.handle("server:source-import", async (event, settings = {}) => {
 });
 
 ipcMain.handle("server:profiles:get", async (_event, { baseURL, token }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const response = await fetch(new URL("api/v1/profiles", base), { headers: authorizationHeaders(token) });
   if (!response.ok) throw await serverResponseError(response);
@@ -2137,7 +2414,7 @@ ipcMain.handle("server:profiles:get", async (_event, { baseURL, token }) => {
 });
 
 ipcMain.handle("server:profiles:create", async (_event, { baseURL, token, name }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const response = await fetch(new URL("api/v1/profiles", base), {
     method: "POST",
@@ -2149,7 +2426,7 @@ ipcMain.handle("server:profiles:create", async (_event, { baseURL, token, name }
 });
 
 ipcMain.handle("server:artwork", async (_event, { baseURL, token, profileID, songID }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   if (!songID) throw new Error("Song artwork is unavailable.");
   const base = normalizeBaseURL(baseURL);
   const artworkURL = new URL(`api/v1/songs/${encodeURIComponent(songID)}/artwork`, base);
@@ -2166,7 +2443,7 @@ ipcMain.handle("server:artwork", async (_event, { baseURL, token, profileID, son
 });
 
 ipcMain.handle("server:catalog", async (_event, { baseURL, token, profileID }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const response = await fetch(new URL("api/v1/songs", base), {
     headers: { ...profileHeaders(token, profileID), Accept: "application/json" },
@@ -2192,7 +2469,7 @@ ipcMain.handle("server:catalog", async (_event, { baseURL, token, profileID }) =
 });
 
 ipcMain.handle("server:playlists:get", async (_event, { baseURL, token, profileID }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const response = await fetch(new URL("api/v1/playlists", base), { headers: profileHeaders(token, profileID) });
   if (!response.ok) throw await serverResponseError(response);
@@ -2200,7 +2477,7 @@ ipcMain.handle("server:playlists:get", async (_event, { baseURL, token, profileI
 });
 
 ipcMain.handle("server:playlists:put", async (_event, { baseURL, token, profileID, document }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const response = await fetch(new URL("api/v1/playlists", base), {
     method: "PUT",
@@ -2216,7 +2493,7 @@ ipcMain.handle("server:playlists:put", async (_event, { baseURL, token, profileI
 });
 
 ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token, profileID, entries }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   if (!Array.isArray(entries) || entries.length === 0 || entries.length > 500) {
     throw new Error("Listening history must contain between 1 and 500 entries.");
   }
@@ -2236,7 +2513,7 @@ ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token,
 });
 
 ipcMain.handle("server:listening-history:get", async (_event, { baseURL, token, profileID, limit = 2000 }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const url = new URL("api/v1/listening-history", base);
   url.searchParams.set("limit", String(Math.max(1, Math.min(2000, Math.floor(Number(limit) || 2000)))));
@@ -2380,7 +2657,7 @@ function canonicalStreamCredential(value) {
   try { token = canonicalCredentialToken(value); }
   catch { token = ""; }
   if (!token) {
-    throw new ServerStreamValidationError("INVALID_CREDENTIAL", "A valid server access token is required.", 400);
+    throw new ServerStreamValidationError("INVALID_CREDENTIAL", "A signed-in Resonance account is required.", 400);
   }
   return token;
 }
@@ -2712,7 +2989,7 @@ ipcMain.handle("server:stream:release", (event, value) => {
 
 ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existing = [], songIDs = null }) => {
   token = canonicalCredentialToken(token);
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   await requireOfflineDownloadMode({ baseURL: base.href, token, profileID });
   const requestContext = await clientConfigContext(base.href, profileID);
@@ -2910,7 +3187,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
 
 ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, files, retryIDs, associationConflictPaths } = {}) => {
   adminToken = canonicalCredentialToken(adminToken);
-  if (!adminToken) throw new Error("Enter the server admin key.");
+  if (!adminToken) throw new Error("Sign in with an administrator account.");
   const base = normalizeBaseURL(baseURL);
   const requestedProfileID = String(profileID || "default");
   await requireClientUploadMode({ baseURL: base.href, token: String(adminToken), profileID: requestedProfileID, mode: "local_file", force: true });

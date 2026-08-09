@@ -28,6 +28,7 @@ struct LikedSongsFocusApp: App {
                 .background(WindowConfigurator())
                 .task {
                     desktopPreferences.bind(to: model)
+                    await model.refreshAccountSessionIfNeeded()
                     await model.refreshClientConfigurationNow()
                     await model.runAutomaticPlaylistSync()
                 }
@@ -37,6 +38,7 @@ struct LikedSongsFocusApp: App {
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
                         Task {
+                            await model.refreshAccountSessionIfNeeded()
                             await model.refreshClientConfigurationNow()
                             await model.syncPlaylistsAutomatically()
                         }

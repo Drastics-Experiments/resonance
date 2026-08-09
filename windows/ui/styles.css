@@ -5577,6 +5577,20 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   .server-table-head > span:nth-last-child(3),
   .server-album { display: none; }
 }
+.settings-account-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid rgba(255,255,255,.11);
+  border-radius: 12px;
+  background: rgba(255,255,255,.035);
+}
+.settings-account-card > div:first-child { display: grid; gap: 4px; }
+.settings-account-card small { color: var(--muted); }
+.settings-auth-grid { display: grid; grid-template-columns: minmax(180px, 1fr); gap: 8px; }
+@media (max-width: 760px) { .settings-account-card { align-items: stretch; flex-direction: column; } .settings-auth-grid { grid-template-columns: 1fr; } }
 
 /* Cinematic cross-platform clip editor. */
 .clip-editor-dialog {

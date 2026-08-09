@@ -1,6 +1,8 @@
 package mov.unblocked.resonance
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import java.io.File
@@ -15,6 +17,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
+import com.clerk.api.Clerk
 import kotlinx.coroutines.launch
 import mov.unblocked.resonance.ui.ResonanceApp
 import mov.unblocked.resonance.ui.ResonanceTheme
@@ -62,17 +65,26 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 33) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
         }
+        viewModel.handleAccountCallback(intent?.data)
         setContent {
             val state by viewModel.uiState.collectAsStateWithLifecycle()
             val updateState by updateManager.state.collectAsStateWithLifecycle()
             LaunchedEffect(Unit) {
                 viewModel.importRequests.collect { importLauncher.launch(arrayOf("audio/*", "video/*")) }
             }
+            LaunchedEffect(state.isNativeAccountSignInOpen) {
+                if (state.isNativeAccountSignInOpen) Clerk.attachActivity(this@MainActivity)
+            }
             LaunchedEffect(Unit) {
                 viewModel.uploadRequests.collect { uploadLauncher.launch(arrayOf("audio/*", "video/*")) }
             }
             LaunchedEffect(Unit) {
                 viewModel.profilePictureRequests.collect { profilePictureLauncher.launch(arrayOf("image/*")) }
+            }
+            LaunchedEffect(Unit) {
+                viewModel.accountBrowserRequests.collect { destination ->
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(destination)))
+                }
             }
             ResonanceTheme {
                 ResonanceApp(
@@ -89,8 +101,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        viewModel.refreshAccountSessionIfNeeded()
         viewModel.syncPlaylistsAutomatically()
         lifecycleScope.launch { updateManager.checkForUpdateIfDue() }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        viewModel.handleAccountCallback(intent.data)
     }
 
     private fun downloadUpdate(update: AndroidUpdateInfo) {

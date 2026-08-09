@@ -278,7 +278,7 @@ test("requires only upload credentials and ignores unrelated synchronization act
   }), null);
   assert.match(serverUploadConfigurationError({ serverURL: "", adminToken: "admin-key" }), /server URL/);
   assert.match(serverUploadConfigurationError({ serverURL: "ftp://music.example", adminToken: "admin-key" }), /server URL/);
-  assert.match(serverUploadConfigurationError({ serverURL: "https://music.example", adminToken: "" }), /admin key/);
+  assert.match(serverUploadConfigurationError({ serverURL: "https://music.example", adminToken: "" }), /administrator account/);
   assert.equal(serverUploadBlockedByActivity({
     playlistSyncInFlight: true,
     catalogRefreshInFlight: true,
@@ -2024,7 +2024,7 @@ test("does not hold uploads behind catalog, playlist, likes, profile, or history
   assert.match(missingUploadSource, /await saveServerForm\(\);\s+if \(serverUploadBlockedByActivity/);
 });
 
-test("reserves an immutable local-import context and clears explicitly blank credentials", () => {
+test("reserves immutable upload contexts while account sessions replace credential fields", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
   const sourceBetween = (start, end) => appSource.slice(appSource.indexOf(start), appSource.indexOf(end));
@@ -2040,12 +2040,12 @@ test("reserves an immutable local-import context and clears explicitly blank cre
   assert.match(contextSource, /serverUploadContextIsCurrent[\s\S]+context\?\.adminToken === serverAdminToken/);
   assert.match(contextSource, /ensureServerContextCanChange[\s\S]+serverTransferActive \|\| serverContextReservation/);
   assert.match(saveFormSource, /const settingsOpen = Boolean\(\$\("#settingsDialog"\)\?\.open && settingsPanel === "server" && \$\("#serverSettingsForm"\)\)/);
-  assert.match(saveFormSource, /const nextServerToken = settingsOpen \? \$\("#serverToken"\)\.value\.trim\(\) : serverToken\.trim\(\)/);
-  assert.match(saveFormSource, /const nextServerAdminToken = settingsOpen \? \$\("#serverAdminToken"\)\.value\.trim\(\) : serverAdminToken\.trim\(\)/);
-  assert.match(saveFormSource, /serverToken = nextServerToken/);
-  assert.match(saveFormSource, /serverAdminToken = nextServerAdminToken/);
-  assert.doesNotMatch(saveFormSource, /serverToken[^\n]+\|\| serverToken|serverAdminToken[^\n]+\|\| serverAdminToken/);
-  assert.doesNotMatch(appSource, /id="serverToken"[^>]+required/);
+  assert.doesNotMatch(saveFormSource, /#serverToken|#serverAdminToken|saveServerCredentials/);
+  assert.match(saveFormSource, /serverToken = String\(accountSession\?\.accessToken \|\| ""\)\.trim\(\)/);
+  assert.match(saveFormSource, /serverAdminToken = accountSession\?\.role === "admin" \? serverToken : ""/);
+  assert.doesNotMatch(appSource, /id="serverToken"|id="serverAdminToken"/);
+  assert.match(appSource, /data-auth-provider="clerk"/);
+  assert.match(appSource, /email, Google, Apple, and Discord/);
   assert.match(localUploadSource, /uploadLocalImportTrack\(track, context\)[\s\S]+requireLocalImportServerContext\(context\)/);
   assert.match(localUploadSource, /baseURL: context\.serverURL[\s\S]+adminToken: context\.adminToken[\s\S]+profileID: context\.profileID/);
   assert.match(localBatchSource, /prepareLocalImportUploadBatch\(tracks, context\)[\s\S]+uploadLocalImportTracks\(tracks, context\)/);
@@ -2055,7 +2055,7 @@ test("reserves an immutable local-import context and clears explicitly blank cre
   assert.match(linkImportSource, /localImportNeedsServerContext\(\{ serverBacked, uploadRequested \}\)[\s\S]+if \(needsServerContext\) \{[\s\S]+currentServerUploadContext\(\)/);
   assert.doesNotMatch(playlistImportSource, /const importContext = currentServerUploadContext\(\)/);
   assert.doesNotMatch(linkImportSource, /const importContext = currentServerUploadContext\(\)/);
-  assert.match(settingsSubmitSource, /if \(!serverToken\.trim\(\)\)[\s\S]+Upload ready • catalog sync off/);
+  assert.match(settingsSubmitSource, /if \(!serverToken\.trim\(\)\)[\s\S]+Server saved • sign in to connect/);
   assert.doesNotMatch(settingsSubmitSource.match(/if \(!serverToken\.trim\(\)\) \{([\s\S]*?)\n\s+\} else/)?.[1] || "", /serverAction\("catalog"\)/);
 });
 
