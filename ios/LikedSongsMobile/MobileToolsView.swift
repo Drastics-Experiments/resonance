@@ -2179,7 +2179,7 @@ struct MobileLocalImportSheet: View {
                                     Text("Upload after downloading")
                                         .font(.subheadline.weight(.semibold))
                                     Text(library.canUploadLocalImports
-                                         ? "Downloads every selected song first, then registers each preserved direct source link with \(library.syncProfileName)."
+                                         ? "Downloads every selected song first, then registers each preserved direct source link with \(library.visibleSyncProfileName)."
                                          : "Sign in with an administrator account, or turn this off for a local-only import.")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
