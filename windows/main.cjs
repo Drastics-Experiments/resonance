@@ -1,5 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, shell, Tray } = require("electron");
 const { autoUpdater } = require("electron-updater");
+const { spawn } = require("node:child_process");
 const { createHash, createHmac, randomBytes, randomUUID } = require("node:crypto");
 const { createReadStream } = require("node:fs");
 const fs = require("node:fs/promises");
@@ -110,6 +111,7 @@ protectDetachedOutput(process.stdout);
 protectDetachedOutput(process.stderr);
 
 const AUDIO_EXTENSIONS = new Set([".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".wav"]);
+const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v", ".webm"]);
 const SERVER_ARTWORK_TYPES = new Set(["image/avif", "image/gif", "image/jpeg", "image/png", "image/webp"]);
 const MAX_SERVER_ARTWORK_BYTES = 8 * 1024 * 1024;
 const MAX_PROFILE_PICTURE_SOURCE_BYTES = 32 * 1024 * 1024;
@@ -202,6 +204,55 @@ async function fileSHA256(filePath) {
     stream.on("data", (chunk) => hash.update(chunk));
     stream.on("error", reject);
     stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+function bundledFFmpegPath() {
+  let executable;
+  try { executable = require("ffmpeg-static"); }
+  catch { throw new Error("Video thumbnails are unavailable in this build."); }
+  if (typeof executable !== "string" || !executable) {
+    throw new Error("Video thumbnails are unavailable in this build.");
+  }
+  return executable.replace(/app\.asar([\\/])/i, "app.asar.unpacked$1");
+}
+
+function captureVideoFrame(filePath, seconds) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bundledFFmpegPath(), [
+      "-hide_banner", "-loglevel", "error",
+      "-ss", Math.max(0, seconds).toFixed(3),
+      "-i", filePath,
+      "-frames:v", "1",
+      "-vf", "scale=240:135:force_original_aspect_ratio=increase,crop=240:135",
+      "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+    ], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const chunks = [];
+    let byteCount = 0;
+    let stderr = "";
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    };
+    child.stdout.on("data", (chunk) => {
+      byteCount += chunk.length;
+      if (byteCount > 2 * 1024 * 1024) {
+        child.kill("SIGKILL");
+        finish(reject, new Error("A video thumbnail was unexpectedly large."));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-2_000); });
+    child.on("error", (error) => finish(reject, error));
+    child.on("close", (code) => {
+      if (settled) return;
+      const data = Buffer.concat(chunks);
+      if (code === 0 && data.length) finish(resolve, `data:image/jpeg;base64,${data.toString("base64")}`);
+      else finish(reject, new Error(stderr.trim() || "Video thumbnail extraction failed."));
+    });
   });
 }
 
@@ -1401,6 +1452,26 @@ ipcMain.handle("library:save", async (_event, state) => {
   librarySaveQueue = save;
   await save;
   return true;
+});
+
+ipcMain.handle("library:video-frames", async (_event, value = {}) => {
+  const filePath = path.resolve(String(value.filePath || ""));
+  const duration = Math.max(0, Math.min(Number(value.duration) || 0, 7 * 24 * 60 * 60));
+  const count = Math.max(1, Math.min(Math.floor(Number(value.count) || 12), 12));
+  const paths = applicationPaths();
+  const managedRoots = [paths.local, paths.remote];
+  if (!VIDEO_EXTENSIONS.has(path.extname(filePath).toLowerCase())
+      || !isManagedLibraryFile(filePath, managedRoots)) {
+    throw new Error("Video thumbnails are limited to installed Resonance videos.");
+  }
+  const information = await fs.stat(filePath);
+  if (!information.isFile() || !duration) throw new Error("The video is unavailable.");
+  const frames = [];
+  for (let index = 0; index < count; index += 1) {
+    const seconds = Math.min(duration * (index + 0.5) / count, Math.max(duration - 0.02, 0));
+    frames.push(await captureVideoFrame(filePath, seconds));
+  }
+  return frames;
 });
 
 function credentialFingerprint(value) {

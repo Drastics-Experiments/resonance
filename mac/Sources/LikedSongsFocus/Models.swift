@@ -294,6 +294,46 @@ struct Track: Identifiable, Hashable, Codable {
 
 }
 
+struct ClipRange: Codable, Hashable {
+    var startSeconds: TimeInterval
+    var endSeconds: TimeInterval
+
+    var duration: TimeInterval { max(0, endSeconds - startSeconds) }
+}
+
+enum ClipPlaybackPolicy {
+    struct Bounds: Equatable {
+        let start: TimeInterval
+        let end: TimeInterval
+    }
+
+    static func bounds(range: ClipRange?, duration: TimeInterval) -> Bounds {
+        let maximum = max(duration.isFinite ? duration : 0, 0)
+        guard let range else { return Bounds(start: 0, end: maximum) }
+        let start = min(max(range.startSeconds.isFinite ? range.startSeconds : 0, 0), maximum)
+        let end = min(max(range.endSeconds.isFinite ? range.endSeconds : start, start), maximum)
+        guard end - start >= ClipRangePolicy.minimumDuration else {
+            return Bounds(start: 0, end: maximum)
+        }
+        return Bounds(start: start, end: end)
+    }
+
+    static func position(fraction: Double, within bounds: Bounds) -> TimeInterval {
+        let fraction = fraction.isFinite ? min(max(fraction, 0), 1) : 0
+        return bounds.start + ((bounds.end - bounds.start) * fraction)
+    }
+
+    static func reachedEnd(
+        position: TimeInterval,
+        bounds: Bounds,
+        tolerance: TimeInterval = 0.02
+    ) -> Bool {
+        bounds.end > bounds.start
+            && position.isFinite
+            && position + max(tolerance, 0) >= bounds.end
+    }
+}
+
 struct MissingServerUploadPlan: Equatable {
     let uploadTrackIDs: [UUID]
     let existingRemoteIDsByTrackID: [UUID: String]
@@ -906,23 +946,27 @@ struct RemotePlaylistsDocument: Codable, Hashable {
     var revision: Int
     var playlists: [RemotePlaylist]
     var likedSongIDs: [String]
+    var clipRanges: [RemoteClipRange]
 
     enum CodingKeys: String, CodingKey {
         case revision, playlists
         case profileID = "profile_id"
         case likedSongIDs = "liked_song_ids"
+        case clipRanges = "clip_ranges"
     }
 
     init(
         profileID: String? = nil,
         revision: Int,
         playlists: [RemotePlaylist],
-        likedSongIDs: [String] = []
+        likedSongIDs: [String] = [],
+        clipRanges: [RemoteClipRange] = []
     ) {
         self.profileID = profileID
         self.revision = revision
         self.playlists = playlists
         self.likedSongIDs = likedSongIDs
+        self.clipRanges = clipRanges
     }
 
     init(from decoder: Decoder) throws {
@@ -931,6 +975,19 @@ struct RemotePlaylistsDocument: Codable, Hashable {
         revision = try values.decode(Int.self, forKey: .revision)
         playlists = try values.decode([RemotePlaylist].self, forKey: .playlists)
         likedSongIDs = try values.decodeIfPresent([String].self, forKey: .likedSongIDs) ?? []
+        clipRanges = try values.decodeIfPresent([RemoteClipRange].self, forKey: .clipRanges) ?? []
+    }
+}
+
+struct RemoteClipRange: Codable, Hashable {
+    var songID: String
+    var startSeconds: TimeInterval
+    var endSeconds: TimeInterval
+
+    enum CodingKeys: String, CodingKey {
+        case songID = "song_id"
+        case startSeconds = "start_seconds"
+        case endSeconds = "end_seconds"
     }
 }
 

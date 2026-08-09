@@ -649,50 +649,42 @@ struct LikedSongsFocusTests {
     }
 
     @Test
-    func createsAnM4AClipAndPersistsItAsALocalLibraryTrack() async throws {
+    func savesClipRangeAsPlaybackMetadataWithoutCreatingAFile() async throws {
         let (defaults, suite) = try defaults()
         defer { defaults.removePersistentDomain(forName: suite) }
         let clipDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ResonanceClipTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("ResonanceClipRangeTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: clipDirectory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: clipDirectory) }
 
         let model = PlayerModel(
             loadPersistedLibrary: false,
             defaults: defaults,
-            clipLibraryRoot: clipDirectory,
             persistServerCredentials: false
         )
         await model.importLocalFiles(at: [hero])
         let source = try #require(model.tracks.first)
-        let end = min(source.duration, 1.0)
-        #expect(end >= ClipRangePolicy.minimumDuration)
+        let selectionEnd = min(source.duration, max(ClipRangePolicy.minimumDuration, source.duration * 0.75))
+        #expect(selectionEnd >= ClipRangePolicy.minimumDuration)
 
-        let clip = try await model.createClip(
-            from: source.id,
-            startTime: 0,
-            endTime: end,
-            title: "Hero Sample"
-        )
-        let clipURL = try #require(clip.fileURL)
-        #expect(clip.title == "Hero Sample")
-        #expect(clip.artist == source.artist)
-        #expect(clip.album == source.album)
-        #expect(clip.kind == .audio)
-        #expect(clip.remoteID == nil)
-        #expect(clip.syncProfileID == nil)
-        #expect(clipURL.pathExtension == "m4a")
-        #expect(clipURL.deletingLastPathComponent() == clipDirectory)
-        #expect(FileManager.default.fileExists(atPath: clipURL.path))
-        #expect(abs(clip.duration - end) < 0.2)
-        #expect(model.tracks.map(\.id).contains(clip.id))
+        model.saveClipRange(for: source, start: 0, end: selectionEnd)
+
+        #expect(model.tracks.count == 1)
+        #expect(model.tracks.first?.fileURL == source.fileURL)
+        #expect(model.clipRange(for: source) == ClipRange(startSeconds: 0, endSeconds: selectionEnd))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: clipDirectory.path).isEmpty)
 
         let reloaded = PlayerModel(
             loadPersistedLibrary: true,
             defaults: defaults,
-            clipLibraryRoot: clipDirectory,
             persistServerCredentials: false
         )
-        #expect(reloaded.tracks.contains(where: { $0.id == clip.id && $0.fileURL == clipURL }))
+        let reloadedSource = try #require(reloaded.tracks.first)
+        #expect(reloaded.clipRange(for: reloadedSource) == ClipRange(startSeconds: 0, endSeconds: selectionEnd))
+
+        reloaded.clearClipRange(for: reloadedSource)
+        #expect(reloaded.clipRange(for: reloadedSource) == nil)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: clipDirectory.path).isEmpty)
     }
 
     @Test
