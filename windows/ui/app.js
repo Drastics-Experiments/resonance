@@ -227,6 +227,7 @@ function settingsIcon(pathMarkup) {
 
 const settingsIcons = Object.freeze({
   general: settingsIcon('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.07.07-2.76 2.76-.07-.07a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.1 1.65V21h-3.8v-.1A1.8 1.8 0 0 0 9 19.25a1.8 1.8 0 0 0-2 .36l-.07.07-2.76-2.76.07-.07a1.8 1.8 0 0 0 .36-2A1.8 1.8 0 0 0 2.95 13H3v-3.8h-.05A1.8 1.8 0 0 0 4.6 8a1.8 1.8 0 0 0-.36-2l-.07-.07 2.76-2.76.07.07a1.8 1.8 0 0 0 2 .36A1.8 1.8 0 0 0 10.1 2H14v.05A1.8 1.8 0 0 0 15 3.7a1.8 1.8 0 0 0 2-.36l.07-.07 2.76 2.76-.07.07a1.8 1.8 0 0 0-.36 2A1.8 1.8 0 0 0 21.05 9H21v4h.05A1.8 1.8 0 0 0 19.4 15Z"/>'),
+  server: settingsIcon('<circle cx="12" cy="12" r="8"/><path d="M4.5 9h15M4.5 15h15M12 4c2 2.2 3 4.9 3 8s-1 5.8-3 8c-2-2.2-3-4.9-3-8s1-5.8 3-8Z"/>'),
   keybinds: settingsIcon('<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h.01M11 14h6M18 10h.01"/>'),
   tools: settingsIcon('<path d="M14.7 6.3a4 4 0 0 0-5 5L3.5 17.5 6.5 20.5l6.2-6.2a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/>'),
   background: settingsIcon('<path d="M4 7h16v11H4z"/><path d="M8 7V4h8v3M8 21h8"/>'),
@@ -648,6 +649,15 @@ function initializeCustomSelects() {
     if ($("#nowPlayingDialog").open) syncFullPlayerTitleMarquee();
   });
   window.addEventListener("scroll", () => customSelectControllers.forEach(positionCustomSelect), true);
+}
+
+function disposeCustomSelects(root) {
+  root?.querySelectorAll("[data-custom-select]").forEach((control) => {
+    const controller = customSelectControllers.get(control);
+    if (!controller) return;
+    controller.menu.remove();
+    customSelectControllers.delete(control);
+  });
 }
 
 function playbackTrackByID(trackID) {
@@ -3419,19 +3429,13 @@ async function activateProfile(profileID, serverURL = state.serverURL) {
   if (resumeListeningSession && currentID && playbackIsActive()) beginListeningSession();
 }
 
-async function openServerSettings() {
-  $("#serverURL").value = state.serverURL || "";
-  $("#serverToken").value = serverToken;
-  $("#serverAdminToken").value = serverAdminToken;
-  renderProfileOptions();
-  renderServerTransferModeOptions();
-  $("#serverSettingsDialog").showModal();
-  await Promise.allSettled([refreshProfiles(), refreshClientConfig()]);
+function openServerSettings() {
+  openSettings("server");
 }
 
 async function saveServerForm() {
   ensureServerContextCanChange();
-  const settingsOpen = Boolean($("#serverSettingsDialog")?.open);
+  const settingsOpen = Boolean($("#settingsDialog")?.open && settingsPanel === "server" && $("#serverSettingsForm"));
   const nextServerURL = settingsOpen ? $("#serverURL").value.trim() : state.serverURL;
   const nextProfileID = settingsOpen ? ($("#syncProfile")?.value || activeProfileID()) : activeProfileID();
   const requestedUploadMode = settingsOpen ? $("#serverUploadMode")?.value : currentServerTransferModes().uploadMode;
@@ -3479,10 +3483,12 @@ function renderSettings() {
     </div>`;
   }).join("");
   const settingsRoot = $("#settingsDialogContent");
+  disposeCustomSelects(settingsRoot);
   settingsRoot.innerHTML = `<div class="settings-heading"><div><span class="eyebrow">RESONANCE</span><h1 id="settingsDialogTitle">Settings</h1><p>Manage how Resonance behaves on this Windows device.</p></div><button id="closeSettings" class="history-close" type="button" aria-label="Close settings">×</button></div>
     <div class="settings-shell">
       <nav class="settings-nav" aria-label="Settings sections">
         <button class="${settingsPanel === "general" ? "active" : ""}" type="button" data-settings-panel="general" aria-current="${settingsPanel === "general" ? "page" : "false"}">${settingsIcons.general}<span>General</span></button>
+        <button class="${settingsPanel === "server" ? "active" : ""}" type="button" data-settings-panel="server" aria-current="${settingsPanel === "server" ? "page" : "false"}">${settingsIcons.server}<span>Server</span></button>
         <button class="${settingsPanel === "keybinds" ? "active" : ""}" type="button" data-settings-panel="keybinds" aria-current="${settingsPanel === "keybinds" ? "page" : "false"}">${settingsIcons.keybinds}<span>Keybinds</span></button>
         <button class="${settingsPanel === "tools" ? "active" : ""}" type="button" data-settings-panel="tools" aria-current="${settingsPanel === "tools" ? "page" : "false"}">${settingsIcons.tools}<span>Library & tools</span></button>
       </nav>
@@ -3517,6 +3523,39 @@ function renderSettings() {
             </div>
           </div>
         </section>
+        <section class="settings-panel" data-settings-content="server" ${settingsPanel === "server" ? "" : "hidden"}>
+          <form id="serverSettingsForm" class="settings-server-form">
+            <div class="settings-panel-title"><div><span class="eyebrow">CONNECTION</span><h2>Music Server</h2><p>Connect Resonance to your private music server. Credentials remain encrypted by the operating system.</p></div></div>
+            <div class="settings-server-card">
+              <label class="settings-server-field settings-server-field-wide" for="serverURL"><span>Server URL</span><input id="serverURL" autocomplete="url" placeholder="https://music.example.com" required></label>
+              <label class="settings-server-field" for="serverToken"><span>Server access token</span><input id="serverToken" type="password" autocomplete="off" placeholder="Optional for catalog and playlist sync"></label>
+              <label class="settings-server-field" for="serverAdminToken"><span>Server admin key</span><input id="serverAdminToken" type="password" autocomplete="off" placeholder="Optional for uploads and deletion"></label>
+            </div>
+            <div class="settings-section-heading compact"><span>PROFILE & TRANSFERS</span><p>Choose the active profile and the methods allowed by this server.</p></div>
+            <div class="settings-server-card settings-server-options">
+              <div class="settings-server-field settings-server-field-wide">
+                <span id="syncProfileLabel">Sync profile</span>
+                <div class="profile-picker-row">
+                  <div id="syncProfile" data-custom-select aria-labelledby="syncProfileLabel"></div>
+                  <button id="newSyncProfile" class="secondary" type="button">New profile</button>
+                </div>
+              </div>
+              <div class="settings-server-field">
+                <span id="serverUploadModeLabel">Upload mode</span>
+                <div id="serverUploadMode" data-custom-select aria-labelledby="serverUploadModeLabel"></div>
+              </div>
+              <div class="settings-server-field">
+                <span id="serverDownloadModeLabel">Download mode</span>
+                <div id="serverDownloadMode" data-custom-select aria-labelledby="serverDownloadModeLabel"></div>
+              </div>
+              <p id="serverTransferModeHelp" class="server-transfer-mode-help settings-server-field-wide">Safe file transfer modes are used until this server returns a valid signed configuration.</p>
+            </div>
+            <div class="settings-server-actions">
+              <span id="serverSettingsStatus" role="status">${escapeHTML(serverConnectionText || "Not connected")}</span>
+              <button id="saveServerSettings" class="primary" type="submit">Save & connect</button>
+            </div>
+          </form>
+        </section>
         <section class="settings-panel" data-settings-content="keybinds" ${settingsPanel === "keybinds" ? "" : "hidden"}>
           <div class="settings-panel-title"><div><span class="eyebrow">PLAYBACK</span><h2>Keybinds</h2><p>Choose a shortcut, then press the new key combination. These work while Resonance is focused.</p></div><button id="resetSettingsKeybinds" class="settings-row-action" type="button">Reset defaults</button></div>
           <div class="settings-group settings-keybinds">${keybindRows}</div>
@@ -3540,6 +3579,7 @@ function renderSettings() {
       settingsPanel = button.dataset.settingsPanel;
       settingsRecordingAction = null;
       renderSettings();
+      if (settingsPanel === "server") void refreshServerSettingsControls();
     };
   });
   const runInBackground = $("#settingsRunInBackground");
@@ -3563,11 +3603,72 @@ function renderSettings() {
     persistInBackground({ refreshSidebar: false });
     renderSettings();
   };
-  if ($("#settingsServer")) $("#settingsServer").onclick = () => { closeSettings(); void openServerSettings(); };
+  if ($("#settingsServer")) $("#settingsServer").onclick = openServerSettings;
   if ($("#settingsHistory")) $("#settingsHistory").onclick = () => { closeSettings(); openListeningHistory(); };
   if ($("#settingsClipEditor")) $("#settingsClipEditor").onclick = () => { closeSettings(); openClipEditor(); };
   if ($("#settingsStorage")) $("#settingsStorage").onclick = () => { closeSettings(); navigate("storage"); };
   if ($("#settingsCheckUpdates")) $("#settingsCheckUpdates").onclick = checkForUpdates;
+
+  if (settingsPanel === "server") bindServerSettingsControls();
+}
+
+function bindServerSettingsControls() {
+  document.querySelectorAll("#serverSettingsForm [data-custom-select]").forEach(initializeCustomSelect);
+  $("#serverURL").value = state.serverURL || "";
+  $("#serverToken").value = serverToken;
+  $("#serverAdminToken").value = serverAdminToken;
+  renderProfileOptions();
+  renderServerTransferModeOptions();
+
+  $("#newSyncProfile").onclick = async () => {
+    const name = prompt("Name this sync profile:");
+    if (!name?.trim()) return;
+    try {
+      const profile = await api.createProfile({
+        baseURL: $("#serverURL")?.value.trim() || state.serverURL,
+        token: $("#serverToken").value,
+        name: name.trim(),
+      });
+      state.syncProfiles = [...state.syncProfiles, profile];
+      renderProfileOptions(profile.id);
+    } catch (error) {
+      showNotice(error.message || "Could not create the sync profile.");
+    }
+  };
+
+  $("#serverSettingsForm").onsubmit = async (event) => {
+    event.preventDefault();
+    serverAutoAttempted = true;
+    const saveButton = $("#saveServerSettings");
+    const status = $("#serverSettingsStatus");
+    saveButton.disabled = true;
+    status.textContent = "Saving server settings…";
+    try {
+      await saveServerForm();
+      if (!serverToken.trim()) {
+        serverConnected = false;
+        replaceServerCatalog([]);
+        serverConnectionText = serverAdminToken.trim()
+          ? "Upload ready • catalog sync off"
+          : "Saved • catalog sync off";
+        if (section === "server") renderServer();
+        showNotice(serverConnectionText, "status");
+      } else {
+        await serverAction("catalog");
+      }
+      status.textContent = serverConnectionText;
+    } catch (error) {
+      const message = error.message || "The server settings could not be saved.";
+      status.textContent = message;
+      showNotice(message);
+    } finally {
+      saveButton.disabled = false;
+    }
+  };
+}
+
+async function refreshServerSettingsControls() {
+  await Promise.allSettled([refreshProfiles(), refreshClientConfig()]);
 }
 
 async function updateAppPreference(key, value) {
@@ -3579,12 +3680,13 @@ async function updateAppPreference(key, value) {
   await api.updateAppPreferences(state.appPreferences).catch(() => undefined);
 }
 
-function openSettings() {
+function openSettings(initialPanel = "general") {
   closeProfileMenu();
-  settingsPanel = "general";
+  settingsPanel = initialPanel;
   settingsRecordingAction = null;
   renderSettings();
-  $("#settingsDialog").showModal();
+  if (!$("#settingsDialog").open) $("#settingsDialog").showModal();
+  if (settingsPanel === "server") void refreshServerSettingsControls();
 }
 
 function discordPresenceActivity() {
@@ -7099,44 +7201,6 @@ $("#listeningHistoryDialog").addEventListener("close", () => {
   $("#listeningHistoryDialog").classList.remove("day-expanded");
   $("#listeningHistoryDayDetails").hidden = true;
 });
-$("#cancelServerSettings").onclick = () => $("#serverSettingsDialog").close();
-$("#newSyncProfile").onclick = async () => {
-  const name = prompt("Name this sync profile:");
-  if (!name?.trim()) return;
-  try {
-    const profile = await api.createProfile({
-      baseURL: $("#serverURL")?.value.trim() || state.serverURL,
-      token: $("#serverToken").value,
-      name: name.trim(),
-    });
-    state.syncProfiles = [...state.syncProfiles, profile];
-    renderProfileOptions(profile.id);
-  } catch (error) {
-    alert(error.message || "Could not create the sync profile.");
-  }
-};
-$("#serverSettingsForm").onsubmit = async (event) => {
-  event.preventDefault();
-  serverAutoAttempted = true;
-  try {
-    await saveServerForm();
-    $("#serverSettingsDialog").close();
-    if (!serverToken.trim()) {
-      serverConnected = false;
-      replaceServerCatalog([]);
-      serverConnectionText = serverAdminToken.trim()
-        ? "Upload ready • catalog sync off"
-        : "Saved • catalog sync off";
-      if (section === "server") renderServer();
-      showNotice(serverConnectionText, "status");
-    } else if (section === "server") {
-      await serverAction("catalog");
-    }
-  } catch (error) {
-    showNotice(error.message || "The server settings could not be saved.");
-  }
-};
-
 async function finishProfileSelection(profile) {
   renderProfileOptions(profile.id);
   const previousProfileID = activeProfileID();

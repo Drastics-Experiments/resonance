@@ -100,16 +100,33 @@ struct SidebarView: View {
 struct MacSettingsSheet: View {
     private enum Panel: String, CaseIterable, Identifiable {
         case general = "General"
+        case server = "Server"
         case keybinds = "Keybinds"
 
         var id: String { rawValue }
-        var symbol: String { self == .general ? "gearshape" : "keyboard" }
+        var symbol: String {
+            switch self {
+            case .general: "gearshape"
+            case .server: "network"
+            case .keybinds: "keyboard"
+            }
+        }
     }
 
+    @EnvironmentObject private var model: PlayerModel
     @EnvironmentObject private var preferences: MacDesktopPreferences
     @Environment(\.dismiss) private var dismiss
     @StateObject private var recorder = MacShortcutRecorder()
-    @State private var panel: Panel = .general
+    @State private var panel: Panel
+    @State private var serverURLDraft = ""
+    @State private var accessTokenDraft = ""
+    @State private var adminTokenDraft = ""
+    @State private var didLoadServerDrafts = false
+    @State private var confirmingCredentialRemoval = false
+
+    init(opensServerPanel: Bool = false) {
+        _panel = State(initialValue: opensServerPanel ? .server : .general)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -173,8 +190,11 @@ struct MacSettingsSheet: View {
                 Rectangle().fill(Color.appLine).frame(width: 1)
 
                 Group {
-                    if panel == .general { generalPanel }
-                    else { keybindPanel }
+                    switch panel {
+                    case .general: generalPanel
+                    case .server: serverPanel
+                    case .keybinds: keybindPanel
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
@@ -202,7 +222,22 @@ struct MacSettingsSheet: View {
             )
         )
         .preferredColorScheme(.dark)
+        .task { loadServerDraftsIfNeeded() }
+        .onChange(of: panel) { _, nextPanel in
+            if nextPanel == .server { loadServerDraftsIfNeeded() }
+        }
         .onDisappear { recorder.cancel() }
+        .alert("Forget server credentials?", isPresented: $confirmingCredentialRemoval) {
+            Button("Cancel", role: .cancel) {}
+            Button("Forget Credentials", role: .destructive) {
+                model.clearServerCredentials()
+                serverURLDraft = ""
+                accessTokenDraft = ""
+                adminTokenDraft = ""
+            }
+        } message: {
+            Text("The server URL and access keys will be removed from this Mac. Downloaded songs stay in your library.")
+        }
     }
 
     private var generalPanel: some View {
@@ -230,6 +265,137 @@ struct MacSettingsSheet: View {
                 }
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
+
+                settingsHeading("APP", detail: "Manage this Mac's server connection.")
+                    .padding(.top, 10)
+                VStack(spacing: 0) {
+                    settingsActionRow(
+                        symbol: "network",
+                        title: "Music Server",
+                        detail: model.serverURLString.isEmpty
+                            ? "No server configured"
+                            : "\(model.activeSyncProfileName) · \(model.serverURLString)",
+                        actionTitle: "Configure"
+                    ) {
+                        panel = .server
+                    }
+                }
+                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
+            }
+            .padding(22)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private var serverPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("CONNECTION")
+                        .font(.system(size: 9, weight: .bold))
+                        .tracking(1.7)
+                        .foregroundStyle(Color.appViolet)
+                    Text("Music Server")
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.appInk)
+                    Text(model.usesPreviewCredentialStore
+                        ? "Stored in a private local file for this disposable Preview build."
+                        : "Access and admin credentials are stored securely in Keychain.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.appMuted)
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    serverFieldLabel("Server URL", symbol: "network")
+                    TextField("https://music.example.com", text: $serverURLDraft)
+                        .textFieldStyle(.roundedBorder)
+
+                    serverFieldLabel("Access token", symbol: "key.fill")
+                    SecureField("Optional for catalog and playlist sync", text: $accessTokenDraft)
+                        .textFieldStyle(.roundedBorder)
+
+                    serverFieldLabel("Admin key", symbol: "key.horizontal.fill")
+                    SecureField("Optional for uploads and deletion", text: $adminTokenDraft)
+                        .textFieldStyle(.roundedBorder)
+                }
+                .padding(15)
+                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
+
+                settingsHeading("TRANSFER MODES", detail: "Choose the methods permitted by this server's verified configuration.")
+                    .padding(.top, 6)
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Upload", selection: uploadModeBinding) {
+                        ForEach(displayedUploadModes) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(model.clientConfiguration.permittedUploadModes.isEmpty)
+
+                    Text(model.clientConfiguration.permittedUploadModes.isEmpty
+                        ? "Uploads are disabled by the verified server configuration."
+                        : model.uploadMode.detail)
+                        .font(.system(size: 9))
+                        .foregroundStyle(Color.appMuted)
+
+                    Rectangle().fill(Color.appLine).frame(height: 1)
+
+                    Picker("Download", selection: downloadModeBinding) {
+                        ForEach(displayedDownloadModes) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(model.clientConfiguration.permittedDownloadModes.isEmpty)
+
+                    Text(model.clientConfiguration.requestedStreamOnly
+                        ? model.offlineDownloadUnavailableMessage
+                        : model.downloadMode.detail)
+                        .font(.system(size: 9))
+                        .foregroundStyle(Color.appMuted)
+
+                    Label(model.clientConfigMessage, systemImage: "checkmark.shield")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.appMuted)
+                }
+                .padding(15)
+                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
+
+                HStack(spacing: 12) {
+                    Text(model.serverMessage)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.appMuted)
+                        .lineLimit(2)
+
+                    Spacer()
+
+                    if !model.serverURLString.isEmpty || !model.serverToken.isEmpty || !model.serverAdminToken.isEmpty {
+                        Button("Forget Credentials", role: .destructive) {
+                            confirmingCredentialRemoval = true
+                        }
+                        .controlSize(.small)
+                    }
+
+                    Button(action: saveServerSettings) {
+                        if model.isSyncingServer {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("Save & Connect")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.appViolet)
+                    .disabled(model.serverUploadActionsDisabled || !ServerConnectionPolicy.canSave(
+                        serverURL: serverURLDraft,
+                        accessToken: accessTokenDraft,
+                        adminToken: adminTokenDraft,
+                        allowsInsecurePreviewLoopback: model.allowsInsecurePreviewLoopback
+                    ))
+                }
+                .padding(.top, 2)
             }
             .padding(22)
         }
@@ -324,6 +490,84 @@ struct MacSettingsSheet: View {
         }
         .padding(.horizontal, 14)
         .frame(minHeight: 64)
+    }
+
+    private var uploadModeBinding: Binding<MacUploadMode> {
+        Binding(get: { model.uploadMode }, set: model.selectUploadMode)
+    }
+
+    private var downloadModeBinding: Binding<MacDownloadMode> {
+        Binding(get: { model.downloadMode }, set: model.selectDownloadMode)
+    }
+
+    private var displayedUploadModes: [MacUploadMode] {
+        let modes = model.clientConfiguration.permittedUploadModes
+        return modes.isEmpty ? [.localFile] : modes
+    }
+
+    private var displayedDownloadModes: [MacDownloadMode] {
+        let modes = model.clientConfiguration.permittedDownloadModes
+        return modes.isEmpty ? [.verifiedFileCache] : modes
+    }
+
+    private func settingsActionRow(
+        symbol: String,
+        title: String,
+        detail: String,
+        actionTitle: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 13) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.appViolet)
+                .frame(width: 36, height: 36)
+                .background(Color.appViolet.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.appInk)
+                Text(detail).font(.system(size: 9)).foregroundStyle(Color.appMuted).lineLimit(2)
+            }
+            Spacer()
+            Button(actionTitle, action: action)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 14)
+        .frame(minHeight: 64)
+    }
+
+    private func serverFieldLabel(_ title: String, symbol: String) -> some View {
+        Label(title, systemImage: symbol)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Color.appInk)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func loadServerDraftsIfNeeded() {
+        guard !didLoadServerDrafts else { return }
+        serverURLDraft = model.serverURLString
+        accessTokenDraft = model.serverToken
+        adminTokenDraft = model.serverAdminToken
+        didLoadServerDrafts = true
+    }
+
+    private func saveServerSettings() {
+        Task {
+            guard !model.serverUploadActionsDisabled else {
+                model.serverMessage = "Wait for the current transfer to finish"
+                return
+            }
+            model.serverURLString = serverURLDraft
+            model.serverToken = accessTokenDraft
+            model.serverAdminToken = adminTokenDraft
+            await model.refreshClientConfigurationNow()
+            if accessTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                model.serverMessage = "Upload ready • Add access token to sync"
+                return
+            }
+            await model.refreshServerCatalogNow()
+            await model.syncPlaylistsNow()
+        }
     }
 
 }

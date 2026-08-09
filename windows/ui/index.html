@@ -314,35 +314,6 @@
       <section id="listeningHistoryDayDetails" class="listening-history-day-details" aria-live="polite" hidden></section>
     </section>
   </dialog>
-  <dialog id="serverSettingsDialog" class="playlist-dialog">
-    <form id="serverSettingsForm">
-      <span class="eyebrow">CONNECTION</span>
-      <h2>Music Server settings</h2>
-      <label for="serverURL">Server URL</label>
-      <input id="serverURL" autocomplete="url" placeholder="https://music.unblocked.mov" required>
-      <label for="serverToken">Server access token</label>
-      <input id="serverToken" type="password" autocomplete="off" placeholder="Optional for catalog and playlist sync">
-      <label for="serverAdminToken">Server admin key</label>
-      <input id="serverAdminToken" type="password" autocomplete="off" placeholder="Optional for uploads and deletion">
-      <label id="syncProfileLabel">Sync profile</label>
-      <div class="profile-picker-row">
-        <div id="syncProfile" data-custom-select aria-labelledby="syncProfileLabel"></div>
-        <button id="newSyncProfile" class="secondary" type="button">New profile</button>
-      </div>
-      <div class="server-transfer-mode-grid">
-        <div>
-          <label id="serverUploadModeLabel">Upload mode</label>
-          <div id="serverUploadMode" data-custom-select aria-labelledby="serverUploadModeLabel"></div>
-        </div>
-        <div>
-          <label id="serverDownloadModeLabel">Download mode</label>
-          <div id="serverDownloadMode" data-custom-select aria-labelledby="serverDownloadModeLabel"></div>
-        </div>
-      </div>
-      <p id="serverTransferModeHelp" class="server-transfer-mode-help">Safe file transfer modes are used until this server returns a valid signed configuration.</p>
-      <div class="dialog-actions"><button id="cancelServerSettings" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Save & connect</button></div>
-    </form>
-  </dialog>
   <dialog id="localImportDialog" class="local-import-dialog" aria-labelledby="localImportTitle">
     <nav id="localImportProviderPill" class="local-import-provider-pill" aria-label="Import sources">
       <button type="button" data-local-import-provider="youtube" aria-label="YouTube" aria-pressed="true" title="YouTube">

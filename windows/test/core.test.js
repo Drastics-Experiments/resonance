@@ -519,13 +519,16 @@ test("renders every Windows select through the themed custom dropdown", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
-  const customControls = htmlSource.match(/<div\b[^>]*\bdata-custom-select\b[^>]*>/gi) || [];
+  const staticCustomControls = htmlSource.match(/<div\b[^>]*\bdata-custom-select\b[^>]*>/gi) || [];
+  const settingsCustomControls = appSource.match(/<div\b[^>]*\bdata-custom-select\b[^>]*>/gi) || [];
 
   assert.doesNotMatch(htmlSource, /<select\b/i);
-  assert.equal(customControls.length, 7);
-  assert.match(htmlSource, /id="serverUploadMode"[^>]+data-custom-select/);
-  assert.match(htmlSource, /id="serverDownloadMode"[^>]+data-custom-select/);
+  assert.doesNotMatch(appSource, /<select\b/i);
+  assert.equal(staticCustomControls.length + settingsCustomControls.length, 7);
+  assert.match(appSource, /id="serverUploadMode"[^>]+data-custom-select/);
+  assert.match(appSource, /id="serverDownloadMode"[^>]+data-custom-select/);
   assert.match(appSource, /function initializeCustomSelects\(\)[\s\S]+querySelectorAll\("\[data-custom-select\]"\)/);
+  assert.match(appSource, /#serverSettingsForm \[data-custom-select\]"\)\.forEach\(initializeCustomSelect\)/);
   assert.match(appSource, /function setCustomSelectOptions\(/);
   assert.match(appSource, /role\", \"listbox/);
   assert.match(appSource, /role\", \"option/);
@@ -598,6 +601,10 @@ test("switches to or creates server profiles and falls back to Default", () => {
   assert.match(appSource, /#profileSettings"\)\.onclick = \(\) =>[\s\S]+openSettings\(\)/);
   assert.doesNotMatch(appSource, /navigate\("settings"\)/);
   assert.doesNotMatch(appSource, /#profileSettings"\)\.onclick = [\s\S]{0,160}openServerSettings/);
+  assert.doesNotMatch(htmlSource, /id="serverSettingsDialog"/);
+  assert.match(appSource, /data-settings-panel="server"[\s\S]+<form id="serverSettingsForm"/);
+  assert.match(appSource, /function openServerSettings\(\) \{\s+openSettings\("server"\)/);
+  assert.match(appSource, /#settingsServer"\)\.onclick = openServerSettings/);
   assert.match(styleSource, /\.settings-grid\s*\{/);
 });
 
@@ -2003,13 +2010,13 @@ test("reserves an immutable local-import context and clears explicitly blank cre
   assert.match(contextSource, /Object\.freeze\(\{[\s\S]+adminToken: serverAdminToken/);
   assert.match(contextSource, /serverUploadContextIsCurrent[\s\S]+context\?\.adminToken === serverAdminToken/);
   assert.match(contextSource, /ensureServerContextCanChange[\s\S]+serverTransferActive \|\| serverContextReservation/);
-  assert.match(saveFormSource, /const settingsOpen = Boolean\(\$\("#serverSettingsDialog"\)\?\.open\)/);
+  assert.match(saveFormSource, /const settingsOpen = Boolean\(\$\("#settingsDialog"\)\?\.open && settingsPanel === "server" && \$\("#serverSettingsForm"\)\)/);
   assert.match(saveFormSource, /const nextServerToken = settingsOpen \? \$\("#serverToken"\)\.value\.trim\(\) : serverToken\.trim\(\)/);
   assert.match(saveFormSource, /const nextServerAdminToken = settingsOpen \? \$\("#serverAdminToken"\)\.value\.trim\(\) : serverAdminToken\.trim\(\)/);
   assert.match(saveFormSource, /serverToken = nextServerToken/);
   assert.match(saveFormSource, /serverAdminToken = nextServerAdminToken/);
   assert.doesNotMatch(saveFormSource, /serverToken[^\n]+\|\| serverToken|serverAdminToken[^\n]+\|\| serverAdminToken/);
-  assert.doesNotMatch(htmlSource, /id="serverToken"[^>]+required/);
+  assert.doesNotMatch(appSource, /id="serverToken"[^>]+required/);
   assert.match(localUploadSource, /uploadLocalImportTrack\(track, context\)[\s\S]+requireLocalImportServerContext\(context\)/);
   assert.match(localUploadSource, /baseURL: context\.serverURL[\s\S]+adminToken: context\.adminToken[\s\S]+profileID: context\.profileID/);
   assert.match(localBatchSource, /prepareLocalImportUploadBatch\(tracks, context\)[\s\S]+uploadLocalImportTracks\(tracks, context\)/);
@@ -2020,7 +2027,7 @@ test("reserves an immutable local-import context and clears explicitly blank cre
   assert.doesNotMatch(playlistImportSource, /const importContext = currentServerUploadContext\(\)/);
   assert.doesNotMatch(linkImportSource, /const importContext = currentServerUploadContext\(\)/);
   assert.match(settingsSubmitSource, /if \(!serverToken\.trim\(\)\)[\s\S]+Upload ready • catalog sync off/);
-  assert.doesNotMatch(settingsSubmitSource.match(/if \(!serverToken\.trim\(\)\) \{([\s\S]*?)\n    \} else/)?.[1] || "", /serverAction\("catalog"\)/);
+  assert.doesNotMatch(settingsSubmitSource.match(/if \(!serverToken\.trim\(\)\) \{([\s\S]*?)\n\s+\} else/)?.[1] || "", /serverAction\("catalog"\)/);
 });
 
 test("matches re-encoded server copies by title artist and duration", () => {
