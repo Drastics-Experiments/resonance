@@ -316,12 +316,41 @@ struct PreviewRegressionTests {
     @Test
     func fullscreenVideoDoesNotContinuouslySeekAgainstTheSampledAudioClock() {
         #expect(!InstalledVideoSyncPolicy.continuouslyPollsAudioClock)
+        #expect(InstalledVideoSyncPolicy.shouldResumeAfterSeek(
+            audioIsPlaying: true,
+            trackMatches: true,
+            videoIsVisible: true,
+            isClosing: false
+        ))
+        #expect(!InstalledVideoSyncPolicy.shouldResumeAfterSeek(
+            audioIsPlaying: false,
+            trackMatches: true,
+            videoIsVisible: true,
+            isClosing: false
+        ))
+        #expect(!InstalledVideoSyncPolicy.shouldResumeAfterSeek(
+            audioIsPlaying: true,
+            trackMatches: false,
+            videoIsVisible: true,
+            isClosing: false
+        ))
+        #expect(!InstalledVideoSyncPolicy.shouldResumeAfterSeek(
+            audioIsPlaying: true,
+            trackMatches: true,
+            videoIsVisible: false,
+            isClosing: false
+        ))
+        #expect(!InstalledVideoSyncPolicy.shouldResumeAfterSeek(
+            audioIsPlaying: true,
+            trackMatches: true,
+            videoIsVisible: true,
+            isClosing: true
+        ))
     }
 
     @Test
     func fullscreenVideoControlsClampSeekProgressAndUseWindowsTiming() {
         #expect(InstalledVideoControlsPolicy.autoHideDelay == 2.2)
-        #expect(InstalledVideoControlsPolicy.pointerExitDelay == 0.45)
         #expect(InstalledVideoControlsPolicy.progress(position: 30, duration: 120) == 0.25)
         #expect(InstalledVideoControlsPolicy.progress(position: -1, duration: 120) == 0)
         #expect(InstalledVideoControlsPolicy.progress(position: 180, duration: 120) == 1)
@@ -339,8 +368,13 @@ struct PreviewRegressionTests {
 
         let travel = NowPlayingMarqueePolicy.travel(contentWidth: 820, availableWidth: 540)
         #expect(travel == 280)
-        #expect(abs(NowPlayingMarqueePolicy.duration(for: travel) - 10) < 0.001)
+        let loopDistance = NowPlayingMarqueePolicy.loopDistance(contentWidth: 820)
+        #expect(loopDistance == 876)
+        #expect(abs(NowPlayingMarqueePolicy.duration(for: loopDistance) - (876.0 / 28.0)) < 0.001)
         #expect(NowPlayingMarqueePolicy.duration(for: 28) == 8)
+        #expect(NowPlayingMarqueePolicy.offset(progress: 0, contentWidth: 820) == 0)
+        #expect(NowPlayingMarqueePolicy.offset(progress: 0.5, contentWidth: 820) == -438)
+        #expect(NowPlayingMarqueePolicy.offset(progress: 1, contentWidth: 820) == -876)
     }
 
     @Test

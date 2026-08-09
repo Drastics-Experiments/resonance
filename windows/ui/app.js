@@ -5744,6 +5744,7 @@ async function uploadMissingDownloadedSongs() {
 async function requestPlayback() {
   try {
     await audio.play();
+    synchronizeInstalledVideoWithAudio({ forceSeek: true });
   } catch (error) {
     if (error?.name === "AbortError") return;
     updateChrome();
@@ -6036,19 +6037,20 @@ function currentPlaybackDuration(track = currentTrack()) {
 
 function syncFullPlayerTitleMarquee() {
   const viewport = $("#fullPlayerTitle");
+  const track = $("#fullPlayerTitleTrack");
   const text = $("#fullPlayerTitleText");
   if (fullPlayerTitleMarqueeFrame) cancelAnimationFrame(fullPlayerTitleMarqueeFrame);
   viewport.classList.remove("overflowing");
-  text.style.removeProperty("--full-player-title-travel");
-  text.style.removeProperty("--full-player-title-duration");
+  track.style.removeProperty("--full-player-title-cycle");
+  track.style.removeProperty("--full-player-title-duration");
 
   fullPlayerTitleMarqueeFrame = requestAnimationFrame(() => {
     fullPlayerTitleMarqueeFrame = null;
     if (!$("#nowPlayingDialog").open) return;
     const metrics = titleMarqueeMetrics(text.getBoundingClientRect().width, viewport.clientWidth);
     if (metrics.travel <= 1) return;
-    text.style.setProperty("--full-player-title-travel", `${-metrics.travel}px`);
-    text.style.setProperty("--full-player-title-duration", `${metrics.durationSeconds}s`);
+    track.style.setProperty("--full-player-title-cycle", `${metrics.cycleDistance}px`);
+    track.style.setProperty("--full-player-title-duration", `${metrics.durationSeconds}s`);
     viewport.classList.add("overflowing");
   });
 }
@@ -6057,7 +6059,10 @@ function setFullPlayerTitle(title) {
   const viewport = $("#fullPlayerTitle");
   const text = $("#fullPlayerTitleText");
   const changed = text.textContent !== title;
-  if (changed) text.textContent = title;
+  if (changed) {
+    text.textContent = title;
+    $("#fullPlayerTitleRepeat").textContent = title;
+  }
   viewport.setAttribute("aria-label", title);
   viewport.title = title;
   if (changed && $("#nowPlayingDialog").open) syncFullPlayerTitleMarquee();
@@ -6233,9 +6238,12 @@ function hideInstalledVideoControls() {
     clearTimeout(installedVideoControlsTimer);
     installedVideoControlsTimer = null;
   }
-  const controls = $("#installedVideoControls");
-  if (audio.paused || controls.matches(":focus-within")) return;
-  $("#installedVideoDialog").classList.remove("video-controls-visible");
+  const dialog = $("#installedVideoDialog");
+  const keyboardFocusedControl = dialog.querySelector(
+    ".installed-video-return:focus-visible, .installed-video-window-actions :focus-visible, #installedVideoControls :focus-visible",
+  );
+  if (audio.paused || keyboardFocusedControl) return;
+  dialog.classList.remove("video-controls-visible");
 }
 
 function showInstalledVideoControls({ keepVisible = false } = {}) {
@@ -6332,6 +6340,7 @@ function configureInstalledVideoSource(track, startTime) {
   installedVideoPlayer.onplay = installedVideoPlaybackStarted;
   installedVideoPlayer.onplaying = installedVideoPlaybackPlaying;
   installedVideoPlayer.onpause = installedVideoPlaybackPaused;
+  installedVideoPlayer.onseeked = () => synchronizeInstalledVideoWithAudio();
   installedVideoPlayer.onended = () => synchronizeInstalledVideoWithAudio({ forceSeek: true });
   installedVideoPlayer.load();
 }
@@ -6499,6 +6508,7 @@ function finishInstalledVideoClose({ session }) {
   installedVideoPlayer.onplay = null;
   installedVideoPlayer.onplaying = null;
   installedVideoPlayer.onpause = null;
+  installedVideoPlayer.onseeked = null;
   installedVideoPlayer.onended = null;
   installedVideoPlayer.removeAttribute("src");
   installedVideoPlayer.load();
@@ -6815,14 +6825,23 @@ $("#installedVideoSeek").oninput = (event) => {
 const installedVideoStage = $(".installed-video-stage");
 installedVideoStage.onpointermove = () => showInstalledVideoControls();
 installedVideoStage.onpointerenter = () => showInstalledVideoControls();
-installedVideoStage.onpointerleave = () => {
-  if (!audio.paused) {
-    if (installedVideoControlsTimer) clearTimeout(installedVideoControlsTimer);
-    installedVideoControlsTimer = setTimeout(hideInstalledVideoControls, 450);
-  }
+installedVideoStage.onpointerleave = () => showInstalledVideoControls();
+const installedVideoControls = $("#installedVideoControls");
+installedVideoControls.onpointerenter = () => showInstalledVideoControls();
+installedVideoControls.onpointerleave = () => showInstalledVideoControls();
+installedVideoControls.onfocusin = (event) => {
+  showInstalledVideoControls({ keepVisible: event.target.matches(":focus-visible") });
 };
-$("#installedVideoControls").onpointerenter = () => showInstalledVideoControls({ keepVisible: true });
-$("#installedVideoControls").onpointerleave = () => showInstalledVideoControls();
+installedVideoControls.onfocusout = () => showInstalledVideoControls();
+$("#installedVideoDialog").addEventListener("focusin", (event) => {
+  if (!event.target.closest(".installed-video-return, .installed-video-window-actions")) return;
+  showInstalledVideoControls({ keepVisible: event.target.matches(":focus-visible") });
+});
+$("#installedVideoDialog").addEventListener("focusout", (event) => {
+  if (event.target.closest(".installed-video-return, .installed-video-window-actions")) {
+    showInstalledVideoControls();
+  }
+});
 $("#installedVideoDialog").addEventListener("cancel", (event) => {
   event.preventDefault();
   closeInstalledVideo();
