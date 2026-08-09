@@ -1,9 +1,12 @@
+const LEGACY_PRODUCTION_ORIGIN = "https://music.unblocked.mov";
+const PRODUCTION_ORIGIN = "https://resonance-core.blithe-haven-9710.chatgpt.site";
+
 export function createEmptyState() {
   return {
     tracks: [],
     playlists: [{ id: "liked", name: "Liked Songs", trackIDs: [], isSystem: true }],
     favorites: [],
-    serverURL: "https://music.unblocked.mov",
+    serverURL: "https://resonance-core.blithe-haven-9710.chatgpt.site",
     volume: 0.78,
     playbackRate: 1,
     shuffle: false,
@@ -394,10 +397,30 @@ function normalizedPlaylistID(value) {
 
 function normalizedServerOrigin(value) {
   try {
-    return new URL(String(value || "").trim()).origin;
+    const origin = new URL(String(value || "").trim()).origin;
+    return origin === LEGACY_PRODUCTION_ORIGIN ? PRODUCTION_ORIGIN : origin;
   } catch {
     return "";
   }
+}
+
+function canonicalServerURL(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    if (url.origin === LEGACY_PRODUCTION_ORIGIN && url.pathname === "/" && !url.search && !url.hash) {
+      return PRODUCTION_ORIGIN;
+    }
+  } catch {}
+  return value;
+}
+
+function canonicalProfileStateKey(value) {
+  const key = String(value || "");
+  const marker = "#profile=";
+  const boundary = key.indexOf(marker);
+  if (boundary < 0) return normalizedServerOrigin(key) || key;
+  const origin = normalizedServerOrigin(key.slice(0, boundary));
+  return origin ? origin + key.slice(boundary) : key;
 }
 
 function normalizedServerSongIdentityText(value) {
@@ -626,7 +649,9 @@ function normalizedProfileState(value = {}) {
     knownRemotePlaylistIDs: unique(Array.isArray(value.knownRemotePlaylistIDs) ? value.knownRemotePlaylistIDs.map(normalizedPlaylistID) : []),
     dirtyPlaylistIDs: unique(Array.isArray(value.dirtyPlaylistIDs) ? value.dirtyPlaylistIDs.map(normalizedPlaylistID) : []),
     deletedPlaylistIDs: unique(Array.isArray(value.deletedPlaylistIDs) ? value.deletedPlaylistIDs.map(normalizedPlaylistID) : []),
-    playlistSyncServerURL: typeof value.playlistSyncServerURL === "string" ? value.playlistSyncServerURL : null,
+    playlistSyncServerURL: typeof value.playlistSyncServerURL === "string"
+      ? canonicalProfileStateKey(value.playlistSyncServerURL)
+      : null,
     remoteLikedSongIDs: unique(Array.isArray(value.remoteLikedSongIDs) ? value.remoteLikedSongIDs.filter((id) => typeof id === "string" && id) : []),
     dirtyRemoteLikeSongIDs: unique(Array.isArray(value.dirtyRemoteLikeSongIDs) ? value.dirtyRemoteLikeSongIDs.filter((id) => typeof id === "string" && id) : []),
     likesDirty: Boolean(value.likesDirty),
@@ -713,6 +738,7 @@ export function normalizeState(value) {
   const hadRemoteLikedSongIDs = Array.isArray(value?.remoteLikedSongIDs);
   const hadDirtyRemoteLikeSongIDs = Array.isArray(value?.dirtyRemoteLikeSongIDs);
   const state = value && typeof value === "object" ? { ...base, ...value } : base;
+  state.serverURL = canonicalServerURL(state.serverURL);
   state.tracks = Array.isArray(state.tracks) ? state.tracks : [];
   state.playlists = Array.isArray(state.playlists) ? state.playlists : [];
   state.favorites = Array.isArray(state.favorites) ? state.favorites : [];
@@ -720,14 +746,27 @@ export function normalizeState(value) {
   state.knownRemotePlaylistIDs = unique(Array.isArray(state.knownRemotePlaylistIDs) ? state.knownRemotePlaylistIDs.map(normalizedPlaylistID) : []);
   state.dirtyPlaylistIDs = unique(Array.isArray(state.dirtyPlaylistIDs) ? state.dirtyPlaylistIDs.map(normalizedPlaylistID) : []);
   state.deletedPlaylistIDs = unique(Array.isArray(state.deletedPlaylistIDs) ? state.deletedPlaylistIDs.map(normalizedPlaylistID) : []);
-  state.playlistSyncServerURL = typeof state.playlistSyncServerURL === "string" ? state.playlistSyncServerURL : null;
+  state.playlistSyncServerURL = typeof state.playlistSyncServerURL === "string"
+    ? canonicalProfileStateKey(state.playlistSyncServerURL)
+    : null;
   state.syncProfileID = typeof state.syncProfileID === "string" && state.syncProfileID ? state.syncProfileID : "default";
   state.syncProfiles = Array.isArray(state.syncProfiles) && state.syncProfiles.length
     ? state.syncProfiles
     : [{ id: "default", name: "Default", is_default: true }];
-  state.profileStates = state.profileStates && typeof state.profileStates === "object"
-    ? Object.fromEntries(Object.entries(state.profileStates).map(([key, snapshot]) => [key, normalizedProfileState(snapshot)]))
-    : {};
+  if (state.profileStates && typeof state.profileStates === "object") {
+    const canonicalStates = {};
+    for (const [key, snapshot] of Object.entries(state.profileStates)) {
+      const canonicalKey = canonicalProfileStateKey(key);
+      if (canonicalKey === key) canonicalStates[canonicalKey] = normalizedProfileState(snapshot);
+    }
+    for (const [key, snapshot] of Object.entries(state.profileStates)) {
+      const canonicalKey = canonicalProfileStateKey(key);
+      if (!(canonicalKey in canonicalStates)) canonicalStates[canonicalKey] = normalizedProfileState(snapshot);
+    }
+    state.profileStates = canonicalStates;
+  } else {
+    state.profileStates = {};
+  }
   state.remoteLikedSongIDs = unique(Array.isArray(state.remoteLikedSongIDs) ? state.remoteLikedSongIDs.filter((id) => typeof id === "string" && id) : []);
   state.dirtyRemoteLikeSongIDs = unique(Array.isArray(state.dirtyRemoteLikeSongIDs) ? state.dirtyRemoteLikeSongIDs.filter((id) => typeof id === "string" && id) : []);
   state.likesDirty = Boolean(state.likesDirty);

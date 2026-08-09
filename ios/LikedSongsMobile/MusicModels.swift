@@ -40,6 +40,9 @@ enum MobileServerEndpointError: LocalizedError, Equatable {
 }
 
 enum MobileServerEndpointPolicy {
+    private static let legacyProductionHost = "music.unblocked.mov"
+    private static let productionHost = "resonance-core.blithe-haven-9710.chatgpt.site"
+
     static func resolve(_ rawValue: String) throws -> MobileServerEndpointResolution {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard var components = URLComponents(string: trimmed),
@@ -53,7 +56,7 @@ enum MobileServerEndpointPolicy {
             throw MobileServerEndpointError.credentialsInURL
         }
         components.scheme = scheme
-        components.host = host
+        components.host = canonicalHost(host, scheme: scheme, port: components.port)
         components.query = nil
         components.fragment = nil
         while components.path.count > 1, components.path.hasSuffix("/") {
@@ -76,16 +79,37 @@ enum MobileServerEndpointPolicy {
               let host = url.host?.lowercased(),
               !host.isEmpty else { return nil }
         let port = url.port ?? (scheme == "https" ? 443 : 80)
+        let canonicalHost = canonicalHost(host, scheme: scheme, port: port)
         var components = URLComponents()
         components.scheme = scheme
-        components.host = host
+        components.host = canonicalHost
         components.port = port
         return components.string
+    }
+
+    static func canonicalContext(_ context: MobileServerContext) -> MobileServerContext {
+        guard let url = URL(string: context.origin),
+              let origin = normalizedOrigin(of: url) else { return context }
+        return MobileServerContext(origin: origin, profileID: context.profileID)
+    }
+
+    static func canonicalStoredServerKey(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let legacyOrigin = "https://\(legacyProductionHost)"
+        guard value == legacyOrigin || value.hasPrefix("\(legacyOrigin)#profile=") else { return value }
+        return "https://\(productionHost)" + value.dropFirst(legacyOrigin.count)
     }
 
     static func context(serverURL: URL, profileID: String) -> MobileServerContext? {
         guard let origin = normalizedOrigin(of: serverURL), !profileID.isEmpty else { return nil }
         return MobileServerContext(origin: origin, profileID: profileID)
+    }
+
+    private static func canonicalHost(_ host: String, scheme: String, port: Int?) -> String {
+        let isDefaultHTTPSPort = port == nil || port == 443
+        return scheme == "https" && isDefaultHTTPSPort && host == legacyProductionHost
+            ? productionHost
+            : host
     }
 }
 

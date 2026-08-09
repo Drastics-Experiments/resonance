@@ -38,6 +38,9 @@ enum MediaKindClassifier {
 }
 
 struct ServerSongIdentity: Hashable, Sendable {
+    private static let legacyProductionHost = "music.unblocked.mov"
+    private static let productionHost = "resonance-core.blithe-haven-9710.chatgpt.site"
+
     let origin: String
     let profileID: String
     let songID: String
@@ -63,7 +66,10 @@ struct ServerSongIdentity: Hashable, Sendable {
               !host.isEmpty else { return nil }
         let defaultPort = scheme == "https" ? 443 : 80
         let port = url.port ?? defaultPort
-        let renderedHost = host.contains(":") ? "[\(host)]" : host
+        let canonicalHost = scheme == "https" && port == 443 && host == legacyProductionHost
+            ? productionHost
+            : host
+        let renderedHost = canonicalHost.contains(":") ? "[\(canonicalHost)]" : canonicalHost
         return port == defaultPort
             ? "\(scheme)://\(renderedHost)"
             : "\(scheme)://\(renderedHost):\(port)"
@@ -81,6 +87,9 @@ struct ServerSongIdentity: Hashable, Sendable {
 }
 
 enum ServerEndpointPolicy {
+    private static let legacyProductionHost = "music.unblocked.mov"
+    private static let productionHost = "resonance-core.blithe-haven-9710.chatgpt.site"
+
     static func normalizedURL(
         _ rawValue: String,
         allowsInsecurePreviewLoopback: Bool = false
@@ -97,7 +106,11 @@ enum ServerEndpointPolicy {
         guard isSecure || isAllowedPreviewLoopback else { return nil }
         guard components.user == nil, components.password == nil else { return nil }
         components.scheme = scheme
-        components.host = host
+        components.host = scheme == "https"
+            && (components.port == nil || components.port == 443)
+            && host == legacyProductionHost
+            ? productionHost
+            : host
         if (scheme == "https" && components.port == 443)
             || (scheme == "http" && components.port == 80) {
             components.port = nil

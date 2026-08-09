@@ -63,6 +63,15 @@ private final class RecordingMacSystemPlaybackController: MacSystemPlaybackContr
 @MainActor
 @Suite(.serialized)
 struct LikedSongsFocusTests {
+    @Test
+    func accountEmailIsCensoredUntilExplicitlyRevealed() {
+        let email = "private@example.com"
+        #expect(ResonanceEmailPrivacy.displayedAddress(email, isRevealed: false)
+            == ResonanceEmailPrivacy.censoredAddress)
+        #expect(ResonanceEmailPrivacy.displayedAddress(email, isRevealed: true) == email)
+        #expect(ResonanceEmailPrivacy.safeDisplayName(email, email: email) == "Clerk account")
+    }
+
     private let glass = URL(fileURLWithPath: "/System/Library/Sounds/Glass.aiff")
     private let ping = URL(fileURLWithPath: "/System/Library/Sounds/Ping.aiff")
     private let hero = URL(fileURLWithPath: "/System/Library/Sounds/Hero.aiff")
@@ -245,6 +254,8 @@ struct LikedSongsFocusTests {
         ))
         #expect(ServerEndpointPolicy.normalizedURL("https://MUSIC.test:443/base/")?.absoluteString
             == "https://music.test/base")
+        #expect(ServerEndpointPolicy.normalizedURL("https://music.unblocked.mov")?.absoluteString
+            == "https://resonance-core.blithe-haven-9710.chatgpt.site")
         #expect(ServerEndpointPolicy.normalizedURL("https://user:secret@music.test") == nil)
     }
 
@@ -274,6 +285,8 @@ struct LikedSongsFocusTests {
         #expect(active == sameOrigin)
         #expect(active != otherProfile)
         #expect(active != otherServer)
+        #expect(ServerSongIdentity.normalizedOrigin("https://music.unblocked.mov")
+            == "https://resonance-core.blithe-haven-9710.chatgpt.site")
     }
 
     @Test

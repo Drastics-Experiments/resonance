@@ -13,8 +13,12 @@ class ServerNetworkIntegrityPolicyTest {
     @Test
     fun productionServerURLsRequireHTTPS() {
         assertEquals(
-            "https://music.unblocked.mov",
-            ServerClient.normalizeServerURL(" https://music.unblocked.mov/ "),
+            "https://resonance-core.blithe-haven-9710.chatgpt.site",
+            ServerClient.normalizeServerURL(" https://resonance-core.blithe-haven-9710.chatgpt.site/ "),
+        )
+        assertEquals(
+            "https://resonance-core.blithe-haven-9710.chatgpt.site",
+            ServerClient.normalizeServerURL("https://music.unblocked.mov"),
         )
 
         expectFailure<IllegalArgumentException>("must use HTTPS") {
@@ -62,20 +66,20 @@ class ServerNetworkIntegrityPolicyTest {
 
     @Test
     fun authorizedMediaURLsMustStayOnTheConfiguredOrigin() {
-        val baseURL = "https://music.unblocked.mov"
+        val baseURL = "https://resonance-core.blithe-haven-9710.chatgpt.site"
 
         assertEquals(
-            "https://music.unblocked.mov/api/v1/songs/song-1/download",
+            "https://resonance-core.blithe-haven-9710.chatgpt.site/api/v1/songs/song-1/download",
             ServerNetworkPolicy.resolveAuthorizedMediaURL(
                 baseURL,
                 "/api/v1/songs/song-1/download",
             ).toString(),
         )
         assertEquals(
-            "https://music.unblocked.mov:443/file/song-1",
+            "https://resonance-core.blithe-haven-9710.chatgpt.site:443/file/song-1",
             ServerNetworkPolicy.resolveAuthorizedMediaURL(
                 baseURL,
-                "https://music.unblocked.mov:443/file/song-1",
+                "https://resonance-core.blithe-haven-9710.chatgpt.site:443/file/song-1",
             ).toString(),
         )
 
@@ -95,11 +99,11 @@ class ServerNetworkIntegrityPolicyTest {
 
     @Test
     fun redirectsCannotLeaveTheOriginOrDowngradeHTTPS() {
-        val baseURL = "https://music.unblocked.mov"
-        val current = URL("https://music.unblocked.mov/api/v1/songs/song-1/download")
+        val baseURL = "https://resonance-core.blithe-haven-9710.chatgpt.site"
+        val current = URL("https://resonance-core.blithe-haven-9710.chatgpt.site/api/v1/songs/song-1/download")
 
         assertEquals(
-            "https://music.unblocked.mov/api/v1/file/song-1",
+            "https://resonance-core.blithe-haven-9710.chatgpt.site/api/v1/file/song-1",
             ServerNetworkPolicy.resolveAuthorizedRedirect(
                 baseURL,
                 current,

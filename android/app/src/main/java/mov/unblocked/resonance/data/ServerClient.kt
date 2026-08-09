@@ -839,7 +839,14 @@ internal object ServerNetworkPolicy {
         ) {
             "Server URL must use HTTPS outside local development"
         }
-        return trimmed
+        return if (
+            scheme == "https" && host == "music.unblocked.mov" &&
+            (uri.port == -1 || uri.port == 443) && uri.path.orEmpty().isEmpty()
+        ) {
+            "https://resonance-core.blithe-haven-9710.chatgpt.site"
+        } else {
+            trimmed
+        }
     }
 
     fun canonicalOrigin(value: String, allowCleartextDevelopment: Boolean): String {

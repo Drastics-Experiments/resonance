@@ -78,6 +78,7 @@ let libraryFilter = "all";
 let serverToken = "";
 let serverAdminToken = "";
 let accountSession = null;
+let isAccountEmailRevealed = false;
 let serverCatalog = [];
 let serverCatalogGeneration = 0;
 const serverArtworkCache = new Map();
@@ -215,8 +216,6 @@ let clipEditorSavedStartSeconds = 0;
 let clipEditorSavedEndSeconds = 0;
 let clipBoundaryTrackID = null;
 let profileGeneration = 0;
-let profilePictureGeneration = 0;
-let profilePictureScope = "";
 let activeProfilePicture = null;
 let settingsPanel = "general";
 let settingsRecordingAction = null;
@@ -858,10 +857,6 @@ async function commitPlaylistTrackReorder(sourceID, targetID, insertAfter) {
   return true;
 }
 
-function profilePictureContext() {
-  return { serverURL: state.serverURL, profileID: activeProfileID() };
-}
-
 function paintProfileAvatar(element, initial) {
   if (!element) return;
   element.textContent = initial;
@@ -870,70 +865,44 @@ function paintProfileAvatar(element, initial) {
   else element.style.removeProperty("background-image");
 }
 
-async function refreshProfilePicture() {
-  const context = profilePictureContext();
-  const scope = `${context.serverURL}#profile=${context.profileID}`;
-  const generation = ++profilePictureGeneration;
-  profilePictureScope = scope;
-  const picture = await api.loadProfilePicture(context).catch(() => null);
-  if (generation !== profilePictureGeneration || scope !== profilePictureScope) return;
-  activeProfilePicture = picture;
-  updateProfileControlView({ refreshPicture: false });
-  if ($("#profileSwitchDialog")?.open) updateProfileSwitchDialog({ resetQuery: false });
-}
-
 function updateProfileControl() {
   updateProfileControlView();
+}
+
+function displayedAccountEmail(email = accountSession?.email) {
+  return isAccountEmailRevealed && email ? email : "••••••@••••••.•••";
+}
+
+function safeAccountDisplayName(session = accountSession, fallback = "Account") {
+  const email = String(session?.email || "").trim();
+  const candidate = String(session?.displayName || fallback || "").trim();
+  const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate);
+  return candidate && !looksLikeEmail && candidate.toLocaleLowerCase() !== email.toLocaleLowerCase()
+    ? candidate
+    : "Clerk account";
 }
 
 function updateProfileControlView({ refreshPicture = true } = {}) {
   const control = $("#profileControl");
   const button = $("#profileButton");
   if (!control || !button) return;
-  const name = String(activeProfile().name || "Default").trim() || "Default";
+  const name = accountSession
+    ? safeAccountDisplayName(accountSession)
+    : safeAccountDisplayName(null, activeProfile().name || "Account");
   control.hidden = false;
   button.title = `Profile: ${name}`;
   button.setAttribute("aria-label", `Open profile menu for ${name}`);
   const initial = Array.from(name)[0]?.toLocaleUpperCase() || "D";
-  const nextScope = `${state.serverURL}#profile=${activeProfileID()}`;
-  if (nextScope !== profilePictureScope) {
-    profilePictureScope = nextScope;
-    activeProfilePicture = null;
-    if (refreshPicture) void refreshProfilePicture();
-  }
+  activeProfilePicture = accountSession?.imageURL || null;
   paintProfileAvatar($("#profileInitial"), initial);
   paintProfileAvatar($("#profileMenuInitial"), initial);
   $("#profileMenuName").textContent = name;
-  $("#profileMenuManage").setAttribute("aria-label", `Manage ${name} profile`);
-}
-
-async function chooseActiveProfilePicture() {
-  const context = profilePictureContext();
-  closeProfileMenu();
-  try {
-    const picture = await api.chooseProfilePicture(context);
-    if (!picture) return;
-    profilePictureScope = `${context.serverURL}#profile=${context.profileID}`;
-    activeProfilePicture = picture;
-    updateProfileControlView({ refreshPicture: false });
-    updateProfileSwitchDialog({ resetQuery: false });
-  } catch (error) {
-    showNotice(friendlyIPCError(error, "Resonance could not use that profile picture."), "error");
-  }
-}
-
-async function removeActiveProfilePicture() {
-  const context = profilePictureContext();
-  closeProfileMenu();
-  try {
-    await api.removeProfilePicture(context);
-    profilePictureScope = `${context.serverURL}#profile=${context.profileID}`;
-    activeProfilePicture = null;
-    updateProfileControlView({ refreshPicture: false });
-    updateProfileSwitchDialog({ resetQuery: false });
-  } catch (error) {
-    showNotice(friendlyIPCError(error, "Resonance could not remove that profile picture."), "error");
-  }
+  const email = $("#profileMenuEmail");
+  email.textContent = accountSession?.email ? displayedAccountEmail() : "Clerk account";
+  email.title = accountSession?.email
+    ? (isAccountEmailRevealed ? "Click to hide email address" : "Click to reveal email address")
+    : "";
+  $("#profileMenuManage").setAttribute("aria-label", `Manage ${name} account`);
 }
 
 function closeProfileMenu({ restoreFocus = false } = {}) {
@@ -3620,6 +3589,17 @@ async function refreshProfiles() {
   const url = $("#serverURL")?.value.trim() || state.serverURL;
   const token = serverToken;
   if (!url || !token) return;
+  if (accountSession?.profileID) {
+    const profile = {
+      id: accountSession.profileID,
+      name: safeAccountDisplayName(accountSession),
+      is_default: true,
+    };
+    state.syncProfiles = [profile];
+    await activateProfile(profile.id, accountSession.baseURL);
+    renderProfileOptions(profile.id);
+    return;
+  }
   const response = await api.fetchProfiles({ baseURL: url, token });
   state.syncProfiles = response.profiles || [];
   const resolution = resolveSyncProfile(state.syncProfiles, activeProfileID(), response.default_profile_id);
@@ -3627,69 +3607,6 @@ async function refreshProfiles() {
     await activateProfile(resolution.profile.id);
   }
   renderProfileOptions(resolution.profile?.id || activeProfileID());
-}
-
-function updateProfileSwitchDialog({ resetQuery = true } = {}) {
-  const profile = activeProfile();
-  const name = String(profile.name || "Default").trim() || "Default";
-  const initial = Array.from(name)[0]?.toLocaleUpperCase() || "D";
-  paintProfileAvatar($("#profileSwitchInitial"), initial);
-  $("#profileSwitchCurrentName").textContent = name;
-  $("#profileSwitchPicture").title = activeProfilePicture
-    ? "Change profile picture"
-    : "Choose profile picture";
-  $("#profileSwitchPicture").setAttribute("aria-label", $("#profileSwitchPicture").title);
-  $("#profileSwitchRemovePicture").hidden = !activeProfilePicture;
-  if (resetQuery) $("#profileSwitchQuery").value = name;
-}
-
-function matchingSyncProfile(query) {
-  const key = String(query || "").trim().toLocaleLowerCase();
-  if (!key) return null;
-  return state.syncProfiles.find((profile) =>
-    String(profile.id || "").toLocaleLowerCase() === key
-    || String(profile.name || "").toLocaleLowerCase() === key) || null;
-}
-
-function updateProfileSwitchActions({ busy = false } = {}) {
-  const query = $("#profileSwitchQuery").value.trim();
-  const current = matchingSyncProfile(query);
-  const connected = Boolean(state.serverURL && serverToken);
-  $("#createProfileFromSwitcher").disabled = busy || !connected || !query || Boolean(current);
-  $("#confirmProfileSwitch").disabled = busy || !connected || !query || current?.id === activeProfileID();
-  if (busy) return;
-  const status = $("#profileSwitchStatus");
-  if (!connected) status.textContent = "Not connected";
-  else if (current?.id === activeProfileID()) status.textContent = "Current profile";
-  else if (current) status.textContent = "Existing profile";
-  else status.textContent = "New profile name";
-}
-
-async function openProfileSwitcher() {
-  closeProfileMenu();
-  updateProfileSwitchDialog();
-  const dialog = $("#profileSwitchDialog");
-  const status = $("#profileSwitchStatus");
-  dialog.showModal();
-  $("#profileSwitchQuery").focus();
-  $("#profileSwitchQuery").select();
-  if (!state.serverURL || !serverToken) {
-    updateProfileSwitchActions();
-    return;
-  }
-  status.textContent = "Checking server profiles…";
-  updateProfileSwitchActions({ busy: true });
-  try {
-    const response = await api.fetchProfiles({ baseURL: state.serverURL, token: serverToken });
-    state.syncProfiles = response.profiles || [];
-    renderProfileOptions();
-    updateProfileSwitchDialog({ resetQuery: false });
-    updateProfileSwitchActions();
-  } catch (error) {
-    status.textContent = error.message || "Could not load profiles";
-    $("#createProfileFromSwitcher").disabled = true;
-    $("#confirmProfileSwitch").disabled = true;
-  }
 }
 
 async function activateProfile(profileID, serverURL = state.serverURL) {
@@ -3740,7 +3657,8 @@ async function saveServerForm() {
   ensureServerContextCanChange();
   const settingsOpen = Boolean($("#settingsDialog")?.open && settingsPanel === "server" && $("#serverSettingsForm"));
   const nextServerURL = settingsOpen ? $("#serverURL").value.trim() : state.serverURL;
-  const nextProfileID = settingsOpen ? ($("#syncProfile")?.value || activeProfileID()) : activeProfileID();
+  const nextProfileID = accountSession?.profileID
+    || (settingsOpen ? ($("#syncProfile")?.value || activeProfileID()) : activeProfileID());
   const requestedUploadMode = settingsOpen ? $("#serverUploadMode")?.value : currentServerTransferModes().uploadMode;
   const requestedDownloadMode = settingsOpen ? $("#serverDownloadMode")?.value : currentServerTransferModes().downloadMode;
   await activateProfile(nextProfileID, nextServerURL);
@@ -3758,9 +3676,11 @@ async function saveServerForm() {
   scheduleListeningHistorySync();
 }
 
-function applyAccountSession(nextSession, error = null) {
+async function applyAccountSession(nextSession, error = null) {
   const previousToken = serverToken;
+  const previousEmail = accountSession?.email || null;
   accountSession = nextSession || null;
+  if ((accountSession?.email || null) !== previousEmail) isAccountEmailRevealed = false;
   serverToken = String(accountSession?.accessToken || "").trim();
   serverAdminToken = accountSession?.role === "admin" ? serverToken : "";
   if (previousToken !== serverToken) {
@@ -3770,9 +3690,19 @@ function applyAccountSession(nextSession, error = null) {
     selectedRemoteIDs.clear();
   }
   if (error) serverConnectionText = error;
-  else if (accountSession) serverConnectionText = `Signed in as ${accountSession.email}`;
+  else if (accountSession) serverConnectionText = "Signed in with Clerk";
   else serverConnectionText = "Not signed in";
   if ($("#settingsDialog")?.open && settingsPanel === "server") renderSettings();
+  if (accountSession?.profileID) {
+    state.serverURL = accountSession.baseURL;
+    state.syncProfiles = [{
+      id: accountSession.profileID,
+      name: safeAccountDisplayName(accountSession),
+      is_default: true,
+    }];
+    await activateProfile(accountSession.profileID, accountSession.baseURL);
+  }
+  updateProfileControlView({ refreshPicture: false });
 }
 
 function renderSettings() {
@@ -3836,19 +3766,12 @@ function renderSettings() {
               <label class="settings-server-field settings-server-field-wide" for="serverURL"><span>Server URL</span><input id="serverURL" autocomplete="url" placeholder="https://music.example.com" required></label>
               <div class="settings-account-card settings-server-field-wide">
                 ${accountSession
-                  ? `<div><strong>${escapeHTML(accountSession.email)}</strong><small>${accountSession.role === "admin" ? "Administrator" : "Member"}</small></div><button id="signOutAccount" class="secondary" type="button">Sign out</button>`
+                  ? `<div><strong>${escapeHTML(safeAccountDisplayName(accountSession))}</strong><small><button id="settingsAccountEmail" class="email-disclosure" type="button" aria-label="${isAccountEmailRevealed ? "Hide" : "Reveal"} email address">${escapeHTML(displayedAccountEmail())}</button> · ${accountSession.role === "admin" ? "Administrator" : "Member"}</small></div><button id="signOutAccount" class="secondary" type="button">Sign out</button>`
                   : `<div><strong>${serverToken ? "Legacy connection" : "Sign in to Resonance"}</strong><small>${serverToken ? "Sign in to finish upgrading this device." : "Use email, Google, Apple, or Discord in your web browser."}</small></div><div class="settings-auth-grid"><button class="secondary" type="button" data-auth-provider="clerk">Sign in or create account</button></div>`}
               </div>
             </div>
-            <div class="settings-section-heading compact"><span>PROFILE & TRANSFERS</span><p>Choose the active profile and the methods allowed by this server.</p></div>
+            <div class="settings-section-heading compact"><span>ACCOUNT & TRANSFERS</span><p>Your Clerk account selects the library; choose the transfer methods allowed by this server.</p></div>
             <div class="settings-server-card settings-server-options">
-              <div class="settings-server-field settings-server-field-wide">
-                <span id="syncProfileLabel">Sync profile</span>
-                <div class="profile-picker-row">
-                  <div id="syncProfile" data-custom-select aria-labelledby="syncProfileLabel"></div>
-                  <button id="newSyncProfile" class="secondary" type="button">New profile</button>
-                </div>
-              </div>
               <div class="settings-server-field">
                 <span id="serverUploadModeLabel">Upload mode</span>
                 <div id="serverUploadMode" data-custom-select aria-labelledby="serverUploadModeLabel"></div>
@@ -3936,6 +3859,7 @@ function bindServerSettingsControls() {
         await api.signInAccount({
           baseURL: $("#serverURL").value.trim(),
           provider: button.dataset.authProvider,
+          profileID: activeProfileID(),
         });
         status.textContent = "Complete sign-in in your web browser.";
       } catch (error) {
@@ -3946,23 +3870,13 @@ function bindServerSettingsControls() {
   const signOut = $("#signOutAccount");
   if (signOut) signOut.onclick = async () => {
     await api.signOutAccount();
-    applyAccountSession(null);
+    await applyAccountSession(null);
   };
-
-  $("#newSyncProfile").onclick = async () => {
-    const name = prompt("Name this sync profile:");
-    if (!name?.trim()) return;
-    try {
-      const profile = await api.createProfile({
-        baseURL: $("#serverURL")?.value.trim() || state.serverURL,
-        token: serverToken,
-        name: name.trim(),
-      });
-      state.syncProfiles = [...state.syncProfiles, profile];
-      renderProfileOptions(profile.id);
-    } catch (error) {
-      showNotice(error.message || "Could not create the sync profile.");
-    }
+  const accountEmail = $("#settingsAccountEmail");
+  if (accountEmail) accountEmail.onclick = () => {
+    isAccountEmailRevealed = !isAccountEmailRevealed;
+    renderSettings();
+    updateProfileControlView({ refreshPicture: false });
   };
 
   $("#serverSettingsForm").onsubmit = async (event) => {
@@ -7336,9 +7250,14 @@ $("#fullPlayerRepeat").onclick = () => {
 };
 $("#newPlaylist").onclick = () => newPlaylist();
 $("#profileButton").onclick = toggleProfileMenu;
-$("#profileMenuManage").onclick = openProfileSwitcher;
-$("#profileSwitchPicture").onclick = chooseActiveProfilePicture;
-$("#profileSwitchRemovePicture").onclick = removeActiveProfilePicture;
+$("#profileMenuManage").onclick = () => openSettings("server");
+$("#profileMenuEmail").onclick = (event) => {
+  if (!accountSession?.email) return;
+  event.preventDefault();
+  event.stopPropagation();
+  isAccountEmailRevealed = !isAccountEmailRevealed;
+  updateProfileControlView({ refreshPicture: false });
+};
 $("#profileHistory").onclick = openListeningHistory;
 $("#profileClipEditor").onclick = openClipEditor;
 $("#profileSettings").onclick = () => {
@@ -7540,7 +7459,6 @@ $("#addSongsDialog").addEventListener("close", () => {
   addSongsPlaylistID = null;
   if (section === "library" && selectedPlaylistID) renderLibrary();
 });
-$("#cancelProfileSwitch").onclick = () => $("#profileSwitchDialog").close();
 $("#closeListeningHistory").onclick = () => $("#listeningHistoryDialog").close();
 $("#listeningHistoryRange").onchange = () => {
   listeningHistoryWindowOffset = 0;
@@ -7564,91 +7482,6 @@ $("#listeningHistoryDialog").addEventListener("close", () => {
   $("#listeningHistoryDialog").classList.remove("day-expanded");
   $("#listeningHistoryDayDetails").hidden = true;
 });
-async function finishProfileSelection(profile) {
-  renderProfileOptions(profile.id);
-  const previousProfileID = activeProfileID();
-  await activateProfile(profile.id);
-  await persist();
-  updateProfileControl();
-  $("#profileSwitchDialog").close();
-  render();
-  if (profile.id !== previousProfileID) {
-    schedulePlaylistSync();
-    scheduleListeningHistorySync();
-    await serverAction("catalog");
-  }
-}
-
-$("#createProfileFromSwitcher").onclick = async () => {
-  const name = $("#profileSwitchQuery").value.replace(/\s+/g, " ").trim();
-  const status = $("#profileSwitchStatus");
-  const create = $("#createProfileFromSwitcher");
-  const submit = $("#confirmProfileSwitch");
-  if (!name) {
-    status.textContent = "Enter a name for the new profile.";
-    return;
-  }
-  const existing = matchingSyncProfile(name);
-  if (existing) {
-    status.textContent = existing.id === activeProfileID() ? "That is already the current profile." : "That profile already exists. Use Switch instead.";
-    updateProfileSwitchActions();
-    return;
-  }
-  if (!state.serverURL || !serverToken) {
-    status.textContent = "Connect to the music server in Settings first.";
-    return;
-  }
-  create.disabled = true;
-  submit.disabled = true;
-  status.textContent = "Creating profile…";
-  try {
-    const profile = await api.createProfile({
-      baseURL: state.serverURL,
-      token: serverToken,
-      name,
-    });
-    state.syncProfiles = [...state.syncProfiles.filter((item) => item.id !== profile.id), profile];
-    await finishProfileSelection(profile);
-    showNotice(`Created and switched to ${profile.name || name}.`, "status");
-  } catch (error) {
-    status.textContent = error.message || "Could not create the profile.";
-  } finally {
-    if ($("#profileSwitchDialog").open) updateProfileSwitchActions();
-  }
-};
-
-$("#profileSwitchForm").onsubmit = async (event) => {
-  event.preventDefault();
-  const query = $("#profileSwitchQuery").value.trim();
-  const status = $("#profileSwitchStatus");
-  const submit = $("#confirmProfileSwitch");
-  if (!query) {
-    status.textContent = "Enter a profile name or ID.";
-    return;
-  }
-  if (!state.serverURL || !serverToken) {
-    status.textContent = "Connect to the music server in Settings first.";
-    return;
-  }
-  submit.disabled = true;
-  status.textContent = "Checking server profiles…";
-  try {
-    const response = await api.fetchProfiles({ baseURL: state.serverURL, token: serverToken });
-    state.syncProfiles = response.profiles || [];
-    const resolution = resolveSyncProfile(state.syncProfiles, query, response.default_profile_id);
-    const { profile } = resolution;
-    if (!profile) throw new Error(`No server profile matches “${query}”.`);
-    await finishProfileSelection(profile);
-    if (resolution.fellBackToDefault) {
-      showNotice(`Profile “${query}” was not found. Switched to ${profile.name || "Default"}.`, "status");
-    }
-  } catch (error) {
-    status.textContent = error.message || "Could not switch profiles.";
-  } finally {
-    if ($("#profileSwitchDialog").open) updateProfileSwitchActions();
-  }
-};
-$("#profileSwitchQuery").oninput = () => updateProfileSwitchActions();
 function keybindFromKeyboardEvent(event) {
   if (["Control", "Alt", "Shift", "Meta"].includes(event.key)) return null;
   let key = event.code === "Space" ? "Space" : event.key;
@@ -8007,24 +7840,32 @@ api.onPrepareToClose(async () => {
     api.readyToClose();
   }
 });
-accountSession = await api.loadAccountSession().catch(() => null);
+accountSession = await api.loadAccountSession({ profileID: activeProfileID() }).catch(() => null);
 if (accountSession) {
   state.serverURL = accountSession.baseURL;
   serverToken = String(accountSession.accessToken || "").trim();
   serverAdminToken = accountSession.role === "admin" ? serverToken : "";
+  if (accountSession.profileID) {
+    state.syncProfiles = [{
+      id: accountSession.profileID,
+      name: safeAccountDisplayName(accountSession),
+      is_default: true,
+    }];
+    await activateProfile(accountSession.profileID, accountSession.baseURL);
+  }
 } else {
   ({ clientToken: serverToken = "", adminToken: serverAdminToken = "" } = await api.loadServerCredentials());
   serverToken = serverToken.trim();
   serverAdminToken = serverAdminToken.trim();
 }
 api.onAccountSession(({ session, error }) => {
-  applyAccountSession(session, error);
-  if (session && state.serverURL) {
-    void refreshClientConfig({ force: true })
+  void applyAccountSession(session, error).then(() => {
+    if (!session || !state.serverURL) return;
+    return refreshClientConfig({ force: true })
       .then(() => refreshProfiles())
       .then(() => serverAction("catalog"))
       .catch((failure) => { serverConnectionText = failure.message || "Connection failed"; });
-  }
+  });
 });
 const localImportCapabilities = await api.localImportCapabilities().catch(() => ({ enabled: false }));
 localImportAvailable = Boolean(localImportCapabilities?.enabled);

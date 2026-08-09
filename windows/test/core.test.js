@@ -75,6 +75,30 @@ test("playlist artwork uses only the first four custom-playlist songs", () => {
   assert.deepEqual(playlistArtworkTrackIDs({ trackIDs, isSystem: true }), []);
 });
 
+test("migrates the legacy production server without losing saved profile state", () => {
+  const state = normalizeState({
+    ...createEmptyState(),
+    serverURL: "https://music.unblocked.mov",
+    syncProfileID: "active-profile",
+    playlistSyncServerURL: "https://music.unblocked.mov#profile=active-profile",
+    profileStates: {
+      "https://music.unblocked.mov#profile=clerk-profile": {
+        playlists: [{ id: "saved", name: "Saved", trackIDs: [], isSystem: false }],
+      },
+    },
+  });
+  assert.equal(state.serverURL, "https://resonance-core.blithe-haven-9710.chatgpt.site");
+  assert.equal(
+    state.playlistSyncServerURL,
+    "https://resonance-core.blithe-haven-9710.chatgpt.site#profile=active-profile",
+  );
+  assert.equal(
+    state.profileStates["https://resonance-core.blithe-haven-9710.chatgpt.site#profile=clerk-profile"]
+      .playlists[0].name,
+    "Saved",
+  );
+});
+
 test("uses a custom fullscreen video player with queue, repeat, controls, and shared volume", () => {
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.mp4", fileUrl: "file:///C:/Music/clip.mp4" }), true);
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.MOV", fileUrl: "file:///C:/Music/clip.MOV" }), true);
@@ -137,18 +161,19 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.doesNotMatch(styleSource, /\.installed-video-controls:focus-within/);
 });
 
-test("keeps profile pictures local to the active server profile", () => {
-  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
-  const preloadSource = readFileSync(new URL("../preload.cjs", import.meta.url), "utf8");
+test("renders the Clerk account name and picture without local profile controls", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
-  assert.match(mainSource, /function profilePicturePath\(serverURL, profileID\)[\s\S]+normalizedServerOrigin\(serverURL\)[\s\S]+createHash\("sha256"\)/);
-  assert.match(mainSource, /ipcMain\.handle\("profile-picture:load"[\s\S]+ipcMain\.handle\("profile-picture:choose"[\s\S]+ipcMain\.handle\("profile-picture:remove"/);
-  assert.match(preloadSource, /loadProfilePicture[\s\S]+chooseProfilePicture[\s\S]+removeProfilePicture/);
-  assert.match(appSource, /function refreshProfilePicture\(\)[\s\S]+profilePictureGeneration[\s\S]+api\.loadProfilePicture/);
-  assert.match(htmlSource, /id="profileMenuManage"[\s\S]+id="profileSwitchPicture"[\s\S]+id="profileSwitchRemovePicture"/);
-  assert.match(appSource, /profileMenuManage"\)\.onclick = openProfileSwitcher[\s\S]+profileSwitchPicture"\)\.onclick = chooseActiveProfilePicture/);
-  assert.doesNotMatch(htmlSource, /id="profilePictureChoose"|id="profileSwitch"/);
+  assert.match(htmlSource, /id="profileMenuName"[\s\S]+id="profileMenuEmail"/);
+  assert.match(appSource, /safeAccountDisplayName\(accountSession\)/);
+  assert.match(appSource, /accountSession\?\.imageURL/);
+  assert.match(appSource, /profileMenuManage"\)\.onclick = \(\) => openSettings\("server"\)/);
+  assert.match(appSource, /function displayedAccountEmail[\s\S]+••••••@••••••\.•••/);
+  assert.match(appSource, /#profileMenuEmail"\)\.onclick = \(event\) =>[\s\S]+isAccountEmailRevealed/);
+  assert.match(appSource, /id="settingsAccountEmail"[\s\S]+displayedAccountEmail\(\)/);
+  assert.doesNotMatch(appSource, /Signed in as \$\{accountSession\.email\}/);
+  assert.doesNotMatch(htmlSource, /id="profileSwitchDialog"|Choose profile picture|Remove profile picture/);
+  assert.doesNotMatch(appSource, /api\.chooseProfilePicture|api\.removeProfilePicture/);
 });
 
 test("classifies remote video as download-required without confusing audio MP4", () => {
@@ -506,7 +531,7 @@ test("keeps contextual search and sorting in the persistent top bar", () => {
   assert.match(appSource, /class="server-playlist-sync-icon"/);
   assert.match(htmlSource, /id="serverTransferToast"/);
   assert.match(htmlSource, /id="dismissServerTransfer"/);
-  assert.doesNotMatch(htmlSource, /img-src[^"]*https:/);
+  assert.match(htmlSource, /img-src[^"]*https:/);
   assert.doesNotMatch(appSource, /<div id="serverTransferToast"/);
   assert.match(appSource, /function hideServerTransfer\(owner = null\)/);
   assert.match(appSource, /#dismissServerTransfer"\)\.onclick = cancelServerTransfer/);
@@ -538,7 +563,7 @@ test("renders every Windows select through the themed custom dropdown", () => {
 
   assert.doesNotMatch(htmlSource, /<select\b/i);
   assert.doesNotMatch(appSource, /<select\b/i);
-  assert.equal(staticCustomControls.length + settingsCustomControls.length, 7);
+  assert.equal(staticCustomControls.length + settingsCustomControls.length, 6);
   assert.match(appSource, /id="serverUploadMode"[^>]+data-custom-select/);
   assert.match(appSource, /id="serverDownloadMode"[^>]+data-custom-select/);
   assert.match(appSource, /function initializeCustomSelects\(\)[\s\S]+querySelectorAll\("\[data-custom-select\]"\)/);
@@ -590,21 +615,16 @@ test("uploads link imports even when the selected source is already saved locall
   assert.doesNotMatch(appSource, /importedTrack\?\.filePath && response\.result\.kind === "created"/);
 });
 
-test("switches to or creates server profiles and falls back to Default", () => {
+test("binds the active library to the signed-in Clerk account", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
-  assert.match(htmlSource, /id="profileSwitchDialog"/);
-  assert.match(htmlSource, /for="profileSwitchQuery">Profile name or ID/);
-  assert.match(htmlSource, /id="createProfileFromSwitcher"[\s\S]+Create profile/);
-  assert.match(appSource, /api\.fetchProfiles\(\{ baseURL: state\.serverURL, token: serverToken \}\)/);
-  assert.match(appSource, /#createProfileFromSwitcher"\)\.onclick[\s\S]+api\.createProfile\([\s\S]+finishProfileSelection\(profile\)/);
-  assert.match(appSource, /resolveSyncProfile\(state\.syncProfiles, query, response\.default_profile_id\)/);
-  assert.match(appSource, /fellBackToDefault[\s\S]+Switched to/);
-  assert.match(appSource, /function matchingSyncProfile\(query\)/);
-  assert.match(appSource, /function updateProfileSwitchActions\(\{ busy = false \} = \{\}\)/);
-  assert.match(appSource, /createProfileFromSwitcher"\)\.disabled = busy \|\| !connected \|\| !query \|\| Boolean\(current\)/);
-  assert.match(appSource, /confirmProfileSwitch"\)\.disabled = busy \|\| !connected \|\| !query \|\| current\?\.id === activeProfileID\(\)/);
+  assert.doesNotMatch(htmlSource, /id="profileSwitchDialog"|profileSwitchQuery|createProfileFromSwitcher/);
+  assert.doesNotMatch(appSource, /api\.createProfile|openProfileSwitcher|matchingSyncProfile/);
+  assert.match(appSource, /profileID: activeProfileID\(\)/);
+  assert.match(appSource, /accountSession\?\.profileID[\s\S]+await activateProfile\(accountSession\.profileID/);
+  assert.match(appSource, /ACCOUNT & TRANSFERS[\s\S]+Clerk account selects the library/);
+  assert.doesNotMatch(appSource, /id="syncProfile"|id="newSyncProfile"/);
   assert.match(appSource, /track\.id === currentID \? toggle\(\) : play\(track, tracks, \{ playlistID: null \}\)/);
   assert.match(appSource, /function updateProfileControl\(\)[\s\S]+control\.hidden = false/);
   for (const id of ["settingsServer", "settingsHistory", "settingsStorage", "settingsCheckUpdates"]) {
@@ -1366,12 +1386,12 @@ test("opens a listening-history analytics dialog and records real playback time"
 test("summarizes persisted listening history by local day", () => {
   const now = new Date(2026, 6, 30, 12, 0, 0);
   const state = normalizeState({
-    serverURL: "https://music.unblocked.mov",
+    serverURL: "https://resonance-core.blithe-haven-9710.chatgpt.site",
     syncProfileID: "music-room",
     listeningHistory: [
-      { id: "first", trackID: "a", profileID: "music-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 8, 0, 0).toISOString(), listenedSeconds: 600, duration: 240 },
-      { id: "second", trackID: "b", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 29, 8, 0, 0).toISOString(), listenedSeconds: 300, duration: 240 },
-      { id: "old", trackID: "c", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 5, 1, 8, 0, 0).toISOString(), listenedSeconds: 900, duration: 240 },
+      { id: "first", trackID: "a", profileID: "music-room", serverOrigin: "https://resonance-core.blithe-haven-9710.chatgpt.site", startedAt: new Date(2026, 6, 30, 8, 0, 0).toISOString(), listenedSeconds: 600, duration: 240 },
+      { id: "second", trackID: "b", serverOrigin: "https://resonance-core.blithe-haven-9710.chatgpt.site", startedAt: new Date(2026, 6, 29, 8, 0, 0).toISOString(), listenedSeconds: 300, duration: 240 },
+      { id: "old", trackID: "c", serverOrigin: "https://resonance-core.blithe-haven-9710.chatgpt.site", startedAt: new Date(2026, 5, 1, 8, 0, 0).toISOString(), listenedSeconds: 900, duration: 240 },
     ],
   });
   const summary = summarizeListeningHistory(state, 7, now);
@@ -1406,7 +1426,7 @@ test("summarizes persisted listening history by local day", () => {
 test("counts a listening-history play only after more than ten percent", () => {
   const now = new Date(2026, 6, 30, 12, 0, 0);
   const base = {
-    serverURL: "https://music.unblocked.mov",
+    serverURL: "https://resonance-core.blithe-haven-9710.chatgpt.site",
     tracks: [{ id: "song", title: "Threshold", artist: "Test", duration: 200 }],
   };
   const entry = (id, listenedSeconds) => ({
@@ -1490,7 +1510,7 @@ test("merges and displays server-only listening history snapshots", () => {
 test("summarizes all-time listening stats independently of the graph window", () => {
   const now = new Date(2026, 6, 30, 12, 0, 0);
   const result = summarizeListeningStats({
-    serverURL: "https://music.unblocked.mov",
+    serverURL: "https://resonance-core.blithe-haven-9710.chatgpt.site",
     syncProfileID: "alpha-room",
     tracks: [
       { id: "a", title: "First", artist: "Alpha", duration: 240 },
@@ -1498,10 +1518,10 @@ test("summarizes all-time listening stats independently of the graph window", ()
       { id: "c", title: "Other profile", artist: "Gamma", duration: 240 },
     ],
     listeningHistory: [
-      { trackID: "a", profileID: "alpha-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 29, 10, 0, 0).toISOString(), listenedSeconds: 120 },
-      { trackID: "a", profileID: "alpha-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 8, 0, 0).toISOString(), listenedSeconds: 60 },
-      { trackID: "b", profileID: "alpha-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 9, 0, 0).toISOString(), listenedSeconds: 30 },
-      { trackID: "c", profileID: "other-room", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 10, 0, 0).toISOString(), listenedSeconds: 900 },
+      { trackID: "a", profileID: "alpha-room", serverOrigin: "https://resonance-core.blithe-haven-9710.chatgpt.site", startedAt: new Date(2026, 6, 29, 10, 0, 0).toISOString(), listenedSeconds: 120 },
+      { trackID: "a", profileID: "alpha-room", serverOrigin: "https://resonance-core.blithe-haven-9710.chatgpt.site", startedAt: new Date(2026, 6, 30, 8, 0, 0).toISOString(), listenedSeconds: 60 },
+      { trackID: "b", profileID: "alpha-room", serverOrigin: "https://resonance-core.blithe-haven-9710.chatgpt.site", startedAt: new Date(2026, 6, 30, 9, 0, 0).toISOString(), listenedSeconds: 30 },
+      { trackID: "c", profileID: "other-room", serverOrigin: "https://resonance-core.blithe-haven-9710.chatgpt.site", startedAt: new Date(2026, 6, 30, 10, 0, 0).toISOString(), listenedSeconds: 900 },
     ],
   }, now);
   assert.equal(result.totalSeconds, 210);
@@ -1517,11 +1537,11 @@ test("summarizes all-time listening stats independently of the graph window", ()
 test("summarizes one-day windows into calendar hours", () => {
   const now = new Date(2026, 6, 30, 12, 35, 0);
   const state = normalizeState({
-    serverURL: "https://music.unblocked.mov",
+    serverURL: "https://resonance-core.blithe-haven-9710.chatgpt.site",
     listeningHistory: [
-      { id: "current-day", trackID: "a", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 11, 10, 0).toISOString(), listenedSeconds: 120, duration: 240 },
-      { id: "current-morning", trackID: "b", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 30, 1, 30, 0).toISOString(), listenedSeconds: 180, duration: 240 },
-      { id: "previous-day", trackID: "c", serverOrigin: "https://music.unblocked.mov", startedAt: new Date(2026, 6, 29, 23, 15, 0).toISOString(), listenedSeconds: 300, duration: 240 },
+      { id: "current-day", trackID: "a", serverOrigin: "https://resonance-core.blithe-haven-9710.chatgpt.site", startedAt: new Date(2026, 6, 30, 11, 10, 0).toISOString(), listenedSeconds: 120, duration: 240 },
+      { id: "current-morning", trackID: "b", serverOrigin: "https://resonance-core.blithe-haven-9710.chatgpt.site", startedAt: new Date(2026, 6, 30, 1, 30, 0).toISOString(), listenedSeconds: 180, duration: 240 },
+      { id: "previous-day", trackID: "c", serverOrigin: "https://resonance-core.blithe-haven-9710.chatgpt.site", startedAt: new Date(2026, 6, 29, 23, 15, 0).toISOString(), listenedSeconds: 300, duration: 240 },
     ],
   });
   const summary = summarizeListeningHistory(state, 1, now);
@@ -1878,7 +1898,7 @@ test("uploaded local tracks adopt server identity and preserve every client refe
       id: "server-copy",
       title: "Shared",
       remoteID: "remote-song",
-      sourceServer: "https://music.unblocked.mov",
+      sourceServer: "https://resonance-core.blithe-haven-9710.chatgpt.site",
       syncProfileID: "default",
       size: 42,
       contentSha256: "same-hash",
@@ -1903,7 +1923,7 @@ test("uploaded local tracks adopt server identity and preserve every client refe
   }];
 
   assert.equal(reconcileUploadedTrack(state, "local", { id: "remote-song" }, {
-    serverURL: "https://music.unblocked.mov",
+    serverURL: "https://resonance-core.blithe-haven-9710.chatgpt.site",
     profileID: "default",
   }), true);
   assert.deepEqual(state.tracks.map((track) => track.id), ["local"]);
@@ -2323,11 +2343,11 @@ test("removing a downloaded song updates remote membership while keeping unresol
 
 test("profile playlist documents include remote likes and apply them without touching local likes", () => {
   const state = normalizeState({
-    serverURL: "https://music.unblocked.mov",
+    serverURL: "https://resonance-core.blithe-haven-9710.chatgpt.site",
     tracks: [
       { id: "local", remoteID: null },
-      { id: "remote-a", remoteID: "song-a", sourceServer: "https://music.unblocked.mov", syncProfileID: "default" },
-      { id: "remote-b", remoteID: "song-b", sourceServer: "https://music.unblocked.mov", syncProfileID: "default" },
+      { id: "remote-a", remoteID: "song-a", sourceServer: "https://resonance-core.blithe-haven-9710.chatgpt.site", syncProfileID: "default" },
+      { id: "remote-b", remoteID: "song-b", sourceServer: "https://resonance-core.blithe-haven-9710.chatgpt.site", syncProfileID: "default" },
     ],
     playlists: [{ id: "liked", name: "Liked Songs", trackIDs: [], isSystem: true }],
     favorites: ["local", "remote-a"],

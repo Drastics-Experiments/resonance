@@ -254,7 +254,7 @@ final class MacLocalImportViewModel: ObservableObject {
     }
 
     var activeProfileName: String {
-        model.activeSyncProfileName
+        ResonanceEmailPrivacy.safeDisplayName(model.activeSyncProfileName, email: model.accountEmail)
     }
 
     var resolveButtonTitle: String {

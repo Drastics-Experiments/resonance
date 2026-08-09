@@ -141,7 +141,7 @@ data class StoredLibrary(
     val tracks: List<Track> = emptyList(),
     val playlists: List<Playlist> = listOf(Playlist(name = "Liked Songs", isSystem = true)),
     val favorites: Set<String> = emptySet(),
-    val serverURL: String = "https://music.unblocked.mov",
+    val serverURL: String = "https://resonance-core.blithe-haven-9710.chatgpt.site",
     val playlistRevision: Int? = 0,
     val knownRemotePlaylistIDs: Set<String>? = emptySet(),
     val dirtyPlaylistIDs: Set<String>? = emptySet(),

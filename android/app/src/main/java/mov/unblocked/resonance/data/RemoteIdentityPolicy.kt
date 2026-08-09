@@ -30,14 +30,25 @@ object RemoteTrackIdentityPolicy {
         require(scheme == "https" || scheme == "http")
         require(uri.rawUserInfo == null)
         require(uri.port in -1..65_535)
-        val host = uri.host?.lowercase()?.takeIf(String::isNotBlank) ?: error("missing host")
+        var host = uri.host?.lowercase()?.takeIf(String::isNotBlank) ?: error("missing host")
         val port = if (uri.port >= 0) uri.port else if (scheme == "https") 443 else 80
+        if (scheme == "https" && port == 443 && host == "music.unblocked.mov") {
+            host = "resonance-core.blithe-haven-9710.chatgpt.site"
+        }
         val formattedHost = if (':' in host && !host.startsWith("[")) "[$host]" else host
         "$scheme://$formattedHost:$port"
     }.getOrNull()
 
     fun contextKey(serverURL: String, profileID: String): String? =
         normalizedOrigin(serverURL)?.let { "$it#profile=${encode(profileID)}" }
+
+    fun canonicalContextKey(value: String): String {
+        val marker = "#profile="
+        val boundary = value.indexOf(marker)
+        if (boundary < 0) return normalizedOrigin(value) ?: value
+        val origin = normalizedOrigin(value.substring(0, boundary)) ?: return value
+        return origin + value.substring(boundary)
+    }
 
     fun identity(track: Track): RemoteTrackIdentity? {
         val songID = track.remoteID?.takeIf(String::isNotBlank) ?: return null

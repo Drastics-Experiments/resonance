@@ -45,7 +45,8 @@ final class ResonanceClerkAuthCoordinator {
 
     func accountSession(
         for client: ResonanceSocialAuthClient,
-        forceRefresh: Bool = false
+        forceRefresh: Bool = false,
+        migrationProfileID: String? = nil
     ) async throws -> ResonanceAccountSession {
         let clerk = try await configure(for: client)
         guard let template = configuredTemplate,
@@ -56,7 +57,10 @@ final class ResonanceClerkAuthCoordinator {
               )) else {
             throw ResonanceSocialAuthError.rejected("Finish signing in to continue.")
         }
-        return try await client.accountSession(nativeToken: token)
+        return try await client.accountSession(
+            nativeToken: token,
+            migrationProfileID: migrationProfileID
+        )
     }
 
     func signOut() async {

@@ -13,6 +13,21 @@ final class MobilePlaylistArtworkPolicyTests: XCTestCase {
     }
 }
 
+final class MobileAccountEmailPrivacyTests: XCTestCase {
+    func testEmailIsCensoredUntilExplicitlyRevealed() {
+        let email = "private@example.com"
+        XCTAssertEqual(
+            ResonanceEmailPrivacy.displayedAddress(email, isRevealed: false),
+            ResonanceEmailPrivacy.censoredAddress
+        )
+        XCTAssertEqual(ResonanceEmailPrivacy.displayedAddress(email, isRevealed: true), email)
+        XCTAssertEqual(
+            ResonanceEmailPrivacy.safeDisplayName(email, email: email),
+            "Clerk account"
+        )
+    }
+}
+
 final class MobileServerEndpointPolicyTests: XCTestCase {
     func testRequiresHTTPSOutsideLoopback() throws {
         let secure = try MobileServerEndpointPolicy.resolve(" HTTPS://Music.Example.test/root/ ")
@@ -40,6 +55,25 @@ final class MobileServerEndpointPolicyTests: XCTestCase {
         XCTAssertNotEqual(
             MobileServerEndpointPolicy.normalizedOrigin(of: first),
             MobileServerEndpointPolicy.normalizedOrigin(of: URL(string: "https://music.example.test:8443")!)
+        )
+    }
+
+    func testLegacyProductionOriginMigratesWithoutChangingProfileIdentity() throws {
+        let legacy = try MobileServerEndpointPolicy.resolve("https://music.unblocked.mov")
+        XCTAssertEqual(
+            legacy.url.absoluteString,
+            "https://resonance-core.blithe-haven-9710.chatgpt.site"
+        )
+        let context = MobileServerContext(
+            origin: "https://music.unblocked.mov:443",
+            profileID: "clerk-profile"
+        )
+        XCTAssertEqual(
+            MobileServerEndpointPolicy.canonicalContext(context),
+            MobileServerContext(
+                origin: "https://resonance-core.blithe-haven-9710.chatgpt.site:443",
+                profileID: "clerk-profile"
+            )
         )
     }
 }

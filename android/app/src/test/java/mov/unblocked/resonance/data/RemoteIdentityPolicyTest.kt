@@ -8,6 +8,23 @@ import org.junit.Test
 
 class RemoteIdentityPolicyTest {
     @Test
+    fun legacyProductionOriginKeepsTheSameRemoteIdentity() {
+        assertEquals(
+            RemoteTrackIdentityPolicy.contextKey(
+                "https://resonance-core.blithe-haven-9710.chatgpt.site",
+                "clerk-profile",
+            ),
+            RemoteTrackIdentityPolicy.contextKey("https://music.unblocked.mov", "clerk-profile"),
+        )
+        assertEquals(
+            "https://resonance-core.blithe-haven-9710.chatgpt.site:443#profile=clerk-profile",
+            RemoteTrackIdentityPolicy.canonicalContextKey(
+                "https://music.unblocked.mov:443#profile=clerk-profile",
+            ),
+        )
+    }
+
+    @Test
     fun sameSongIdFromDifferentServersAndProfilesRemainsDistinct() {
         val active = remoteTrack("active", "https://music.example", "default", "song-1")
         val otherProfile = remoteTrack("profile", "https://music.example", "family", "song-1")

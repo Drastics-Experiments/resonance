@@ -341,7 +341,16 @@ function canonicalStoredAccountSession(value) {
   const expiresAt = Number(value.expiresAt);
   const baseURL = normalizeServerBaseURL(value.baseURL, { allowInsecureLoopback: !app.isPackaged }).origin;
   if (!accessToken || !refreshToken || !email || !role || !Number.isFinite(expiresAt)) return null;
-  return { accessToken, refreshToken, email, role, expiresAt, baseURL };
+  const accountID = String(value.accountID || "").trim() || null;
+  const profileID = String(value.profileID || "").trim() || null;
+  const displayName = String(value.displayName || "").trim() || null;
+  let imageURL = null;
+  if (value.imageURL) {
+    const candidate = new URL(value.imageURL);
+    if (candidate.protocol !== "https:" || candidate.username || candidate.password) return null;
+    imageURL = candidate.href;
+  }
+  return { accessToken, refreshToken, email, role, expiresAt, baseURL, accountID, profileID, displayName, imageURL };
 }
 
 async function readAccountSession() {
@@ -446,14 +455,14 @@ function scheduleAccountSessionRefresh() {
   accountSessionRefreshTimer.unref?.();
 }
 
-async function refreshCurrentAccountSession() {
+async function refreshCurrentAccountSession(migrationProfileID = null) {
   if (!accountSession) return null;
   if (accountSessionRefreshInFlight) return accountSessionRefreshInFlight;
   const active = accountSession;
   const generation = accountSessionGeneration;
   const refresh = (async () => {
     const configuration = await fetchAuthConfiguration(active.baseURL);
-    const refreshed = await refreshAuthSession(configuration, active);
+    const refreshed = await refreshAuthSession(configuration, active, fetch, migrationProfileID);
     if (accountSessionGeneration !== generation || accountSession !== active) {
       return publicSession(accountSession);
     }
@@ -505,6 +514,8 @@ async function handleAccountAuthCallback(value) {
     pending.baseURL,
     code,
     pending.verifier,
+    fetch,
+    pending.migrationProfileID,
   );
   await persistAccountSession(accountSession);
   await purgeLegacyServerCredentials();
@@ -1534,11 +1545,12 @@ ipcMain.handle("server:credentials:save", async (event, value) => {
   return true;
 });
 
-ipcMain.handle("account:session:load", async () => {
+ipcMain.handle("account:session:load", async (_event, value) => {
   if (!accountSession) accountSession = await readAccountSession();
   if (!accountSession) return null;
-  if (accountSession.expiresAt <= Date.now() + 5 * 60_000) {
-    try { return await refreshCurrentAccountSession(); }
+  if (!accountSession.profileID || !accountSession.displayName ||
+      accountSession.expiresAt <= Date.now() + 5 * 60_000) {
+    try { return await refreshCurrentAccountSession(value?.profileID); }
     catch (error) {
       if (accountSession.expiresAt <= Date.now()) {
         await clearPersistedAccountSession();
@@ -1563,6 +1575,7 @@ ipcMain.handle("account:sign-in", async (_event, value) => {
     verifier: pkce.verifier,
     state: pkce.state,
     startedAt: Date.now(),
+    migrationProfileID: String(value?.profileID || "").trim() || null,
   };
   pendingAccountSignIn = pending;
   try {

@@ -28,7 +28,14 @@ class CredentialStore(context: Context) {
         set(value) = writeSecret(ADMIN_TOKEN, value)
 
     var serverURL: String
-        get() = preferences.getString(SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
+        get() {
+            val stored = preferences.getString(SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
+            return if (stored.trim().trimEnd('/') == ResonanceLegacyProductionServerURL) {
+                DEFAULT_SERVER_URL
+            } else {
+                stored
+            }
+        }
         set(value) {
             preferences.edit().putString(SERVER_URL, value.trim()).apply()
         }
@@ -38,7 +45,13 @@ class CredentialStore(context: Context) {
     }
 
     var accountSession: AccountSession?
-        get() = readSecret(ACCOUNT_SESSION)?.let { runCatching { JSON.decodeFromString<AccountSession>(it) }.getOrNull() }
+        get() = readSecret(ACCOUNT_SESSION)?.let {
+            runCatching {
+                val decoded = JSON.decodeFromString<AccountSession>(it)
+                val canonicalBaseURL = canonicalHTTPSOrigin(decoded.baseURL)
+                if (canonicalBaseURL == decoded.baseURL) decoded else decoded.copy(baseURL = canonicalBaseURL)
+            }.getOrNull()
+        }
         set(value) {
             if (value == null) preferences.edit().remove(ACCOUNT_SESSION).apply()
             else writeSecret(ACCOUNT_SESSION, JSON.encodeToString(value))
@@ -110,7 +123,7 @@ class CredentialStore(context: Context) {
         const val SERVER_URL = "server-url"
         const val ACCOUNT_SESSION = "account-session-v1"
         const val PENDING_ACCOUNT_SIGN_IN = "pending-account-sign-in-v1"
-        const val DEFAULT_SERVER_URL = "https://music.unblocked.mov"
+        const val DEFAULT_SERVER_URL = ResonanceProductionServerURL
         val JSON = Json { ignoreUnknownKeys = true }
     }
 }

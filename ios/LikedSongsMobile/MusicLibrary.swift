@@ -476,11 +476,13 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published var shuffleEnabled = false { didSet { UserDefaults.standard.set(shuffleEnabled, forKey: "Resonance.shuffle") } }
     @Published var repeatEnabled = false { didSet { UserDefaults.standard.set(repeatEnabled, forKey: "Resonance.repeat") } }
     @Published var searchText = ""
-    @Published private(set) var serverURL = "https://music.unblocked.mov"
+    @Published private(set) var serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site"
     @Published private(set) var serverToken = ""
     @Published private(set) var serverAdminToken = ""
     @Published private(set) var accountEmail: String?
     @Published private(set) var accountRole: String?
+    @Published private(set) var accountDisplayName: String?
+    @Published private(set) var accountImageURL: URL?
     @Published private(set) var isAuthenticatingAccount = false
     @Published var remoteSongs: [MobileRemoteSong] = []
     @Published var selectedRemoteSongIDs: Set<String> = []
@@ -508,6 +510,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published private(set) var selectedUploadMode = MobileUploadMode.localFile
     @Published private(set) var selectedDownloadMode = MobileDownloadMode.verifiedFileCache
     @Published private(set) var isTransientStreamActive = false
+
+    var visibleSyncProfileName: String {
+        ResonanceEmailPrivacy.safeDisplayName(syncProfileName, email: accountEmail)
+    }
 
     var isUploadTransferBusy: Bool {
         isActivatingSyncProfile || MobileUploadBlockingPolicy.blocksUpload(
@@ -638,11 +644,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         repeatEnabled = UserDefaults.standard.bool(forKey: "Resonance.repeat")
         if let session = Self.readAccountSession() {
             accountSession = session
-            serverURL = session.baseURL.absoluteString
+            serverURL = (try? MobileServerEndpointPolicy.resolve(session.baseURL.absoluteString).url.absoluteString)
+                ?? session.baseURL.absoluteString
             serverToken = session.accessToken
             serverAdminToken = session.isAdmin ? session.accessToken : ""
             accountEmail = session.email
             accountRole = session.role
+            accountDisplayName = session.profileDisplayName
+            accountImageURL = session.imageURL
+            if session.profileID == syncProfileID {
+                syncProfileName = session.profileDisplayName
+            }
             try? Self.storeToken("", account: "client")
             try? Self.storeToken("", account: "admin")
             scheduleAccountRefresh(session)
@@ -686,11 +698,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         do {
             let resolution = try MobileServerEndpointPolicy.resolve(rawServerURL)
             let client = try ResonanceSocialAuthClient(baseURL: resolution.url)
-            let session = try await client.signIn(with: provider)
+            let session = try await client.signIn(
+                with: provider,
+                migrationProfileID: syncProfileID
+            )
             try Self.storeAccountSession(session)
             accountSession = session
             accountEmail = session.email
             accountRole = session.role
+            accountDisplayName = session.profileDisplayName
+            accountImageURL = session.imageURL
             try? Self.storeToken("", account: "client")
             try? Self.storeToken("", account: "admin")
             guard applyServerConfiguration(
@@ -698,8 +715,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 accessToken: session.accessToken,
                 adminToken: session.isAdmin ? session.accessToken : ""
             ) else { return }
+            if let profileID = session.profileID, !profileID.isEmpty {
+                selectSyncProfile(profileID, name: session.profileDisplayName)
+            }
             scheduleAccountRefresh(session)
-            serverMessage = "Signed in as \(session.email)"
+            serverMessage = "Signed in with Clerk"
             await refreshClientConfiguration()
         } catch {
             serverMessage = error.localizedDescription
@@ -715,11 +735,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         do {
             let resolution = try MobileServerEndpointPolicy.resolve(rawServerURL)
             let client = try ResonanceSocialAuthClient(baseURL: resolution.url)
-            let session = try await ResonanceClerkAuthCoordinator.shared.accountSession(for: client)
+            let session = try await ResonanceClerkAuthCoordinator.shared.accountSession(
+                for: client,
+                migrationProfileID: syncProfileID
+            )
             try Self.storeAccountSession(session)
             accountSession = session
             accountEmail = session.email
             accountRole = session.role
+            accountDisplayName = session.profileDisplayName
+            accountImageURL = session.imageURL
             try? Self.storeToken("", account: "client")
             try? Self.storeToken("", account: "admin")
             guard applyServerConfiguration(
@@ -727,8 +752,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 accessToken: session.accessToken,
                 adminToken: session.isAdmin ? session.accessToken : ""
             ) else { return }
+            if let profileID = session.profileID, !profileID.isEmpty {
+                selectSyncProfile(profileID, name: session.profileDisplayName)
+            }
             scheduleAccountRefresh(session)
-            serverMessage = "Signed in as \(session.email)"
+            serverMessage = "Signed in with Clerk"
             await refreshClientConfiguration()
         } catch {
             serverMessage = error.localizedDescription
@@ -746,6 +774,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         try? Self.storeToken("", account: "admin")
         accountEmail = nil
         accountRole = nil
+        accountDisplayName = nil
+        accountImageURL = nil
         serverToken = ""
         serverAdminToken = ""
         isServerConnected = false
@@ -761,23 +791,37 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     func refreshAccountSessionIfNeeded() async {
         guard let current = accountSession,
-              current.expiresAt <= Date().addingTimeInterval(current.usesNativeClerkSession ? 15 : 5 * 60),
               !isRefreshingAccountSession else { return }
+        let needsProfileHydration = current.profileID?.isEmpty != false
+            || current.displayName?.isEmpty != false
+        guard current.usesLegacyProductionServer
+            || needsProfileHydration
+            || current.expiresAt <= Date().addingTimeInterval(current.usesNativeClerkSession ? 15 : 5 * 60)
+        else { return }
         isRefreshingAccountSession = true
         defer { isRefreshingAccountSession = false }
         do {
             let client = try ResonanceSocialAuthClient(baseURL: current.baseURL)
             let refreshed = current.usesNativeClerkSession
-                ? try await ResonanceClerkAuthCoordinator.shared.accountSession(for: client, forceRefresh: true)
-                : try await client.refresh(current)
+                ? try await ResonanceClerkAuthCoordinator.shared.accountSession(
+                    for: client,
+                    forceRefresh: true,
+                    migrationProfileID: current.profileID ?? syncProfileID
+                )
+                : try await client.refresh(current, migrationProfileID: syncProfileID)
             guard accountSession == current else { return }
             try Self.storeAccountSession(refreshed)
             accountSession = refreshed
             accountEmail = refreshed.email
             accountRole = refreshed.role
+            accountDisplayName = refreshed.profileDisplayName
+            accountImageURL = refreshed.imageURL
             serverURL = refreshed.baseURL.absoluteString
             serverToken = refreshed.accessToken
             serverAdminToken = refreshed.isAdmin ? refreshed.accessToken : ""
+            if let profileID = refreshed.profileID, !profileID.isEmpty {
+                selectSyncProfile(profileID, name: refreshed.profileDisplayName)
+            }
             await refreshClientConfiguration()
             scheduleAccountRefresh(refreshed)
         } catch {
@@ -4664,16 +4708,18 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
         guard let stored = recovery.library else { return }
 
-        serverURL = stored.serverURL
+        var fallbackServerURL = URL(string: stored.serverURL)
         do {
-            _ = try MobileServerEndpointPolicy.resolve(stored.serverURL)
+            let resolution = try MobileServerEndpointPolicy.resolve(stored.serverURL)
+            serverURL = resolution.url.absoluteString
+            fallbackServerURL = resolution.url
         } catch {
+            serverURL = stored.serverURL
             serverConfigurationMessage = error.localizedDescription
             serverMessage = error.localizedDescription
         }
         syncProfileID = stored.syncProfileID ?? "default"
         syncProfileName = stored.syncProfileName ?? (syncProfileID == "default" ? "Default" : syncProfileID)
-        let fallbackServerURL = URL(string: stored.serverURL)
         var availableTracks = stored.tracks.filter {
             fileManager.fileExists(atPath: musicDirectory.appendingPathComponent($0.relativePath).path)
         }
@@ -4698,7 +4744,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         knownRemotePlaylistIDs = stored.knownRemotePlaylistIDs ?? []
         dirtyPlaylistIDs = stored.dirtyPlaylistIDs ?? []
         deletedPlaylistIDs = stored.deletedPlaylistIDs ?? []
-        playlistSyncServerURL = stored.playlistSyncServerURL
+        playlistSyncServerURL = MobileServerEndpointPolicy.canonicalStoredServerKey(stored.playlistSyncServerURL)
         let migratedLikedSongIDs = Set<String>(favorites.compactMap { trackID -> String? in
             guard let track = tracks.first(where: { $0.id == trackID }),
                   belongsToActiveServerContext(track) else { return nil }
@@ -4723,7 +4769,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         dirtyClipRangeKeys = stored.dirtyClipRangeKeys ?? []
         deletedClipRangeKeys = stored.deletedClipRangeKeys ?? []
         migrateLegacyClipRangeKeys(fallbackServerURL: fallbackServerURL)
-        profileSyncStates = stored.profileStates ?? [:]
+        let storedProfileStates = stored.profileStates ?? [:]
+        profileSyncStates = storedProfileStates.filter { context, _ in
+            MobileServerEndpointPolicy.canonicalContext(context) == context
+        }
+        for (context, state) in storedProfileStates {
+            let canonicalContext = MobileServerEndpointPolicy.canonicalContext(context)
+            if profileSyncStates[canonicalContext] == nil {
+                profileSyncStates[canonicalContext] = state
+            }
+        }
         captureActiveProfileState()
         hydrateRemotePlaylistTracks()
         hydrateRemoteLikedTracks()

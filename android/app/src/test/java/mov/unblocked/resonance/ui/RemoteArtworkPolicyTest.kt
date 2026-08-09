@@ -15,9 +15,9 @@ class RemoteArtworkPolicyTest {
     @Test
     fun artworkURLsAreResolvedThroughTheSharedNetworkPolicy() {
         assertEquals(
-            "https://music.unblocked.mov/api/v1/songs/song-1/artwork",
+            "https://resonance-core.blithe-haven-9710.chatgpt.site/api/v1/songs/song-1/artwork",
             resolveRemoteArtworkURL(
-                serverURL = "https://music.unblocked.mov",
+                serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site",
                 artworkURL = "/api/v1/songs/song-1/artwork",
                 allowCleartextDevelopment = false,
             ),
@@ -25,7 +25,7 @@ class RemoteArtworkPolicyTest {
         assertEquals(
             "https://cdn.example/cover.jpg",
             resolveRemoteArtworkURL(
-                serverURL = "https://music.unblocked.mov",
+                serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site",
                 artworkURL = "https://cdn.example/cover.jpg",
                 allowCleartextDevelopment = false,
             ),
@@ -33,14 +33,14 @@ class RemoteArtworkPolicyTest {
 
         assertNull(
             resolveRemoteArtworkURL(
-                serverURL = "https://music.unblocked.mov",
+                serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site",
                 artworkURL = "http://cdn.example/cover.jpg",
                 allowCleartextDevelopment = false,
             ),
         )
         assertNull(
             resolveRemoteArtworkURL(
-                serverURL = "https://music.unblocked.mov",
+                serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site",
                 artworkURL = "https://user:secret@cdn.example/cover.jpg",
                 allowCleartextDevelopment = false,
             ),
@@ -91,8 +91,8 @@ class RemoteArtworkPolicyTest {
         )
 
         val result = loadRemoteArtworkBytes(
-            serverURL = "https://music.unblocked.mov",
-            url = "https://music.unblocked.mov/cover.jpg",
+            serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site",
+            url = "https://resonance-core.blithe-haven-9710.chatgpt.site/cover.jpg",
             allowCleartextDevelopment = false,
             connectionFactory = { url ->
                 FakeHttpConnection(url, responses.removeFirst()).also(openedConnections::add)
@@ -102,7 +102,7 @@ class RemoteArtworkPolicyTest {
         assertArrayEquals(payload, result)
         assertEquals(
             listOf(
-                "https://music.unblocked.mov/cover.jpg",
+                "https://resonance-core.blithe-haven-9710.chatgpt.site/cover.jpg",
                 "https://cdn.example/final-cover.jpg",
             ),
             openedConnections.map { it.url.toString() },
@@ -120,8 +120,8 @@ class RemoteArtworkPolicyTest {
         val openedConnections = mutableListOf<FakeHttpConnection>()
 
         val result = loadRemoteArtworkBytes(
-            serverURL = "https://music.unblocked.mov",
-            url = "https://music.unblocked.mov/cover.jpg",
+            serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site",
+            url = "https://resonance-core.blithe-haven-9710.chatgpt.site/cover.jpg",
             allowCleartextDevelopment = false,
             connectionFactory = { url ->
                 FakeHttpConnection(
@@ -151,7 +151,7 @@ class RemoteArtworkPolicyTest {
         )
 
         val oversized = FakeHttpConnection(
-            URL("https://music.unblocked.mov/cover.jpg"),
+            URL("https://resonance-core.blithe-haven-9710.chatgpt.site/cover.jpg"),
             FakeResponse(
                 status = HttpURLConnection.HTTP_OK,
                 body = payload,
@@ -160,8 +160,8 @@ class RemoteArtworkPolicyTest {
         )
         assertNull(
             loadRemoteArtworkBytes(
-                serverURL = "https://music.unblocked.mov",
-                url = "https://music.unblocked.mov/cover.jpg",
+                serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site",
+                url = "https://resonance-core.blithe-haven-9710.chatgpt.site/cover.jpg",
                 allowCleartextDevelopment = false,
                 connectionFactory = { oversized },
             ),

@@ -19,6 +19,23 @@ import kotlinx.serialization.json.long
 
 val ResonanceSocialAuthProviders = listOf("clerk")
 const val ResonanceAuthCallback = "resonance://auth/callback"
+const val ResonanceLegacyProductionServerURL = "https://music.unblocked.mov"
+const val ResonanceProductionServerURL = "https://resonance-core.blithe-haven-9710.chatgpt.site"
+
+object AccountEmailPrivacy {
+    const val CensoredAddress = "••••••@••••••.•••"
+
+    fun displayedAddress(email: String, isRevealed: Boolean): String =
+        if (isRevealed) email else CensoredAddress
+
+    fun safeDisplayName(value: String?, email: String?): String {
+        val candidate = value?.trim().orEmpty()
+        val looksLikeEmail = candidate.substringAfter('@', "").contains('.') && '@' in candidate
+        return candidate.takeIf {
+            it.isNotEmpty() && !looksLikeEmail && !it.equals(email, ignoreCase = true)
+        } ?: "Clerk account"
+    }
+}
 
 @Serializable
 data class AccountSession(
@@ -28,9 +45,15 @@ data class AccountSession(
     val email: String,
     val role: String,
     val baseURL: String,
+    val accountID: String? = null,
+    val profileID: String? = null,
+    val displayName: String? = null,
+    val imageURL: String? = null,
 ) {
     val usesNativeClerkSession: Boolean
         get() = refreshToken == NativeClerkRefreshMarker
+    val profileDisplayName: String
+        get() = AccountEmailPrivacy.safeDisplayName(displayName, email)
 }
 
 const val NativeClerkRefreshMarker = "clerk-native-session"
@@ -87,8 +110,12 @@ private data class TokenPayload(
 
 @Serializable
 private data class AccountPayload(
+    val id: String = "",
     val email: String = "",
     val role: String = "",
+    @SerialName("profile_id") val profileID: String = "",
+    @SerialName("display_name") val displayName: String = "",
+    @SerialName("image_url") val imageURL: String? = null,
     val error: String? = null,
 )
 
@@ -122,11 +149,17 @@ class SocialAuthClient(private val baseURL: String) {
         configuration().native ?: error("This Resonance server has not enabled native account sign-in.")
     }
 
-    suspend fun accountSession(nativeToken: String): AccountSession = withContext(Dispatchers.IO) {
+    suspend fun accountSession(
+        nativeToken: String,
+        migrationProfileID: String? = null,
+    ): AccountSession = withContext(Dispatchers.IO) {
         val expiration = jwtExpiration(nativeToken)
-        val account = account(nativeToken)
+        val account = account(nativeToken, migrationProfileID)
         require(account.role == "member" || account.role == "admin") {
             account.error ?: "This account could not access this Resonance server."
+        }
+        require(account.id.isNotBlank() && account.profileID.isNotBlank() && account.displayName.isNotBlank()) {
+            "The Resonance server returned an incomplete Clerk profile."
         }
         AccountSession(
             accessToken = bounded(nativeToken, "Clerk session token"),
@@ -135,12 +168,21 @@ class SocialAuthClient(private val baseURL: String) {
             email = bounded(account.email, "account email").lowercase(),
             role = account.role,
             baseURL = origin,
+            accountID = bounded(account.id, "Clerk account ID"),
+            profileID = bounded(account.profileID, "Clerk profile ID"),
+            displayName = bounded(account.displayName, "Clerk display name"),
+            imageURL = account.imageURL,
         )
     }
 
-    suspend fun exchange(code: String, state: String?, pending: PendingAccountSignIn): AccountSession = withContext(Dispatchers.IO) {
+    suspend fun exchange(
+        code: String,
+        state: String?,
+        pending: PendingAccountSignIn,
+        migrationProfileID: String? = null,
+    ): AccountSession = withContext(Dispatchers.IO) {
         require(
-            pending.baseURL == origin && state == pending.state &&
+            canonicalHTTPSOrigin(pending.baseURL) == origin && state == pending.state &&
                 System.currentTimeMillis() - pending.startedAt <= 10 * 60_000
         ) {
             "The sign-in request expired. Please try again."
@@ -156,11 +198,16 @@ class SocialAuthClient(private val baseURL: String) {
                 "code_verifier" to pending.verifier,
             ),
         )
-        session(token, account(token.idToken), pending.baseURL)
+        session(token, account(token.idToken, migrationProfileID), origin)
     }
 
-    suspend fun refresh(current: AccountSession): AccountSession = withContext(Dispatchers.IO) {
-        require(current.baseURL == origin) { "The account session belongs to a different server." }
+    suspend fun refresh(
+        current: AccountSession,
+        migrationProfileID: String? = null,
+    ): AccountSession = withContext(Dispatchers.IO) {
+        require(canonicalHTTPSOrigin(current.baseURL) == origin) {
+            "The account session belongs to a different server."
+        }
         val configuration = configuration()
         val token = tokenRequest(
             configuration,
@@ -170,7 +217,12 @@ class SocialAuthClient(private val baseURL: String) {
                 "refresh_token" to bounded(current.refreshToken, "refresh token"),
             ),
         )
-        session(token, account(token.idToken), current.baseURL, current.refreshToken)
+        session(
+            token,
+            account(token.idToken, current.profileID ?: migrationProfileID),
+            origin,
+            current.refreshToken,
+        )
     }
 
     suspend fun signOut(current: AccountSession) = withContext(Dispatchers.IO) {
@@ -256,11 +308,18 @@ class SocialAuthClient(private val baseURL: String) {
         return payload
     }
 
-    private fun account(accessToken: String): AccountPayload {
+    private fun account(accessToken: String, migrationProfileID: String? = null): AccountPayload {
+        val headers = mutableMapOf(
+            "Accept" to "application/json",
+            "Authorization" to "Bearer ${bounded(accessToken, "access token")}",
+        )
+        migrationProfileID?.trim()?.takeIf(String::isNotEmpty)?.let {
+            headers["X-Resonance-Profile"] = it
+        }
         val response = request(
             URL(origin + "/api/v1/auth/me"),
             "GET",
-            mapOf("Accept" to "application/json", "Authorization" to "Bearer ${bounded(accessToken, "access token")}"),
+            headers,
         )
         val payload = authJSON.decodeFromString<AccountPayload>(response.body)
         require(response.code in 200..299) { payload.error ?: "This account could not access this Resonance server." }
@@ -275,6 +334,9 @@ class SocialAuthClient(private val baseURL: String) {
     ): AccountSession {
         require(token.expiresIn in 1..604_800) { "The authentication server returned an invalid session lifetime." }
         require(account.role == "member" || account.role == "admin") { "The Resonance server returned an invalid account role." }
+        require(account.id.isNotBlank() && account.profileID.isNotBlank() && account.displayName.isNotBlank()) {
+            "The Resonance server returned an incomplete Clerk profile."
+        }
         return AccountSession(
             accessToken = bounded(token.idToken, "Clerk ID token"),
             refreshToken = bounded(token.refreshToken.ifBlank { fallbackRefreshToken }, "refresh token"),
@@ -282,6 +344,10 @@ class SocialAuthClient(private val baseURL: String) {
             email = bounded(account.email, "account email").lowercase(),
             role = account.role,
             baseURL = serverOrigin,
+            accountID = bounded(account.id, "Clerk account ID"),
+            profileID = bounded(account.profileID, "Clerk profile ID"),
+            displayName = bounded(account.displayName, "Clerk display name"),
+            imageURL = account.imageURL,
         )
     }
 
@@ -344,7 +410,12 @@ fun canonicalHTTPSOrigin(value: String): String {
     val url = URL(value.trim())
     require(url.protocol == "https" && url.userInfo == null && url.host.isNotBlank()) { "Server URL must use HTTPS." }
     val port = if (url.port == -1 || url.port == 443) "" else ":${url.port}"
-    return "https://${url.host.lowercase()}$port"
+    val host = if (port.isEmpty() && url.host.equals("music.unblocked.mov", ignoreCase = true)) {
+        "resonance-core.blithe-haven-9710.chatgpt.site"
+    } else {
+        url.host.lowercase()
+    }
+    return "https://$host$port"
 }
 
 private fun bounded(value: String, label: String): String {

@@ -982,7 +982,6 @@ private struct TopBarView: View {
 
 private struct MacProfileMenu: View {
     private enum PresentedSheet: String, Identifiable {
-        case switchProfile
         case listeningHistory
         case clipEditor
         case settings
@@ -992,35 +991,31 @@ private struct MacProfileMenu: View {
 
     @State private var isShowingProfileMenu = false
     @State private var presentedSheet: PresentedSheet?
-    @State private var profilePictureData: Data?
     @State private var isProfileHeaderHovering = false
+    @State private var isEmailRevealed = false
     @EnvironmentObject private var model: PlayerModel
 
     private var profileName: String {
-        let name = model.activeSyncProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? "Default" : name
+        ResonanceEmailPrivacy.safeDisplayName(
+            model.accountDisplayName ?? model.activeSyncProfileName,
+            email: model.accountEmail
+        )
     }
 
     private var profileInitial: String {
         String(profileName.prefix(1)).uppercased()
     }
 
-    private var profilePictureContext: String {
-        ProfilePictureScope.contextKey(
-            serverURL: model.serverURLString,
-            profileID: model.syncProfileID
-        )
-    }
-
     var body: some View {
         Button {
+            if !isShowingProfileMenu { isEmailRevealed = false }
             isShowingProfileMenu.toggle()
         } label: {
             ProfileAvatar(
                 initial: profileInitial,
                 size: 42,
                 fontSize: 15,
-                imageData: profilePictureData
+                imageURL: model.accountImageURL
             )
         }
         .buttonStyle(PressableScaleStyle())
@@ -1028,48 +1023,73 @@ private struct MacProfileMenu: View {
         .accessibilityLabel("Profile and settings, \(profileName)")
         .popover(isPresented: $isShowingProfileMenu, arrowEdge: .top) {
             VStack(spacing: 0) {
-                Button {
-                    isShowingProfileMenu = false
-                    presentedSheet = .switchProfile
-                } label: {
-                    HStack(spacing: 13) {
+                HStack(spacing: 13) {
+                    Button {
+                        isShowingProfileMenu = false
+                        presentedSheet = .settings
+                    } label: {
                         ProfileAvatar(
                             initial: profileInitial,
                             size: 48,
                             fontSize: 17,
-                            imageData: profilePictureData
+                            imageURL: model.accountImageURL
                         )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Manage \(profileName) account")
 
-                        VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Button {
+                            isShowingProfileMenu = false
+                            presentedSheet = .settings
+                        } label: {
                             Text(profileName)
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundStyle(Color.appInk)
                                 .lineLimit(1)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Manage \(profileName) account")
 
-                            Text("Local Profile")
+                        if let email = model.accountEmail {
+                            Button {
+                                isEmailRevealed.toggle()
+                            } label: {
+                                Text(ResonanceEmailPrivacy.displayedAddress(email, isRevealed: isEmailRevealed))
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Color.appMuted)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(isEmailRevealed ? "Hide email address" : "Reveal email address")
+                        } else {
+                            Text("Clerk account")
                                 .font(.system(size: 11))
                                 .foregroundStyle(Color.appMuted)
                         }
+                    }
 
-                        Spacer(minLength: 0)
+                    Spacer(minLength: 0)
 
+                    Button {
+                        isShowingProfileMenu = false
+                        presentedSheet = .settings
+                    } label: {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(Color.appMuted)
                     }
-                    .padding(.horizontal, 9)
-                    .frame(height: 64)
-                    .background(
-                        isProfileHeaderHovering ? Color.white.opacity(0.075) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Manage \(profileName) account")
                 }
-                .buttonStyle(.plain)
+                .padding(.horizontal, 9)
+                .frame(height: 64)
+                .background(
+                    isProfileHeaderHovering ? Color.white.opacity(0.075) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
                 .padding(8)
                 .onHover { isProfileHeaderHovering = $0 }
-                .accessibilityLabel("Manage \(profileName) profile")
-                .accessibilityHint("Switch profiles or change the profile picture")
 
                 Rectangle()
                     .fill(Color.appLine)
@@ -1107,10 +1127,8 @@ private struct MacProfileMenu: View {
             .background(Color.appSurfaceRaised)
             .presentationBackground(Color.appSurfaceRaised)
         }
-        .sheet(item: $presentedSheet, onDismiss: reloadProfilePicture) { sheet in
+        .sheet(item: $presentedSheet) { sheet in
             switch sheet {
-            case .switchProfile:
-                MacSwitchProfileSheet()
             case .listeningHistory:
                 MacListeningHistorySheet()
             case .clipEditor:
@@ -1119,19 +1137,11 @@ private struct MacProfileMenu: View {
                 MacSettingsSheet()
             }
         }
-        .onAppear(perform: reloadProfilePicture)
-        .onChange(of: profilePictureContext) { _, _ in reloadProfilePicture() }
         .onReceive(NotificationCenter.default.publisher(for: .openResonanceSettings)) { _ in
             isShowingProfileMenu = false
             presentedSheet = .settings
         }
-    }
-
-    private func reloadProfilePicture() {
-        profilePictureData = MacProfilePictureStore.load(
-            serverURL: model.serverURLString,
-            profileID: model.syncProfileID
-        )
+        .onChange(of: model.accountEmail) { _, _ in isEmailRevealed = false }
     }
 
 }
@@ -1141,6 +1151,7 @@ private struct ProfileAvatar: View {
     let size: CGFloat
     let fontSize: CGFloat
     var imageData: Data? = nil
+    var imageURL: URL? = nil
 
     var body: some View {
         ZStack {
@@ -1150,7 +1161,17 @@ private struct ProfileAvatar: View {
                 endPoint: .bottomTrailing
             )
 
-            if let imageData, let image = NSImage(data: imageData) {
+            if let imageURL {
+                AsyncImage(url: imageURL) { image in
+                    image
+                        .resizable()
+                        .scaledToFill()
+                } placeholder: {
+                    Text(initial)
+                        .font(.system(size: fontSize, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.white)
+                }
+            } else if let imageData, let image = NSImage(data: imageData) {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFill()
@@ -1197,195 +1218,6 @@ private struct ProfilePopoverRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(.easeOut(duration: 0.12), value: isHovering)
-    }
-}
-
-private struct MacSwitchProfileSheet: View {
-    @EnvironmentObject private var model: PlayerModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var profileQuery = ""
-    @State private var isSwitching = false
-    @State private var isChoosingProfilePicture = false
-    @State private var profilePictureData: Data?
-
-    private var profilePictureContext: String {
-        ProfilePictureScope.contextKey(
-            serverURL: model.serverURLString,
-            profileID: model.syncProfileID
-        )
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Profile")
-                        .font(.system(size: 24, weight: .bold))
-                    Text("Switch profiles or update your picture")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color.appMuted)
-                }
-
-                Spacer()
-
-                Button("Cancel") { dismiss() }
-            }
-
-            HStack(spacing: 12) {
-                Button {
-                    isChoosingProfilePicture = true
-                } label: {
-                    ZStack(alignment: .bottomTrailing) {
-                        ProfileAvatar(
-                            initial: String(model.activeSyncProfileName.prefix(1)).uppercased(),
-                            size: 48,
-                            fontSize: 16,
-                            imageData: profilePictureData
-                        )
-
-                        Image(systemName: "camera.fill")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(Color.white)
-                            .frame(width: 20, height: 20)
-                            .background(Color.appAccent, in: Circle())
-                            .overlay { Circle().stroke(Color.appPanel, lineWidth: 2) }
-                    }
-                }
-                .buttonStyle(.plain)
-                .help(profilePictureData == nil ? "Choose profile picture" : "Change profile picture")
-                .accessibilityLabel(profilePictureData == nil ? "Choose profile picture" : "Change profile picture")
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(model.activeSyncProfileName)
-                        .font(.system(size: 14, weight: .semibold))
-                    Text("Current profile · Click the picture to change it")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.appMuted)
-                }
-
-                Spacer(minLength: 0)
-
-                if profilePictureData != nil {
-                    Button {
-                        removeProfilePicture()
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 12, weight: .semibold))
-                            .frame(width: 30, height: 30)
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(Color.appMuted)
-                    .help("Remove profile picture")
-                    .accessibilityLabel("Remove profile picture")
-                }
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
-            .overlay {
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.appLine, lineWidth: 1)
-            }
-
-            VStack(alignment: .leading, spacing: 7) {
-                Text("Profile name or ID")
-                    .font(.system(size: 11, weight: .semibold))
-                TextField("Existing profile name or ID", text: $profileQuery)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { switchProfile() }
-                Text("This switches profiles only; it does not create or delete them.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.appMuted)
-            }
-
-            HStack {
-                Text(model.serverMessage)
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.appMuted)
-                    .lineLimit(2)
-
-                Spacer()
-
-                Button {
-                    switchProfile()
-                } label: {
-                    if isSwitching {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Text("Switch")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.appAccent)
-                .disabled(
-                    isSwitching
-                        || profileQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || model.serverURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || model.serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
-            }
-        }
-        .padding(24)
-        .frame(width: 430)
-        .background(Color.appPanel)
-        .task {
-            profileQuery = model.activeSyncProfileName
-            reloadProfilePicture()
-        }
-        .onChange(of: profilePictureContext) { _, _ in reloadProfilePicture() }
-        .fileImporter(
-            isPresented: $isChoosingProfilePicture,
-            allowedContentTypes: [.image],
-            allowsMultipleSelection: false
-        ) { result in
-            guard case .success(let urls) = result, let url = urls.first else { return }
-            do {
-                profilePictureData = try MacProfilePictureStore.save(
-                    sourceURL: url,
-                    serverURL: model.serverURLString,
-                    profileID: model.syncProfileID
-                )
-            } catch {
-                model.fileOperationError = "Resonance could not use that profile picture. \(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func reloadProfilePicture() {
-        profilePictureData = MacProfilePictureStore.load(
-            serverURL: model.serverURLString,
-            profileID: model.syncProfileID
-        )
-    }
-
-    private func removeProfilePicture() {
-        do {
-            try MacProfilePictureStore.remove(
-                serverURL: model.serverURLString,
-                profileID: model.syncProfileID
-            )
-            profilePictureData = nil
-        } catch {
-            model.fileOperationError = "Resonance could not remove that profile picture. \(error.localizedDescription)"
-        }
-    }
-
-    private func switchProfile() {
-        guard !isSwitching else { return }
-        isSwitching = true
-        Task {
-            guard await model.selectSyncProfile(matching: profileQuery) else {
-                isSwitching = false
-                return
-            }
-            await model.refreshClientConfigurationNow()
-            await model.refreshServerCatalogNow()
-            await model.syncPlaylistsNow()
-            isSwitching = false
-            if model.serverMessage.localizedCaseInsensitiveContains("connected") {
-                dismiss()
-            }
-        }
     }
 }
 

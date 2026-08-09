@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self'; style-src 'self'; media-src 'self' file: blob: resonance-stream:; img-src 'self' data: file:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self'; style-src 'self'; media-src 'self' file: blob: resonance-stream:; img-src 'self' data: file: https:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Resonance</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="shuffle-icon.css">
@@ -31,7 +31,7 @@
           <div id="profileMenu" class="profile-menu" role="menu" aria-label="Profile" hidden>
             <button id="profileMenuManage" class="profile-menu-header" type="button" role="menuitem" aria-label="Manage current profile">
               <span id="profileMenuInitial" class="profile-menu-avatar" aria-hidden="true">D</span>
-              <span><strong id="profileMenuName">Default</strong><small>Local Profile</small></span>
+              <span><strong id="profileMenuName">Account</strong><small id="profileMenuEmail">Clerk account</small></span>
               <svg class="profile-menu-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg>
             </button>
             <div class="profile-menu-divider"></div>
@@ -203,36 +203,6 @@
       <label class="add-songs-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg><input id="addSongsSearch" autocomplete="off" spellcheck="false" placeholder="Search songs, artists, or albums…" aria-label="Search songs to add"></label>
       <div id="addSongsList" class="add-songs-list"></div>
     </div>
-  </dialog>
-  <dialog id="profileSwitchDialog" class="profile-switch-dialog">
-    <form id="profileSwitchForm">
-      <div class="profile-switch-heading">
-        <div><h2>Profile</h2><p>Switch profiles or update your picture</p></div>
-        <button id="cancelProfileSwitch" class="secondary" type="button">Cancel</button>
-      </div>
-      <div class="profile-switch-current">
-        <button id="profileSwitchPicture" class="profile-switch-picture" type="button" title="Choose profile picture" aria-label="Choose profile picture">
-          <span id="profileSwitchInitial" class="profile-menu-avatar" aria-hidden="true">D</span>
-          <span class="profile-switch-camera" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3"/></svg>
-          </span>
-        </button>
-        <span><strong id="profileSwitchCurrentName">Default</strong><small>Current profile</small></span>
-        <button id="profileSwitchRemovePicture" class="profile-switch-remove-picture" type="button" title="Remove profile picture" aria-label="Remove profile picture" hidden>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6 7l1 14h10l1-14"/></svg>
-        </button>
-      </div>
-      <label for="profileSwitchQuery">Profile name or ID</label>
-      <input id="profileSwitchQuery" maxlength="80" autocomplete="off" spellcheck="false" required>
-      <p class="profile-switch-help">Enter an existing name or ID to switch, or enter a new name to create.</p>
-      <div class="profile-switch-footer">
-        <span id="profileSwitchStatus" role="status">Not connected</span>
-        <div class="profile-switch-actions">
-          <button id="createProfileFromSwitcher" class="secondary" type="button">Create profile</button>
-          <button id="confirmProfileSwitch" class="primary" type="submit">Switch</button>
-        </div>
-      </div>
-    </form>
   </dialog>
   <dialog id="clipEditorDialog" class="clip-editor-dialog" aria-labelledby="clipEditorTitle">
     <section class="clip-editor-panel">
