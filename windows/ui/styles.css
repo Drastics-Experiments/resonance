@@ -1455,7 +1455,6 @@ label.settings-row { cursor: pointer; }
   box-shadow: inset 0 1px #ffffff0a;
 }
 .settings-row-icon.discord { color: #8ea1ff; }
-.settings-row-icon.storage { font-size: 18px; }
 .settings-row-copy { min-width: 0; }
 .settings-row-copy strong,
 .settings-row-copy small { display: block; }
@@ -1528,8 +1527,6 @@ label.settings-row { cursor: pointer; }
   outline: 0;
 }
 .settings-server-field input:focus { border-color: #9776ff; box-shadow: 0 0 0 3px #7148ff18; }
-.settings-server-field .resonance-select { min-width: 0; }
-.settings-server-field .resonance-select-trigger { width: 100%; background: #ffffff0b; color: var(--text); }
 .settings-server-actions {
   display: flex;
   align-items: center;
@@ -4347,11 +4344,6 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .profile-picker-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
 .profile-picker-row .resonance-select { min-width: 0; }
 .profile-picker-row .resonance-select-trigger { background: #ffffff0b; color: var(--text); }
-.server-transfer-mode-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.server-transfer-mode-grid > div { display: grid; gap: 7px; min-width: 0; }
-.server-transfer-mode-grid .resonance-select { min-width: 0; }
-.server-transfer-mode-grid .resonance-select-trigger { width: 100%; background: #ffffff0b; color: var(--text); }
-.server-transfer-mode-help { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 12px; }
 .profile-switch-dialog {
   width: min(620px, calc(100vw - 40px));

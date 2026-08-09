@@ -680,7 +680,6 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
     var isEmailRevealed by remember(state.accountEmail) { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val connecting = state.isApplyingServerConnection || state.isRefreshingServer || state.isSigningIn
-    val editingConnection = url.trim() != state.serverUrl.trim()
 
     LaunchedEffect(connectRequested, connecting, state.isConnected, state.serverMessage) {
         if (connectRequested && !connecting && state.isConnected) dismiss()
@@ -751,32 +750,6 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
                 }
-                TransferModeSelector(
-                    title = "Upload mode",
-                    selected = if (editingConnection) "Connect first" else state.serverUploadMode?.label ?: "Disabled",
-                    options = if (editingConnection) emptyList() else state.availableServerUploadModes.map { mode ->
-                        mode.label to { actions.setServerUploadMode(mode) }
-                    },
-                )
-                TransferModeSelector(
-                    title = "Download mode",
-                    selected = if (editingConnection) "Connect first" else state.serverDownloadMode.label,
-                    options = if (editingConnection) emptyList() else state.availableServerDownloadModes.map { mode ->
-                        mode.label to { actions.setServerDownloadMode(mode) }
-                    },
-                )
-                if (editingConnection) {
-                    Text(
-                        "Save this server first. Then reopen Connection to choose modes from that account's signed policy.",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
-                    )
-                }
-                Text(
-                    state.clientConfigStatus,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f),
-                )
                 Text(state.serverMessage, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
             }
         },
@@ -820,46 +793,6 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                     isDismissible = true,
                     onDismiss = actions::dismissNativeAccountSignIn,
                     onAuthComplete = actions::completeNativeAccountSignIn,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun TransferModeSelector(
-    title: String,
-    selected: String,
-    options: List<Pair<String, () -> Unit>>,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    Box(Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, Color.White.copy(alpha = .16f), RoundedCornerShape(4.dp))
-                .clickable(enabled = options.isNotEmpty()) { expanded = true }
-                .padding(horizontal = 14.dp, vertical = 11.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
-                Text(selected, fontSize = 14.sp)
-            }
-            Icon(Icons.Default.Settings, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            options.forEach { (label, select) ->
-                DropdownMenuItem(
-                    text = { Text(label) },
-                    leadingIcon = {
-                        if (label == selected) Icon(Icons.Default.Check, null)
-                    },
-                    onClick = {
-                        select()
-                        expanded = false
-                    },
                 )
             }
         }

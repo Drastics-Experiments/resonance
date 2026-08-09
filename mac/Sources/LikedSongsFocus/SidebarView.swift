@@ -368,47 +368,6 @@ struct MacSettingsSheet: View {
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
 
-                settingsHeading("TRANSFER MODES", detail: "Choose the methods permitted by this server's verified configuration.")
-                    .padding(.top, 6)
-                VStack(alignment: .leading, spacing: 12) {
-                    Picker("Upload", selection: uploadModeBinding) {
-                        ForEach(displayedUploadModes) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .disabled(model.clientConfiguration.permittedUploadModes.isEmpty)
-
-                    Text(model.clientConfiguration.permittedUploadModes.isEmpty
-                        ? "Uploads are disabled by the verified server configuration."
-                        : model.uploadMode.detail)
-                        .font(.system(size: 9))
-                        .foregroundStyle(Color.appMuted)
-
-                    Rectangle().fill(Color.appLine).frame(height: 1)
-
-                    Picker("Download", selection: downloadModeBinding) {
-                        ForEach(displayedDownloadModes) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .disabled(model.clientConfiguration.permittedDownloadModes.isEmpty)
-
-                    Text(model.clientConfiguration.requestedStreamOnly
-                        ? model.offlineDownloadUnavailableMessage
-                        : model.downloadMode.detail)
-                        .font(.system(size: 9))
-                        .foregroundStyle(Color.appMuted)
-
-                    Label(model.clientConfigMessage, systemImage: "checkmark.shield")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Color.appMuted)
-                }
-                .padding(15)
-                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
-
                 HStack(spacing: 12) {
                     Text(model.serverMessage)
                         .font(.system(size: 10))
@@ -547,24 +506,6 @@ struct MacSettingsSheet: View {
         }
         .padding(.horizontal, 14)
         .frame(minHeight: 64)
-    }
-
-    private var uploadModeBinding: Binding<MacUploadMode> {
-        Binding(get: { model.uploadMode }, set: model.selectUploadMode)
-    }
-
-    private var downloadModeBinding: Binding<MacDownloadMode> {
-        Binding(get: { model.downloadMode }, set: model.selectDownloadMode)
-    }
-
-    private var displayedUploadModes: [MacUploadMode] {
-        let modes = model.clientConfiguration.permittedUploadModes
-        return modes.isEmpty ? [.localFile] : modes
-    }
-
-    private var displayedDownloadModes: [MacDownloadMode] {
-        let modes = model.clientConfiguration.permittedDownloadModes
-        return modes.isEmpty ? [.verifiedFileCache] : modes
     }
 
     private func settingsActionRow(

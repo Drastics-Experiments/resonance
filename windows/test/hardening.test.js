@@ -620,7 +620,7 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(appSource, /function focusSearchSortOption[\s\S]+\["ArrowDown", "ArrowUp", "Home", "End"\]\.includes\(event\.key\)/);
   assert.match(htmlSource, /class="full-player-queue-tabs" role="tablist"/);
   assert.match(htmlSource, /object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'/);
-  assert.match(appSource, /id="serverUploadMode"[\s\S]+id="serverDownloadMode"/);
+  assert.doesNotMatch(appSource, /id="serverUploadMode"|id="serverDownloadMode"|serverTransferModeHelp/);
   assert.match(htmlSource, /media-src 'self' file: blob: resonance-stream:/);
   assert.match(mainSource, /protocol\.registerSchemesAsPrivileged[\s\S]+standard: true,[\s\S]+secure: true,[\s\S]+stream: true/);
   assert.doesNotMatch(mainSource, /supportFetchAPI/);

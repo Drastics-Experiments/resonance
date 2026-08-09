@@ -2184,40 +2184,6 @@ private struct ServerConnectionSheet: View {
                     Text("Account")
                 }
                 Section {
-                    if library.availableUploadModes.isEmpty {
-                        Label("Uploads disabled by server policy", systemImage: "nosign")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Picker("Upload mode", selection: uploadModeBinding) {
-                            ForEach(library.availableUploadModes) { mode in
-                                Text(mode.title).tag(mode)
-                            }
-                        }
-                        Text((library.activeUploadMode ?? .localFile).detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if library.availableDownloadModes.isEmpty {
-                        Label("Downloads disabled by server policy", systemImage: "nosign")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Picker("Download mode", selection: downloadModeBinding) {
-                            ForEach(library.availableDownloadModes) { mode in
-                                Text(mode.title).tag(mode)
-                            }
-                        }
-                        Text((library.activeDownloadMode ?? .verifiedFileCache).detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                } header: {
-                    Text("Transfers")
-                } footer: {
-                    Text(library.clientConfigurationDisplayStatus)
-                }
-                .disabled(library.isProfileTransitionBusy)
-                Section {
                     Button {
                         focusedField = nil
                         guard saveServerDraft() else { return }
@@ -2307,20 +2273,6 @@ private struct ServerConnectionSheet: View {
             serverURLDraft = library.serverURL
             validationMessage = library.serverConfigurationMessage
         }
-    }
-
-    private var uploadModeBinding: Binding<MobileUploadMode> {
-        Binding(
-            get: { library.activeUploadMode ?? .localFile },
-            set: library.selectUploadMode
-        )
-    }
-
-    private var downloadModeBinding: Binding<MobileDownloadMode> {
-        Binding(
-            get: { library.activeDownloadMode ?? .verifiedFileCache },
-            set: library.selectDownloadMode
-        )
     }
 
     @discardableResult

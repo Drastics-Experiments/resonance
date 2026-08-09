@@ -563,11 +563,10 @@ test("renders every Windows select through the themed custom dropdown", () => {
 
   assert.doesNotMatch(htmlSource, /<select\b/i);
   assert.doesNotMatch(appSource, /<select\b/i);
-  assert.equal(staticCustomControls.length + settingsCustomControls.length, 6);
-  assert.match(appSource, /id="serverUploadMode"[^>]+data-custom-select/);
-  assert.match(appSource, /id="serverDownloadMode"[^>]+data-custom-select/);
+  assert.equal(staticCustomControls.length + settingsCustomControls.length, 4);
+  assert.doesNotMatch(appSource, /id="serverUploadMode"|id="serverDownloadMode"/);
   assert.match(appSource, /function initializeCustomSelects\(\)[\s\S]+querySelectorAll\("\[data-custom-select\]"\)/);
-  assert.match(appSource, /#serverSettingsForm \[data-custom-select\]"\)\.forEach\(initializeCustomSelect\)/);
+  assert.doesNotMatch(appSource, /#serverSettingsForm \[data-custom-select\]/);
   assert.match(appSource, /function setCustomSelectOptions\(/);
   assert.match(appSource, /role\", \"listbox/);
   assert.match(appSource, /role\", \"option/);
@@ -623,13 +622,16 @@ test("binds the active library to the signed-in Clerk account", () => {
   assert.doesNotMatch(appSource, /api\.createProfile|openProfileSwitcher|matchingSyncProfile/);
   assert.match(appSource, /profileID: activeProfileID\(\)/);
   assert.match(appSource, /accountSession\?\.profileID[\s\S]+await activateProfile\(accountSession\.profileID/);
-  assert.match(appSource, /ACCOUNT & TRANSFERS[\s\S]+Clerk account selects the library/);
+  assert.doesNotMatch(appSource, /ACCOUNT & TRANSFERS|Clerk account selects the library/);
   assert.doesNotMatch(appSource, /id="syncProfile"|id="newSyncProfile"/);
   assert.match(appSource, /track\.id === currentID \? toggle\(\) : play\(track, tracks, \{ playlistID: null \}\)/);
   assert.match(appSource, /function updateProfileControl\(\)[\s\S]+control\.hidden = false/);
-  for (const id of ["settingsServer", "settingsHistory", "settingsStorage", "settingsCheckUpdates"]) {
+  for (const id of ["settingsServer", "settingsCheckUpdates"]) {
     assert.match(appSource, new RegExp(`id="${id}"`));
   }
+  assert.doesNotMatch(appSource, /Library & tools|data-settings-panel="tools"|id="settingsHistory"|id="settingsClipEditor"|id="settingsStorage"/);
+  assert.match(htmlSource, /id="profileHistory"[\s\S]+id="profileClipEditor"/);
+  assert.match(htmlSource, /data-section="storage"[\s\S]+Song Storage/);
   assert.doesNotMatch(appSource, /Under construction/);
   assert.match(htmlSource, /id="settingsDialog"[^>]+settings-dialog/);
   assert.match(appSource, /#profileSettings"\)\.onclick = \(\) =>[\s\S]+openSettings\(\)/);

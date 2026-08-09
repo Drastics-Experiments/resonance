@@ -159,7 +159,6 @@ let serverConnected = false;
 let clientConfig = SAFE_CLIENT_CONFIG;
 let clientConfigRequestGeneration = 0;
 let clientConfigRenewalTimer = null;
-let clientConfigLeaseStatus = "safe-defaults";
 let activeServerStream = null;
 let serverStreamRequestGeneration = 0;
 let serverConnectInFlight = false;
@@ -249,7 +248,6 @@ const settingsIcons = Object.freeze({
   general: settingsIcon('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.07.07-2.76 2.76-.07-.07a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.1 1.65V21h-3.8v-.1A1.8 1.8 0 0 0 9 19.25a1.8 1.8 0 0 0-2 .36l-.07.07-2.76-2.76.07-.07a1.8 1.8 0 0 0 .36-2A1.8 1.8 0 0 0 2.95 13H3v-3.8h-.05A1.8 1.8 0 0 0 4.6 8a1.8 1.8 0 0 0-.36-2l-.07-.07 2.76-2.76.07.07a1.8 1.8 0 0 0 2 .36A1.8 1.8 0 0 0 10.1 2H14v.05A1.8 1.8 0 0 0 15 3.7a1.8 1.8 0 0 0 2-.36l.07-.07 2.76 2.76-.07.07a1.8 1.8 0 0 0-.36 2A1.8 1.8 0 0 0 21.05 9H21v4h.05A1.8 1.8 0 0 0 19.4 15Z"/>'),
   server: settingsIcon('<circle cx="12" cy="12" r="8"/><path d="M4.5 9h15M4.5 15h15M12 4c2 2.2 3 4.9 3 8s-1 5.8-3 8c-2-2.2-3-4.9-3-8s1-5.8 3-8Z"/>'),
   keybinds: settingsIcon('<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h.01M11 14h6M18 10h.01"/>'),
-  tools: settingsIcon('<path d="M14.7 6.3a4 4 0 0 0-5 5L3.5 17.5 6.5 20.5l6.2-6.2a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/>'),
   background: settingsIcon('<path d="M4 7h16v11H4z"/><path d="M8 7V4h8v3M8 21h8"/>'),
   discord: settingsIcon('<path d="M7.5 7.4A11 11 0 0 1 12 6.5a11 11 0 0 1 4.5.9c1.1 1.5 2 4.4 2 6.4-1.3 1.6-2.6 2.2-4 2.6l-1-1.3M16.5 7.4l.9-1.7M7.5 7.4l-.9-1.7M10 13h.01M14 13h.01M9.5 15.1c1.7.7 3.3.7 5 0"/>'),
   update: settingsIcon('<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/>'),
@@ -2453,63 +2451,17 @@ function currentServerTransferModes() {
   });
 }
 
-function renderServerTransferModeOptions() {
-  const uploadControl = $("#serverUploadMode");
-  const downloadControl = $("#serverDownloadMode");
-  if (!uploadControl || !downloadControl) return;
-  const modes = currentServerTransferModes();
-  setCustomSelectOptions(uploadControl, modes.available.upload.map((value) => ({
-    value,
-    label: serverUploadModeOptions[value] || value,
-  })), modes.uploadMode || "");
-  setCustomSelectOptions(downloadControl, modes.available.download.map((value) => ({
-    value,
-    label: serverDownloadModeOptions[value] || value,
-  })), modes.downloadMode);
-  uploadControl.disabled = modes.available.upload.length === 0;
-  downloadControl.disabled = modes.available.download.length < 2;
-  const help = $("#serverTransferModeHelp");
-  if (!help) return;
-  if (activeServerClientConfig(clientConfig) !== SAFE_CLIENT_CONFIG) {
-    help.textContent = modes.downloadMode === "stream_only"
-      ? "Stream-only plays authenticated media directly from this server and never saves the song bytes to this device."
-      : "Only modes enabled by this server's signed configuration are shown. Flags never replace access or admin authorization.";
-  } else if (clientConfigLeaseStatus === "unavailable") {
-    help.textContent = "The signed configuration could not be renewed. Safe file modes are active while Resonance retries.";
-  } else if (clientConfigLeaseStatus === "missing-credential") {
-    help.textContent = "Safe file modes are active until a server credential can verify this server's signed configuration.";
-  } else {
-    help.textContent = "Safe file transfer modes are in use because no valid signed server configuration is available.";
-  }
-}
-
-function saveServerTransferModeControls({ serverURL = state.serverURL, profileID = activeProfileID() } = {}) {
-  const uploadMode = $("#serverUploadMode")?.value;
-  const downloadMode = $("#serverDownloadMode")?.value;
-  return setServerTransferPreference(state, {
-    serverURL,
-    profileID,
-    uploadMode,
-    downloadMode,
-    config: clientConfig,
-  });
-}
-
 async function refreshClientConfig({ force = false } = {}) {
   const requestGeneration = ++clientConfigRequestGeneration;
-  const previousConfig = clientConfig;
   let context = null;
   try { context = { ...currentProfileContext(), configToken: serverToken || serverAdminToken }; }
   catch {
     clientConfig = SAFE_CLIENT_CONFIG;
-    clientConfigLeaseStatus = "invalid-context";
     scheduleClientConfigRenewal();
     return clientConfig;
   }
   if (!context.configToken) {
     clientConfig = SAFE_CLIENT_CONFIG;
-    clientConfigLeaseStatus = "missing-credential";
-    renderServerTransferModeOptions();
     scheduleClientConfigRenewal();
     return clientConfig;
   }
@@ -2526,17 +2478,12 @@ async function refreshClientConfig({ force = false } = {}) {
     clientConfig = response?.config && typeof response.config === "object"
       ? { ...response.config, source: response.source === "remote" ? "remote" : (response.source || "cache") }
       : SAFE_CLIENT_CONFIG;
-    clientConfigLeaseStatus = activeServerClientConfig(clientConfig) === SAFE_CLIENT_CONFIG
-      ? (force && previousConfig?.verified === true ? "unavailable" : "safe-defaults")
-      : (response.source || "cache");
   } catch {
     if (requestGeneration !== clientConfigRequestGeneration
       || !profileContextIsCurrent(context)
       || context.configToken !== (serverToken || serverAdminToken)) return clientConfig;
     clientConfig = SAFE_CLIENT_CONFIG;
-    clientConfigLeaseStatus = "unavailable";
   }
-  renderServerTransferModeOptions();
   scheduleClientConfigRenewal();
   if (activeServerStream && currentServerTransferModes().downloadMode !== "stream_only") {
     releaseActiveServerStream({ stopPlayback: true });
@@ -3775,17 +3722,8 @@ async function saveServerForm() {
   const nextServerURL = settingsOpen ? $("#serverURL").value.trim() : state.serverURL;
   const nextProfileID = accountSession?.profileID
     || (settingsOpen ? ($("#syncProfile")?.value || activeProfileID()) : activeProfileID());
-  const requestedUploadMode = settingsOpen ? $("#serverUploadMode")?.value : currentServerTransferModes().uploadMode;
-  const requestedDownloadMode = settingsOpen ? $("#serverDownloadMode")?.value : currentServerTransferModes().downloadMode;
   await activateProfile(nextProfileID, nextServerURL);
   await refreshClientConfig({ force: true });
-  setServerTransferPreference(state, {
-    serverURL: state.serverURL,
-    profileID: activeProfileID(),
-    uploadMode: requestedUploadMode,
-    downloadMode: requestedDownloadMode,
-    config: clientConfig,
-  });
   await persist();
   updateProfileControl();
   schedulePlaylistSync();
@@ -3823,7 +3761,6 @@ async function applyAccountSession(nextSession, error = null) {
 
 function renderSettings() {
   const profile = activeProfile();
-  const track = currentTrack();
   state.appPreferences = normalizedAppPreferences(state.appPreferences);
   const preferences = state.appPreferences;
   const keybindRows = Object.entries(settingsKeybindActions).map(([action, metadata]) => {
@@ -3842,7 +3779,6 @@ function renderSettings() {
         <button class="${settingsPanel === "general" ? "active" : ""}" type="button" data-settings-panel="general" aria-current="${settingsPanel === "general" ? "page" : "false"}">${settingsIcons.general}<span>General</span></button>
         <button class="${settingsPanel === "server" ? "active" : ""}" type="button" data-settings-panel="server" aria-current="${settingsPanel === "server" ? "page" : "false"}">${settingsIcons.server}<span>Server</span></button>
         <button class="${settingsPanel === "keybinds" ? "active" : ""}" type="button" data-settings-panel="keybinds" aria-current="${settingsPanel === "keybinds" ? "page" : "false"}">${settingsIcons.keybinds}<span>Keybinds</span></button>
-        <button class="${settingsPanel === "tools" ? "active" : ""}" type="button" data-settings-panel="tools" aria-current="${settingsPanel === "tools" ? "page" : "false"}">${settingsIcons.tools}<span>Library & tools</span></button>
       </nav>
       <div class="settings-content">
         <section class="settings-panel" data-settings-content="general" ${settingsPanel === "general" ? "" : "hidden"}>
@@ -3886,18 +3822,6 @@ function renderSettings() {
                   : `<div><strong>${serverToken ? "Legacy connection" : "Sign in to Resonance"}</strong><small>${serverToken ? "Sign in to finish upgrading this device." : "Use email, Google, Apple, or Discord in your web browser."}</small></div><div class="settings-auth-grid"><button class="secondary" type="button" data-auth-provider="clerk">Sign in or create account</button></div>`}
               </div>
             </div>
-            <div class="settings-section-heading compact"><span>ACCOUNT & TRANSFERS</span><p>Your Clerk account selects the library; choose the transfer methods allowed by this server.</p></div>
-            <div class="settings-server-card settings-server-options">
-              <div class="settings-server-field">
-                <span id="serverUploadModeLabel">Upload mode</span>
-                <div id="serverUploadMode" data-custom-select aria-labelledby="serverUploadModeLabel"></div>
-              </div>
-              <div class="settings-server-field">
-                <span id="serverDownloadModeLabel">Download mode</span>
-                <div id="serverDownloadMode" data-custom-select aria-labelledby="serverDownloadModeLabel"></div>
-              </div>
-              <p id="serverTransferModeHelp" class="server-transfer-mode-help settings-server-field-wide">Safe file transfer modes are used until this server returns a valid signed configuration.</p>
-            </div>
             <div class="settings-server-actions">
               <span id="serverSettingsStatus" role="status">${escapeHTML(serverConnectionText || "Not connected")}</span>
               <button id="saveServerSettings" class="primary" type="submit">Save & connect</button>
@@ -3907,14 +3831,6 @@ function renderSettings() {
         <section class="settings-panel" data-settings-content="keybinds" ${settingsPanel === "keybinds" ? "" : "hidden"}>
           <div class="settings-panel-title"><div><span class="eyebrow">PLAYBACK</span><h2>Keybinds</h2><p>Choose a shortcut, then press the new key combination. These work while Resonance is focused.</p></div><button id="resetSettingsKeybinds" class="settings-row-action" type="button">Reset defaults</button></div>
           <div class="settings-group settings-keybinds">${keybindRows}</div>
-        </section>
-        <section class="settings-panel" data-settings-content="tools" ${settingsPanel === "tools" ? "" : "hidden"}>
-          <div class="settings-panel-title"><div><span class="eyebrow">LIBRARY</span><h2>Library & tools</h2><p>Open the existing tools without changing their behavior.</p></div></div>
-          <div class="settings-group">
-            <div class="settings-row"><span class="settings-row-icon" aria-hidden="true">${historyClockIcon}</span><span class="settings-row-copy"><strong>Listening History</strong><small>Review this profile’s recent playback.</small></span><button id="settingsHistory" class="settings-row-action" type="button">Open</button></div>
-            <div class="settings-row"><span class="settings-row-icon" aria-hidden="true">${settingsIcons.tools}</span><span class="settings-row-copy"><strong>Clip Editor</strong><small>${track ? `Edit the playback range for ${escapeHTML(track.title)}.` : "Choose a song before opening the clip editor."}</small></span><button id="settingsClipEditor" class="settings-row-action" type="button" ${track && !track.transientStream ? "" : "disabled"}>Open</button></div>
-            <div class="settings-row"><span class="settings-row-icon storage" aria-hidden="true">♪</span><span class="settings-row-copy"><strong>Local storage</strong><small>${tracksForActiveProfile(state).length} songs on this profile.</small></span><button id="settingsStorage" class="settings-row-action" type="button">Manage</button></div>
-          </div>
         </section>
       </div>
     </div>
@@ -3952,20 +3868,15 @@ function renderSettings() {
     renderSettings();
   };
   if ($("#settingsServer")) $("#settingsServer").onclick = openServerSettings;
-  if ($("#settingsHistory")) $("#settingsHistory").onclick = () => { closeSettings(); openListeningHistory(); };
-  if ($("#settingsClipEditor")) $("#settingsClipEditor").onclick = () => { closeSettings(); openClipEditor(); };
-  if ($("#settingsStorage")) $("#settingsStorage").onclick = () => { closeSettings(); navigate("storage"); };
   if ($("#settingsCheckUpdates")) $("#settingsCheckUpdates").onclick = checkForUpdates;
 
   if (settingsPanel === "server") bindServerSettingsControls();
 }
 
 function bindServerSettingsControls() {
-  document.querySelectorAll("#serverSettingsForm [data-custom-select]").forEach(initializeCustomSelect);
   $("#serverURL").value = state.serverURL || "";
   $("#serverURL").disabled = Boolean(accountSession);
   renderProfileOptions();
-  renderServerTransferModeOptions();
 
   document.querySelectorAll("[data-auth-provider]").forEach((button) => {
     button.onclick = async () => {
