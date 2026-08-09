@@ -61,6 +61,7 @@ struct SidebarView: View {
                     ForEach(model.playlists) { playlist in
                         PlaylistSidebarRow(
                             playlist: playlist,
+                            tracks: model.tracks,
                             isSelected: model.section == .playlists && model.selectedPlaylistID == playlist.id,
                             deleteAction: playlist.isSystem ? nil : { model.deletePlaylist(playlist) }
                         ) {
@@ -376,6 +377,7 @@ private struct SidebarNavigationRow: View {
 
 private struct PlaylistSidebarRow: View {
     let playlist: Playlist
+    let tracks: [Track]
     let isSelected: Bool
     let deleteAction: (() -> Void)?
     let action: () -> Void
@@ -385,9 +387,9 @@ private struct PlaylistSidebarRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 11) {
-                MiniArtwork(
-                    style: playlist.artwork,
-                    symbol: playlist.artwork == .liked ? "heart.fill" : "music.note",
+                PlaylistArtworkView(
+                    playlist: playlist,
+                    tracks: tracks,
                     size: 39,
                     cornerRadius: 6
                 )

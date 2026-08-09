@@ -33,6 +33,7 @@ import {
   normalizeState,
   playbackRangeForTrack,
   planMissingDownloadedUploads,
+  playlistArtworkTrackIDs,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
   serverSongMetadataMatches,
@@ -67,6 +68,12 @@ const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdat
 const { isManagedLibraryFile } = libraryPaths;
 const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload } = serverDownload;
 const { discordArtworkURL, sanitizeDiscordActivity } = discordRPC;
+
+test("playlist artwork uses only the first four custom-playlist songs", () => {
+  const trackIDs = ["one", "two", "three", "four", "five"];
+  assert.deepEqual(playlistArtworkTrackIDs({ trackIDs, isSystem: false }), trackIDs.slice(0, 4));
+  assert.deepEqual(playlistArtworkTrackIDs({ trackIDs, isSystem: true }), []);
+});
 
 test("uses a custom fullscreen video player with queue, repeat, controls, and shared volume", () => {
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.mp4", fileUrl: "file:///C:/Music/clip.mp4" }), true);

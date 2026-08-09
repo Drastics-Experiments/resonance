@@ -84,6 +84,16 @@ struct LikedSongsFocusTests {
     }
 
     @Test
+    func automaticPlaylistArtworkUsesOnlyTheFirstFourCustomPlaylistTracks() {
+        let trackIDs = (0..<5).map { _ in UUID() }
+        let playlist = Playlist(name: "Mix", artwork: .electric, trackIDs: trackIDs)
+        let likedSongs = Playlist.library(trackIDs: trackIDs)
+
+        #expect(playlist.automaticArtworkTrackIDs == Array(trackIDs.prefix(4)))
+        #expect(likedSongs.automaticArtworkTrackIDs.isEmpty)
+    }
+
+    @Test
     func serverUploadNamesUseTrackTitlesInsteadOfManagedCacheHashes() {
         let cached = URL(fileURLWithPath: "/ServerCache/980026786a7d6c4928bb9b3fdd9e42b9b53eb7432473cac2b.m4a")
         #expect(ServerUploadNaming.filename(for: cached, title: "No Dogs Allowed") == "No Dogs Allowed.m4a")
