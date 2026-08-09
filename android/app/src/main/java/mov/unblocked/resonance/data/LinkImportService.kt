@@ -95,6 +95,7 @@ data class LinkImportDownload(
     val metadata: LinkImportTrack,
     val artwork: ByteArray?,
     val durationMs: Long,
+    val downloadSourceURL: String,
     val sourceSHA256: String,
     val contentSHA256: String,
 )
@@ -410,6 +411,7 @@ class LinkImportService(context: Context) {
                     ),
                     artwork,
                     ((metadata.durationSeconds ?: resolved.track.durationSeconds) ?: 0).coerceAtLeast(0) * 1_000L,
+                    resolved.url.toString(),
                     hash,
                     hash,
                 )
@@ -432,6 +434,7 @@ class LinkImportService(context: Context) {
                 ),
                 artwork,
                 ((metadata.durationSeconds ?: resolved.candidate.durationSeconds) ?: 0).coerceAtLeast(0) * 1_000L,
+                resolved.streamURL.toString(),
                 hash,
                 hash,
             )

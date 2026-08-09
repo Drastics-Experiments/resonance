@@ -767,7 +767,9 @@ function safeServerUploadRetryRecord(value) {
     ? new Date(value.createdAt).toISOString()
     : null;
   const recordAge = createdAt ? Date.now() - Date.parse(createdAt) : Number.POSITIVE_INFINITY;
+  const mediaSourceURL = preservedMediaSourceURL(value.mediaSourceURL);
   if (!retryID || !filePath || !serverOrigin || !createdAt
+      || !mediaSourceURL
       || recordAge < -5 * 60 * 1000
       || recordAge > SERVER_UPLOAD_RETRY_MAX_AGE_MS) return null;
   return {
@@ -776,11 +778,47 @@ function safeServerUploadRetryRecord(value) {
     trackID: boundedText(value.trackID, 128),
     title: boundedText(value.title) || path.basename(filePath, path.extname(filePath)),
     artist: boundedText(value.artist),
+    album: boundedText(value.album),
+    duration: Number.isFinite(Number(value.duration)) && Number(value.duration) >= 0 ? Number(value.duration) : 0,
+    artworkURL: safeArtworkURL(value.artworkURL)?.href || null,
+    mediaSourceURL,
     uploadFilename: safeFilename(value.uploadFilename || path.basename(filePath)),
     serverOrigin,
     profileID: boundedText(value.profileID, 128) || "default",
     createdAt,
   };
+}
+
+function preservedMediaSourceURL(value) {
+  const source = typeof value === "string" ? value.trim() : "";
+  if (!source || source.length > 8192) return null;
+  try {
+    const url = new URL(source);
+    if (url.protocol !== "https:" || url.username || url.password || url.hash) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function sourceLinkRegistrationBody(item, filename) {
+  const sourceURL = preservedMediaSourceURL(item.mediaSourceURL);
+  if (!sourceURL) {
+    throw new Error("Only songs downloaded from a preserved source link can be uploaded. Download this song from its link again first.");
+  }
+  const duration = Number(item.duration);
+  return JSON.stringify({
+    schema_version: 1,
+    source_url: sourceURL,
+    filename,
+    metadata: {
+      title: boundedText(item.title, 500) || path.basename(filename, path.extname(filename)),
+      artist: boundedText(item.artist, 500) || "Unknown Artist",
+      album: boundedText(item.album, 500) || "Unknown Album",
+      ...(Number.isFinite(duration) && duration > 0 ? { duration_seconds: duration } : {}),
+      ...(safeArtworkURL(item.artworkURL)?.href ? { artwork_url: safeArtworkURL(item.artworkURL).href } : {}),
+    },
+  });
 }
 
 async function ensureServerUploadRetriesLoaded() {
@@ -1911,7 +1949,9 @@ ipcMain.handle("local-import:cancel", (event) => {
   return true;
 });
 
-ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profileID, filePath, title, mode } = {}) => {
+ipcMain.handle("local-import:upload", async (event, {
+  baseURL, adminToken, profileID, filePath, title, artist, album, duration, artworkURL, mediaSourceURL, mode,
+} = {}) => {
   if (!localImportEnabled()) {
     return { ok: false, error: { stage: "syncing", code: "FEATURE_DISABLED", message: "Local link import is disabled in this build." } };
   }
@@ -1925,20 +1965,18 @@ ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profi
       throw new LocalImportError("syncing", "INVALID_LOCAL_FILE", "Only a song already saved in the managed Resonance library can be uploaded.");
     }
     const information = await fs.stat(absolute);
-    if (!information.isFile() || information.size <= 0 || information.size > MAX_LOCAL_IMPORT_UPLOAD_BYTES) {
-      throw new LocalImportError("syncing", "INVALID_LOCAL_FILE", "The local song cannot be uploaded because its size is invalid.");
+    if (!information.isFile() || information.size <= 0) {
+      throw new LocalImportError("syncing", "INVALID_LOCAL_FILE", "The local song file is missing or empty.");
     }
     if (!adminToken) {
       throw new LocalImportError("syncing", "ADMIN_KEY_REQUIRED", "Sign in with an administrator account before uploading this local song.");
     }
     const base = normalizeBaseURL(baseURL);
-    const requestedMode = mode === "reviewed_match" ? "reviewed_match" : "local_file";
+    const requestedMode = ["server_source_link", "reviewed_match"].includes(mode) ? mode : "local_file";
     const requestContext = await clientConfigContext(base.href, profileID);
     const filename = serverUploadFilename(absolute, title);
     const url = new URL("api/v1/admin/songs", base);
-    url.searchParams.set("filename", filename);
     let completed = 0;
-    let body = null;
     const publishUploadProgress = () => {
       if (!event.sender.isDestroyed()) {
         event.sender.send("local-import:progress", {
@@ -1946,7 +1984,7 @@ ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profi
           profileID: String(profileID || "default"),
           currentFile: filename,
           completed,
-          total: information.size,
+          total: 1,
         });
       }
     };
@@ -1959,34 +1997,30 @@ ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profi
       force: true,
     });
     controller.signal.throwIfAborted();
-    body = createReadStream(absolute);
-    body.on("data", (chunk) => {
-      completed += chunk.length;
-      publishUploadProgress();
-    });
-    controller.signal.addEventListener("abort", () => body.destroy(controller.signal.reason), { once: true });
+    const body = sourceLinkRegistrationBody({
+      title, artist, album, duration, artworkURL, mediaSourceURL,
+    }, filename);
     const response = await fetch(url, {
       method: "PUT",
       headers: {
         ...profileHeaders(adminToken, profileID),
         ...requestContext.expected.request_headers,
-        "Content-Type": "application/octet-stream",
-        "Content-Length": String(information.size),
+        "Content-Type": "application/json",
+        Accept: "application/json",
       },
       body,
-      duplex: "half",
       redirect: "manual",
       signal: controller.signal,
     });
     const { song: remoteSong } = await readServerUploadResponse(response, { serverOrigin: base.origin });
-    completed = information.size;
+    completed = 1;
     publishUploadProgress();
     event.sender.send("local-import:progress", {
       stage: "complete",
       profileID: String(profileID || "default"),
       currentFile: filename,
       completed,
-      total: information.size,
+      total: 1,
     });
     return { ok: true, remoteSong };
   } catch (error) {
@@ -3173,6 +3207,9 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
         remoteModified,
         size: downloadedSize,
         contentSha256: downloadedSHA256,
+        sourceIdentity: song.source_url
+          ? normalizeSourceIdentity(matching?.sourceIdentity, { mediaSourceURL: song.source_url })
+          : matching?.sourceIdentity,
       }));
     } catch (error) {
       if (error?.name === "AbortError") throw error;
@@ -3229,34 +3266,20 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
       filePath: path.resolve(String(item?.filePath || "")),
       title: String(item?.title || ""),
       artist: String(item?.artist || ""),
+      album: String(item?.album || ""),
+      duration: Number(item?.duration) || 0,
+      artworkURL: safeArtworkURL(item?.artworkURL)?.href || null,
+      mediaSourceURL: preservedMediaSourceURL(item?.mediaSourceURL),
       uploadFilename: serverUploadFilename(item?.filePath, item?.title),
       serverOrigin: base.origin,
       profileID: requestedProfileID,
       createdAt: new Date().toISOString(),
     }));
-    if (requestedFiles.some((item) => !item.trackID || !isManagedLibraryFile(item.filePath, managedRoots))) {
+    if (requestedFiles.some((item) => !item.trackID || !item.mediaSourceURL || !isManagedLibraryFile(item.filePath, managedRoots))) {
       throw new Error("Only songs stored in the managed Resonance library can be batch uploaded.");
     }
   } else {
-    const selection = await dialog.showOpenDialog(mainWindow, {
-      title: "Upload music to Resonance Server",
-      properties: ["openFile", "multiSelections"],
-      filters: [{ name: "Audio", extensions: [...AUDIO_EXTENSIONS].map((item) => item.slice(1)) }],
-    });
-    if (selection.canceled) return { uploaded: 0, results: [], failed: [], selectionCancelled: true };
-    if (!selection.filePaths.length || selection.filePaths.length > MAX_SERVER_UPLOAD_BATCH_FILES) {
-      throw new Error(`Choose between 1 and ${MAX_SERVER_UPLOAD_BATCH_FILES} songs to upload.`);
-    }
-    requestedFiles = selection.filePaths.map((filePath) => ({
-      retryID: randomUUID(),
-      filePath,
-      title: path.basename(filePath, path.extname(filePath)),
-      artist: "",
-      uploadFilename: serverUploadFilename(filePath),
-      serverOrigin: base.origin,
-      profileID: requestedProfileID,
-      createdAt: new Date().toISOString(),
-    }));
+    throw new Error("File uploads are no longer accepted. Download a song from a link first, then upload its preserved source link.");
   }
   const rawAssociationConflictPaths = Array.isArray(associationConflictPaths) ? associationConflictPaths : [];
   if (rawAssociationConflictPaths.length > 50_000) {
@@ -3294,14 +3317,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
       attempts += 1;
       attemptsByRetryID.set(item.retryID, attempts);
       const url = new URL("api/v1/admin/songs", base);
-      url.searchParams.set("filename", filename);
-      let body = null;
-      const abortBody = () => body?.destroy(new Error("Upload cancelled"));
       try {
-        const information = await fs.stat(filePath);
-        if (!information.isFile() || information.size <= 0) throw new Error("The local song file is missing or empty.");
-        body = createReadStream(filePath);
-        signal.addEventListener("abort", abortBody, { once: true });
         await requireClientUploadMode({
           baseURL: base.href,
           token: String(adminToken),
@@ -3310,16 +3326,16 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
           force: true,
         });
         signal.throwIfAborted();
+        const body = sourceLinkRegistrationBody(item, filename);
         const response = await fetch(url, {
           method: "PUT",
           headers: {
             ...profileHeaders(adminToken, requestedProfileID),
             ...requestContext.expected.request_headers,
-            "Content-Type": "application/octet-stream",
-            "Content-Length": String(information.size),
+            "Content-Type": "application/json",
+            Accept: "application/json",
           },
           body,
-          duplex: "half",
           redirect: "manual",
           signal,
         });
@@ -3329,9 +3345,6 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
         lastError = error;
         if (error?.retryable === false) throw error;
         if (attempts < 3) await new Promise((resolve) => setTimeout(resolve, attempts === 1 ? 400 : 1200));
-      } finally {
-        signal.removeEventListener("abort", abortBody);
-        body?.destroy();
       }
     }
     if (remoteSong) {

@@ -1189,7 +1189,6 @@ private func formatBytes(_ bytes: Int64) -> String {
 
 private struct ServerView: View {
     @EnvironmentObject private var library: MusicLibrary
-    @State private var choosingUploads = false
     @State private var deletionCandidate: MobileRemoteSong?
     @State private var presentedSheet: ServerSheet?
     @State private var searchText = ""
@@ -1385,13 +1384,10 @@ private struct ServerView: View {
             library.selectedRemoteSongIDs.removeAll()
             scope = .all
         }
-        .fileImporter(isPresented: $choosingUploads, allowedContentTypes: [.audio, .movie], allowsMultipleSelection: true) { result in
-            if case .success(let urls) = result { Task { await library.uploadFiles(urls) } }
-        }
         .sheet(item: $presentedSheet) { sheet in
             switch sheet {
             case .connection: ServerConnectionSheet()
-            case .sourceImport: ServerSourceImportSheet()
+            case .linkImport: MobileLocalImportSheet()
             case .reviewedImport: MobileLocalImportSheet(reviewedServerMatch: true)
             }
         }
@@ -1487,10 +1483,8 @@ private struct ServerView: View {
                 isDisabled: library.isUploadTransferBusy || library.activeUploadMode == nil
             ) {
                 switch library.activeUploadMode {
-                case .localFile:
-                    choosingUploads = true
-                case .serverSourceLink:
-                    presentedSheet = .sourceImport
+                case .localFile, .serverSourceLink:
+                    presentedSheet = .linkImport
                 case .reviewedMatch:
                     presentedSheet = .reviewedImport
                 case nil:
@@ -1610,7 +1604,7 @@ private struct ServerTransferFailuresCard: View {
 }
 
 private enum ServerSheet: String, Identifiable {
-    case connection, sourceImport, reviewedImport
+    case connection, linkImport, reviewedImport
     var id: String { rawValue }
 }
 

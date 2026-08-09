@@ -524,6 +524,15 @@ struct PlayerModelRegressionTests {
         )
         model.serverURLString = "https://music.test"
         model.serverToken = "access-token"
+        model.tracks = [Track(
+            title: "Glass",
+            artist: "System",
+            album: "Sounds",
+            duration: 1,
+            artwork: .liked,
+            fileURL: glass,
+            downloadSourceURL: "https://media.example/glass.aiff"
+        )]
 
         let refresh = Task { await model.refreshServerCatalogNow() }
         await catalogFetchStarted.wait()
@@ -632,7 +641,8 @@ struct PlayerModelRegressionTests {
             album: "Album",
             duration: 1,
             artwork: .liked,
-            fileURL: glass
+            fileURL: glass,
+            downloadSourceURL: "https://media.example/local-context.aiff"
         )
         model.tracks = [track]
         model.serverURLString = "https://music.test"

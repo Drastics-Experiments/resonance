@@ -187,6 +187,33 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         }
     }
 
+    private struct SourceLinkUploadDocument: Encodable {
+        struct Metadata: Encodable {
+            let title: String
+            let artist: String
+            let album: String
+            let durationSeconds: TimeInterval?
+            let artworkURL: String?
+
+            enum CodingKeys: String, CodingKey {
+                case title, artist, album
+                case durationSeconds = "duration_seconds"
+                case artworkURL = "artwork_url"
+            }
+        }
+
+        let schemaVersion = 1
+        let sourceURL: String
+        let filename: String
+        let metadata: Metadata
+
+        enum CodingKeys: String, CodingKey {
+            case filename, metadata
+            case schemaVersion = "schema_version"
+            case sourceURL = "source_url"
+        }
+    }
+
     private struct ListeningHistoryUploadDocument: Encodable {
         let client = "macos"
         let deviceID: String
@@ -258,6 +285,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         case invalidSongIdentifier
         case crossOriginDownload
         case invalidMedia
+        case missingSourceLink
         case downloadTooLarge
         case unexpectedDownloadSize
         case downloadHashMismatch
@@ -273,6 +301,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             case .invalidSongIdentifier: "The server returned an unsafe song identifier."
             case .crossOriginDownload: "The server returned a download URL from another server."
             case .invalidMedia: "The downloaded file is not playable media."
+            case .missingSourceLink: "Only songs downloaded from a preserved source link can be uploaded. Download this song from its link again first."
             case .downloadTooLarge: "The server file exceeds the supported download size."
             case .unexpectedDownloadSize: "The downloaded file size did not match the server catalog."
             case .downloadHashMismatch: "The downloaded file checksum did not match the server catalog."
@@ -498,14 +527,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         }
         if reservingUpload, context.requiresReviewedMatch, context.uploadMode != .reviewedMatch {
             throw LocalImportTransferContextError.reviewedMatchRequired
-        }
-        if reservingUpload, context.uploadMode == .serverSourceLink {
-            guard MacSourceImportPolicy.exactCanonicalYouTubePage(context.rawSourceInput) != nil else {
-                throw LocalImportTransferContextError.unsupportedSourceLink
-            }
-            guard context.mediaMode == .audio else {
-                throw LocalImportTransferContextError.sourceLinkRequiresAudio
-            }
         }
         activeLocalImportTransferID = context.id
         isUploadingLocalImport = true
@@ -2033,39 +2054,24 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func chooseSongsToUpload() {
-        switch uploadMode {
-        case .serverSourceLink, .reviewedMatch:
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                await refreshClientConfigurationNow()
-                guard clientConfiguration.permittedUploadModes.contains(uploadMode) else {
-                    uploadStatus = "\(uploadMode.title) is disabled by the verified server configuration"
-                    return
-                }
-                serverMessage = uploadMode == .serverSourceLink
-                    ? "Enter the exact original YouTube watch page in Import from Link"
-                    : "Choose and review a match in Import from Link"
-                NotificationCenter.default.post(name: .importMusicFromLink, object: nil)
-            }
-            return
-        case .localFile:
-            guard clientConfiguration.allowsLocalFileUpload else {
-                uploadStatus = "Local-file uploads are disabled by the verified server configuration"
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await refreshClientConfigurationNow()
+            guard clientConfiguration.permittedUploadModes.contains(uploadMode) else {
+                uploadStatus = "\(uploadMode.title) is disabled by the verified server configuration"
                 return
             }
+            serverMessage = uploadMode == .reviewedMatch
+                ? "Choose and review a match in Import from Link"
+                : "Download a song in Import from Link to register its preserved direct source"
+            NotificationCenter.default.post(name: .importMusicFromLink, object: nil)
         }
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.audio, .mpeg4Movie, .movie]
-        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-        uploadTask = Task { await uploadSongsToServer(panel.urls) }
     }
 
     func uploadMissingDownloadedSongs() {
         guard !localFileUploadActionsDisabled else {
             if !clientConfiguration.allowsLocalFileUpload {
-                uploadStatus = "Local-file uploads are disabled by the verified server configuration"
+                uploadStatus = "Preserved source-link uploads are disabled by the verified server configuration"
             }
             return
         }
@@ -2265,6 +2271,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         remoteID: remote.id,
                         sourceServer: ServerSongIdentity.normalizedOrigin(base),
                         syncProfileID: syncProfileID,
+                        downloadSourceURL: remote.sourceURL ?? existingIndex.flatMap { tracks[$0].downloadSourceURL },
                         contentSHA256: resolvedContentSHA256,
                         dateAdded: existingIndex.map { tracks[$0].dateAdded } ?? .now
                     )
@@ -2321,7 +2328,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         let capturedUploadMode = MacUploadMode.localFile
         guard !localFileUploadActionsDisabled else {
             if !clientConfiguration.allowsLocalFileUpload {
-                uploadStatus = "Local-file uploads are disabled by the verified server configuration"
+                uploadStatus = "Preserved source-link uploads are disabled by the verified server configuration"
             }
             return
         }
@@ -2363,8 +2370,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     continue
                 }
                 do {
+                    guard let tracked = tracks.first(where: { Self.sameLocalFile($0.fileURL, fileURL) }) else {
+                        throw ServerSyncError.missingSourceLink
+                    }
                     let uploadedSong = try await uploadServerFile(
-                        fileURL,
+                        tracked,
                         base: base,
                         adminToken: adminToken,
                         profileID: profileID,
@@ -2401,7 +2411,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         let capturedUploadMode = MacUploadMode.localFile
         guard !localFileUploadActionsDisabled else {
             if !clientConfiguration.allowsLocalFileUpload {
-                uploadStatus = "Local-file uploads are disabled by the verified server configuration"
+                uploadStatus = "Preserved source-link uploads are disabled by the verified server configuration"
                 serverMessage = uploadStatus
             }
             return
@@ -2466,12 +2476,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                             try await Task.sleep(for: .milliseconds(attempt == 2 ? 400 : 1_200))
                         }
                         uploadedSong = try await uploadServerFile(
-                            fileURL,
+                            track,
                             base: base,
                             adminToken: adminToken,
                             profileID: profileID,
-                            capturedUploadMode: capturedUploadMode,
-                            title: track.title
+                            capturedUploadMode: capturedUploadMode
                         )
                         break
                     } catch is CancellationError {
@@ -2517,30 +2526,22 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     private func uploadServerFile(
-        _ fileURL: URL,
+        _ track: Track,
         base: URL,
         adminToken: String,
         profileID: String,
-        capturedUploadMode: MacUploadMode,
-        title: String? = nil
+        capturedUploadMode: MacUploadMode
     ) async throws -> RemoteSong {
-        let values = try fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-        guard values.isRegularFile == true, (values.fileSize ?? 0) > 0 else {
-            throw ServerSyncError.invalidMedia
-        }
-        var components = URLComponents(
-            url: base.appendingPathComponent("api/v1/admin/songs"),
-            resolvingAgainstBaseURL: false
-        )
-        components?.queryItems = [
-            URLQueryItem(name: "filename", value: ServerUploadNaming.filename(for: fileURL, title: title))
-        ]
-        guard let url = components?.url else { throw ServerSyncError.invalidURL }
+        guard let rawSource = track.downloadSourceURL,
+              let sourceURL = URL(string: rawSource),
+              sourceURL.scheme?.lowercased() == "https",
+              sourceURL.user == nil,
+              sourceURL.password == nil else { throw ServerSyncError.missingSourceLink }
+        let url = base.appendingPathComponent("api/v1/admin/songs")
+        guard Self.sameOrigin(url, base) else { throw ServerSyncError.invalidURL }
         await refreshClientConfigurationNow()
         try Task.checkCancellation()
-        guard capturedUploadMode == .localFile,
-              clientConfiguration.allowsLocalFileUpload,
-              clientConfiguration.permittedUploadModes.contains(capturedUploadMode),
+        guard clientConfiguration.permittedUploadModes.contains(capturedUploadMode),
               matchesGenericFileUploadContext(
                 base: base,
                 profileID: profileID,
@@ -2550,17 +2551,31 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         }
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
-        request.timeoutInterval = 600
-        request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(
-            UTType(filenameExtension: fileURL.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
-            forHTTPHeaderField: "Content-Type"
+        request.timeoutInterval = 90
+        let filename = track.fileURL.map {
+            ServerUploadNaming.filename(for: $0, title: track.title)
+        } ?? ServerUploadNaming.filename(
+            for: URL(fileURLWithPath: track.title + (track.kind == .video ? ".mp4" : ".m4a")),
+            title: track.title
         )
+        request.httpBody = try JSONEncoder().encode(SourceLinkUploadDocument(
+            sourceURL: sourceURL.absoluteString,
+            filename: filename,
+            metadata: .init(
+                title: track.title,
+                artist: track.artist,
+                album: track.album,
+                durationSeconds: track.duration > 0 ? track.duration : nil,
+                artworkURL: track.artworkURL
+            )
+        ))
+        request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         setProfileHeader(on: &request, profileID: profileID)
         applyCurrentClientConfigHeaders(to: &request, base: base, fallbackToken: adminToken)
-        let (data, response) = try await networkSession.upload(
+        let (data, response) = try await networkSession.data(
             for: request,
-            fromFile: fileURL,
             delegate: MacRejectRedirectDelegate()
         )
         guard matchesGenericFileUploadContext(
@@ -2934,6 +2949,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             sourceServer: nil,
             syncProfileID: nil,
             sourceURL: imported.metadata.sourceURL,
+            downloadSourceURL: imported.downloadSourceURL?.absoluteString,
             sourceSHA256: imported.sourceSHA256,
             contentSHA256: imported.contentSHA256,
             dateAdded: .now
@@ -3010,68 +3026,23 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             )
             return false
         }
-        if context.uploadMode == .serverSourceLink {
-            let uploadedSong = try await importServerSourcePage(
-                for: currentTrack,
-                rawUserInput: context.rawSourceInput,
-                base: base,
-                adminToken: adminToken,
-                profileID: context.profileID,
-                context: context
-            )
-            try validateCommittedLocalImportTransfer(context)
-            mergeUploadedServerSong(uploadedSong, base: base, profileID: context.profileID)
-            reconcileUploadedLocalTrack(
-                trackID: currentTrack.id,
-                remoteID: uploadedSong.id,
-                sourceServer: ServerSongIdentity.normalizedOrigin(base),
-                profileID: context.profileID
-            )
-            serverMessage = "Connected • \(remoteSongs.count) songs available"
-            return true
-        }
         if context.requiresReviewedMatch, context.uploadMode != .reviewedMatch {
             throw LocalImportTransferContextError.reviewedMatchRequired
         }
-        guard context.uploadMode == .localFile || context.uploadMode == .reviewedMatch,
-              let fileURL = currentTrack.fileURL else {
+        guard context.uploadMode == .localFile
+                || context.uploadMode == .serverSourceLink
+                || context.uploadMode == .reviewedMatch else {
             throw LocalImportTransferContextError.uploadModeUnavailable
         }
-        let values = try fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-        let isVideo = currentTrack.kind == .video
-        let maximumSize = isVideo ? 1_024 * 1_024 * 1_024 : 256 * 1_024 * 1_024
-        guard values.isRegularFile == true,
-              let size = values.fileSize,
-              size > 0,
-              size <= maximumSize else { throw ServerSyncError.invalidMedia }
-
         saveServerURL(base)
-        var components = URLComponents(
-            url: base.appendingPathComponent("api/v1/admin/songs"),
-            resolvingAgainstBaseURL: false
-        )
-        components?.queryItems = [
-            URLQueryItem(
-                name: "filename",
-                value: ServerUploadNaming.filename(for: fileURL, title: currentTrack.title)
-            )
-        ]
-        guard let url = components?.url else { throw ServerSyncError.invalidURL }
-        var request = URLRequest(url: url)
-        request.httpMethod = "PUT"
-        request.timeoutInterval = 600
-        request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(isVideo ? "video/mp4" : "audio/mp4", forHTTPHeaderField: "Content-Type")
-        request.setValue(String(size), forHTTPHeaderField: "Content-Length")
-        setProfileHeader(on: &request, profileID: context.profileID)
-        applyCurrentClientConfigHeaders(to: &request, base: base, fallbackToken: adminToken)
         try validateLocalImportTransfer(context)
-        let (data, response) = try await networkSession.upload(
-            for: request,
-            fromFile: fileURL,
-            delegate: MacRejectRedirectDelegate()
+        let uploadedSong = try await uploadServerFile(
+            currentTrack,
+            base: base,
+            adminToken: adminToken,
+            profileID: context.profileID,
+            capturedUploadMode: context.uploadMode
         )
-        let uploadedSong = try Self.uploadedSong(from: data, response: response)
         try validateCommittedLocalImportTransfer(context)
         mergeUploadedServerSong(uploadedSong, base: base, profileID: context.profileID)
         reconcileUploadedLocalTrack(

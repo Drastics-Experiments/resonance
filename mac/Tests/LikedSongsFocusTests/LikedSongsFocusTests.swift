@@ -470,7 +470,8 @@ struct LikedSongsFocusTests {
             fileURL: glass,
             remoteID: "old-id",
             sourceServer: "https://music.test",
-            syncProfileID: "default"
+            syncProfileID: "default",
+            downloadSourceURL: "https://media.example/downloaded.aiff"
         )
         model.tracks = [track]
         model.serverURLString = "https://music.test"
@@ -1124,6 +1125,7 @@ struct LikedSongsFocusTests {
                         "size": audioData.count,
                         "modified_at": "2026-07-11T00:00:00+00:00",
                         "content_type": "audio/aiff",
+                        "source_url": "https://media.example/Glass.aiff?token=preserved",
                         "download_url": "/api/v1/songs/\(identifier)/file",
                         "stream_url": "/api/v1/songs/\(identifier)/stream",
                     ]],
@@ -1152,6 +1154,7 @@ struct LikedSongsFocusTests {
         #expect(model.tracks.count == 1)
         #expect(model.tracks[0].remoteID == identifier)
         #expect(model.tracks[0].sourceServer == "https://music.test:8765")
+        #expect(model.tracks[0].downloadSourceURL == "https://media.example/Glass.aiff?token=preserved")
         #expect(model.tracks[0].fileURL.map { FileManager.default.fileExists(atPath: $0.path) } == true)
         #expect(model.serverMessage == "Synced 1 song")
     }

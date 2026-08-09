@@ -10,20 +10,20 @@ enum MobileUploadMode: String, CaseIterable, Codable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .localFile: "Local file"
-        case .serverSourceLink: "Source link"
-        case .reviewedMatch: "Reviewed match"
+        case .localFile: "Preserved source link"
+        case .serverSourceLink: "Preserved source link"
+        case .reviewedMatch: "Reviewed source link"
         }
     }
 
     var detail: String {
         switch self {
         case .localFile:
-            "Uploads audio or video bytes from this device."
+            "Registers the direct source link preserved when this device downloaded the song."
         case .serverSourceLink:
-            "Sends the original supported source page to your server for verified ingestion."
+            "Registers the direct source link preserved after downloading the song."
         case .reviewedMatch:
-            "Lets you review an audio match before downloading and uploading it."
+            "Lets you review a match, download it, and register its preserved source link."
         }
     }
 }

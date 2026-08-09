@@ -608,7 +608,7 @@ test("isolates and visibly names source Preview instances by Git worktree", () =
 test("uploads link imports even when the selected source is already saved locally", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   assert.match(appSource, /function localImportUploadConfigurationError/);
-  assert.match(appSource, /response\.result\.kind === "duplicate"[\s\S]+importedTrack = state\.tracks\.find[\s\S]+uploadLocalImportTrack\(importedTrack, importContext\)/);
+  assert.match(appSource, /response\.result\.kind === "duplicate"[\s\S]+importedTrack = state\.tracks\.find[\s\S]+uploadImportedTrackWithMode\(/);
   assert.match(appSource, /!response\.result\.serverBacked && uploadRequested && importedTrack\?\.filePath\)/);
   assert.match(appSource, /scheduleServerCatalogRefresh/);
   assert.match(appSource, /Uploaded \$\{importedTrack\.title\}/);
@@ -1143,7 +1143,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /api\.onLocalImportProgress\(\(value\) => \{[\s\S]+updateLocalImportTransfer\(value\)/);
   assert.match(appSource, /sourceURL: candidate\.sourceURL/);
   assert.match(appSource, /state\.tracks\.push\(importedTrack\)[\s\S]+await persist\(\)/);
-  assert.match(appSource, /if \(!response\.result\.serverBacked && uploadRequested[\s\S]+uploadLocalImportTrack\(importedTrack, importContext\)/);
+  assert.match(appSource, /if \(!response\.result\.serverBacked && uploadRequested[\s\S]+uploadImportedTrackWithMode\(/);
   assert.match(appSource, /function uploadLocalImportTrack\(track, context\)[\s\S]+api\.uploadLocalImport/);
   assert.doesNotMatch(appSource, /A failed upload will not remove or alter the local media file/);
   assert.match(appSource, /mediaKind: localImportResolution\.mediaKind|mediaKind,/);
@@ -1171,8 +1171,8 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(playlistImportSource, /uploadFailures\.push\(\.\.\.\(uploadResult\?\.failed \|\| \[\]\)\)/);
   assert.match(playlistImportSource, /formatServerUploadFailureNotice\(uploadFailures\)/);
   assert.match(mainSource, /mediaKind: value\.mediaKind/);
-  assert.match(mainSource, /body\.on\("data", \(chunk\) => \{[\s\S]+publishUploadProgress\(\)/);
-  assert.match(mainSource, /currentFile: filename,[\s\S]+completed,[\s\S]+total: information\.size/);
+  assert.match(mainSource, /sourceLinkRegistrationBody\(\{[\s\S]+mediaSourceURL[\s\S]+"Content-Type": "application\/json"/);
+  assert.match(mainSource, /currentFile: filename,[\s\S]+completed,[\s\S]+total: 1/);
   assert.match(appSource, /sourceProvider === "debrid_vault"[\s\S]+return "Debrid Vault"/);
   assert.match(appSource, /api\.startExternalImport\(/);
   assert.match(appSource, /response\.result\.kind === "selection_required"/);
@@ -1815,7 +1815,8 @@ test("guards profile transitions, authenticated downloads, persistence, and tran
   assert.doesNotMatch(alreadyDownloadedBranch, /return/);
   assert.match(syncSource, /writeResponseToFile\(response, temporary/);
   assert.doesNotMatch(syncSource, /response\.arrayBuffer\(\)/);
-  assert.match(uploadSource, /createReadStream\(filePath\)/);
+  assert.doesNotMatch(uploadSource, /createReadStream\(filePath\)|duplex: "half"/);
+  assert.match(uploadSource, /sourceLinkRegistrationBody\(item, filename\)[\s\S]+"Content-Type": "application\/json"/);
   assert.doesNotMatch(uploadSource, /fs\.readFile\(filePath\)/);
   assert.match(uploadSource, /managedRoots = \[paths\.local, paths\.remote\]/);
   assert.match(uploadSource, /isManagedLibraryFile\(item\.filePath, managedRoots\)/);
@@ -2082,7 +2083,7 @@ test("reserves immutable upload contexts while account sessions replace credenti
   assert.match(localUploadSource, /baseURL: context\.serverURL[\s\S]+adminToken: context\.adminToken[\s\S]+profileID: context\.profileID/);
   assert.match(localBatchSource, /prepareLocalImportUploadBatch\(tracks, context\)[\s\S]+uploadLocalImportTracks\(tracks, context\)/);
   assert.match(playlistImportSource, /reserveServerContext\(importContext\)[\s\S]+prepareLocalImportUploadBatch\(uploadQueue, importContext\)[\s\S]+releaseServerContext\(importContext\)/);
-  assert.match(linkImportSource, /reserveServerContext\(importContext\)[\s\S]+uploadLocalImportTrack\(importedTrack, importContext\)[\s\S]+releaseServerContext\(importContext\)/);
+  assert.match(linkImportSource, /reserveServerContext\(importContext\)[\s\S]+uploadImportedTrackWithMode\([\s\S]+releaseServerContext\(importContext\)/);
   assert.match(playlistImportSource, /localImportNeedsServerContext\(\{ uploadRequested \}\)[\s\S]+if \(needsServerContext\) \{[\s\S]+currentServerUploadContext\(\)/);
   assert.match(linkImportSource, /localImportNeedsServerContext\(\{ serverBacked, uploadRequested \}\)[\s\S]+if \(needsServerContext\) \{[\s\S]+currentServerUploadContext\(\)/);
   assert.doesNotMatch(playlistImportSource, /const importContext = currentServerUploadContext\(\)/);

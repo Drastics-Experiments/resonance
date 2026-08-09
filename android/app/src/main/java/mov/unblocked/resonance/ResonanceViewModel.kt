@@ -80,12 +80,9 @@ import mov.unblocked.resonance.data.ServerSongIdentityPolicy
 import mov.unblocked.resonance.data.ServerDownloadMode
 import mov.unblocked.resonance.data.ServerTransferModePolicy
 import mov.unblocked.resonance.data.ServerUploadMode
-import mov.unblocked.resonance.data.ServerUploadTransport
 import mov.unblocked.resonance.data.ServerUploadTransportPolicy
 import mov.unblocked.resonance.data.SocialAuthClient
 import mov.unblocked.resonance.data.NativeAuthConfiguration
-import mov.unblocked.resonance.data.SourceImportMetadata
-import mov.unblocked.resonance.data.SourceImportPolicy
 import mov.unblocked.resonance.data.StoredLibrary
 import mov.unblocked.resonance.data.SyncProfile
 import mov.unblocked.resonance.data.ProfilePictureStore
@@ -738,33 +735,14 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         if (resolution.reviewedMatchPolicyBound && (!uploadAfterImport || uploadMode != ServerUploadMode.ReviewedMatch)) {
             applyLinkUploadModeFailure(
                 current,
-                "These candidates came from the server's Reviewed match gate. Keep Reviewed match selected and upload the explicitly reviewed local bytes, or resolve the link again for a device-only import.",
+                "These candidates came from the server's Reviewed match gate. Keep Reviewed match selected to register the explicitly reviewed source link, or resolve the link again for a device-only import.",
             )
             return false
         }
         if (uploadAfterImport && uploadMode == ServerUploadMode.ReviewedMatch && !resolution.reviewedMatchPolicyBound) {
             return beginReviewedMatchResolution(current)
         }
-        val sourcePageURL = if (
-            uploadAfterImport && uploadMode == ServerUploadMode.ServerSourceLink
-        ) {
-            if (resolution.kind.isPlaylist) {
-                applyLinkUploadModeFailure(
-                    current,
-                    "Source-link upload currently accepts one original YouTube video page at a time. Use the local-file mode for playlists.",
-                )
-                return false
-            }
-            runCatching {
-                SourceImportPolicy.canonicalYouTubePageURL(current.requestedSource.orEmpty())
-            }.getOrElse {
-                applyLinkUploadModeFailure(
-                    current,
-                    "This upload mode needs the original YouTube page URL. Open Import from Link with that URL, or select Local file mode.",
-                )
-                return false
-            }
-        } else null
+        val sourcePageURL: String? = null
         val uploadSnapshot = if (uploadAfterImport) {
             currentUploadPolicySnapshot(requireNotNull(uploadMode)) ?: run {
                 applyLinkUploadModeFailure(current, "The server upload policy changed; refresh and review the match again.")
@@ -1348,28 +1326,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 // Capture and revalidate immediately before every request. A retry
                 // is a new request and therefore needs a still-current lease.
                 requireUploadPolicySnapshot(snapshot)
-                when (ServerUploadTransportPolicy.transportFor(requestedMode)) {
-                    ServerUploadTransport.RawVerifiedFile ->
-                        client.upload(repository.fileForTrack(track), track.title) {
-                            requireUploadPolicySnapshot(snapshot)
-                        }
-                    ServerUploadTransport.CanonicalSourcePage -> {
-                        val source = sourcePageURL
-                            ?: throw IllegalStateException("The original YouTube page is unavailable; select Local file mode")
-                        client.importSource(
-                            sourcePageURL = source,
-                            cohortKey = clientConfigStore.cohortKey,
-                            filename = repository.fileForTrack(track).name,
-                            metadata = SourceImportMetadata(
-                                title = track.title.takeIf(String::isNotBlank),
-                                artist = track.artist.takeIf(String::isNotBlank),
-                                album = track.album.takeIf(String::isNotBlank),
-                                durationSeconds = track.durationMs.div(1_000L)
-                                    .takeIf { it in 1L..86_400L }
-                                    ?.toInt(),
-                            ),
-                        ) { requireUploadPolicySnapshot(snapshot) }
-                    }
+                client.upload(track, repository.fileForTrack(track).name) {
+                    requireUploadPolicySnapshot(snapshot)
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -1524,10 +1482,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val state = mutableState.value
         if (!state.isApplyingServerConnection && !state.isDownloading && !state.isUploading) {
             when (activeUploadMode()) {
-                ServerUploadMode.LocalFile -> mutableUploadRequests.tryEmit(Unit)
-                ServerUploadMode.ServerSourceLink, ServerUploadMode.ReviewedMatch -> {
+                ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink, ServerUploadMode.ReviewedMatch -> {
                     mutableState.value = mutableState.value.copy(
-                        errorMessage = "Use Import from Link for the selected server upload mode.",
+                        errorMessage = "Use Import from Link so Resonance can preserve and register the direct source URL.",
                     )
                 }
                 null -> mutableState.value = mutableState.value.copy(
@@ -1541,7 +1498,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         if (mutableState.value.isApplyingServerConnection || mutableState.value.isDownloading || mutableState.value.isUploading) return
         if (activeUploadMode() != ServerUploadMode.LocalFile) {
             mutableState.value = mutableState.value.copy(
-                errorMessage = "Downloaded songs need Local file upload mode because their original source pages are not stored.",
+                errorMessage = "Downloaded-song source-link registration requires Preserved source link mode.",
             )
             return
         }
@@ -1604,7 +1561,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         if (uploadedID == null) {
                             runCatching {
                                 requireUploadPolicySnapshot(uploadSnapshot)
-                                client.upload(file, track.title) {
+                                client.upload(track, file.name) {
                                     requireUploadPolicySnapshot(uploadSnapshot)
                                 }
                             }
@@ -1664,86 +1621,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun uploadUris(uris: List<Uri>) {
-        if (uris.isEmpty() || mutableState.value.isApplyingServerConnection || mutableState.value.isDownloading || mutableState.value.isUploading) return
-        if (activeUploadMode() != ServerUploadMode.LocalFile) {
-            mutableState.value = mutableState.value.copy(
-                errorMessage = "Select Local file upload mode before choosing device files.",
-            )
-            return
-        }
-        val uploadSnapshot = currentUploadPolicySnapshot(ServerUploadMode.LocalFile) ?: return
-        mutableState.value = mutableState.value.copy(isUploading = true, uploadProgress = 0f, uploadDetail = "Preparing uploads…")
-        viewModelScope.launch {
-            val temporaryFiles = uris.mapIndexedNotNull { index, uri ->
-                runCatching {
-                    val requestedName = displayName(uri) ?: "Upload-${index + 1}.mp3"
-                    val safeName = File(requestedName).name.takeIf { it.isNotBlank() }
-                        ?: "Upload-${index + 1}.mp3"
-                    val uploadDirectory = File(context.cacheDir, "resonance-upload-${UUID.randomUUID()}")
-                        .apply { mkdirs() }
-                    File(uploadDirectory, safeName).also { file ->
-                        context.contentResolver.openInputStream(uri)!!.use { input -> file.outputStream().use(input::copyTo) }
-                    }
-                }.getOrNull()
-            }
-            var committedUploads = 0
-            try {
-                val client = serverClient(uploadSnapshot.context)
-                if (temporaryFiles.isEmpty()) error("None of the selected files could be read")
-                for ((index, file) in temporaryFiles.withIndex()) {
-                    mutableState.value = mutableState.value.copy(
-                        uploadProgress = index.toFloat() / temporaryFiles.size,
-                        uploadDetail = "Uploading ${index + 1} of ${temporaryFiles.size} • ${file.name}",
-                    )
-                    try {
-                        // Each file is a new raw PUT and captures the exact lease
-                        // immediately before opening that request.
-                        requireUploadPolicySnapshot(uploadSnapshot)
-                        client.upload(file) {
-                            requireUploadPolicySnapshot(uploadSnapshot)
-                        }
-                        committedUploads += 1
-                        if (currentServerProfileContext() == uploadSnapshot.context) {
-                            uploadMutationGeneration += 1
-                        }
-                        mutableState.value = mutableState.value.copy(
-                            uploadProgress = committedUploads.toFloat() / temporaryFiles.size,
-                        )
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (error: Throwable) {
-                        showError(error)
-                        mutableState.value = mutableState.value.copy(
-                            uploadDetail = if (committedUploads == 0) {
-                                "Upload failed: ${error.message ?: "Unknown error"}"
-                            } else {
-                                "Uploaded $committedUploads before stopping: ${error.message ?: "policy or network error"}"
-                            },
-                        )
-                        break
-                    }
-                }
-                if (committedUploads == temporaryFiles.size) {
-                    mutableState.value = mutableState.value.copy(
-                        uploadDetail = "Uploaded $committedUploads song${if (committedUploads == 1) "" else "s"}",
-                    )
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                showError(error)
-            } finally {
-                temporaryFiles.forEach { file ->
-                    file.delete()
-                    file.parentFile?.delete()
-                }
-                mutableState.value = mutableState.value.copy(isUploading = false)
-            }
-            if (
-                committedUploads > 0 &&
-                currentServerProfileContext() == uploadSnapshot.context
-            ) refreshCatalogAfterUpload()
-        }
+        if (uris.isEmpty()) return
+        mutableState.value = mutableState.value.copy(
+            errorMessage = "File uploads are no longer accepted. Download a song from a link first, then upload its preserved source link.",
+            uploadDetail = "Choose a link-downloaded song to upload",
+        )
     }
 
     private fun refreshCatalogAfterUpload() {

@@ -256,9 +256,9 @@ const settingsIcons = Object.freeze({
 });
 
 const serverUploadModeOptions = Object.freeze({
-  local_file: "Local files",
-  server_source_link: "Source link (server import)",
-  reviewed_match: "Reviewed audio match",
+  local_file: "Preserved source links",
+  server_source_link: "Preserved source links",
+  reviewed_match: "Reviewed source links",
 });
 const serverDownloadModeOptions = Object.freeze({
   verified_file_cache: "Verified files on this device",
@@ -3420,7 +3420,7 @@ function serverUploadManifestMarkup() {
     const retryIDs = serverUploadManifestRetryIDs(manifest);
     const label = manifest.source === "missing-downloads"
       ? "Downloaded-song upload"
-      : manifest.source === "link-import" ? "Link-import upload" : "File upload";
+      : manifest.source === "link-import" ? "Link-import upload" : "Source-link upload";
     const timestamp = new Date(manifest.updatedAt).toLocaleString();
     const summary = failures.length
       ? `${uploaded} uploaded · ${failures.length} need attention`
@@ -4680,10 +4680,6 @@ function updateDirectServerSourceImportState() {
 function scheduleLocalImportResolution({ immediate = false } = {}) {
   clearLocalImportAutoResolve();
   if (localImportRunning) return;
-  if (localImportServerUploadMode === "server_source_link") {
-    updateDirectServerSourceImportState();
-    return;
-  }
   const source = $("#localImportSource").value.trim();
   if (!localImportSourceIsReady(source)) return;
   const sourceKey = `${selectedLocalImportMediaKind()}:${source}`;
@@ -4733,15 +4729,16 @@ function resetLocalImport() {
 
 function openLocalImport({ serverUploadMode = null } = {}) {
   resetLocalImport();
-  if (["server_source_link", "reviewed_match"].includes(serverUploadMode)) {
+  if (["local_file", "server_source_link", "reviewed_match"].includes(serverUploadMode)) {
     localImportServerUploadMode = serverUploadMode;
-    $("#localImportTitle").textContent = serverUploadMode === "reviewed_match" ? "Upload reviewed match" : "Upload source link";
+    $("#localImportTitle").textContent = serverUploadMode === "reviewed_match" ? "Upload reviewed source" : "Upload source link";
     $("#localImportSource").placeholder = serverUploadMode === "reviewed_match"
       ? "YouTube song link or music search…"
-      : "Canonical YouTube song link…";
+      : "Song link or music search…";
     $("#localImportMediaKind").hidden = true;
     $("#localImportProviderPill").hidden = true;
     $("#chooseLocalFiles").hidden = true;
+    $("#localImportSync").checked = true;
   }
   $("#localImportSource").value = "";
   $("#localImportDialog").showModal();
@@ -4974,6 +4971,11 @@ async function uploadImportedTrackWithMode(track, context, mode) {
     profileID: context.profileID,
     filePath: track.filePath,
     title: track.title || "Untitled song",
+    artist: track.artist || "Unknown Artist",
+    album: track.album || "Unknown Album",
+    duration: Number(track.duration) || 0,
+    artworkURL: track.artworkURL || null,
+    mediaSourceURL: track.sourceIdentity?.mediaSourceURL || null,
     mode,
   });
   requireLocalImportServerContext(context);
@@ -5087,6 +5089,10 @@ async function uploadLocalImportTracks(tracks, context) {
       filePath: track.filePath,
       title: track.title || "Untitled song",
       artist: track.artist || "",
+      album: track.album || "",
+      duration: Number(track.duration) || 0,
+      artworkURL: track.artworkURL || null,
+      mediaSourceURL: track.sourceIdentity?.mediaSourceURL || null,
     })),
   });
   requireLocalImportServerContext(context);
@@ -5252,10 +5258,6 @@ function renderLocalImportResolution() {
 }
 
 async function resolveLinkImport() {
-  if (localImportServerUploadMode === "server_source_link") {
-    await confirmLinkImport();
-    return;
-  }
   if (localImportRunning) return;
   clearLocalImportAutoResolve();
   normalizeLocalImportMediaKindForSource();
@@ -5297,7 +5299,7 @@ async function resolveLinkImport() {
     requireCurrentLocalImportOperation(operation);
     if (reviewedContext) {
       requireLocalImportServerContext(reviewedContext);
-      await requireCurrentServerUploadMode("reviewed_match", { requiresLocalFile: true });
+      await requireCurrentServerUploadMode("reviewed_match");
       requireCurrentLocalImportOperation(operation);
       requireLocalImportServerContext(reviewedContext);
     }
@@ -5534,16 +5536,9 @@ async function confirmPlaylistImport() {
   }
 }
 
-async function requireCurrentServerUploadMode(requestedMode, { requiresLocalFile = false } = {}) {
+async function requireCurrentServerUploadMode(requestedMode) {
   await refreshClientConfig({ force: true });
   const modes = currentServerTransferModes();
-  if (requiresLocalFile && !modes.available.upload.includes("local_file")) {
-    throw {
-      stage: "syncing",
-      code: "LOCAL_FILE_MODE_REQUIRED",
-      message: "Reviewed-match upload also requires Local files mode because Windows uploads the verified reviewed bytes.",
-    };
-  }
   if (modes.uploadMode !== requestedMode || !modes.available.upload.includes(requestedMode)) {
     throw { stage: "syncing", code: "MODE_DISABLED", message: "That upload mode is no longer enabled for this server and profile." };
   }
@@ -5606,14 +5601,6 @@ async function confirmServerSourceImport() {
 
 async function confirmLinkImport() {
   if (localImportRunning) return;
-  if (localImportServerUploadMode === "server_source_link") {
-    try {
-      await confirmServerSourceImport();
-    } catch (error) {
-      showLocalImportError(error);
-    }
-    return;
-  }
   if (!localImportResolution) return;
   const resolution = localImportResolution;
   const reviewedUpload = localImportServerUploadMode === "reviewed_match";
@@ -5640,7 +5627,7 @@ async function confirmLinkImport() {
     });
     return;
   }
-  const uploadRequested = reviewedUpload || $("#localImportSync").checked;
+  const uploadRequested = Boolean(localImportServerUploadMode) || $("#localImportSync").checked;
   if (reviewedUpload) $("#localImportSync").checked = true;
   const serverBacked = Boolean(candidate.serverBacked);
   const needsServerContext = localImportNeedsServerContext({ serverBacked, uploadRequested });
@@ -5663,7 +5650,7 @@ async function confirmLinkImport() {
   setLocalImportOperationLocked(true);
   try {
     if (reviewedUpload) {
-      await requireCurrentServerUploadMode("reviewed_match", { requiresLocalFile: true });
+      await requireCurrentServerUploadMode("reviewed_match");
       requireCurrentLocalImportOperation(operation);
       if (importContext) requireLocalImportServerContext(importContext);
     }
@@ -5788,7 +5775,11 @@ async function confirmLinkImport() {
       setLocalImportStage({ stage: "syncing", profileID: importContext.profileID });
       const uploaded = reviewedUpload
         ? await uploadReviewedMatchTrack(importedTrack, importContext)
-        : await uploadLocalImportTrack(importedTrack, importContext);
+        : await uploadImportedTrackWithMode(
+            importedTrack,
+            importContext,
+            localImportServerUploadMode === "server_source_link" ? "server_source_link" : "local_file",
+          );
       if (!uploaded?.ok) {
         showLocalImportError(uploaded?.error || {
           stage: "syncing",
@@ -6053,7 +6044,7 @@ async function uploadServerSongs() {
   await saveServerForm();
   if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || Boolean(serverContextReservation) })) return;
   const uploadMode = currentServerTransferModes().uploadMode;
-  if (["server_source_link", "reviewed_match"].includes(uploadMode)) {
+  if (["local_file", "server_source_link", "reviewed_match"].includes(uploadMode)) {
     openLocalImport({ serverUploadMode: uploadMode });
     return;
   }
@@ -6157,6 +6148,10 @@ async function uploadMissingDownloadedSongs() {
         filePath: track.filePath,
         title: track.title,
         artist: track.artist,
+        album: track.album,
+        duration: Number(track.duration) || 0,
+        artworkURL: track.artworkURL || null,
+        mediaSourceURL: track.sourceIdentity?.mediaSourceURL || null,
       })),
     });
     if (!serverUploadContextIsCurrent(context)) return;

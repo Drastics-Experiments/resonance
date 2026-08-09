@@ -184,8 +184,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                     selecting = false
                 },
                 onUpload = {
-                    if (state.serverUploadMode == ServerUploadMode.LocalFile) actions.uploadAudio()
-                    else linkImportOpen = true
+                    linkImportOpen = true
                 },
                 onUploadMissing = actions::uploadMissingDownloads,
                 onToggleSelection = {
@@ -403,7 +402,7 @@ private fun ServerActionBar(
             ActionDivider()
             ServerAction(
                 icon = Icons.Default.CloudUpload,
-                label = "Files",
+                label = "Link",
                 enabled = uploadEnabled,
                 onClick = onUpload,
                 modifier = Modifier.weight(1f),

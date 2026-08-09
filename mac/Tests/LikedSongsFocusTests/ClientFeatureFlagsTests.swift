@@ -473,7 +473,7 @@ struct ClientFeatureFlagsTests {
         #expect(importViewModel.canSync)
     }
 
-    @Test("local-import transfer freezes raw input and enforces source versus reviewed modes")
+    @Test("local-import transfer freezes raw input across source-link and reviewed modes")
     func localImportTransferModePolicy() async throws {
         let suite = "ClientFeatureFlagsTransferPolicy.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
@@ -526,30 +526,22 @@ struct ClientFeatureFlagsTests {
         await model.refreshClientConfigurationNow()
 
         model.selectUploadMode(.serverSourceLink)
-        var rejectedShortLink = false
-        do {
-            _ = try model.beginLocalImportTransfer(
-                reservingUpload: true,
-                rawSourceInput: "https://youtu.be/dQw4w9WgXcQ",
-                mediaMode: .audio
-            )
-        } catch LocalImportTransferContextError.unsupportedSourceLink {
-            rejectedShortLink = true
-        }
-        #expect(rejectedShortLink)
+        let shortLinkContext = try model.beginLocalImportTransfer(
+            reservingUpload: true,
+            rawSourceInput: "https://youtu.be/dQw4w9WgXcQ",
+            mediaMode: .audio
+        )
+        #expect(shortLinkContext.uploadMode == .serverSourceLink)
+        model.endLocalImportTransfer(shortLinkContext)
 
         let canonical = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-        var rejectedVideo = false
-        do {
-            _ = try model.beginLocalImportTransfer(
-                reservingUpload: true,
-                rawSourceInput: canonical,
-                mediaMode: .video
-            )
-        } catch LocalImportTransferContextError.sourceLinkRequiresAudio {
-            rejectedVideo = true
-        }
-        #expect(rejectedVideo)
+        let videoContext = try model.beginLocalImportTransfer(
+            reservingUpload: true,
+            rawSourceInput: canonical,
+            mediaMode: .video
+        )
+        #expect(videoContext.mediaMode == .video)
+        model.endLocalImportTransfer(videoContext)
 
         let sourceContext = try model.beginLocalImportTransfer(
             reservingUpload: true,
@@ -660,7 +652,7 @@ struct ClientFeatureFlagsTests {
         #expect(viewModel.resolvedSourceInput == "Song A by Artist")
         #expect(viewModel.resolution?.kind == .spotify)
         #expect(viewModel.selectedCandidate?.videoID == "reviewed-a")
-        #expect(viewModel.requiresReviewedMatchForUpload)
+        #expect(!viewModel.requiresReviewedMatchForUpload)
 
         viewModel.source = "Song B by Artist"
         #expect(viewModel.resolvedSourceInput == nil)
@@ -1033,6 +1025,15 @@ struct ClientFeatureFlagsTests {
         #expect(model.clientConfiguration.allowsLocalFileUpload)
         model.selectUploadMode(.reviewedMatch)
         #expect(model.uploadMode == .reviewedMatch)
+        model.tracks = [Track(
+            title: "Managed upload",
+            artist: "Artist",
+            album: "Album",
+            duration: 1,
+            artwork: .liked,
+            fileURL: mediaURL,
+            downloadSourceURL: "https://media.example/managed-upload.m4a"
+        )]
         let initialConfigRequestCount = defaults.integer(forKey: "config-request-count")
         defaults.set(true, forKey: "revoke-local-file")
 
@@ -1094,6 +1095,15 @@ struct ClientFeatureFlagsTests {
             model.serverURLString = "https://music.example"
             model.serverToken = token
             model.serverAdminToken = "admin-token"
+            model.tracks = [Track(
+                title: "Committed",
+                artist: "Artist",
+                album: "Album",
+                duration: 1,
+                artwork: .liked,
+                fileURL: mediaURL,
+                downloadSourceURL: "https://media.example/committed.m4a"
+            )]
 
             let upload = Task { await model.uploadSongsToServer([mediaURL]) }
             for _ in 0..<100 where !defaults.bool(forKey: "put-started") {
@@ -1192,7 +1202,8 @@ struct ClientFeatureFlagsTests {
             album: "Album",
             duration: 1,
             artwork: .liked,
-            fileURL: mediaURL
+            fileURL: mediaURL,
+            downloadSourceURL: "https://media.example/committed.m4a"
         )
         model.tracks = [track]
         let transfer = try model.beginLocalImportTransfer(reservingUpload: true)

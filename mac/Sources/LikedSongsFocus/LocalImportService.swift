@@ -579,6 +579,9 @@ actor LocalDeviceImportService {
                 metadata: metadata,
                 duration: duration,
                 artworkData: artwork,
+                downloadSourceURL: resolved.companionAudioStream == nil
+                    ? resolved.primaryStream.streamingURL
+                    : nil,
                 sourceSHA256: sourceHash,
                 contentSHA256: contentHash,
                 mediaMode: mediaMode
@@ -674,6 +677,7 @@ actor LocalDeviceImportService {
                 metadata: metadata,
                 duration: player.duration,
                 artworkData: artwork,
+                downloadSourceURL: stream.streamingURL,
                 sourceSHA256: sourceHash,
                 contentSHA256: contentHash,
                 mediaMode: .audio

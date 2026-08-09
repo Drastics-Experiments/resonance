@@ -30,6 +30,7 @@ data class Track(
     val remoteID: String? = null,
     val sourceServer: String? = null,
     val syncProfileID: String? = null,
+    val downloadSourceURL: String? = null,
     val artworkFilename: String? = null,
     val artworkScanComplete: Boolean? = false,
     val dateAddedEpochMs: Long = System.currentTimeMillis(),
@@ -86,6 +87,7 @@ data class RemoteSong(
     val durationSeconds: Double? = null,
     val artworkURL: String? = null,
     val contentSHA256: String? = null,
+    val sourceURL: String? = null,
 ) {
     val durationText: String?
         get() = durationSeconds
@@ -250,6 +252,7 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
                 ?.trim()
                 ?.takeIf(String::isNotEmpty),
             contentSHA256 = string("content_sha256")?.trim()?.lowercase()?.takeIf(String::isNotEmpty),
+            sourceURL = string("source_url")?.trim()?.takeIf(String::isNotEmpty),
         )
     }
 
@@ -270,6 +273,7 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
             value.durationSeconds?.let { put("duration_seconds", JsonPrimitive(it)) }
             value.artworkURL?.let { put("artwork_url", JsonPrimitive(it)) }
             value.contentSHA256?.let { put("content_sha256", JsonPrimitive(it)) }
+            value.sourceURL?.let { put("source_url", JsonPrimitive(it)) }
         })
     }
 }

@@ -39,9 +39,9 @@ object ClientContextHeaderPolicy {
 }
 
 enum class ServerUploadMode(val wireValue: String, val label: String) {
-    LocalFile("local_file", "Local file"),
-    ServerSourceLink("server_source_link", "Source link"),
-    ReviewedMatch("reviewed_match", "Reviewed match"),
+    LocalFile("local_file", "Preserved source link"),
+    ServerSourceLink("server_source_link", "Preserved source link"),
+    ReviewedMatch("reviewed_match", "Reviewed source link"),
     ;
 
     companion object {
@@ -63,17 +63,18 @@ enum class ServerDownloadMode(val wireValue: String, val label: String) {
     }
 }
 
-enum class ServerUploadTransport { RawVerifiedFile, CanonicalSourcePage }
+enum class ServerUploadTransport { PreservedSourceLink }
 
 object ServerUploadTransportPolicy {
     fun transportFor(mode: ServerUploadMode): ServerUploadTransport = when (mode) {
-        ServerUploadMode.LocalFile, ServerUploadMode.ReviewedMatch ->
-            ServerUploadTransport.RawVerifiedFile
-        ServerUploadMode.ServerSourceLink -> ServerUploadTransport.CanonicalSourcePage
+        ServerUploadMode.LocalFile,
+        ServerUploadMode.ServerSourceLink,
+        ServerUploadMode.ReviewedMatch,
+        -> ServerUploadTransport.PreservedSourceLink
     }
 
     fun allowsLinkDerivedServerUpload(mode: ServerUploadMode): Boolean =
-        mode == ServerUploadMode.ServerSourceLink || mode == ServerUploadMode.ReviewedMatch
+        mode in ServerUploadMode.entries
 }
 
 @Serializable

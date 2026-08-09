@@ -195,6 +195,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
     var remoteID: String?
     var sourceServer: String?
     var syncProfileID: String?
+    var downloadSourceURL: String?
     var artworkFilename: String?
     var artworkScanComplete: Bool?
     var dateAdded: Date
@@ -211,6 +212,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         remoteID: String? = nil,
         sourceServer: String? = nil,
         syncProfileID: String? = nil,
+        downloadSourceURL: String? = nil,
         artworkFilename: String? = nil,
         artworkScanComplete: Bool? = false,
         dateAdded: Date = .now,
@@ -226,6 +228,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         self.remoteID = remoteID
         self.sourceServer = sourceServer
         self.syncProfileID = syncProfileID
+        self.downloadSourceURL = downloadSourceURL
         self.artworkFilename = artworkFilename
         self.artworkScanComplete = artworkScanComplete
         self.dateAdded = dateAdded
@@ -742,6 +745,7 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
     let duration: TimeInterval?
     let artworkURL: URL?
     let contentSHA256: String?
+    let sourceURL: String?
 
     enum CodingKeys: String, CodingKey {
         case id, filename, name, title, artist, album, size
@@ -755,6 +759,7 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
         case artworkURL = "artwork_url"
         case artwork
         case contentSHA256 = "content_sha256"
+        case sourceURL = "source_url"
     }
 
     init(from decoder: Decoder) throws {
@@ -782,6 +787,7 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
             return trimmed.isEmpty ? nil : URL(string: trimmed)
         }
         contentSHA256 = try values.decodeIfPresent(String.self, forKey: .contentSHA256)
+        sourceURL = try values.decodeIfPresent(String.self, forKey: .sourceURL)
     }
 
     var durationText: String? {

@@ -210,21 +210,13 @@ final class MacLocalImportViewModel: ObservableObject {
         guard resolution != nil else { return nil }
         switch model.uploadMode {
         case .serverSourceLink:
-            guard mediaMode == .audio else {
-                return "Server source-link import creates audio only. Choose Audio to upload this source."
-            }
-            guard resolution?.kind == .youtube,
-                  MacSourceImportPolicy.exactCanonicalYouTubePage(resolvedSourceInput) != nil else {
-                return "Server source link requires the exact original https://www.youtube.com/watch?v=… URL. Choose Reviewed match for short links, searches, and matched sources."
-            }
+            break
         case .reviewedMatch:
             guard model.clientConfiguration.allowsReviewedMatch else {
                 return "Reviewed match is disabled by the verified server configuration."
             }
         case .localFile:
-            if requiresReviewedMatchForUpload {
-                return "Discovered and matched sources require Reviewed match mode before upload."
-            }
+            break
         }
         return nil
     }
@@ -238,9 +230,7 @@ final class MacLocalImportViewModel: ObservableObject {
     }
 
     var requiresReviewedMatchForUpload: Bool {
-        guard let resolution else { return false }
-        return resolution.kind != .youtube
-            || MacSourceImportPolicy.exactCanonicalYouTubePage(resolvedSourceInput) == nil
+        false
     }
 
     func isServerReviewCandidate(_ candidate: LocalImportAudioSourceMatch) -> Bool {
