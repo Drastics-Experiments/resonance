@@ -55,10 +55,19 @@ test("rejects cross-origin Clerk endpoints and hides refresh tokens from the ren
 
   const session = canonicalSession(
     { id_token: "identity", refresh_token: "refresh", expires_in: 3600 },
-    { email: "listener@example.com", role: "member" },
+    {
+      id: "user_listener",
+      email: "listener@example.com",
+      role: "member",
+      profile_id: "user_listener",
+      display_name: "Listener",
+      image_url: "https://images.clerk.dev/listener.jpg",
+    },
     "https://music.example",
   );
   assert.equal(publicSession(session).accessToken, "identity");
+  assert.equal(publicSession(session).profileID, "user_listener");
+  assert.equal(publicSession(session).displayName, "Listener");
   assert.equal(Object.hasOwn(publicSession(session), "refreshToken"), false);
 });
 

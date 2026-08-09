@@ -45,7 +45,7 @@ contextBridge.exposeInMainWorld("likedSongs", {
   deleteServerSong: (settings) => ipcRenderer.invoke("server:delete", settings),
   loadServerCredentials: () => ipcRenderer.invoke("server:credentials:load"),
   saveServerCredentials: (credentials) => ipcRenderer.invoke("server:credentials:save", credentials),
-  loadAccountSession: () => ipcRenderer.invoke("account:session:load"),
+  loadAccountSession: (value) => ipcRenderer.invoke("account:session:load", value),
   signInAccount: (value) => ipcRenderer.invoke("account:sign-in", value),
   refreshAccountSession: () => ipcRenderer.invoke("account:session:refresh"),
   signOutAccount: () => ipcRenderer.invoke("account:sign-out"),

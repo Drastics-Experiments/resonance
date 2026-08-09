@@ -123,6 +123,7 @@ struct MacSettingsSheet: View {
     @State private var didLoadServerDrafts = false
     @State private var confirmingCredentialRemoval = false
     @State private var showingNativeAccountSignIn = false
+    @State private var isEmailRevealed = false
 
     init(opensServerPanel: Bool = false) {
         _panel = State(initialValue: opensServerPanel ? .server : .general)
@@ -282,7 +283,7 @@ struct MacSettingsSheet: View {
                         title: "Music Server",
                         detail: model.serverURLString.isEmpty
                             ? "No server configured"
-                            : "\(model.activeSyncProfileName) · \(model.serverURLString)",
+                            : "\(ResonanceEmailPrivacy.safeDisplayName(model.activeSyncProfileName, email: model.accountEmail)) · \(model.serverURLString)",
                         actionTitle: "Configure"
                     ) {
                         panel = .server
@@ -323,7 +324,14 @@ struct MacSettingsSheet: View {
                     if let email = model.accountEmail {
                         HStack {
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(email).font(.system(size: 11, weight: .semibold))
+                                Button {
+                                    isEmailRevealed.toggle()
+                                } label: {
+                                    Text(ResonanceEmailPrivacy.displayedAddress(email, isRevealed: isEmailRevealed))
+                                        .font(.system(size: 11, weight: .semibold))
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(isEmailRevealed ? "Hide email address" : "Reveal email address")
                                 Text(model.accountRole == "admin" ? "Administrator" : "Member")
                                     .font(.system(size: 9))
                                     .foregroundStyle(Color.appMuted)
@@ -435,6 +443,7 @@ struct MacSettingsSheet: View {
                 .padding(.top, 2)
             }
             .padding(22)
+            .onChange(of: model.accountEmail) { _, _ in isEmailRevealed = false }
         }
         .scrollIndicators(.hidden)
     }

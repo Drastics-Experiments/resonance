@@ -3,6 +3,8 @@ const { createHash, randomBytes } = require("node:crypto");
 const SOCIAL_AUTH_PROVIDERS = Object.freeze(["clerk"]);
 const CALLBACK_URL = "resonance://auth/callback";
 const MAX_AUTH_VALUE_LENGTH = 16 * 1024;
+const LEGACY_PRODUCTION_ORIGIN = "https://music.unblocked.mov";
+const PRODUCTION_ORIGIN = "https://resonance-core.blithe-haven-9710.chatgpt.site";
 
 function boundedAuthText(value, label) {
   const text = String(value || "").trim();
@@ -17,7 +19,7 @@ function httpsOrigin(value, label) {
   if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
     throw new Error(`${label} must use a complete HTTPS URL.`);
   }
-  return url.origin;
+  return url.origin === LEGACY_PRODUCTION_ORIGIN ? PRODUCTION_ORIGIN : url.origin;
 }
 
 function publishableKeyOrigin(value) {
@@ -124,6 +126,17 @@ function canonicalSession(value, account, baseURL, fallbackRefreshToken = "") {
   const email = boundedAuthText(account?.email, "account email").toLowerCase();
   const role = account?.role === "admin" ? "admin" : account?.role === "member" ? "member" : null;
   if (!role) throw new Error("The Resonance server returned an invalid account role.");
+  const accountID = boundedAuthText(account?.id, "Clerk account ID");
+  const profileID = boundedAuthText(account?.profile_id, "Clerk profile ID");
+  const displayName = boundedAuthText(account?.display_name, "Clerk display name");
+  let imageURL = null;
+  if (account?.image_url) {
+    const candidate = new URL(account.image_url);
+    if (candidate.protocol !== "https:" || candidate.username || candidate.password) {
+      throw new Error("The Clerk profile image URL is invalid.");
+    }
+    imageURL = candidate.href;
+  }
   return Object.freeze({
     accessToken: boundedAuthText(value?.id_token, "Clerk ID token"),
     refreshToken: boundedAuthText(value?.refresh_token || fallbackRefreshToken, "refresh token"),
@@ -131,12 +144,18 @@ function canonicalSession(value, account, baseURL, fallbackRefreshToken = "") {
     email,
     role,
     baseURL: httpsOrigin(baseURL, "Server URL"),
+    accountID,
+    profileID,
+    displayName,
+    imageURL,
   });
 }
 
-async function accountForAccessToken(baseURL, accessToken, fetchImpl = fetch) {
+async function accountForAccessToken(baseURL, accessToken, fetchImpl = fetch, migrationProfileID = null) {
+  const headers = { Accept: "application/json", Authorization: `Bearer ${boundedAuthText(accessToken, "access token")}` };
+  if (migrationProfileID) headers["X-Resonance-Profile"] = boundedAuthText(migrationProfileID, "migration profile ID");
   const response = await fetchImpl(new URL("/api/v1/auth/me", httpsOrigin(baseURL, "Server URL")), {
-    headers: { Accept: "application/json", Authorization: `Bearer ${boundedAuthText(accessToken, "access token")}` },
+    headers,
     cache: "no-store",
   });
   const payload = await response.json().catch(() => ({}));
@@ -160,7 +179,7 @@ async function tokenRequest(configuration, fields, fetchImpl) {
   return payload;
 }
 
-async function exchangeAuthCode(configuration, baseURL, code, verifier, fetchImpl = fetch) {
+async function exchangeAuthCode(configuration, baseURL, code, verifier, fetchImpl = fetch, migrationProfileID = null) {
   const payload = await tokenRequest(configuration, {
     grant_type: "authorization_code",
     client_id: configuration.clientID,
@@ -168,17 +187,22 @@ async function exchangeAuthCode(configuration, baseURL, code, verifier, fetchImp
     code: boundedAuthText(code, "authorization code"),
     code_verifier: boundedAuthText(verifier, "sign-in verifier"),
   }, fetchImpl);
-  const account = await accountForAccessToken(baseURL, payload.id_token, fetchImpl);
+  const account = await accountForAccessToken(baseURL, payload.id_token, fetchImpl, migrationProfileID);
   return canonicalSession(payload, account, baseURL);
 }
 
-async function refreshAuthSession(configuration, session, fetchImpl = fetch) {
+async function refreshAuthSession(configuration, session, fetchImpl = fetch, migrationProfileID = null) {
   const payload = await tokenRequest(configuration, {
     grant_type: "refresh_token",
     client_id: configuration.clientID,
     refresh_token: boundedAuthText(session.refreshToken, "refresh token"),
   }, fetchImpl);
-  const account = await accountForAccessToken(session.baseURL, payload.id_token, fetchImpl);
+  const account = await accountForAccessToken(
+    session.baseURL,
+    payload.id_token,
+    fetchImpl,
+    session.profileID || migrationProfileID,
+  );
   return canonicalSession(payload, account, session.baseURL, session.refreshToken);
 }
 
@@ -202,6 +226,10 @@ function publicSession(session) {
     email: session.email,
     role: session.role,
     baseURL: session.baseURL,
+    accountID: session.accountID || null,
+    profileID: session.profileID || null,
+    displayName: session.displayName || session.email,
+    imageURL: session.imageURL || null,
   });
 }
 

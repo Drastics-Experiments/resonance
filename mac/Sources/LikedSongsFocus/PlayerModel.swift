@@ -391,6 +391,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
     @Published private(set) var accountEmail: String?
     @Published private(set) var accountRole: String?
+    @Published private(set) var accountDisplayName: String?
+    @Published private(set) var accountImageURL: URL?
     @Published private(set) var isAuthenticatingAccount = false
     @Published var serverMessage = "Not connected"
     @Published var remoteSongs: [RemoteSong] = []
@@ -733,14 +735,20 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             ?? availableTracks.first?.id
         let restoredAccountSession = persistServerCredentials ? Self.readAccountSession() : nil
         accountSession = restoredAccountSession
-        serverURLString = restoredAccountSession?.baseURL.absoluteString
+        let restoredServerURLString = restoredAccountSession?.baseURL.absoluteString
             ?? (persistServerCredentials ? (defaults.string(forKey: Self.serverURLKey) ?? "") : "")
+        serverURLString = ServerEndpointPolicy.normalizedURL(
+            restoredServerURLString,
+            allowsInsecurePreviewLoopback: !persistServerCredentials
+        )?.absoluteString ?? restoredServerURLString
         serverToken = restoredAccountSession?.accessToken
             ?? (persistServerCredentials ? Self.readServerToken() : "")
         serverAdminToken = restoredAccountSession.map { $0.isAdmin ? $0.accessToken : "" }
             ?? (persistServerCredentials ? Self.readServerToken(account: Self.adminCredentialAccount) : "")
         accountEmail = restoredAccountSession?.email
         accountRole = restoredAccountSession?.role
+        accountDisplayName = restoredAccountSession?.profileDisplayName
+        accountImageURL = restoredAccountSession?.imageURL
         if restoredAccountSession != nil {
             Self.saveServerToken("")
             Self.saveServerToken("", account: Self.adminCredentialAccount)
@@ -749,9 +757,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         knownRemotePlaylistIDs = stored?.knownRemotePlaylistIDs ?? []
         dirtyPlaylistIDs = stored?.dirtyPlaylistIDs ?? []
         deletedPlaylistIDs = stored?.deletedPlaylistIDs ?? []
-        playlistSyncServerURL = stored?.playlistSyncServerURL
+        playlistSyncServerURL = Self.canonicalServerContextKey(stored?.playlistSyncServerURL)
         syncProfileID = restoredSyncProfileID
         activeSyncProfileName = restoredSyncProfileName
+        if restoredAccountSession?.profileID == restoredSyncProfileID,
+           let restoredAccountSession {
+            activeSyncProfileName = restoredAccountSession.profileDisplayName
+        }
         remoteLikedSongIDs = stored?.remoteLikedSongIDs ?? Set(availableFavorites.compactMap { trackID in
             availableTracks.first(where: {
                 $0.id == trackID
@@ -1390,6 +1402,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         Self.deleteAccountSession()
         accountEmail = nil
         accountRole = nil
+        accountDisplayName = nil
+        accountImageURL = nil
         serverURLString = ""
         serverToken = ""
         serverAdminToken = ""
@@ -1412,23 +1426,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 throw ResonanceSocialAuthError.invalidConfiguration
             }
             let client = try ResonanceSocialAuthClient(baseURL: rawURL, session: networkSession)
-            let session = try await client.signIn(with: provider)
-            guard !shouldPersistServerCredentials || Self.saveAccountSession(session) else {
-                throw ResonanceSocialAuthError.rejected("The account session could not be saved securely.")
-            }
-            accountSession = session
-            accountEmail = session.email
-            accountRole = session.role
-            serverURLString = session.baseURL.absoluteString
-            serverToken = session.accessToken
-            serverAdminToken = session.isAdmin ? session.accessToken : ""
-            Self.saveServerToken("")
-            Self.saveServerToken("", account: Self.adminCredentialAccount)
-            scheduleAccountRefresh(session)
-            serverMessage = "Signed in as \(session.email)"
-            await refreshClientConfigurationNow()
-            await refreshServerCatalogNow()
-            await syncPlaylistsNow()
+            let session = try await client.signIn(
+                with: provider,
+                migrationProfileID: syncProfileID
+            )
+            try await applyAccountSession(session)
         } catch {
             serverMessage = error.localizedDescription
         }
@@ -1447,7 +1449,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 throw ResonanceSocialAuthError.invalidConfiguration
             }
             let client = try ResonanceSocialAuthClient(baseURL: rawURL, session: networkSession)
-            let session = try await ResonanceClerkAuthCoordinator.shared.accountSession(for: client)
+            let session = try await ResonanceClerkAuthCoordinator.shared.accountSession(
+                for: client,
+                migrationProfileID: syncProfileID
+            )
             try await applyAccountSession(session)
         } catch {
             serverMessage = error.localizedDescription
@@ -1461,13 +1466,22 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         accountSession = session
         accountEmail = session.email
         accountRole = session.role
+        accountDisplayName = session.profileDisplayName
+        accountImageURL = session.imageURL
         serverURLString = session.baseURL.absoluteString
         serverToken = session.accessToken
         serverAdminToken = session.isAdmin ? session.accessToken : ""
+        if let profileID = session.profileID, !profileID.isEmpty {
+            activateSyncProfile(SyncProfile(
+                id: profileID,
+                name: session.profileDisplayName,
+                isDefault: true
+            ))
+        }
         Self.saveServerToken("")
         Self.saveServerToken("", account: Self.adminCredentialAccount)
         scheduleAccountRefresh(session)
-        serverMessage = "Signed in as \(session.email)"
+        serverMessage = "Signed in with Clerk"
         await refreshClientConfigurationNow()
         await refreshServerCatalogNow()
         await syncPlaylistsNow()
@@ -1485,15 +1499,24 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     func refreshAccountSessionIfNeeded() async {
         guard let current = accountSession,
-              current.expiresAt <= Date().addingTimeInterval(current.usesNativeClerkSession ? 15 : 5 * 60),
               !isRefreshingAccountSession else { return }
+        let needsProfileHydration = current.profileID?.isEmpty != false
+            || current.displayName?.isEmpty != false
+        guard current.usesLegacyProductionServer
+            || needsProfileHydration
+            || current.expiresAt <= Date().addingTimeInterval(current.usesNativeClerkSession ? 15 : 5 * 60)
+        else { return }
         isRefreshingAccountSession = true
         defer { isRefreshingAccountSession = false }
         do {
             let client = try ResonanceSocialAuthClient(baseURL: current.baseURL, session: networkSession)
             let refreshed = current.usesNativeClerkSession
-                ? try await ResonanceClerkAuthCoordinator.shared.accountSession(for: client, forceRefresh: true)
-                : try await client.refresh(current)
+                ? try await ResonanceClerkAuthCoordinator.shared.accountSession(
+                    for: client,
+                    forceRefresh: true,
+                    migrationProfileID: current.profileID ?? syncProfileID
+                )
+                : try await client.refresh(current, migrationProfileID: syncProfileID)
             guard accountSession == current else { return }
             guard !shouldPersistServerCredentials || Self.saveAccountSession(refreshed) else {
                 throw ResonanceSocialAuthError.rejected("The refreshed account session could not be saved securely.")
@@ -1501,9 +1524,18 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             accountSession = refreshed
             accountEmail = refreshed.email
             accountRole = refreshed.role
+            accountDisplayName = refreshed.profileDisplayName
+            accountImageURL = refreshed.imageURL
             serverURLString = refreshed.baseURL.absoluteString
             serverToken = refreshed.accessToken
             serverAdminToken = refreshed.isAdmin ? refreshed.accessToken : ""
+            if let profileID = refreshed.profileID, !profileID.isEmpty {
+                activateSyncProfile(SyncProfile(
+                    id: profileID,
+                    name: refreshed.profileDisplayName,
+                    isDefault: true
+                ))
+            }
             await refreshClientConfigurationNow()
             scheduleAccountRefresh(refreshed)
         } catch {
@@ -3682,7 +3714,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private func activateSyncProfile(_ profile: SyncProfile) {
         guard !profile.id.isEmpty else { return }
-        activeSyncProfileName = profile.name
+        activeSyncProfileName = ResonanceEmailPrivacy.safeDisplayName(profile.name, email: accountEmail)
         guard profile.id != syncProfileID else {
             serverMessage = "Using \(profile.name)"
             persistLibrary()
@@ -4071,6 +4103,18 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private static func serverContextKey(base: URL, profileID: String) -> String {
         "\(ServerSongIdentity.normalizedOrigin(base) ?? base.absoluteString)#profile=\(profileID)"
+    }
+
+    private static func canonicalServerContextKey(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let marker = "#profile="
+        guard let markerRange = value.range(of: marker) else {
+            return ServerSongIdentity.normalizedOrigin(value)
+        }
+        guard let origin = ServerSongIdentity.normalizedOrigin(String(value[..<markerRange.lowerBound])) else {
+            return value
+        }
+        return origin + String(value[markerRange.lowerBound...])
     }
 
     private static func originFromServerContextKey(_ value: String?) -> String? {

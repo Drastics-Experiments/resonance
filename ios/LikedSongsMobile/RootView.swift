@@ -1,4 +1,3 @@
-import PhotosUI
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -134,9 +133,9 @@ private struct LibraryView: View {
                         }
                         Spacer()
                         ProfileButton(
-                            profileName: library.syncProfileName,
-                            profileID: library.syncProfileID,
-                            serverURL: library.serverURL,
+                            displayName: library.accountDisplayName ?? library.syncProfileName,
+                            email: library.accountEmail,
+                            imageURL: library.accountImageURL,
                             onClipEditor: { presentedSheet = .clipEditor },
                             onConnection: { presentedSheet = .profile }
                         )
@@ -210,52 +209,51 @@ private enum LibrarySheet: String, Identifiable {
 }
 
 private struct ProfileButton: View {
-    let profileName: String
-    let profileID: String
-    let serverURL: String
+    let displayName: String
+    let email: String?
+    let imageURL: URL?
     let onClipEditor: () -> Void
     let onConnection: () -> Void
-    @State private var selectedPicture: PhotosPickerItem?
-    @State private var pictureData: Data?
-    @State private var pictureError: String?
+    @State private var isEmailRevealed = false
 
-    private var displayName: String {
-        let trimmed = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "Profile" : trimmed
+    private var resolvedDisplayName: String {
+        ResonanceEmailPrivacy.safeDisplayName(displayName, email: email)
     }
 
     private var initial: String {
-        String(displayName.prefix(1)).uppercased()
-    }
-
-    private var pictureContext: String {
-        MobileProfilePictureScope.contextKey(serverURL: serverURL, profileID: profileID)
+        String(resolvedDisplayName.prefix(1)).uppercased()
     }
 
     var body: some View {
         Menu {
-            Section(displayName) {
-                PhotosPicker(selection: $selectedPicture, matching: .images) {
-                    Label(
-                        pictureData == nil ? "Choose Profile Picture" : "Change Profile Picture",
-                        systemImage: "photo"
-                    )
-                }
-                if pictureData != nil {
-                    Button("Remove Picture", systemImage: "person.crop.circle.badge.minus", role: .destructive) {
-                        removePicture()
+            Section(resolvedDisplayName) {
+                if let email {
+                    Button {
+                        isEmailRevealed.toggle()
+                    } label: {
+                        Label(
+                            ResonanceEmailPrivacy.displayedAddress(email, isRevealed: isEmailRevealed),
+                            systemImage: isEmailRevealed ? "eye.slash" : "eye"
+                        )
                     }
+                    .accessibilityLabel(isEmailRevealed ? "Hide email address" : "Reveal email address")
                 }
                 Button("Clip Editor", systemImage: "waveform.path.ecg", action: onClipEditor)
             }
-            Button("Profile & Connection", systemImage: "person.crop.circle", action: onConnection)
+            Button("Account & Connection", systemImage: "person.crop.circle", action: onConnection)
         } label: {
             ZStack {
                 Circle().fill(Color.violet)
-                if let pictureData, let image = UIImage(data: pictureData) {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
+                if let imageURL {
+                    AsyncImage(url: imageURL) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFill()
+                        } else {
+                            Text(initial)
+                                .font(.headline.weight(.bold))
+                                .foregroundStyle(.white)
+                        }
+                    }
                 } else {
                     Text(initial)
                         .font(.headline.weight(.bold))
@@ -271,49 +269,9 @@ private struct ProfileButton: View {
             .shadow(color: Color.violet.opacity(0.28), radius: 12, y: 5)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(displayName) profile")
-        .accessibilityHint("Opens profile tools")
-        .task(id: pictureContext) {
-            pictureData = MobileProfilePictureStore.load(
-                serverURL: serverURL,
-                profileID: profileID
-            )
-        }
-        .onChange(of: selectedPicture) { _, item in
-            guard let item else { return }
-            Task {
-                do {
-                    guard let sourceData = try await item.loadTransferable(type: Data.self) else {
-                        throw CocoaError(.fileReadCorruptFile)
-                    }
-                    pictureData = try MobileProfilePictureStore.save(
-                        sourceData,
-                        serverURL: serverURL,
-                        profileID: profileID
-                    )
-                } catch {
-                    pictureError = "Resonance could not use that profile picture. \(error.localizedDescription)"
-                }
-                selectedPicture = nil
-            }
-        }
-        .alert("Profile Picture", isPresented: Binding(
-            get: { pictureError != nil },
-            set: { if !$0 { pictureError = nil } }
-        )) {
-            Button("OK", role: .cancel) { pictureError = nil }
-        } message: {
-            Text(pictureError ?? "")
-        }
-    }
-
-    private func removePicture() {
-        do {
-            try MobileProfilePictureStore.remove(serverURL: serverURL, profileID: profileID)
-            pictureData = nil
-        } catch {
-            pictureError = "Resonance could not remove that profile picture. \(error.localizedDescription)"
-        }
+        .accessibilityLabel("\(resolvedDisplayName) account")
+        .accessibilityHint("Opens account tools")
+        .onChange(of: email) { _, _ in isEmailRevealed = false }
     }
 }
 
@@ -2169,20 +2127,20 @@ private struct ServerConnectionSheet: View {
     @EnvironmentObject private var library: MusicLibrary
     @FocusState private var focusedField: ConnectionField?
     @State private var serverURLDraft = ""
-    @State private var profileName = ""
-    @State private var isApplyingProfile = false
+    @State private var isConnecting = false
     @State private var validationMessage: String?
     @State private var showingNativeAccountSignIn = false
+    @State private var isEmailRevealed = false
 
     private enum ConnectionField: Hashable {
-        case url, profile
+        case url
     }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("Server") {
-                    TextField("https://music.unblocked.mov", text: $serverURLDraft)
+                    TextField("https://resonance-core.blithe-haven-9710.chatgpt.site", text: $serverURLDraft)
                         .focused($focusedField, equals: .url)
                         .submitLabel(.done)
                         .onSubmit { focusedField = nil }
@@ -2195,10 +2153,20 @@ private struct ServerConnectionSheet: View {
                 .disabled(library.isProfileTransitionBusy)
                 Section {
                     if let email = library.accountEmail {
-                        LabeledContent(email) {
-                            Text(library.accountRole == "admin" ? "Administrator" : "Member")
-                                .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(ResonanceEmailPrivacy.safeDisplayName(library.accountDisplayName, email: email))
+                                .font(.headline)
+                            Button {
+                                isEmailRevealed.toggle()
+                            } label: {
+                                Text(ResonanceEmailPrivacy.displayedAddress(email, isRevealed: isEmailRevealed))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(isEmailRevealed ? "Hide email address" : "Reveal email address")
                         }
+                        LabeledContent("Access", value: library.accountRole == "admin" ? "Administrator" : "Member")
                         Button("Sign out", role: .destructive) {
                             Task { await library.signOutAccount() }
                         }
@@ -2221,19 +2189,6 @@ private struct ServerConnectionSheet: View {
                 } header: {
                     Text("Account")
                 }
-                Section {
-                    TextField("Profile name", text: $profileName)
-                        .focused($focusedField, equals: .profile)
-                        .submitLabel(.done)
-                        .onSubmit { focusedField = nil }
-                        .textInputAutocapitalization(.words)
-                        .autocorrectionDisabled()
-                } header: {
-                    Text("Active Profile")
-                } footer: {
-                    Text("Type one profile name. Existing names reconnect; new names are created.")
-                }
-                .disabled(library.isProfileTransitionBusy)
                 Section {
                     if library.availableUploadModes.isEmpty {
                         Label("Uploads disabled by server policy", systemImage: "nosign")
@@ -2273,12 +2228,9 @@ private struct ServerConnectionSheet: View {
                         focusedField = nil
                         guard saveServerDraft() else { return }
                         Task {
-                            isApplyingProfile = true
-                            defer { isApplyingProfile = false }
-                            guard await library.activateSyncProfile(named: profileName) else {
-                                validationMessage = library.serverMessage
-                                return
-                            }
+                            isConnecting = true
+                            defer { isConnecting = false }
+                            await library.refreshClientConfiguration()
                             await library.refreshCatalog()
                             if library.isServerConnected {
                                 dismiss()
@@ -2289,19 +2241,18 @@ private struct ServerConnectionSheet: View {
                     } label: {
                         HStack {
                             Spacer()
-                            if isApplyingProfile || library.isSyncing {
+                            if isConnecting || library.isSyncing {
                                 ProgressView().padding(.trailing, 6)
                             }
-                            Text(isApplyingProfile || library.isSyncing ? "Connecting…" : "Connect")
+                            Text(isConnecting || library.isSyncing ? "Connecting…" : "Connect")
                             Spacer()
                         }
                     }
                     .disabled(
-                        isApplyingProfile
+                        isConnecting
                             || library.isSyncing
                             || library.isProfileTransitionBusy
                             || library.serverToken.isEmpty
-                            || profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     )
                 }
                 Section {
@@ -2309,9 +2260,9 @@ private struct ServerConnectionSheet: View {
                         .foregroundStyle(validationMessage == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.orange))
                 }
             }
+            .onChange(of: library.accountEmail) { _, _ in isEmailRevealed = false }
             .onAppear {
                 serverURLDraft = library.serverURL
-                profileName = library.syncProfileName
                 validationMessage = nil
             }
             .task {
@@ -2324,33 +2275,15 @@ private struct ServerConnectionSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
                         focusedField = nil
-                        let previousContext = library.activeServerContext
                         guard saveServerDraft() else { return }
-                        let trimmed = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !trimmed.isEmpty else {
-                            validationMessage = "Enter a profile name."
-                            return
-                        }
-                        guard previousContext != library.activeServerContext
-                            || trimmed != library.syncProfileName else {
-                            Task {
-                                await library.refreshClientConfiguration()
-                                dismiss()
-                            }
-                            return
-                        }
                         Task {
-                            isApplyingProfile = true
-                            defer { isApplyingProfile = false }
-                            if await library.activateSyncProfile(named: trimmed) {
-                                await library.refreshClientConfiguration()
-                                dismiss()
-                            } else {
-                                validationMessage = library.serverMessage
-                            }
+                            isConnecting = true
+                            defer { isConnecting = false }
+                            await library.refreshClientConfiguration()
+                            dismiss()
                         }
                     }
-                    .disabled(isApplyingProfile || library.isProfileTransitionBusy || library.serverToken.isEmpty)
+                    .disabled(isConnecting || library.isProfileTransitionBusy || library.serverToken.isEmpty)
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()

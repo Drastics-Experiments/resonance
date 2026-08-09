@@ -46,6 +46,10 @@ function sha256(value) {
 
 test("requires HTTPS before server credentials leave the client", () => {
   assert.equal(normalizeServerBaseURL("https://Music.Example/api?ignored=1#fragment").href, "https://music.example/api/");
+  assert.equal(
+    normalizeServerBaseURL("https://music.unblocked.mov").origin,
+    "https://resonance-core.blithe-haven-9710.chatgpt.site",
+  );
   assert.throws(() => normalizeServerBaseURL("http://music.example"), /https:\/\//i);
   assert.throws(() => normalizeServerBaseURL("http://127.0.0.1"), /local development/i);
   assert.throws(

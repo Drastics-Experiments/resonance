@@ -618,12 +618,12 @@ struct MobileClipEditorSheet: View {
             library.clearClipRange(for: track)
             savedStartSeconds = 0
             savedEndSeconds = track.duration
-            saveConfirmation = "Saved full-song playback for \(library.syncProfileName)."
+            saveConfirmation = "Saved full-song playback for \(library.visibleSyncProfileName)."
         } else {
             library.saveClipRange(for: track, start: startSeconds, end: endSeconds)
             savedStartSeconds = startSeconds
             savedEndSeconds = endSeconds
-            saveConfirmation = "Saved \(formatTime(startSeconds))–\(formatTime(endSeconds)) for \(library.syncProfileName)."
+            saveConfirmation = "Saved \(formatTime(startSeconds))–\(formatTime(endSeconds)) for \(library.visibleSyncProfileName)."
         }
     }
 }
@@ -932,7 +932,7 @@ private struct LegacyMobileClipEditorSheet: View {
                                 waveform(track)
                                 timeFields(track)
                                 previewTransport(track)
-                                Text("The range is saved for \(library.syncProfileName). The song file is never changed.")
+                                Text("The range is saved for \(library.visibleSyncProfileName). The song file is never changed.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 controls(track)
@@ -2180,7 +2180,7 @@ struct MobileLocalImportSheet: View {
                                     Text("Upload after downloading")
                                         .font(.subheadline.weight(.semibold))
                                     Text(library.canUploadLocalImports
-                                         ? "Downloads every selected song first, then uploads missing songs to \(library.syncProfileName)."
+                                         ? "Downloads every selected song first, then uploads missing songs to \(library.visibleSyncProfileName)."
                                          : "Sign in with an administrator account, or turn this off for a local-only import.")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)

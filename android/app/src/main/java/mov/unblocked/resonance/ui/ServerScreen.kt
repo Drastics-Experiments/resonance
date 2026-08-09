@@ -82,6 +82,7 @@ import com.clerk.ui.auth.AuthView
 import mov.unblocked.resonance.data.RemoteSong
 import mov.unblocked.resonance.data.ServerDownloadMode
 import mov.unblocked.resonance.data.ServerUploadMode
+import mov.unblocked.resonance.data.AccountEmailPrivacy
 import java.net.URI
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -676,14 +677,11 @@ private val RemoteSong.mediaKindLabel: String
 @Composable
 internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions, dismiss: () -> Unit) {
     var url by remember(state.serverUrl) { mutableStateOf(state.serverUrl) }
-    var profileName by remember(state.syncProfileId, state.syncProfiles) {
-        mutableStateOf(activeSyncProfileName(state))
-    }
     var connectRequested by remember { mutableStateOf(false) }
+    var isEmailRevealed by remember(state.accountEmail) { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val connecting = state.isApplyingServerConnection || state.isRefreshingServer || state.isSigningIn
-    val editingConnection = url.trim() != state.serverUrl.trim() ||
-        profileName.trim() != activeSyncProfileName(state).trim()
+    val editingConnection = url.trim() != state.serverUrl.trim()
 
     LaunchedEffect(connectRequested, connecting, state.isConnected, state.serverMessage) {
         if (connectRequested && !connecting && state.isConnected) dismiss()
@@ -713,7 +711,20 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column {
-                            Text(state.accountEmail, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                AccountEmailPrivacy.safeDisplayName(state.accountDisplayName, state.accountEmail),
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            TextButton(
+                                onClick = { isEmailRevealed = !isEmailRevealed },
+                                contentPadding = PaddingValues(0.dp),
+                            ) {
+                                Text(
+                                    AccountEmailPrivacy.displayedAddress(state.accountEmail, isEmailRevealed),
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                                )
+                            }
                             Text(
                                 if (state.accountRole == "admin") "Administrator" else "Member",
                                 fontSize = 11.sp,
@@ -741,15 +752,6 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
                 }
-                OutlinedTextField(
-                    profileName,
-                    { profileName = it },
-                    label = { Text("Profile name") },
-                    supportingText = { Text("Existing names reconnect; new names are created.") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
-                )
                 TransferModeSelector(
                     title = "Upload mode",
                     selected = if (editingConnection) "Connect first" else state.serverUploadMode?.label ?: "Disabled",
@@ -766,7 +768,7 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                 )
                 if (editingConnection) {
                     Text(
-                        "Save this server and profile first. Then reopen Connection to choose modes from that context's signed policy.",
+                        "Save this server first. Then reopen Connection to choose modes from that account's signed policy.",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
@@ -781,11 +783,19 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
         },
         confirmButton = {
             TextButton(
-                enabled = !connecting && profileName.isNotBlank() && state.serverToken.isNotBlank(),
+                enabled = !connecting && state.serverToken.isNotBlank(),
                 onClick = {
                     focusManager.clearFocus()
                     connectRequested = true
-                    actions.saveServerConnection(url.trim(), state.serverToken, state.serverAdminKey, profileName)
+                    actions.saveServerConnection(
+                        url.trim(),
+                        state.serverToken,
+                        state.serverAdminKey,
+                        AccountEmailPrivacy.safeDisplayName(
+                            state.accountDisplayName ?: activeSyncProfileName(state),
+                            state.accountEmail,
+                        ),
+                    )
                 },
             ) {
                 if (connecting) {

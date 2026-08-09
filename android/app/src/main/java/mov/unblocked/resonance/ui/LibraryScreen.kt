@@ -1,6 +1,8 @@
 package mov.unblocked.resonance.ui
 
 import android.graphics.BitmapFactory
+import java.net.HttpURLConnection
+import java.net.URL
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardActions
@@ -26,8 +28,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.AddAPhoto
-import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -46,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -63,6 +64,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import mov.unblocked.resonance.data.Track
+import mov.unblocked.resonance.data.AccountEmailPrivacy
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: Modifier = Modifier) {
@@ -199,13 +203,13 @@ private fun ProfileButton(
     onConnection: () -> Unit,
     onClipEditor: () -> Unit,
 ) {
-    val profileName = activeSyncProfileName(state)
+    val profileName = AccountEmailPrivacy.safeDisplayName(
+        state.accountDisplayName ?: activeSyncProfileName(state),
+        state.accountEmail,
+    )
     var expanded by remember { mutableStateOf(false) }
-    val profileBitmap = remember(state.profilePicturePath) {
-        state.profilePicturePath
-            ?.takeIf(String::isNotBlank)
-            ?.let { path -> runCatching { BitmapFactory.decodeFile(path)?.asImageBitmap() }.getOrNull() }
-    }
+    var isEmailRevealed by remember(state.accountEmail) { mutableStateOf(false) }
+    val profileBitmap = rememberAccountImage(state.accountImageURL)
     Box {
         IconButton(
             onClick = { expanded = true },
@@ -234,22 +238,12 @@ private fun ProfileButton(
             }
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(
-                text = { Text(if (profileBitmap == null) "Choose Profile Picture" else "Change Profile Picture") },
-                leadingIcon = { Icon(Icons.Default.AddAPhoto, null) },
-                onClick = {
-                    expanded = false
-                    actions.chooseProfilePicture()
-                },
-            )
-            if (profileBitmap != null) {
+            if (state.accountEmail != null) {
                 DropdownMenuItem(
-                    text = { Text("Remove Picture") },
-                    leadingIcon = { Icon(Icons.Default.PersonRemove, null) },
-                    onClick = {
-                        expanded = false
-                        actions.removeProfilePicture()
+                    text = {
+                        Text(AccountEmailPrivacy.displayedAddress(state.accountEmail, isEmailRevealed))
                     },
+                    onClick = { isEmailRevealed = !isEmailRevealed },
                 )
             }
             DropdownMenuItem(
@@ -261,7 +255,7 @@ private fun ProfileButton(
                 },
             )
             DropdownMenuItem(
-                text = { Text("Profile & Connection") },
+                text = { Text("Account & Connection") },
                 leadingIcon = { Icon(Icons.Default.Settings, null) },
                 onClick = {
                     expanded = false
@@ -270,6 +264,31 @@ private fun ProfileButton(
             )
         }
     }
+}
+
+@Composable
+private fun rememberAccountImage(imageURL: String?): androidx.compose.ui.graphics.ImageBitmap? {
+    val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, imageURL) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                val url = URL(imageURL?.takeIf(String::isNotBlank) ?: return@runCatching null)
+                require(url.protocol.equals("https", ignoreCase = true))
+                val connection = url.openConnection() as HttpURLConnection
+                try {
+                    connection.connectTimeout = 5_000
+                    connection.readTimeout = 5_000
+                    connection.instanceFollowRedirects = true
+                    connection.connect()
+                    require(connection.responseCode in 200..299)
+                    require(connection.contentLengthLong <= 5 * 1024 * 1024 || connection.contentLengthLong < 0)
+                    connection.inputStream.use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
+                } finally {
+                    connection.disconnect()
+                }
+            }.getOrNull()
+        }
+    }
+    return bitmap
 }
 
 @Composable
@@ -317,12 +336,15 @@ private fun RecentlyAddedSection(
 }
 
 internal fun activeSyncProfileName(state: ResonanceUiState): String =
-    state.syncProfiles
+    AccountEmailPrivacy.safeDisplayName(
+        state.syncProfiles
         .firstOrNull { it.id == state.syncProfileId }
         ?.name
         ?.trim()
         ?.takeIf(String::isNotEmpty)
-        ?: "Default"
+            ?: "Default",
+        state.accountEmail,
+    )
 
 internal fun syncProfileInitial(name: String): String =
     name.trim().firstOrNull(Char::isLetterOrDigit)?.uppercase() ?: "?"

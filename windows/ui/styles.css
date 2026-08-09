@@ -485,6 +485,7 @@ main {
   color: var(--muted);
   font-size: 12px;
 }
+#profileMenuEmail { cursor: pointer; }
 .profile-menu-divider {
   height: 1px;
   margin: 8px 1px;
@@ -5589,6 +5590,16 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 }
 .settings-account-card > div:first-child { display: grid; gap: 4px; }
 .settings-account-card small { color: var(--muted); }
+.email-disclosure {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.email-disclosure:hover,
+.email-disclosure:focus-visible { color: var(--ink); text-decoration: underline; outline: none; }
 .settings-auth-grid { display: grid; grid-template-columns: minmax(180px, 1fr); gap: 8px; }
 @media (max-width: 760px) { .settings-account-card { align-items: stretch; flex-direction: column; } .settings-auth-grid { grid-template-columns: 1fr; } }
 

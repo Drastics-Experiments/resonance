@@ -7,6 +7,31 @@ import AppKit
 import UIKit
 #endif
 
+private let resonanceLegacyProductionHost = "music.unblocked.mov"
+private let resonanceProductionHost = "resonance-core.blithe-haven-9710.chatgpt.site"
+
+enum ResonanceEmailPrivacy {
+    static let censoredAddress = "••••••@••••••.•••"
+
+    static func displayedAddress(_ email: String, isRevealed: Bool) -> String {
+        isRevealed ? email : censoredAddress
+    }
+
+    static func safeDisplayName(_ value: String?, email: String?) -> String {
+        let candidate = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !candidate.isEmpty, !looksLikeEmail(candidate),
+              candidate.caseInsensitiveCompare(email ?? "") != .orderedSame else {
+            return "Clerk account"
+        }
+        return candidate
+    }
+
+    private static func looksLikeEmail(_ value: String) -> Bool {
+        guard let at = value.firstIndex(of: "@"), at != value.startIndex else { return false }
+        return value[value.index(after: at)...].contains(".")
+    }
+}
+
 enum ResonanceSocialAuthProvider: String, CaseIterable, Identifiable {
     case clerk
 
@@ -23,9 +48,21 @@ struct ResonanceAccountSession: Codable, Equatable {
     let email: String
     let role: String
     let baseURL: URL
+    let accountID: String?
+    let profileID: String?
+    let displayName: String?
+    let imageURL: URL?
 
     var isAdmin: Bool { role == "admin" }
     var usesNativeClerkSession: Bool { refreshToken == Self.nativeRefreshMarker }
+    var usesLegacyProductionServer: Bool {
+        baseURL.scheme?.lowercased() == "https"
+            && baseURL.host?.lowercased() == resonanceLegacyProductionHost
+            && (baseURL.port == nil || baseURL.port == 443)
+    }
+    var profileDisplayName: String {
+        ResonanceEmailPrivacy.safeDisplayName(displayName, email: email)
+    }
 }
 
 struct ResonanceNativeAuthConfiguration: Equatable {
@@ -92,9 +129,20 @@ private struct ResonanceAuthTokenPayload: Decodable {
 }
 
 private struct ResonanceAccountPayload: Decodable {
+    let id: String?
     let email: String?
     let role: String?
+    let profileID: String?
+    let displayName: String?
+    let imageURL: URL?
     let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, email, role, error
+        case profileID = "profile_id"
+        case displayName = "display_name"
+        case imageURL = "image_url"
+    }
 }
 
 private struct ResonanceAuthConfiguration {
@@ -121,7 +169,10 @@ struct ResonanceSocialAuthClient {
         self.session = session
     }
 
-    func signIn(with provider: ResonanceSocialAuthProvider) async throws -> ResonanceAccountSession {
+    func signIn(
+        with provider: ResonanceSocialAuthProvider,
+        migrationProfileID: String? = nil
+    ) async throws -> ResonanceAccountSession {
         let configuration = try await configuration()
         guard configuration.providers.contains(provider.rawValue) else {
             throw ResonanceSocialAuthError.rejected("This sign-in provider is not enabled by the server.")
@@ -162,7 +213,7 @@ struct ResonanceSocialAuthClient {
                 "code_verifier": verifier,
             ]
         )
-        return try await authorizedSession(token)
+        return try await authorizedSession(token, migrationProfileID: migrationProfileID)
     }
 
     func nativeConfiguration() async throws -> ResonanceNativeAuthConfiguration {
@@ -172,11 +223,17 @@ struct ResonanceSocialAuthClient {
         return native
     }
 
-    func accountSession(nativeToken: String) async throws -> ResonanceAccountSession {
+    func accountSession(
+        nativeToken: String,
+        migrationProfileID: String? = nil
+    ) async throws -> ResonanceAccountSession {
         let expiration = try Self.jwtExpiration(nativeToken)
-        let account = try await account(accessToken: nativeToken)
+        let account = try await account(accessToken: nativeToken, migrationProfileID: migrationProfileID)
         guard let email = account.email?.lowercased(), !email.isEmpty,
-              let role = account.role, role == "member" || role == "admin" else {
+              let role = account.role, role == "member" || role == "admin",
+              let accountID = account.id, !accountID.isEmpty,
+              let profileID = account.profileID, !profileID.isEmpty,
+              let displayName = account.displayName, !displayName.isEmpty else {
             throw ResonanceSocialAuthError.rejected(account.error ?? "This account could not access this Resonance server.")
         }
         return ResonanceAccountSession(
@@ -185,11 +242,18 @@ struct ResonanceSocialAuthClient {
             expiresAt: expiration,
             email: email,
             role: role,
-            baseURL: baseURL
+            baseURL: baseURL,
+            accountID: accountID,
+            profileID: profileID,
+            displayName: displayName,
+            imageURL: account.imageURL
         )
     }
 
-    func refresh(_ current: ResonanceAccountSession) async throws -> ResonanceAccountSession {
+    func refresh(
+        _ current: ResonanceAccountSession,
+        migrationProfileID: String? = nil
+    ) async throws -> ResonanceAccountSession {
         guard Self.httpsOrigin(current.baseURL) == baseURL else { throw ResonanceSocialAuthError.invalidConfiguration }
         let configuration = try await configuration()
         let token = try await token(
@@ -200,7 +264,11 @@ struct ResonanceSocialAuthClient {
                 "refresh_token": try Self.bounded(current.refreshToken),
             ]
         )
-        return try await authorizedSession(token, fallbackRefreshToken: current.refreshToken)
+        return try await authorizedSession(
+            token,
+            fallbackRefreshToken: current.refreshToken,
+            migrationProfileID: current.profileID ?? migrationProfileID
+        )
     }
 
     func signOut(_ current: ResonanceAccountSession) async {
@@ -285,16 +353,20 @@ struct ResonanceSocialAuthClient {
 
     private func authorizedSession(
         _ token: ResonanceAuthTokenPayload,
-        fallbackRefreshToken: String = ""
+        fallbackRefreshToken: String = "",
+        migrationProfileID: String? = nil
     ) async throws -> ResonanceAccountSession {
         guard let accessToken = token.idToken,
               let expiresIn = token.expiresIn, (1...604_800).contains(expiresIn) else {
             throw ResonanceSocialAuthError.invalidConfiguration
         }
         let refreshToken = token.refreshToken ?? fallbackRefreshToken
-        let account = try await account(accessToken: accessToken)
+        let account = try await account(accessToken: accessToken, migrationProfileID: migrationProfileID)
         guard let email = account.email?.lowercased(), !email.isEmpty,
-              let role = account.role, role == "member" || role == "admin" else {
+              let role = account.role, role == "member" || role == "admin",
+              let accountID = account.id, !accountID.isEmpty,
+              let profileID = account.profileID, !profileID.isEmpty,
+              let displayName = account.displayName, !displayName.isEmpty else {
             throw ResonanceSocialAuthError.rejected(account.error ?? "This account could not access this Resonance server.")
         }
         return ResonanceAccountSession(
@@ -303,15 +375,26 @@ struct ResonanceSocialAuthClient {
             expiresAt: Date().addingTimeInterval(expiresIn),
             email: email,
             role: role,
-            baseURL: baseURL
+            baseURL: baseURL,
+            accountID: accountID,
+            profileID: profileID,
+            displayName: displayName,
+            imageURL: account.imageURL
         )
     }
 
-    private func account(accessToken: String) async throws -> ResonanceAccountPayload {
+    private func account(
+        accessToken: String,
+        migrationProfileID: String? = nil
+    ) async throws -> ResonanceAccountPayload {
         var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/auth/me"))
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(try Self.bounded(accessToken))", forHTTPHeaderField: "Authorization")
+        if let migrationProfileID,
+           !migrationProfileID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            request.setValue(migrationProfileID, forHTTPHeaderField: "X-Resonance-Profile")
+        }
         let (data, response) = try await session.data(for: request)
         let account = try JSONDecoder().decode(ResonanceAccountPayload.self, from: data)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -352,7 +435,11 @@ struct ResonanceSocialAuthClient {
         guard url.scheme?.lowercased() == "https", url.user == nil, url.password == nil, url.host != nil else { return nil }
         var components = URLComponents()
         components.scheme = "https"
-        components.host = url.host?.lowercased()
+        let host = url.host?.lowercased()
+        components.host = host == resonanceLegacyProductionHost
+            && (url.port == nil || url.port == 443)
+            ? resonanceProductionHost
+            : host
         if let port = url.port, port != 443 { components.port = port }
         return components.url
     }

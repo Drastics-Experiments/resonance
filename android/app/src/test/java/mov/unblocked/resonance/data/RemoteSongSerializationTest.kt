@@ -26,13 +26,13 @@ class RemoteSongSerializationTest {
               "download_url": "/api/v1/songs/song-1/download",
               "stream_url": "/api/v1/songs/song-1/stream",
               "duration_seconds": 184.46,
-              "artwork_url": "https://music.unblocked.mov/api/v1/songs/song-1/artwork"
+              "artwork_url": "https://resonance-core.blithe-haven-9710.chatgpt.site/api/v1/songs/song-1/artwork"
             }
             """.trimIndent(),
         )
 
         assertEquals("3:04", song.durationText)
-        assertEquals("https://music.unblocked.mov/api/v1/songs/song-1/artwork", song.artworkURL)
+        assertEquals("https://resonance-core.blithe-haven-9710.chatgpt.site/api/v1/songs/song-1/artwork", song.artworkURL)
     }
 
     @Test

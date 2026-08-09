@@ -68,6 +68,7 @@ import mov.unblocked.resonance.data.PlaylistMutationSnapshot
 import mov.unblocked.resonance.data.PlaylistOrderPolicy
 import mov.unblocked.resonance.data.PlaylistSyncMutationPolicy
 import mov.unblocked.resonance.data.ProfileLibraryStatePolicy
+import mov.unblocked.resonance.data.ProfileLibraryState
 import mov.unblocked.resonance.data.RemotePlaylist
 import mov.unblocked.resonance.data.RemoteClipRange
 import mov.unblocked.resonance.data.RemotePlaylistsDocument
@@ -86,6 +87,7 @@ import mov.unblocked.resonance.data.NativeAuthConfiguration
 import mov.unblocked.resonance.data.SourceImportMetadata
 import mov.unblocked.resonance.data.SourceImportPolicy
 import mov.unblocked.resonance.data.StoredLibrary
+import mov.unblocked.resonance.data.SyncProfile
 import mov.unblocked.resonance.data.ProfilePictureStore
 import mov.unblocked.resonance.data.Track
 import mov.unblocked.resonance.playback.PlaybackService
@@ -134,6 +136,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             serverAdminKey = accountSession?.takeIf { it.role == "admin" }?.accessToken ?: credentials.adminToken,
             accountEmail = accountSession?.email,
             accountRole = accountSession?.role,
+            accountDisplayName = accountSession?.profileDisplayName,
+            accountImageURL = accountSession?.imageURL,
             shuffleEnabled = preferences.getBoolean("shuffle", false),
             repeatEnabled = preferences.getBoolean("repeat", false),
             playbackSpeed = preferences.getFloat("speed", 1f),
@@ -241,7 +245,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         if (mutableState.value.isSigningIn) return
         mutableState.value = mutableState.value.copy(isSigningIn = true, serverMessage = "Finishing sign-in…")
         viewModelScope.launch {
-            runCatching { nativeAccountSession(serverURL, forceRefresh = false) }
+            runCatching {
+                nativeAccountSession(
+                    serverURL,
+                    forceRefresh = false,
+                    migrationProfileID = library.syncProfileID,
+                )
+            }
                 .onSuccess { session ->
                     nativeAuthServerURL = null
                     acceptAccountSession(session)
@@ -276,7 +286,14 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
         viewModelScope.launch {
-            runCatching { SocialAuthClient(pending.baseURL).exchange(code, pending.state, pending) }
+            runCatching {
+                SocialAuthClient(pending.baseURL).exchange(
+                    code,
+                    pending.state,
+                    pending,
+                    migrationProfileID = library.syncProfileID,
+                )
+            }
                 .onSuccess { session ->
                     acceptAccountSession(session)
                 }
@@ -302,6 +319,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             serverAdminKey = "",
             accountEmail = null,
             accountRole = null,
+            accountDisplayName = null,
+            accountImageURL = null,
             isSigningIn = false,
             isNativeAccountSignInOpen = false,
             remoteSongs = emptyList(),
@@ -323,7 +342,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     fun refreshAccountSessionIfNeeded() {
         val current = accountSession ?: return
         val refreshLead = if (current.usesNativeClerkSession) 15_000L else 5 * 60_000L
-        if (current.expiresAt > System.currentTimeMillis() + refreshLead) {
+        val needsProfileHydration = current.profileID.isNullOrBlank() || current.displayName.isNullOrBlank()
+        if (!needsProfileHydration && current.expiresAt > System.currentTimeMillis() + refreshLead) {
             scheduleAccountRefresh(current)
             return
         }
@@ -332,9 +352,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             try {
                 val refreshed = if (current.usesNativeClerkSession) {
-                    nativeAccountSession(current.baseURL, forceRefresh = true)
+                    nativeAccountSession(
+                        current.baseURL,
+                        forceRefresh = true,
+                        migrationProfileID = current.profileID ?: library.syncProfileID,
+                    )
                 } else {
-                    SocialAuthClient(current.baseURL).refresh(current)
+                    SocialAuthClient(current.baseURL).refresh(current, library.syncProfileID)
                 }
                 if (accountSession != current) return@launch
                 accountSession = refreshed
@@ -369,9 +393,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             serverAdminKey = session.accessToken.takeIf { session.role == "admin" }.orEmpty(),
             accountEmail = session.email,
             accountRole = session.role,
+            accountDisplayName = session.profileDisplayName,
+            accountImageURL = session.imageURL,
             isSigningIn = false,
             isNativeAccountSignInOpen = false,
-            serverMessage = "Signed in as ${session.email}",
+            serverMessage = "Signed in with Clerk",
         )
     }
 
@@ -395,7 +421,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             session.baseURL,
             session.accessToken,
             session.accessToken.takeIf { session.role == "admin" }.orEmpty(),
-            activeSyncProfileName(mutableState.value),
+            session.profileDisplayName,
         )
     }
 
@@ -409,7 +435,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         withTimeout(20_000) { Clerk.isInitialized.first { it } }
     }
 
-    private suspend fun nativeAccountSession(serverURL: String, forceRefresh: Boolean): AccountSession {
+    private suspend fun nativeAccountSession(
+        serverURL: String,
+        forceRefresh: Boolean,
+        migrationProfileID: String? = null,
+    ): AccountSession {
         val client = SocialAuthClient(serverURL)
         val configuration = client.nativeConfiguration()
         configureClerk(configuration)
@@ -426,7 +456,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 result.throwable?.message ?: "Clerk could not create a Resonance session token.",
             )
         }
-        return client.accountSession(token)
+        return client.accountSession(token, migrationProfileID)
     }
 
     override fun chooseProfilePicture() {
@@ -2389,7 +2419,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
         val normalized = runCatching { ServerClient.normalizeServerURL(url) }.getOrElse { showError(it); return }
-        val normalizedProfileName = normalizeProfileName(profileName)
+        val normalizedProfileName = accountSession?.profileDisplayName ?: normalizeProfileName(profileName)
         if (normalizedProfileName.isEmpty()) {
             mutableState.value = mutableState.value.copy(serverMessage = "Enter a profile name.")
             return
@@ -2451,11 +2481,24 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     library.syncProfileID,
                     clientConfigStore.cohortKey,
                 )
-                val response = client.fetchProfiles()
-                val profile = response.profiles.firstOrNull {
-                    it.id == normalizedProfileName || it.name.equals(normalizedProfileName, ignoreCase = true)
-                } ?: client.createProfile(normalizedProfileName)
-                val profiles = (response.profiles + profile).distinctBy { it.id }
+                val activeAccount = accountSession
+                val response = if (activeAccount == null) client.fetchProfiles() else null
+                val profile = if (activeAccount?.profileID != null) {
+                    SyncProfile(
+                        id = activeAccount.profileID,
+                        name = activeAccount.profileDisplayName,
+                        isDefault = true,
+                    )
+                } else {
+                    response!!.profiles.firstOrNull {
+                        it.id == normalizedProfileName || it.name.equals(normalizedProfileName, ignoreCase = true)
+                    } ?: client.createProfile(normalizedProfileName)
+                }
+                val profiles = if (activeAccount != null) {
+                    listOf(profile)
+                } else {
+                    (response!!.profiles + profile).distinctBy { it.id }
+                }
                 credentials.serverURL = normalized
                 if (accountSession == null) {
                     credentials.clientToken = accessToken
@@ -3149,7 +3192,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     /** Moves legacy `profile|remote:` clip keys under the server-origin scope. */
     private fun migrateCompoundClipKeys(value: StoredLibrary): StoredLibrary {
         fun migratedKey(key: String): String {
-            if ("#profile=" in key) return key
+            if ("#profile=" in key) return RemoteTrackIdentityPolicy.canonicalContextKey(key)
             val boundary = listOf(key.indexOf("|remote:"), key.indexOf("|local:"))
                 .filter { it >= 0 }
                 .minOrNull()
@@ -3169,11 +3212,20 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         }
 
         val syncKey = value.playlistSyncServerURL?.let { existing ->
-            if ("#profile=" in existing) existing
+            if ("#profile=" in existing) RemoteTrackIdentityPolicy.canonicalContextKey(existing)
             else RemoteTrackIdentityPolicy.contextKey(existing, value.syncProfileID) ?: existing
+        }
+        val profileStates = LinkedHashMap<String, ProfileLibraryState>()
+        value.profileStates.forEach { (key, state) ->
+            val canonicalKey = RemoteTrackIdentityPolicy.canonicalContextKey(key)
+            if (canonicalKey == key) profileStates[canonicalKey] = state
+        }
+        value.profileStates.forEach { (key, state) ->
+            profileStates.putIfAbsent(RemoteTrackIdentityPolicy.canonicalContextKey(key), state)
         }
         return value.copy(
             playlistSyncServerURL = syncKey,
+            profileStates = profileStates,
             clipRanges = migrateRanges(value.clipRanges),
             dirtyClipRangeKeys = value.dirtyClipRangeKeys.mapTo(linkedSetOf(), ::migratedKey),
             deletedClipRangeKeys = value.deletedClipRangeKeys.mapTo(linkedSetOf(), ::migratedKey),
@@ -3285,6 +3337,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             serverAdminKey = accountSession?.takeIf { it.role == "admin" }?.accessToken ?: credentials.adminToken,
             accountEmail = accountSession?.email,
             accountRole = accountSession?.role,
+            accountDisplayName = accountSession?.profileDisplayName,
+            accountImageURL = accountSession?.imageURL,
             syncProfileId = library.syncProfileID,
             syncProfiles = library.syncProfiles,
             profilePicturePath = profilePictureStore.existingPath(
