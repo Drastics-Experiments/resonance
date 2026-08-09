@@ -77,6 +77,7 @@ let selectedPlaylistID = null;
 let libraryFilter = "all";
 let serverToken = "";
 let serverAdminToken = "";
+let accountSession = null;
 let serverCatalog = [];
 let serverCatalogGeneration = 0;
 const serverArtworkCache = new Map();
@@ -2249,7 +2250,7 @@ async function playRemoteStream(song) {
     return;
   }
   if (!song?.id || !serverToken.trim()) {
-    showNotice("Connect with a server access token before streaming this song.");
+    showNotice("Sign in to your Resonance account before streaming this song.");
     return;
   }
   if (serverSongRequiresDownload(song)) {
@@ -2482,7 +2483,7 @@ async function syncPlaylistsNow({ automatic = false } = {}) {
   const context = currentProfileContext();
   playlistSyncInFlight = (async () => {
     if (!serverToken.trim()) {
-      if (!automatic) showNotice("Enter the server access token.");
+      if (!automatic) showNotice("Sign in to your Resonance account.");
       return;
     }
 
@@ -3332,7 +3333,7 @@ function renderProfileOptions(selectedID = activeProfileID()) {
 
 async function refreshProfiles() {
   const url = $("#serverURL")?.value.trim() || state.serverURL;
-  const token = $("#serverToken")?.value || serverToken;
+  const token = serverToken;
   if (!url || !token) return;
   const response = await api.fetchProfiles({ baseURL: url, token });
   state.syncProfiles = response.profiles || [];
@@ -3457,21 +3458,7 @@ async function saveServerForm() {
   const nextProfileID = settingsOpen ? ($("#syncProfile")?.value || activeProfileID()) : activeProfileID();
   const requestedUploadMode = settingsOpen ? $("#serverUploadMode")?.value : currentServerTransferModes().uploadMode;
   const requestedDownloadMode = settingsOpen ? $("#serverDownloadMode")?.value : currentServerTransferModes().downloadMode;
-  const nextServerToken = settingsOpen ? $("#serverToken").value.trim() : serverToken.trim();
-  const nextServerAdminToken = settingsOpen ? $("#serverAdminToken").value.trim() : serverAdminToken.trim();
-  const accessTokenChanged = nextServerToken !== serverToken;
-  if (accessTokenChanged) releaseActiveServerStream({ stopPlayback: true });
-  if (settingsOpen) {
-    serverToken = nextServerToken;
-    serverAdminToken = nextServerAdminToken;
-    if (accessTokenChanged) {
-      serverConnected = false;
-      replaceServerCatalog([]);
-      selectedRemoteIDs.clear();
-    }
-  }
   await activateProfile(nextProfileID, nextServerURL);
-  await api.saveServerCredentials({ clientToken: serverToken, adminToken: serverAdminToken });
   await refreshClientConfig({ force: true });
   setServerTransferPreference(state, {
     serverURL: state.serverURL,
@@ -3484,6 +3471,23 @@ async function saveServerForm() {
   updateProfileControl();
   schedulePlaylistSync();
   scheduleListeningHistorySync();
+}
+
+function applyAccountSession(nextSession, error = null) {
+  const previousToken = serverToken;
+  accountSession = nextSession || null;
+  serverToken = String(accountSession?.accessToken || "").trim();
+  serverAdminToken = accountSession?.role === "admin" ? serverToken : "";
+  if (previousToken !== serverToken) {
+    releaseActiveServerStream({ stopPlayback: true });
+    serverConnected = false;
+    replaceServerCatalog([]);
+    selectedRemoteIDs.clear();
+  }
+  if (error) serverConnectionText = error;
+  else if (accountSession) serverConnectionText = `Signed in as ${accountSession.email}`;
+  else serverConnectionText = "Not signed in";
+  if ($("#settingsDialog")?.open && settingsPanel === "server") renderSettings();
 }
 
 function renderSettings() {
@@ -3542,11 +3546,14 @@ function renderSettings() {
         </section>
         <section class="settings-panel" data-settings-content="server" ${settingsPanel === "server" ? "" : "hidden"}>
           <form id="serverSettingsForm" class="settings-server-form">
-            <div class="settings-panel-title"><div><span class="eyebrow">CONNECTION</span><h2>Music Server</h2><p>Connect Resonance to your private music server. Credentials remain encrypted by the operating system.</p></div></div>
+            <div class="settings-panel-title"><div><span class="eyebrow">ACCOUNT</span><h2>Music Server</h2><p>Clerk securely handles email, Google, Apple, and Discord sign-in for Resonance.</p></div></div>
             <div class="settings-server-card">
               <label class="settings-server-field settings-server-field-wide" for="serverURL"><span>Server URL</span><input id="serverURL" autocomplete="url" placeholder="https://music.example.com" required></label>
-              <label class="settings-server-field" for="serverToken"><span>Server access token</span><input id="serverToken" type="password" autocomplete="off" placeholder="Optional for catalog and playlist sync"></label>
-              <label class="settings-server-field" for="serverAdminToken"><span>Server admin key</span><input id="serverAdminToken" type="password" autocomplete="off" placeholder="Optional for uploads and deletion"></label>
+              <div class="settings-account-card settings-server-field-wide">
+                ${accountSession
+                  ? `<div><strong>${escapeHTML(accountSession.email)}</strong><small>${accountSession.role === "admin" ? "Administrator" : "Member"}</small></div><button id="signOutAccount" class="secondary" type="button">Sign out</button>`
+                  : `<div><strong>${serverToken ? "Legacy connection" : "Sign in to Resonance"}</strong><small>${serverToken ? "Sign in to finish upgrading this device." : "Use email, Google, Apple, or Discord in your web browser."}</small></div><div class="settings-auth-grid"><button class="secondary" type="button" data-auth-provider="clerk">Sign in or create account</button></div>`}
+              </div>
             </div>
             <div class="settings-section-heading compact"><span>PROFILE & TRANSFERS</span><p>Choose the active profile and the methods allowed by this server.</p></div>
             <div class="settings-server-card settings-server-options">
@@ -3632,10 +3639,30 @@ function renderSettings() {
 function bindServerSettingsControls() {
   document.querySelectorAll("#serverSettingsForm [data-custom-select]").forEach(initializeCustomSelect);
   $("#serverURL").value = state.serverURL || "";
-  $("#serverToken").value = serverToken;
-  $("#serverAdminToken").value = serverAdminToken;
+  $("#serverURL").disabled = Boolean(accountSession);
   renderProfileOptions();
   renderServerTransferModeOptions();
+
+  document.querySelectorAll("[data-auth-provider]").forEach((button) => {
+    button.onclick = async () => {
+      const status = $("#serverSettingsStatus");
+      try {
+        status.textContent = "Opening secure sign-in…";
+        await api.signInAccount({
+          baseURL: $("#serverURL").value.trim(),
+          provider: button.dataset.authProvider,
+        });
+        status.textContent = "Complete sign-in in your web browser.";
+      } catch (error) {
+        status.textContent = error.message || "Sign-in could not be started.";
+      }
+    };
+  });
+  const signOut = $("#signOutAccount");
+  if (signOut) signOut.onclick = async () => {
+    await api.signOutAccount();
+    applyAccountSession(null);
+  };
 
   $("#newSyncProfile").onclick = async () => {
     const name = prompt("Name this sync profile:");
@@ -3643,7 +3670,7 @@ function bindServerSettingsControls() {
     try {
       const profile = await api.createProfile({
         baseURL: $("#serverURL")?.value.trim() || state.serverURL,
-        token: $("#serverToken").value,
+        token: serverToken,
         name: name.trim(),
       });
       state.syncProfiles = [...state.syncProfiles, profile];
@@ -3665,9 +3692,7 @@ function bindServerSettingsControls() {
       if (!serverToken.trim()) {
         serverConnected = false;
         replaceServerCatalog([]);
-        serverConnectionText = serverAdminToken.trim()
-          ? "Upload ready • catalog sync off"
-          : "Saved • catalog sync off";
+        serverConnectionText = "Server saved • sign in to connect";
         if (section === "server") renderServer();
         showNotice(serverConnectionText, "status");
       } else {
@@ -4578,7 +4603,7 @@ function updateLocalImportSyncForSelection({ preserveChecked = false } = {}) {
     ? "This source is already saved to the active server profile."
     : canSync
       ? "Upload a copy to the active server profile after downloading."
-      : "Add a server admin key before importing to upload this copy.";
+      : "Sign in with an administrator account before importing to upload this copy.";
   updateLocalImportConfirmLabel();
 }
 
@@ -4588,7 +4613,7 @@ function localImportUploadConfigurationError(serverBacked = false, context = nul
     return { stage: "syncing", code: "SERVER_URL_REQUIRED", message: "Add a server URL in Music Server settings before uploading." };
   }
   if (!String(context?.adminToken ?? serverAdminToken).trim()) {
-    return { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Add a server admin key in Music Server settings before uploading." };
+    return { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Sign in with an administrator account before uploading." };
   }
   return null;
 }
@@ -4932,7 +4957,7 @@ async function resolveLinkImport() {
     try {
       reviewedContext = currentServerUploadContext();
       if (!reviewedContext.adminToken.trim()) {
-        throw { stage: "searching_candidates", code: "ADMIN_KEY_REQUIRED", message: "Add a server admin key before requesting reviewed matches." };
+        throw { stage: "searching_candidates", code: "ADMIN_KEY_REQUIRED", message: "Sign in with an administrator account before requesting reviewed matches." };
       }
       reserveServerContext(reviewedContext);
     } catch (error) {
@@ -5219,7 +5244,7 @@ async function confirmServerSourceImport() {
   }
   const context = currentServerUploadContext();
   if (!context.adminToken.trim()) {
-    throw { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Add a server admin key before importing a source link." };
+    throw { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Sign in with an administrator account before importing a source link." };
   }
   reserveServerContext(context);
   const operation = localImportOperationSnapshot();
@@ -7666,9 +7691,25 @@ api.onPrepareToClose(async () => {
     api.readyToClose();
   }
 });
-({ clientToken: serverToken = "", adminToken: serverAdminToken = "" } = await api.loadServerCredentials());
-serverToken = serverToken.trim();
-serverAdminToken = serverAdminToken.trim();
+accountSession = await api.loadAccountSession().catch(() => null);
+if (accountSession) {
+  state.serverURL = accountSession.baseURL;
+  serverToken = String(accountSession.accessToken || "").trim();
+  serverAdminToken = accountSession.role === "admin" ? serverToken : "";
+} else {
+  ({ clientToken: serverToken = "", adminToken: serverAdminToken = "" } = await api.loadServerCredentials());
+  serverToken = serverToken.trim();
+  serverAdminToken = serverAdminToken.trim();
+}
+api.onAccountSession(({ session, error }) => {
+  applyAccountSession(session, error);
+  if (session && state.serverURL) {
+    void refreshClientConfig({ force: true })
+      .then(() => refreshProfiles())
+      .then(() => serverAction("catalog"))
+      .catch((failure) => { serverConnectionText = failure.message || "Connection failed"; });
+  }
+});
 const localImportCapabilities = await api.localImportCapabilities().catch(() => ({ enabled: false }));
 localImportAvailable = Boolean(localImportCapabilities?.enabled);
 shuffle = Boolean(state.shuffle); repeat = Boolean(state.repeat);

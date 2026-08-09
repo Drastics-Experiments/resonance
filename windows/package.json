@@ -56,6 +56,7 @@
       "server-stream.cjs",
       "server-upload.cjs",
       "server-upload-response.cjs",
+      "social-auth.cjs",
       "updater-feed.cjs",
       "preload.cjs",
       "package.json",
@@ -64,6 +65,14 @@
     ],
     "asarUnpack": [
       "node_modules/ffmpeg-static/**"
+    ],
+    "protocols": [
+      {
+        "name": "Resonance Account Sign-In",
+        "schemes": [
+          "resonance"
+        ]
+      }
     ],
     "win": {
       "icon": "resonance.ico",

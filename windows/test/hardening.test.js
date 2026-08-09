@@ -490,6 +490,12 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(mainSource, /ipcMain\.handle\("library:storage"[\s\S]+sumDirectory\(paths\.local\)[\s\S]+sumDirectory\(paths\.remote\)/);
   assert.match(mainSource, /encodedSongID = encodeURIComponent\(String\(songID \|\| ""\)\)[\s\S]+api\/v1\/admin\/songs\/\$\{encodedSongID\}/);
   assert.match(mainSource, /setWindowOpenHandler\(\(\) => \(\{ action: "deny" \}\)\)[\s\S]+will-navigate[\s\S]+targetURL !== trustedRendererURL[\s\S]+will-attach-webview/);
+  assert.match(mainSource, /openAccountSignInBrowser\(destination\)[\s\S]+shell\.openExternal\(destination\.href\)/);
+  assert.doesNotMatch(mainSource, /function isAllowedAccountAuthNavigation|resonance-clerk-auth-/);
+  assert.match(mainSource, /ipcMain\.handle\("account:sign-in"[\s\S]+openAccountSignInBrowser\(destination\)/);
+  assert.deepEqual(packageJSON.build.protocols.flatMap((entry) => entry.schemes), ["resonance"]);
+  assert.match(mainSource, /setAsDefaultProtocolClient\("resonance"[\s\S]+app\.on\("second-instance"[\s\S]+authCallbackFromArguments\(commandLine\)/);
+  assert.match(appSource, /Complete sign-in in your web browser\./);
   assert.match(mainSource, /serverUploadRetries[\s\S]+retryIDs[\s\S]+serverOrigin === base\.origin[\s\S]+persistServerUploadRetries/);
   assert.match(mainSource, /const MAX_SERVER_UPLOAD_BATCH_FILES = 500;[\s\S]+const MAX_SERVER_UPLOAD_MANIFESTS = 20;[\s\S]+const MAX_SERVER_UPLOAD_RETRY_RECORDS = MAX_SERVER_UPLOAD_BATCH_FILES \* MAX_SERVER_UPLOAD_MANIFESTS;/);
   assert.match(mainSource, /async function loadClientConfig\([\s\S]+const evictCache = async[\s\S]+response\.status >= 500\) return cachedResult\(\);[\s\S]+response\.status !== 200\)[\s\S]+await evictCache\(\)[\s\S]+verifyClientConfigResponse\([\s\S]+catch \{[\s\S]+await evictCache\(\)/);

@@ -2169,14 +2169,13 @@ private struct ServerConnectionSheet: View {
     @EnvironmentObject private var library: MusicLibrary
     @FocusState private var focusedField: ConnectionField?
     @State private var serverURLDraft = ""
-    @State private var accessTokenDraft = ""
-    @State private var adminTokenDraft = ""
     @State private var profileName = ""
     @State private var isApplyingProfile = false
     @State private var validationMessage: String?
+    @State private var showingNativeAccountSignIn = false
 
     private enum ConnectionField: Hashable {
-        case url, accessToken, adminKey, profile
+        case url, profile
     }
 
     var body: some View {
@@ -2185,24 +2184,43 @@ private struct ServerConnectionSheet: View {
                 Section("Server") {
                     TextField("https://music.unblocked.mov", text: $serverURLDraft)
                         .focused($focusedField, equals: .url)
-                        .submitLabel(.next)
-                        .onSubmit { focusedField = .accessToken }
+                        .submitLabel(.done)
+                        .onSubmit { focusedField = nil }
                         .textContentType(.URL)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    SecureField("Server access token", text: $accessTokenDraft)
-                        .focused($focusedField, equals: .accessToken)
-                        .submitLabel(.next)
-                        .onSubmit { focusedField = .adminKey }
-                        .textContentType(.password)
-                    SecureField("Server admin key", text: $adminTokenDraft)
-                        .focused($focusedField, equals: .adminKey)
-                        .submitLabel(.next)
-                        .onSubmit { focusedField = .profile }
-                        .textContentType(.password)
+                        .disabled(library.accountEmail != nil)
                 }
                 .disabled(library.isProfileTransitionBusy)
+                Section {
+                    if let email = library.accountEmail {
+                        LabeledContent(email) {
+                            Text(library.accountRole == "admin" ? "Administrator" : "Member")
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("Sign out", role: .destructive) {
+                            Task { await library.signOutAccount() }
+                        }
+                    } else {
+                        if !library.serverToken.isEmpty {
+                            Label("Legacy connection", systemImage: "exclamationmark.triangle")
+                            Text("Continue with Clerk to finish upgrading this device.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("Sign in or create account") {
+                            focusedField = nil
+                            showingNativeAccountSignIn = true
+                        }
+                        .disabled(library.isAuthenticatingAccount || normalizedServerURL == nil)
+                        Text("Use email, Google, Apple, or Discord without leaving Resonance.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("Account")
+                }
                 Section {
                     TextField("Profile name", text: $profileName)
                         .focused($focusedField, equals: .profile)
@@ -2257,11 +2275,6 @@ private struct ServerConnectionSheet: View {
                         Task {
                             isApplyingProfile = true
                             defer { isApplyingProfile = false }
-                            if isSavedConfigurationAdminOnly {
-                                await library.refreshClientConfiguration()
-                                dismiss()
-                                return
-                            }
                             guard await library.activateSyncProfile(named: profileName) else {
                                 validationMessage = library.serverMessage
                                 return
@@ -2287,8 +2300,8 @@ private struct ServerConnectionSheet: View {
                         isApplyingProfile
                             || library.isSyncing
                             || library.isProfileTransitionBusy
-                            || (!isAdminOnlyDraft
-                                && profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            || library.serverToken.isEmpty
+                            || profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     )
                 }
                 Section {
@@ -2298,8 +2311,6 @@ private struct ServerConnectionSheet: View {
             }
             .onAppear {
                 serverURLDraft = library.serverURL
-                accessTokenDraft = library.serverToken
-                adminTokenDraft = library.serverAdminToken
                 profileName = library.syncProfileName
                 validationMessage = nil
             }
@@ -2315,15 +2326,6 @@ private struct ServerConnectionSheet: View {
                         focusedField = nil
                         let previousContext = library.activeServerContext
                         guard saveServerDraft() else { return }
-                        if isSavedConfigurationAdminOnly {
-                            Task {
-                                isApplyingProfile = true
-                                defer { isApplyingProfile = false }
-                                await library.refreshClientConfiguration()
-                                dismiss()
-                            }
-                            return
-                        }
                         let trimmed = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !trimmed.isEmpty else {
                             validationMessage = "Enter a profile name."
@@ -2348,13 +2350,35 @@ private struct ServerConnectionSheet: View {
                             }
                         }
                     }
-                    .disabled(isApplyingProfile || library.isProfileTransitionBusy)
+                    .disabled(isApplyingProfile || library.isProfileTransitionBusy || library.serverToken.isEmpty)
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Done") { focusedField = nil }
                 }
             }
+            .sheet(isPresented: $showingNativeAccountSignIn, onDismiss: finishNativeSignInIfNeeded) {
+                if let serverURL = normalizedServerURL {
+                    ResonanceNativeAuthView(serverURL: serverURL)
+                } else {
+                    ContentUnavailableView("Invalid server URL", systemImage: "network.slash")
+                }
+            }
+        }
+    }
+
+    private var normalizedServerURL: URL? {
+        let value = serverURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: value), url.scheme?.lowercased() == "https", url.host != nil else { return nil }
+        return url
+    }
+
+    private func finishNativeSignInIfNeeded() {
+        guard ResonanceClerkAuthCoordinator.shared.hasActiveSession else { return }
+        Task {
+            await library.completeNativeSignIn(serverURL: serverURLDraft)
+            serverURLDraft = library.serverURL
+            validationMessage = library.serverConfigurationMessage
         }
     }
 
@@ -2363,16 +2387,6 @@ private struct ServerConnectionSheet: View {
             get: { library.activeUploadMode ?? .localFile },
             set: library.selectUploadMode
         )
-    }
-
-    private var isSavedConfigurationAdminOnly: Bool {
-        library.serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !library.serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private var isAdminOnlyDraft: Bool {
-        accessTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !adminTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var downloadModeBinding: Binding<MobileDownloadMode> {
@@ -2386,8 +2400,8 @@ private struct ServerConnectionSheet: View {
     private func saveServerDraft() -> Bool {
         let saved = library.applyServerConfiguration(
             serverURL: serverURLDraft,
-            accessToken: accessTokenDraft,
-            adminToken: adminTokenDraft
+            accessToken: library.serverToken,
+            adminToken: library.serverAdminToken
         )
         validationMessage = saved ? nil : library.serverConfigurationMessage
         return saved

@@ -479,6 +479,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published private(set) var serverURL = "https://music.unblocked.mov"
     @Published private(set) var serverToken = ""
     @Published private(set) var serverAdminToken = ""
+    @Published private(set) var accountEmail: String?
+    @Published private(set) var accountRole: String?
+    @Published private(set) var isAuthenticatingAccount = false
     @Published var remoteSongs: [MobileRemoteSong] = []
     @Published var selectedRemoteSongIDs: Set<String> = []
     @Published var serverMessage = "Not connected"
@@ -605,6 +608,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var streamingFailureObserver: NSObjectProtocol?
     private var streamingStatusObservation: NSKeyValueObservation?
     private var streamingGeneration: UInt64 = 0
+    private var accountSession: ResonanceAccountSession?
+    private var accountRefreshTask: Task<Void, Never>?
+    private var isRefreshingAccountSession = false
 
     private struct EmbeddedMetadata {
         var title: String?
@@ -630,15 +636,28 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         if UserDefaults.standard.object(forKey: "Resonance.rate") != nil { playbackRate = Float(UserDefaults.standard.double(forKey: "Resonance.rate")) }
         shuffleEnabled = UserDefaults.standard.bool(forKey: "Resonance.shuffle")
         repeatEnabled = UserDefaults.standard.bool(forKey: "Resonance.repeat")
-        serverToken = Self.readToken(account: "client")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        serverAdminToken = Self.readToken(account: "admin")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let session = Self.readAccountSession() {
+            accountSession = session
+            serverURL = session.baseURL.absoluteString
+            serverToken = session.accessToken
+            serverAdminToken = session.isAdmin ? session.accessToken : ""
+            accountEmail = session.email
+            accountRole = session.role
+            try? Self.storeToken("", account: "client")
+            try? Self.storeToken("", account: "admin")
+            scheduleAccountRefresh(session)
+        } else {
+            serverToken = Self.readToken(account: "client")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            serverAdminToken = Self.readToken(account: "admin")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         configureAudioSession()
         observeAudioSession()
         configureRemoteCommands()
         Task { [weak self] in
             await self?.refreshEmbeddedMetadata()
+            await self?.refreshAccountSessionIfNeeded()
         }
     }
 
@@ -646,6 +665,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         timer?.invalidate()
         playlistSyncTask?.cancel()
         clientConfigRefreshTask?.cancel()
+        accountRefreshTask?.cancel()
         activeDownloadAuthorizations.values.forEach { $0.revoke() }
         if let streamingEndObserver { NotificationCenter.default.removeObserver(streamingEndObserver) }
         if let streamingFailureObserver { NotificationCenter.default.removeObserver(streamingFailureObserver) }
@@ -655,6 +675,134 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         streamingAuthorizationLease?.invalidate()
         for observer in audioSessionObservers {
             NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    func signIn(with provider: ResonanceSocialAuthProvider, serverURL rawServerURL: String) async {
+        guard !isAuthenticatingAccount else { return }
+        isAuthenticatingAccount = true
+        serverMessage = "Opening \(provider.title) sign-in…"
+        defer { isAuthenticatingAccount = false }
+        do {
+            let resolution = try MobileServerEndpointPolicy.resolve(rawServerURL)
+            let client = try ResonanceSocialAuthClient(baseURL: resolution.url)
+            let session = try await client.signIn(with: provider)
+            try Self.storeAccountSession(session)
+            accountSession = session
+            accountEmail = session.email
+            accountRole = session.role
+            try? Self.storeToken("", account: "client")
+            try? Self.storeToken("", account: "admin")
+            guard applyServerConfiguration(
+                serverURL: session.baseURL.absoluteString,
+                accessToken: session.accessToken,
+                adminToken: session.isAdmin ? session.accessToken : ""
+            ) else { return }
+            scheduleAccountRefresh(session)
+            serverMessage = "Signed in as \(session.email)"
+            await refreshClientConfiguration()
+        } catch {
+            serverMessage = error.localizedDescription
+            serverConfigurationMessage = error.localizedDescription
+        }
+    }
+
+    func completeNativeSignIn(serverURL rawServerURL: String) async {
+        guard !isAuthenticatingAccount else { return }
+        isAuthenticatingAccount = true
+        serverMessage = "Finishing account sign-in…"
+        defer { isAuthenticatingAccount = false }
+        do {
+            let resolution = try MobileServerEndpointPolicy.resolve(rawServerURL)
+            let client = try ResonanceSocialAuthClient(baseURL: resolution.url)
+            let session = try await ResonanceClerkAuthCoordinator.shared.accountSession(for: client)
+            try Self.storeAccountSession(session)
+            accountSession = session
+            accountEmail = session.email
+            accountRole = session.role
+            try? Self.storeToken("", account: "client")
+            try? Self.storeToken("", account: "admin")
+            guard applyServerConfiguration(
+                serverURL: session.baseURL.absoluteString,
+                accessToken: session.accessToken,
+                adminToken: session.isAdmin ? session.accessToken : ""
+            ) else { return }
+            scheduleAccountRefresh(session)
+            serverMessage = "Signed in as \(session.email)"
+            await refreshClientConfiguration()
+        } catch {
+            serverMessage = error.localizedDescription
+            serverConfigurationMessage = error.localizedDescription
+        }
+    }
+
+    func signOutAccount() async {
+        let active = accountSession
+        accountSession = nil
+        accountRefreshTask?.cancel()
+        accountRefreshTask = nil
+        try? Self.storeToken("", account: Self.accountSessionKey)
+        try? Self.storeToken("", account: "client")
+        try? Self.storeToken("", account: "admin")
+        accountEmail = nil
+        accountRole = nil
+        serverToken = ""
+        serverAdminToken = ""
+        isServerConnected = false
+        remoteSongs.removeAll()
+        selectedRemoteSongIDs.removeAll()
+        serverMessage = "Signed out"
+        if active?.usesNativeClerkSession == true {
+            await ResonanceClerkAuthCoordinator.shared.signOut()
+        } else if let active, let client = try? ResonanceSocialAuthClient(baseURL: active.baseURL) {
+            await client.signOut(active)
+        }
+    }
+
+    func refreshAccountSessionIfNeeded() async {
+        guard let current = accountSession,
+              current.expiresAt <= Date().addingTimeInterval(current.usesNativeClerkSession ? 15 : 5 * 60),
+              !isRefreshingAccountSession else { return }
+        isRefreshingAccountSession = true
+        defer { isRefreshingAccountSession = false }
+        do {
+            let client = try ResonanceSocialAuthClient(baseURL: current.baseURL)
+            let refreshed = current.usesNativeClerkSession
+                ? try await ResonanceClerkAuthCoordinator.shared.accountSession(for: client, forceRefresh: true)
+                : try await client.refresh(current)
+            guard accountSession == current else { return }
+            try Self.storeAccountSession(refreshed)
+            accountSession = refreshed
+            accountEmail = refreshed.email
+            accountRole = refreshed.role
+            serverURL = refreshed.baseURL.absoluteString
+            serverToken = refreshed.accessToken
+            serverAdminToken = refreshed.isAdmin ? refreshed.accessToken : ""
+            await refreshClientConfiguration()
+            scheduleAccountRefresh(refreshed)
+        } catch {
+            guard accountSession == current else { return }
+            if current.expiresAt <= Date() {
+                await signOutAccount()
+                serverMessage = "Your account session expired. Please sign in again."
+            } else {
+                accountRefreshTask?.cancel()
+                accountRefreshTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(60))
+                    await self?.refreshAccountSessionIfNeeded()
+                }
+            }
+        }
+    }
+
+    private func scheduleAccountRefresh(_ session: ResonanceAccountSession) {
+        accountRefreshTask?.cancel()
+        let leadTime: TimeInterval = session.usesNativeClerkSession ? 15 : 5 * 60
+        let delay = max(5, session.expiresAt.timeIntervalSinceNow - leadTime)
+        accountRefreshTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            await self?.refreshAccountSessionIfNeeded()
         }
     }
 
@@ -2176,7 +2324,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 catalog: [],
                 uploadedSongsAwaitingCatalog: uploadedSongsAwaitingCatalog
             )
-            serverMessage = "Enter the access token."
+            serverMessage = "Sign in to your Resonance account."
             return
         }
         let requestsDownloads = songIDs.map { !$0.isEmpty } ?? true
@@ -2676,7 +2824,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             return false
         }
         guard let baseURL = normalizedServer(), !serverAdminToken.isEmpty else {
-            serverMessage = "Save a valid server URL and admin key first."
+            serverMessage = "Sign in with an administrator account first."
             return false
         }
 
@@ -2758,7 +2906,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         guard let baseURL = normalizedServer(), !accessToken.isEmpty else {
             showTransferNotice(
                 title: "Stream unavailable",
-                detail: "Save a valid server URL and access token first.",
+                detail: "Sign in to your Resonance account first.",
                 isError: true
             )
             return
@@ -3154,7 +3302,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         guard !isUploadTransferBusy else { return }
         guard let baseURL = normalizedServer(),
               MobileUploadCredentialPolicy.canUpload(serverURL: baseURL, adminKey: serverAdminToken) else {
-            uploadDetail = "Enter a valid server URL and server admin key"
+            uploadDetail = "Sign in with an administrator account"
             return
         }
         let uploadProfileID = syncProfileID
@@ -3249,19 +3397,22 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
         let accessToken = rawAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
         let adminToken = rawAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        let previousAccessToken = Self.readToken(account: "client")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let previousAdminToken = Self.readToken(account: "admin")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let previousAccessToken = serverToken
+        let previousAdminToken = serverAdminToken
         do {
-            try Self.storeToken(accessToken, account: "client")
-            try Self.storeToken(adminToken, account: "admin")
+            if accountSession?.accessToken == accessToken {
+                try Self.storeToken("", account: "client")
+                try Self.storeToken("", account: "admin")
+            } else {
+                try Self.storeToken(accessToken, account: "client")
+                try Self.storeToken(adminToken, account: "admin")
+            }
         } catch {
             try? Self.storeToken(previousAccessToken, account: "client")
             try? Self.storeToken(previousAdminToken, account: "admin")
             serverToken = previousAccessToken
             serverAdminToken = previousAdminToken
-            serverConfigurationMessage = "Could not save credentials securely: \(error.localizedDescription)"
+            serverConfigurationMessage = "Could not save the account session securely: \(error.localizedDescription)"
             return false
         }
 
@@ -3438,7 +3589,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             return
         }
         guard !serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            uploadDetail = "Enter the server admin key"
+            uploadDetail = "Sign in with an administrator account"
             serverMessage = uploadDetail
             return
         }
@@ -3748,7 +3899,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             recordTransferFailure(
                 .delete,
                 item: song.title,
-                reason: "Save a valid server URL and admin key first.",
+                reason: "Sign in with an administrator account first.",
                 retryTarget: .delete(remoteSongID: song.id)
             )
             return
@@ -3790,7 +3941,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             return
         }
         guard !serverToken.isEmpty else {
-            playlistSyncDetail = "Enter the access token"
+            playlistSyncDetail = "Sign in to your Resonance account"
             return
         }
         let submittedProfileID = syncProfileID
@@ -4276,7 +4427,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             return false
         }
         guard !serverToken.isEmpty else {
-            serverMessage = "Enter the access token."
+            serverMessage = "Sign in to your Resonance account."
             return false
         }
 
@@ -4906,6 +5057,21 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private static let keychainService = "com.gavindietrich.LikedSongsMobile"
+    private static let accountSessionKey = "account-session-v1"
+
+    private static func readAccountSession() -> ResonanceAccountSession? {
+        let raw = readToken(account: accountSessionKey)
+        guard let data = raw.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(ResonanceAccountSession.self, from: data)
+    }
+
+    private static func storeAccountSession(_ session: ResonanceAccountSession) throws {
+        let data = try JSONEncoder().encode(session)
+        guard let raw = String(data: data, encoding: .utf8) else {
+            throw ResonanceSocialAuthError.invalidConfiguration
+        }
+        try storeToken(raw, account: accountSessionKey)
+    }
 
     private struct KeychainStoreError: LocalizedError {
         let operation: String

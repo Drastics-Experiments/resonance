@@ -779,7 +779,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
             error = LocalImportError(
                 stage: .syncing,
                 code: "SERVER_UPLOAD_NOT_CONFIGURED",
-                message: "Save a valid server URL and admin key, or turn off server upload."
+                message: "Sign in with an administrator account, or turn off server upload."
             )
             stage = .failed
             return false
@@ -1390,7 +1390,7 @@ struct MobileLocalImportSheet: View {
                                         .font(.subheadline.weight(.semibold))
                                     Text(library.canUploadLocalImports
                                          ? "Downloads every selected song first, then uploads missing songs to \(library.syncProfileName)."
-                                         : "Configure a valid server URL and admin key, or turn this off for a local-only import.")
+                                         : "Sign in with an administrator account, or turn this off for a local-only import.")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }

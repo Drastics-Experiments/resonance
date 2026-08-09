@@ -264,8 +264,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         var errorDescription: String? {
             switch self {
             case .invalidURL: "Enter a complete HTTPS server URL. Preview builds may use HTTP only for localhost."
-            case .missingToken: "Enter the server access token."
-            case .missingAdminToken: "Enter the server admin key to upload songs."
+            case .missingToken: "Sign in to your Resonance account."
+            case .missingAdminToken: "Sign in with an administrator account to upload songs."
             case .invalidResponse: "The server returned an invalid response."
             case .invalidSongIdentifier: "The server returned an unsafe song identifier."
             case .crossOriginDownload: "The server returned a download URL from another server."
@@ -285,6 +285,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private static let serverURLKey = "LikedSongsFocus.serverURL.v1"
     private static let clientCredentialAccount = "music-server-client-token"
     private static let adminCredentialAccount = "music-server-admin-token"
+    private static let accountSessionCredentialAccount = "music-server-account-session-v1"
     private static let productionCredentialService = "com.gavindietrich.LikedSongsFocus.music-server"
     private static let knownDrasticProfileID = "4f633616-9cf0-44db-8864-09358970c8f9"
     private static let volumeKey = "LikedSongsFocus.volume.v1"
@@ -385,6 +386,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             }
         }
     }
+    @Published private(set) var accountEmail: String?
+    @Published private(set) var accountRole: String?
+    @Published private(set) var isAuthenticatingAccount = false
     @Published var serverMessage = "Not connected"
     @Published var remoteSongs: [RemoteSong] = []
     @Published var isSyncingServer = false
@@ -601,6 +605,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var clientConfigRequestGeneration: UInt64 = 0
     private var clientConfigExpiryTask: Task<Void, Never>?
     private var clientConfigRenewalAttemptedExpiry: String?
+    private var accountSession: ResonanceAccountSession?
+    private var accountRefreshTask: Task<Void, Never>?
+    private var isRefreshingAccountSession = false
 
     init(
         loadPersistedLibrary: Bool = true,
@@ -720,9 +727,20 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         let persistedTrackID = defaults.string(forKey: Self.currentTrackKey).flatMap(UUID.init(uuidString:))
         currentTrackID = persistedTrackID.flatMap { wanted in availableTracks.first(where: { $0.id == wanted })?.id }
             ?? availableTracks.first?.id
-        serverURLString = persistServerCredentials ? (defaults.string(forKey: Self.serverURLKey) ?? "") : ""
-        serverToken = persistServerCredentials ? Self.readServerToken() : ""
-        serverAdminToken = persistServerCredentials ? Self.readServerToken(account: Self.adminCredentialAccount) : ""
+        let restoredAccountSession = persistServerCredentials ? Self.readAccountSession() : nil
+        accountSession = restoredAccountSession
+        serverURLString = restoredAccountSession?.baseURL.absoluteString
+            ?? (persistServerCredentials ? (defaults.string(forKey: Self.serverURLKey) ?? "") : "")
+        serverToken = restoredAccountSession?.accessToken
+            ?? (persistServerCredentials ? Self.readServerToken() : "")
+        serverAdminToken = restoredAccountSession.map { $0.isAdmin ? $0.accessToken : "" }
+            ?? (persistServerCredentials ? Self.readServerToken(account: Self.adminCredentialAccount) : "")
+        accountEmail = restoredAccountSession?.email
+        accountRole = restoredAccountSession?.role
+        if restoredAccountSession != nil {
+            Self.saveServerToken("")
+            Self.saveServerToken("", account: Self.adminCredentialAccount)
+        }
         playlistRevision = stored?.playlistRevision ?? 0
         knownRemotePlaylistIDs = stored?.knownRemotePlaylistIDs ?? []
         dirtyPlaylistIDs = stored?.dirtyPlaylistIDs ?? []
@@ -826,9 +844,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         didFinishInitialization = true
         resetClientConfigurationForCurrentContext()
         configureSystemPlaybackHandlers()
+        if let restoredAccountSession { scheduleAccountRefresh(restoredAccountSession) }
     }
 
     deinit {
+        accountRefreshTask?.cancel()
         Self.persistenceCoordinator.flush()
         playlistSyncTask?.cancel()
         playlistSyncDebounceTask?.cancel()
@@ -1314,6 +1334,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func clearServerCredentials() {
+        accountSession = nil
+        accountRefreshTask?.cancel()
+        accountRefreshTask = nil
+        Self.deleteAccountSession()
+        accountEmail = nil
+        accountRole = nil
         serverURLString = ""
         serverToken = ""
         serverAdminToken = ""
@@ -1324,6 +1350,136 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         uploadStatus = ""
         playlistSyncStatus = ""
         resetClientConfigurationForCurrentContext()
+    }
+
+    func signIn(with provider: ResonanceSocialAuthProvider, serverURL rawServerURL: String) async {
+        guard !isAuthenticatingAccount else { return }
+        isAuthenticatingAccount = true
+        serverMessage = "Opening \(provider.title) sign-in…"
+        defer { isAuthenticatingAccount = false }
+        do {
+            guard let rawURL = URL(string: rawServerURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                throw ResonanceSocialAuthError.invalidConfiguration
+            }
+            let client = try ResonanceSocialAuthClient(baseURL: rawURL, session: networkSession)
+            let session = try await client.signIn(with: provider)
+            guard !shouldPersistServerCredentials || Self.saveAccountSession(session) else {
+                throw ResonanceSocialAuthError.rejected("The account session could not be saved securely.")
+            }
+            accountSession = session
+            accountEmail = session.email
+            accountRole = session.role
+            serverURLString = session.baseURL.absoluteString
+            serverToken = session.accessToken
+            serverAdminToken = session.isAdmin ? session.accessToken : ""
+            Self.saveServerToken("")
+            Self.saveServerToken("", account: Self.adminCredentialAccount)
+            scheduleAccountRefresh(session)
+            serverMessage = "Signed in as \(session.email)"
+            await refreshClientConfigurationNow()
+            await refreshServerCatalogNow()
+            await syncPlaylistsNow()
+        } catch {
+            serverMessage = error.localizedDescription
+        }
+    }
+
+    func completeNativeSignIn(serverURL rawServerURL: String) async {
+        guard !isAuthenticatingAccount else { return }
+        isAuthenticatingAccount = true
+        serverMessage = "Finishing account sign-in…"
+        defer { isAuthenticatingAccount = false }
+        do {
+            guard !usesPreviewCredentialStore else {
+                throw ResonanceSocialAuthError.rejected("Native Clerk sessions are disabled in the disposable Preview so it never touches Keychain.")
+            }
+            guard let rawURL = URL(string: rawServerURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                throw ResonanceSocialAuthError.invalidConfiguration
+            }
+            let client = try ResonanceSocialAuthClient(baseURL: rawURL, session: networkSession)
+            let session = try await ResonanceClerkAuthCoordinator.shared.accountSession(for: client)
+            try await applyAccountSession(session)
+        } catch {
+            serverMessage = error.localizedDescription
+        }
+    }
+
+    private func applyAccountSession(_ session: ResonanceAccountSession) async throws {
+        guard !shouldPersistServerCredentials || Self.saveAccountSession(session) else {
+            throw ResonanceSocialAuthError.rejected("The account session could not be saved securely.")
+        }
+        accountSession = session
+        accountEmail = session.email
+        accountRole = session.role
+        serverURLString = session.baseURL.absoluteString
+        serverToken = session.accessToken
+        serverAdminToken = session.isAdmin ? session.accessToken : ""
+        Self.saveServerToken("")
+        Self.saveServerToken("", account: Self.adminCredentialAccount)
+        scheduleAccountRefresh(session)
+        serverMessage = "Signed in as \(session.email)"
+        await refreshClientConfigurationNow()
+        await refreshServerCatalogNow()
+        await syncPlaylistsNow()
+    }
+
+    func signOutAccount() async {
+        let active = accountSession
+        clearServerCredentials()
+        if active?.usesNativeClerkSession == true {
+            await ResonanceClerkAuthCoordinator.shared.signOut()
+        } else if let active, let client = try? ResonanceSocialAuthClient(baseURL: active.baseURL, session: networkSession) {
+            await client.signOut(active)
+        }
+    }
+
+    func refreshAccountSessionIfNeeded() async {
+        guard let current = accountSession,
+              current.expiresAt <= Date().addingTimeInterval(current.usesNativeClerkSession ? 15 : 5 * 60),
+              !isRefreshingAccountSession else { return }
+        isRefreshingAccountSession = true
+        defer { isRefreshingAccountSession = false }
+        do {
+            let client = try ResonanceSocialAuthClient(baseURL: current.baseURL, session: networkSession)
+            let refreshed = current.usesNativeClerkSession
+                ? try await ResonanceClerkAuthCoordinator.shared.accountSession(for: client, forceRefresh: true)
+                : try await client.refresh(current)
+            guard accountSession == current else { return }
+            guard !shouldPersistServerCredentials || Self.saveAccountSession(refreshed) else {
+                throw ResonanceSocialAuthError.rejected("The refreshed account session could not be saved securely.")
+            }
+            accountSession = refreshed
+            accountEmail = refreshed.email
+            accountRole = refreshed.role
+            serverURLString = refreshed.baseURL.absoluteString
+            serverToken = refreshed.accessToken
+            serverAdminToken = refreshed.isAdmin ? refreshed.accessToken : ""
+            await refreshClientConfigurationNow()
+            scheduleAccountRefresh(refreshed)
+        } catch {
+            guard accountSession == current else { return }
+            if current.expiresAt <= Date() {
+                await signOutAccount()
+                serverMessage = "Your account session expired. Please sign in again."
+            } else {
+                accountRefreshTask?.cancel()
+                accountRefreshTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(60))
+                    await self?.refreshAccountSessionIfNeeded()
+                }
+            }
+        }
+    }
+
+    private func scheduleAccountRefresh(_ session: ResonanceAccountSession) {
+        accountRefreshTask?.cancel()
+        let leadTime: TimeInterval = session.usesNativeClerkSession ? 15 : 5 * 60
+        let delay = max(5, session.expiresAt.timeIntervalSinceNow - leadTime)
+        accountRefreshTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            await self?.refreshAccountSessionIfNeeded()
+        }
     }
 
     func selectUploadMode(_ mode: MacUploadMode) {
@@ -3936,6 +4092,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private func persistServerCredentialsImmediately() {
         guard shouldPersistServerCredentials else { return }
         defaults.set(serverURLString, forKey: Self.serverURLKey)
+        if let accountSession {
+            _ = Self.saveAccountSession(accountSession)
+            Self.saveServerToken("")
+            Self.saveServerToken("", account: Self.adminCredentialAccount)
+            return
+        }
         let token = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
         Self.saveServerToken(token)
         let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5122,7 +5284,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     private static func migratePlaintextCredentialsToKeychainIfNeeded() {
-        for account in [clientCredentialAccount, adminCredentialAccount] {
+        for account in [clientCredentialAccount, adminCredentialAccount, accountSessionCredentialAccount] {
             guard let plaintext = credentialStore.read(account: account), !plaintext.isEmpty else { continue }
             let keychainValue = keychainCredentialStore.read(account: account)
             if keychainValue != nil
@@ -5163,6 +5325,23 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             token,
             account: account == adminCredentialAccount ? adminCredentialAccount : clientCredentialAccount
         )
+    }
+
+    private static func readAccountSession() -> ResonanceAccountSession? {
+        guard let raw = activeCredentialStore.read(account: accountSessionCredentialAccount),
+              let data = raw.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(ResonanceAccountSession.self, from: data)
+    }
+
+    @discardableResult
+    private static func saveAccountSession(_ session: ResonanceAccountSession) -> Bool {
+        guard let data = try? JSONEncoder().encode(session),
+              let raw = String(data: data, encoding: .utf8) else { return false }
+        return activeCredentialStore.save(raw, account: accountSessionCredentialAccount)
+    }
+
+    private static func deleteAccountSession() {
+        _ = activeCredentialStore.delete(account: accountSessionCredentialAccount)
     }
 
     private enum PathExtension {

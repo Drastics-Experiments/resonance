@@ -120,10 +120,9 @@ struct MacSettingsSheet: View {
     @StateObject private var recorder = MacShortcutRecorder()
     @State private var panel: Panel
     @State private var serverURLDraft = ""
-    @State private var accessTokenDraft = ""
-    @State private var adminTokenDraft = ""
     @State private var didLoadServerDrafts = false
     @State private var confirmingCredentialRemoval = false
+    @State private var showingNativeAccountSignIn = false
 
     init(opensServerPanel: Bool = false) {
         _panel = State(initialValue: opensServerPanel ? .server : .general)
@@ -228,16 +227,24 @@ struct MacSettingsSheet: View {
             if nextPanel == .server { loadServerDraftsIfNeeded() }
         }
         .onDisappear { recorder.cancel() }
-        .alert("Forget server credentials?", isPresented: $confirmingCredentialRemoval) {
+        .alert("Sign out and forget this server?", isPresented: $confirmingCredentialRemoval) {
             Button("Cancel", role: .cancel) {}
-            Button("Forget Credentials", role: .destructive) {
-                model.clearServerCredentials()
-                serverURLDraft = ""
-                accessTokenDraft = ""
-                adminTokenDraft = ""
+            Button("Sign Out", role: .destructive) {
+                Task {
+                    await model.signOutAccount()
+                    serverURLDraft = ""
+                }
             }
         } message: {
-            Text("The server URL and access keys will be removed from this Mac. Downloaded songs stay in your library.")
+            Text("The Resonance account session and server URL will be removed from this Mac. Downloaded songs stay in your library.")
+        }
+        .sheet(isPresented: $showingNativeAccountSignIn, onDismiss: finishNativeSignInIfNeeded) {
+            if let serverURL = normalizedServerURL {
+                ResonanceNativeAuthView(serverURL: serverURL)
+            } else {
+                ContentUnavailableView("Invalid server URL", systemImage: "network.slash")
+                    .frame(width: 560, height: 620)
+            }
         }
     }
 
@@ -293,7 +300,7 @@ struct MacSettingsSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("CONNECTION")
+                    Text("ACCOUNT")
                         .font(.system(size: 9, weight: .bold))
                         .tracking(1.7)
                         .foregroundStyle(Color.appViolet)
@@ -301,8 +308,8 @@ struct MacSettingsSheet: View {
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                         .foregroundStyle(Color.appInk)
                     Text(model.usesPreviewCredentialStore
-                        ? "Stored in a private local file for this disposable Preview build."
-                        : "Access and admin credentials are stored securely in Keychain.")
+                        ? "The disposable Preview keeps its account session in its private local store."
+                        : "Your Resonance account session is stored securely in Keychain.")
                         .font(.system(size: 10))
                         .foregroundStyle(Color.appMuted)
                 }
@@ -311,14 +318,43 @@ struct MacSettingsSheet: View {
                     serverFieldLabel("Server URL", symbol: "network")
                     TextField("https://music.example.com", text: $serverURLDraft)
                         .textFieldStyle(.roundedBorder)
+                        .disabled(model.accountEmail != nil)
 
-                    serverFieldLabel("Access token", symbol: "key.fill")
-                    SecureField("Optional for catalog and playlist sync", text: $accessTokenDraft)
-                        .textFieldStyle(.roundedBorder)
-
-                    serverFieldLabel("Admin key", symbol: "key.horizontal.fill")
-                    SecureField("Optional for uploads and deletion", text: $adminTokenDraft)
-                        .textFieldStyle(.roundedBorder)
+                    if let email = model.accountEmail {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(email).font(.system(size: 11, weight: .semibold))
+                                Text(model.accountRole == "admin" ? "Administrator" : "Member")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Color.appMuted)
+                            }
+                            Spacer()
+                            Button("Sign out", role: .destructive) { confirmingCredentialRemoval = true }
+                                .controlSize(.small)
+                        }
+                    } else {
+                        if !model.serverToken.isEmpty {
+                            Label("Legacy connection • sign in to finish upgrading", systemImage: "exclamationmark.triangle")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Color.appMuted)
+                        }
+                        Button(model.usesPreviewCredentialStore ? "Sign in securely" : "Sign in or create account") {
+                            if model.usesPreviewCredentialStore {
+                                Task { await model.signIn(with: .clerk, serverURL: serverURLDraft) }
+                            } else {
+                                showingNativeAccountSignIn = true
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Color.appViolet)
+                        .frame(maxWidth: .infinity)
+                        .disabled(model.isAuthenticatingAccount || normalizedServerURL == nil)
+                        Text(model.usesPreviewCredentialStore
+                            ? "Preview uses the secure system browser so it never touches Keychain."
+                            : "Use email, Google, Apple, or Discord without leaving Resonance.")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color.appMuted)
+                    }
                 }
                 .padding(15)
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
@@ -374,7 +410,7 @@ struct MacSettingsSheet: View {
                     Spacer()
 
                     if !model.serverURLString.isEmpty || !model.serverToken.isEmpty || !model.serverAdminToken.isEmpty {
-                        Button("Forget Credentials", role: .destructive) {
+                        Button(model.accountEmail == nil ? "Forget Legacy Connection" : "Sign Out", role: .destructive) {
                             confirmingCredentialRemoval = true
                         }
                         .controlSize(.small)
@@ -391,8 +427,8 @@ struct MacSettingsSheet: View {
                     .tint(Color.appViolet)
                     .disabled(model.serverUploadActionsDisabled || !ServerConnectionPolicy.canSave(
                         serverURL: serverURLDraft,
-                        accessToken: accessTokenDraft,
-                        adminToken: adminTokenDraft,
+                        accessToken: model.serverToken,
+                        adminToken: model.serverAdminToken,
                         allowsInsecurePreviewLoopback: model.allowsInsecurePreviewLoopback
                     ))
                 }
@@ -401,6 +437,17 @@ struct MacSettingsSheet: View {
             .padding(22)
         }
         .scrollIndicators(.hidden)
+    }
+
+    private var normalizedServerURL: URL? {
+        let value = serverURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: value), url.scheme?.lowercased() == "https", url.host != nil else { return nil }
+        return url
+    }
+
+    private func finishNativeSignInIfNeeded() {
+        guard ResonanceClerkAuthCoordinator.shared.hasActiveSession else { return }
+        Task { await model.completeNativeSignIn(serverURL: serverURLDraft) }
     }
 
     private var keybindPanel: some View {
@@ -547,8 +594,6 @@ struct MacSettingsSheet: View {
     private func loadServerDraftsIfNeeded() {
         guard !didLoadServerDrafts else { return }
         serverURLDraft = model.serverURLString
-        accessTokenDraft = model.serverToken
-        adminTokenDraft = model.serverAdminToken
         didLoadServerDrafts = true
     }
 
@@ -559,11 +604,9 @@ struct MacSettingsSheet: View {
                 return
             }
             model.serverURLString = serverURLDraft
-            model.serverToken = accessTokenDraft
-            model.serverAdminToken = adminTokenDraft
             await model.refreshClientConfigurationNow()
-            if accessTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                model.serverMessage = "Upload ready • Add access token to sync"
+            if model.serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                model.serverMessage = "Server saved • Sign in to connect"
                 return
             }
             await model.refreshServerCatalogNow()

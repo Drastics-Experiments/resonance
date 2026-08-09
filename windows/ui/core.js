@@ -1372,9 +1372,9 @@ export function serverUploadConfigurationError({ serverURL, adminToken } = {}) {
   const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
   const hostname = parsedServerURL.hostname.toLocaleLowerCase().replace(/\.$/, "");
   if (parsedServerURL.protocol !== "https:" && !loopbackHosts.has(hostname)) {
-    return "Use an HTTPS server URL before sending an admin key. HTTP is only available for explicit loopback development.";
+    return "Use an HTTPS server URL before authenticating. HTTP is only available for explicit loopback development.";
   }
-  if (!String(adminToken || "").trim()) return "Enter the server admin key before uploading.";
+  if (!String(adminToken || "").trim()) return "Sign in with an administrator account before uploading.";
   return null;
 }
 

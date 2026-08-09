@@ -10,6 +10,8 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 class CredentialStore(context: Context) {
     private val preferences = context.applicationContext.getSharedPreferences(
@@ -34,6 +36,22 @@ class CredentialStore(context: Context) {
     fun clearTokens() {
         preferences.edit().remove(CLIENT_TOKEN).remove(ADMIN_TOKEN).apply()
     }
+
+    var accountSession: AccountSession?
+        get() = readSecret(ACCOUNT_SESSION)?.let { runCatching { JSON.decodeFromString<AccountSession>(it) }.getOrNull() }
+        set(value) {
+            if (value == null) preferences.edit().remove(ACCOUNT_SESSION).apply()
+            else writeSecret(ACCOUNT_SESSION, JSON.encodeToString(value))
+        }
+
+    var pendingAccountSignIn: PendingAccountSignIn?
+        get() = readSecret(PENDING_ACCOUNT_SIGN_IN)?.let {
+            runCatching { JSON.decodeFromString<PendingAccountSignIn>(it) }.getOrNull()
+        }
+        set(value) {
+            if (value == null) preferences.edit().remove(PENDING_ACCOUNT_SIGN_IN).apply()
+            else writeSecret(PENDING_ACCOUNT_SIGN_IN, JSON.encodeToString(value))
+        }
 
     private fun writeSecret(account: String, value: String) {
         if (value.isEmpty()) {
@@ -90,6 +108,9 @@ class CredentialStore(context: Context) {
         const val CLIENT_TOKEN = "client-token"
         const val ADMIN_TOKEN = "admin-token"
         const val SERVER_URL = "server-url"
+        const val ACCOUNT_SESSION = "account-session-v1"
+        const val PENDING_ACCOUNT_SIGN_IN = "pending-account-sign-in-v1"
         const val DEFAULT_SERVER_URL = "https://music.unblocked.mov"
+        val JSON = Json { ignoreUnknownKeys = true }
     }
 }

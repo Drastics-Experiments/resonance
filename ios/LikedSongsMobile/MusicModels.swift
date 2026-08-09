@@ -32,7 +32,7 @@ enum MobileServerEndpointError: LocalizedError, Equatable {
         case .invalidURL:
             "Enter a valid HTTPS server URL."
         case .credentialsInURL:
-            "Do not put credentials in the server URL. Use the secure token fields."
+            "Do not put credentials in the server URL. Sign in through the account section."
         case .insecureRemoteHTTP:
             "HTTPS is required. Unencrypted HTTP is allowed only for localhost development."
         }

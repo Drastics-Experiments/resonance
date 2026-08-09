@@ -710,16 +710,16 @@ class ServerClient(
 
     private fun requireAccessToken(): String =
         accessToken.trim().takeIf { it.isNotEmpty() }
-            ?: throw IllegalStateException("Enter the access token")
+            ?: throw IllegalStateException("Sign in to your Resonance account")
 
     private fun requireAdminToken(): String =
         adminToken.trim().takeIf { it.isNotEmpty() }
-            ?: throw IllegalStateException("Enter the server admin key")
+            ?: throw IllegalStateException("Sign in with an administrator account")
 
     private fun requireClientConfigToken(): String =
         accessToken.trim().takeIf(String::isNotEmpty)
             ?: adminToken.trim().takeIf(String::isNotEmpty)
-            ?: throw IllegalStateException("Enter the access token or server admin key")
+            ?: throw IllegalStateException("Sign in to your Resonance account")
 
     private fun requireInstallationCohortKey(): String = installationCohortKey
         .takeIf(String::isNotBlank)

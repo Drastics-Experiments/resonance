@@ -199,7 +199,7 @@ final class MacLocalImportViewModel: ObservableObject {
     var uploadUnavailableMessage: String? {
         guard !model.serverURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !model.serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return "Add a server URL and admin key in Connection settings to enable upload."
+            return "Sign in with a Resonance administrator account to enable upload."
         }
         guard !model.clientConfiguration.permittedUploadModes.isEmpty else {
             return "Uploads are disabled by the verified server configuration."

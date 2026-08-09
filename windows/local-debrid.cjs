@@ -384,7 +384,7 @@ async function downloadPreparedFile(payload, input, settings, signal, onStage, f
 
 async function importFileBackedSource(input, signal, onStage = () => {}, fetchImpl = fetch) {
   const settings = normalizedServerSettings(input);
-  if (!settings) throw externalError("preparing_external", "ADMIN_KEY_REQUIRED", "Add a Resonance server admin key to use file-backed source results.");
+  if (!settings) throw externalError("preparing_external", "ADMIN_KEY_REQUIRED", "Sign in with an administrator account to use file-backed source results.");
   let body = input.resume
     ? { ...input.resume, ...(Number.isSafeInteger(input.fileID) ? { file_id: input.fileID } : {}) }
     : { source: String(input.sourceURL || ""), metadata: externalMetadata(input.metadata) };
