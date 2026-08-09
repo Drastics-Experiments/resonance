@@ -888,6 +888,10 @@ struct Playlist: Identifiable, Hashable, Codable {
 
     var count: Int { trackIDs.count }
 
+    var automaticArtworkTrackIDs: [UUID] {
+        isSystem ? [] : Array(trackIDs.prefix(4))
+    }
+
     static func library(trackIDs: [UUID] = []) -> Playlist {
         Playlist(
             name: "Liked Songs",

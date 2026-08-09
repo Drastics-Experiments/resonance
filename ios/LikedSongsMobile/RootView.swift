@@ -461,8 +461,9 @@ private struct PlaylistsView: View {
                             PlaylistDetailView(playlistID: playlist.id)
                         } label: {
                             HStack(spacing: 12) {
-                                ArtworkTile(symbol: playlist.isSystem ? "heart.fill" : "music.note.list")
+                                PlaylistArtworkTile(playlist: playlist)
                                     .frame(width: 52, height: 52)
+                                    .accessibilityHidden(true)
                                 VStack(alignment: .leading) {
                                     Text(playlist.name).font(.headline)
                                     Text("\(library.tracks(in: playlist).count) tracks").font(.caption).foregroundStyle(.secondary)
@@ -2802,14 +2803,77 @@ private struct ArtworkTile: View {
     let symbol: String
     var body: some View {
         SquareArtworkContainer { _ in
-            ZStack {
-                LinearGradient(
-                    colors: [.violet, Color(hex: 0x874BFF), Color(hex: 0xB079FF)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                Image(systemName: symbol).font(.title2.weight(.semibold)).foregroundStyle(.white.opacity(0.9))
+            ArtworkPlaceholder(symbol: symbol)
+        }
+    }
+}
+
+private struct ArtworkPlaceholder: View {
+    let symbol: String
+    var compact = false
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [.violet, Color(hex: 0x874BFF), Color(hex: 0xB079FF)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            Image(systemName: symbol)
+                .font(compact ? .caption.weight(.semibold) : .title2.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.9))
+        }
+    }
+}
+
+private struct PlaylistArtworkTile: View {
+    @EnvironmentObject private var library: MusicLibrary
+    let playlist: MobilePlaylist
+
+    private var artworkTracks: [MobileTrack?] {
+        let tracksByID = Dictionary(
+            library.tracks.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let trackIDs = playlist.automaticArtworkTrackIDs
+        return (0..<4).map { index in
+            guard trackIDs.indices.contains(index) else { return nil }
+            return tracksByID[trackIDs[index]]
+        }
+    }
+
+    var body: some View {
+        if playlist.isSystem || playlist.automaticArtworkTrackIDs.isEmpty {
+            ArtworkTile(symbol: playlist.isSystem ? "heart.fill" : "music.note.list")
+        } else {
+            SquareArtworkContainer { size in
+                let cellSize = CGSize(width: size.width / 2, height: size.height / 2)
+                VStack(spacing: 0) {
+                    HStack(spacing: 0) {
+                        artworkCell(artworkTracks[0], size: cellSize)
+                        artworkCell(artworkTracks[1], size: cellSize)
+                    }
+                    HStack(spacing: 0) {
+                        artworkCell(artworkTracks[2], size: cellSize)
+                        artworkCell(artworkTracks[3], size: cellSize)
+                    }
+                }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func artworkCell(_ track: MobileTrack?, size: CGSize) -> some View {
+        if let track, let artwork = library.artwork(for: track) {
+            Image(uiImage: artwork)
+                .resizable()
+                .scaledToFill()
+                .frame(width: size.width, height: size.height)
+                .clipped()
+        } else {
+            ArtworkPlaceholder(symbol: "music.note", compact: true)
+                .frame(width: size.width, height: size.height)
+                .clipped()
         }
     }
 }

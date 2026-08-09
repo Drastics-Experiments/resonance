@@ -33,6 +33,7 @@ import {
   normalizeState,
   playbackRangeForTrack,
   planMissingDownloadedUploads,
+  playlistArtworkTrackIDs,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
   serverSongMetadataMatches,
@@ -68,6 +69,12 @@ const { isManagedLibraryFile } = libraryPaths;
 const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload } = serverDownload;
 const { discordArtworkURL, sanitizeDiscordActivity } = discordRPC;
 
+test("playlist artwork uses only the first four custom-playlist songs", () => {
+  const trackIDs = ["one", "two", "three", "four", "five"];
+  assert.deepEqual(playlistArtworkTrackIDs({ trackIDs, isSystem: false }), trackIDs.slice(0, 4));
+  assert.deepEqual(playlistArtworkTrackIDs({ trackIDs, isSystem: true }), []);
+});
+
 test("uses a custom fullscreen video player with queue, repeat, controls, and shared volume", () => {
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.mp4", fileUrl: "file:///C:/Music/clip.mp4" }), true);
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.MOV", fileUrl: "file:///C:/Music/clip.MOV" }), true);
@@ -99,6 +106,7 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(appSource, /function openInstalledVideo\([\s\S]+video-from-art[\s\S]+video-expanded[\s\S]+video-revealed/);
   assert.doesNotMatch(appSource, /function openInstalledVideo\([^]*?if \(!audio\.paused\) audio\.pause\(\)/);
   assert.match(appSource, /function synchronizeInstalledVideoWithAudio\([^)]*\)[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0[\s\S]+audio\.paused[\s\S]+installedVideoPlayer\.play/);
+  assert.match(appSource, /async function requestPlayback\(\)[\s\S]+await audio\.play\(\)[\s\S]+synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\)/);
   assert.match(appSource, /function installedVideoPlaybackPlaying\(\)[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0/);
   assert.doesNotMatch(appSource, /videoOwnsPlayback|waitingForAudioHandoff|handOffInstalledVideoToAudio/);
   assert.match(appSource, /function animateInstalledVideoStage\(from, to, onFinish\)[\s\S]+classList\.add\("video-geometry-animating"\)[\s\S]+applyInstalledVideoStageGeometry\(from\)[\s\S]+\.animate\(\[from, to\],[\s\S]+animation\.cancel\(\)[\s\S]+clearInstalledVideoStageGeometry\(\)[\s\S]+classList\.remove\("video-geometry-animating"\)/);
@@ -106,8 +114,11 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(appSource, /function closeInstalledVideo\([^)]*\)[\s\S]+currentGeometry = installedVideoStageGeometry\(\)[\s\S]+classList\.add\("video-revealed", "video-closing"\)[\s\S]+syncFullPlayerTitleMarquee\(\)[\s\S]+animateInstalledVideoStage\(currentGeometry, geometry\.source[\s\S]+finishInstalledVideoClose/);
   assert.match(appSource, /installedVideoArtworkTimer = setTimeout\([\s\S]+classList\.add\("video-artwork-restored"\)[\s\S]+geometryDuration - installedVideoAnimationDuration\(INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS\)/);
   assert.match(appSource, /function advanceInstalledVideo\(direction = 1\)[\s\S]+nextIndex\(tracks, currentID, direction\)[\s\S]+selectInstalledVideoTarget/);
+  assert.match(appSource, /installedVideoPlayer\.onseeked = \(\) => synchronizeInstalledVideoWithAudio\(\)/);
   assert.match(appSource, /installedVideoPlayer\.onended = \(\) => synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\)/);
-  assert.match(appSource, /installedVideoStage\.onpointermove = \(\) => showInstalledVideoControls\(\)/);
+  assert.match(appSource, /function hideInstalledVideoControls\(\)[\s\S]+installed-video-return:focus-visible[\s\S]+#installedVideoControls :focus-visible[\s\S]+classList\.remove\("video-controls-visible"\)/);
+  assert.match(appSource, /installedVideoStage\.onpointermove = \(\) => showInstalledVideoControls\(\)[\s\S]+installedVideoControls\.onpointerenter = \(\) => showInstalledVideoControls\(\)/);
+  assert.doesNotMatch(appSource, /installedVideoControls\.onpointerenter = \(\) => showInstalledVideoControls\(\{ keepVisible: true \}\)/);
   assert.match(appSource, /function setPlaybackVolume\([\s\S]+audio\.volume = gain[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0[\s\S]+installedVideoVolume/);
   assert.match(styleSource, /\.full-player-dialog\.video-active \.full-player-details[\s\S]+opacity: 0/);
   assert.doesNotMatch(styleSource, /\.installed-video-dialog\.video-from-art \.installed-video-stage/);
@@ -121,6 +132,9 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(styleSource, /\.installed-video-stage video\s*\{[\s\S]*?object-fit: contain;[\s\S]*?object-position: center;/);
   assert.match(styleSource, /\.installed-video-controls\s*\{[\s\S]+bottom: 0[\s\S]+opacity: 0[\s\S]+pointer-events: none/);
   assert.match(styleSource, /\.installed-video-dialog\.video-revealed\.video-controls-visible \.installed-video-controls[\s\S]+\.installed-video-dialog\.video-revealed\.video-paused \.installed-video-controls[\s\S]+opacity: 1[\s\S]+pointer-events: auto/);
+  assert.match(styleSource, /video-revealed\.video-controls-visible \.installed-video-return[\s\S]+video-revealed\.video-paused \.installed-video-return/);
+  assert.match(styleSource, /video-revealed\.video-controls-visible \.installed-video-window-actions[\s\S]+video-revealed\.video-paused \.installed-video-window-actions/);
+  assert.doesNotMatch(styleSource, /\.installed-video-controls:focus-within/);
 });
 
 test("keeps profile pictures local to the active server profile", () => {
@@ -428,9 +442,9 @@ test("rejects stale same-context catalog responses after an upload mutates the c
 });
 
 test("moves fullscreen titles only by their rendered overflow", () => {
-  assert.deepEqual(titleMarqueeMetrics(420, 500), { travel: 0, durationSeconds: 0 });
-  assert.deepEqual(titleMarqueeMetrics(820, 540), { travel: 280, durationSeconds: 10 });
-  assert.deepEqual(titleMarqueeMetrics(568, 540), { travel: 28, durationSeconds: 8 });
+  assert.deepEqual(titleMarqueeMetrics(420, 500), { travel: 0, cycleDistance: 0, durationSeconds: 0 });
+  assert.deepEqual(titleMarqueeMetrics(820, 540), { travel: 280, cycleDistance: 876, durationSeconds: 876 / 28 });
+  assert.deepEqual(titleMarqueeMetrics(568, 540), { travel: 28, cycleDistance: 624, durationSeconds: 624 / 28 });
 });
 
 test("maps the volume slider to a clamped perceptual playback curve", () => {
@@ -519,13 +533,16 @@ test("renders every Windows select through the themed custom dropdown", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
-  const customControls = htmlSource.match(/<div\b[^>]*\bdata-custom-select\b[^>]*>/gi) || [];
+  const staticCustomControls = htmlSource.match(/<div\b[^>]*\bdata-custom-select\b[^>]*>/gi) || [];
+  const settingsCustomControls = appSource.match(/<div\b[^>]*\bdata-custom-select\b[^>]*>/gi) || [];
 
   assert.doesNotMatch(htmlSource, /<select\b/i);
-  assert.equal(customControls.length, 7);
-  assert.match(htmlSource, /id="serverUploadMode"[^>]+data-custom-select/);
-  assert.match(htmlSource, /id="serverDownloadMode"[^>]+data-custom-select/);
+  assert.doesNotMatch(appSource, /<select\b/i);
+  assert.equal(staticCustomControls.length + settingsCustomControls.length, 7);
+  assert.match(appSource, /id="serverUploadMode"[^>]+data-custom-select/);
+  assert.match(appSource, /id="serverDownloadMode"[^>]+data-custom-select/);
   assert.match(appSource, /function initializeCustomSelects\(\)[\s\S]+querySelectorAll\("\[data-custom-select\]"\)/);
+  assert.match(appSource, /#serverSettingsForm \[data-custom-select\]"\)\.forEach\(initializeCustomSelect\)/);
   assert.match(appSource, /function setCustomSelectOptions\(/);
   assert.match(appSource, /role\", \"listbox/);
   assert.match(appSource, /role\", \"option/);
@@ -598,6 +615,10 @@ test("switches to or creates server profiles and falls back to Default", () => {
   assert.match(appSource, /#profileSettings"\)\.onclick = \(\) =>[\s\S]+openSettings\(\)/);
   assert.doesNotMatch(appSource, /navigate\("settings"\)/);
   assert.doesNotMatch(appSource, /#profileSettings"\)\.onclick = [\s\S]{0,160}openServerSettings/);
+  assert.doesNotMatch(htmlSource, /id="serverSettingsDialog"/);
+  assert.match(appSource, /data-settings-panel="server"[\s\S]+<form id="serverSettingsForm"/);
+  assert.match(appSource, /function openServerSettings\(\) \{\s+openSettings\("server"\)/);
+  assert.match(appSource, /#settingsServer"\)\.onclick = openServerSettings/);
   assert.match(styleSource, /\.settings-grid\s*\{/);
 });
 
@@ -881,15 +902,16 @@ test("opens a synchronized full-screen Now Playing viewer from the mini-player",
   assert.match(styleSource, /\.full-player-artwork\s*\{[\s\S]+aspect-ratio: 1/);
   assert.match(styleSource, /\.full-player-details\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\);[\s\S]*?width: 100%;[\s\S]*?max-width: 100%;[\s\S]*?min-width: 0;/);
   assert.match(styleSource, /\.full-player-copy\s*\{[\s\S]*?min-width: 0;/);
-  assert.match(htmlSource, /id="fullPlayerTitle"[\s\S]+id="fullPlayerTitleText"/);
+  assert.match(htmlSource, /id="fullPlayerTitle"[\s\S]+id="fullPlayerTitleTrack"[\s\S]+id="fullPlayerTitleText"[\s\S]+id="fullPlayerTitleRepeat"[^>]+aria-hidden="true"/);
   assert.match(appSource, /function syncFullPlayerTitleMarquee\(\)[\s\S]+titleMarqueeMetrics\(text\.getBoundingClientRect\(\)\.width, viewport\.clientWidth\)/);
   assert.match(appSource, /function setFullPlayerTitle\(title\)[\s\S]+aria-label[\s\S]+syncFullPlayerTitleMarquee/);
-  assert.match(styleSource, /#fullPlayerTitle\.overflowing #fullPlayerTitleText\s*\{[\s\S]+full-player-title-marquee/);
-  assert.match(styleSource, /@keyframes full-player-title-marquee\s*\{[\s\S]+var\(--full-player-title-travel\)/);
+  assert.match(styleSource, /#fullPlayerTitle\.overflowing #fullPlayerTitleTrack\s*\{[\s\S]+full-player-title-marquee/);
+  assert.match(styleSource, /full-player-title-marquee[^;]+linear 1s infinite/);
   assert.doesNotMatch(styleSource, /full-player-title-marquee[^;]+alternate/);
+  assert.match(styleSource, /@keyframes full-player-title-marquee\s*\{[\s\S]+from[^}]+translateX\(0\)[\s\S]+to[^}]+calc\(-1 \* var\(--full-player-title-cycle\)\)/);
   assert.match(appSource, /function currentPlaybackDuration\([^]*?audioMetadataTrackID !== track\.id[^]*?isInstalledVideoTrack\(track\)/);
   assert.match(appSource, /audio\.onloadedmetadata = async \(\) => \{[^]*?audioSourceTrackID[^]*?!isInstalledVideoTrack\(track\)/);
-  assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]+#fullPlayerTitle\.overflowing #fullPlayerTitleText/);
+  assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]+#fullPlayerTitle\.overflowing #fullPlayerTitleTrack/);
   assert.match(styleSource, /\.full-player-transport \.full-player-play\s*\{/);
   assert.match(styleSource, /\.full-player-queue-panel\s*\{/);
   assert.match(styleSource, /\.full-player-queue-tabs\s*\{[\s\S]+grid-template-columns: 1fr 1fr/);
@@ -2017,13 +2039,13 @@ test("reserves an immutable local-import context and clears explicitly blank cre
   assert.match(contextSource, /Object\.freeze\(\{[\s\S]+adminToken: serverAdminToken/);
   assert.match(contextSource, /serverUploadContextIsCurrent[\s\S]+context\?\.adminToken === serverAdminToken/);
   assert.match(contextSource, /ensureServerContextCanChange[\s\S]+serverTransferActive \|\| serverContextReservation/);
-  assert.match(saveFormSource, /const settingsOpen = Boolean\(\$\("#serverSettingsDialog"\)\?\.open\)/);
+  assert.match(saveFormSource, /const settingsOpen = Boolean\(\$\("#settingsDialog"\)\?\.open && settingsPanel === "server" && \$\("#serverSettingsForm"\)\)/);
   assert.match(saveFormSource, /const nextServerToken = settingsOpen \? \$\("#serverToken"\)\.value\.trim\(\) : serverToken\.trim\(\)/);
   assert.match(saveFormSource, /const nextServerAdminToken = settingsOpen \? \$\("#serverAdminToken"\)\.value\.trim\(\) : serverAdminToken\.trim\(\)/);
   assert.match(saveFormSource, /serverToken = nextServerToken/);
   assert.match(saveFormSource, /serverAdminToken = nextServerAdminToken/);
   assert.doesNotMatch(saveFormSource, /serverToken[^\n]+\|\| serverToken|serverAdminToken[^\n]+\|\| serverAdminToken/);
-  assert.doesNotMatch(htmlSource, /id="serverToken"[^>]+required/);
+  assert.doesNotMatch(appSource, /id="serverToken"[^>]+required/);
   assert.match(localUploadSource, /uploadLocalImportTrack\(track, context\)[\s\S]+requireLocalImportServerContext\(context\)/);
   assert.match(localUploadSource, /baseURL: context\.serverURL[\s\S]+adminToken: context\.adminToken[\s\S]+profileID: context\.profileID/);
   assert.match(localBatchSource, /prepareLocalImportUploadBatch\(tracks, context\)[\s\S]+uploadLocalImportTracks\(tracks, context\)/);
@@ -2034,7 +2056,7 @@ test("reserves an immutable local-import context and clears explicitly blank cre
   assert.doesNotMatch(playlistImportSource, /const importContext = currentServerUploadContext\(\)/);
   assert.doesNotMatch(linkImportSource, /const importContext = currentServerUploadContext\(\)/);
   assert.match(settingsSubmitSource, /if \(!serverToken\.trim\(\)\)[\s\S]+Upload ready • catalog sync off/);
-  assert.doesNotMatch(settingsSubmitSource.match(/if \(!serverToken\.trim\(\)\) \{([\s\S]*?)\n    \} else/)?.[1] || "", /serverAction\("catalog"\)/);
+  assert.doesNotMatch(settingsSubmitSource.match(/if \(!serverToken\.trim\(\)\) \{([\s\S]*?)\n\s+\} else/)?.[1] || "", /serverAction\("catalog"\)/);
 });
 
 test("matches re-encoded server copies by title artist and duration", () => {

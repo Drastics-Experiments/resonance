@@ -213,7 +213,7 @@ private struct ServerLibraryView: View {
         }
         .sheet(item: $presentedSheet) { sheet in
             switch sheet {
-            case .connection: MacServerConnectionSheet()
+            case .settings: MacSettingsSheet(opensServerPanel: true)
             }
         }
         .task {
@@ -255,7 +255,7 @@ private struct ServerLibraryView: View {
                 .frame(height: 27)
                 .background((isConnected ? Color(hex: 0x55D98B) : Color.appMuted).opacity(0.12), in: Capsule())
 
-            Button { presentedSheet = .connection } label: {
+            Button { presentedSheet = .settings } label: {
                 HStack(spacing: 8) {
                     Text(serverAddress)
                         .lineLimit(1)
@@ -363,7 +363,7 @@ private struct ServerLibraryView: View {
 }
 
 private enum MacServerSheet: String, Identifiable {
-    case connection
+    case settings
     var id: String { rawValue }
 }
 
@@ -759,169 +759,6 @@ private struct MacServerArtwork: View {
     }
 }
 
-private struct MacServerConnectionSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var model: PlayerModel
-    @State private var serverURLDraft = ""
-    @State private var accessTokenDraft = ""
-    @State private var adminTokenDraft = ""
-    @State private var didLoadDrafts = false
-    @State private var confirmingCredentialRemoval = false
-
-    private var uploadModeBinding: Binding<MacUploadMode> {
-        Binding(get: { model.uploadMode }, set: model.selectUploadMode)
-    }
-
-    private var downloadModeBinding: Binding<MacDownloadMode> {
-        Binding(get: { model.downloadMode }, set: model.selectDownloadMode)
-    }
-
-    private var displayedUploadModes: [MacUploadMode] {
-        let modes = model.clientConfiguration.permittedUploadModes
-        return modes.isEmpty ? [.localFile] : modes
-    }
-
-    private var displayedDownloadModes: [MacDownloadMode] {
-        let modes = model.clientConfiguration.permittedDownloadModes
-        return modes.isEmpty ? [.verifiedFileCache] : modes
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Server Connection").font(.system(size: 22, weight: .bold))
-                    Text(model.usesPreviewCredentialStore
-                        ? "Stored in a private local file for this disposable Preview build."
-                        : "Access and admin credentials are stored securely in Keychain.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.appMuted)
-                }
-                Spacer()
-                Button("Cancel") { dismiss() }
-            }
-
-            VStack(spacing: 12) {
-                Label("Server URL", systemImage: "network").frame(maxWidth: .infinity, alignment: .leading)
-                TextField("https://music.example.com", text: $serverURLDraft)
-                    .textFieldStyle(.roundedBorder)
-                Label("Access token", systemImage: "key.fill").frame(maxWidth: .infinity, alignment: .leading)
-                SecureField("Server access token", text: $accessTokenDraft)
-                    .textFieldStyle(.roundedBorder)
-                Label("Admin key", systemImage: "key.horizontal.fill").frame(maxWidth: .infinity, alignment: .leading)
-                SecureField("Required for uploads and deletion", text: $adminTokenDraft)
-                    .textFieldStyle(.roundedBorder)
-            }
-            .font(.system(size: 11, weight: .semibold))
-
-            GroupBox("Transfer Modes") {
-                VStack(alignment: .leading, spacing: 13) {
-                    Picker("Upload", selection: uploadModeBinding) {
-                        ForEach(displayedUploadModes) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .disabled(model.clientConfiguration.permittedUploadModes.isEmpty)
-
-                    Text(model.clientConfiguration.permittedUploadModes.isEmpty
-                        ? "Uploads are disabled by the verified server configuration."
-                        : model.uploadMode.detail)
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.appMuted)
-
-                    Picker("Download", selection: downloadModeBinding) {
-                        ForEach(displayedDownloadModes) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .disabled(model.clientConfiguration.permittedDownloadModes.isEmpty)
-
-                    Text(model.clientConfiguration.requestedStreamOnly
-                        ? model.offlineDownloadUnavailableMessage
-                        : model.downloadMode.detail)
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.appMuted)
-
-                    Label(model.clientConfigMessage, systemImage: "checkmark.shield")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color.appMuted)
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            HStack {
-                Text(model.serverMessage)
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.appMuted)
-                    .lineLimit(2)
-                if !model.serverURLString.isEmpty || !model.serverToken.isEmpty || !model.serverAdminToken.isEmpty {
-                    Button("Forget Credentials", role: .destructive) {
-                        confirmingCredentialRemoval = true
-                    }
-                }
-                Spacer()
-                Button {
-                    Task {
-                        guard !model.serverUploadActionsDisabled else {
-                            model.serverMessage = "Wait for the current transfer to finish"
-                            return
-                        }
-                        model.serverURLString = serverURLDraft
-                        model.serverToken = accessTokenDraft
-                        model.serverAdminToken = adminTokenDraft
-                        await model.refreshClientConfigurationNow()
-                        if accessTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            model.serverMessage = "Upload ready • Add access token to sync"
-                            dismiss()
-                            return
-                        }
-                        await model.refreshServerCatalogNow()
-                        await model.syncPlaylistsNow()
-                        if model.serverMessage.localizedCaseInsensitiveContains("connected") { dismiss() }
-                    }
-                } label: {
-                    if model.isSyncingServer { ProgressView().controlSize(.small) }
-                    else { Text("Connect") }
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.appAccent)
-                .disabled(model.serverUploadActionsDisabled || !ServerConnectionPolicy.canSave(
-                    serverURL: serverURLDraft,
-                    accessToken: accessTokenDraft,
-                    adminToken: adminTokenDraft,
-                    allowsInsecurePreviewLoopback: model.allowsInsecurePreviewLoopback
-                ))
-            }
-        }
-        .padding(24)
-        .frame(width: 480)
-        .background(Color.appPanel)
-        .task {
-            if !didLoadDrafts {
-                serverURLDraft = model.serverURLString
-                accessTokenDraft = model.serverToken
-                adminTokenDraft = model.serverAdminToken
-                didLoadDrafts = true
-            }
-        }
-        .alert("Forget server credentials?", isPresented: $confirmingCredentialRemoval) {
-            Button("Cancel", role: .cancel) {}
-            Button("Forget Credentials", role: .destructive) {
-                model.clearServerCredentials()
-                serverURLDraft = ""
-                accessTokenDraft = ""
-                adminTokenDraft = ""
-                dismiss()
-            }
-        } message: {
-            Text("The server URL and access keys will be removed from this Mac. Downloaded songs stay in your library.")
-        }
-    }
-}
-
 private struct PlaylistsOverviewView: View {
     @EnvironmentObject private var model: PlayerModel
     private let columns = [GridItem(.adaptive(minimum: 170), spacing: 14)]
@@ -959,9 +796,9 @@ private struct PlaylistsOverviewView: View {
                     ForEach(model.playlists) { playlist in
                         Button { model.selectPlaylist(playlist) } label: {
                             HStack(spacing: 12) {
-                                MiniArtwork(
-                                    style: playlist.artwork,
-                                    symbol: playlist.isSystem ? "heart.fill" : "music.note",
+                                PlaylistArtworkView(
+                                    playlist: playlist,
+                                    tracks: model.tracks,
                                     size: 58,
                                     cornerRadius: 9
                                 )
@@ -3422,15 +3259,26 @@ private struct CollectionHeroView: View {
                 )
 
                 HStack(spacing: proxy.size.width < 620 ? 24 : 32) {
-                    ArtworkView(
-                        style: model.collectionArtwork,
-                        symbol: symbol,
-                        symbolSize: proxy.size.width < 550 ? 54 : 70,
-                        cornerRadius: 9,
-                        glow: true
-                    )
-                    .aspectRatio(1, contentMode: .fit)
-                    .frame(width: proxy.size.width < 550 ? 202 : 232)
+                    Group {
+                        if model.section == .playlists, let playlist = model.selectedPlaylist {
+                            PlaylistArtworkView(
+                                playlist: playlist,
+                                tracks: model.tracks,
+                                size: proxy.size.width < 550 ? 202 : 232,
+                                cornerRadius: 9
+                            )
+                        } else {
+                            ArtworkView(
+                                style: model.collectionArtwork,
+                                symbol: symbol,
+                                symbolSize: proxy.size.width < 550 ? 54 : 70,
+                                cornerRadius: 9,
+                                glow: true
+                            )
+                            .aspectRatio(1, contentMode: .fit)
+                            .frame(width: proxy.size.width < 550 ? 202 : 232)
+                        }
+                    }
                     .shadow(color: Color(hex: 0x1F1B6F).opacity(0.42), radius: 28, y: 18)
 
                     VStack(alignment: .leading, spacing: 0) {
