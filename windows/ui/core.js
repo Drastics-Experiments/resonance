@@ -238,13 +238,15 @@ export function setServerTransferPreference(state, { serverURL, profileID, uploa
   return resolveServerTransferModes({ state, serverURL, profileID, config, now });
 }
 
-export function titleMarqueeMetrics(contentWidth, availableWidth) {
+export function titleMarqueeMetrics(contentWidth, availableWidth, loopSpacing = 56) {
   const content = Number.isFinite(Number(contentWidth)) ? Math.max(Number(contentWidth), 0) : 0;
   const available = Number.isFinite(Number(availableWidth)) ? Math.max(Number(availableWidth), 0) : 0;
   const travel = Math.max(content - available, 0);
+  const cycleDistance = travel > 0 ? content + Math.max(Number(loopSpacing) || 0, 0) : 0;
   return {
     travel,
-    durationSeconds: travel > 0 ? Math.max(8, travel / 28) : 0,
+    cycleDistance,
+    durationSeconds: cycleDistance > 0 ? Math.max(8, cycleDistance / 28) : 0,
   };
 }
 

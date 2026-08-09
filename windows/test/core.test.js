@@ -106,6 +106,7 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(appSource, /function openInstalledVideo\([\s\S]+video-from-art[\s\S]+video-expanded[\s\S]+video-revealed/);
   assert.doesNotMatch(appSource, /function openInstalledVideo\([^]*?if \(!audio\.paused\) audio\.pause\(\)/);
   assert.match(appSource, /function synchronizeInstalledVideoWithAudio\([^)]*\)[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0[\s\S]+audio\.paused[\s\S]+installedVideoPlayer\.play/);
+  assert.match(appSource, /async function requestPlayback\(\)[\s\S]+await audio\.play\(\)[\s\S]+synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\)/);
   assert.match(appSource, /function installedVideoPlaybackPlaying\(\)[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0/);
   assert.doesNotMatch(appSource, /videoOwnsPlayback|waitingForAudioHandoff|handOffInstalledVideoToAudio/);
   assert.match(appSource, /function animateInstalledVideoStage\(from, to, onFinish\)[\s\S]+classList\.add\("video-geometry-animating"\)[\s\S]+applyInstalledVideoStageGeometry\(from\)[\s\S]+\.animate\(\[from, to\],[\s\S]+animation\.cancel\(\)[\s\S]+clearInstalledVideoStageGeometry\(\)[\s\S]+classList\.remove\("video-geometry-animating"\)/);
@@ -113,8 +114,11 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(appSource, /function closeInstalledVideo\([^)]*\)[\s\S]+currentGeometry = installedVideoStageGeometry\(\)[\s\S]+classList\.add\("video-revealed", "video-closing"\)[\s\S]+syncFullPlayerTitleMarquee\(\)[\s\S]+animateInstalledVideoStage\(currentGeometry, geometry\.source[\s\S]+finishInstalledVideoClose/);
   assert.match(appSource, /installedVideoArtworkTimer = setTimeout\([\s\S]+classList\.add\("video-artwork-restored"\)[\s\S]+geometryDuration - installedVideoAnimationDuration\(INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS\)/);
   assert.match(appSource, /function advanceInstalledVideo\(direction = 1\)[\s\S]+nextIndex\(tracks, currentID, direction\)[\s\S]+selectInstalledVideoTarget/);
+  assert.match(appSource, /installedVideoPlayer\.onseeked = \(\) => synchronizeInstalledVideoWithAudio\(\)/);
   assert.match(appSource, /installedVideoPlayer\.onended = \(\) => synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\)/);
-  assert.match(appSource, /installedVideoStage\.onpointermove = \(\) => showInstalledVideoControls\(\)/);
+  assert.match(appSource, /function hideInstalledVideoControls\(\)[\s\S]+installed-video-return:focus-visible[\s\S]+#installedVideoControls :focus-visible[\s\S]+classList\.remove\("video-controls-visible"\)/);
+  assert.match(appSource, /installedVideoStage\.onpointermove = \(\) => showInstalledVideoControls\(\)[\s\S]+installedVideoControls\.onpointerenter = \(\) => showInstalledVideoControls\(\)/);
+  assert.doesNotMatch(appSource, /installedVideoControls\.onpointerenter = \(\) => showInstalledVideoControls\(\{ keepVisible: true \}\)/);
   assert.match(appSource, /function setPlaybackVolume\([\s\S]+audio\.volume = gain[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0[\s\S]+installedVideoVolume/);
   assert.match(styleSource, /\.full-player-dialog\.video-active \.full-player-details[\s\S]+opacity: 0/);
   assert.doesNotMatch(styleSource, /\.installed-video-dialog\.video-from-art \.installed-video-stage/);
@@ -128,6 +132,9 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(styleSource, /\.installed-video-stage video\s*\{[\s\S]*?object-fit: contain;[\s\S]*?object-position: center;/);
   assert.match(styleSource, /\.installed-video-controls\s*\{[\s\S]+bottom: 0[\s\S]+opacity: 0[\s\S]+pointer-events: none/);
   assert.match(styleSource, /\.installed-video-dialog\.video-revealed\.video-controls-visible \.installed-video-controls[\s\S]+\.installed-video-dialog\.video-revealed\.video-paused \.installed-video-controls[\s\S]+opacity: 1[\s\S]+pointer-events: auto/);
+  assert.match(styleSource, /video-revealed\.video-controls-visible \.installed-video-return[\s\S]+video-revealed\.video-paused \.installed-video-return/);
+  assert.match(styleSource, /video-revealed\.video-controls-visible \.installed-video-window-actions[\s\S]+video-revealed\.video-paused \.installed-video-window-actions/);
+  assert.doesNotMatch(styleSource, /\.installed-video-controls:focus-within/);
 });
 
 test("keeps profile pictures local to the active server profile", () => {
@@ -435,9 +442,9 @@ test("rejects stale same-context catalog responses after an upload mutates the c
 });
 
 test("moves fullscreen titles only by their rendered overflow", () => {
-  assert.deepEqual(titleMarqueeMetrics(420, 500), { travel: 0, durationSeconds: 0 });
-  assert.deepEqual(titleMarqueeMetrics(820, 540), { travel: 280, durationSeconds: 10 });
-  assert.deepEqual(titleMarqueeMetrics(568, 540), { travel: 28, durationSeconds: 8 });
+  assert.deepEqual(titleMarqueeMetrics(420, 500), { travel: 0, cycleDistance: 0, durationSeconds: 0 });
+  assert.deepEqual(titleMarqueeMetrics(820, 540), { travel: 280, cycleDistance: 876, durationSeconds: 876 / 28 });
+  assert.deepEqual(titleMarqueeMetrics(568, 540), { travel: 28, cycleDistance: 624, durationSeconds: 624 / 28 });
 });
 
 test("maps the volume slider to a clamped perceptual playback curve", () => {
@@ -881,15 +888,16 @@ test("opens a synchronized full-screen Now Playing viewer from the mini-player",
   assert.match(styleSource, /\.full-player-artwork\s*\{[\s\S]+aspect-ratio: 1/);
   assert.match(styleSource, /\.full-player-details\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\);[\s\S]*?width: 100%;[\s\S]*?max-width: 100%;[\s\S]*?min-width: 0;/);
   assert.match(styleSource, /\.full-player-copy\s*\{[\s\S]*?min-width: 0;/);
-  assert.match(htmlSource, /id="fullPlayerTitle"[\s\S]+id="fullPlayerTitleText"/);
+  assert.match(htmlSource, /id="fullPlayerTitle"[\s\S]+id="fullPlayerTitleTrack"[\s\S]+id="fullPlayerTitleText"[\s\S]+id="fullPlayerTitleRepeat"[^>]+aria-hidden="true"/);
   assert.match(appSource, /function syncFullPlayerTitleMarquee\(\)[\s\S]+titleMarqueeMetrics\(text\.getBoundingClientRect\(\)\.width, viewport\.clientWidth\)/);
   assert.match(appSource, /function setFullPlayerTitle\(title\)[\s\S]+aria-label[\s\S]+syncFullPlayerTitleMarquee/);
-  assert.match(styleSource, /#fullPlayerTitle\.overflowing #fullPlayerTitleText\s*\{[\s\S]+full-player-title-marquee/);
-  assert.match(styleSource, /@keyframes full-player-title-marquee\s*\{[\s\S]+var\(--full-player-title-travel\)/);
+  assert.match(styleSource, /#fullPlayerTitle\.overflowing #fullPlayerTitleTrack\s*\{[\s\S]+full-player-title-marquee/);
+  assert.match(styleSource, /full-player-title-marquee[^;]+linear 1s infinite/);
   assert.doesNotMatch(styleSource, /full-player-title-marquee[^;]+alternate/);
+  assert.match(styleSource, /@keyframes full-player-title-marquee\s*\{[\s\S]+from[^}]+translateX\(0\)[\s\S]+to[^}]+calc\(-1 \* var\(--full-player-title-cycle\)\)/);
   assert.match(appSource, /function currentPlaybackDuration\([^]*?audioMetadataTrackID !== track\.id[^]*?isInstalledVideoTrack\(track\)/);
   assert.match(appSource, /audio\.onloadedmetadata = async \(\) => \{[^]*?audioSourceTrackID[^]*?!isInstalledVideoTrack\(track\)/);
-  assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]+#fullPlayerTitle\.overflowing #fullPlayerTitleText/);
+  assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]+#fullPlayerTitle\.overflowing #fullPlayerTitleTrack/);
   assert.match(styleSource, /\.full-player-transport \.full-player-play\s*\{/);
   assert.match(styleSource, /\.full-player-queue-panel\s*\{/);
   assert.match(styleSource, /\.full-player-queue-tabs\s*\{[\s\S]+grid-template-columns: 1fr 1fr/);

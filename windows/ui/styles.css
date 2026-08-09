@@ -2238,25 +2238,37 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   white-space: nowrap;
   text-shadow: 0 8px 32px #0008;
 }
-#fullPlayerTitleText {
-  display: inline-block;
+#fullPlayerTitleTrack {
+  display: inline-flex;
+  gap: 56px;
   max-width: none;
   transform: translateX(0);
+}
+#fullPlayerTitleText,
+#fullPlayerTitleRepeat {
+  display: inline-block;
+  flex: none;
+}
+#fullPlayerTitleRepeat {
+  display: none;
 }
 #fullPlayerTitle.overflowing {
   text-align: left;
 }
-#fullPlayerTitle.overflowing #fullPlayerTitleText {
+#fullPlayerTitle.overflowing #fullPlayerTitleTrack {
   will-change: transform;
   animation: full-player-title-marquee var(--full-player-title-duration) linear 1s infinite;
 }
+#fullPlayerTitle.overflowing #fullPlayerTitleRepeat {
+  display: inline-block;
+}
 @keyframes full-player-title-marquee {
-  0%, 12% { transform: translateX(0); }
-  88%, 100% { transform: translateX(var(--full-player-title-travel)); }
+  from { transform: translateX(0); }
+  to { transform: translateX(calc(-1 * var(--full-player-title-cycle))); }
 }
 @media (prefers-reduced-motion: reduce) {
   #fullPlayerTitle.overflowing { text-overflow: ellipsis; }
-  #fullPlayerTitle.overflowing #fullPlayerTitleText {
+  #fullPlayerTitle.overflowing #fullPlayerTitleTrack {
     display: block;
     max-width: 100%;
     overflow: hidden;
@@ -2264,6 +2276,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
     text-overflow: ellipsis;
     transform: none;
   }
+  #fullPlayerTitle.overflowing #fullPlayerTitleRepeat { display: none; }
 }
 .full-player-copy p {
   margin: 14px 0 0;
@@ -2511,7 +2524,8 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   pointer-events: none;
   transition: opacity 180ms ease;
 }
-.installed-video-dialog.video-revealed .installed-video-return {
+.installed-video-dialog.video-revealed.video-controls-visible .installed-video-return,
+.installed-video-dialog.video-revealed.video-paused .installed-video-return {
   opacity: 1;
   pointer-events: auto;
 }
@@ -2530,7 +2544,8 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   pointer-events: none;
   transition: opacity 180ms ease;
 }
-.installed-video-dialog.video-revealed .installed-video-window-actions {
+.installed-video-dialog.video-revealed.video-controls-visible .installed-video-window-actions,
+.installed-video-dialog.video-revealed.video-paused .installed-video-window-actions {
   opacity: 1;
   pointer-events: auto;
 }
@@ -2650,8 +2665,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   transition: opacity 180ms ease, transform 220ms ease;
 }
 .installed-video-dialog.video-revealed.video-controls-visible .installed-video-controls,
-.installed-video-dialog.video-revealed.video-paused .installed-video-controls,
-.installed-video-dialog.video-revealed .installed-video-controls:focus-within {
+.installed-video-dialog.video-revealed.video-paused .installed-video-controls {
   opacity: 1;
   pointer-events: auto;
   transform: translateY(0);
