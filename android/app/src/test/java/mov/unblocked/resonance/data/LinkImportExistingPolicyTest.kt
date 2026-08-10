@@ -66,6 +66,29 @@ class LinkImportExistingPolicyTest {
     }
 
     @Test
+    fun doesNotReuseAudioBytesForAVideoImportWithMatchingMetadata() {
+        val audio = Track(
+            id = "audio-id",
+            title = expected.title,
+            artist = expected.artist,
+            durationMs = 223_000,
+            relativePath = "Feels.m4a",
+        )
+        val video = audio.copy(id = "video-id", relativePath = "Feels.mp4")
+
+        val match = LinkImportExistingPolicy.match(
+            expected,
+            listOf(audio, video),
+            emptyList(),
+            "https://music.example",
+            "default",
+            LinkImportMediaMode.Video,
+        )
+
+        assertEquals("video-id", match.deviceTrackID)
+    }
+
+    @Test
     fun remoteIdFastPathRequiresActiveServerAndProfile() {
         val collidingRemote = remoteSong(
             id = "collision",

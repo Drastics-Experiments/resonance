@@ -1,12 +1,18 @@
 package mov.unblocked.resonance.data
 
 import android.content.Context
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
+import android.media.MediaMuxer
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
+import java.nio.ByteBuffer
 import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
@@ -60,6 +66,9 @@ data class LinkImportCandidate(
 )
 
 enum class LinkImportSourceProvider { YouTube, SoundCloud }
+enum class LinkImportMediaMode(val fileExtension: String) {
+    Audio("m4a"), Video("mp4");
+}
 enum class LinkImportKind {
     Track, SpotifyPlaylist, SoundCloudPlaylist;
 
@@ -95,9 +104,10 @@ data class LinkImportDownload(
     val metadata: LinkImportTrack,
     val artwork: ByteArray?,
     val durationMs: Long,
-    val downloadSourceURL: String,
+    val downloadSourceURL: String?,
     val sourceSHA256: String,
     val contentSHA256: String,
+    val mediaMode: LinkImportMediaMode = LinkImportMediaMode.Audio,
 )
 data class LinkImportPreview(val url: String, val headers: Map<String, String>)
 
@@ -118,10 +128,17 @@ class LinkImportService(context: Context) {
         val info: LinkImportPlaylist,
         val tracks: List<LinkImportTrack>,
     )
-    private data class ResolvedAudio(
-        val candidate: LinkImportCandidate,
-        val streamURL: URL,
+    private data class ResolvedStream(
+        val url: URL,
         val contentLength: Long,
+        val contentType: String,
+        val itag: Int?,
+    )
+    private data class ResolvedMedia(
+        val mediaMode: LinkImportMediaMode,
+        val candidate: LinkImportCandidate,
+        val primary: ResolvedStream,
+        val companionAudio: ResolvedStream? = null,
     )
 
     private val appContext = context.applicationContext
@@ -129,6 +146,7 @@ class LinkImportService(context: Context) {
     private val spotifyHosts = setOf("open.spotify.com", "www.open.spotify.com", "spotify.link", "www.spotify.link")
     private val youtubeHosts = setOf("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com")
     private val maxAudioBytes = 256L * 1_024 * 1_024
+    private val maxVideoBytes = 1_024L * 1_024 * 1_024
     private val webAgent = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36"
     private val playerAgent = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L) gzip"
 
@@ -166,9 +184,18 @@ class LinkImportService(context: Context) {
         resolveYouTubeMetadata(videoID)
     }
 
-    suspend fun resolve(source: String, progress: (LinkImportProgress) -> Unit): LinkImportResolution =
+    suspend fun resolve(
+        source: String,
+        mediaMode: LinkImportMediaMode = LinkImportMediaMode.Audio,
+        progress: (LinkImportProgress) -> Unit,
+    ): LinkImportResolution =
         withContext(Dispatchers.IO) {
             if (SoundCloudImportUrls.source(source.trim()) != null) {
+                if (mediaMode == LinkImportMediaMode.Video) throw LinkImportException(
+                    LinkImportStage.ResolvingMetadata,
+                    "VIDEO_REQUIRES_YOUTUBE",
+                    "Video downloads require a YouTube link or video search result. SoundCloud links provide audio only.",
+                )
                 progress(LinkImportProgress(LinkImportStage.ResolvingMetadata))
                 when (val resolved = SoundCloudImport.resolve(source.trim())) {
                     is SoundCloudSource.Track -> {
@@ -260,6 +287,11 @@ class LinkImportService(context: Context) {
             }
             val spotify = spotifyURL(source.trim())
             if (spotify != null) {
+                if (mediaMode == LinkImportMediaMode.Video) throw LinkImportException(
+                    LinkImportStage.ResolvingMetadata,
+                    "VIDEO_REQUIRES_YOUTUBE",
+                    "Video downloads require a YouTube link or video search result. Spotify links provide audio metadata only.",
+                )
                 progress(LinkImportProgress(LinkImportStage.ResolvingMetadata))
                 val parts = spotify.path.split('/').filter(String::isNotBlank).let {
                     if (it.firstOrNull()?.startsWith("intl-") == true) it.drop(1) else it
@@ -333,7 +365,7 @@ class LinkImportService(context: Context) {
                 "Enter a Spotify, SoundCloud, or supported YouTube track or playlist URL.",
             )
             progress(LinkImportProgress(LinkImportStage.InspectingSource))
-            val resolved = resolveYouTube(id)
+            val resolved = resolveYouTube(id, mediaMode)
             val track = LinkImportTrack(
                 resolved.candidate.title,
                 resolved.candidate.artist ?: "Unknown uploader",
@@ -344,7 +376,10 @@ class LinkImportService(context: Context) {
             LinkImportResolution(track, listOf(resolved.candidate))
         }
 
-    suspend fun search(value: String): LinkImportSearchResponse = withContext(Dispatchers.IO) {
+    suspend fun search(
+        value: String,
+        mediaMode: LinkImportMediaMode = LinkImportMediaMode.Audio,
+    ): LinkImportSearchResponse = withContext(Dispatchers.IO) {
         val query = value.replace(Regex("\\s+"), " ").trim()
         if (query.isEmpty()) throw LinkImportException(
             LinkImportStage.SearchingCandidates,
@@ -365,7 +400,7 @@ class LinkImportService(context: Context) {
         coroutineScope {
             val spotifyTask = async { providerResultsOrEmpty { searchSpotifyTracks(query) } }
             val soundCloudTask = async { providerResultsOrEmpty { searchSoundCloudTracks(query) } }
-            val youtubeTask = async { providerResultsOrEmpty { searchYouTubeResults(query) } }
+            val youtubeTask = async { providerResultsOrEmpty { searchYouTubeResults(query, mediaMode) } }
             val spotifyTracks = spotifyTask.await()
             val soundCloudTracks = soundCloudTask.await()
             val youtubeCandidates = youtubeTask.await()
@@ -378,7 +413,12 @@ class LinkImportService(context: Context) {
                 }
             }
             val soundCloud = soundCloudTracks.mapNotNull { soundCloudTrack ->
-                val candidates = listOfNotNull(soundCloudTrack.directCandidate()) +
+                val directCandidates = if (mediaMode == LinkImportMediaMode.Audio) {
+                    listOfNotNull(soundCloudTrack.directCandidate())
+                } else {
+                    emptyList()
+                }
+                val candidates = directCandidates +
                     scoreCandidates(soundCloudTrack.metadata, youtubeCandidates).take(3)
                 val unique = candidates.distinctBy(LinkImportCandidate::videoID)
                 unique.takeIf(List<LinkImportCandidate>::isNotEmpty)?.let {
@@ -399,7 +439,11 @@ class LinkImportService(context: Context) {
             if (results.isEmpty()) throw LinkImportException(
                 LinkImportStage.SearchingCandidates,
                 "NO_SEARCH_RESULTS",
-                "Spotify, SoundCloud, and YouTube returned no previewable results for that search.",
+                if (mediaMode == LinkImportMediaMode.Video) {
+                    "Spotify, SoundCloud, and YouTube returned no downloadable video results for that search."
+                } else {
+                    "Spotify, SoundCloud, and YouTube returned no previewable results for that search."
+                },
             )
             LinkImportSearchResponse(query, results)
         }
@@ -446,9 +490,9 @@ class LinkImportService(context: Context) {
                 headers = mapOf("User-Agent" to webAgent),
             )
         }
-        val resolved = resolveYouTube(candidate.videoID)
+        val resolved = resolveYouTube(candidate.videoID, LinkImportMediaMode.Audio)
         LinkImportPreview(
-            url = resolved.streamURL.toString(),
+            url = resolved.primary.url.toString(),
             headers = mapOf(
                 "User-Agent" to playerAgent,
                 "Origin" to "https://www.youtube.com",
@@ -459,9 +503,15 @@ class LinkImportService(context: Context) {
     suspend fun download(
         candidate: LinkImportCandidate,
         metadata: LinkImportTrack,
+        mediaMode: LinkImportMediaMode = LinkImportMediaMode.Audio,
         progress: (LinkImportProgress) -> Unit,
     ): LinkImportDownload = withContext(Dispatchers.IO) {
         if (candidate.sourceProvider == LinkImportSourceProvider.SoundCloud) {
+            if (mediaMode == LinkImportMediaMode.Video) throw LinkImportException(
+                LinkImportStage.InspectingSource,
+                "VIDEO_REQUIRES_YOUTUBE",
+                "This SoundCloud result is audio only. Choose a YouTube result for video.",
+            )
             val resolved = SoundCloudImport.resolveAudio(candidate.sourceURL)
             val directory = File(appContext.cacheDir, "resonance-link-import-" + System.nanoTime()).apply { mkdirs() }
             val output = File(directory, "source.mp3")
@@ -481,17 +531,45 @@ class LinkImportService(context: Context) {
                     resolved.url.toString(),
                     hash,
                     hash,
+                    LinkImportMediaMode.Audio,
                 )
             } catch (error: Throwable) {
                 directory.deleteRecursively()
                 throw error
             }
         }
-        val resolved = resolveYouTube(candidate.videoID)
+        val resolved = resolveYouTube(candidate.videoID, mediaMode)
         val directory = File(appContext.cacheDir, "resonance-link-import-" + System.nanoTime()).apply { mkdirs() }
-        val output = File(directory, "source.m4a")
+        val primaryFile = File(directory, "primary.${mediaMode.fileExtension}")
+        val companionFile = resolved.companionAudio?.let { File(directory, "companion.m4a") }
+        val output = File(directory, "source.${mediaMode.fileExtension}")
         try {
-            val hash = downloadRanges(resolved, output, progress)
+            val totalBytes = resolved.primary.contentLength + (resolved.companionAudio?.contentLength ?: 0L)
+            val primaryHash = downloadRanges(
+                stream = resolved.primary,
+                destination = primaryFile,
+                progressOffset = 0L,
+                progressTotal = totalBytes,
+                progress = progress,
+            )
+            val companionHash = if (resolved.companionAudio != null && companionFile != null) {
+                downloadRanges(
+                    stream = resolved.companionAudio,
+                    destination = companionFile,
+                    progressOffset = resolved.primary.contentLength,
+                    progressTotal = totalBytes,
+                    progress = progress,
+                )
+            } else null
+            if (companionFile != null) {
+                muxVideoAndAudio(primaryFile, companionFile, output)
+            } else if (!primaryFile.renameTo(output)) {
+                primaryFile.copyTo(output)
+                primaryFile.delete()
+            }
+            validateDownloadedMedia(output, mediaMode)
+            val sourceHash = if (companionHash == null) primaryHash else combinedHash(primaryHash, companionHash)
+            val contentHash = if (companionHash == null) sourceHash else sha256(output)
             val artwork = fetchArtwork(metadata.artworkURL ?: resolved.candidate.thumbnailURL)
             LinkImportDownload(
                 output,
@@ -501,9 +579,10 @@ class LinkImportService(context: Context) {
                 ),
                 artwork,
                 ((metadata.durationSeconds ?: resolved.candidate.durationSeconds) ?: 0).coerceAtLeast(0) * 1_000L,
-                resolved.streamURL.toString(),
-                hash,
-                hash,
+                resolved.companionAudio?.let { null } ?: resolved.primary.url.toString(),
+                sourceHash,
+                contentHash,
+                mediaMode,
             )
         } catch (error: Throwable) {
             directory.deleteRecursively()
@@ -756,7 +835,10 @@ class LinkImportService(context: Context) {
             .take(6)
     }
 
-    private suspend fun searchYouTubeResults(query: String): List<LinkImportCandidate> = coroutineScope {
+    private suspend fun searchYouTubeResults(
+        query: String,
+        mediaMode: LinkImportMediaMode,
+    ): List<LinkImportCandidate> = coroutineScope {
         val encoded = URLEncoder.encode(query, "UTF-8")
         val sources = listOf(
             URL("https://music.youtube.com/search?q=$encoded"),
@@ -785,7 +867,7 @@ class LinkImportService(context: Context) {
         ids.map { id ->
             async {
                 try {
-                    resolveYouTube(id).candidate
+                    resolveYouTube(id, mediaMode).candidate
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Exception) {
@@ -864,7 +946,10 @@ class LinkImportService(context: Context) {
         }
     }
 
-    private suspend fun resolveYouTube(videoID: String): ResolvedAudio {
+    private suspend fun resolveYouTube(
+        videoID: String,
+        mediaMode: LinkImportMediaMode = LinkImportMediaMode.Audio,
+    ): ResolvedMedia {
         val watch = request(
             URL("https://www.youtube.com/watch?v=" + videoID + "&bpctr=9999999999&has_verified=1"),
             6 * 1_024 * 1_024,
@@ -919,29 +1004,13 @@ class LinkImportService(context: Context) {
         val streaming = player.obj("streamingData") ?: JsonObject(emptyMap())
         val formats = (streaming.array("adaptiveFormats") + streaming.array("formats"))
             .mapNotNull { it as? JsonObject }
+            .filter(::isVerifiedYouTubeFormat)
+        val audioFormat = formats
             .filter {
-                it.string("mimeType")?.startsWith("audio/mp4", true) == true
-                    && it.string("url") != null && it.long("contentLength") > 0
-                    && it["qualityLabel"] == null
+                it.string("mimeType")?.startsWith("audio/mp4", true) == true &&
+                    it["qualityLabel"] == null && it.long("contentLength") <= maxAudioBytes
             }
-            .sortedByDescending { it.long("averageBitrate").takeIf { value -> value > 0 } ?: it.long("bitrate") }
-        val format = formats.firstOrNull() ?: throw LinkImportException(
-            LinkImportStage.InspectingSource,
-            "YOUTUBE_NO_VERIFIED_M4A",
-            "YouTube did not provide a direct, verifiable M4A audio stream for this video.",
-        )
-        val stream = URL(requireNotNull(format.string("url")))
-        if (!isGoogleVideo(stream)) throw LinkImportException(
-            LinkImportStage.InspectingSource,
-            "YOUTUBE_UNSAFE_STREAM",
-            "YouTube returned an untrusted audio stream.",
-        )
-        val length = format.long("contentLength")
-        if (length !in 1..maxAudioBytes) throw LinkImportException(
-            LinkImportStage.InspectingSource,
-            "YOUTUBE_AUDIO_TOO_LARGE",
-            "The selected audio is too large to import on this device.",
-        )
+            .maxByOrNull(::formatBitrate)
         val thumbs = details.obj("thumbnail")?.array("thumbnails").orEmpty().mapNotNull { it as? JsonObject }
         val thumbnail = thumbs.maxByOrNull { it.long("width") }?.string("url")?.takeIf(::isArtwork)
         val candidate = LinkImportCandidate(
@@ -953,22 +1022,106 @@ class LinkImportService(context: Context) {
             "https://www.youtube.com/watch?v=" + videoID,
             1.0,
         )
-        return ResolvedAudio(candidate, stream, length)
+        if (mediaMode == LinkImportMediaMode.Audio) {
+            val format = audioFormat ?: throw LinkImportException(
+                LinkImportStage.InspectingSource,
+                "YOUTUBE_NO_VERIFIED_M4A",
+                "YouTube did not provide a direct, verifiable M4A audio stream for this video.",
+            )
+            return ResolvedMedia(mediaMode, candidate, verifiedStream(format, maxAudioBytes, "audio"))
+        }
+
+        val progressive = formats
+            .filter {
+                it.string("mimeType")?.startsWith("video/mp4", true) == true &&
+                    it.string("qualityLabel") != null && formatHasAudio(it) &&
+                    it.long("contentLength") <= maxVideoBytes
+            }
+            .maxWithOrNull(compareBy<JsonObject>({ isH264(it) }, { formatHeight(it) }, { formatBitrate(it) }))
+        val adaptive = formats
+            .filter {
+                    it.string("mimeType")?.startsWith("video/mp4", true) == true &&
+                    it.string("qualityLabel") != null && !formatHasAudio(it) &&
+                    it.long("contentLength") <= maxVideoBytes - (audioFormat?.long("contentLength") ?: maxVideoBytes)
+            }
+            .maxWithOrNull(compareBy<JsonObject>({ isH264(it) }, { formatHeight(it) }, { formatBitrate(it) }))
+        val useAdaptive = adaptive != null && audioFormat != null &&
+            (progressive == null || formatHeight(adaptive) > formatHeight(progressive))
+        if (useAdaptive) {
+            val video = requireNotNull(adaptive)
+            val audio = requireNotNull(audioFormat)
+            val primary = verifiedStream(video, maxVideoBytes, "video")
+            val companion = verifiedStream(audio, maxAudioBytes, "audio")
+            return ResolvedMedia(mediaMode, candidate, primary, companion)
+        }
+        val format = progressive ?: throw LinkImportException(
+            LinkImportStage.InspectingSource,
+            "YOUTUBE_NO_VERIFIED_MP4",
+            "YouTube did not provide a direct, verifiable MP4 video for this result.",
+        )
+        return ResolvedMedia(mediaMode, candidate, verifiedStream(format, maxVideoBytes, "video"))
+    }
+
+    private fun isVerifiedYouTubeFormat(format: JsonObject): Boolean {
+        if (format.string("url").isNullOrBlank() || format.long("contentLength") <= 0) return false
+        if (format.string("type") == "FORMAT_STREAM_TYPE_OTF") return false
+        if (format["drmFamilies"] != null || format.string("drmTrackType") != null) return false
+        return runCatching { isGoogleVideo(URL(requireNotNull(format.string("url")))) }.getOrDefault(false)
+    }
+
+    private fun formatHasAudio(format: JsonObject): Boolean =
+        format.string("audioQuality") != null ||
+            format.string("mimeType").orEmpty().substringAfter("codecs=", "").contains("mp4a", true)
+
+    private fun isH264(format: JsonObject): Boolean =
+        format.string("mimeType").orEmpty().contains("avc1", true)
+
+    private fun formatHeight(format: JsonObject): Int =
+        format.long("height").toInt().takeIf { it > 0 }
+            ?: format.string("qualityLabel")?.filter(Char::isDigit)?.toIntOrNull()
+            ?: 0
+
+    private fun formatBitrate(format: JsonObject): Long =
+        format.long("averageBitrate").takeIf { it > 0 } ?: format.long("bitrate")
+
+    private fun verifiedStream(format: JsonObject, maximumBytes: Long, kind: String): ResolvedStream {
+        val url = runCatching { URL(requireNotNull(format.string("url"))) }.getOrNull()
+            ?: throw LinkImportException(LinkImportStage.InspectingSource, "YOUTUBE_UNSAFE_STREAM", "YouTube returned an invalid $kind stream.")
+        if (!isGoogleVideo(url)) throw LinkImportException(
+            LinkImportStage.InspectingSource,
+            "YOUTUBE_UNSAFE_STREAM",
+            "YouTube returned an untrusted $kind stream.",
+        )
+        val length = format.long("contentLength")
+        if (length !in 1..maximumBytes) throw LinkImportException(
+            LinkImportStage.InspectingSource,
+            "YOUTUBE_${kind.uppercase()}_TOO_LARGE",
+            "The selected $kind is too large to import on this device.",
+        )
+        val contentType = format.string("mimeType")?.substringBefore(';')?.trim()?.lowercase()
+        if (contentType !in setOf("audio/mp4", "video/mp4")) throw LinkImportException(
+            LinkImportStage.InspectingSource,
+            "YOUTUBE_UNSUPPORTED_FORMAT",
+            "YouTube returned an unsupported $kind format.",
+        )
+        return ResolvedStream(url, length, requireNotNull(contentType), format.long("itag").toInt().takeIf { it > 0 })
     }
 
     private suspend fun downloadRanges(
-        resolved: ResolvedAudio,
+        stream: ResolvedStream,
         destination: File,
+        progressOffset: Long,
+        progressTotal: Long,
         progress: (LinkImportProgress) -> Unit,
     ): String {
         val digest = MessageDigest.getInstance("SHA-256")
         var completed = 0L
         FileOutputStream(destination).use { output ->
-            while (completed < resolved.contentLength) {
+            while (completed < stream.contentLength) {
                 currentCoroutineContext().ensureActive()
-                val end = minOf(resolved.contentLength - 1, completed + 10L * 1_024 * 1_024 - 1)
+                val end = minOf(stream.contentLength - 1, completed + 10L * 1_024 * 1_024 - 1)
                 val connection = open(
-                    resolved.streamURL,
+                    stream.url,
                     "GET",
                     mapOf(
                         "Range" to "bytes=" + completed + "-" + end,
@@ -980,28 +1133,28 @@ class LinkImportService(context: Context) {
                 try {
                     val status = connection.responseCode
                     if (!isGoogleVideo(connection.url) || status !in listOf(200, 206)) {
-                        throw LinkImportException(LinkImportStage.Downloading, "YOUTUBE_DOWNLOAD_FAILED", "The YouTube audio stream could not be read.")
+                        throw LinkImportException(LinkImportStage.Downloading, "YOUTUBE_DOWNLOAD_FAILED", "The YouTube media stream could not be read.")
                     }
                     val contentType = connection.contentType?.substringBefore(';')?.trim()?.lowercase()
-                    if (contentType != "audio/mp4") throw LinkImportException(
+                    if (contentType != stream.contentType) throw LinkImportException(
                         LinkImportStage.Downloading,
                         "YOUTUBE_CONTENT_TYPE_MISMATCH",
-                        "YouTube returned an unexpected audio format.",
+                        "YouTube returned an unexpected media format.",
                     )
                     val expectedBytes = if (status == 206) {
                         expectedRangeLength(
                             connection.getHeaderField("Content-Range"),
                             completed,
                             end,
-                            resolved.contentLength,
+                            stream.contentLength,
                         )
                     } else {
-                        if (completed != 0L || end != resolved.contentLength - 1) throw LinkImportException(
+                        if (completed != 0L || end != stream.contentLength - 1) throw LinkImportException(
                             LinkImportStage.Downloading,
                             "YOUTUBE_RANGE_MISMATCH",
-                            "YouTube ignored a required audio range.",
+                            "YouTube ignored a required media range.",
                         )
-                        resolved.contentLength
+                        stream.contentLength
                     }
                     connection.inputStream.use { input ->
                         val buffer = ByteArray(64 * 1_024)
@@ -1013,17 +1166,17 @@ class LinkImportService(context: Context) {
                             if (received + count > expectedBytes) throw LinkImportException(
                                 LinkImportStage.Downloading,
                                 "YOUTUBE_RANGE_OVERFLOW",
-                                "YouTube returned more audio data than requested.",
+                                "YouTube returned more media data than requested.",
                             )
                             output.write(buffer, 0, count)
                             digest.update(buffer, 0, count)
                             received += count
-                            progress(LinkImportProgress(LinkImportStage.Downloading, completed + received, resolved.contentLength))
+                            progress(LinkImportProgress(LinkImportStage.Downloading, progressOffset + completed + received, progressTotal))
                         }
-                        if (received != expectedBytes || completed + received > resolved.contentLength) throw LinkImportException(
+                        if (received != expectedBytes || completed + received > stream.contentLength) throw LinkImportException(
                             LinkImportStage.Downloading,
                             "YOUTUBE_SIZE_MISMATCH",
-                            "YouTube returned an unverifiable audio size.",
+                            "YouTube returned an unverifiable media size.",
                         )
                         completed += received
                     }
@@ -1032,11 +1185,133 @@ class LinkImportService(context: Context) {
                 }
             }
         }
-        if (completed != resolved.contentLength) throw LinkImportException(
+        if (completed != stream.contentLength) throw LinkImportException(
             LinkImportStage.Downloading,
             "YOUTUBE_SIZE_MISMATCH",
-            "The downloaded audio size could not be verified.",
+            "The downloaded media size could not be verified.",
         )
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private suspend fun muxVideoAndAudio(video: File, audio: File, output: File) {
+        data class MuxTrack(
+            val extractor: MediaExtractor,
+            val format: MediaFormat,
+            var destinationIndex: Int = -1,
+            var complete: Boolean = false,
+        )
+
+        fun track(file: File, mimePrefix: String): MuxTrack {
+            val extractor = MediaExtractor().apply { setDataSource(file.absolutePath) }
+            val index = (0 until extractor.trackCount).firstOrNull { position ->
+                extractor.getTrackFormat(position).getString(MediaFormat.KEY_MIME)?.startsWith(mimePrefix) == true
+            } ?: run {
+                extractor.release()
+                throw LinkImportException(LinkImportStage.SavingLocal, "VIDEO_TRACK_MISSING", "The downloaded video could not be assembled.")
+            }
+            return MuxTrack(extractor, extractor.getTrackFormat(index)).also { extractor.selectTrack(index) }
+        }
+
+        val videoTrack = track(video, "video/")
+        val audioTrack = try {
+            track(audio, "audio/")
+        } catch (error: Throwable) {
+            videoTrack.extractor.release()
+            throw error
+        }
+        val tracks = listOf(videoTrack, audioTrack)
+        val muxer = try {
+            MediaMuxer(output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        } catch (error: Throwable) {
+            tracks.forEach { it.extractor.release() }
+            throw error
+        }
+        var started = false
+        try {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(video.absolutePath)
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                    ?.toIntOrNull()?.takeIf { it in setOf(90, 180, 270) }?.let(muxer::setOrientationHint)
+            } finally {
+                retriever.release()
+            }
+            tracks.forEach { it.destinationIndex = muxer.addTrack(it.format) }
+            muxer.start()
+            started = true
+            val maximumSampleSize = tracks.maxOf { item ->
+                runCatching { item.format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) }.getOrDefault(0)
+            }.coerceIn(1 * 1_024 * 1_024, 16 * 1_024 * 1_024)
+            val buffer = ByteBuffer.allocateDirect(maximumSampleSize)
+            val info = MediaCodec.BufferInfo()
+            while (tracks.any { !it.complete }) {
+                currentCoroutineContext().ensureActive()
+                val next = tracks.filterNot(MuxTrack::complete).minByOrNull { item ->
+                    item.extractor.sampleTime.takeIf { it >= 0 } ?: Long.MAX_VALUE
+                } ?: break
+                val time = next.extractor.sampleTime
+                if (time < 0) {
+                    next.complete = true
+                    continue
+                }
+                buffer.clear()
+                val count = next.extractor.readSampleData(buffer, 0)
+                if (count < 0) {
+                    next.complete = true
+                    continue
+                }
+                info.set(0, count, time, next.extractor.sampleFlags)
+                muxer.writeSampleData(next.destinationIndex, buffer, info)
+                if (!next.extractor.advance()) next.complete = true
+            }
+        } catch (error: Throwable) {
+            output.delete()
+            if (error is CancellationException) throw error
+            if (error is LinkImportException) throw error
+            throw LinkImportException(LinkImportStage.SavingLocal, "VIDEO_MUX_FAILED", "The downloaded video and audio could not be assembled.")
+        } finally {
+            if (started) runCatching { muxer.stop() }
+            muxer.release()
+            tracks.forEach { it.extractor.release() }
+        }
+    }
+
+    private fun validateDownloadedMedia(file: File, mediaMode: LinkImportMediaMode) {
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(file.absolutePath)
+            val mimeTypes = (0 until extractor.trackCount).mapNotNull { index ->
+                extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)
+            }
+            val valid = when (mediaMode) {
+                LinkImportMediaMode.Audio -> mimeTypes.any { it.startsWith("audio/") }
+                LinkImportMediaMode.Video -> mimeTypes.any { it.startsWith("video/") } && mimeTypes.any { it.startsWith("audio/") }
+            }
+            if (!valid) throw LinkImportException(
+                LinkImportStage.SavingLocal,
+                "IMPORTED_MEDIA_INVALID",
+                "The downloaded ${mediaMode.name.lowercase()} was not a playable media file.",
+            )
+        } finally {
+            extractor.release()
+        }
+    }
+
+    private fun combinedHash(primary: String, companion: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest("$primary\n$companion".toByteArray())
+            .joinToString("") { "%02x".format(it) }
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1_024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 

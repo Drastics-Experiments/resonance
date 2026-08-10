@@ -118,10 +118,20 @@ actor LocalDeviceImportService {
         }
     }
 
-    private struct ResolvedYouTubeAudio: Sendable {
-        let preview: LocalImportYouTubePreview
+    private struct ResolvedYouTubeStream: Sendable {
+        let mediaMode: LocalImportMediaMode
         let streamingURL: URL
         let streamingHeaders: [String: String]
+        let contentLength: Int64
+        let contentType: String
+        let itag: Int
+    }
+
+    private struct ResolvedYouTubeMedia: Sendable {
+        let mediaMode: LocalImportMediaMode
+        let preview: LocalImportYouTubePreview
+        let primaryStream: ResolvedYouTubeStream
+        let companionAudioStream: ResolvedYouTubeStream?
     }
 
     private struct YouTubeVisitorSession: Sendable {
@@ -146,7 +156,8 @@ actor LocalDeviceImportService {
     private let maxPlayerBytes = 4 * 1_024 * 1_024
     private let maxArtworkBytes = 10 * 1_024 * 1_024
     private let maxAudioBytes: Int64 = 256 * 1_024 * 1_024
-    private let audioChunkSize: Int64 = 10 * 1_024 * 1_024
+    private let maxVideoBytes: Int64 = 1_024 * 1_024 * 1_024
+    private let mediaChunkSize: Int64 = 10 * 1_024 * 1_024
 
     init(
         sessions: LocalImportSessions = .production(),
@@ -167,9 +178,15 @@ actor LocalDeviceImportService {
         }
     }
 
-    func search(query: String) async throws -> LocalImportSearchResponse {
+    func search(
+        query: String,
+        mediaMode: LocalImportMediaMode = .audio
+    ) async throws -> LocalImportSearchResponse {
         try Task.checkCancellation()
-        return try await LocalImportSearchEngine(sessions: sessions).search(query)
+        return try await LocalImportSearchEngine(sessions: sessions).search(
+            query,
+            mediaMode: mediaMode
+        )
     }
 
     func resolveMetadata(source: String) async throws -> LocalImportSpotifyTrack {
@@ -210,10 +227,21 @@ actor LocalDeviceImportService {
         return try await resolveYouTubeMetadata(videoID: videoID)
     }
 
-    func resolve(source: String, progress: LocalImportProgressHandler) async throws -> LocalImportResolution {
+    func resolve(
+        source: String,
+        mediaMode: LocalImportMediaMode = .audio,
+        progress: LocalImportProgressHandler
+    ) async throws -> LocalImportResolution {
         try Task.checkCancellation()
         try await prepareDirectories()
         if LocalImportURL.isSoundCloud(source) {
+            guard mediaMode == .audio else {
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "SOUNDCLOUD_AUDIO_ONLY",
+                    message: "SoundCloud links can only be imported as audio."
+                )
+            }
             await progress(.init(stage: .resolvingMetadata))
             let soundCloudSource = try await LocalImportSoundCloud.resolve(source: source, session: sessions.soundcloud)
             switch soundCloudSource {
@@ -275,6 +303,13 @@ actor LocalDeviceImportService {
             }
         }
         if LocalImportURL.isSpotify(source) {
+            guard mediaMode == .audio else {
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "SPOTIFY_VIDEO_UNSUPPORTED",
+                    message: "Video downloads require a direct YouTube video URL."
+                )
+            }
             await progress(.init(stage: .resolvingMetadata))
             let canonicalSource = try await canonicalSpotifySource(source)
             if let canonicalPlaylist = try LocalImportURL.spotifyPlaylist(canonicalSource.absoluteString) {
@@ -331,7 +366,7 @@ actor LocalDeviceImportService {
             throw LocalImportError(stage: .resolvingMetadata, code: "UNSUPPORTED_SOURCE", message: "Enter a Spotify, SoundCloud, or supported YouTube track or playlist URL.")
         }
         await progress(.init(stage: .inspectingSource))
-        let resolved = try await resolveYouTubeAudio(videoID: videoID)
+        let resolved = try await resolveYouTubeMedia(videoID: videoID, mediaMode: mediaMode)
         let preview = resolved.preview
         let track = LocalImportSpotifyTrack(
             provider: "youtube",
@@ -424,11 +459,19 @@ actor LocalDeviceImportService {
         _ candidate: LocalImportAudioSourceMatch,
         metadata inputMetadata: LocalImportMetadata,
         existingTracks: [MobileTrack],
+        mediaMode: LocalImportMediaMode = .audio,
         progress: LocalImportProgressHandler
     ) async throws -> LocalImportOutcome {
         try Task.checkCancellation()
         try await prepareDirectories()
         if candidate.sourceProvider == .soundcloud {
+            guard mediaMode == .audio else {
+                throw LocalImportError(
+                    stage: .inspectingSource,
+                    code: "SOUNDCLOUD_AUDIO_ONLY",
+                    message: "SoundCloud links can only be imported as audio."
+                )
+            }
             return try await importSoundCloudCandidate(
                 candidate,
                 metadata: inputMetadata,
@@ -440,19 +483,43 @@ actor LocalDeviceImportService {
         try fileManager.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? fileManager.removeItem(at: temporary) }
 
-        let source = temporary.appendingPathComponent("source.m4a")
-        let processed = temporary.appendingPathComponent("processed.m4a")
+        let source = temporary.appendingPathComponent("source.\(mediaMode.fileExtension)")
+        let companionAudio = temporary.appendingPathComponent("source-audio.m4a")
+        let processed = temporary.appendingPathComponent("processed.\(mediaMode.fileExtension)")
         await progress(.init(stage: .inspectingSource))
         let videoID = try LocalImportURL.youtubeVideoID(candidate.sourceURL)
         guard let videoID else {
             throw LocalImportError(stage: .inspectingSource, code: "INVALID_YOUTUBE_VIDEO", message: "The selected source is not a supported YouTube video.")
         }
-        let resolved = try await resolveYouTubeAudio(videoID: videoID)
+        let resolved = try await resolveYouTubeMedia(videoID: videoID, mediaMode: mediaMode)
         let sourceAssociation = LocalImportSourceAssociation(
             sourceURL: inputMetadata.sourceURL,
-            downloadSourceURL: resolved.streamingURL
+            downloadSourceURL: resolved.companionAudioStream == nil
+                ? resolved.primaryStream.streamingURL
+                : nil
         )
-        let sourceHash = try await download(resolved, to: source, progress: progress)
+        let totalDownloadBytes = resolved.preview.contentLength
+        let primaryHash = try await download(
+            resolved.primaryStream,
+            to: source,
+            completedOffset: 0,
+            total: totalDownloadBytes,
+            progress: progress
+        )
+        var sourceHashes = [primaryHash]
+        var companionAudioInput: URL?
+        if let audioStream = resolved.companionAudioStream {
+            let audioHash = try await download(
+                audioStream,
+                to: companionAudio,
+                completedOffset: resolved.primaryStream.contentLength,
+                total: totalDownloadBytes,
+                progress: progress
+            )
+            sourceHashes.append(audioHash)
+            companionAudioInput = companionAudio
+        }
+        let sourceHash = Self.combinedSourceHash(sourceHashes)
         if let duplicate = existingTracks.first(where: {
             $0.sourceSHA256 == sourceHash || $0.contentSHA256 == sourceHash
         }) {
@@ -471,12 +538,26 @@ actor LocalDeviceImportService {
         let artwork = await fetchArtwork(metadata.artworkURL)
         try Task.checkCancellation()
         do {
-            try await LocalImportMediaProcessor.remuxM4A(input: source, output: processed, metadata: metadata, artwork: artwork)
+            try await LocalImportMediaProcessor.remux(
+                input: source,
+                companionAudioInput: companionAudioInput,
+                output: processed,
+                mediaMode: mediaMode,
+                metadata: metadata,
+                artwork: artwork
+            )
         } catch is CancellationError {
             throw CancellationError()
         } catch where artwork != nil {
             try? fileManager.removeItem(at: processed)
-            try await LocalImportMediaProcessor.remuxM4A(input: source, output: processed, metadata: metadata, artwork: nil)
+            try await LocalImportMediaProcessor.remux(
+                input: source,
+                companionAudioInput: companionAudioInput,
+                output: processed,
+                mediaMode: mediaMode,
+                metadata: metadata,
+                artwork: nil
+            )
         }
         let contentHash = try hashFile(processed)
         if let duplicate = existingTracks.first(where: {
@@ -487,22 +568,42 @@ actor LocalDeviceImportService {
 
         try Task.checkCancellation()
         await progress(.init(stage: .savingLocal))
-        let filename = safeFilename("\(metadata.artist) - \(metadata.title)") + ".m4a"
+        let filename = safeFilename("\(metadata.artist) - \(metadata.title)") + ".\(mediaMode.fileExtension)"
         let destination = try uniqueDestination(preferredFilename: filename)
         do {
             try fileManager.moveItem(at: processed, to: destination)
-            guard let player = try? AVAudioPlayer(contentsOf: destination), player.duration > 0 else {
-                try? fileManager.removeItem(at: destination)
-                throw LocalImportError(stage: .savingLocal, code: "INVALID_LOCAL_MEDIA", message: "The completed local audio file is not playable.")
+            let duration: TimeInterval
+            if mediaMode == .video {
+                let asset = AVURLAsset(url: destination)
+                let videoTracks = try await asset.loadTracks(withMediaType: .video)
+                let assetDuration = try await asset.load(.duration).seconds
+                guard !videoTracks.isEmpty, assetDuration.isFinite, assetDuration > 0 else {
+                    try? fileManager.removeItem(at: destination)
+                    throw LocalImportError(stage: .savingLocal, code: "INVALID_LOCAL_MEDIA", message: "The completed local video file is not playable.")
+                }
+                if let player = try? AVAudioPlayer(contentsOf: destination),
+                   player.duration.isFinite,
+                   player.duration > 0 {
+                    duration = player.duration
+                } else {
+                    duration = assetDuration
+                }
+            } else {
+                guard let player = try? AVAudioPlayer(contentsOf: destination), player.duration > 0 else {
+                    try? fileManager.removeItem(at: destination)
+                    throw LocalImportError(stage: .savingLocal, code: "INVALID_LOCAL_MEDIA", message: "The completed local audio file is not playable.")
+                }
+                duration = player.duration
             }
             return .created(LocalImportedAudio(
                 fileURL: destination,
                 metadata: metadata,
-                duration: player.duration,
+                duration: duration,
                 artworkData: artwork,
                 downloadSourceURL: sourceAssociation.downloadSourceURL,
                 sourceSHA256: sourceHash,
-                contentSHA256: contentHash
+                contentSHA256: contentHash,
+                mediaMode: mediaMode
             ))
         } catch {
             try? fileManager.removeItem(at: destination)
@@ -615,8 +716,11 @@ actor LocalDeviceImportService {
                 message: "The selected source is not a supported YouTube video."
             )
         }
-        let resolved = try await resolveYouTubeAudio(videoID: videoID)
-        return LocalImportPreviewStream(url: resolved.streamingURL, httpHeaders: resolved.streamingHeaders)
+        let resolved = try await resolveYouTubeMedia(videoID: videoID, mediaMode: .audio)
+        return LocalImportPreviewStream(
+            url: resolved.primaryStream.streamingURL,
+            httpHeaders: resolved.primaryStream.streamingHeaders
+        )
     }
 
     private func resolveSpotify(_ source: String) async throws -> LocalImportSpotifyTrack {
@@ -1015,7 +1119,10 @@ actor LocalDeviceImportService {
         )
     }
 
-    private func resolveYouTubeAudio(videoID: String) async throws -> ResolvedYouTubeAudio {
+    private func resolveYouTubeMedia(
+        videoID: String,
+        mediaMode: LocalImportMediaMode
+    ) async throws -> ResolvedYouTubeMedia {
         let session = try await fetchYouTubeVisitorSession(videoID: videoID)
         let clients = [
             YouTubePlayerClient(
@@ -1040,7 +1147,12 @@ actor LocalDeviceImportService {
         for client in clients {
             do {
                 let player = try await fetchYouTubePlayer(videoID: videoID, visitor: session, client: client)
-                return try resolvedYouTubeAudio(videoID: videoID, player: player, client: client)
+                return try resolvedYouTubeMedia(
+                    videoID: videoID,
+                    player: player,
+                    client: client,
+                    mediaMode: mediaMode
+                )
             } catch let error as LocalImportError {
                 if error.code == "YOUTUBE_PLAYBACK_VERIFICATION_REQUIRED" { verificationError = error }
                 else { lastError = error }
@@ -1153,11 +1265,12 @@ actor LocalDeviceImportService {
         throw lastError ?? LocalImportError(stage: .inspectingSource, code: "YOUTUBE_RESOLVE_FAILED", message: "YouTube could not resolve this video.")
     }
 
-    private func resolvedYouTubeAudio(
+    private func resolvedYouTubeMedia(
         videoID: String,
         player: [String: Any],
-        client: YouTubePlayerClient
-    ) throws -> ResolvedYouTubeAudio {
+        client: YouTubePlayerClient,
+        mediaMode: LocalImportMediaMode
+    ) throws -> ResolvedYouTubeMedia {
         let details = player["videoDetails"] as? [String: Any] ?? [:]
         if let returnedID = details["videoId"] as? String, returnedID != videoID {
             throw LocalImportError(stage: .inspectingSource, code: "YOUTUBE_MISMATCH", message: "YouTube returned the wrong video.")
@@ -1168,32 +1281,127 @@ actor LocalDeviceImportService {
         let streaming = player["streamingData"] as? [String: Any] ?? [:]
         let adaptive = streaming["adaptiveFormats"] as? [[String: Any]] ?? []
         let formats = streaming["formats"] as? [[String: Any]] ?? []
-        let candidates = (adaptive + formats).filter { format in
-            let mime = format["mimeType"] as? String ?? ""
-            return mime.lowercased().hasPrefix("audio/mp4")
-                && format["url"] is String
-                && Self.integer(format["itag"]) > 0
-                && Self.integer64(format["contentLength"]) > 0
-                && format["qualityLabel"] == nil
-                && format["drmFamilies"] == nil
-                && (format["type"] as? String) != "FORMAT_STREAM_TYPE_OTF"
-        }.sorted { lhs, rhs in
-            let preference = Self.originalAudioPreference(rhs) - Self.originalAudioPreference(lhs)
-            if preference != 0 { return preference < 0 }
-            return Self.integer64(rhs["averageBitrate"] ?? rhs["bitrate"]) < Self.integer64(lhs["averageBitrate"] ?? lhs["bitrate"])
+        let streamHeaders = ["User-Agent": client.userAgent, "Origin": client.origin]
+
+        func directStream(
+            for format: [String: Any],
+            mediaMode: LocalImportMediaMode
+        ) -> ResolvedYouTubeStream? {
+            let contentLength = Self.integer64(format["contentLength"])
+            let maximumSize = mediaMode == .video ? maxVideoBytes : maxAudioBytes
+            guard let streamValue = format["url"] as? String,
+                  let streamURL = URL(string: streamValue),
+                  LocalImportURL.isGoogleVideo(streamURL),
+                  Self.integer(format["itag"]) > 0,
+                  contentLength > 0,
+                  contentLength <= maximumSize,
+                  format["drmFamilies"] == nil,
+                  (format["type"] as? String) != "FORMAT_STREAM_TYPE_OTF" else { return nil }
+            let fallbackType = mediaMode == .video ? "video/mp4" : "audio/mp4"
+            return ResolvedYouTubeStream(
+                mediaMode: mediaMode,
+                streamingURL: streamURL,
+                streamingHeaders: streamHeaders,
+                contentLength: contentLength,
+                contentType: (format["mimeType"] as? String)?.split(separator: ";").first.map(String.init) ?? fallbackType,
+                itag: Self.integer(format["itag"])
+            )
         }
-        guard let format = candidates.first,
-              let streamValue = format["url"] as? String,
-              let streamURL = URL(string: streamValue), LocalImportURL.isGoogleVideo(streamURL) else {
-            throw LocalImportError(stage: .inspectingSource, code: "YOUTUBE_NO_VERIFIED_M4A", message: "YouTube did not provide a direct, verifiable M4A audio stream for this video.")
+
+        func prefersVideo(_ lhs: [String: Any], _ rhs: [String: Any]) -> Bool {
+            let lhsMIME = (lhs["mimeType"] as? String ?? "").lowercased()
+            let rhsMIME = (rhs["mimeType"] as? String ?? "").lowercased()
+            let lhsH264 = lhsMIME.contains("avc1") ? 1 : 0
+            let rhsH264 = rhsMIME.contains("avc1") ? 1 : 0
+            if lhsH264 != rhsH264 { return lhsH264 > rhsH264 }
+            let lhsHeight = Self.integer(lhs["height"])
+            let rhsHeight = Self.integer(rhs["height"])
+            if lhsHeight != rhsHeight { return lhsHeight > rhsHeight }
+            return Self.integer64(lhs["averageBitrate"] ?? lhs["bitrate"])
+                > Self.integer64(rhs["averageBitrate"] ?? rhs["bitrate"])
         }
-        let contentLength = Self.integer64(format["contentLength"])
-        guard contentLength > 0, contentLength <= maxAudioBytes else {
-            throw LocalImportError(stage: .inspectingSource, code: "YOUTUBE_AUDIO_TOO_LARGE", message: "The selected audio is too large to import on this device.")
+
+        func prefersAudio(_ lhs: [String: Any], _ rhs: [String: Any]) -> Bool {
+            let lhsPreference = Self.originalAudioPreference(lhs)
+            let rhsPreference = Self.originalAudioPreference(rhs)
+            if lhsPreference != rhsPreference { return lhsPreference > rhsPreference }
+            return Self.integer64(lhs["averageBitrate"] ?? lhs["bitrate"])
+                > Self.integer64(rhs["averageBitrate"] ?? rhs["bitrate"])
         }
+
+        let primaryStream: ResolvedYouTubeStream
+        let companionAudioStream: ResolvedYouTubeStream?
+        if mediaMode == .video {
+            let progressiveCandidates = formats.filter { format in
+                let mime = (format["mimeType"] as? String ?? "").lowercased()
+                return mime.hasPrefix("video/mp4")
+                    && format["qualityLabel"] is String
+                    && (format["audioQuality"] is String || Self.integer(format["audioChannels"]) > 0)
+                    && directStream(for: format, mediaMode: .video) != nil
+            }.sorted(by: prefersVideo)
+            let audioCandidates = adaptive.filter { format in
+                let mime = (format["mimeType"] as? String ?? "").lowercased()
+                return mime.hasPrefix("audio/mp4")
+                    && format["qualityLabel"] == nil
+                    && directStream(for: format, mediaMode: .audio) != nil
+            }.sorted(by: prefersAudio)
+
+            let selectedAudioFormat = audioCandidates.first
+            let selectedAudioStream = selectedAudioFormat.flatMap { directStream(for: $0, mediaMode: .audio) }
+            let adaptiveVideoCandidates = adaptive.filter { format in
+                let mime = (format["mimeType"] as? String ?? "").lowercased()
+                guard mime.hasPrefix("video/mp4"),
+                      format["qualityLabel"] is String,
+                      let videoStream = directStream(for: format, mediaMode: .video),
+                      let audioStream = selectedAudioStream else { return false }
+                return videoStream.contentLength + audioStream.contentLength <= maxVideoBytes
+            }.sorted(by: prefersVideo)
+
+            let progressiveFormat = progressiveCandidates.first
+            let adaptiveVideoFormat = adaptiveVideoCandidates.first
+            let shouldUseAdaptivePair: Bool
+            if let adaptiveVideoFormat {
+                shouldUseAdaptivePair = progressiveFormat == nil
+                    || Self.integer(adaptiveVideoFormat["height"]) > Self.integer(progressiveFormat?["height"])
+            } else {
+                shouldUseAdaptivePair = false
+            }
+
+            if shouldUseAdaptivePair,
+               let adaptiveVideoFormat,
+               let videoStream = directStream(for: adaptiveVideoFormat, mediaMode: .video),
+               let audioStream = selectedAudioStream {
+                primaryStream = videoStream
+                companionAudioStream = audioStream
+            } else if let progressiveFormat,
+                      let videoStream = directStream(for: progressiveFormat, mediaMode: .video) {
+                primaryStream = videoStream
+                companionAudioStream = nil
+            } else {
+                throw LocalImportError(
+                    stage: .inspectingSource,
+                    code: "YOUTUBE_NO_VERIFIED_MP4",
+                    message: "YouTube did not provide compatible direct MP4 video and M4A audio streams for this video."
+                )
+            }
+        } else {
+            let audioCandidates = (adaptive + formats).filter { format in
+                let mime = (format["mimeType"] as? String ?? "").lowercased()
+                return mime.hasPrefix("audio/mp4")
+                    && format["qualityLabel"] == nil
+                    && directStream(for: format, mediaMode: .audio) != nil
+            }.sorted(by: prefersAudio)
+            guard let audioFormat = audioCandidates.first,
+                  let audioStream = directStream(for: audioFormat, mediaMode: .audio) else {
+                throw LocalImportError(stage: .inspectingSource, code: "YOUTUBE_NO_VERIFIED_M4A", message: "YouTube did not provide a direct, verifiable M4A audio stream for this video.")
+            }
+            primaryStream = audioStream
+            companionAudioStream = nil
+        }
+
         let duration = Self.integer(details["lengthSeconds"])
         guard duration <= 24 * 60 * 60 else {
-            throw LocalImportError(stage: .inspectingSource, code: "YOUTUBE_DURATION_TOO_LONG", message: "The selected audio is too long to import.")
+            throw LocalImportError(stage: .inspectingSource, code: "YOUTUBE_DURATION_TOO_LONG", message: "The selected \(mediaMode.rawValue) is too long to import.")
         }
         let thumbnails = ((details["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]] ?? [])
             .sorted { Self.integer($0["width"]) > Self.integer($1["width"]) }
@@ -1204,49 +1412,53 @@ actor LocalDeviceImportService {
             author: cleanMetadata(details["author"] as? String, fallback: "Unknown uploader"),
             durationSeconds: duration > 0 ? duration : nil,
             thumbnailURL: thumbnail,
-            itag: Self.integer(format["itag"]),
-            contentLength: contentLength,
-            contentType: "audio/mp4",
+            itag: primaryStream.itag,
+            contentLength: primaryStream.contentLength + (companionAudioStream?.contentLength ?? 0),
+            contentType: primaryStream.contentType,
             sourceURL: "https://www.youtube.com/watch?v=\(videoID)"
         )
-        return ResolvedYouTubeAudio(
+        return ResolvedYouTubeMedia(
+            mediaMode: mediaMode,
             preview: preview,
-            streamingURL: streamURL,
-            streamingHeaders: ["User-Agent": client.userAgent, "Origin": client.origin]
+            primaryStream: primaryStream,
+            companionAudioStream: companionAudioStream
         )
     }
 
     private func download(
-        _ resolved: ResolvedYouTubeAudio,
+        _ stream: ResolvedYouTubeStream,
         to destination: URL,
+        completedOffset: Int64,
+        total: Int64,
         progress: LocalImportProgressHandler
     ) async throws -> String {
+        let mediaLabel = stream.mediaMode.rawValue
         guard fileManager.createFile(atPath: destination.path, contents: nil),
               let file = try? FileHandle(forWritingTo: destination) else {
-            throw LocalImportError(stage: .downloading, code: "LOCAL_WRITE_FAILED", message: "The temporary audio file could not be created.")
+            throw LocalImportError(stage: .downloading, code: "LOCAL_WRITE_FAILED", message: "The temporary \(mediaLabel) file could not be created.")
         }
         var hasher = SHA256()
         var completed: Int64 = 0
         do {
             defer { try? file.close() }
             var start: Int64 = 0
-            while start < resolved.preview.contentLength {
+            while start < stream.contentLength {
                 try Task.checkCancellation()
-                let end = min(resolved.preview.contentLength - 1, start + audioChunkSize - 1)
-                var request = URLRequest(url: resolved.streamingURL)
-                resolved.streamingHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+                let end = min(stream.contentLength - 1, start + mediaChunkSize - 1)
+                var request = URLRequest(url: stream.streamingURL)
+                stream.streamingHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
                 request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
                 request.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
                 let (bytes, rawResponse) = try await sessions.googleVideo.bytes(for: request)
                 guard let response = rawResponse as? HTTPURLResponse,
                       response.url.map(LocalImportURL.isGoogleVideo) == true else {
-                    throw LocalImportError(stage: .downloading, code: "YOUTUBE_UNSAFE_REDIRECT", message: "YouTube returned an unsafe audio redirect.")
+                    throw LocalImportError(stage: .downloading, code: "YOUTUBE_UNSAFE_REDIRECT", message: "YouTube returned an unsafe \(mediaLabel) redirect.")
                 }
                 if response.statusCode == 429 {
                     throw LocalImportError(
                         stage: .downloading,
                         code: "YOUTUBE_RATE_LIMITED",
-                        message: "YouTube rate-limited the audio import.",
+                        message: "YouTube rate-limited the \(mediaLabel) import.",
                         retryAfter: response.value(forHTTPHeaderField: "Retry-After")
                     )
                 }
@@ -1256,15 +1468,15 @@ actor LocalDeviceImportService {
                         response.value(forHTTPHeaderField: "Content-Range"),
                         start: start,
                         end: end,
-                        total: resolved.preview.contentLength
+                        total: stream.contentLength
                     )
-                } else if response.statusCode == 200, start == 0, end == resolved.preview.contentLength - 1 {
-                    expected = resolved.preview.contentLength
+                } else if response.statusCode == 200, start == 0, end == stream.contentLength - 1 {
+                    expected = stream.contentLength
                 } else {
-                    throw LocalImportError(stage: .downloading, code: "YOUTUBE_DOWNLOAD_FAILED", message: "The YouTube audio stream could not be read.")
+                    throw LocalImportError(stage: .downloading, code: "YOUTUBE_DOWNLOAD_FAILED", message: "The YouTube \(mediaLabel) stream could not be read.")
                 }
                 if let length = response.value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init), length != expected {
-                    throw LocalImportError(stage: .downloading, code: "YOUTUBE_SIZE_MISMATCH", message: "YouTube returned an unverifiable audio size.")
+                    throw LocalImportError(stage: .downloading, code: "YOUTUBE_SIZE_MISMATCH", message: "YouTube returned an unverifiable \(mediaLabel) size.")
                 }
                 var received: Int64 = 0
                 var buffer = Data()
@@ -1274,7 +1486,7 @@ actor LocalDeviceImportService {
                     buffer.append(byte)
                     received += 1
                     if received > expected {
-                        throw LocalImportError(stage: .downloading, code: "YOUTUBE_RANGE_OVERFLOW", message: "YouTube returned more audio data than requested.")
+                        throw LocalImportError(stage: .downloading, code: "YOUTUBE_RANGE_OVERFLOW", message: "YouTube returned more \(mediaLabel) data than requested.")
                     }
                     if buffer.count >= 64 * 1_024 {
                         try file.write(contentsOf: buffer)
@@ -1282,7 +1494,7 @@ actor LocalDeviceImportService {
                         buffer.removeAll(keepingCapacity: true)
                     }
                     if received % (256 * 1_024) == 0 {
-                        await progress(.init(stage: .downloading, completed: completed + received, total: resolved.preview.contentLength))
+                        await progress(.init(stage: .downloading, completed: completedOffset + completed + received, total: total))
                     }
                 }
                 if !buffer.isEmpty {
@@ -1290,14 +1502,14 @@ actor LocalDeviceImportService {
                     hasher.update(data: buffer)
                 }
                 guard received == expected else {
-                    throw LocalImportError(stage: .downloading, code: "YOUTUBE_RANGE_TRUNCATED", message: "YouTube ended an audio range before it was complete.")
+                    throw LocalImportError(stage: .downloading, code: "YOUTUBE_RANGE_TRUNCATED", message: "YouTube ended a \(mediaLabel) range before it was complete.")
                 }
                 completed += received
-                await progress(.init(stage: .downloading, completed: completed, total: resolved.preview.contentLength))
+                await progress(.init(stage: .downloading, completed: completedOffset + completed, total: total))
                 start = end + 1
             }
-            guard completed == resolved.preview.contentLength else {
-                throw LocalImportError(stage: .downloading, code: "YOUTUBE_SIZE_MISMATCH", message: "The downloaded audio size could not be verified.")
+            guard completed == stream.contentLength else {
+                throw LocalImportError(stage: .downloading, code: "YOUTUBE_SIZE_MISMATCH", message: "The downloaded \(mediaLabel) size could not be verified.")
             }
             try file.synchronize()
             return hasher.finalize().map { String(format: "%02x", $0) }.joined()
@@ -1370,6 +1582,13 @@ actor LocalDeviceImportService {
             counter += 1
         }
         return candidate
+    }
+
+    private static func combinedSourceHash(_ hashes: [String]) -> String {
+        guard hashes.count > 1 else { return hashes.first ?? "" }
+        return SHA256.hash(data: Data(hashes.joined(separator: "\n").utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     private func hashFile(_ url: URL) throws -> String {
@@ -1504,13 +1723,48 @@ enum LocalImportMediaProcessor {
         metadata: LocalImportMetadata,
         artwork: Data?
     ) async throws {
-        let asset = AVURLAsset(url: input)
-        let preset = input.pathExtension.lowercased() == "mp3"
+        try await remux(
+            input: input,
+            companionAudioInput: nil,
+            output: output,
+            mediaMode: .audio,
+            metadata: metadata,
+            artwork: artwork
+        )
+    }
+
+    static func remux(
+        input: URL,
+        companionAudioInput: URL? = nil,
+        output: URL,
+        mediaMode: LocalImportMediaMode,
+        metadata: LocalImportMetadata,
+        artwork: Data?
+    ) async throws {
+        let asset: AVAsset
+        if let companionAudioInput {
+            guard mediaMode == .video else {
+                throw LocalImportError(
+                    stage: .processing,
+                    code: "MEDIA_PROCESSING_FAILED",
+                    message: "A separate audio stream can only be combined with video."
+                )
+            }
+            asset = try await composition(videoInput: input, audioInput: companionAudioInput)
+        } else {
+            asset = AVURLAsset(url: input)
+        }
+        let fileType: AVFileType = mediaMode == .video ? .mp4 : .m4a
+        let preset = mediaMode == .audio && input.pathExtension.lowercased() == "mp3"
             ? AVAssetExportPresetAppleM4A
             : AVAssetExportPresetPassthrough
         guard let exporter = AVAssetExportSession(asset: asset, presetName: preset),
-              exporter.supportedFileTypes.contains(.m4a) else {
-            throw LocalImportError(stage: .processing, code: "MEDIA_PROCESSOR_UNAVAILABLE", message: "The local media processor cannot remux this M4A file.")
+              exporter.supportedFileTypes.contains(fileType) else {
+            throw LocalImportError(
+                stage: .processing,
+                code: "MEDIA_PROCESSOR_UNAVAILABLE",
+                message: "The local media processor cannot prepare this \(mediaMode.rawValue) file."
+            )
         }
         var items = [
             metadataItem(.commonIdentifierTitle, value: metadata.title as NSString),
@@ -1528,7 +1782,7 @@ enum LocalImportMediaProcessor {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 box.value.outputURL = output
-                box.value.outputFileType = .m4a
+                box.value.outputFileType = fileType
                 box.value.exportAsynchronously {
                     switch box.value.status {
                     case .completed:
@@ -1539,7 +1793,7 @@ enum LocalImportMediaProcessor {
                         continuation.resume(throwing: LocalImportError(
                             stage: .processing,
                             code: "MEDIA_PROCESSING_FAILED",
-                            message: box.value.error?.localizedDescription ?? "The local M4A metadata remux failed."
+                            message: box.value.error?.localizedDescription ?? "The local \(mediaMode.rawValue) metadata remux failed."
                         ))
                     }
                 }
@@ -1547,6 +1801,55 @@ enum LocalImportMediaProcessor {
         } onCancel: {
             box.value.cancelExport()
         }
+    }
+
+    private static func composition(videoInput: URL, audioInput: URL) async throws -> AVMutableComposition {
+        let videoAsset = AVURLAsset(url: videoInput)
+        let audioAsset = AVURLAsset(url: audioInput)
+        guard let sourceVideoTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
+              let sourceAudioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first else {
+            throw LocalImportError(
+                stage: .processing,
+                code: "MEDIA_PROCESSING_FAILED",
+                message: "The separate YouTube video and audio streams could not be combined."
+            )
+        }
+
+        let videoTimeRange = try await sourceVideoTrack.load(.timeRange)
+        let audioTimeRange = try await sourceAudioTrack.load(.timeRange)
+        guard videoTimeRange.duration.isNumeric,
+              videoTimeRange.duration.seconds > 0,
+              audioTimeRange.duration.isNumeric,
+              audioTimeRange.duration.seconds > 0 else {
+            throw LocalImportError(
+                stage: .processing,
+                code: "MEDIA_PROCESSING_FAILED",
+                message: "The separate YouTube streams had invalid durations."
+            )
+        }
+
+        let composition = AVMutableComposition()
+        guard let compositionVideoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ), let compositionAudioTrack = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw LocalImportError(
+                stage: .processing,
+                code: "MEDIA_PROCESSOR_UNAVAILABLE",
+                message: "The local media processor cannot combine this video."
+            )
+        }
+
+        let sharedDuration = CMTimeMinimum(videoTimeRange.duration, audioTimeRange.duration)
+        let trimmedVideoRange = CMTimeRange(start: videoTimeRange.start, duration: sharedDuration)
+        let trimmedAudioRange = CMTimeRange(start: audioTimeRange.start, duration: sharedDuration)
+        try compositionVideoTrack.insertTimeRange(trimmedVideoRange, of: sourceVideoTrack, at: .zero)
+        try compositionAudioTrack.insertTimeRange(trimmedAudioRange, of: sourceAudioTrack, at: .zero)
+        compositionVideoTrack.preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
+        return composition
     }
 
     private static func metadataItem(_ identifier: AVMetadataIdentifier, value: NSCopying & NSObjectProtocol) -> AVMetadataItem {

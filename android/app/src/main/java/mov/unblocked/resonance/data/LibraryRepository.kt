@@ -176,7 +176,8 @@ class LibraryRepository(
 
     suspend fun registerLocalImport(download: LinkImportDownload): Track =
         withContext(Dispatchers.IO) {
-            val extension = download.file.extension.lowercase().takeIf { it in setOf("m4a", "mp3") } ?: "m4a"
+            val extension = download.file.extension.lowercase().takeIf { it in setOf("m4a", "mp3", "mp4") }
+                ?: download.mediaMode.fileExtension
             val preferred = safeFilename(download.metadata.artist + " - " + download.metadata.title) + "." + extension
             val destination = uniqueMusicFile(preferred)
             try {
