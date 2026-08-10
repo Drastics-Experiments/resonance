@@ -202,6 +202,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
     var dateAdded: Date
     var sourceSHA256: String?
     var contentSHA256: String?
+    var preservesUnlinkedImport: Bool?
 
     init(
         id: UUID = UUID(),
@@ -219,7 +220,8 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         artworkScanComplete: Bool? = false,
         dateAdded: Date = .now,
         sourceSHA256: String? = nil,
-        contentSHA256: String? = nil
+        contentSHA256: String? = nil,
+        preservesUnlinkedImport: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -237,6 +239,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         self.dateAdded = dateAdded
         self.sourceSHA256 = sourceSHA256
         self.contentSHA256 = contentSHA256
+        self.preservesUnlinkedImport = preservesUnlinkedImport
     }
 
     var durationText: String {
@@ -254,6 +257,35 @@ struct MobileTrack: Identifiable, Codable, Hashable {
                 profileID: syncProfileID ?? "default"
               ) else { return nil }
         return MobileRemoteIdentity(context: context, remoteID: remoteID)
+    }
+}
+
+enum MobileUnlinkedDownloadMigrationPolicy {
+    static let identifier = "delete-unlinked-downloads-v1"
+
+    struct Decision: Equatable {
+        var track: MobileTrack
+        let shouldDelete: Bool
+    }
+
+    static func decision(for track: MobileTrack, legacyDownloadOwned: Bool) -> Decision {
+        var migrated = track
+        if migrated.preservesUnlinkedImport == nil {
+            migrated.preservesUnlinkedImport = !legacyDownloadOwned
+        }
+
+        let hasRemoteIdentity = [migrated.remoteID, migrated.sourceServer].contains { value in
+            value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+        let hasSourceLink = [migrated.sourceURL, migrated.downloadSourceURL].contains { value in
+            value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+        return Decision(
+            track: migrated,
+            shouldDelete: (hasRemoteIdentity || legacyDownloadOwned)
+                && !hasSourceLink
+                && migrated.preservesUnlinkedImport != true
+        )
     }
 }
 
@@ -877,6 +909,7 @@ struct MobileStoredLibrary: Codable, Equatable {
     var playbackPlaylistID: UUID? = nil
     var playbackSnapshot: MobilePlaybackSnapshot? = nil
     var transferFailures: [MobileTransferFailure]? = nil
+    var completedMigrations: Set<String>? = nil
 }
 
 struct MobileLibraryNormalizationResult: Equatable {

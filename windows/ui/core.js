@@ -31,6 +31,7 @@ export function createEmptyState() {
     dirtyClipRangeKeys: [],
     deletedClipRangeKeys: [],
     listeningHistory: [],
+    completedMigrations: [],
     serverUploadManifests: [],
     serverTransferPreferences: {},
     appPreferences: {
@@ -887,6 +888,10 @@ export function normalizeState(value) {
       originatedOnThisDevice: entry.originatedOnThisDevice !== false,
     }))
     .slice(-2000);
+  state.completedMigrations = unique(
+    (Array.isArray(state.completedMigrations) ? state.completedMigrations : [])
+      .filter((item) => typeof item === "string" && item.length <= 100),
+  );
   state.serverUploadManifests = (Array.isArray(state.serverUploadManifests) ? state.serverUploadManifests : [])
     .map(normalizeServerUploadManifest)
     .filter(Boolean)

@@ -37,6 +37,7 @@ data class Track(
     val sourceSHA256: String? = null,
     val contentSHA256: String? = null,
     val sourceURL: String? = null,
+    val preservesUnlinkedImport: Boolean? = null,
 ) {
     val durationText: String
         get() {
@@ -44,6 +45,32 @@ data class Track(
             val totalSeconds = durationMs / 1_000L
             return "${totalSeconds / 60}:${(totalSeconds % 60).toString().padStart(2, '0')}"
         }
+}
+
+object UnlinkedDownloadMigrationPolicy {
+    const val Identifier = "delete-unlinked-downloads-v1"
+
+    data class Decision(
+        val track: Track,
+        val shouldDelete: Boolean,
+    )
+
+    fun decision(track: Track, legacyDownloadOwned: Boolean): Decision {
+        val migrated = if (track.preservesUnlinkedImport == null) {
+            track.copy(preservesUnlinkedImport = !legacyDownloadOwned)
+        } else {
+            track
+        }
+        val hasRemoteIdentity = listOf(migrated.remoteID, migrated.sourceServer)
+            .any { !it.isNullOrBlank() }
+        val hasSourceLink = listOf(migrated.sourceURL, migrated.downloadSourceURL)
+            .any { !it.isNullOrBlank() }
+        return Decision(
+            track = migrated,
+            shouldDelete = (hasRemoteIdentity || legacyDownloadOwned) &&
+                !hasSourceLink && migrated.preservesUnlinkedImport != true,
+        )
+    }
 }
 
 @Serializable
@@ -177,6 +204,7 @@ data class StoredLibrary(
      * save and restored when the server/profile context changes.
      */
     val profileStates: Map<String, ProfileLibraryState> = emptyMap(),
+    val completedMigrations: Set<String> = emptySet(),
 )
 
 @Serializable

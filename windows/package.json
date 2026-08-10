@@ -42,6 +42,7 @@
       "local-soundcloud.cjs",
       "local-youtube.cjs",
       "library-paths.cjs",
+      "library-update-migration.cjs",
       "crash-safe-file.cjs",
       "discord-rpc.cjs",
       "download-file.cjs",

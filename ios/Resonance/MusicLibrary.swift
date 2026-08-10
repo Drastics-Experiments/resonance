@@ -628,6 +628,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var clipRanges: [String: MobileClipRange] = [:]
     private var dirtyClipRangeKeys: Set<String> = []
     private var deletedClipRangeKeys: Set<String> = []
+    private var completedMigrations: Set<String> = []
     private var clipRangeMutationGeneration: UInt64 = 0
     private var profileSyncStates: [MobileServerContext: MobileProfileSyncState] = [:]
     private var clientConfigRequestGeneration: UInt64 = 0
@@ -1801,7 +1802,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                     duration: metadata.duration ?? audio.duration,
                     relativePath: filename,
                     artworkFilename: saveArtwork(metadata.artworkData, for: trackID),
-                    artworkScanComplete: true
+                    artworkScanComplete: true,
+                    preservesUnlinkedImport: true
                 ))
             } catch {
                 try? fileManager.removeItem(at: destination)
@@ -1869,7 +1871,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 artworkFilename: saveArtwork(imported.artworkData, for: id),
                 artworkScanComplete: true,
                 sourceSHA256: imported.sourceSHA256,
-                contentSHA256: imported.contentSHA256
+                contentSHA256: imported.contentSHA256,
+                preservesUnlinkedImport: true
             )
             tracks.append(track)
             normalizeSystemPlaylist()
@@ -2787,7 +2790,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                             downloadSourceURL: song.sourceURL,
                             artworkFilename: saveArtwork(artworkData, for: trackID),
                             artworkScanComplete: true,
-                            contentSHA256: downloaded.sha256
+                            contentSHA256: downloaded.sha256,
+                            preservesUnlinkedImport: false
                         ))
                         downloadedSongIDs.insert(song.id)
                         completed += 1
@@ -4902,7 +4906,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             playbackQueue: queueReferences.map(\.trackID),
             playbackPlaylistID: queueReferences.isEmpty ? nil : playbackPlaylistID,
             playbackSnapshot: playbackSnapshot,
-            transferFailures: transferFailures
+            transferFailures: transferFailures,
+            completedMigrations: completedMigrations
         )
         do {
             let data = try JSONEncoder().encode(stored)
@@ -4917,6 +4922,59 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 message: "Your in-memory changes are still available. \(error.localizedDescription)"
             )
         }
+    }
+
+    private func migrateUnlinkedDownloads(
+        _ storedTracks: [MobileTrack]
+    ) -> (tracks: [MobileTrack], completed: Bool, changed: Bool) {
+        var retained: [MobileTrack] = []
+        var completed = true
+        var changed = false
+
+        for track in storedTracks {
+            let mediaURL = fileURL(for: track)
+            let legacyDownloadOwned = (try? mediaURL.resourceValues(
+                forKeys: [.isExcludedFromBackupKey]
+            ).isExcludedFromBackup) == true
+            let decision = MobileUnlinkedDownloadMigrationPolicy.decision(
+                for: track,
+                legacyDownloadOwned: legacyDownloadOwned
+            )
+            changed = changed || decision.track != track
+            guard decision.shouldDelete else {
+                retained.append(decision.track)
+                continue
+            }
+
+            guard isDescendant(mediaURL, of: musicDirectory) else {
+                retained.append(decision.track)
+                completed = false
+                continue
+            }
+            do {
+                if fileManager.fileExists(atPath: mediaURL.path) {
+                    try fileManager.removeItem(at: mediaURL)
+                }
+                if let artworkFilename = decision.track.artworkFilename {
+                    let artworkURL = artworkDirectory.appendingPathComponent(artworkFilename)
+                    if isDescendant(artworkURL, of: artworkDirectory) {
+                        try? fileManager.removeItem(at: artworkURL)
+                        artworkCache.removeValue(forKey: artworkFilename)
+                    }
+                }
+                changed = true
+            } catch {
+                retained.append(decision.track)
+                completed = false
+            }
+        }
+        return (retained, completed, changed)
+    }
+
+    private func isDescendant(_ candidate: URL, of directory: URL) -> Bool {
+        let rootPath = directory.standardizedFileURL.path
+        let candidatePath = candidate.standardizedFileURL.path
+        return candidatePath.hasPrefix(rootPath + "/")
     }
 
     private func load() {
@@ -4963,7 +5021,41 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 )
             }
         }
-        guard let stored = recovery.library else { return }
+        guard var stored = recovery.library else {
+            if !recovery.primaryWasCorrupt {
+                completedMigrations.insert(MobileUnlinkedDownloadMigrationPolicy.identifier)
+            }
+            return
+        }
+
+        var didMigrateUnlinkedDownloads = false
+        if !(stored.completedMigrations ?? []).contains(MobileUnlinkedDownloadMigrationPolicy.identifier) {
+            let migration = migrateUnlinkedDownloads(stored.tracks)
+            stored.tracks = migration.tracks
+            let retainedIDs = Set(migration.tracks.map(\.id))
+            stored.playlists = stored.playlists.map { playlist in
+                var migrated = playlist
+                migrated.trackIDs.removeAll { !retainedIDs.contains($0) }
+                return migrated
+            }
+            stored.favorites.formIntersection(retainedIDs)
+            stored.profileStates = stored.profileStates?.mapValues { state in
+                var migrated = state
+                migrated.playlists = migrated.playlists.map { playlist in
+                    var playlist = playlist
+                    playlist.trackIDs.removeAll { !retainedIDs.contains($0) }
+                    return playlist
+                }
+                return migrated
+            }
+            if migration.completed {
+                var migrations = stored.completedMigrations ?? []
+                migrations.insert(MobileUnlinkedDownloadMigrationPolicy.identifier)
+                stored.completedMigrations = migrations
+            }
+            didMigrateUnlinkedDownloads = migration.changed || migration.completed
+        }
+        completedMigrations = stored.completedMigrations ?? []
 
         var fallbackServerURL = URL(string: stored.serverURL)
         do {
@@ -5070,7 +5162,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         currentTrackID = restoredPlayback.currentTrackID ?? legacyCurrentTrackID
         history = restoredPlayback.history
 
-        for track in tracks where track.remoteID != nil {
+        for track in tracks
+        where track.remoteID != nil && track.preservesUnlinkedImport != true {
             try? markServerDownloadExcludedFromBackup(at: fileURL(for: track))
         }
         if normalization.repairCount > 0 {
@@ -5087,6 +5180,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 )
             }
             dirtyPlaylistIDs.formUnion(playlists.filter { !$0.isSystem }.map(\.id))
+            save()
+        } else if didMigrateUnlinkedDownloads {
             save()
         }
     }

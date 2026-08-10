@@ -248,6 +248,7 @@ struct Track: Identifiable, Hashable, Codable {
     var downloadSourceURL: String?
     var sourceSHA256: String?
     var contentSHA256: String?
+    var preservesUnlinkedImport: Bool?
     var dateAdded: Date
 
     init(
@@ -268,6 +269,7 @@ struct Track: Identifiable, Hashable, Codable {
         downloadSourceURL: String? = nil,
         sourceSHA256: String? = nil,
         contentSHA256: String? = nil,
+        preservesUnlinkedImport: Bool? = nil,
         dateAdded: Date = .now
     ) {
         self.id = id
@@ -287,6 +289,7 @@ struct Track: Identifiable, Hashable, Codable {
         self.downloadSourceURL = downloadSourceURL
         self.sourceSHA256 = sourceSHA256
         self.contentSHA256 = contentSHA256
+        self.preservesUnlinkedImport = preservesUnlinkedImport
         self.dateAdded = dateAdded
     }
 
@@ -315,6 +318,35 @@ struct Track: Identifiable, Hashable, Codable {
         return "\(total / 60):\(String(format: "%02d", total % 60))"
     }
 
+}
+
+enum UnlinkedDownloadMigrationPolicy {
+    static let identifier = "delete-unlinked-downloads-v1"
+
+    struct Decision: Equatable {
+        var track: Track
+        let shouldDelete: Bool
+    }
+
+    static func decision(for track: Track, legacyDownloadOwned: Bool) -> Decision {
+        var migrated = track
+        if migrated.preservesUnlinkedImport == nil {
+            migrated.preservesUnlinkedImport = !legacyDownloadOwned
+        }
+
+        let hasRemoteIdentity = [migrated.remoteID, migrated.sourceServer].contains { value in
+            value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+        let hasSourceLink = [migrated.sourceURL, migrated.downloadSourceURL].contains { value in
+            value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+        return Decision(
+            track: migrated,
+            shouldDelete: (hasRemoteIdentity || legacyDownloadOwned)
+                && !hasSourceLink
+                && migrated.preservesUnlinkedImport != true
+        )
+    }
 }
 
 struct ClipRange: Codable, Hashable {

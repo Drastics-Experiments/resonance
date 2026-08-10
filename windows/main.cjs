@@ -27,6 +27,10 @@ const {
 const { MAX_SERVER_MEDIA_BYTES, adoptDownloadedFile, writeResponseToFile } = require("./download-file.cjs");
 const { sanitizeWindowsFilename, windowsCollisionFilename } = require("./filename-policy.cjs");
 const { isManagedLibraryFile } = require("./library-paths.cjs");
+const {
+  UNLINKED_DOWNLOAD_MIGRATION_ID,
+  migrateUnlinkedDownloads,
+} = require("./library-update-migration.cjs");
 const { readAudioMetadata } = require("./metadata.cjs");
 const { normalizeSourceIdentities, normalizeSourceIdentity } = require("./provenance.cjs");
 const { createRenewablePolicyLease } = require("./policy-lease.cjs");
@@ -943,6 +947,24 @@ function storageLocationForPath(filePath) {
   return "external";
 }
 
+function isDirectServerCacheFile(filePath) {
+  if (typeof filePath !== "string" || !filePath) return false;
+  const remote = path.resolve(applicationPaths().remote);
+  const candidate = path.resolve(filePath);
+  return candidate !== remote && path.dirname(candidate) === remote;
+}
+
+async function deleteManagedServerCacheFile(track) {
+  if (!track?.filePath) return true;
+  if (!isDirectServerCacheFile(track.filePath)) return false;
+  try {
+    await fs.rm(path.resolve(track.filePath), { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function safeListeningHistory(value) {
   const optionalText = (candidate, maximumLength = 500) => {
     const text = typeof candidate === "string" ? candidate.trim() : "";
@@ -1087,6 +1109,9 @@ function publicTrack(filePath, details = {}) {
     sourceIdentities,
     sourceSha256: details.sourceSha256 || null,
     contentSha256: details.contentSha256 || null,
+    preservesUnlinkedImport: typeof details.preservesUnlinkedImport === "boolean"
+      ? details.preservesUnlinkedImport
+      : null,
     dateAdded: details.dateAdded || new Date().toISOString(),
   };
 }
@@ -1412,7 +1437,12 @@ function sanitizePersistentPlaybackReferences(value, persistentTrackIDs) {
 ipcMain.handle("library:load", async () => {
   const { state } = await ensureDirectories();
   try {
-    const stored = JSON.parse(await fs.readFile(state, "utf8"));
+    let stored = JSON.parse(await fs.readFile(state, "utf8"));
+    const migration = await migrateUnlinkedDownloads(stored, {
+      legacyDownloadOwned: (track) => isDirectServerCacheFile(track?.filePath),
+      deleteManagedDownload: deleteManagedServerCacheFile,
+    });
+    stored = migration.state;
     const storedTracks = Array.isArray(stored.tracks) ? stored.tracks.filter(persistableLibraryTrack) : [];
     const localUploadSizes = new Set(storedTracks
       .filter((track) => !track?.remoteID && track?.contentSha256 && Number.isFinite(Number(track?.size)))
@@ -1453,7 +1483,9 @@ ipcMain.handle("library:load", async () => {
     }, null, 2), "utf8");
     return { state: stored, warning: null };
   } catch (error) {
-    if (error?.code === "ENOENT") return { state: null, warning: null };
+    if (error?.code === "ENOENT") {
+      return { state: { completedMigrations: [UNLINKED_DOWNLOAD_MIGRATION_ID] }, warning: null };
+    }
     const backup = `${state}.corrupt-${Date.now()}`;
     let warning = "Resonance could not read your saved library. A new empty library was opened.";
     try {
@@ -1515,6 +1547,9 @@ ipcMain.handle("library:save", async (_event, state) => {
     serverUploadManifests: safeServerUploadManifests(state.serverUploadManifests),
     serverTransferPreferences: safeServerTransferPreferences(state.serverTransferPreferences),
     appPreferences: safeAppPreferences(state.appPreferences),
+    completedMigrations: Array.isArray(state.completedMigrations)
+      ? state.completedMigrations.filter((item) => typeof item === "string" && item.length <= 100)
+      : [],
   };
   const save = librarySaveQueue
     .catch(() => {})
@@ -1674,7 +1709,10 @@ ipcMain.handle("library:import", async () => {
     const destination = await uniqueDestination(paths.local, path.basename(source));
     await fs.copyFile(source, destination);
     const information = await fs.stat(destination);
-    tracks.push(await enrichedTrack(destination, { size: information.size }));
+    tracks.push(await enrichedTrack(destination, {
+      size: information.size,
+      preservesUnlinkedImport: true,
+    }));
   }
   return tracks;
 });
@@ -1925,6 +1963,7 @@ ipcMain.handle("local-import:start-external", async (event, value = {}) => {
       sourceIdentity: result.sourceIdentity || value.sourceIdentity,
       sourceSha256: result.sourceSha256,
       contentSha256: result.contentSha256,
+      preservesUnlinkedImport: true,
     });
     publish({ stage: "local_complete", song: track, serverBacked: true });
     return { ok: true, result: { kind: "created", track, serverBacked: true, remoteSong: result.remoteSong } };
@@ -1973,6 +2012,7 @@ ipcMain.handle("local-import:start", async (event, value = {}) => {
       sourceIdentity: result.sourceIdentity || value.sourceIdentity,
       sourceSha256: result.sourceSha256,
       contentSha256: result.contentSha256,
+      preservesUnlinkedImport: true,
     });
     publish({ stage: "local_complete", song: track });
     return { ok: true, result: { kind: "created", track } };
@@ -3119,6 +3159,9 @@ async function downloadSavedSourceSong(song, options) {
     syncProfileID: options.profileID,
     remoteModified: null,
     storageLocation: "server-cache",
+    preservesUnlinkedImport: typeof duplicate?.preservesUnlinkedImport === "boolean"
+      ? duplicate.preservesUnlinkedImport
+      : storageLocationForPath(filePath) !== "server-cache",
   });
 }
 
@@ -3326,6 +3369,9 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
         sourceIdentity: song.source_url
           ? normalizeSourceIdentity(matching?.sourceIdentity, { mediaSourceURL: song.source_url })
           : matching?.sourceIdentity,
+        preservesUnlinkedImport: typeof matching?.preservesUnlinkedImport === "boolean"
+          ? matching.preservesUnlinkedImport
+          : false,
       }));
     } catch (error) {
       if (error?.name === "AbortError") throw error;

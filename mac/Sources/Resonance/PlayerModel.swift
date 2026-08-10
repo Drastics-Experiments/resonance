@@ -142,6 +142,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         var clipRanges: [String: ClipRange]?
         var dirtyClipRangeKeys: Set<String>?
         var deletedClipRangeKeys: Set<String>?
+        var completedMigrations: Set<String>?
     }
 
     private enum StoredLibraryLoadResult {
@@ -174,6 +175,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 duration: duration,
                 artwork: artwork,
                 fileURL: URL(fileURLWithPath: filePath),
+                preservesUnlinkedImport: true,
                 dateAdded: dateAdded
             )
         }
@@ -602,6 +604,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var clipRanges: [String: ClipRange] = [:]
     private var dirtyClipRangeKeys: Set<String> = []
     private var deletedClipRangeKeys: Set<String> = []
+    private var completedMigrations: Set<String> = []
     private var clipRangeMutationGeneration: UInt64 = 0
     private var serverCatalogRequestGeneration: UInt64 = 0
     private var serverUploadMutationGeneration: UInt64 = 0
@@ -635,7 +638,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         }
 
         let loadResult = loadPersistedLibrary ? Self.loadLibrary(from: defaults) : .missing
-        let stored: StoredLibrary?
+        var stored: StoredLibrary?
         let libraryWasCorrupt: Bool
         switch loadResult {
         case .missing:
@@ -656,6 +659,24 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             ?? Self.fallbackProfileName(for: restoredSyncProfileID)
         let restoredServerOrigin = Self.originFromServerContextKey(stored?.playlistSyncServerURL)
             ?? ServerSongIdentity.normalizedOrigin(defaults.string(forKey: Self.serverURLKey))
+        var didMigrateUnlinkedDownloads = false
+        if loadPersistedLibrary,
+           var library = stored,
+           !(library.completedMigrations ?? []).contains(UnlinkedDownloadMigrationPolicy.identifier),
+           let cacheRoot = Self.serverCacheRootDirectory(customRoot: serverCacheRoot) {
+            let migration = Self.migrateUnlinkedDownloads(
+                library.tracks,
+                managedCacheRoot: cacheRoot
+            )
+            library.tracks = migration.tracks
+            if migration.completed {
+                var migrations = library.completedMigrations ?? []
+                migrations.insert(UnlinkedDownloadMigrationPolicy.identifier)
+                library.completedMigrations = migrations
+            }
+            stored = library
+            didMigrateUnlinkedDownloads = migration.changed || migration.completed
+        }
         // A file can be temporarily unavailable when an external or network volume is
         // disconnected. Keep its library record and let playback surface availability.
         var migratedPersistedFileURLs = false
@@ -784,6 +805,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         clipRanges = stored?.clipRanges ?? [:]
         dirtyClipRangeKeys = stored?.dirtyClipRangeKeys ?? []
         deletedClipRangeKeys = stored?.deletedClipRangeKeys ?? []
+        completedMigrations = stored?.completedMigrations ?? []
+        if loadPersistedLibrary, stored == nil, !libraryWasCorrupt {
+            completedMigrations.insert(UnlinkedDownloadMigrationPolicy.identifier)
+        }
 
         super.init()
 
@@ -859,7 +884,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
         if loadPersistedLibrary, stored == nil, !libraryWasCorrupt {
             migrateLegacyLibraryIfNeeded()
-        } else if migratedPersistedFileURLs {
+        } else if migratedPersistedFileURLs || didMigrateUnlinkedDownloads {
             persistLibrary()
         }
         didFinishInitialization = true
@@ -2340,6 +2365,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         syncProfileID: syncProfileID,
                         downloadSourceURL: remote.sourceURL ?? existingIndex.flatMap { tracks[$0].downloadSourceURL },
                         contentSHA256: resolvedContentSHA256,
+                        preservesUnlinkedImport: existingIndex.flatMap { tracks[$0].preservesUnlinkedImport } ?? false,
                         dateAdded: existingIndex.map { tracks[$0].dateAdded } ?? .now
                     )
 
@@ -2982,6 +3008,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 artwork: styles[(tracks.count + offset) % styles.count],
                 artworkData: inspection.artworkData,
                 fileURL: inspection.fileURL,
+                preservesUnlinkedImport: true,
                 dateAdded: .now
             )
         }
@@ -3051,6 +3078,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             downloadSourceURL: imported.downloadSourceURL?.absoluteString,
             sourceSHA256: imported.sourceSHA256,
             contentSHA256: imported.contentSHA256,
+            preservesUnlinkedImport: true,
             dateAdded: .now
         )
         tracks.append(track)
@@ -3676,7 +3704,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             likesDirty: likesDirty,
             clipRanges: clipRanges,
             dirtyClipRangeKeys: dirtyClipRangeKeys,
-            deletedClipRangeKeys: deletedClipRangeKeys
+            deletedClipRangeKeys: deletedClipRangeKeys,
+            completedMigrations: completedMigrations
         )
         persist(stored, key: Self.libraryKey)
     }
@@ -5561,6 +5590,59 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             .appendingPathComponent(safeName, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    private static func serverCacheRootDirectory(customRoot: URL?) -> URL? {
+        let root = customRoot ?? FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first
+        guard let root else { return nil }
+        return root
+            .appendingPathComponent("Resonance", isDirectory: true)
+            .appendingPathComponent("ServerCache", isDirectory: true)
+            .standardizedFileURL
+    }
+
+    private static func migrateUnlinkedDownloads(
+        _ tracks: [Track],
+        managedCacheRoot: URL
+    ) -> (tracks: [Track], completed: Bool, changed: Bool) {
+        let fileManager = FileManager.default
+        var retained: [Track] = []
+        var completed = true
+        var changed = false
+
+        for track in tracks {
+            let isManagedDownload = track.fileURL.map {
+                isDescendant($0.standardizedFileURL, of: managedCacheRoot)
+            } ?? false
+            let decision = UnlinkedDownloadMigrationPolicy.decision(
+                for: track,
+                legacyDownloadOwned: isManagedDownload
+            )
+            changed = changed || decision.track != track
+            guard decision.shouldDelete else {
+                retained.append(decision.track)
+                continue
+            }
+
+            guard isManagedDownload, let fileURL = decision.track.fileURL else {
+                retained.append(decision.track)
+                completed = false
+                continue
+            }
+            do {
+                if fileManager.fileExists(atPath: fileURL.path) {
+                    try fileManager.removeItem(at: fileURL)
+                }
+                changed = true
+            } catch {
+                retained.append(decision.track)
+                completed = false
+            }
+        }
+        return (retained, completed, changed)
     }
 
     private static var credentialStoreURL: URL {

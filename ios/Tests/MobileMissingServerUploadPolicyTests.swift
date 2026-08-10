@@ -2,6 +2,68 @@ import Foundation
 import XCTest
 @testable import Resonance
 
+final class MobileUnlinkedDownloadMigrationPolicyTests: XCTestCase {
+    private func track(
+        sourceURL: String? = nil,
+        downloadSourceURL: String? = nil,
+        preservesUnlinkedImport: Bool? = nil
+    ) -> MobileTrack {
+        MobileTrack(
+            title: "Song",
+            artist: "Artist",
+            album: "Album",
+            duration: 120,
+            relativePath: "song.m4a",
+            remoteID: "remote-song",
+            sourceServer: "https://music.example",
+            sourceURL: sourceURL,
+            downloadSourceURL: downloadSourceURL,
+            preservesUnlinkedImport: preservesUnlinkedImport
+        )
+    }
+
+    func testUnlinkedManagedDownloadIsSelectedForCleanup() {
+        let decision = MobileUnlinkedDownloadMigrationPolicy.decision(
+            for: track(),
+            legacyDownloadOwned: true
+        )
+
+        XCTAssertTrue(decision.shouldDelete)
+        XCTAssertEqual(decision.track.preservesUnlinkedImport, false)
+    }
+
+    func testEitherPreservedSourceLinkKeepsDownload() {
+        XCTAssertFalse(MobileUnlinkedDownloadMigrationPolicy.decision(
+            for: track(sourceURL: "https://source.example/song"),
+            legacyDownloadOwned: true
+        ).shouldDelete)
+        XCTAssertFalse(MobileUnlinkedDownloadMigrationPolicy.decision(
+            for: track(downloadSourceURL: "https://media.example/song.m4a"),
+            legacyDownloadOwned: true
+        ).shouldDelete)
+    }
+
+    func testExplicitImportFlagWinsAfterRemoteAssociation() {
+        let decision = MobileUnlinkedDownloadMigrationPolicy.decision(
+            for: track(preservesUnlinkedImport: true),
+            legacyDownloadOwned: true
+        )
+
+        XCTAssertFalse(decision.shouldDelete)
+        XCTAssertEqual(decision.track.preservesUnlinkedImport, true)
+    }
+
+    func testLegacyNonDownloadFileBecomesProtectedImport() {
+        let decision = MobileUnlinkedDownloadMigrationPolicy.decision(
+            for: track(),
+            legacyDownloadOwned: false
+        )
+
+        XCTAssertFalse(decision.shouldDelete)
+        XCTAssertEqual(decision.track.preservesUnlinkedImport, true)
+    }
+}
+
 final class MobilePlaylistArtworkPolicyTests: XCTestCase {
     func testUsesOnlyTheFirstFourCustomPlaylistTracks() {
         let trackIDs = (0..<5).map { _ in UUID() }
