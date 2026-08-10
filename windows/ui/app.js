@@ -697,7 +697,7 @@ function persistentPlaybackQueueIDs(trackIDs) {
 }
 
 const currentTrack = () => playbackTrackByID(currentID);
-const playlistTracks = () => (selectedPlaylistID ? tracksForPlaylist(state, selectedPlaylistID) : tracksForActiveProfile(state))
+const playlistTracks = () => (selectedPlaylistID ? tracksForPlaylist(state, selectedPlaylistID, serverCatalog) : tracksForActiveProfile(state))
   .filter((track) => trackBelongsToActiveProfile(state, track));
 const activeRemoteTrack = (remoteID) => state.tracks.find((track) => track.remoteID === remoteID && trackBelongsToActiveProfile(state, track));
 const activeProfile = () => state.syncProfiles.find((profile) => profile.id === activeProfileID())
@@ -3052,19 +3052,21 @@ function trackRow(track, index) {
   const liked = state.favorites.includes(track.id);
   const mediaKind = isInstalledVideoTrack(track) ? "Video" : "Audio";
   const unavailable = track.available === false || track.missing;
+  const notDownloaded = track.playlistUnavailable === true;
   const editablePlaylist = state.playlists.find((playlist) => playlist.id === selectedPlaylistID && !playlist.isSystem);
   const actionLabel = unavailable
-    ? `${track.title || "Untitled"} by ${track.artist || "Unknown artist"}. File unavailable on this device`
+    ? `${track.title || "Untitled"} by ${track.artist || "Unknown artist"}. ${notDownloaded ? "Not downloaded on this device" : "File unavailable on this device"}`
     : `Play ${track.title || "Untitled"} by ${track.artist || "Unknown artist"}`;
-  const reorderLabel = editablePlaylist ? ". Press Alt+Up or Alt+Down to reorder" : "";
-  const draggableAttributes = editablePlaylist
+  const canReorder = Boolean(editablePlaylist && !unavailable && editablePlaylist.trackIDs.includes(track.id));
+  const reorderLabel = canReorder ? ". Press Alt+Up or Alt+Down to reorder" : "";
+  const draggableAttributes = canReorder
     ? ` data-playlist-draggable="true" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Shift+F10"`
     : ` aria-keyshortcuts="Enter Space Shift+F10"`;
-  return `<div class="track-row ${track.id === currentID ? "playing" : ""}${editablePlaylist ? " playlist-draggable" : ""}${unavailable ? " unavailable" : ""}" data-track="${escapeHTML(track.id)}" tabindex="0" aria-label="${escapeHTML(actionLabel + reorderLabel)}" aria-disabled="${unavailable}"${draggableAttributes}>
+  return `<div class="track-row ${track.id === currentID ? "playing" : ""}${canReorder ? " playlist-draggable" : ""}${unavailable ? " unavailable" : ""}${notDownloaded ? " playlist-unavailable" : ""}" data-track="${escapeHTML(track.id)}" tabindex="0" aria-label="${escapeHTML(actionLabel + reorderLabel)}" aria-disabled="${unavailable}"${draggableAttributes}>
     <span class="track-number" title="${track.id === currentID && !audio.paused ? "Now playing" : `Track ${index + 1}`}">${track.id === currentID && !audio.paused ? nowPlayingIcon : index + 1}</span>${artwork(track)}
-    <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / ${unavailable ? "File unavailable" : mediaKind}</small></div>
-    <span class="album">${escapeHTML(displayAlbum(track))}</span><span class="track-time">${unavailable ? "Missing" : formatTime(track.duration)}</span>
-    <button type="button" class="heart" data-favorite="${escapeHTML(track.id)}" aria-label="${liked ? "Remove from" : "Add to"} Liked Songs" aria-pressed="${liked}">${liked ? "♥" : "♡"}</button>
+    <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / ${notDownloaded ? "Not downloaded" : unavailable ? "File unavailable" : mediaKind}</small></div>
+    <span class="album">${escapeHTML(displayAlbum(track))}</span><span class="track-time">${notDownloaded ? "Not saved" : unavailable ? "Missing" : formatTime(track.duration)}</span>
+    ${notDownloaded ? `<span class="playlist-cloud-status" title="Not downloaded on this device" aria-hidden="true">☁</span>` : `<button type="button" class="heart" data-favorite="${escapeHTML(track.id)}" aria-label="${liked ? "Remove from" : "Add to"} Liked Songs" aria-pressed="${liked}">${liked ? "♥" : "♡"}</button>`}
   </div>`;
 }
 
@@ -3085,10 +3087,11 @@ function renderLibrary() {
   const selectedPlaylist = selectedPlaylistID ? state.playlists.find((item) => item.id === selectedPlaylistID) : null;
   const title = selectedPlaylist?.name || (selectedPlaylistID ? "Playlist" : "Library");
   const editablePlaylist = Boolean(selectedPlaylist && !selectedPlaylist.isSystem);
+  const playableTrackCount = tracks.filter((track) => track.available !== false && !track.missing).length;
   const collectionPlaying = isCurrentCollectionPlayback(tracks) && !audio.paused;
   const playlistMenuItems = selectedPlaylist ? [
     `<button type="button" role="menuitem" data-hero-import>Import Songs…</button>`,
-    tracks.length ? `<button type="button" role="menuitem" data-hero-next>Next Track</button>` : "",
+    playableTrackCount ? `<button type="button" role="menuitem" data-hero-next>Next Track</button>` : "",
     `<button type="button" role="menuitem" data-hero-sync>Sync Playlists</button>`,
     editablePlaylist ? `<button class="danger-item" type="button" role="menuitem" data-hero-delete>Delete Playlist</button>` : "",
   ].filter(Boolean).join("") : "";
@@ -3096,14 +3099,14 @@ function renderLibrary() {
     ? `<details class="playlist-more" id="playlistMore"><summary title="More options" aria-label="More playlist options"><span aria-hidden="true">•••</span></summary><div class="playlist-menu" role="menu">${playlistMenuItems}</div></details>`
     : "";
   const playlistCapsule = selectedPlaylist
-    ? `<div class="playlist-action-cluster"><button class="${shuffle ? "active" : ""}" id="heroShuffle" title="${currentTrack()?.transientStream ? "Unavailable for one-song server playback" : "Shuffle"}" aria-label="${currentTrack()?.transientStream ? "Unavailable for one-song server playback" : "Shuffle"}" aria-pressed="${shuffle}" ${tracks.length && !currentTrack()?.transientStream ? "" : "disabled"}>${shuffleIcon}</button><button id="heroAdd" title="Add songs" aria-label="Add songs">${plusIcon}</button>${playlistMoreMenu}</div>`
+    ? `<div class="playlist-action-cluster"><button class="${shuffle ? "active" : ""}" id="heroShuffle" title="${currentTrack()?.transientStream ? "Unavailable for one-song server playback" : "Shuffle"}" aria-label="${currentTrack()?.transientStream ? "Unavailable for one-song server playback" : "Shuffle"}" aria-pressed="${shuffle}" ${playableTrackCount && !currentTrack()?.transientStream ? "" : "disabled"}>${shuffleIcon}</button><button id="heroAdd" title="Add songs" aria-label="Add songs">${plusIcon}</button>${playlistMoreMenu}</div>`
     : "";
   const libraryFilters = `<div class="filters${selectedPlaylistID ? "" : " library-top-filters"}" role="group" aria-label="Library filter"><button class="${libraryFilter === "all" ? "active" : ""}" data-library-filter="all" aria-pressed="${libraryFilter === "all"}">All songs</button><button class="${libraryFilter === "recent" ? "active" : ""}" data-library-filter="recent" aria-pressed="${libraryFilter === "recent"}">Recently added</button><button class="${libraryFilter === "audio" ? "active" : ""}" data-library-filter="audio" aria-pressed="${libraryFilter === "audio"}">Audio</button><button class="${libraryFilter === "video" ? "active" : ""}" data-library-filter="video" aria-pressed="${libraryFilter === "video"}">Video</button></div>`;
   const hasLibraryFilter = Boolean(libraryQuery.trim()) || libraryFilter !== "all";
   const emptyLibraryTitle = hasLibraryFilter ? "No matching songs" : selectedPlaylistID ? "This playlist is empty" : "No songs yet";
   const emptyLibraryHelp = hasLibraryFilter ? "Try another search or filter." : selectedPlaylistID ? "Like songs or add them from your Library." : "Import audio files or connect your music server.";
   const collectionHeader = selectedPlaylistID
-    ? `<div class="hero">${playlistArtworkMarkup(selectedPlaylist, { className: "hero-art" })}<div><span class="eyebrow">PLAYLIST</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions"><button class="primary playlist-play" id="playCollection" ${tracks.length ? "" : "disabled"}><span class="button-icon">${collectionPlaying ? playbackPauseIcon : playbackPlayIcon}</span><span>${collectionPlaying ? "Pause" : "Play"}</span></button>${playlistCapsule}</div></div></div>`
+    ? `<div class="hero">${playlistArtworkMarkup(selectedPlaylist, { className: "hero-art" })}<div><span class="eyebrow">PLAYLIST</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / ${playableTrackCount} stored locally</p><div class="hero-actions"><button class="primary playlist-play" id="playCollection" ${playableTrackCount ? "" : "disabled"}><span class="button-icon">${collectionPlaying ? playbackPauseIcon : playbackPlayIcon}</span><span>${collectionPlaying ? "Pause" : "Play"}</span></button>${playlistCapsule}</div></div></div>`
     : libraryFilters;
   content.innerHTML = `<div class="collection-scroll">${collectionHeader}
     ${recentTracks.length ? `<section class="recently-added" aria-labelledby="recentlyAddedTitle"><div class="section-heading"><div><span class="eyebrow">FRESH TO YOUR LIBRARY</span><h2 id="recentlyAddedTitle">Recently Added</h2></div><span>${recentTracks.length} newest</span></div><div class="recent-track-list">${recentTracks.map(recentTrackItem).join("")}</div></section>` : ""}
@@ -3168,7 +3171,7 @@ function renderLibrary() {
 function renderPlaylists() {
   updateTopSearch();
   const playlists = filterPlaylists(state.playlists, tracksForActiveProfile(state), playlistQuery);
-  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10">${playlistArtworkMarkup(playlist)}<div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
+  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10">${playlistArtworkMarkup(playlist)}<div><strong>${escapeHTML(playlist.name)}</strong><small>${tracksForPlaylist(state, playlist.id, serverCatalog).length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
   $("#pageNewPlaylist").onclick = () => newPlaylist();
   $("#pageSyncPlaylists").onclick = () => syncPlaylistsNow();
   document.querySelectorAll("[data-open-playlist]").forEach((button) => {
@@ -4096,18 +4099,30 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
         return;
       }
       if (event.target.closest("button, select, input, a")) return;
+      if (row.getAttribute("aria-disabled") === "true") {
+        if (row.classList.contains("playlist-unavailable")) showNotice("This song is in the playlist but is not downloaded on this device.", "status");
+        return;
+      }
       play(state.tracks.find((track) => track.id === row.dataset.track), playbackTracks, { playlistID: selectedPlaylistID });
     };
-    row.oncontextmenu = (event) => openTrackContextMenu(event, row.dataset.track, { playbackTracks, playlistID: selectedPlaylistID });
+    row.oncontextmenu = (event) => {
+      if (row.getAttribute("aria-disabled") === "true") return;
+      openTrackContextMenu(event, row.dataset.track, { playbackTracks, playlistID: selectedPlaylistID });
+    };
     row.onkeydown = async (event) => {
       if (event.target !== row) return;
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
+        if (row.getAttribute("aria-disabled") === "true") {
+          if (row.classList.contains("playlist-unavailable")) showNotice("This song is in the playlist but is not downloaded on this device.", "status");
+          return;
+        }
         play(state.tracks.find((track) => track.id === row.dataset.track), playbackTracks, { playlistID: selectedPlaylistID });
         return;
       }
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
         event.preventDefault();
+        if (row.getAttribute("aria-disabled") === "true") return;
         openTrackContextMenu(event, row.dataset.track, { playbackTracks, playlistID: selectedPlaylistID });
         return;
       }
@@ -6326,7 +6341,7 @@ function newPlaylist(trackID = null) {
 
 function renderSidebar() {
   normalizeState(state);
-  $("#sidebarPlaylists").innerHTML = state.playlists.map((playlist) => `<button data-side-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10">${playlistArtworkMarkup(playlist, { className: "playlist-sidebar-art", tagName: "span" })}<div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div></button>`).join("");
+  $("#sidebarPlaylists").innerHTML = state.playlists.map((playlist) => `<button data-side-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10">${playlistArtworkMarkup(playlist, { className: "playlist-sidebar-art", tagName: "span" })}<div><strong>${escapeHTML(playlist.name)}</strong><small>${tracksForPlaylist(state, playlist.id, serverCatalog).length} tracks</small></div></button>`).join("");
   document.querySelectorAll("[data-side-playlist]").forEach((button) => {
     button.onclick = () => navigate("library", button.dataset.sidePlaylist);
     button.oncontextmenu = (event) => openPlaylistContextMenu(event, button.dataset.sidePlaylist);

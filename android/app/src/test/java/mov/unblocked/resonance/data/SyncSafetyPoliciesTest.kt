@@ -27,6 +27,45 @@ class SyncSafetyPoliciesTest {
     }
 
     @Test
+    fun playlistPresentationIncludesUndownloadedRemoteSongsInOrder() {
+        val local = Track(title = "Local", relativePath = "local.m4a")
+        val remoteA = Track(
+            title = "Downloaded A",
+            relativePath = "a.m4a",
+            remoteID = "remote-a",
+        )
+        val remoteB = Track(
+            title = "Downloaded B",
+            relativePath = "b.m4a",
+            remoteID = "remote-b",
+        )
+        val playlist = Playlist(
+            name = "Shared",
+            trackIDs = listOf(remoteA.id, local.id, remoteB.id),
+            remoteSongIDs = listOf("remote-b", "remote-missing", "remote-a"),
+        )
+
+        val entries = PlaylistPresentationPolicy.entries(
+            playlist,
+            listOf(local, remoteA, remoteB),
+            emptyList(),
+        )
+
+        assertEquals(
+            listOf("remote:remote-b", "local:${local.id}", "remote:remote-missing", "remote:remote-a"),
+            entries.map(PlaylistPresentationEntry::stableID),
+        )
+        assertEquals(
+            listOf(true, true, false, true),
+            entries.map { it is PlaylistPresentationEntry.Downloaded },
+        )
+        assertEquals(
+            "remote-missing",
+            (entries[2] as PlaylistPresentationEntry.Unavailable).remoteSongID,
+        )
+    }
+
+    @Test
     fun stablePlaylistSubmissionClearsOnlyItsOwnDirtySnapshot() {
         val result = PlaylistSyncMutationPolicy.reconcile(
             submitted = PlaylistMutationSnapshot(4, setOf("submitted"), setOf("deleted")),

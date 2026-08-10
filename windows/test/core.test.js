@@ -840,9 +840,9 @@ test("keeps reviewed Windows empty, selection, filter, and metadata states truth
   assert.match(appSource, /const showConnectionDetail = !connected;/);
 
   assert.match(appSource, /const emptyLibraryTitle = hasLibraryFilter \? "No matching songs"[\s\S]+"This playlist is empty"/);
-  assert.match(appSource, /id="playCollection" \$\{tracks\.length \? "" : "disabled"\}/);
-  assert.match(appSource, /tracks\.length \? `<button[^`]+data-hero-next>Next Track<\/button>` : ""/);
-  assert.match(appSource, /id="heroShuffle"[\s\S]+\$\{tracks\.length \? "" : "disabled"\}/);
+  assert.match(appSource, /id="playCollection" \$\{playableTrackCount \? "" : "disabled"\}/);
+  assert.match(appSource, /playableTrackCount \? `<button[^`]+data-hero-next>Next Track<\/button>` : ""/);
+  assert.match(appSource, /id="heroShuffle"[\s\S]+\$\{playableTrackCount && !currentTrack\(\)\?\.transientStream \? "" : "disabled"\}/);
   assert.match(appSource, /aria-label="Library filter"[\s\S]+aria-pressed="\$\{libraryFilter === "all"\}"/);
 
   assert.match(appSource, /storageScope === "downloads" \? "No server downloads yet"/);
@@ -994,7 +994,7 @@ test("hides inline playlist row buttons while preserving drag and context contro
   assert.doesNotMatch(appSource, /data-reorder-track/);
   assert.doesNotMatch(appSource, /data-remove-playlist-track/);
   assert.doesNotMatch(appSource, /playlist-track-actions/);
-  assert.match(appSource, /row\.oncontextmenu\s*=\s*\(event\) => openTrackContextMenu/);
+  assert.match(appSource, /row\.oncontextmenu\s*=\s*\(event\) => \{[\s\S]+openTrackContextMenu/);
   assert.match(appSource, /function renderContextMenu\(\{ title, subtitle, actions \}\)/);
   assert.match(appSource, /function renderTrackPlaylistContextMenu\(track, options\)/);
   assert.match(appSource, /label: "Add to playlist"/);
@@ -2332,6 +2332,41 @@ test("merges server playlist order without moving Windows-only items out of thei
     mergePlaylistOrderWithPreservedItems(["local-only"], ["downloaded-a"], ["local-only"]),
     ["local-only", "downloaded-a"],
   );
+});
+
+test("playlist presentation includes undownloaded server songs in order", () => {
+  const state = createEmptyState();
+  state.tracks = [
+    { id: "downloaded-a", title: "Downloaded A", remoteID: "remote-a", sourceServer: state.serverURL, syncProfileID: "default" },
+    { id: "local", title: "Local", remoteID: null },
+    { id: "downloaded-b", title: "Downloaded B", remoteID: "remote-b", sourceServer: state.serverURL, syncProfileID: "default" },
+  ];
+  state.playlists.push({
+    id: "shared",
+    name: "Shared",
+    trackIDs: ["downloaded-a", "local", "downloaded-b"],
+    remoteSongIDs: ["remote-b", "remote-missing", "remote-a"],
+    isSystem: false,
+  });
+
+  const entries = tracksForPlaylist(state, "shared", [{
+    id: "remote-missing",
+    title: "Server-only song",
+    artist: "Remote artist",
+    album: "Remote album",
+    duration: 125,
+    filename: "remote.m4a",
+  }]);
+
+  assert.deepEqual(entries.map((entry) => entry.id), [
+    "downloaded-b",
+    "local",
+    "playlist-remote:remote-missing",
+    "downloaded-a",
+  ]);
+  assert.equal(entries[2].title, "Server-only song");
+  assert.equal(entries[2].available, false);
+  assert.equal(entries[2].playlistUnavailable, true);
 });
 
 test("animates playback progress independently of media timeupdate events", () => {

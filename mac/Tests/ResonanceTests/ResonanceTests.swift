@@ -1049,6 +1049,54 @@ struct ResonanceTests {
     }
 
     @Test
+    func playlistPresentationIncludesUndownloadedRemoteSongsInOrder() {
+        let local = Track(
+            title: "Local",
+            artist: "Artist",
+            album: "Album",
+            duration: 120,
+            artwork: .liked
+        )
+        let remoteA = Track(
+            title: "Downloaded A",
+            artist: "Artist",
+            album: "Album",
+            duration: 120,
+            artwork: .liked,
+            remoteID: "remote-a"
+        )
+        let remoteB = Track(
+            title: "Downloaded B",
+            artist: "Artist",
+            album: "Album",
+            duration: 120,
+            artwork: .liked,
+            remoteID: "remote-b"
+        )
+        let playlist = Playlist(
+            name: "Shared",
+            artwork: .liked,
+            trackIDs: [remoteA.id, local.id, remoteB.id],
+            remoteSongIDs: ["remote-b", "remote-missing", "remote-a"]
+        )
+
+        let entries = PlaylistPresentationPolicy.entries(
+            in: playlist,
+            tracks: [local, remoteA, remoteB],
+            remoteSongs: []
+        )
+
+        #expect(entries.map(\.id) == [
+            .remote("remote-b"),
+            .local(local.id),
+            .remote("remote-missing"),
+            .remote("remote-a")
+        ])
+        #expect(entries.map(\.isDownloaded) == [true, true, false, true])
+        #expect(entries[2].title == "Unavailable song")
+    }
+
+    @Test
     func playbackControlsKeepTheirQueueAfterNavigationAndFiltering() async throws {
         let (defaults, suite) = try defaults()
         defer { defaults.removePersistentDomain(forName: suite) }

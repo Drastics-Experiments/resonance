@@ -40,6 +40,91 @@ enum PlaylistOrderPolicy {
     }
 }
 
+enum PlaylistPresentationEntryID: Hashable {
+    case local(UUID)
+    case remote(String)
+}
+
+struct PlaylistPresentationEntry: Identifiable, Hashable {
+    let id: PlaylistPresentationEntryID
+    let track: Track?
+    let remoteSongID: String?
+    let remoteSong: RemoteSong?
+
+    var isDownloaded: Bool { track != nil }
+    var title: String { track?.title ?? remoteSong?.title ?? "Unavailable song" }
+    var artist: String { track?.artist ?? remoteSong?.artist ?? "Not downloaded on this Mac" }
+    var album: String { track?.album ?? remoteSong?.album ?? "Server playlist" }
+    var kind: SongFilter { track?.kind ?? remoteSong?.kind ?? .audio }
+    var durationText: String { track?.durationText ?? remoteSong?.durationText ?? "—" }
+}
+
+enum PlaylistPresentationPolicy {
+    static func entries(
+        in playlist: Playlist,
+        tracks: [Track],
+        remoteSongs: [RemoteSong]
+    ) -> [PlaylistPresentationEntry] {
+        let tracksByID = tracks.reduce(into: [UUID: Track]()) { result, track in
+            if result[track.id] == nil { result[track.id] = track }
+        }
+        let playlistTracks = playlist.trackIDs.compactMap { tracksByID[$0] }
+        guard !playlist.isSystem, let remoteSongIDs = playlist.remoteSongIDs else {
+            return playlistTracks.map {
+                PlaylistPresentationEntry(id: .local($0.id), track: $0, remoteSongID: nil, remoteSong: nil)
+            }
+        }
+
+        let orderedRemoteIDs = unique(remoteSongIDs)
+        let remoteIDSet = Set(orderedRemoteIDs)
+        var downloadedByRemoteID: [String: Track] = [:]
+        let previousKeys: [PlaylistPresentationEntryID] = playlistTracks.map { track in
+            guard let remoteID = track.remoteID, remoteIDSet.contains(remoteID) else {
+                return .local(track.id)
+            }
+            if downloadedByRemoteID[remoteID] == nil { downloadedByRemoteID[remoteID] = track }
+            return .remote(remoteID)
+        }
+        let orderedKeys = orderedRemoteIDs.map(PlaylistPresentationEntryID.remote)
+        let preservedKeys = previousKeys.filter {
+            if case .local = $0 { return true }
+            return false
+        }
+        let remoteSongsByID = remoteSongs.reduce(into: [String: RemoteSong]()) { result, song in
+            if result[song.id] == nil { result[song.id] = song }
+        }
+
+        return PlaylistOrderPolicy.merge(
+            previous: previousKeys,
+            ordered: orderedKeys,
+            preserving: preservedKeys
+        ).compactMap { key in
+            switch key {
+            case .local(let trackID):
+                guard let track = tracksByID[trackID] else { return nil }
+                return PlaylistPresentationEntry(
+                    id: key,
+                    track: track,
+                    remoteSongID: nil,
+                    remoteSong: nil
+                )
+            case .remote(let remoteID):
+                return PlaylistPresentationEntry(
+                    id: key,
+                    track: downloadedByRemoteID[remoteID],
+                    remoteSongID: remoteID,
+                    remoteSong: remoteSongsByID[remoteID]
+                )
+            }
+        }
+    }
+
+    private static func unique<Element: Hashable>(_ values: [Element]) -> [Element] {
+        var seen = Set<Element>()
+        return values.filter { seen.insert($0).inserted }
+    }
+}
+
 @MainActor
 final class PlaybackPositionState: ObservableObject {
     @Published private(set) var position: TimeInterval
@@ -961,6 +1046,51 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         }
     }
 
+    var unfilteredCollectionEntries: [PlaylistPresentationEntry] {
+        if section == .playlists, let playlist = selectedPlaylist {
+            return playlistEntries(in: playlist)
+        }
+        return visibleTracks.map {
+            PlaylistPresentationEntry(id: .local($0.id), track: $0, remoteSongID: nil, remoteSong: nil)
+        }
+    }
+
+    var displayedCollectionEntries: [PlaylistPresentationEntry] {
+        let cutoff = Calendar.current.date(byAdding: .day, value: -30, to: .now) ?? .distantPast
+        let filtered = unfilteredCollectionEntries.filter { entry in
+            switch filter {
+            case .all:
+                return true
+            case .recentlyAdded:
+                return entry.track.map { $0.dateAdded >= cutoff } ?? false
+            case .audio:
+                return entry.kind == .audio
+            case .video:
+                return entry.kind == .video
+            }
+        }
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return filtered }
+        return filtered.filter { entry in
+            entry.title.localizedCaseInsensitiveContains(query)
+                || entry.artist.localizedCaseInsensitiveContains(query)
+                || entry.album.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    func playlistEntries(in playlist: Playlist) -> [PlaylistPresentationEntry] {
+        PlaylistPresentationPolicy.entries(in: playlist, tracks: tracks, remoteSongs: remoteSongs)
+    }
+
+    func playlistEntryCount(_ playlist: Playlist) -> Int {
+        playlistEntries(in: playlist).count
+    }
+
+    var selectedPlaylistHasUnavailableEntries: Bool {
+        guard section == .playlists, selectedPlaylist != nil else { return false }
+        return unfilteredCollectionEntries.contains { !$0.isDownloaded }
+    }
+
     var unfilteredCollectionTracks: [Track] {
         if section == .playlists, let playlist = selectedPlaylist {
             let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
@@ -1064,7 +1194,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     var collectionTrackCount: Int {
-        section == .playlists ? (selectedPlaylist?.count ?? 0) : tracks.count
+        section == .playlists ? unfilteredCollectionEntries.count : tracks.count
+    }
+
+    var collectionDownloadedTrackCount: Int {
+        section == .playlists
+            ? unfilteredCollectionEntries.reduce(0) { $0 + ($1.isDownloaded ? 1 : 0) }
+            : tracks.count
     }
 
     func selectSection(_ newSection: AppSection) {

@@ -25,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -49,14 +50,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import mov.unblocked.resonance.data.Playlist
+import mov.unblocked.resonance.data.PlaylistPresentationEntry
+import mov.unblocked.resonance.data.PlaylistPresentationPolicy
 
 @Composable
 fun PlaylistsScreen(
@@ -107,6 +112,11 @@ private fun PlaylistCollectionScreen(
             item { EmptyPlaylistMessage("No playlists", "Create a playlist to organize your music.") }
         } else {
             items(state.playlists, key = { it.id }) { playlist ->
+                val trackCount = PlaylistPresentationPolicy.entries(
+                    playlist,
+                    state.tracks,
+                    state.remoteSongs,
+                ).size
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -120,7 +130,7 @@ private fun PlaylistCollectionScreen(
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text(playlist.name, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "${playlist.trackIDs.size} tracks",
+                            "$trackCount tracks",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                         )
@@ -183,7 +193,9 @@ private fun PlaylistDetailScreen(
     var addSongs by remember { mutableStateOf(false) }
     var reorder by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
-    val tracks = playlist.trackIDs.mapNotNull { id -> state.tracks.firstOrNull { it.id == id } }
+    val entries = PlaylistPresentationPolicy.entries(playlist, state.tracks, state.remoteSongs)
+    val tracks = entries.mapNotNull { (it as? PlaylistPresentationEntry.Downloaded)?.track }
+    val hasUnavailableEntries = entries.any { it is PlaylistPresentationEntry.Unavailable }
     val isActivePlaylist = state.activePlaylistId == playlist.id && state.currentTrackId != null
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -196,7 +208,7 @@ private fun PlaylistDetailScreen(
                 Text(playlist.name, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
                 if (!playlist.isSystem) {
                     IconButton(onClick = { addSongs = true }) { Icon(Icons.Default.Add, "Add songs") }
-                    if (tracks.size > 1) {
+                    if (tracks.size > 1 && !hasUnavailableEntries) {
                         TextButton(onClick = { reorder = !reorder }) { Text(if (reorder) "Done" else "Reorder") }
                     }
                     IconButton(onClick = { confirmDelete = true }) {
@@ -237,35 +249,44 @@ private fun PlaylistDetailScreen(
                 ) { Icon(Icons.Default.Shuffle, "Shuffle") }
             }
         }
-        if (tracks.isEmpty()) {
+        if (entries.isEmpty()) {
             item { EmptyPlaylistMessage("No Songs", if (playlist.isSystem) "Like songs to add them here." else "Add songs from your library.") }
         } else {
             item { SongListHeader() }
-            itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.weight(1f)) {
-                        TrackRow(
-                            track,
-                            state,
-                            actions,
-                            number = index + 1,
-                            queue = tracks,
-                            playlistId = playlist.id,
-                            allowDeleteFromDevice = false,
-                        )
-                    }
-                    if (reorder) {
-                        Column {
-                            IconButton(
-                                enabled = index > 0,
-                                onClick = { actions.movePlaylistTrack(playlist.id, index, index - 1) },
-                            ) { Icon(Icons.Default.KeyboardArrowUp, "Move up") }
-                            IconButton(
-                                enabled = index < tracks.lastIndex,
-                                onClick = { actions.movePlaylistTrack(playlist.id, index, index + 1) },
-                            ) { Icon(Icons.Default.KeyboardArrowDown, "Move down") }
+            itemsIndexed(entries, key = { _, entry -> entry.stableID }) { index, entry ->
+                when (entry) {
+                    is PlaylistPresentationEntry.Downloaded -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.weight(1f)) {
+                                TrackRow(
+                                    entry.track,
+                                    state,
+                                    actions,
+                                    number = index + 1,
+                                    queue = tracks,
+                                    playlistId = playlist.id,
+                                    allowDeleteFromDevice = false,
+                                )
+                            }
+                            if (reorder) {
+                                Column {
+                                    IconButton(
+                                        enabled = index > 0,
+                                        onClick = { actions.movePlaylistTrack(playlist.id, index, index - 1) },
+                                    ) { Icon(Icons.Default.KeyboardArrowUp, "Move up") }
+                                    IconButton(
+                                        enabled = index < tracks.lastIndex,
+                                        onClick = { actions.movePlaylistTrack(playlist.id, index, index + 1) },
+                                    ) { Icon(Icons.Default.KeyboardArrowDown, "Move down") }
+                                }
+                            }
                         }
                     }
+                    is PlaylistPresentationEntry.Unavailable -> UnavailablePlaylistSongRow(
+                        entry = entry,
+                        number = index + 1,
+                        serverURL = state.serverUrl,
+                    )
                 }
             }
         }
@@ -330,6 +351,68 @@ private fun PlaylistDetailScreen(
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
         )
+    }
+}
+
+@Composable
+private fun UnavailablePlaylistSongRow(
+    entry: PlaylistPresentationEntry.Unavailable,
+    number: Int,
+    serverURL: String,
+) {
+    val song = entry.remoteSong
+    val title = song?.title ?: "Unavailable song"
+    val artist = song?.artist ?: "Not downloaded on this device"
+    val album = song?.album ?: "Server playlist"
+    val mediaKind = if (song?.isVideoMedia == true) "Video" else "Audio"
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 76.dp)
+            .alpha(.52f)
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            number.toString(),
+            modifier = Modifier.width(24.dp),
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .65f),
+        )
+        if (song != null) {
+            RemoteArtwork(song.artworkURL, serverURL, Modifier.size(52.dp))
+        } else {
+            Artwork(null, Modifier.size(52.dp))
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                "$artist / $mediaKind / Not downloaded",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                album,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            Icon(Icons.Default.CloudDownload, "Not downloaded", Modifier.size(17.dp))
+            Text(
+                song?.durationText ?: "—",
+                modifier = Modifier.width(44.dp),
+                fontSize = 11.sp,
+                textAlign = TextAlign.End,
+                maxLines = 1,
+            )
+        }
     }
 }
 

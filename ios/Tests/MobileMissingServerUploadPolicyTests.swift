@@ -594,6 +594,46 @@ final class MobileLibraryNormalizationTests: XCTestCase {
         )
     }
 
+    func testPlaylistPresentationIncludesUndownloadedRemoteSongsInOrder() {
+        let local = MobileTrack(
+            title: "Local",
+            duration: 120,
+            relativePath: "local.m4a"
+        )
+        let remoteA = MobileTrack(
+            title: "Downloaded A",
+            duration: 120,
+            relativePath: "a.m4a",
+            remoteID: "remote-a"
+        )
+        let remoteB = MobileTrack(
+            title: "Downloaded B",
+            duration: 120,
+            relativePath: "b.m4a",
+            remoteID: "remote-b"
+        )
+        let playlist = MobilePlaylist(
+            name: "Shared",
+            trackIDs: [remoteA.id, local.id, remoteB.id],
+            remoteSongIDs: ["remote-b", "remote-missing", "remote-a"]
+        )
+
+        let entries = MobilePlaylistPresentationPolicy.entries(
+            in: playlist,
+            tracks: [local, remoteA, remoteB],
+            remoteSongs: []
+        )
+
+        XCTAssertEqual(entries.map(\.id), [
+            .remote("remote-b"),
+            .local(local.id),
+            .remote("remote-missing"),
+            .remote("remote-a")
+        ])
+        XCTAssertEqual(entries.map(\.isDownloaded), [true, true, false, true])
+        XCTAssertEqual(entries[2].title, "Unavailable song")
+    }
+
     func testRepairsDuplicateTrackPlaylistAndCompoundRemoteIdentifiers() throws {
         let duplicateTrackID = UUID()
         let duplicatePlaylistID = UUID()

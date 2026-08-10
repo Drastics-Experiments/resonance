@@ -62,6 +62,7 @@ struct SidebarView: View {
                         PlaylistSidebarRow(
                             playlist: playlist,
                             tracks: model.tracks,
+                            trackCount: model.playlistEntryCount(playlist),
                             isSelected: model.section == .playlists && model.selectedPlaylistID == playlist.id,
                             deleteAction: playlist.isSystem ? nil : { model.deletePlaylist(playlist) }
                         ) {
@@ -615,6 +616,7 @@ private struct SidebarNavigationRow: View {
 private struct PlaylistSidebarRow: View {
     let playlist: Playlist
     let tracks: [Track]
+    let trackCount: Int
     let isSelected: Bool
     let deleteAction: (() -> Void)?
     let action: () -> Void
@@ -636,7 +638,7 @@ private struct PlaylistSidebarRow: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Color.appInk)
                         .lineLimit(1)
-                    Text("Playlist / \(playlist.count) \(playlist.count == 1 ? "track" : "tracks")")
+                    Text("Playlist / \(trackCount) \(trackCount == 1 ? "track" : "tracks")")
                         .font(.system(size: 11))
                         .foregroundStyle(Color.appMuted)
                         .lineLimit(1)

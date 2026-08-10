@@ -1026,6 +1026,95 @@ enum MobilePlaylistOrderPolicy {
     }
 }
 
+enum MobilePlaylistPresentationEntryID: Hashable {
+    case local(UUID)
+    case remote(String)
+}
+
+struct MobilePlaylistPresentationEntry: Identifiable, Hashable {
+    let id: MobilePlaylistPresentationEntryID
+    let track: MobileTrack?
+    let remoteSongID: String?
+    let remoteSong: MobileRemoteSong?
+
+    var isDownloaded: Bool { track != nil }
+    var title: String { track?.title ?? remoteSong?.title ?? "Unavailable song" }
+    var artist: String { track?.artist ?? remoteSong?.artist ?? "Not downloaded on this device" }
+    var album: String { track?.album ?? remoteSong?.album ?? "Server playlist" }
+    var durationText: String { track?.durationText ?? remoteSong?.durationText ?? "—" }
+}
+
+enum MobilePlaylistPresentationPolicy {
+    static func entries(
+        in playlist: MobilePlaylist,
+        tracks: [MobileTrack],
+        remoteSongs: [MobileRemoteSong]
+    ) -> [MobilePlaylistPresentationEntry] {
+        let tracksByID = tracks.reduce(into: [UUID: MobileTrack]()) { result, track in
+            if result[track.id] == nil { result[track.id] = track }
+        }
+        let playlistTracks = playlist.trackIDs.compactMap { tracksByID[$0] }
+        guard !playlist.isSystem, let remoteSongIDs = playlist.remoteSongIDs else {
+            return playlistTracks.map {
+                MobilePlaylistPresentationEntry(
+                    id: .local($0.id),
+                    track: $0,
+                    remoteSongID: nil,
+                    remoteSong: nil
+                )
+            }
+        }
+
+        let orderedRemoteIDs = unique(remoteSongIDs)
+        let remoteIDSet = Set(orderedRemoteIDs)
+        var downloadedByRemoteID: [String: MobileTrack] = [:]
+        let previousKeys: [MobilePlaylistPresentationEntryID] = playlistTracks.map { track in
+            guard let remoteID = track.remoteID, remoteIDSet.contains(remoteID) else {
+                return .local(track.id)
+            }
+            if downloadedByRemoteID[remoteID] == nil { downloadedByRemoteID[remoteID] = track }
+            return .remote(remoteID)
+        }
+        let orderedKeys = orderedRemoteIDs.map(MobilePlaylistPresentationEntryID.remote)
+        let preservedKeys = previousKeys.filter {
+            if case .local = $0 { return true }
+            return false
+        }
+        let remoteSongsByID = remoteSongs.reduce(into: [String: MobileRemoteSong]()) { result, song in
+            if result[song.id] == nil { result[song.id] = song }
+        }
+
+        return MobilePlaylistOrderPolicy.merge(
+            previous: previousKeys,
+            ordered: orderedKeys,
+            preserving: preservedKeys
+        ).compactMap { key in
+            switch key {
+            case .local(let trackID):
+                guard let track = tracksByID[trackID] else { return nil }
+                return MobilePlaylistPresentationEntry(
+                    id: key,
+                    track: track,
+                    remoteSongID: nil,
+                    remoteSong: nil
+                )
+            case .remote(let remoteID):
+                return MobilePlaylistPresentationEntry(
+                    id: key,
+                    track: downloadedByRemoteID[remoteID],
+                    remoteSongID: remoteID,
+                    remoteSong: remoteSongsByID[remoteID]
+                )
+            }
+        }
+    }
+
+    private static func unique<Element: Hashable>(_ values: [Element]) -> [Element] {
+        var seen = Set<Element>()
+        return values.filter { seen.insert($0).inserted }
+    }
+}
+
 enum MobileQueueCompletionPolicy {
     static func nextIndex(count: Int, currentIndex: Int) -> Int? {
         guard count > 0 else { return nil }
