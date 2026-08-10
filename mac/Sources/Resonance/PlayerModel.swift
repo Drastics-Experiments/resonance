@@ -294,10 +294,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private static let libraryRecoveryKey = "Resonance.library.v2.recovery"
     private static let legacyTracksKey = "Resonance.importedTracks.v1"
     private static let serverURLKey = "Resonance.serverURL.v1"
-    private static let clientCredentialAccount = "music-server-client-token"
-    private static let adminCredentialAccount = "music-server-admin-token"
-    private static let accountSessionCredentialAccount = "music-server-account-session-v1"
-    private static let productionCredentialService = "com.gavindietrich.Resonance.music-server"
+    private static let clientCredentialKey = "music-server-client-token"
+    private static let adminCredentialKey = "music-server-admin-token"
+    private static let accountSessionCredentialKey = "music-server-account-session-v1"
     private static let knownDrasticProfileID = "4f633616-9cf0-44db-8864-09358970c8f9"
     private static let volumeKey = "Resonance.volume.v1"
     private static let playbackRateKey = "Resonance.playbackRate.v1"
@@ -425,8 +424,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published private(set) var uploadMode = MacUploadMode.localFile
     @Published private(set) var downloadMode = MacDownloadMode.verifiedFileCache
 
-    var usesPreviewCredentialStore: Bool { Self.usesPreviewCredentialStore }
-    var allowsInsecurePreviewLoopback: Bool { Self.usesPreviewCredentialStore }
+    var allowsInsecurePreviewLoopback: Bool { Self.isPreviewBundle }
 
     var serverUploadActionsDisabled: Bool {
         isUploadingServer
@@ -761,14 +759,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         serverToken = restoredAccountSession?.accessToken
             ?? (persistServerCredentials ? Self.readServerToken() : "")
         serverAdminToken = restoredAccountSession?.accessToken
-            ?? (persistServerCredentials ? Self.readServerToken(account: Self.adminCredentialAccount) : "")
+            ?? (persistServerCredentials ? Self.readServerToken(key: Self.adminCredentialKey) : "")
         accountEmail = restoredAccountSession?.email
         accountRole = restoredAccountSession?.role
         accountDisplayName = restoredAccountSession?.profileDisplayName
         accountImageURL = restoredAccountSession?.imageURL
         if restoredAccountSession != nil {
             Self.saveServerToken("")
-            Self.saveServerToken("", account: Self.adminCredentialAccount)
+            Self.saveServerToken("", key: Self.adminCredentialKey)
         }
         playlistRevision = stored?.playlistRevision ?? 0
         knownRemotePlaylistIDs = stored?.knownRemotePlaylistIDs ?? []
@@ -1462,29 +1460,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         }
     }
 
-    func completeNativeSignIn(serverURL rawServerURL: String) async {
-        guard !isAuthenticatingAccount else { return }
-        isAuthenticatingAccount = true
-        serverMessage = "Finishing account sign-in…"
-        defer { isAuthenticatingAccount = false }
-        do {
-            guard !usesPreviewCredentialStore else {
-                throw ResonanceSocialAuthError.rejected("Native Clerk sessions are disabled in the disposable Preview so it never touches Keychain.")
-            }
-            guard let rawURL = URL(string: rawServerURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-                throw ResonanceSocialAuthError.invalidConfiguration
-            }
-            let client = try ResonanceSocialAuthClient(baseURL: rawURL, session: networkSession)
-            let session = try await ResonanceClerkAuthCoordinator.shared.accountSession(
-                for: client,
-                migrationProfileID: syncProfileID
-            )
-            try await applyAccountSession(session)
-        } catch {
-            serverMessage = error.localizedDescription
-        }
-    }
-
     private func applyAccountSession(_ session: ResonanceAccountSession) async throws {
         migrateConfirmedLegacyProfile(for: session)
         guard !shouldPersistServerCredentials || Self.saveAccountSession(session) else {
@@ -1506,7 +1481,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             ))
         }
         Self.saveServerToken("")
-        Self.saveServerToken("", account: Self.adminCredentialAccount)
+        Self.saveServerToken("", key: Self.adminCredentialKey)
         scheduleAccountRefresh(session)
         serverMessage = "Signed in with Clerk"
         await refreshClientConfigurationNow()
@@ -1517,9 +1492,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     func signOutAccount() async {
         let active = accountSession
         clearServerCredentials()
-        if active?.usesNativeClerkSession == true {
-            await ResonanceClerkAuthCoordinator.shared.signOut()
-        } else if let active, let client = try? ResonanceSocialAuthClient(baseURL: active.baseURL, session: networkSession) {
+        if let active, let client = try? ResonanceSocialAuthClient(baseURL: active.baseURL, session: networkSession) {
             await client.signOut(active)
         }
     }
@@ -1532,19 +1505,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             || current.displayName?.isEmpty != false
         guard current.usesLegacyProductionServer
             || needsProfileHydration
-            || current.expiresAt <= Date().addingTimeInterval(current.usesNativeClerkSession ? 15 : 5 * 60)
+            || current.expiresAt <= Date().addingTimeInterval(5 * 60)
         else { return }
         isRefreshingAccountSession = true
         defer { isRefreshingAccountSession = false }
         do {
             let client = try ResonanceSocialAuthClient(baseURL: current.baseURL, session: networkSession)
-            let refreshed = current.usesNativeClerkSession
-                ? try await ResonanceClerkAuthCoordinator.shared.accountSession(
-                    for: client,
-                    forceRefresh: true,
-                    migrationProfileID: current.profileID ?? syncProfileID
-                )
-                : try await client.refresh(current, migrationProfileID: syncProfileID)
+            let refreshed = try await client.refresh(current, migrationProfileID: syncProfileID)
             guard accountSession == current else { return }
             migrateConfirmedLegacyProfile(for: refreshed)
             guard !shouldPersistServerCredentials || Self.saveAccountSession(refreshed) else {
@@ -1584,8 +1551,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private func scheduleAccountRefresh(_ session: ResonanceAccountSession) {
         accountRefreshTask?.cancel()
-        let leadTime: TimeInterval = session.usesNativeClerkSession ? 15 : 5 * 60
-        let delay = max(5, session.expiresAt.timeIntervalSinceNow - leadTime)
+        let delay = max(5, session.expiresAt.timeIntervalSinceNow - 5 * 60)
         accountRefreshTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
@@ -3922,7 +3888,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private func normalizedServerURL() throws -> URL {
         guard let url = ServerEndpointPolicy.normalizedURL(
             serverURLString,
-            allowsInsecurePreviewLoopback: Self.usesPreviewCredentialStore
+            allowsInsecurePreviewLoopback: Self.isPreviewBundle
         ) else { throw ServerSyncError.invalidURL }
         return url
     }
@@ -4280,13 +4246,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         if let accountSession {
             _ = Self.saveAccountSession(accountSession)
             Self.saveServerToken("")
-            Self.saveServerToken("", account: Self.adminCredentialAccount)
+            Self.saveServerToken("", key: Self.adminCredentialKey)
             return
         }
         let token = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
         Self.saveServerToken(token)
         let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        Self.saveServerToken(adminToken, account: Self.adminCredentialAccount)
+        Self.saveServerToken(adminToken, key: Self.adminCredentialKey)
     }
 
     func syncPlaylists() {
@@ -5652,61 +5618,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             .appendingPathComponent("server-credentials.json")
     }
 
-    private static var credentialStore: LocalServerCredentialStore {
-        LocalServerCredentialStore(storeURL: credentialStoreURL)
+    private static var credentialStore: FileServerCredentialStore {
+        FileServerCredentialStore(storeURL: credentialStoreURL)
     }
 
-    private static var keychainCredentialStore: KeychainServerCredentialStore {
-        KeychainServerCredentialStore(service: productionCredentialService)
-    }
-
-    private static var legacyKeychainCredentialStore: KeychainServerCredentialStore {
-        KeychainServerCredentialStore(service: MacAppCompatibility.legacyCredentialService)
-    }
-
-    private static var usesPreviewCredentialStore: Bool {
-        CredentialStorePolicy.usesPlaintextStore(bundleIdentifier: Bundle.main.bundleIdentifier)
-    }
-
-    private static var activeCredentialStore: any ServerCredentialStoring {
-        if usesPreviewCredentialStore {
-            credentialStore
-        } else {
-            keychainCredentialStore
-        }
+    private static var isPreviewBundle: Bool {
+        CredentialStorePolicy.isPreviewBundle(bundleIdentifier: Bundle.main.bundleIdentifier)
     }
 
     private static func prepareCredentialStore() {
-        if !usesPreviewCredentialStore {
-            migrateLegacyKeychainCredentialsIfNeeded()
-            migratePlaintextCredentialsToKeychainIfNeeded()
-        }
         bootstrapCredentialStoreFromEnvironment()
-    }
-
-    private static func migrateLegacyKeychainCredentialsIfNeeded() {
-        for account in [clientCredentialAccount, adminCredentialAccount, accountSessionCredentialAccount] {
-            guard let legacyValue = legacyKeychainCredentialStore.read(account: account),
-                  !legacyValue.isEmpty else { continue }
-            let currentValue = keychainCredentialStore.read(account: account)
-            if currentValue != nil
-                || (keychainCredentialStore.save(legacyValue, account: account)
-                    && keychainCredentialStore.read(account: account) == legacyValue) {
-                _ = legacyKeychainCredentialStore.delete(account: account)
-            }
-        }
-    }
-
-    private static func migratePlaintextCredentialsToKeychainIfNeeded() {
-        for account in [clientCredentialAccount, adminCredentialAccount, accountSessionCredentialAccount] {
-            guard let plaintext = credentialStore.read(account: account), !plaintext.isEmpty else { continue }
-            let keychainValue = keychainCredentialStore.read(account: account)
-            if keychainValue != nil
-                || (keychainCredentialStore.save(plaintext, account: account)
-                    && keychainCredentialStore.read(account: account) == plaintext) {
-                _ = credentialStore.delete(account: account)
-            }
-        }
     }
 
     private static func bootstrapCredentialStoreFromEnvironment() {
@@ -5714,35 +5635,35 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         guard let client = environment["RESONANCE_CLIENT_TOKEN"],
               let admin = environment["RESONANCE_ADMIN_TOKEN"],
               !client.isEmpty, !admin.isEmpty else { return }
-        _ = activeCredentialStore.save(client, account: clientCredentialAccount)
-        _ = activeCredentialStore.save(admin, account: adminCredentialAccount)
+        _ = credentialStore.save(client, key: clientCredentialKey)
+        _ = credentialStore.save(admin, key: adminCredentialKey)
         unsetenv("RESONANCE_CLIENT_TOKEN")
         unsetenv("RESONANCE_ADMIN_TOKEN")
     }
 
     private static func readServerToken() -> String {
-        activeCredentialStore.read(account: clientCredentialAccount) ?? ""
+        credentialStore.read(key: clientCredentialKey) ?? ""
     }
 
-    private static func readServerToken(account: String) -> String {
-        activeCredentialStore.read(
-            account: account == adminCredentialAccount ? adminCredentialAccount : clientCredentialAccount
+    private static func readServerToken(key: String) -> String {
+        credentialStore.read(
+            key: key == adminCredentialKey ? adminCredentialKey : clientCredentialKey
         ) ?? ""
     }
 
     private static func saveServerToken(_ token: String) {
-        _ = activeCredentialStore.save(token, account: clientCredentialAccount)
+        _ = credentialStore.save(token, key: clientCredentialKey)
     }
 
-    private static func saveServerToken(_ token: String, account: String) {
-        _ = activeCredentialStore.save(
+    private static func saveServerToken(_ token: String, key: String) {
+        _ = credentialStore.save(
             token,
-            account: account == adminCredentialAccount ? adminCredentialAccount : clientCredentialAccount
+            key: key == adminCredentialKey ? adminCredentialKey : clientCredentialKey
         )
     }
 
     private static func readAccountSession() -> ResonanceAccountSession? {
-        guard let raw = activeCredentialStore.read(account: accountSessionCredentialAccount),
+        guard let raw = credentialStore.read(key: accountSessionCredentialKey),
               let data = raw.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(ResonanceAccountSession.self, from: data)
     }
@@ -5751,11 +5672,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private static func saveAccountSession(_ session: ResonanceAccountSession) -> Bool {
         guard let data = try? JSONEncoder().encode(session),
               let raw = String(data: data, encoding: .utf8) else { return false }
-        return activeCredentialStore.save(raw, account: accountSessionCredentialAccount)
+        return credentialStore.save(raw, key: accountSessionCredentialKey)
     }
 
     private static func deleteAccountSession() {
-        _ = activeCredentialStore.delete(account: accountSessionCredentialAccount)
+        _ = credentialStore.delete(key: accountSessionCredentialKey)
     }
 
     private enum PathExtension {

@@ -20,9 +20,6 @@
 		A1000000000000000000000C /* MobileAuthenticatedStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* MobileAuthenticatedStream.swift */; };
 		A1000000000000000000000D /* MobileProfilePictureStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* MobileProfilePictureStore.swift */; };
 		A1000000000000000000000E /* SocialAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* SocialAuth.swift */; };
-		A1000000000000000000000F /* ClerkNativeAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000011 /* ClerkNativeAuth.swift */; };
-		A10000000000000000000010 /* ClerkKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000001 /* ClerkKit */; };
-		A10000000000000000000011 /* ClerkKitUI in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000002 /* ClerkKitUI */; };
 		A10000000000000000000012 /* MobileLegacyAppMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* MobileLegacyAppMigration.swift */; };
 		B10000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift */; };
 		B10000000000000000000002 /* MobileClientConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000003 /* MobileClientConfigurationTests.swift */; };
@@ -56,7 +53,6 @@
 		A2000000000000000000000E /* MobileAuthenticatedStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthenticatedStream.swift; sourceTree = "<group>"; };
 		A2000000000000000000000F /* MobileProfilePictureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileProfilePictureStore.swift; sourceTree = "<group>"; };
 		A20000000000000000000010 /* SocialAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocialAuth.swift; sourceTree = "<group>"; };
-		A20000000000000000000011 /* ClerkNativeAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClerkNativeAuth.swift; sourceTree = "<group>"; };
 		A20000000000000000000012 /* MobileLegacyAppMigration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileLegacyAppMigration.swift; sourceTree = "<group>"; };
 		B20000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileMissingServerUploadPolicyTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000002 /* ResonanceTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ResonanceTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -65,7 +61,7 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		A30000000000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000010 /* ClerkKit in Frameworks */, A10000000000000000000011 /* ClerkKitUI in Frameworks */,); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		B30000000000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
@@ -95,7 +91,6 @@
 				A2000000000000000000000E /* MobileAuthenticatedStream.swift */,
 				A2000000000000000000000F /* MobileProfilePictureStore.swift */,
 				A20000000000000000000010 /* SocialAuth.swift */,
-				A20000000000000000000011 /* ClerkNativeAuth.swift */,
 				A20000000000000000000012 /* MobileLegacyAppMigration.swift */,
 				A20000000000000000000005 /* Info.plist */,
 				A20000000000000000000007 /* Assets.xcassets */,
@@ -136,10 +131,7 @@
 			buildRules = ();
 			dependencies = ();
 			name = Resonance;
-			packageProductDependencies = (
-				AA0000000000000000000001 /* ClerkKit */,
-				AA0000000000000000000002 /* ClerkKitUI */,
-			);
+			packageProductDependencies = ();
 			productName = Resonance;
 			productReference = A20000000000000000000006 /* Resonance.app */;
 			productType = "com.apple.product-type.application";
@@ -180,9 +172,7 @@
 			hasScannedForEncodings = 0;
 			knownRegions = (en, Base);
 			mainGroup = A40000000000000000000001;
-			packageReferences = (
-				AB0000000000000000000001 /* XCRemoteSwiftPackageReference "clerk-ios" */,
-			);
+			packageReferences = ();
 			productRefGroup = A40000000000000000000003 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -215,7 +205,6 @@
 				A1000000000000000000000C /* MobileAuthenticatedStream.swift in Sources */,
 				A1000000000000000000000D /* MobileProfilePictureStore.swift in Sources */,
 				A1000000000000000000000E /* SocialAuth.swift in Sources */,
-				A1000000000000000000000F /* ClerkNativeAuth.swift in Sources */,
 				A10000000000000000000012 /* MobileLegacyAppMigration.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -255,29 +244,6 @@
 		B90000000000000000000001 /* Build configuration list for PBXNativeTarget "ResonanceTests" */ = {isa = XCConfigurationList; buildConfigurations = (B80000000000000000000001 /* Debug */, B80000000000000000000002 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		AB0000000000000000000001 /* XCRemoteSwiftPackageReference "clerk-ios" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/clerk/clerk-ios";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.3.6;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		AA0000000000000000000001 /* ClerkKit */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = AB0000000000000000000001 /* XCRemoteSwiftPackageReference "clerk-ios" */;
-			productName = ClerkKit;
-		};
-		AA0000000000000000000002 /* ClerkKitUI */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = AB0000000000000000000001 /* XCRemoteSwiftPackageReference "clerk-ios" */;
-			productName = ClerkKitUI;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A70000000000000000000001 /* Project object */;
 }

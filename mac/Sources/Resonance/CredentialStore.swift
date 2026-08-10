@@ -1,72 +1,22 @@
 import Foundation
-import Security
 
 protocol ServerCredentialStoring {
-    func read(account: String) -> String?
-    @discardableResult func save(_ token: String, account: String) -> Bool
-    @discardableResult func delete(account: String) -> Bool
+    func read(key: String) -> String?
+    @discardableResult func save(_ token: String, key: String) -> Bool
+    @discardableResult func delete(key: String) -> Bool
 }
 
 enum CredentialStorePolicy {
     static let previewBundleIdentifier = "com.gavindietrich.ResonancePreview"
 
-    static func usesPlaintextStore(bundleIdentifier: String?) -> Bool {
+    static func isPreviewBundle(bundleIdentifier: String?) -> Bool {
         guard let bundleIdentifier else { return false }
         return bundleIdentifier == previewBundleIdentifier
             || bundleIdentifier.hasPrefix(previewBundleIdentifier + ".worktree.")
     }
 }
 
-struct KeychainServerCredentialStore: ServerCredentialStoring {
-    let service: String
-
-    func read(account: String) -> String? {
-        var query = baseQuery(account: account)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data,
-              let value = String(data: data, encoding: .utf8),
-              !value.isEmpty else { return nil }
-        return value
-    }
-
-    @discardableResult
-    func save(_ token: String, account: String) -> Bool {
-        guard !token.isEmpty else { return delete(account: account) }
-        guard !token.contains("\n"), !token.contains("\r"),
-              let data = token.data(using: .utf8) else { return false }
-        let query = baseQuery(account: account)
-        let attributes: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-        ]
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if updateStatus == errSecSuccess { return true }
-        guard updateStatus == errSecItemNotFound else { return false }
-
-        var item = query
-        attributes.forEach { item[$0.key] = $0.value }
-        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
-    }
-
-    @discardableResult
-    func delete(account: String) -> Bool {
-        let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
-    }
-
-    private func baseQuery(account: String) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-    }
-}
-
-struct LocalServerCredentialStore: ServerCredentialStoring {
+struct FileServerCredentialStore: ServerCredentialStoring {
     let storeURL: URL
 
     private struct StoredCredentials: Codable {
@@ -78,24 +28,24 @@ struct LocalServerCredentialStore: ServerCredentialStoring {
         var adminToken = ""
     }
 
-    func read(account: String) -> String? {
-        load().values[account]
+    func read(key: String) -> String? {
+        load().values[key]
     }
 
     @discardableResult
-    func save(_ token: String, account: String) -> Bool {
-        guard !token.isEmpty else { return delete(account: account) }
+    func save(_ token: String, key: String) -> Bool {
+        guard !token.isEmpty else { return delete(key: key) }
         guard !token.contains("\n"), !token.contains("\r") else { return false }
         var stored = load()
-        guard stored.values[account] != token else { return true }
-        stored.values[account] = token
+        guard stored.values[key] != token else { return true }
+        stored.values[key] = token
         return persist(stored)
     }
 
     @discardableResult
-    func delete(account: String) -> Bool {
+    func delete(key: String) -> Bool {
         var stored = load()
-        guard stored.values.removeValue(forKey: account) != nil else { return true }
+        guard stored.values.removeValue(forKey: key) != nil else { return true }
         if stored.values.isEmpty {
             do {
                 if FileManager.default.fileExists(atPath: storeURL.path) {

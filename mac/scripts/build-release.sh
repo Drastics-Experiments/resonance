@@ -12,7 +12,6 @@ BUILD_NUMBER="${BUILD_NUMBER:-17}"
 APP_SIGN_IDENTITY="${MACOS_APP_IDENTITY:--}"
 INSTALLER_IDENTITY="${MACOS_INSTALLER_IDENTITY:-}"
 PRODUCTION_SIGNING_REQUIRED="${RESONANCE_REQUIRE_PRODUCTION_SIGNING:-0}"
-NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 NOTARY_KEY_PATH="${NOTARY_KEY_PATH:-}"
 NOTARY_KEY_ID="${NOTARY_KEY_ID:-}"
 NOTARY_ISSUER_ID="${NOTARY_ISSUER_ID:-}"
@@ -44,11 +43,6 @@ if [[ -n "$NOTARY_KEY_PATH" || -n "$NOTARY_KEY_ID" || -n "$NOTARY_ISSUER_ID" ]];
     }
     NOTARY_API_CONFIGURED=1
 fi
-if [[ -n "$NOTARY_PROFILE" && "$NOTARY_API_CONFIGURED" == "1" ]]; then
-    echo "Configure either NOTARY_PROFILE or Notary API authentication, not both." >&2
-    exit 64
-fi
-
 if [[ "$PRODUCTION_SIGNING_REQUIRED" == "1" ]]; then
     [[ "$APP_SIGN_IDENTITY" == "Developer ID Application:"* ]] || {
         echo "A Developer ID Application identity is required for a production release." >&2
@@ -58,7 +52,7 @@ if [[ "$PRODUCTION_SIGNING_REQUIRED" == "1" ]]; then
         echo "A Developer ID Installer identity is required for a production release." >&2
         exit 64
     }
-    [[ -n "$NOTARY_PROFILE" || "$NOTARY_API_CONFIGURED" == "1" ]] || {
+    [[ "$NOTARY_API_CONFIGURED" == "1" ]] || {
         echo "Notary authentication is required for a production release." >&2
         exit 64
     }
@@ -66,67 +60,18 @@ fi
 
 submit_for_notarization() {
     local artifact="$1"
-    if [[ -n "$NOTARY_PROFILE" ]]; then
-        xcrun notarytool submit "$artifact" --keychain-profile "$NOTARY_PROFILE" --wait
-    else
-        xcrun notarytool submit "$artifact" \
-            --key "$NOTARY_KEY_PATH" \
-            --key-id "$NOTARY_KEY_ID" \
-            --issuer "$NOTARY_ISSUER_ID" \
-            --wait
-    fi
-}
-
-patch_swiftpm_resource_accessors() {
-    local bin_dir="$1"
-    local found=0
-    local accessor
-    for accessor in "$bin_dir"/*.build/DerivedSources/resource_bundle_accessor.swift; do
-        [[ -f "$accessor" ]] || continue
-        found=1
-        if grep -Fq '(Bundle.main.resourceURL ?? Bundle.main.bundleURL)' "$accessor"; then
-            continue
-        fi
-        grep -Fq 'Bundle.main.bundleURL.appendingPathComponent' "$accessor" || {
-            echo "Unsupported SwiftPM resource accessor: $accessor" >&2
-            exit 70
-        }
-        sed -i '' 's/Bundle\.main\.bundleURL/(Bundle.main.resourceURL ?? Bundle.main.bundleURL)/g' "$accessor"
-    done
-    [[ "$found" == "1" ]] || {
-        echo "The release build did not generate SwiftPM resource accessors." >&2
-        exit 70
-    }
-}
-
-verify_swiftpm_resource_accessors() {
-    local bin_dir="$1"
-    local found=0
-    local accessor
-    for accessor in "$bin_dir"/*.build/DerivedSources/resource_bundle_accessor.swift; do
-        [[ -f "$accessor" ]] || continue
-        found=1
-        grep -Fq '(Bundle.main.resourceURL ?? Bundle.main.bundleURL)' "$accessor" || {
-            echo "SwiftPM retained an incompatible resource accessor: $accessor" >&2
-            exit 70
-        }
-    done
-    [[ "$found" == "1" ]] || {
-        echo "The release build did not retain SwiftPM resource accessors." >&2
-        exit 70
-    }
+    xcrun notarytool submit "$artifact" \
+        --key "$NOTARY_KEY_PATH" \
+        --key-id "$NOTARY_KEY_ID" \
+        --issuer "$NOTARY_ISSUER_ID" \
+        --wait
 }
 
 cd "$ROOT_DIR"
 EXECUTABLES=()
-BIN_DIRS=()
 for arch in arm64 x86_64; do
     swift build -c release --arch "$arch" --product "$PRODUCT"
     BIN_DIR="$(swift build -c release --arch "$arch" --show-bin-path)"
-    patch_swiftpm_resource_accessors "$BIN_DIR"
-    swift build -c release --arch "$arch" --product "$PRODUCT"
-    verify_swiftpm_resource_accessors "$BIN_DIR"
-    BIN_DIRS+=("$BIN_DIR")
     EXECUTABLES+=("$BIN_DIR/$PRODUCT")
 done
 for executable in "${EXECUTABLES[@]}"; do
@@ -137,25 +82,6 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$WORK_DIR/AppIcon.icon
 lipo -create "${EXECUTABLES[@]}" -output "$APP/Contents/MacOS/$PRODUCT"
 chmod 0755 "$APP/Contents/MacOS/$PRODUCT"
 install -m 0755 "$SCRIPT_DIR/install-update.sh" "$APP/Contents/Resources/install-update.sh"
-
-# SwiftPM keeps dependency resources beside the executable. Copy every resource
-# bundle into Bundle.main.resourceURL so generated Bundle.module accessors keep
-# working after the executable is moved into the release app.
-while IFS= read -r -d '' resource_bundle; do
-    ditto "$resource_bundle" "$APP/Contents/Resources/${resource_bundle##*/}"
-done < <(find "${BIN_DIRS[0]}" -maxdepth 1 -type d -name '*.bundle' -print0)
-
-REQUIRED_RESOURCE_FILES=(
-    "Clerk_ClerkKitUI.bundle/Info.plist"
-    "Clerk_ClerkKitUI.bundle/Localizable.xcstrings"
-    "PhoneNumberKit_PhoneNumberKit.bundle/PhoneNumberMetadata.json"
-)
-for resource_file in "${REQUIRED_RESOURCE_FILES[@]}"; do
-    [[ -s "$APP/Contents/Resources/$resource_file" ]] || {
-        echo "Missing required SwiftPM resource: $resource_file" >&2
-        exit 70
-    }
-done
 
 PLIST="$APP/Contents/Info.plist"
 plutil -create xml1 "$PLIST"
@@ -218,7 +144,7 @@ if [[ "$PRODUCTION_SIGNING_REQUIRED" == "1" ]]; then
     }
 fi
 
-if [[ -n "$NOTARY_PROFILE" || "$NOTARY_API_CONFIGURED" == "1" ]]; then
+if [[ "$NOTARY_API_CONFIGURED" == "1" ]]; then
     [[ "$APP_SIGN_IDENTITY" != "-" && -n "$INSTALLER_IDENTITY" ]] || {
         echo "Notarization requires Developer ID app and installer identities." >&2
         exit 64
@@ -259,14 +185,7 @@ if ! grep -Eq '(^|/)Applications/Resonance\.app/Contents/MacOS/Resonance$' <<< "
     echo "The macOS installer does not contain the Resonance application payload." >&2
     exit 70
 fi
-for resource_file in "${REQUIRED_RESOURCE_FILES[@]}"; do
-    if ! grep -Fq "Applications/Resonance.app/Contents/Resources/$resource_file" <<< "$INSTALLER_PAYLOAD_FILES"; then
-        echo "The macOS installer is missing $resource_file." >&2
-        exit 70
-    fi
-done
-
-if [[ -n "$NOTARY_PROFILE" || "$NOTARY_API_CONFIGURED" == "1" ]]; then
+if [[ "$NOTARY_API_CONFIGURED" == "1" ]]; then
     submit_for_notarization "$INSTALLER"
     xcrun stapler staple "$INSTALLER"
     xcrun stapler validate "$INSTALLER"
