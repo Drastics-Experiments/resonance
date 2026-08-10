@@ -44,11 +44,14 @@ import {
   removeClipRangeForTrack,
   resolveSyncProfile,
   restoreProfileState,
+  migrateProfileContext,
   SAFE_CLIENT_CONFIG,
   serverUploadBlockedByActivity,
   serverUploadConfigurationError,
   serverTrackRemoteIDBelongsToContext,
   serverSongRequiresDownload,
+  serverSourceDisplayFallback,
+  serverSourceNeedsOriginalPage,
   serverUploadManifestRetryIDs,
   shuffledTrackIDs,
   storeActiveProfileState,
@@ -2174,22 +2177,16 @@ function pendingListeningHistoryBatches() {
     const syncKey = `${serverOrigin}#profile=${profileID}#event=${entry.id}`;
     if ((listeningHistorySyncedSeconds.get(syncKey) || 0) >= listenedSeconds) continue;
     const track = tracksByID.get(entry.trackID);
-    const duration = Number(track?.duration);
+    const remoteID = optionalText(entry.remoteID || track?.remoteID, 128);
+    if (!remoteID) continue;
     const upload = {
       syncKey,
       listenedSeconds,
       entry: {
         id: entry.id,
-        trackID: entry.trackID,
-        remoteID: optionalText(entry.remoteID || track?.remoteID, 128),
+        remoteID,
         startedAt: entry.startedAt,
         listenedSeconds,
-        title: optionalText(entry.title || track?.title, 500),
-        artist: optionalText(entry.artist || track?.artist, 500),
-        album: optionalText(entry.album || track?.album, 500),
-        duration: Number.isFinite(Number(entry.duration))
-          ? Number(entry.duration)
-          : Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60 ? duration : null,
       },
     };
     if (!entriesByProfile.has(profileID)) entriesByProfile.set(profileID, []);
@@ -2743,9 +2740,70 @@ function hydrateServerCatalogArtwork(songs) {
   void Promise.allSettled(workers);
 }
 
+function hydrateServerCatalogMetadata(songs) {
+  const context = currentProfileContext();
+  const generation = serverCatalogGeneration;
+  const queue = songs.filter((song) =>
+    !activeRemoteTrack(song?.id)
+      && song?.source_url
+      && !serverSourceNeedsOriginalPage(song.source_url));
+  const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
+    while (queue.length) {
+      const song = queue.shift();
+      let metadata;
+      try {
+        metadata = await api.resolveServerSourceMetadata({
+          sourceURL: song.source_url,
+          mediaKind: song.media_kind,
+        });
+      } catch {
+        if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) return;
+        const current = serverCatalog.find((item) => item.id === song.id && item.source_url === song.source_url);
+        if (current) {
+          const fallback = serverSourceDisplayFallback(song.source_url, { failed: true });
+          Object.assign(current, fallback, { name: fallback.title });
+          if (section === "server") renderServer();
+        }
+        continue;
+      }
+      if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) return;
+      const current = serverCatalog.find((item) => item.id === song.id && item.source_url === song.source_url);
+      if (!current) continue;
+      current.title = metadata?.title || current.title;
+      current.name = metadata?.title || current.name;
+      current.artist = metadata?.artist || current.artist;
+      current.album = metadata?.album || "Imported";
+      current.duration = Number(metadata?.duration) > 0 ? Number(metadata.duration) : current.duration;
+      if (metadata?.artworkURL) {
+        const artwork = await api.fetchLocalImportArtwork(metadata.artworkURL).catch(() => null);
+        if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) return;
+        if (artwork) current.artwork = artwork;
+      }
+      if (section === "server") renderServer();
+    }
+  });
+  void Promise.allSettled(workers);
+}
+
 function replaceServerCatalog(songs) {
-  serverCatalog = Array.isArray(songs) ? songs : [];
+  serverCatalog = (Array.isArray(songs) ? songs : []).map((song) => {
+    const local = activeRemoteTrack(song?.id);
+    const sourceFallback = serverSourceDisplayFallback(song?.source_url);
+    const fallbackTitle = song?.source_url
+      ? sourceFallback.title
+      : `Saved song ${String(song?.id || "").slice(0, 8)}`;
+    return {
+      ...song,
+      name: local?.title || song?.name || song?.filename || fallbackTitle,
+      title: local?.title || song?.title || fallbackTitle,
+      artist: local?.artist || song?.artist || (song?.source_url ? sourceFallback.artist : "Unknown Artist"),
+      album: local?.album || song?.album || (song?.source_url ? sourceFallback.album : "Server Library"),
+      duration: Number(local?.duration) > 0 ? Number(local.duration) : Number(song?.duration) || null,
+      artwork: local?.artwork || song?.artwork || null,
+    };
+  });
   serverCatalogGeneration += 1;
+  hydrateServerCatalogMetadata(serverCatalog);
 }
 
 function markPlaylistDirty(playlist) {
@@ -3736,7 +3794,15 @@ async function applyAccountSession(nextSession, error = null) {
   accountSession = nextSession || null;
   if ((accountSession?.email || null) !== previousEmail) isAccountEmailRevealed = false;
   serverToken = String(accountSession?.accessToken || "").trim();
-  serverAdminToken = accountSession?.role === "admin" ? serverToken : "";
+  serverAdminToken = accountSession ? serverToken : "";
+  const migratedLocalContext = accountSession?.profileID && accountSession?.migratedProfileID
+    ? migrateProfileContext(
+        state,
+        accountSession.baseURL,
+        accountSession.migratedProfileID,
+        accountSession.profileID,
+      )
+    : false;
   if (previousToken !== serverToken) {
     releaseActiveServerStream({ stopPlayback: true });
     serverConnected = false;
@@ -3756,6 +3822,7 @@ async function applyAccountSession(nextSession, error = null) {
     }];
     await activateProfile(accountSession.profileID, accountSession.baseURL);
   }
+  if (migratedLocalContext) await persist();
   updateProfileControlView({ refreshPicture: false });
 }
 
@@ -4826,7 +4893,7 @@ function updateLocalImportSyncForSelection({ preserveChecked = false } = {}) {
     ? "This source is already saved to the active server profile."
     : canSync
       ? "Upload a copy to the active server profile after downloading."
-      : "Sign in with an administrator account before importing to upload this copy.";
+      : "Sign in to your Resonance account before importing to upload this copy.";
   updateLocalImportConfirmLabel();
 }
 
@@ -4836,7 +4903,7 @@ function localImportUploadConfigurationError(serverBacked = false, context = nul
     return { stage: "syncing", code: "SERVER_URL_REQUIRED", message: "Add a server URL in Music Server settings before uploading." };
   }
   if (!String(context?.adminToken ?? serverAdminToken).trim()) {
-    return { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Sign in with an administrator account before uploading." };
+    return { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Sign in to your Resonance account before uploading." };
   }
   return null;
 }
@@ -4886,7 +4953,8 @@ async function uploadImportedTrackWithMode(track, context, mode) {
     album: track.album || "Unknown Album",
     duration: Number(track.duration) || 0,
     artworkURL: track.artworkURL || null,
-    mediaSourceURL: track.sourceIdentity?.mediaSourceURL || null,
+    mediaSourceURL: track.sourceIdentity?.sourcePageURL || track.sourceURL || track.sourceIdentity?.mediaSourceURL || null,
+    mediaKind: isInstalledVideoTrack(track) ? "video" : "audio",
     mode,
   });
   requireLocalImportServerContext(context);
@@ -5003,7 +5071,8 @@ async function uploadLocalImportTracks(tracks, context) {
       album: track.album || "",
       duration: Number(track.duration) || 0,
       artworkURL: track.artworkURL || null,
-      mediaSourceURL: track.sourceIdentity?.mediaSourceURL || null,
+      mediaSourceURL: track.sourceIdentity?.sourcePageURL || track.sourceURL || track.sourceIdentity?.mediaSourceURL || null,
+      mediaKind: isInstalledVideoTrack(track) ? "video" : "audio",
     })),
   });
   requireLocalImportServerContext(context);
@@ -5185,7 +5254,7 @@ async function resolveLinkImport() {
     try {
       reviewedContext = currentServerUploadContext();
       if (!reviewedContext.adminToken.trim()) {
-        throw { stage: "searching_candidates", code: "ADMIN_KEY_REQUIRED", message: "Sign in with an administrator account before requesting reviewed matches." };
+        throw { stage: "searching_candidates", code: "ADMIN_KEY_REQUIRED", message: "Sign in to your Resonance account before requesting reviewed matches." };
       }
       reserveServerContext(reviewedContext);
     } catch (error) {
@@ -5465,7 +5534,7 @@ async function confirmServerSourceImport() {
   }
   const context = currentServerUploadContext();
   if (!context.adminToken.trim()) {
-    throw { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Sign in with an administrator account before importing a source link." };
+    throw { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Sign in to your Resonance account before importing a source link." };
   }
   reserveServerContext(context);
   const operation = localImportOperationSnapshot();
@@ -6062,7 +6131,8 @@ async function uploadMissingDownloadedSongs() {
         album: track.album,
         duration: Number(track.duration) || 0,
         artworkURL: track.artworkURL || null,
-        mediaSourceURL: track.sourceIdentity?.mediaSourceURL || null,
+        mediaSourceURL: track.sourceIdentity?.sourcePageURL || track.sourceURL || track.sourceIdentity?.mediaSourceURL || null,
+        mediaKind: isInstalledVideoTrack(track) ? "video" : "audio",
       })),
     });
     if (!serverUploadContextIsCurrent(context)) return;
@@ -7872,7 +7942,7 @@ accountSession = await api.loadAccountSession({ profileID: activeProfileID() }).
 if (accountSession) {
   state.serverURL = accountSession.baseURL;
   serverToken = String(accountSession.accessToken || "").trim();
-  serverAdminToken = accountSession.role === "admin" ? serverToken : "";
+  serverAdminToken = serverToken;
   if (accountSession.profileID) {
     state.syncProfiles = [{
       id: accountSession.profileID,

@@ -935,6 +935,7 @@ test("tags a downloaded M4A locally, saves it outside profile ownership, and det
             thumbnailURL: null,
             sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
           },
+          mediaSourceURL: "https://media.example/local-test.m4a",
           download: { path: destination, sha256: sourceSha256, size: sourceBytes.length },
         };
       },
@@ -944,6 +945,7 @@ test("tags a downloaded M4A locally, saves it outside profile ownership, and det
     assert.equal(imported.metadata.title, "Local Test");
     assert.equal(imported.sourceIdentity.providerID, "jNQXAC9IVRw");
     assert.equal(imported.sourceIdentity.sourcePageURL, `https://open.spotify.com/track/${spotifyTrackID}`);
+    assert.equal(imported.sourceIdentity.mediaSourceURL, "https://media.example/local-test.m4a");
     assert.deepEqual(stages, ["inspecting_source", "processing", "saving_local"]);
     const tags = await metadata.readAudioMetadata(imported.filePath);
     assert.equal(tags.title, "Local Test");
@@ -970,12 +972,14 @@ test("tags a downloaded M4A locally, saves it outside profile ownership, and det
             thumbnailURL: null,
             sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
           },
+          mediaSourceURL: "https://media.example/local-test.m4a",
           download: { path: destination, sha256: sourceSha256, size: sourceBytes.length },
         };
       },
     });
     assert.equal(duplicate.kind, "duplicate");
     assert.equal(duplicate.sourceIdentity.providerID, "jNQXAC9IVRw");
+    assert.equal(duplicate.sourceIdentity.mediaSourceURL, "https://media.example/local-test.m4a");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

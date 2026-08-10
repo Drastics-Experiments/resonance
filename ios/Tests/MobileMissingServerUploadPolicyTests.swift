@@ -26,6 +26,41 @@ final class MobileAccountEmailPrivacyTests: XCTestCase {
             "Clerk account"
         )
     }
+
+
+    func testAccountScopeSupportsTheDeployedLegacyResponseUntilCoreMigratesIt() {
+        XCTAssertEqual(
+            ResonanceAccountScopePolicy.resolvedProfileID(
+                accountID: "user_listener",
+                serverProfileID: nil,
+                requestedLegacyProfileID: "legacy-library"
+            ),
+            "legacy-library"
+        )
+        XCTAssertEqual(
+            ResonanceAccountScopePolicy.resolvedProfileID(
+                accountID: "user_listener",
+                serverProfileID: nil,
+                requestedLegacyProfileID: nil
+            ),
+            "default"
+        )
+        XCTAssertEqual(
+            ResonanceAccountScopePolicy.resolvedProfileID(
+                accountID: "user_listener",
+                serverProfileID: "user_listener",
+                requestedLegacyProfileID: "legacy-library"
+            ),
+            "user_listener"
+        )
+        XCTAssertNil(
+            ResonanceAccountScopePolicy.resolvedProfileID(
+                accountID: "user_listener",
+                serverProfileID: "someone_else",
+                requestedLegacyProfileID: "legacy-library"
+            )
+        )
+    }
 }
 
 final class MobileServerEndpointPolicyTests: XCTestCase {

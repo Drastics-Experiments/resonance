@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -37,6 +38,20 @@ object AccountEmailPrivacy {
     }
 }
 
+object AccountScopePolicy {
+    fun resolvedProfileID(
+        accountID: String?,
+        serverProfileID: String?,
+        requestedLegacyProfileID: String?,
+    ): String? {
+        val accountScope = accountID?.trim().orEmpty()
+        if (accountScope.isEmpty()) return null
+        val serverScope = serverProfileID?.trim().orEmpty()
+        if (serverScope.isNotEmpty()) return accountScope.takeIf { serverScope == accountScope }
+        return requestedLegacyProfileID?.trim()?.takeIf(String::isNotEmpty) ?: "default"
+    }
+}
+
 @Serializable
 data class AccountSession(
     val accessToken: String,
@@ -49,6 +64,7 @@ data class AccountSession(
     val profileID: String? = null,
     val displayName: String? = null,
     val imageURL: String? = null,
+    @Transient val migratedProfileID: String? = null,
 ) {
     val usesNativeClerkSession: Boolean
         get() = refreshToken == NativeClerkRefreshMarker
@@ -114,6 +130,7 @@ private data class AccountPayload(
     val email: String = "",
     val role: String = "",
     @SerialName("profile_id") val profileID: String = "",
+    @SerialName("migrated_profile_id") val migratedProfileID: String? = null,
     @SerialName("display_name") val displayName: String = "",
     @SerialName("image_url") val imageURL: String? = null,
     val error: String? = null,
@@ -158,8 +175,16 @@ class SocialAuthClient(private val baseURL: String) {
         require(account.role == "member" || account.role == "admin") {
             account.error ?: "This account could not access this Resonance server."
         }
-        require(account.id.isNotBlank() && account.profileID.isNotBlank() && account.displayName.isNotBlank()) {
-            "The Resonance server returned an incomplete Clerk profile."
+        val accountID = bounded(account.id, "Clerk account ID")
+        val profileID = AccountScopePolicy.resolvedProfileID(
+            accountID,
+            account.profileID,
+            migrationProfileID,
+        ) ?: error(
+            "The Resonance server returned a legacy profile instead of this Clerk account library."
+        )
+        val displayName = account.displayName.trim().takeIf(String::isNotEmpty)?.let {
+            bounded(it, "Clerk display name")
         }
         AccountSession(
             accessToken = bounded(nativeToken, "Clerk session token"),
@@ -168,10 +193,11 @@ class SocialAuthClient(private val baseURL: String) {
             email = bounded(account.email, "account email").lowercase(),
             role = account.role,
             baseURL = origin,
-            accountID = bounded(account.id, "Clerk account ID"),
-            profileID = bounded(account.profileID, "Clerk profile ID"),
-            displayName = bounded(account.displayName, "Clerk display name"),
+            accountID = accountID,
+            profileID = bounded(profileID, "Clerk profile ID"),
+            displayName = displayName,
             imageURL = account.imageURL,
+            migratedProfileID = account.migratedProfileID,
         )
     }
 
@@ -198,7 +224,12 @@ class SocialAuthClient(private val baseURL: String) {
                 "code_verifier" to pending.verifier,
             ),
         )
-        session(token, account(token.idToken, migrationProfileID), origin)
+        session(
+            token,
+            account(token.idToken, migrationProfileID),
+            origin,
+            requestedLegacyProfileID = migrationProfileID,
+        )
     }
 
     suspend fun refresh(
@@ -222,6 +253,7 @@ class SocialAuthClient(private val baseURL: String) {
             account(token.idToken, current.profileID ?: migrationProfileID),
             origin,
             current.refreshToken,
+            current.profileID ?: migrationProfileID,
         )
     }
 
@@ -331,11 +363,20 @@ class SocialAuthClient(private val baseURL: String) {
         account: AccountPayload,
         serverOrigin: String,
         fallbackRefreshToken: String = "",
+        requestedLegacyProfileID: String? = null,
     ): AccountSession {
         require(token.expiresIn in 1..604_800) { "The authentication server returned an invalid session lifetime." }
         require(account.role == "member" || account.role == "admin") { "The Resonance server returned an invalid account role." }
-        require(account.id.isNotBlank() && account.profileID.isNotBlank() && account.displayName.isNotBlank()) {
-            "The Resonance server returned an incomplete Clerk profile."
+        val accountID = bounded(account.id, "Clerk account ID")
+        val profileID = AccountScopePolicy.resolvedProfileID(
+            accountID,
+            account.profileID,
+            requestedLegacyProfileID,
+        ) ?: error(
+            "The Resonance server returned a legacy profile instead of this Clerk account library."
+        )
+        val displayName = account.displayName.trim().takeIf(String::isNotEmpty)?.let {
+            bounded(it, "Clerk display name")
         }
         return AccountSession(
             accessToken = bounded(token.idToken, "Clerk ID token"),
@@ -344,10 +385,11 @@ class SocialAuthClient(private val baseURL: String) {
             email = bounded(account.email, "account email").lowercase(),
             role = account.role,
             baseURL = serverOrigin,
-            accountID = bounded(account.id, "Clerk account ID"),
-            profileID = bounded(account.profileID, "Clerk profile ID"),
-            displayName = bounded(account.displayName, "Clerk display name"),
+            accountID = accountID,
+            profileID = bounded(profileID, "Clerk profile ID"),
+            displayName = displayName,
             imageURL = account.imageURL,
+            migratedProfileID = account.migratedProfileID,
         )
     }
 

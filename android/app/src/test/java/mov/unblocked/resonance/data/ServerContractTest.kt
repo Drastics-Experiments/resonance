@@ -19,6 +19,26 @@ class ServerContractTest {
     }
 
     @Test
+    fun accountScopeFallsBackOnlyWhenTheDeployedServerOmitsItsNewProfileField() {
+        assertEquals(
+            "legacy-library",
+            AccountScopePolicy.resolvedProfileID("user_listener", null, "legacy-library"),
+        )
+        assertEquals(
+            "default",
+            AccountScopePolicy.resolvedProfileID("user_listener", null, null),
+        )
+        assertEquals(
+            "user_listener",
+            AccountScopePolicy.resolvedProfileID("user_listener", "user_listener", "legacy-library"),
+        )
+        assertEquals(
+            null,
+            AccountScopePolicy.resolvedProfileID("user_listener", "someone_else", "legacy-library"),
+        )
+    }
+
+    @Test
     fun uploadResponseAcceptsTheServersNameField() {
         val response = json.decodeFromString<RemoteUpload>(
             """{"id":"song-1","name":"Example.mp3","size":123}""",
@@ -27,6 +47,22 @@ class ServerContractTest {
         assertEquals("song-1", response.id)
         assertEquals(123L, response.size)
         assertEquals("", response.filename)
+    }
+
+    @Test
+    fun audioLinkUploadsRetryOnlyTheExactOlderSchemaError() {
+        assertTrue(SourceLinkSchemaCompatibility.shouldRetryLegacy(
+            400,
+            "Unsupported source-link schema_version",
+            "audio",
+        ))
+        assertFalse(SourceLinkSchemaCompatibility.shouldRetryLegacy(
+            400,
+            "Unsupported source-link schema_version",
+            "video",
+        ))
+        assertFalse(SourceLinkSchemaCompatibility.shouldRetryLegacy(400, "Invalid source URL", "audio"))
+        assertFalse(SourceLinkSchemaCompatibility.shouldRetryLegacy(401, "Unsupported source-link schema_version", "audio"))
     }
 
     @Test

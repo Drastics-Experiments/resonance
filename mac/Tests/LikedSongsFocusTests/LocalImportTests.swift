@@ -913,11 +913,13 @@ struct LocalImportTests {
             metadata: imported.metadata,
             existingTracks: [duplicateTrack]
         ) { _ in }
-        guard case .duplicate(let duplicateID) = duplicate else {
+        guard case .duplicate(let duplicateID, let duplicateSource) = duplicate else {
             Issue.record("Expected SHA-256 duplicate detection")
             return
         }
         #expect(duplicateID == duplicateTrack.id)
+        #expect(duplicateSource.sourceURL == imported.metadata.sourceURL)
+        #expect(duplicateSource.downloadSourceURL == imported.downloadSourceURL)
         let localFiles = try FileManager.default.contentsOfDirectory(at: library, includingPropertiesForKeys: nil)
         #expect(localFiles.count == 1)
     }
@@ -1219,18 +1221,71 @@ struct LocalImportTests {
             metadata: .init(title: "Local", artist: "Device", album: "Only", artworkURL: nil, sourceURL: "https://youtu.be/\(videoID)"),
             duration: 4,
             artworkData: nil,
+            downloadSourceURL: URL(string: "https://media.example/local-profile-import.m4a"),
             sourceSHA256: "source-hash",
             contentSHA256: "content-hash"
         )
         let track = model.insertLocalImportedAudio(imported)
         #expect(track.remoteID == nil)
         #expect(track.syncProfileID == nil)
+        #expect(track.sourceURL == "https://youtu.be/\(videoID)")
+        #expect(track.downloadSourceURL == "https://media.example/local-profile-import.m4a")
         #expect(await model.selectSyncProfile(matching: "another-profile"))
         #expect(model.visibleTracks.contains(where: { $0.id == track.id }))
 
+        model.flushPersistence()
         let reloaded = PlayerModel(loadPersistedLibrary: true, defaults: defaults, persistServerCredentials: false)
         #expect(reloaded.visibleTracks.contains(where: { $0.id == track.id }))
-        #expect(reloaded.tracks.first(where: { $0.id == track.id })?.syncProfileID == nil)
+        let reloadedTrack = try #require(reloaded.tracks.first(where: { $0.id == track.id }))
+        #expect(reloadedTrack.syncProfileID == nil)
+        #expect(reloadedTrack.fileURL == track.fileURL)
+        #expect(reloadedTrack.sourceURL == "https://youtu.be/\(videoID)")
+        #expect(reloadedTrack.downloadSourceURL == "https://media.example/local-profile-import.m4a")
+    }
+
+    @Test
+    func duplicateLocalImportBackfillsLinksBesideTheExistingFile() throws {
+        let suiteName = "LocalImportSourceBackfill.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        let existing = Track(
+            title: "Existing",
+            artist: "Device",
+            album: "Imported",
+            duration: 4,
+            artwork: .midnight,
+            fileURL: m4a,
+            sourceSHA256: "same-source",
+            contentSHA256: "same-content"
+        )
+        model.tracks = [existing]
+
+        let associated = model.insertLocalImportedAudio(LocalImportedAudio(
+            fileURL: m4a,
+            metadata: .init(
+                title: "Existing",
+                artist: "Device",
+                album: "Imported",
+                artworkURL: nil,
+                sourceURL: "https://www.youtube.com/watch?v=\(videoID)"
+            ),
+            duration: 4,
+            artworkData: nil,
+            downloadSourceURL: URL(string: "https://media.example/existing.m4a"),
+            sourceSHA256: "same-source",
+            contentSHA256: "same-content"
+        ))
+
+        #expect(associated.id == existing.id)
+        #expect(associated.fileURL == existing.fileURL)
+        #expect(associated.sourceURL == "https://www.youtube.com/watch?v=\(videoID)")
+        #expect(associated.downloadSourceURL == "https://media.example/existing.m4a")
     }
 
     @Test
@@ -1283,6 +1338,7 @@ struct LocalImportTests {
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         LocalImportMockURLProtocol.reset()
+        var uploadSchemas: [Int] = []
         LocalImportMockURLProtocol.handler = { request in
             let url = try #require(request.url)
             if request.httpMethod == "GET", url.path == "/api/v1/profiles" {
@@ -1296,9 +1352,18 @@ struct LocalImportTests {
                 #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
                 let body = try localImportRequestBody(request)
                 let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
-                #expect(object["source_url"] as? String == "https://media.example/local-upload.m4a")
-                #expect(object["filename"] as? String == "Local Upload.m4a")
-                let data = Data(#"{"id":"uploaded-audio","filename":"Local Upload.m4a","title":"Local Upload","artist":"Device","album":"Only","size":1,"modified_at":"2026-08-03T00:00:00Z","content_type":"audio/mp4","duration_seconds":4,"artwork_url":null,"download_url":"/api/v1/songs/uploaded-audio/file","stream_url":"/api/v1/songs/uploaded-audio/stream"}"#.utf8)
+                let schema = try #require(object["schema_version"] as? Int)
+                uploadSchemas.append(schema)
+                #expect(object["source_url"] as? String == "https://youtu.be/\(videoID)")
+                if schema == 3 {
+                    #expect(Set(object.keys) == ["schema_version", "source_url", "media_kind"])
+                    #expect(object["media_kind"] as? String == "audio")
+                    let data = Data(#"{"error":"Unsupported source-link schema_version"}"#.utf8)
+                    return (HTTPURLResponse(url: url, statusCode: 400, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, data)
+                }
+                #expect(schema == 2)
+                #expect(Set(object.keys) == ["schema_version", "source_url"])
+                let data = Data(#"{"id":"uploaded-audio","source_url":"https://media.example/local-upload.m4a","profile_id":"profile-b","download_url":"/api/v1/songs/uploaded-audio/file","stream_url":"/api/v1/songs/uploaded-audio/stream"}"#.utf8)
                 return (HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!, data)
             }
             if request.httpMethod == "GET", url.path == "/api/v1/songs" {
@@ -1335,6 +1400,7 @@ struct LocalImportTests {
         ))
 
         #expect(try await model.uploadLocalImportToActiveProfile(track))
+        #expect(uploadSchemas == [3, 2])
         #expect(model.tracks.first(where: { $0.id == track.id })?.remoteID == "uploaded-audio")
         #expect(model.tracks.first(where: { $0.id == track.id })?.syncProfileID == "profile-b")
 
@@ -1613,9 +1679,6 @@ struct LocalImportTests {
         }
         let localFile = root.appendingPathComponent("Local Upload.mp4")
         try Data(repeating: 0x44, count: 64).write(to: localFile, options: .atomic)
-        let uploadSize = try #require(
-            localFile.resourceValues(forKeys: [.fileSizeKey]).fileSize
-        )
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [LocalImportMockURLProtocol.self]
@@ -1638,20 +1701,15 @@ struct LocalImportTests {
                 #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
                 let body = try localImportRequestBody(request)
                 let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
-                #expect(object["source_url"] as? String == "https://media.example/local-video-upload.mp4")
-                #expect(object["filename"] as? String == "Local Video Upload.mp4")
+                #expect(Set(object.keys) == ["schema_version", "source_url", "media_kind"])
+                #expect(object["schema_version"] as? Int == 3)
+                #expect(object["source_url"] as? String == "https://youtu.be/\(videoID)")
+                #expect(object["media_kind"] as? String == "video")
                 let data = Data(#"""
                 {
                   "id":"uploaded-video",
-                  "filename":"Local Upload.mp4",
-                  "title":"Local Video Upload",
-                  "artist":"Device",
-                  "album":"Only",
-                  "size":\#(uploadSize),
-                  "modified_at":"2026-08-02T00:00:00.000Z",
-                  "content_type":"video/mp4",
-                  "duration_seconds":1,
-                  "artwork_url":null,
+                  "source_url":"https://media.example/local-video-upload.mp4",
+                  "profile_id":"profile-b",
                   "download_url":"/api/v1/songs/uploaded-video/file",
                   "stream_url":"/api/v1/songs/uploaded-video/stream"
                 }

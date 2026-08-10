@@ -8,6 +8,70 @@ final class MobileClientConfigurationTests: XCTestCase {
     private let cohortKey = "AAECAwQFBgcICQoLDA0ODw"
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    func testConfirmedProfileMigrationSignalIsNeverPersistedWithTheClerkSession() throws {
+        let session = ResonanceAccountSession(
+            accessToken: "access",
+            refreshToken: "refresh",
+            expiresAt: Date(timeIntervalSince1970: 1_900_000_000),
+            email: "listener@example.com",
+            role: "admin",
+            baseURL: try XCTUnwrap(URL(string: "https://music.example")),
+            accountID: "user_listener",
+            profileID: "user_listener",
+            displayName: "Listener",
+            imageURL: nil,
+            migratedProfileID: "default"
+        )
+
+        let encoded = try JSONEncoder().encode(session)
+        let decoded = try JSONDecoder().decode(ResonanceAccountSession.self, from: encoded)
+        XCTAssertEqual(decoded.profileID, "user_listener")
+        XCTAssertNil(decoded.migratedProfileID)
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("migratedProfileID"))
+    }
+
+    func testLocalTrackPersistenceAssociatesBothLinksWithItsFile() throws {
+        let track = MobileTrack(
+            title: "Local song",
+            artist: "Device",
+            album: "Imported",
+            duration: 120,
+            relativePath: "Device - Local song.m4a",
+            sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            downloadSourceURL: "https://media.example/local-song.m4a"
+        )
+
+        let decoded = try JSONDecoder().decode(
+            MobileTrack.self,
+            from: JSONEncoder().encode(track)
+        )
+        XCTAssertEqual(decoded.relativePath, track.relativePath)
+        XCTAssertEqual(decoded.sourceURL, track.sourceURL)
+        XCTAssertEqual(decoded.downloadSourceURL, track.downloadSourceURL)
+    }
+
+    func testMinimalServerCatalogKeepsMetadataOnDevice() throws {
+        let data = try XCTUnwrap("""
+        {
+          "id": "saved-song-uuid",
+          "source_url": "https://media.example/Local%20Title.m4a?token=preserved",
+          "download_url": "/api/v1/songs/saved-song-uuid/file",
+          "stream_url": "/api/v1/songs/saved-song-uuid/stream"
+        }
+        """.data(using: .utf8))
+        let song = try JSONDecoder().decode(MobileRemoteSong.self, from: data)
+
+        XCTAssertEqual(song.id, "saved-song-uuid")
+        XCTAssertEqual(song.filename, "Local Title.m4a")
+        XCTAssertEqual(song.title, "Resolving metadata…")
+        XCTAssertEqual(song.artist, "On-device lookup")
+        XCTAssertEqual(song.album, "Link only")
+        XCTAssertEqual(song.size, 0)
+        XCTAssertEqual(song.sourceURL, "https://media.example/Local%20Title.m4a?token=preserved")
+        XCTAssertEqual(song.mediaKind, "audio")
+        XCTAssertTrue(song.isSourceLinkRecord)
+    }
+
     func testOrdinaryTextSearchFallsBackToDeviceOnlyForServerLinkModes() {
         for mode in [MobileUploadMode.serverSourceLink, .reviewedMatch] {
             let preparation = MobileLocalImportSearchPolicy.prepare(

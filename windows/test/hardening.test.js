@@ -477,12 +477,13 @@ test("upload manifests retain per-file failures and never allow cleanup before s
 });
 
 test("Windows renderer and main-process integrations retain the hardening boundaries", async () => {
-  const [mainSource, preloadSource, appSource, htmlSource, packageSource] = await Promise.all([
+  const [mainSource, preloadSource, appSource, htmlSource, packageSource, launcherSource] = await Promise.all([
     readFile(new URL("../main.cjs", import.meta.url), "utf8"),
     readFile(new URL("../preload.cjs", import.meta.url), "utf8"),
     readFile(new URL("../ui/app.js", import.meta.url), "utf8"),
     readFile(new URL("../ui/index.html", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../../.launcher-terminal.zsh", import.meta.url), "utf8"),
   ]);
   const packageJSON = JSON.parse(packageSource);
 
@@ -499,6 +500,17 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(mainSource, /ipcMain\.handle\("account:sign-in"[\s\S]+openAccountSignInBrowser\(destination\)/);
   assert.deepEqual(packageJSON.build.protocols.flatMap((entry) => entry.schemes), ["resonance"]);
   assert.match(mainSource, /setAsDefaultProtocolClient\("resonance"[\s\S]+app\.on\("second-instance"[\s\S]+authCallbackFromArguments\(commandLine\)/);
+  assert.match(mainSource, /previewCredentialStorePath\(\)[\s\S]+app\.getPath\("userData"\)[\s\S]+server-credentials\.json/);
+  assert.match(mainSource, /previewAccountSessionPath\(\)[\s\S]+app\.getPath\("userData"\)[\s\S]+account-session\.json/);
+  assert.doesNotMatch(mainSource, /app\.getPath\("appData"\), "Liked Songs", (?:"server-credentials\.json"|"account-session\.json")/);
+  assert.match(launcherSource, /CFBundleURLTypes[\s\S]+CFBundleURLSchemes\.0 -string resonance/);
+  assert.match(launcherSource, /RES_WINDOWS_APP_ROOT="\$HOME\/Library\/Application Support\/Resonance Worktrees\/\$RES_WORKTREE_ID\/Applications"/);
+  assert.doesNotMatch(launcherSource, /RES_WINDOWS_APP="\$RES_LAUNCHER_ROOT\/windows/);
+  assert.match(launcherSource, /CFBundleTypeRole -string Viewer/);
+  assert.match(
+    launcherSource,
+    /codesign --force --deep --sign - "\$RES_ELECTRON_APP"[\s\S]+RES_LAUNCH_SERVICES_REGISTER" -f "\$RES_ELECTRON_APP"[\s\S]+open -n "\$RES_ELECTRON_APP"/,
+  );
   assert.match(appSource, /Complete sign-in in your web browser\./);
   assert.match(mainSource, /serverUploadRetries[\s\S]+retryIDs[\s\S]+serverOrigin === base\.origin[\s\S]+persistServerUploadRetries/);
   assert.match(mainSource, /const MAX_SERVER_UPLOAD_BATCH_FILES = 500;[\s\S]+const MAX_SERVER_UPLOAD_MANIFESTS = 20;[\s\S]+const MAX_SERVER_UPLOAD_RETRY_RECORDS = MAX_SERVER_UPLOAD_BATCH_FILES \* MAX_SERVER_UPLOAD_MANIFESTS;/);
@@ -540,7 +552,19 @@ test("Windows renderer and main-process integrations retain the hardening bounda
     appSource.indexOf("async function confirmLinkImport()"),
     appSource.indexOf("async function cancelLinkImport()"),
   );
+  const sourceLinkBody = mainSource.slice(
+    mainSource.indexOf("function sourceLinkRegistrationBody"),
+    mainSource.indexOf("async function ensureServerUploadRetriesLoaded"),
+  );
+  assert.match(sourceLinkBody, /schema_version: 3,[\s\S]+source_url: sourceURL/);
+  assert.match(sourceLinkBody, /media_kind: item\.mediaKind === "video" \? "video" : "audio"/);
+  assert.match(sourceLinkBody, /schemaVersion === 2[\s\S]+schema_version: 2,[\s\S]+source_url: sourceURL/);
+  assert.match(sourceLinkBody, /item\.mediaKind !== "video" && response\.status === 400/);
+  assert.match(sourceLinkBody, /payload\?\.error === "Unsupported source-link schema_version"/);
+  assert.match(sourceLinkBody, /putSourceLinkRegistration/);
+  assert.doesNotMatch(sourceLinkBody, /filename,|metadata:|title:|artist:|album:|duration_seconds|artwork_url/);
   assert.match(sourceImportHandler, /source_page_url: sourcePageURL/);
+  assert.doesNotMatch(sourceImportHandler, /filename:|metadata:|title:|artist:|album:|duration_seconds|artwork_url/);
   assert.match(sourceImportHandler, /api\/v1\/admin\/source-imports/);
   assert.match(sourceImportHandler, /settings\.mode !== "server_source_link"/);
   assert.doesNotMatch(sourceImportHandler, /reviewed_match/);
@@ -549,17 +573,17 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(mainSource, /redirect: "manual"/);
   assert.match(localRawUploadHandler, /clientConfigContext\(base\.href, profileID\)/);
   assert.match(localRawUploadHandler, /requestedMode = \["server_source_link", "reviewed_match"\]\.includes\(mode\) \? mode : "local_file"/);
-  assert.match(localRawUploadHandler, /requireClientUploadMode\(\{[\s\S]+mode: requestedMode,[\s\S]+force: true,[\s\S]+controller\.signal\.throwIfAborted\(\);[\s\S]+sourceLinkRegistrationBody\([\s\S]+const response = await fetch\(url/);
+  assert.match(localRawUploadHandler, /requireClientUploadMode\(\{[\s\S]+mode: requestedMode,[\s\S]+force: true,[\s\S]+controller\.signal\.throwIfAborted\(\);[\s\S]+putSourceLinkRegistration\(\{/);
   assert.match(localRawUploadHandler, /adminToken = canonicalCredentialToken\(adminToken\)[\s\S]+\.\.\.profileHeaders\(adminToken, profileID\),[\s\S]+\.\.\.requestContext\.expected\.request_headers/);
-  assert.match(localRawUploadHandler, /method: "PUT",[\s\S]+redirect: "manual"/);
+  assert.match(sourceLinkBody, /method: "PUT",[\s\S]+redirect: "manual"/);
   assert.match(localRawUploadHandler, /"Content-Type": "application\/json"/);
   assert.doesNotMatch(localRawUploadHandler, /createReadStream|application\/octet-stream|duplex: "half"/);
   assert.match(sourceImportHandler, /requireClientUploadMode\(\{[\s\S]+mode: "server_source_link",[\s\S]+force: true,[\s\S]+const response = await fetch\(new URL\("api\/v1\/admin\/source-imports"/);
   assert.match(externalImportHandler, /requireClientUploadMode\(\{[\s\S]+mode: "external_object",[\s\S]+force: true,[\s\S]+importFileBackedSource/);
   assert.match(rawUploadHandler, /clientConfigContext\(base\.href, requestedProfileID\)/);
   assert.match(rawUploadHandler, /\.\.\.profileHeaders\(adminToken, requestedProfileID\),[\s\S]+\.\.\.requestContext\.expected\.request_headers/);
-  assert.match(rawUploadHandler, /while \(attempts < 3 && !remoteSong\)[\s\S]+requireClientUploadMode\(\{[\s\S]+mode: "local_file",[\s\S]+force: true,[\s\S]+signal\.throwIfAborted\(\);[\s\S]+const response = await fetch\(url, \{[\s\S]+method: "PUT",[\s\S]+redirect: "manual"/);
-  assert.match(rawUploadHandler, /sourceLinkRegistrationBody\(item, filename\)[\s\S]+"Content-Type": "application\/json"/);
+  assert.match(rawUploadHandler, /while \(attempts < 3 && !remoteSong\)[\s\S]+requireClientUploadMode\(\{[\s\S]+mode: "local_file",[\s\S]+force: true,[\s\S]+signal\.throwIfAborted\(\);[\s\S]+putSourceLinkRegistration\(\{/);
+  assert.match(rawUploadHandler, /putSourceLinkRegistration\(\{[\s\S]+"Content-Type": "application\/json"[\s\S]+item,/);
   assert.doesNotMatch(rawUploadHandler, /createReadStream\(filePath\)|application\/octet-stream|duplex: "half"/);
   assert.match(mainSource, /error\.name = "ClientUploadPolicyError";[\s\S]+error\.retryable = false;/);
   assert.match(rawUploadHandler, /if \(error\?\.retryable === false\) throw error;[\s\S]+policyBlockedUploadEntries\([\s\S]+completedRetryIDs[\s\S]+rememberRetry\(item\);[\s\S]+failed\.push\(failure\);[\s\S]+return \{ uploaded, results, failed, policyBlocked: true \}/);

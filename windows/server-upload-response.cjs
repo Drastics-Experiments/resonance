@@ -32,6 +32,20 @@ function sameOriginURL(value, serverOrigin) {
   return url.href;
 }
 
+function externalSourceURL(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || value.length > 8_192) {
+    throw new ServerUploadResponseError("The server returned an invalid source URL.");
+  }
+  let url;
+  try { url = new URL(value); }
+  catch { throw new ServerUploadResponseError("The server returned an invalid source URL."); }
+  if (url.protocol !== "https:" || url.username || url.password || url.hash) {
+    throw new ServerUploadResponseError("The server returned an unsafe source URL.");
+  }
+  return url.href;
+}
+
 function sanitizedUploadSong(value, serverOrigin) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new ServerUploadResponseError("The server did not return an uploaded song object.");
@@ -44,6 +58,7 @@ function sanitizedUploadSong(value, serverOrigin) {
   const duration = Number(value.duration_seconds ?? value.duration);
   const size = Number(value.size);
   const sha256 = String(value.content_sha256 || value.sha256 || "").trim().toLowerCase();
+  const mediaKind = value.media_kind === "video" ? "video" : "audio";
   return {
     id,
     filename,
@@ -62,6 +77,8 @@ function sanitizedUploadSong(value, serverOrigin) {
     download_url: sameOriginURL(value.download_url, serverOrigin),
     stream_url: sameOriginURL(value.stream_url, serverOrigin),
     artwork_url: sameOriginURL(value.artwork_url, serverOrigin),
+    source_url: externalSourceURL(value.source_url),
+    media_kind: mediaKind,
   };
 }
 

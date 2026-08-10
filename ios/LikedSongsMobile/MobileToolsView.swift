@@ -1313,7 +1313,7 @@ enum MobileLocalImportSearchPolicy {
         let searchesProviders = !LocalImportInput.looksLikeLink(input)
         let requiresDeviceOnlySearch = searchesProviders
             && !explicitlyReviewedServerMatch
-            && activeUploadMode == .reviewedMatch
+            && (activeUploadMode == .serverSourceLink || activeUploadMode == .reviewedMatch)
         let adjustedSync = requiresDeviceOnlySearch ? false : syncAfterImport
         return Preparation(
             searchesProviders: searchesProviders,
@@ -1569,7 +1569,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
             error = LocalImportError(
                 stage: .syncing,
                 code: "SERVER_UPLOAD_NOT_CONFIGURED",
-                message: "Sign in with an administrator account, or turn off server upload."
+                message: "Sign in to your Resonance account, or turn off server upload."
             )
             stage = .failed
             return false
@@ -1787,6 +1787,15 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     activeProfileID: library.syncProfileID
                 )
             var track = match.deviceTrackID.flatMap { id in library.tracks.first { $0.id == id } }
+            if let existingTrack = track {
+                track = library.associateLocalImportSource(
+                    trackID: existingTrack.id,
+                    source: LocalImportSourceAssociation(
+                        sourceURL: metadata.sourceURL,
+                        downloadSourceURL: nil
+                    )
+                ) ?? existingTrack
+            }
             let plannedDownloads = track == nil ? 1 : 0
             if plannedDownloads > 0 {
                 beginDownloads(total: plannedDownloads, library: library)
@@ -1906,6 +1915,15 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 try Task.checkCancellation()
                 let initialMatch = initialMatches[item.track.trackID]
                 var track = initialMatch?.deviceTrackID.flatMap { id in library.tracks.first { $0.id == id } }
+                if let existingTrack = track {
+                    track = library.associateLocalImportSource(
+                        trackID: existingTrack.id,
+                        source: LocalImportSourceAssociation(
+                            sourceURL: item.track.sourceURL,
+                            downloadSourceURL: nil
+                        )
+                    ) ?? existingTrack
+                }
                 if track == nil {
                     let metadata = LocalImportMetadata(
                         title: item.track.title,
@@ -2048,8 +2066,13 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 }
                 switch outcome {
                 case .created(let imported): return try library.insertLocalImportedAudio(imported)
-                case .duplicate(let id):
-                    if let track = library.tracks.first(where: { $0.id == id }) { return track }
+                case .duplicate(let id, let source):
+                    if let track = (
+                        library.associateLocalImportSource(trackID: id, source: source)
+                            ?? library.tracks.first(where: { $0.id == id })
+                    ) {
+                        return track
+                    }
                     throw LocalImportError(stage: .savingLocal, code: "DUPLICATE_NOT_FOUND", message: "The existing local song could not be found.")
                 }
             } catch is CancellationError {
@@ -2180,7 +2203,7 @@ struct MobileLocalImportSheet: View {
                                         .font(.subheadline.weight(.semibold))
                                     Text(library.canUploadLocalImports
                                          ? "Downloads every selected song first, then registers each preserved direct source link with \(library.visibleSyncProfileName)."
-                                         : "Sign in with an administrator account, or turn this off for a local-only import.")
+                                         : "Sign in to your Resonance account, or turn this off for a local-only import.")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }

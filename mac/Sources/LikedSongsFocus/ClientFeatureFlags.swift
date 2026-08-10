@@ -507,25 +507,10 @@ enum MacClientConfigIdentity {
 }
 
 struct MacSourceImportRequest: Encodable, Sendable {
-    struct Metadata: Encodable, Sendable {
-        let title: String
-        let artist: String
-        let album: String?
-        let durationSeconds: TimeInterval?
-
-        enum CodingKeys: String, CodingKey {
-            case title, artist, album
-            case durationSeconds = "duration_seconds"
-        }
-    }
-
     let schemaVersion = 1
     let sourcePageURL: String
-    let filename: String?
-    let metadata: Metadata?
 
     enum CodingKeys: String, CodingKey {
-        case filename, metadata
         case schemaVersion = "schema_version"
         case sourcePageURL = "source_page_url"
     }

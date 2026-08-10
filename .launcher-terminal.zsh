@@ -40,7 +40,8 @@ res_prepare_worktree_identity() {
 
   typeset -g RES_WINDOWS_INSTANCE_NAME="Resonance Windows [${RES_WORKTREE_LABEL}]"
   typeset -g RES_WINDOWS_BUNDLE_ID="mov.unblocked.resonance.windows-preview.worktree.w${RES_WORKTREE_HASH}"
-  typeset -g RES_WINDOWS_APP="$RES_LAUNCHER_ROOT/windows/Resonance-Windows-${RES_WORKTREE_ID}.app"
+  typeset -g RES_WINDOWS_APP_ROOT="$HOME/Library/Application Support/Resonance Worktrees/$RES_WORKTREE_ID/Applications"
+  typeset -g RES_WINDOWS_APP="$RES_WINDOWS_APP_ROOT/Resonance-Windows-${RES_WORKTREE_ID}.app"
   typeset -g RES_WINDOWS_EXECUTABLE="$RES_WINDOWS_APP/Contents/MacOS/Electron"
   typeset -g RES_WINDOWS_USER_DATA="$HOME/Library/Application Support/Resonance Worktrees/$RES_WORKTREE_ID/windows"
 
@@ -75,7 +76,7 @@ res_write_instance_registry() {
   # All registry values are pure functions of the canonical worktree path.
   # Avoid rebuilding the document on every command once this schema is present.
   if [[ -f "$RES_INSTANCE_REGISTRY" ]] \
-    && [[ "$(/usr/bin/plutil -extract schemaVersion raw "$RES_INSTANCE_REGISTRY" 2>/dev/null || true)" == 5 ]] \
+    && [[ "$(/usr/bin/plutil -extract schemaVersion raw "$RES_INSTANCE_REGISTRY" 2>/dev/null || true)" == 6 ]] \
     && [[ "$(/usr/bin/plutil -extract worktree.pathSHA256 raw "$RES_INSTANCE_REGISTRY" 2>/dev/null || true)" == "$RES_WORKTREE_HASH_FULL" ]]; then
     return 0
   fi
@@ -86,7 +87,7 @@ res_write_instance_registry() {
   res_registry_json_temp="$res_registry_temp.json"
   /usr/bin/plutil -create xml1 "$res_registry_temp"
 
-  /usr/bin/plutil -insert schemaVersion -integer 5 "$res_registry_temp"
+  /usr/bin/plutil -insert schemaVersion -integer 6 "$res_registry_temp"
   /usr/bin/plutil -insert registryPath -string "$RES_INSTANCE_REGISTRY" "$res_registry_temp"
 
   /usr/bin/plutil -insert worktree -dictionary "$res_registry_temp"
@@ -256,10 +257,13 @@ RES_ELECTRON_APP="$RES_WINDOWS_APP"
 RES_ELECTRON_EXECUTABLE="$RES_WINDOWS_EXECUTABLE"
 RES_ELECTRON_PLIST="$RES_ELECTRON_APP/Contents/Info.plist"
 RES_ELECTRON_BUNDLE_ID="$RES_WINDOWS_BUNDLE_ID"
+RES_LAUNCH_SERVICES_REGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+RES_LEGACY_ELECTRON_APP="$RES_LAUNCHER_ROOT/windows/Resonance-Windows-${RES_WORKTREE_ID}.app"
+RES_LEGACY_ELECTRON_EXECUTABLE="$RES_LEGACY_ELECTRON_APP/Contents/MacOS/Electron"
 
 trap res_close_launcher_terminal EXIT
 
-mkdir -p "$RES_RUN_DIR"
+mkdir -p "$RES_RUN_DIR" "$RES_WINDOWS_APP_ROOT"
 res_write_instance_registry
 res_set_terminal_title "$RES_WINDOWS_INSTANCE_NAME"
 
@@ -308,6 +312,7 @@ fi
 RES_ELECTRON_SOURCE_PROCESS_EXECUTABLE="$(/bin/realpath "$RES_ELECTRON_SOURCE_EXECUTABLE")"
 RES_OLD_WINDOWS_PIDS="$({
   /usr/bin/pgrep -f "^$RES_ELECTRON_EXECUTABLE $RES_WINDOWS_DIR$" || true
+  /usr/bin/pgrep -f "^$RES_LEGACY_ELECTRON_EXECUTABLE $RES_WINDOWS_DIR$" || true
   /usr/bin/pgrep -f "^$RES_ELECTRON_SOURCE_PROCESS_EXECUTABLE $RES_WINDOWS_DIR$" || true
 } | /usr/bin/sort -u)"
 if [[ -n "$RES_OLD_WINDOWS_PIDS" ]]; then
@@ -316,6 +321,7 @@ if [[ -n "$RES_OLD_WINDOWS_PIDS" ]]; then
   done
   for RES_ATTEMPT in {1..50}; do
     if ! /usr/bin/pgrep -f "^$RES_ELECTRON_EXECUTABLE $RES_WINDOWS_DIR$" >/dev/null \
+      && ! /usr/bin/pgrep -f "^$RES_LEGACY_ELECTRON_EXECUTABLE $RES_WINDOWS_DIR$" >/dev/null \
       && ! /usr/bin/pgrep -f "^$RES_ELECTRON_SOURCE_PROCESS_EXECUTABLE $RES_WINDOWS_DIR$" >/dev/null; then
       break
     fi
@@ -323,12 +329,27 @@ if [[ -n "$RES_OLD_WINDOWS_PIDS" ]]; then
   done
 fi
 
+[[ "${RES_ELECTRON_APP:h}" == "$RES_WINDOWS_APP_ROOT" ]] \
+  || { echo "Refusing to replace an unexpected Windows Preview bundle: $RES_ELECTRON_APP" >&2; exit 1; }
 /bin/rm -rf "$RES_ELECTRON_APP"
 /bin/cp -cR "$RES_ELECTRON_SOURCE_APP" "$RES_ELECTRON_APP"
 /usr/bin/plutil -replace CFBundleDisplayName -string "$RES_WINDOWS_INSTANCE_NAME" "$RES_ELECTRON_PLIST"
 /usr/bin/plutil -replace CFBundleName -string "$RES_WINDOWS_INSTANCE_NAME" "$RES_ELECTRON_PLIST"
 /usr/bin/plutil -replace CFBundleIdentifier -string "$RES_ELECTRON_BUNDLE_ID" "$RES_ELECTRON_PLIST"
+/usr/bin/plutil -remove CFBundleURLTypes "$RES_ELECTRON_PLIST" 2>/dev/null || true
+/usr/bin/plutil -insert CFBundleURLTypes -array "$RES_ELECTRON_PLIST"
+/usr/bin/plutil -insert CFBundleURLTypes.0 -dictionary "$RES_ELECTRON_PLIST"
+/usr/bin/plutil -insert CFBundleURLTypes.0.CFBundleURLName -string "$RES_ELECTRON_BUNDLE_ID" "$RES_ELECTRON_PLIST"
+/usr/bin/plutil -insert CFBundleURLTypes.0.CFBundleTypeRole -string Viewer "$RES_ELECTRON_PLIST"
+/usr/bin/plutil -insert CFBundleURLTypes.0.CFBundleURLSchemes -array "$RES_ELECTRON_PLIST"
+/usr/bin/plutil -insert CFBundleURLTypes.0.CFBundleURLSchemes.0 -string resonance "$RES_ELECTRON_PLIST"
 /usr/bin/codesign --force --deep --sign - "$RES_ELECTRON_APP"
+# Launch Services records apps under /private/tmp but will not open them as URL
+# handlers. The bundle therefore lives in this worktree's Application Support
+# folder, and its registration is refreshed after every rebuild before Electron
+# sets itself as the default resonance:// handler.
+"$RES_LAUNCH_SERVICES_REGISTER" -u "$RES_LEGACY_ELECTRON_APP" 2>/dev/null || true
+"$RES_LAUNCH_SERVICES_REGISTER" -f "$RES_ELECTRON_APP"
 RES_ELECTRON_PROCESS_EXECUTABLE="$(/bin/realpath "$RES_ELECTRON_EXECUTABLE")"
 
 : >"$RES_LOG_FILE"

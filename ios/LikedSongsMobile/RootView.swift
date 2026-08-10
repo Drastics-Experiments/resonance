@@ -1997,6 +1997,7 @@ private struct ServerSongRow: View {
     }
 
     private var mediaKind: String {
+        if song.mediaKind == "video" { return "Video" }
         let type = song.contentType.lowercased()
         let fileExtension = URL(fileURLWithPath: song.filename).pathExtension.lowercased()
         return type.contains("video") || ["mp4", "mov", "m4v", "webm"].contains(fileExtension) ? "Video" : "Audio"

@@ -32,6 +32,24 @@ enum ResonanceEmailPrivacy {
     }
 }
 
+enum ResonanceAccountScopePolicy {
+    static func resolvedProfileID(
+        accountID: String?,
+        serverProfileID: String?,
+        requestedLegacyProfileID: String?
+    ) -> String? {
+        let accountID = accountID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !accountID.isEmpty else { return nil }
+        let serverProfileID = serverProfileID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !serverProfileID.isEmpty {
+            return serverProfileID == accountID ? accountID : nil
+        }
+        let legacyProfileID = requestedLegacyProfileID?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return legacyProfileID.isEmpty ? "default" : legacyProfileID
+    }
+}
+
 enum ResonanceSocialAuthProvider: String, CaseIterable, Identifiable {
     case clerk
 
@@ -52,6 +70,12 @@ struct ResonanceAccountSession: Codable, Equatable {
     let profileID: String?
     let displayName: String?
     let imageURL: URL?
+    var migratedProfileID: String? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case accessToken, refreshToken, expiresAt, email, role, baseURL
+        case accountID, profileID, displayName, imageURL
+    }
 
     var isAdmin: Bool { role == "admin" }
     var usesNativeClerkSession: Bool { refreshToken == Self.nativeRefreshMarker }
@@ -133,6 +157,7 @@ private struct ResonanceAccountPayload: Decodable {
     let email: String?
     let role: String?
     let profileID: String?
+    let migratedProfileID: String?
     let displayName: String?
     let imageURL: URL?
     let error: String?
@@ -140,6 +165,7 @@ private struct ResonanceAccountPayload: Decodable {
     enum CodingKeys: String, CodingKey {
         case id, email, role, error
         case profileID = "profile_id"
+        case migratedProfileID = "migrated_profile_id"
         case displayName = "display_name"
         case imageURL = "image_url"
     }
@@ -229,11 +255,16 @@ struct ResonanceSocialAuthClient {
     ) async throws -> ResonanceAccountSession {
         let expiration = try Self.jwtExpiration(nativeToken)
         let account = try await account(accessToken: nativeToken, migrationProfileID: migrationProfileID)
+        let profileID = ResonanceAccountScopePolicy.resolvedProfileID(
+            accountID: account.id,
+            serverProfileID: account.profileID,
+            requestedLegacyProfileID: migrationProfileID
+        )
+        let displayName = try account.displayName.map { try Self.bounded($0) }
         guard let email = account.email?.lowercased(), !email.isEmpty,
               let role = account.role, role == "member" || role == "admin",
               let accountID = account.id, !accountID.isEmpty,
-              let profileID = account.profileID, !profileID.isEmpty,
-              let displayName = account.displayName, !displayName.isEmpty else {
+              let profileID else {
             throw ResonanceSocialAuthError.rejected(account.error ?? "This account could not access this Resonance server.")
         }
         return ResonanceAccountSession(
@@ -246,7 +277,8 @@ struct ResonanceSocialAuthClient {
             accountID: accountID,
             profileID: profileID,
             displayName: displayName,
-            imageURL: account.imageURL
+            imageURL: account.imageURL,
+            migratedProfileID: account.migratedProfileID
         )
     }
 
@@ -362,11 +394,16 @@ struct ResonanceSocialAuthClient {
         }
         let refreshToken = token.refreshToken ?? fallbackRefreshToken
         let account = try await account(accessToken: accessToken, migrationProfileID: migrationProfileID)
+        let profileID = ResonanceAccountScopePolicy.resolvedProfileID(
+            accountID: account.id,
+            serverProfileID: account.profileID,
+            requestedLegacyProfileID: migrationProfileID
+        )
+        let displayName = try account.displayName.map { try Self.bounded($0) }
         guard let email = account.email?.lowercased(), !email.isEmpty,
               let role = account.role, role == "member" || role == "admin",
               let accountID = account.id, !accountID.isEmpty,
-              let profileID = account.profileID, !profileID.isEmpty,
-              let displayName = account.displayName, !displayName.isEmpty else {
+              let profileID else {
             throw ResonanceSocialAuthError.rejected(account.error ?? "This account could not access this Resonance server.")
         }
         return ResonanceAccountSession(
@@ -379,7 +416,8 @@ struct ResonanceSocialAuthClient {
             accountID: accountID,
             profileID: profileID,
             displayName: displayName,
-            imageURL: account.imageURL
+            imageURL: account.imageURL,
+            migratedProfileID: account.migratedProfileID
         )
     }
 

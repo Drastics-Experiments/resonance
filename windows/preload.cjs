@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld("likedSongs", {
   deleteAudio: (filePath) => ipcRenderer.invoke("library:delete", filePath),
   storageSummary: () => ipcRenderer.invoke("library:storage"),
   fetchCatalog: (settings) => ipcRenderer.invoke("server:catalog", settings),
+  resolveServerSourceMetadata: (settings) => ipcRenderer.invoke("server:source-metadata", settings),
   fetchClientConfig: (settings) => ipcRenderer.invoke("server:client-config", settings),
   createServerStream: (settings) => ipcRenderer.invoke("server:stream:create", settings),
   releaseServerStream: (streamURL) => ipcRenderer.invoke("server:stream:release", streamURL),

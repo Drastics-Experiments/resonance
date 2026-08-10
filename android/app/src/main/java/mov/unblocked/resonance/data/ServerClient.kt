@@ -44,6 +44,15 @@ internal object ServerUploadNaming {
         .take(180)
 }
 
+internal object SourceLinkSchemaCompatibility {
+    private const val UnsupportedSchema = "Unsupported source-link schema_version"
+
+    fun shouldRetryLegacy(status: Int, error: String?, mediaKind: String): Boolean =
+        status == HttpURLConnection.HTTP_BAD_REQUEST &&
+            error == UnsupportedSchema &&
+            mediaKind == "audio"
+}
+
 class ServerClient(
     serverURL: String,
     private val accessToken: String,
@@ -206,10 +215,9 @@ class ServerClient(
 
     suspend fun upload(
         track: Track,
-        sourceFilename: String,
         authorize: () -> Unit,
     ): RemoteUpload = withContext(Dispatchers.IO) {
-        val sourceURL = track.downloadSourceURL?.trim()?.takeIf(String::isNotEmpty)
+        val sourceURL = (track.sourceURL ?: track.downloadSourceURL)?.trim()?.takeIf(String::isNotEmpty)
             ?: throw IllegalStateException(
                 "Only songs downloaded from a preserved source link can be uploaded. Download this song from its link again first.",
             )
@@ -217,19 +225,14 @@ class ServerClient(
         require(sourceURI?.scheme.equals("https", ignoreCase = true) && sourceURI?.rawUserInfo == null) {
             "The preserved source link must be a public HTTPS URL without credentials"
         }
-        val uploadFilename = ServerUploadNaming.filename(sourceFilename, track.title)
+        val mediaKind = if (track.relativePath.substringAfterLast('.', "").lowercase() in
+            setOf("mp4", "mov", "m4v", "webm")) "video" else "audio"
         val payload = SourceLinkUploadRequest(
             sourceURL = sourceURL,
-            filename = uploadFilename,
-            metadata = SourceLinkUploadMetadata(
-                title = track.title,
-                artist = track.artist,
-                album = track.album,
-                durationSeconds = track.durationMs.takeIf { it > 0L }?.div(1_000.0),
-            ),
+            mediaKind = mediaKind,
         )
         authorize()
-        val response = request(
+        var response = request(
             method = "PUT",
             url = endpoint("/api/v1/admin/songs"),
             token = requireAdminToken(),
@@ -239,6 +242,23 @@ class ServerClient(
             requestHeaders = clientContextHeaders(requireInstallationCohortKey()),
             maxResponseBytes = MAX_SOURCE_IMPORT_RESPONSE_BYTES,
         )
+        val error = runCatching {
+            json.decodeFromString<ServerErrorPayload>(response.body.toString(Charsets.UTF_8)).error
+        }.getOrNull()
+        if (SourceLinkSchemaCompatibility.shouldRetryLegacy(response.status, error, mediaKind)) {
+            authorize()
+            response = request(
+                method = "PUT",
+                url = endpoint("/api/v1/admin/songs"),
+                token = requireAdminToken(),
+                body = json.encodeToString(LegacySourceLinkUploadRequest(sourceURL))
+                    .toByteArray(Charsets.UTF_8),
+                contentType = "application/json",
+                accept = "application/json",
+                requestHeaders = clientContextHeaders(requireInstallationCohortKey()),
+                maxResponseBytes = MAX_SOURCE_IMPORT_RESPONSE_BYTES,
+            )
+        }
         requireStatus(response, setOf(HttpURLConnection.HTTP_CREATED, HttpURLConnection.HTTP_CONFLICT))
         if (response.status == HttpURLConnection.HTTP_CONFLICT) {
             json.decodeFromString<DuplicateRemoteUpload>(response.body.toString(Charsets.UTF_8)).duplicateOf
@@ -250,15 +270,11 @@ class ServerClient(
     suspend fun importSource(
         sourcePageURL: String,
         cohortKey: String,
-        filename: String? = null,
-        metadata: SourceImportMetadata? = null,
         authorize: () -> Unit,
     ): RemoteUpload = withContext(Dispatchers.IO) {
         val canonicalSource = SourceImportPolicy.canonicalYouTubePageURL(sourcePageURL)
         val payload = SourceImportRequest(
             sourcePageURL = canonicalSource,
-            filename = filename?.let { ServerUploadNaming.filename(it, metadata?.title) },
-            metadata = metadata,
         )
         authorize()
         val response = request(
@@ -715,7 +731,7 @@ class ServerClient(
 
     private fun requireAdminToken(): String =
         adminToken.trim().takeIf { it.isNotEmpty() }
-            ?: throw IllegalStateException("Sign in with an administrator account")
+            ?: throw IllegalStateException("Sign in to your Resonance account")
 
     private fun requireClientConfigToken(): String =
         accessToken.trim().takeIf(String::isNotEmpty)
@@ -1090,23 +1106,20 @@ internal fun hasSameOrigin(first: URL, second: URL): Boolean {
 data class RemoteUpload(
     val id: String,
     val filename: String = "",
-    val size: Long,
+    val size: Long = 0,
 )
 
 @Serializable
 private data class SourceLinkUploadRequest(
-    @SerialName("schema_version") val schemaVersion: Int = 1,
+    @SerialName("schema_version") val schemaVersion: Int = 3,
     @SerialName("source_url") val sourceURL: String,
-    val filename: String,
-    val metadata: SourceLinkUploadMetadata,
+    @SerialName("media_kind") val mediaKind: String,
 )
 
 @Serializable
-private data class SourceLinkUploadMetadata(
-    val title: String,
-    val artist: String,
-    val album: String,
-    @SerialName("duration_seconds") val durationSeconds: Double? = null,
+private data class LegacySourceLinkUploadRequest(
+    @SerialName("source_url") val sourceURL: String,
+    @SerialName("schema_version") val schemaVersion: Int = 2,
 )
 
 sealed interface ClientConfigFetchResult {
@@ -1118,14 +1131,6 @@ sealed interface ClientConfigFetchResult {
 
     data object Unsupported : ClientConfigFetchResult
 }
-
-@Serializable
-data class SourceImportMetadata(
-    val title: String? = null,
-    val artist: String? = null,
-    val album: String? = null,
-    @SerialName("duration_seconds") val durationSeconds: Int? = null,
-)
 
 @Serializable
 private data class ReviewedMatchResolveRequest(val source: String)
@@ -1229,8 +1234,6 @@ private fun String?.requireReviewedText(field: String): String = this
 private data class SourceImportRequest(
     @SerialName("schema_version") val schemaVersion: Int = 1,
     @SerialName("source_page_url") val sourcePageURL: String,
-    val filename: String? = null,
-    val metadata: SourceImportMetadata? = null,
 )
 
 @Serializable
@@ -1246,7 +1249,7 @@ private data class SourceImportSong(
     val id: String,
     val filename: String = "",
     val name: String = "",
-    val size: Long,
+    val size: Long = 0,
 ) {
     fun toRemoteUpload(): RemoteUpload = RemoteUpload(
         id = id,

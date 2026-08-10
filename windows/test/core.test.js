@@ -25,6 +25,7 @@ import {
   mergeSyncedTracks,
   mergeTrackSourceIdentity,
   mergeUploadedSongsIntoCatalog,
+  migrateProfileContext,
   nextIndex,
   niceChartMaximum,
   normalizedAppPreferences,
@@ -47,6 +48,8 @@ import {
   serverUploadConfigurationError,
   serverTrackRemoteIDBelongsToContext,
   serverSongRequiresDownload,
+  serverSourceDisplayFallback,
+  serverSourceNeedsOriginalPage,
   shuffledTrackIDs,
   storeActiveProfileState,
   setClipRangeForTrack,
@@ -177,10 +180,31 @@ test("renders the Clerk account name and picture without local profile controls"
 });
 
 test("classifies remote video as download-required without confusing audio MP4", () => {
+  assert.equal(serverSongRequiresDownload({ media_kind: "video" }), true);
+  assert.equal(serverSongRequiresDownload({ media_kind: "audio", source_url: "https://example.com/watch" }), false);
   assert.equal(serverSongRequiresDownload({ content_type: "video/mp4", filename: "clip.bin" }), true);
   assert.equal(serverSongRequiresDownload({ filename: "clip.WEBM" }), true);
   assert.equal(serverSongRequiresDownload({ content_type: "audio/mp4", filename: "song.m4a" }), false);
   assert.equal(serverSongRequiresDownload({ content_type: "audio/mpeg", filename: "song.mp3" }), false);
+});
+
+test("uses honest on-device states instead of URL pathnames for saved links", () => {
+  assert.deepEqual(serverSourceDisplayFallback("https://www.youtube.com/watch?v=example"), {
+    title: "Resolving metadata…",
+    artist: "On-device lookup",
+    album: "Link only",
+  });
+  assert.deepEqual(serverSourceDisplayFallback("https://www.youtube.com/watch?v=example", { failed: true }), {
+    title: "Metadata unavailable",
+    artist: "Refresh to retry",
+    album: "Link only",
+  });
+  assert.equal(serverSourceNeedsOriginalPage("https://rr1.example.googlevideo.com/videoplayback?expire=1"), true);
+  assert.deepEqual(serverSourceDisplayFallback("https://rr1.example.googlevideo.com/videoplayback?expire=1"), {
+    title: "Original source link needed",
+    artist: "Re-import on the original device",
+    album: "Legacy expired link",
+  });
 });
 
 test("requires explicit review before selecting metadata-only audio matches", () => {
@@ -303,7 +327,7 @@ test("requires only upload credentials and ignores unrelated synchronization act
   }), null);
   assert.match(serverUploadConfigurationError({ serverURL: "", adminToken: "admin-key" }), /server URL/);
   assert.match(serverUploadConfigurationError({ serverURL: "ftp://music.example", adminToken: "admin-key" }), /server URL/);
-  assert.match(serverUploadConfigurationError({ serverURL: "https://music.example", adminToken: "" }), /administrator account/);
+  assert.match(serverUploadConfigurationError({ serverURL: "https://music.example", adminToken: "" }), /Resonance account/);
   assert.equal(serverUploadBlockedByActivity({
     playlistSyncInFlight: true,
     catalogRefreshInFlight: true,
@@ -585,7 +609,9 @@ test("avoids macOS Keychain access while persisting source Preview credentials l
   const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
   assert.doesNotMatch(mainSource, /\{ app, BrowserWindow, dialog, ipcMain, safeStorage, shell \}/);
   assert.match(mainSource, /function usesPreviewCredentialStore\(\)[\s\S]+process\.platform === "darwin" && !app\.isPackaged/);
-  assert.match(mainSource, /previewCredentialStorePath[\s\S]+"Liked Songs", "server-credentials\.json"/);
+  assert.match(mainSource, /previewCredentialStorePath[\s\S]+app\.getPath\("userData"\), "server-credentials\.json"/);
+  assert.match(mainSource, /previewAccountSessionPath[\s\S]+app\.getPath\("userData"\), "account-session\.json"/);
+  assert.doesNotMatch(mainSource, /previewCredentialStorePath[\s\S]+"Liked Songs", "server-credentials\.json"/);
   assert.match(mainSource, /fs\.mkdir\(directory, \{ recursive: true, mode: 0o700 \}\)/);
   assert.match(mainSource, /fs\.chmod\(destination, 0o600\)/);
   assert.match(mainSource, /server:credentials:load[\s\S]+usesPreviewCredentialStore\(\)[\s\S]+readPreviewCredentials/);
@@ -1173,7 +1199,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(playlistImportSource, /uploadFailures\.push\(\.\.\.\(uploadResult\?\.failed \|\| \[\]\)\)/);
   assert.match(playlistImportSource, /formatServerUploadFailureNotice\(uploadFailures\)/);
   assert.match(mainSource, /mediaKind: value\.mediaKind/);
-  assert.match(mainSource, /sourceLinkRegistrationBody\(\{[\s\S]+mediaSourceURL[\s\S]+"Content-Type": "application\/json"/);
+  assert.match(mainSource, /putSourceLinkRegistration\(\{[\s\S]+"Content-Type": "application\/json"[\s\S]+item: \{ mediaSourceURL, mediaKind \}/);
   assert.match(mainSource, /currentFile: filename,[\s\S]+completed,[\s\S]+total: 1/);
   assert.match(appSource, /sourceProvider === "debrid_vault"[\s\S]+return "Debrid Vault"/);
   assert.match(appSource, /api\.startExternalImport\(/);
@@ -1269,7 +1295,14 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(mainSource, /ipcMain\.handle\("server:listening-history:post"/);
   assert.match(mainSource, /ipcMain\.handle\("server:listening-history:get"[\s\S]+url\.searchParams\.set\("limit"[\s\S]+Accept: "application\/json"/);
   assert.match(mainSource, /api\/v1\/listening-history/);
-  assert.match(mainSource, /JSON\.stringify\(\{ client: "windows", entries \}\)/);
+  assert.match(mainSource, /const minimalEntries = entries\.map[\s\S]+song_id: songID[\s\S]+JSON\.stringify\(\{ entries: minimalEntries \}\)/);
+  assert.doesNotMatch(
+    mainSource.slice(
+      mainSource.indexOf('ipcMain.handle("server:listening-history:post"'),
+      mainSource.indexOf('ipcMain.handle("server:listening-history:get"'),
+    ),
+    /device_id|client: "windows"|title:|artist:|album:|duration_seconds/,
+  );
   assert.match(mainSource, /response\.status === 404[\s\S]+supported: false/);
   assert.match(appSource, /const LISTENING_HISTORY_BATCH_SIZE = 500/);
   assert.match(appSource, /profileID: activeProfileID\(\)/);
@@ -1521,6 +1554,55 @@ test("merges and displays server-only listening history snapshots", () => {
   assert.equal(restored.listeningHistory[0].originatedOnThisDevice, false);
 });
 
+test("hydrates legacy listening history from one downloaded local copy without guessing", () => {
+  const now = new Date(2026, 6, 30, 12, 0, 0);
+  const downloaded = {
+    id: "downloaded-copy",
+    title: "Candle - Light/Speed (Geometry Dash / FUNHOUSE)",
+    artist: "EDMS and Candle / Audio",
+    album: "Current Local Metadata",
+    duration: 276,
+    artwork: "data:image/png;base64,iVBORw0KGgo=",
+    filePath: "/music/candle-history-copy.m4a",
+  };
+  const historyEntry = {
+    id: "legacy-play",
+    trackID: "old-device-track",
+    profileID: "default",
+    serverOrigin: "https://resonance.example",
+    remoteID: "old-server-song",
+    startedAt: now.toISOString(),
+    listenedSeconds: 120,
+    title: "Candle - Light/Speed (Geometry Dash / FUNHOUSE)",
+    artist: "Candle and EDMS / Audio",
+    album: "Imported",
+    duration: 276,
+    originatedOnThisDevice: false,
+  };
+  const state = normalizeState({
+    serverURL: "https://resonance.example",
+    syncProfileID: "default",
+    tracks: [downloaded],
+    listeningHistory: [historyEntry],
+  });
+
+  const hydrated = summarizeListeningHistory(state, 1, now).songSeries[0];
+  assert.equal(hydrated.trackID, downloaded.id);
+  assert.equal(hydrated.artwork, downloaded.artwork);
+  assert.equal(hydrated.album, downloaded.album);
+  assert.equal(summarizeListeningStats(state, now).topTrackID, downloaded.id);
+
+  state.tracks.push({
+    ...downloaded,
+    id: "ambiguous-copy",
+    album: "Different Copy",
+    filePath: "/music/candle-history-copy-2.m4a",
+  });
+  const unresolved = summarizeListeningHistory(state, 1, now).songSeries[0];
+  assert.equal(unresolved.trackID, historyEntry.trackID);
+  assert.equal(unresolved.artwork, null);
+});
+
 test("summarizes all-time listening stats independently of the graph window", () => {
   const now = new Date(2026, 6, 30, 12, 0, 0);
   const result = summarizeListeningStats({
@@ -1766,6 +1848,52 @@ test("preserves unsynced playlist state across profile switches", () => {
   assert.deepEqual(state.dirtyPlaylistIDs, ["offline-mix"]);
 });
 
+test("moves the confirmed legacy device context to its Clerk account without touching other profiles", () => {
+  const serverURL = "https://music.example";
+  const oldKey = "https://music.example#profile=default";
+  const nextKey = "https://music.example#profile=user_listener";
+  const state = normalizeState({
+    ...createEmptyState(),
+    serverURL,
+    syncProfileID: "default",
+    tracks: [
+      { id: "migrated", remoteID: "song-a", sourceServer: serverURL, syncProfileID: "default" },
+      { id: "other", remoteID: "song-b", sourceServer: serverURL, syncProfileID: "family" },
+    ],
+    playlists: [
+      { id: "liked", name: "Liked Songs", trackIDs: ["migrated"], isSystem: true },
+      { id: "mix", name: "Mix", trackIDs: ["migrated"], remoteSongIDs: ["song-a"], isSystem: false },
+    ],
+    favorites: ["migrated"],
+    playlistSyncServerURL: oldKey,
+    dirtyPlaylistIDs: ["mix"],
+    listeningHistory: [{
+      id: "play-a",
+      trackID: "migrated",
+      profileID: "default",
+      serverOrigin: serverURL,
+      startedAt: new Date().toISOString(),
+      listenedSeconds: 30,
+    }],
+    serverTransferPreferences: { [oldKey]: { uploadMode: "server_source_link", downloadMode: "stream_only" } },
+  });
+
+  assert.equal(migrateProfileContext(state, serverURL, "default", "user_listener"), true);
+  assert.equal(state.syncProfileID, "user_listener");
+  assert.equal(state.tracks[0].syncProfileID, "user_listener");
+  assert.equal(state.tracks[1].syncProfileID, "family");
+  assert.equal(state.listeningHistory[0].profileID, "user_listener");
+  assert.equal(state.playlistSyncServerURL, nextKey);
+  assert.deepEqual(state.profileStates[nextKey].dirtyPlaylistIDs, ["mix"]);
+  assert.equal(state.profileStates[oldKey], undefined);
+  assert.deepEqual(state.serverTransferPreferences[nextKey], {
+    uploadMode: "server_source_link",
+    downloadMode: "stream_only",
+  });
+  assert.equal(state.serverTransferPreferences[oldKey], undefined);
+  assert.equal(migrateProfileContext(state, serverURL, "default", "user_listener"), false);
+});
+
 test("keeps clip ranges profile specific and migrates local ranges after upload", () => {
   const track = { id: "local-track", title: "Range", duration: 120 };
   const state = normalizeState({
@@ -1818,7 +1946,7 @@ test("guards profile transitions, authenticated downloads, persistence, and tran
   assert.match(syncSource, /writeResponseToFile\(response, temporary/);
   assert.doesNotMatch(syncSource, /response\.arrayBuffer\(\)/);
   assert.doesNotMatch(uploadSource, /createReadStream\(filePath\)|duplex: "half"/);
-  assert.match(uploadSource, /sourceLinkRegistrationBody\(item, filename\)[\s\S]+"Content-Type": "application\/json"/);
+  assert.match(uploadSource, /putSourceLinkRegistration\(\{[\s\S]+"Content-Type": "application\/json"[\s\S]+item,/);
   assert.doesNotMatch(uploadSource, /fs\.readFile\(filePath\)/);
   assert.match(uploadSource, /managedRoots = \[paths\.local, paths\.remote\]/);
   assert.match(uploadSource, /isManagedLibraryFile\(item\.filePath, managedRoots\)/);
@@ -2077,7 +2205,7 @@ test("reserves immutable upload contexts while account sessions replace credenti
   assert.match(saveFormSource, /const settingsOpen = Boolean\(\$\("#settingsDialog"\)\?\.open && settingsPanel === "server" && \$\("#serverSettingsForm"\)\)/);
   assert.doesNotMatch(saveFormSource, /#serverToken|#serverAdminToken|saveServerCredentials/);
   assert.match(saveFormSource, /serverToken = String\(accountSession\?\.accessToken \|\| ""\)\.trim\(\)/);
-  assert.match(saveFormSource, /serverAdminToken = accountSession\?\.role === "admin" \? serverToken : ""/);
+  assert.match(saveFormSource, /serverAdminToken = accountSession \? serverToken : ""/);
   assert.doesNotMatch(appSource, /id="serverToken"|id="serverAdminToken"/);
   assert.match(appSource, /data-auth-provider="clerk"/);
   assert.match(appSource, /email, Google, Apple, and Discord/);

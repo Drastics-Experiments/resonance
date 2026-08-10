@@ -183,6 +183,53 @@ object ProfileLibraryStatePolicy {
         return restoreContext(captureActive(library), serverURL, profileID)
     }
 
+    fun migrateContext(
+        library: StoredLibrary,
+        serverURL: String,
+        migratedProfileID: String,
+        accountProfileID: String,
+    ): StoredLibrary {
+        val oldProfileID = migratedProfileID.trim()
+        val nextProfileID = accountProfileID.trim()
+        val oldKey = RemoteTrackIdentityPolicy.contextKey(serverURL, oldProfileID) ?: return library
+        val nextKey = RemoteTrackIdentityPolicy.contextKey(serverURL, nextProfileID) ?: return library
+        if (oldProfileID.isEmpty() || nextProfileID.isEmpty() || oldProfileID == nextProfileID) return library
+        if (library.syncProfileID != oldProfileID ||
+            RemoteTrackIdentityPolicy.normalizedOrigin(library.serverURL) !=
+            RemoteTrackIdentityPolicy.normalizedOrigin(serverURL)
+        ) return library
+
+        val captured = captureActive(library)
+        fun migratedKey(key: String): String =
+            if (key.startsWith("$oldKey|")) nextKey + key.removePrefix(oldKey) else key
+        fun migratedRanges(ranges: Map<String, ClipRange>): Map<String, ClipRange> =
+            ranges.entries.associate { (key, range) -> migratedKey(key) to range }
+        fun migratedState(state: ProfileLibraryState): ProfileLibraryState = state.copy(
+            playlistSyncServerURL = if (state.playlistSyncServerURL == oldKey) nextKey else state.playlistSyncServerURL,
+            clipRanges = migratedRanges(state.clipRanges),
+            dirtyClipRangeKeys = state.dirtyClipRangeKeys.mapTo(linkedSetOf(), ::migratedKey),
+            deletedClipRangeKeys = state.deletedClipRangeKeys.mapTo(linkedSetOf(), ::migratedKey),
+        )
+
+        val states = captured.profileStates.toMutableMap()
+        states.remove(oldKey)?.let { states[nextKey] = migratedState(it) }
+        return captured.copy(
+            tracks = captured.tracks.map { track ->
+                if (RemoteTrackIdentityPolicy.belongsToContext(track, serverURL, oldProfileID)) {
+                    track.copy(syncProfileID = nextProfileID)
+                } else {
+                    track
+                }
+            },
+            syncProfileID = nextProfileID,
+            playlistSyncServerURL = if (captured.playlistSyncServerURL == oldKey) nextKey else captured.playlistSyncServerURL,
+            clipRanges = migratedRanges(captured.clipRanges),
+            dirtyClipRangeKeys = captured.dirtyClipRangeKeys.mapTo(linkedSetOf(), ::migratedKey),
+            deletedClipRangeKeys = captured.deletedClipRangeKeys.mapTo(linkedSetOf(), ::migratedKey),
+            profileStates = states,
+        )
+    }
+
     fun restoreContext(captured: StoredLibrary, serverURL: String, profileID: String): StoredLibrary {
         val targetKey = RemoteTrackIdentityPolicy.contextKey(serverURL, profileID)
             ?: throw IllegalArgumentException("Enter a valid server URL")

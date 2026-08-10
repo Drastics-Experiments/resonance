@@ -41,6 +41,20 @@ test("accepts only the exact duplicate_of shape for HTTP 409", async () => {
   );
 });
 
+test("accepts the minimal link-only upload response", async () => {
+  const result = await readServerUploadResponse(response({
+    id: "saved-uuid",
+    source_url: "https://media.example/song.m4a?token=preserved",
+    media_kind: "video",
+    download_url: "/api/v1/songs/saved-uuid/file",
+    stream_url: "/api/v1/songs/saved-uuid/stream",
+  }), { serverOrigin: origin });
+  assert.equal(result.song.id, "saved-uuid");
+  assert.equal(result.song.source_url, "https://media.example/song.m4a?token=preserved");
+  assert.equal(result.song.media_kind, "video");
+  assert.equal(result.song.size, 0);
+});
+
 test("rejects malformed, non-JSON, oversized, and unsafe upload responses", async () => {
   await assert.rejects(
     readServerUploadResponse(new Response("not json", { status: 201, headers: { "content-type": "application/json" } }), { serverOrigin: origin }),

@@ -508,26 +508,23 @@ private struct MacServerSongRow: View {
     @State private var isHovering = false
 
     private var displayTitle: String {
-        guard song.title.isEmpty, let localTrack, !localTrack.title.isEmpty else { return song.title }
-        return localTrack.title
+        guard let localTitle = localTrack?.title.trimmingCharacters(in: .whitespacesAndNewlines),
+              !localTitle.isEmpty else { return song.title }
+        return localTitle
     }
 
     private var displayArtist: String {
-        guard song.artist.isEmpty || song.artist == "Unknown Artist",
-              let localTrack,
-              !localTrack.artist.isEmpty,
-              localTrack.artist != "Unknown Artist"
-        else { return song.artist }
-        return localTrack.artist
+        guard let localArtist = localTrack?.artist.trimmingCharacters(in: .whitespacesAndNewlines),
+              !localArtist.isEmpty,
+              localArtist != "Unknown Artist" else { return song.artist }
+        return localArtist
     }
 
     private var displayAlbum: String {
-        guard song.album.isEmpty || song.album == "Server Library",
-              let localTrack,
-              !localTrack.album.isEmpty,
-              localTrack.album != "Server Library"
-        else { return song.album }
-        return localTrack.album
+        guard let localAlbum = localTrack?.album.trimmingCharacters(in: .whitespacesAndNewlines),
+              !localAlbum.isEmpty,
+              localAlbum != "Server Library" else { return song.album }
+        return localAlbum
     }
 
     private var sizeOrDurationText: String {
