@@ -77,11 +77,56 @@ submit_for_notarization() {
     fi
 }
 
+patch_swiftpm_resource_accessors() {
+    local bin_dir="$1"
+    local found=0
+    local accessor
+    for accessor in "$bin_dir"/*.build/DerivedSources/resource_bundle_accessor.swift; do
+        [[ -f "$accessor" ]] || continue
+        found=1
+        if grep -Fq '(Bundle.main.resourceURL ?? Bundle.main.bundleURL)' "$accessor"; then
+            continue
+        fi
+        grep -Fq 'Bundle.main.bundleURL.appendingPathComponent' "$accessor" || {
+            echo "Unsupported SwiftPM resource accessor: $accessor" >&2
+            exit 70
+        }
+        sed -i '' 's/Bundle\.main\.bundleURL/(Bundle.main.resourceURL ?? Bundle.main.bundleURL)/g' "$accessor"
+    done
+    [[ "$found" == "1" ]] || {
+        echo "The release build did not generate SwiftPM resource accessors." >&2
+        exit 70
+    }
+}
+
+verify_swiftpm_resource_accessors() {
+    local bin_dir="$1"
+    local found=0
+    local accessor
+    for accessor in "$bin_dir"/*.build/DerivedSources/resource_bundle_accessor.swift; do
+        [[ -f "$accessor" ]] || continue
+        found=1
+        grep -Fq '(Bundle.main.resourceURL ?? Bundle.main.bundleURL)' "$accessor" || {
+            echo "SwiftPM retained an incompatible resource accessor: $accessor" >&2
+            exit 70
+        }
+    done
+    [[ "$found" == "1" ]] || {
+        echo "The release build did not retain SwiftPM resource accessors." >&2
+        exit 70
+    }
+}
+
 cd "$ROOT_DIR"
 EXECUTABLES=()
+BIN_DIRS=()
 for arch in arm64 x86_64; do
     swift build -c release --arch "$arch" --product "$PRODUCT"
     BIN_DIR="$(swift build -c release --arch "$arch" --show-bin-path)"
+    patch_swiftpm_resource_accessors "$BIN_DIR"
+    swift build -c release --arch "$arch" --product "$PRODUCT"
+    verify_swiftpm_resource_accessors "$BIN_DIR"
+    BIN_DIRS+=("$BIN_DIR")
     EXECUTABLES+=("$BIN_DIR/$PRODUCT")
 done
 for executable in "${EXECUTABLES[@]}"; do
@@ -92,6 +137,25 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$WORK_DIR/AppIcon.icon
 lipo -create "${EXECUTABLES[@]}" -output "$APP/Contents/MacOS/$PRODUCT"
 chmod 0755 "$APP/Contents/MacOS/$PRODUCT"
 install -m 0755 "$SCRIPT_DIR/install-update.sh" "$APP/Contents/Resources/install-update.sh"
+
+# SwiftPM keeps dependency resources beside the executable. Copy every resource
+# bundle into Bundle.main.resourceURL so generated Bundle.module accessors keep
+# working after the executable is moved into the release app.
+while IFS= read -r -d '' resource_bundle; do
+    ditto "$resource_bundle" "$APP/Contents/Resources/${resource_bundle##*/}"
+done < <(find "${BIN_DIRS[0]}" -maxdepth 1 -type d -name '*.bundle' -print0)
+
+REQUIRED_RESOURCE_FILES=(
+    "Clerk_ClerkKitUI.bundle/Info.plist"
+    "Clerk_ClerkKitUI.bundle/Localizable.xcstrings"
+    "PhoneNumberKit_PhoneNumberKit.bundle/PhoneNumberMetadata.json"
+)
+for resource_file in "${REQUIRED_RESOURCE_FILES[@]}"; do
+    [[ -s "$APP/Contents/Resources/$resource_file" ]] || {
+        echo "Missing required SwiftPM resource: $resource_file" >&2
+        exit 70
+    }
+done
 
 PLIST="$APP/Contents/Info.plist"
 plutil -create xml1 "$PLIST"
@@ -190,10 +254,17 @@ PKG_ARGS=(--root "$PKG_ROOT" --install-location / --identifier "$BUNDLE_ID.insta
 if [[ -n "$INSTALLER_IDENTITY" ]]; then PKG_ARGS+=(--sign "$INSTALLER_IDENTITY"); fi
 COPYFILE_DISABLE=1 pkgbuild "${PKG_ARGS[@]}" "$INSTALLER"
 
-if ! pkgutil --payload-files "$INSTALLER" | grep -Eq '(^|/)Applications/Resonance\.app/Contents/MacOS/Resonance$'; then
+INSTALLER_PAYLOAD_FILES="$(pkgutil --payload-files "$INSTALLER")"
+if ! grep -Eq '(^|/)Applications/Resonance\.app/Contents/MacOS/Resonance$' <<< "$INSTALLER_PAYLOAD_FILES"; then
     echo "The macOS installer does not contain the Resonance application payload." >&2
     exit 70
 fi
+for resource_file in "${REQUIRED_RESOURCE_FILES[@]}"; do
+    if ! grep -Fq "Applications/Resonance.app/Contents/Resources/$resource_file" <<< "$INSTALLER_PAYLOAD_FILES"; then
+        echo "The macOS installer is missing $resource_file." >&2
+        exit 70
+    fi
+done
 
 if [[ -n "$NOTARY_PROFILE" || "$NOTARY_API_CONFIGURED" == "1" ]]; then
     submit_for_notarization "$INSTALLER"
