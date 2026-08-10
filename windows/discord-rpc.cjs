@@ -26,7 +26,7 @@ function discordIPCPaths(platform = process.platform, environment = process.env)
   ].filter((value, index, values) => value && values.indexOf(value) === index);
   return prefixes.flatMap((prefix) => Array.from(
     { length: 10 },
-    (_unused, index) => path.join(prefix, `discord-ipc-${index}`),
+    (_unused, index) => path.posix.join(prefix, `discord-ipc-${index}`),
   ));
 }
 
