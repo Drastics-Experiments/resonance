@@ -373,6 +373,9 @@ class LibraryRepository(
             tracks = existingTracks,
             playlists = cleanedPlaylists,
             favorites = favorites,
+            remoteSongMetadataCache = RemoteSongMetadataCachePolicy.normalized(
+                reconciled.remoteSongMetadataCache,
+            ),
             profileStates = reconciled.profileStates.mapValues { (_, state) ->
                 normalizeProfileState(state, existingTracks)
             },

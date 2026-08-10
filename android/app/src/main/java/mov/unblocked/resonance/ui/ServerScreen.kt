@@ -101,21 +101,41 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
     LaunchedEffect(Unit) { actions.onServerScreenOpened() }
 
     val query = search.trim()
-    val visible = state.remoteSongs.filter { song ->
-        val synced = song.id in state.downloadedRemoteSongIds
-        val matchesScope = when (scope) {
-            ServerScope.All -> true
-            ServerScope.OnDevice -> synced
-            ServerScope.NotDownloaded -> !synced
-        }
-        matchesScope && (query.isEmpty() || song.title.contains(query, true) || song.artist.contains(query, true) ||
-            song.album.contains(query, true) || song.filename.contains(query, true))
-    }.sortedWith { a, b ->
-        when (sort) {
-            ServerSort.Title -> a.title.compareTo(b.title, true)
-            ServerSort.Artist -> a.artist.compareTo(b.artist, true)
-            ServerSort.FileSize -> b.size.compareTo(a.size)
-            ServerSort.RecentlyUpdated -> b.modifiedAt.compareTo(a.modifiedAt)
+    val pendingMetadataCount = remember(state.remoteSongs) {
+        state.remoteSongs.count(RemoteSong::isMetadataLoading)
+    }
+    val visible = remember(
+        state.remoteSongs,
+        state.downloadedRemoteSongIds,
+        query,
+        scope,
+        sort,
+        pendingMetadataCount,
+    ) {
+        state.remoteSongs.filter { song ->
+            val synced = song.id in state.downloadedRemoteSongIds
+            val matchesScope = when (scope) {
+                ServerScope.All -> true
+                ServerScope.OnDevice -> synced
+                ServerScope.NotDownloaded -> !synced
+            }
+            matchesScope && (query.isEmpty() || song.title.contains(query, true) || song.artist.contains(query, true) ||
+                song.album.contains(query, true) || song.filename.contains(query, true))
+        }.sortedWith { a, b ->
+            when (sort) {
+                ServerSort.Title -> if (pendingMetadataCount > 0) {
+                    a.filename.compareTo(b.filename, true)
+                } else {
+                    a.title.compareTo(b.title, true)
+                }
+                ServerSort.Artist -> if (pendingMetadataCount > 0) {
+                    a.filename.compareTo(b.filename, true)
+                } else {
+                    a.artist.compareTo(b.artist, true)
+                }
+                ServerSort.FileSize -> b.size.compareTo(a.size)
+                ServerSort.RecentlyUpdated -> b.modifiedAt.compareTo(a.modifiedAt)
+            }
         }
     }
     val syncedCount = state.remoteSongs.count { it.id in state.downloadedRemoteSongIds }
@@ -217,6 +237,26 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                 )
             }
         }
+        if (pendingMetadataCount > 0) {
+            item {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(12.dp),
+                        strokeWidth = 1.5.dp,
+                        color = Violet,
+                    )
+                    Text(
+                        "Loading metadata for $pendingMetadataCount ${if (pendingMetadataCount == 1) "song" else "songs"}",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                    )
+                }
+            }
+        }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
@@ -262,7 +302,13 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
             }
         }
         item { SongListHeader() }
-        if (visible.isEmpty()) {
+        if (visible.isEmpty() && state.remoteSongs.isEmpty() && state.isRefreshingServer) {
+            repeat(7) { index ->
+                item(key = "server-placeholder-$index") {
+                    ServerSongPlaceholderRow(index + 1)
+                }
+            }
+        } else if (visible.isEmpty()) {
             item {
                 Column(
                     Modifier.fillMaxWidth().padding(vertical = 42.dp),
@@ -548,6 +594,7 @@ private fun ServerSongRow(
     val synced = song.id in state.downloadedRemoteSongIds
     val selected = song.id in state.selectedRemoteSongIds
     val local = state.tracks.firstOrNull { it.remoteID == song.id }
+    val metadataLoading = song.isMetadataLoading && local == null
     val displayTitle = local?.title?.takeIf(String::isNotBlank) ?: song.title
     val displayArtist = local?.artist?.takeIf { it.isNotBlank() && it != "Unknown Artist" } ?: song.artist
     val displayAlbum = local?.album?.takeIf { it.isNotBlank() && it != "Server Library" } ?: song.album
@@ -591,52 +638,78 @@ private fun ServerSongRow(
                     state.artworkPathsByTrackId[local.id] ?: local.artworkFilename,
                     Modifier.size(52.dp),
                 )
+            } else if (metadataLoading) {
+                Box(
+                    Modifier
+                        .size(52.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(Color.White.copy(alpha = .07f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = Color.White.copy(alpha = .68f),
+                    )
+                }
             } else {
                 RemoteArtwork(song.artworkURL, state.serverUrl, Modifier.size(52.dp))
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (metadataLoading) {
+                    ServerMetadataPlaceholder(148.dp, 11.dp)
+                    ServerMetadataPlaceholder(96.dp, 8.dp)
+                    ServerMetadataPlaceholder(88.dp, 9.dp)
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            displayTitle,
+                            modifier = Modifier.weight(1f, fill = false),
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (synced) {
+                            Icon(
+                                Icons.Default.CheckCircle,
+                                contentDescription = "Downloaded",
+                                modifier = Modifier.size(9.dp),
+                                tint = SuccessGreen,
+                            )
+                        }
+                    }
                     Text(
-                        displayTitle,
-                        modifier = Modifier.weight(1f, fill = false),
-                        fontWeight = FontWeight.SemiBold,
+                        "$displayArtist / ${song.mediaKindLabel}",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (synced) {
-                        Icon(
-                            Icons.Default.CheckCircle,
-                            contentDescription = "Downloaded",
-                            modifier = Modifier.size(9.dp),
-                            tint = SuccessGreen,
+                    if (displayAlbum.isNotBlank()) {
+                        Text(
+                            displayAlbum,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .43f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
-                Text(
-                    "$displayArtist / ${song.mediaKindLabel}",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (displayAlbum.isNotBlank()) {
-                    Text(
-                        displayAlbum,
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .43f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
             }
-            Text(
-                trailingDetail,
-                modifier = Modifier.width(44.dp),
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
-                textAlign = TextAlign.End,
-                maxLines = 1,
-            )
+            if (metadataLoading) {
+                Box(Modifier.width(44.dp), contentAlignment = Alignment.CenterEnd) {
+                    ServerMetadataPlaceholder(42.dp, 9.dp)
+                }
+            } else {
+                Text(
+                    trailingDetail,
+                    modifier = Modifier.width(44.dp),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                    textAlign = TextAlign.End,
+                    maxLines = 1,
+                )
+            }
         }
         Box(Modifier.align(Alignment.CenterEnd)) {
             if (!selecting) {
@@ -669,6 +742,63 @@ private fun ServerSongRow(
             color = Color.White.copy(alpha = .10f),
         )
     }
+}
+
+@Composable
+private fun ServerSongPlaceholderRow(number: Int) {
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 76.dp)
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                number.toString(),
+                modifier = Modifier.width(24.dp),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .25f),
+            )
+            Box(
+                Modifier
+                    .size(52.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(Color.White.copy(alpha = .07f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = Color.White.copy(alpha = .58f),
+                )
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                ServerMetadataPlaceholder(148.dp, 11.dp)
+                ServerMetadataPlaceholder(96.dp, 8.dp)
+                ServerMetadataPlaceholder(88.dp, 9.dp)
+            }
+            Box(Modifier.width(44.dp), contentAlignment = Alignment.CenterEnd) {
+                ServerMetadataPlaceholder(42.dp, 9.dp)
+            }
+        }
+        androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = .10f))
+    }
+}
+
+@Composable
+private fun ServerMetadataPlaceholder(
+    width: androidx.compose.ui.unit.Dp,
+    height: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier
+            .width(width)
+            .height(height)
+            .background(Color.White.copy(alpha = .09f), RoundedCornerShape(height / 2)),
+    )
 }
 
 private val RemoteSong.mediaKindLabel: String

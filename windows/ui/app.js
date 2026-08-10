@@ -28,6 +28,7 @@ import {
   niceChartMaximum,
   normalizeServerUploadManifest,
   normalizedAppPreferences,
+  normalizedRemoteSongMetadataCache,
   normalizedVolume,
   playbackGainForVolume,
   normalizeState,
@@ -40,6 +41,7 @@ import {
   preservedUploadSourceURL,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
+  remoteSongMetadataCacheKey,
   reconcileUploadedTrack,
   reorderPlaylistTrackIDs,
   resolveServerTransferModes,
@@ -2706,8 +2708,12 @@ function updateServerArtworkNode(song) {
   if (!container) return;
   const source = song?.artwork;
   const canRenderImage = source && !/^https?:/i.test(source);
+  const isMetadataLoading = Boolean(song?.metadataLoading || song?.metadataArtworkLoading);
+  const placeholder = container.querySelector(".server-artwork-placeholder");
   container.querySelector("img")?.remove();
   container.classList.remove("loaded", "has-image", "failed");
+  container.classList.toggle("server-metadata-artwork", isMetadataLoading);
+  if (placeholder) placeholder.textContent = isMetadataLoading ? "" : "♪";
   if (!canRenderImage) {
     container.classList.add("failed");
     container.setAttribute("aria-busy", "false");
@@ -2768,59 +2774,169 @@ function hydrateServerCatalogArtwork(songs) {
   void Promise.allSettled(workers);
 }
 
-function hydrateServerCatalogMetadata(songs) {
-  const context = currentProfileContext();
-  const generation = serverCatalogGeneration;
-  const queue = songs.filter((song) =>
-    !activeRemoteTrack(song?.id)
-      && song?.source_url
-      && !serverSourceNeedsOriginalPage(song.source_url));
-  const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
-    while (queue.length) {
-      const song = queue.shift();
-      let metadata;
-      try {
-        metadata = await api.resolveServerSourceMetadata({
-          sourceURL: song.source_url,
-          mediaKind: song.media_kind,
-        });
-      } catch {
-        if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) return;
-        const current = serverCatalog.find((item) => item.id === song.id && item.source_url === song.source_url);
-        if (current) {
-          const fallback = serverSourceDisplayFallback(song.source_url, { failed: true });
-          Object.assign(current, fallback, { name: fallback.title });
-          if (section === "server") renderServer();
-        }
-        continue;
-      }
-      if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) return;
-      const current = serverCatalog.find((item) => item.id === song.id && item.source_url === song.source_url);
-      if (!current) continue;
-      current.title = metadata?.title || current.title;
-      current.name = metadata?.title || current.name;
-      current.artist = metadata?.artist || current.artist;
-      current.album = metadata?.album || "Imported";
-      current.duration = Number(metadata?.duration) > 0 ? Number(metadata.duration) : current.duration;
-      if (metadata?.artworkURL) {
-        const artwork = await api.fetchLocalImportArtwork(metadata.artworkURL).catch(() => null);
-        if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) return;
-        if (artwork) current.artwork = artwork;
-      }
-      if (section === "server") renderServer();
+function cachedServerSongMetadata(song) {
+  const key = remoteSongMetadataCacheKey(song?.source_url, song?.media_kind);
+  return key ? state.remoteSongMetadataCache?.[key] || null : null;
+}
+
+function serverSongHasCatalogMetadata(song) {
+  return Boolean(String(song?.title || song?.name || "").trim() && String(song?.artist || "").trim());
+}
+
+function applyServerSongMetadata(song, metadata) {
+  song.title = metadata?.title || song.title;
+  song.name = metadata?.title || song.name;
+  song.artist = metadata?.artist || song.artist;
+  song.album = metadata?.album || "Imported";
+  song.duration = Number(metadata?.duration) > 0 ? Number(metadata.duration) : song.duration;
+  song.metadataLoading = false;
+  song.metadataArtworkURL = metadata?.artworkURL || null;
+  const cachedArtwork = serverArtworkCache.get(serverArtworkKey(song));
+  if (cachedArtwork) song.artwork = cachedArtwork;
+  song.metadataArtworkLoading = Boolean(song.metadataArtworkURL && !song.artwork);
+  return song;
+}
+
+function rememberServerSongMetadata(song, metadata) {
+  const key = remoteSongMetadataCacheKey(song?.source_url, song?.media_kind);
+  if (!key || !metadata?.title || !metadata?.artist) return false;
+  state.remoteSongMetadataCache[key] = {
+    sourceURL: song.source_url,
+    mediaKind: song.media_kind === "video" ? "video" : "audio",
+    title: metadata.title,
+    artist: metadata.artist,
+    album: metadata.album || null,
+    duration: Number(metadata.duration) > 0 ? Number(metadata.duration) : null,
+    artworkURL: metadata.artworkURL || null,
+    cachedAt: new Date().toISOString(),
+  };
+  return true;
+}
+
+async function hydrateServerMetadataArtwork(song, context, generation) {
+  const source = song?.metadataArtworkURL;
+  if (!source) return;
+  const key = serverArtworkKey(song);
+  const cached = serverArtworkCache.get(key);
+  if (cached) {
+    song.artwork = cached;
+    song.metadataArtworkLoading = false;
+    updateServerArtworkNode(song);
+    return;
+  }
+  let pending = serverArtworkPending.get(key);
+  if (!pending) {
+    pending = api.fetchLocalImportArtwork(source).catch(() => null);
+    serverArtworkPending.set(key, pending);
+  }
+  try {
+    const artwork = await pending;
+    if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) return;
+    const current = serverCatalog.find((item) => item.id === song.id && item.metadataArtworkURL === source);
+    if (!current) return;
+    current.metadataArtworkLoading = false;
+    if (artwork) {
+      if (serverArtworkCache.size >= 256) serverArtworkCache.delete(serverArtworkCache.keys().next().value);
+      serverArtworkCache.set(key, artwork);
+      current.artwork = artwork;
     }
+    updateServerArtworkNode(current);
+  } finally {
+    if (serverArtworkPending.get(key) === pending) serverArtworkPending.delete(key);
+  }
+}
+
+function hydrateServerCatalogMetadataArtwork(songs, context, generation) {
+  const queue = songs.filter((song) => song.metadataArtworkLoading && song.metadataArtworkURL);
+  const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
+    while (queue.length) await hydrateServerMetadataArtwork(queue.shift(), context, generation);
   });
   void Promise.allSettled(workers);
 }
 
+function hydrateServerCatalogMetadata(songs) {
+  const context = currentProfileContext();
+  const generation = serverCatalogGeneration;
+  const requests = new Map();
+  for (const song of songs.filter((item) => item.metadataLoading)) {
+    const key = remoteSongMetadataCacheKey(song.source_url, song.media_kind);
+    if (!key) continue;
+    const existing = requests.get(key);
+    if (existing) existing.songIDs.push(song.id);
+    else requests.set(key, {
+      key,
+      songIDs: [song.id],
+      sourceURL: song.source_url,
+      mediaKind: song.media_kind === "video" ? "video" : "audio",
+    });
+  }
+  const queue = [...requests.values()];
+  const bufferedResults = [];
+  let completedRequests = 0;
+  let cacheChanged = false;
+  const flush = () => {
+    if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) {
+      bufferedResults.length = 0;
+      return false;
+    }
+    if (!bufferedResults.length) return true;
+    const artworkSongs = [];
+    for (const result of bufferedResults.splice(0)) {
+      const songIDs = new Set(result.request.songIDs);
+      for (const current of serverCatalog.filter((item) => songIDs.has(item.id) && item.source_url === result.request.sourceURL)) {
+        if (result.metadata) {
+          applyServerSongMetadata(current, result.metadata);
+          cacheChanged = rememberServerSongMetadata(current, result.metadata) || cacheChanged;
+          if (current.metadataArtworkLoading) artworkSongs.push(current);
+        } else {
+          const fallback = serverSourceDisplayFallback(current.source_url, { failed: true });
+          Object.assign(current, fallback, {
+            name: fallback.title,
+            metadataLoading: false,
+            metadataArtworkLoading: false,
+          });
+        }
+      }
+    }
+    if (section === "server") renderServer();
+    hydrateServerCatalogMetadataArtwork(artworkSongs, context, generation);
+    return true;
+  };
+  const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
+    while (queue.length) {
+      const request = queue.shift();
+      let metadata = null;
+      try {
+        metadata = await api.resolveServerSourceMetadata({
+          sourceURL: request.sourceURL,
+          mediaKind: request.mediaKind,
+        });
+      } catch {
+        metadata = null;
+      }
+      if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) return;
+      bufferedResults.push({ request, metadata });
+      completedRequests += 1;
+      if (bufferedResults.length >= 4 || completedRequests === requests.size) flush();
+    }
+  });
+  void Promise.allSettled(workers).then(() => {
+    flush();
+    if (!cacheChanged) return;
+    state.remoteSongMetadataCache = normalizedRemoteSongMetadataCache(state.remoteSongMetadataCache);
+    persistInBackground({ refreshSidebar: false });
+  });
+}
+
 function replaceServerCatalog(songs) {
+  state.remoteSongMetadataCache = normalizedRemoteSongMetadataCache(state.remoteSongMetadataCache);
   serverCatalog = (Array.isArray(songs) ? songs : []).map((song) => {
     const local = activeRemoteTrack(song?.id);
     const sourceFallback = serverSourceDisplayFallback(song?.source_url);
     const fallbackTitle = song?.source_url
       ? sourceFallback.title
       : `Saved song ${String(song?.id || "").slice(0, 8)}`;
-    return {
+    const mapped = {
       ...song,
       name: local?.title || song?.name || song?.filename || fallbackTitle,
       title: local?.title || song?.title || fallbackTitle,
@@ -2828,9 +2944,24 @@ function replaceServerCatalog(songs) {
       album: local?.album || song?.album || (song?.source_url ? sourceFallback.album : "Server Library"),
       duration: Number(local?.duration) > 0 ? Number(local.duration) : Number(song?.duration) || null,
       artwork: local?.artwork || song?.artwork || null,
+      metadataLoading: false,
+      metadataArtworkLoading: false,
+      metadataArtworkURL: null,
     };
+    const cached = !local && cachedServerSongMetadata(song);
+    if (cached) return applyServerSongMetadata(mapped, cached);
+    mapped.metadataLoading = Boolean(
+      !local
+      && song?.source_url
+      && !serverSourceNeedsOriginalPage(song.source_url)
+      && !serverSongHasCatalogMetadata(song)
+    );
+    return mapped;
   });
   serverCatalogGeneration += 1;
+  const context = currentProfileContext();
+  const generation = serverCatalogGeneration;
+  hydrateServerCatalogMetadataArtwork(serverCatalog, context, generation);
   hydrateServerCatalogMetadata(serverCatalog);
 }
 
@@ -2984,15 +3115,15 @@ async function syncPlaylistsNow({ automatic = false } = {}) {
   }
 }
 
-function artwork(track, { animateLoading = false } = {}) {
+function artwork(track, { animateLoading = false, forceLoading = false } = {}) {
   const source = track?.artwork;
-  const hasRemoteArtwork = animateLoading && Boolean(source || track?.artwork_url);
+  const hasRemoteArtwork = animateLoading && Boolean(forceLoading || source || track?.artwork_url);
   const canRenderImage = source && !/^https?:/i.test(source);
   if (!hasRemoteArtwork) {
     return `<div class="row-art">${source ? squareArtworkImageMarkup(source) : "♪"}</div>`;
   }
-  return `<div class="row-art server-artwork-loading${canRenderImage ? " has-image" : ""}" data-server-artwork-id="${escapeHTML(track?.id || "")}" aria-busy="true">
-    <span class="server-artwork-placeholder" aria-hidden="true">♪</span>
+  return `<div class="row-art server-artwork-loading${forceLoading ? " server-metadata-artwork" : ""}${canRenderImage ? " has-image" : ""}" data-server-artwork-id="${escapeHTML(track?.id || "")}" aria-busy="true">
+    <span class="server-artwork-placeholder" aria-hidden="true">${forceLoading ? "" : "♪"}</span>
     ${canRenderImage ? squareArtworkImageMarkup(source) : ""}
   </div>`;
 }
@@ -3615,6 +3746,32 @@ async function retryServerUploadManifest(manifestID) {
   }
 }
 
+function pendingServerMetadataCount() {
+  return serverCatalog.filter((song) => song.metadataLoading).length;
+}
+
+function serverMetadataPlaceholder(className) {
+  return `<span class="server-metadata-placeholder ${className}" aria-hidden="true"></span>`;
+}
+
+function serverCatalogPlaceholderRows() {
+  return Array.from({ length: 7 }, () => `
+    <div class="remote-row server-catalog-placeholder ${serverSelecting ? "selecting" : ""}" aria-label="Loading server song">
+      ${serverSelecting ? '<span class="server-placeholder-check" aria-hidden="true"></span>' : ""}
+      <div class="row-art server-artwork-loading server-metadata-artwork" aria-busy="true">
+        <span class="server-artwork-placeholder" aria-hidden="true"></span>
+      </div>
+      <span class="server-song-title server-metadata-copy">
+        ${serverMetadataPlaceholder("server-metadata-title")}
+        ${serverMetadataPlaceholder("server-metadata-subtitle")}
+      </span>
+      <span class="server-cell">${serverMetadataPlaceholder("server-metadata-artist")}</span>
+      <span class="server-cell server-album">${serverMetadataPlaceholder("server-metadata-album")}</span>
+      <span class="server-cell server-duration">${serverMetadataPlaceholder("server-metadata-duration")}</span>
+      <span class="server-placeholder-menu" aria-hidden="true"></span>
+    </div>`).join("");
+}
+
 function renderServer() {
   updateTopSearch();
   const transferModes = currentServerTransferModes();
@@ -3636,6 +3793,12 @@ function renderServer() {
     : "Download all songs";
   const filtered = Boolean(serverQuery.trim()) || serverScope !== "all";
   const resultSummary = filtered ? `Showing ${filteredCount} of ${serverCatalog.length} tracks` : "All tracks";
+  const pendingMetadata = pendingServerMetadataCount();
+  const catalogRows = filteredCount
+    ? remoteRows()
+    : serverConnectInFlight && !serverCatalog.length
+      ? serverCatalogPlaceholderRows()
+      : `<div class="empty"><b>${serverCatalog.length ? "No matching songs" : "No server songs"}</b><span>${serverCatalog.length ? "Try another search or filter." : "Open connection settings to connect."}</span></div>`;
   content.innerHTML = `<div class="page server-page">
     <div class="server-heading"><h1>Music Server</h1><div class="server-status-line">
       <span id="serverStatus" class="connection-pill ${connected ? "connected" : ""}">● ${escapeHTML(connected ? "Connected" : serverConnectInFlight ? "Connecting" : "Offline")}</span>
@@ -3646,7 +3809,7 @@ function renderServer() {
       <span class="server-dot">•</span><span class="server-inline-metric green">${serverDeviceIcon}<strong>${downloaded}</strong><span>on device</span></span>
     </div></div>
     ${serverUploadManifestMarkup()}
-    <div class="server-library-bar"><div><strong>${resultSummary}</strong><small class="server-transfer-mode-summary">${escapeHTML(`${serverUploadModeOptions[transferModes.uploadMode] || "Uploads disabled"} · ${serverDownloadModeOptions[transferModes.downloadMode] || "Downloads disabled"}`)}</small></div><div class="server-actions">
+    <div class="server-library-bar"><div><strong>${resultSummary}</strong>${pendingMetadata ? `<small class="server-metadata-status"><span aria-hidden="true"></span>Loading metadata for ${pendingMetadata} ${pendingMetadata === 1 ? "song" : "songs"}</small>` : ""}<small class="server-transfer-mode-summary">${escapeHTML(`${serverUploadModeOptions[transferModes.uploadMode] || "Uploads disabled"} · ${serverDownloadModeOptions[transferModes.downloadMode] || "Downloads disabled"}`)}</small></div><div class="server-actions">
       <button id="uploadMissingDownloads" title="${fileUploadSelected ? "Upload downloaded songs missing from the server" : "Available only in Local files upload mode"}" aria-label="Upload downloaded songs missing from the server" ${fileUploadSelected ? "" : "disabled"}>${serverUploadMissingIcon}</button>
       <button id="uploadServer" title="${escapeHTML(uploadAvailable ? serverUploadModeOptions[transferModes.uploadMode] : "Uploads are disabled")}" aria-label="${escapeHTML(uploadAvailable ? serverUploadModeOptions[transferModes.uploadMode] : "Uploads are disabled")}" ${uploadAvailable ? "" : "disabled"}>${serverUploadIcon}</button>
       <button id="syncAll" title="${downloadLabel}" aria-label="${downloadLabel}" ${!offlineDownloadAvailable || (serverSelecting && !selectedRemoteIDs.size) ? "disabled" : ""}>${serverDownloadIcon}</button>
@@ -3654,7 +3817,7 @@ function renderServer() {
       <button id="syncServerPlaylists" title="Sync playlists" aria-label="Sync playlists">${serverPlaylistIcon}</button>
     </div></div>
     <div class="server-table-head ${serverSelecting ? "selecting" : ""}">${serverSelecting ? "<span></span>" : ""}<span></span><span>TITLE</span><span>ARTIST</span><span>ALBUM</span><span>DURATION</span><span></span></div>
-    <div id="remoteSongs" class="remote-list redesigned server-library">${filteredCount ? remoteRows() : `<div class="empty"><b>${serverCatalog.length ? "No matching songs" : "No server songs"}</b><span>${serverConnectInFlight ? "Connecting to your server…" : serverCatalog.length ? "Try another search or filter." : "Open connection settings to connect."}</span></div>`}</div>
+    <div id="remoteSongs" class="remote-list redesigned server-library">${catalogRows}</div>
   </div>`;
   $("#serverSettings").onclick = openServerSettings;
   $("#syncSelected").onclick = () => {
@@ -3686,6 +3849,7 @@ function renderServer() {
 
 function filteredServerCatalog() {
   const query = serverQuery.toLocaleLowerCase();
+  const metadataPending = pendingServerMetadataCount() > 0;
   return serverCatalog.filter((song) => {
     const onDevice = Boolean(activeRemoteTrack(song.id));
     if (serverScope === "device" && !onDevice) return false;
@@ -3693,6 +3857,9 @@ function filteredServerCatalog() {
     return `${song.title || song.name || ""} ${song.artist || ""} ${song.album || ""}`.toLocaleLowerCase().includes(query);
   }).sort((left, right) => {
     if (serverSort === "size") return (right.size || 0) - (left.size || 0);
+    if (metadataPending) {
+      return String(left.filename || left.id || "").localeCompare(String(right.filename || right.id || ""));
+    }
     if (serverSort === "artist") return String(left.artist || "").localeCompare(String(right.artist || ""));
     return String(left.title || left.name || "").localeCompare(String(right.title || right.name || ""));
   });
@@ -3702,15 +3869,18 @@ function remoteRows() {
   return filteredServerCatalog().map((song) => {
     const onDevice = Boolean(activeRemoteTrack(song.id));
     const selected = selectedRemoteIDs.has(song.id);
+    const metadataLoading = Boolean(song.metadataLoading);
+    const artworkLoading = metadataLoading || Boolean(song.metadataArtworkLoading);
+    const songTitle = song.title || song.name || "server song";
     const duration = Number(song.duration) > 0 ? formatTime(Number(song.duration)) : "—";
-    return `<div class="remote-row ${serverSelecting ? "selecting" : ""} ${selected ? "selected" : ""}" data-remote-row="${escapeHTML(song.id)}" tabindex="0" aria-keyshortcuts="Enter Space Shift+F10">
-      <button class="remote-check ${selected ? "selected" : ""}" data-select-remote="${escapeHTML(song.id)}" ${serverSelecting ? "" : "hidden"} aria-label="${selected ? "Deselect" : "Select"} ${escapeHTML(song.title || song.name)}">${selected ? "✓" : ""}</button>
-      ${artwork(song, { animateLoading: true })}
-      <span class="server-song-title"><strong>${escapeHTML(song.title || song.name)}</strong>${onDevice ? '<small>On device</small>' : serverSongRequiresDownload(song) && currentServerTransferModes().downloadMode === "stream_only" ? '<small>Video · download required</small>' : ""}</span>
-      <span class="server-cell">${escapeHTML(song.artist || "Unknown Artist")}</span>
-      <span class="server-cell server-album">${escapeHTML(displayAlbum(song))}</span>
-      <span class="server-cell server-duration">${duration}</span>
-      <button class="row-menu" data-remote-menu="${escapeHTML(song.id)}" title="More options" aria-label="More options for ${escapeHTML(song.title || song.name)}">•••</button>
+    return `<div class="remote-row ${serverSelecting ? "selecting" : ""} ${selected ? "selected" : ""} ${metadataLoading ? "metadata-loading" : ""}" data-remote-row="${escapeHTML(song.id)}" tabindex="0" aria-keyshortcuts="Enter Space Shift+F10" ${metadataLoading ? 'aria-busy="true" aria-label="Loading song metadata"' : ""}>
+      <button class="remote-check ${selected ? "selected" : ""}" data-select-remote="${escapeHTML(song.id)}" ${serverSelecting ? "" : "hidden"} aria-label="${selected ? "Deselect" : "Select"} ${escapeHTML(songTitle)}">${selected ? "✓" : ""}</button>
+      ${artwork(song, { animateLoading: true, forceLoading: artworkLoading })}
+      ${metadataLoading ? `<span class="server-song-title server-metadata-copy">${serverMetadataPlaceholder("server-metadata-title")}${serverMetadataPlaceholder("server-metadata-subtitle")}</span>` : `<span class="server-song-title"><strong>${escapeHTML(songTitle)}</strong>${onDevice ? '<small>On device</small>' : serverSongRequiresDownload(song) && currentServerTransferModes().downloadMode === "stream_only" ? '<small>Video · download required</small>' : ""}</span>`}
+      <span class="server-cell">${metadataLoading ? serverMetadataPlaceholder("server-metadata-artist") : escapeHTML(song.artist || "Unknown Artist")}</span>
+      <span class="server-cell server-album">${metadataLoading ? serverMetadataPlaceholder("server-metadata-album") : escapeHTML(displayAlbum(song))}</span>
+      <span class="server-cell server-duration">${metadataLoading ? serverMetadataPlaceholder("server-metadata-duration") : duration}</span>
+      <button class="row-menu" data-remote-menu="${escapeHTML(song.id)}" title="More options" aria-label="More options for ${escapeHTML(songTitle)}">•••</button>
     </div>`;
   }).join("");
 }
@@ -5992,7 +6162,8 @@ async function serverAction(mode) {
     updateServerTransfer({ direction: "download", currentFile: "Preparing download…", completed: 0, total: 1 });
   }
   serverConnectionText = mode === "catalog" ? "Connecting…" : "Syncing downloads…";
-  if (status) status.textContent = serverConnectionText;
+  if (section === "server") renderServer();
+  else if (status) status.textContent = serverConnectionText;
   let transferCancelled = false;
   try {
     let catalog;
@@ -6029,6 +6200,7 @@ async function serverAction(mode) {
       replaceServerCatalog(catalog.songs);
       serverConnected = true;
       hydrateServerCatalogArtwork(serverCatalog);
+      if (section === "server") renderServer();
     }
     await persist();
     renderSidebar();

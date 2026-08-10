@@ -3327,6 +3327,41 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 }
 .server-artwork-loading.failed::before { display: none; }
 .server-artwork-loading.failed .server-artwork-placeholder { animation: none; }
+.server-metadata-artwork { display: grid; place-items: center; background: #ffffff12; }
+.server-metadata-artwork::before { display: none; }
+.server-metadata-artwork .server-artwork-placeholder {
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #ffffff28;
+  border-top-color: #d3c7f4;
+  border-radius: 50%;
+  font-size: 0;
+  opacity: .82;
+  animation: server-metadata-spin .8s linear infinite;
+}
+.remote-row.metadata-loading,
+.server-catalog-placeholder { cursor: progress; }
+.server-catalog-placeholder { pointer-events: none; }
+.server-metadata-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
+.server-metadata-placeholder { display: block; height: 9px; max-width: 100%; border-radius: 999px; background: #ffffff17; }
+.server-metadata-title { width: 148px; height: 11px; }
+.server-metadata-subtitle { width: 96px; height: 8px; }
+.server-metadata-artist { width: 76px; }
+.server-metadata-album { width: 88px; }
+.server-metadata-duration { width: 42px; margin-left: auto; }
+.server-placeholder-check { width: 19px; height: 19px; }
+.server-placeholder-menu { width: 34px; height: 1px; }
+.server-metadata-status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; }
+.server-metadata-status > span {
+  box-sizing: border-box;
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid #ffffff25;
+  border-top-color: #ad91ff;
+  border-radius: 50%;
+  animation: server-metadata-spin .8s linear infinite;
+}
 .server-song-title { min-width: 0; }
 .server-song-title strong,
 .server-song-title small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3364,6 +3399,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   0%, 100% { opacity: .35; transform: scale(.92); }
   50% { opacity: .68; transform: scale(1); }
 }
+@keyframes server-metadata-spin { to { transform: rotate(360deg); } }
 @keyframes history-tooltip-in {
   from { opacity: 0; transform: translateY(3px) scale(.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
@@ -3371,6 +3407,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 @media (prefers-reduced-motion: reduce) {
   .server-artwork-loading::before,
   .server-artwork-placeholder,
+  .server-metadata-status > span,
   .history-chart-tooltip,
   .listening-history-day-details { animation: none; }
 }

@@ -255,6 +255,139 @@ struct LocalImportTests {
     }
 
     @Test
+    func metadataOnlySpotifyResolutionStopsBeforeImportCandidateSearch() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            LocalImportMockURLProtocol.reset()
+        }
+        LocalImportMockURLProtocol.reset()
+
+        let spotifyID = self.spotifyID
+        LocalImportMockURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.host == "open.spotify.com", url.path == "/oembed" {
+                let payload: [String: Any] = [
+                    "provider_name": "Spotify",
+                    "type": "rich",
+                    "title": "Never Gonna Give You Up",
+                    "thumbnail_url": "https://image-cdn-ak.spotifycdn.com/image/cover",
+                    "html": "<iframe src=\"https://open.spotify.com/embed/track/\(spotifyID)\"></iframe>",
+                ]
+                let data = try JSONSerialization.data(withJSONObject: payload)
+                return (
+                    HTTPURLResponse(
+                        url: url,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: ["Content-Length": String(data.count)]
+                    )!,
+                    data
+                )
+            }
+            if url.host == "open.spotify.com", url.path == "/embed/track/\(spotifyID)" {
+                let entity: [String: Any] = [
+                    "type": "track",
+                    "id": spotifyID,
+                    "title": "Never Gonna Give You Up",
+                    "artists": [["name": "Rick Astley"]],
+                    "duration": 213_573,
+                    "visualIdentity": [
+                        "image": [[
+                            "url": "https://image-cdn-fa.spotifycdn.com/image/cover",
+                            "maxWidth": 640,
+                        ]],
+                    ],
+                ]
+                let root: [String: Any] = [
+                    "props": ["pageProps": ["state": ["data": ["entity": entity]]]],
+                ]
+                let json = String(
+                    data: try JSONSerialization.data(withJSONObject: root),
+                    encoding: .utf8
+                )!
+                let data = Data(
+                    "<html><script id=\"__NEXT_DATA__\" type=\"application/json\">\(json)</script></html>".utf8
+                )
+                return (
+                    HTTPURLResponse(
+                        url: url,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: ["Content-Length": String(data.count)]
+                    )!,
+                    data
+                )
+            }
+            Issue.record("Metadata-only Spotify resolution made an import-preparation request to \(url)")
+            throw URLError(.unsupportedURL)
+        }
+
+        let service = LocalDeviceImportService(sessions: .testing(session))
+        let metadata = try await service.resolveMetadata(
+            source: "https://open.spotify.com/track/\(spotifyID)"
+        )
+
+        #expect(metadata.title == "Never Gonna Give You Up")
+        #expect(metadata.artist == "Rick Astley")
+        #expect(metadata.durationSeconds == 214)
+        #expect(LocalImportMockURLProtocol.hosts() == ["open.spotify.com", "open.spotify.com"])
+    }
+
+    @Test
+    func metadataOnlyYouTubeResolutionUsesOneOEmbedRequest() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            LocalImportMockURLProtocol.reset()
+        }
+        LocalImportMockURLProtocol.reset()
+
+        let videoID = self.videoID
+        LocalImportMockURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            #expect(url.host == "www.youtube.com")
+            #expect(url.path == "/oembed")
+            let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+            #expect(query?.first(where: { $0.name == "format" })?.value == "json")
+            #expect(query?.first(where: { $0.name == "url" })?.value == "https://www.youtube.com/watch?v=\(videoID)")
+            let payload: [String: Any] = [
+                "type": "video",
+                "provider_name": "YouTube",
+                "title": "Metadata Song",
+                "author_name": "Metadata Artist",
+                "thumbnail_url": "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg",
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            return (
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Length": String(data.count)]
+                )!,
+                data
+            )
+        }
+
+        let service = LocalDeviceImportService(sessions: .testing(session))
+        let metadata = try await service.resolveMetadata(
+            source: "https://youtu.be/\(videoID)",
+            mediaMode: .video
+        )
+
+        #expect(metadata.title == "Metadata Song")
+        #expect(metadata.artist == "Metadata Artist")
+        #expect(metadata.durationSeconds == nil)
+        #expect(metadata.sourceURL == "https://www.youtube.com/watch?v=\(videoID)")
+        #expect(LocalImportMockURLProtocol.hosts() == ["www.youtube.com"])
+    }
+
+    @Test
     func parsesOnlyValidatedDebridVaultReleaseSources() throws {
         let infoHash = String(repeating: "a", count: 40)
         let payload: [String: Any] = [

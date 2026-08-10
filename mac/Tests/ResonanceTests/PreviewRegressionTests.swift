@@ -110,6 +110,8 @@ struct PreviewRegressionTests {
         {
           "id": "saved-song-uuid",
           "source_url": "https://media.example/Local%20Title.m4a?token=preserved",
+          "title": "   ",
+          "artist": "",
           "download_url": "/api/v1/songs/saved-song-uuid/file",
           "stream_url": "/api/v1/songs/saved-song-uuid/stream"
         }
@@ -125,6 +127,7 @@ struct PreviewRegressionTests {
         #expect(song.sourceURL == "https://media.example/Local%20Title.m4a?token=preserved")
         #expect(song.mediaKind == "audio")
         #expect(song.isSourceLinkRecord)
+        #expect(song.isMetadataLoading)
 
         let encoded = try JSONEncoder().encode(MacSourceImportRequest(
             sourcePageURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw"
@@ -435,6 +438,7 @@ struct PreviewRegressionTests {
         #expect(song.durationText == "4:19")
         #expect(song.artworkURL?.contains("/artwork?") == true)
         #expect(song.sourceURL == "https://media.example/catalog-song.mp3?token=preserved")
+        #expect(!song.isMetadataLoading)
     }
 
     @Test

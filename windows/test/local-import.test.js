@@ -32,10 +32,18 @@ const {
 const {
   duplicateTrack,
   importConfirmedSource,
+  resolveLocalImportMetadata,
   resolveLocalImportSource,
   safeArtworkURL,
 } = platform;
-const { chooseMP4VideoFormat, chooseMP4VideoOnlyFormat, downloadResolvedAudio, downloadResolvedVideo, verifiedContentRange } = youtube;
+const {
+  chooseMP4VideoFormat,
+  chooseMP4VideoOnlyFormat,
+  downloadResolvedAudio,
+  downloadResolvedVideo,
+  resolveYouTubeMetadata,
+  verifiedContentRange,
+} = youtube;
 const { importFileBackedSource, searchFileBackedSources } = debrid;
 
 const spotifyTrackID = "4PTG3Z6ehGkBFwjybzWkR8";
@@ -425,6 +433,67 @@ test("keeps the local coordinator observable and cancellable without a Resonance
     resolveLocalImportSource("https://youtu.be/jNQXAC9IVRw", controller.signal, () => {}, {}),
     (error) => error?.name === "AbortError",
   );
+});
+
+test("resolves server catalog metadata without preparing import candidates", async () => {
+  let candidateSearches = 0;
+  const expected = {
+    provider: "spotify",
+    type: "track",
+    trackID: spotifyTrackID,
+    title: "Never Gonna Give You Up",
+    artist: "Rick Astley",
+    album: "Whenever You Need Somebody",
+    trackNumber: 1,
+    durationSeconds: 214,
+    artworkURL: "https://i.scdn.co/image/cover",
+    embedURL: `https://open.spotify.com/embed/track/${spotifyTrackID}`,
+    sourceURL: `https://open.spotify.com/track/${spotifyTrackID}`,
+  };
+  const metadata = await resolveLocalImportMetadata(
+    expected.sourceURL,
+    new AbortController().signal,
+    {
+      resolveSpotifyTrack: async () => expected,
+      searchYouTubeAudioSources: async () => {
+        candidateSearches += 1;
+        return [];
+      },
+    },
+  );
+  assert.deepEqual(metadata, expected);
+  assert.equal(candidateSearches, 0);
+});
+
+test("resolves YouTube catalog metadata with one bounded oEmbed request", async () => {
+  const requests = [];
+  const metadata = await resolveYouTubeMetadata(
+    "https://youtu.be/jNQXAC9IVRw",
+    new AbortController().signal,
+    async (input, options) => {
+      const url = new URL(input);
+      requests.push({ url, options });
+      return new Response(JSON.stringify({
+        type: "video",
+        provider_name: "YouTube",
+        title: "Me at the zoo",
+        author_name: "jawed",
+        thumbnail_url: "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg",
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  );
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url.origin, "https://www.youtube.com");
+  assert.equal(requests[0].url.pathname, "/oembed");
+  assert.equal(requests[0].url.searchParams.get("format"), "json");
+  assert.equal(requests[0].options.redirect, "error");
+  assert.equal(metadata.title, "Me at the zoo");
+  assert.equal(metadata.artist, "jawed");
+  assert.equal(metadata.durationSeconds, null);
+  assert.equal(metadata.sourceURL, "https://www.youtube.com/watch?v=jNQXAC9IVRw");
 });
 
 test("returns an ordered selectable batch for Spotify playlists", async () => {

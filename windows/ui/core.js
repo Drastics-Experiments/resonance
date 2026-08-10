@@ -35,6 +35,7 @@ export function createEmptyState() {
     completedMigrations: [],
     serverUploadManifests: [],
     serverTransferPreferences: {},
+    remoteSongMetadataCache: {},
     appPreferences: {
       runInBackground: false,
       discordRichPresence: false,
@@ -47,6 +48,81 @@ export function createEmptyState() {
       },
     },
   };
+}
+
+const REMOTE_SONG_METADATA_CACHE_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+const REMOTE_SONG_METADATA_CACHE_LIMIT = 2_000;
+
+function remoteSongMetadataSourceURL(value) {
+  const source = typeof value === "string" ? value.trim() : "";
+  if (!source || source.length > 8_192) return null;
+  try {
+    const url = new URL(source);
+    if (url.protocol !== "https:" || url.username || url.password || url.hash) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function remoteSongMetadataText(value) {
+  const text = typeof value === "string"
+    ? value.replace(/[\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 500)
+    : "";
+  return text || null;
+}
+
+function remoteSongMetadataArtworkURL(value) {
+  if (typeof value !== "string" || value.length > 2_048) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+export function remoteSongMetadataCacheKey(sourceURL, mediaKind = "audio") {
+  const source = remoteSongMetadataSourceURL(sourceURL);
+  return source ? `${mediaKind === "video" ? "video" : "audio"}:${source}` : null;
+}
+
+export function normalizedRemoteSongMetadataCache(value, now = Date.now()) {
+  const currentTime = now instanceof Date ? now.getTime() : Number(now);
+  const cutoff = (Number.isFinite(currentTime) ? currentTime : Date.now()) - REMOTE_SONG_METADATA_CACHE_LIFETIME_MS;
+  const entries = [];
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const item of Object.values(value)) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const sourceURL = remoteSongMetadataSourceURL(item.sourceURL);
+      const mediaKind = item.mediaKind === "video" ? "video" : "audio";
+      const key = remoteSongMetadataCacheKey(sourceURL, mediaKind);
+      const title = remoteSongMetadataText(item.title);
+      const artist = remoteSongMetadataText(item.artist);
+      const cachedAtTime = Date.parse(item.cachedAt);
+      if (!key || !title || !artist || !Number.isFinite(cachedAtTime) || cachedAtTime < cutoff) continue;
+      const duration = Number(item.duration);
+      entries.push([key, {
+        sourceURL,
+        mediaKind,
+        title,
+        artist,
+        album: remoteSongMetadataText(item.album),
+        duration: Number.isFinite(duration) && duration > 0 ? duration : null,
+        artworkURL: remoteSongMetadataArtworkURL(item.artworkURL),
+        cachedAt: new Date(cachedAtTime).toISOString(),
+      }]);
+    }
+  }
+  const normalized = {};
+  let normalizedCount = 0;
+  for (const [key, item] of entries.sort((left, right) => Date.parse(right[1].cachedAt) - Date.parse(left[1].cachedAt))) {
+    if (Object.hasOwn(normalized, key)) continue;
+    normalized[key] = item;
+    normalizedCount += 1;
+    if (normalizedCount >= REMOTE_SONG_METADATA_CACHE_LIMIT) break;
+  }
+  return normalized;
 }
 
 export function playlistArtworkTrackIDs(playlist) {
@@ -898,6 +974,7 @@ export function normalizeState(value) {
     .filter(Boolean)
     .slice(-20);
   state.serverTransferPreferences = normalizedServerTransferPreferences(state.serverTransferPreferences);
+  state.remoteSongMetadataCache = normalizedRemoteSongMetadataCache(state.remoteSongMetadataCache);
   state.appPreferences = normalizedAppPreferences(state.appPreferences);
   state.tracks = state.tracks.map((track) => track?.remoteID ? {
     ...track,

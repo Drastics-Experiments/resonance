@@ -490,7 +490,7 @@ final class MobileMissingServerUploadPolicyTests: XCTestCase {
 
 final class MobileLocalImportMediaModeTests: XCTestCase {
     func testVideoImportDoesNotReuseMatchingAudioBytes() {
-        let expected = spotifyTrack(title: "Example", artist: "Artist")
+        let expected = spotifyTrack(title: "Example", artist: "Example Artist")
         let audio = MobileTrack(
             title: expected.title,
             artist: expected.artist,

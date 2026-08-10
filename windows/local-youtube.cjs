@@ -425,6 +425,66 @@ function safeThumbnailURL(value) {
   return null;
 }
 
+async function resolveYouTubeMetadata(source, signal, fetchImpl = fetch) {
+  const videoID = YOUTUBE_VIDEO_ID.test(source) ? source : youtubeVideoID(source);
+  if (!videoID) throw youtubeError("INVALID_YOUTUBE_VIDEO", "Enter a supported YouTube video URL.", { stage: "resolving_metadata" });
+  const oEmbedURL = new URL("/oembed", "https://www.youtube.com");
+  oEmbedURL.searchParams.set("url", `https://www.youtube.com/watch?v=${videoID}`);
+  oEmbedURL.searchParams.set("format", "json");
+  let response;
+  try {
+    response = await fetchImpl(oEmbedURL, {
+      headers: { Accept: "application/json", "User-Agent": WEB_USER_AGENT },
+      redirect: "error",
+      signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    throw youtubeError("YOUTUBE_UNREACHABLE", "YouTube metadata could not be reached.", { stage: "resolving_metadata" });
+  }
+  if (response.status === 404) {
+    throw youtubeError("YOUTUBE_UNAVAILABLE", "YouTube could not find that video.", { stage: "resolving_metadata" });
+  }
+  if (response.status === 429) {
+    throw youtubeError("YOUTUBE_RATE_LIMITED", "YouTube rate-limited this metadata request.", {
+      stage: "resolving_metadata",
+      retryAfter: response.headers.get("retry-after"),
+    });
+  }
+  let responseURL;
+  try { responseURL = new URL(response.url || oEmbedURL); }
+  catch { responseURL = null; }
+  if (!response.ok || responseURL?.protocol !== "https:"
+      || responseURL.hostname !== "www.youtube.com" || responseURL.pathname !== "/oembed") {
+    throw youtubeError("YOUTUBE_METADATA_FAILED", "YouTube could not load that video's metadata.", { stage: "resolving_metadata" });
+  }
+  let payload;
+  try {
+    payload = JSON.parse(await responseTextWithLimit(response, 256 * 1024));
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    throw youtubeError("YOUTUBE_INVALID_METADATA", "YouTube returned invalid video metadata.", { stage: "resolving_metadata" });
+  }
+  const title = cleanLabel(payload?.title, "");
+  const artist = cleanLabel(payload?.author_name, "");
+  if (payload?.type !== "video" || payload?.provider_name !== "YouTube" || !title || !artist) {
+    throw youtubeError("YOUTUBE_INVALID_METADATA", "YouTube returned invalid video metadata.", { stage: "resolving_metadata" });
+  }
+  return {
+    provider: "youtube",
+    type: "track",
+    trackID: videoID,
+    title,
+    artist,
+    album: null,
+    trackNumber: null,
+    durationSeconds: null,
+    artworkURL: safeThumbnailURL(payload.thumbnail_url),
+    embedURL: null,
+    sourceURL: `https://www.youtube.com/watch?v=${videoID}`,
+  };
+}
+
 async function resolveYouTubeAudio(source, signal, fetchImpl = fetch) {
   const videoID = YOUTUBE_VIDEO_ID.test(source) ? source : youtubeVideoID(source);
   if (!videoID) throw youtubeError("INVALID_YOUTUBE_VIDEO", "Enter a supported YouTube video URL.");
@@ -691,6 +751,7 @@ module.exports = {
   extractYouTubeVisitorData,
   inspectYouTubeAudio,
   inspectYouTubeVideo,
+  resolveYouTubeMetadata,
   resolveYouTubeAudio,
   resolveYouTubeVideo,
   safeStreamingURL,

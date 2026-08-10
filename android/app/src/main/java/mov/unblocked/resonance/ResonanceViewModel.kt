@@ -27,6 +27,9 @@ import java.util.concurrent.Future
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -74,6 +77,8 @@ import mov.unblocked.resonance.data.RemotePlaylist
 import mov.unblocked.resonance.data.RemoteClipRange
 import mov.unblocked.resonance.data.RemotePlaylistsDocument
 import mov.unblocked.resonance.data.RemoteSong
+import mov.unblocked.resonance.data.RemoteSongMetadataCacheEntry
+import mov.unblocked.resonance.data.RemoteSongMetadataCachePolicy
 import mov.unblocked.resonance.data.ResonanceAccountSignInServerURL
 import mov.unblocked.resonance.data.ServerClient
 import mov.unblocked.resonance.data.ServerProfileContext
@@ -116,6 +121,18 @@ private data class ServerUploadPolicySnapshot(
     val context: ServerProfileContext,
     val config: EffectiveClientConfig,
     val mode: ServerUploadMode,
+)
+
+private data class RemoteSongMetadataRequest(
+    val songIDs: List<String>,
+    val cacheKey: String,
+    val source: String,
+    val mediaKind: String,
+)
+
+private data class RemoteSongMetadataResult(
+    val request: RemoteSongMetadataRequest,
+    val metadata: LinkImportTrack?,
 )
 
 private const val STREAM_ARTWORK_URL_EXTRA = "resonance.stream.artwork_url"
@@ -167,6 +184,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private var clipRangeMutationGeneration = 0L
     private var connectionGeneration = 0L
     private var catalogRequestGeneration = 0L
+    private var remoteSongMetadataHydrationGeneration = 0L
+    private var remoteSongMetadataHydrationJob: Job? = null
     private var uploadMutationGeneration = 0L
     private var clientConfigRequestGeneration = 0L
     private var linkImportJob: Job? = null
@@ -315,6 +334,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         credentials.accountSession = null
         credentials.pendingAccountSignIn = null
         credentials.clearTokens()
+        cancelRemoteSongMetadataHydration()
         mutableState.value = mutableState.value.copy(
             serverToken = "",
             serverAdminKey = "",
@@ -596,6 +616,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun onCleared() {
         stopLinkImportPreview()
+        remoteSongMetadataHydrationJob?.cancel()
         controller?.release()
         controller = null
         controllerFuture?.cancel(true)
@@ -1713,9 +1734,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                             uploadMutationGeneration,
                         )
                     ) {
+                        val songs = applyingKnownRemoteSongMetadata(catalog.songs)
                         mutableState.value = mutableState.value.copy(
-                            remoteSongs = resolveRemoteSongMetadata(catalog.songs),
+                            remoteSongs = songs,
                         )
+                        beginRemoteSongMetadataHydration(snapshot.context, client)
                     }
                 }
         }
@@ -2300,13 +2323,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val (catalogSnapshot, client) = beginCatalogRequest() ?: return
         mutableState.value = mutableState.value.copy(isRefreshingServer = true, serverMessage = "Connecting…")
         runCatching {
-            val profiles = client.fetchProfiles()
-            val fetchedCatalog = client.fetchCatalog()
-            val catalog = fetchedCatalog.copy(
-                songs = resolveRemoteSongMetadata(fetchedCatalog.songs),
-                count = fetchedCatalog.count,
-            )
-            catalog to profiles
+            coroutineScope {
+                val profiles = async { client.fetchProfiles() }
+                val catalog = async { client.fetchCatalog() }
+                catalog.await() to profiles.await()
+            }
         }
             .onSuccess { (catalog, profiles) ->
                 if (currentServerProfileContext() != catalogSnapshot.context) return@onSuccess
@@ -2317,8 +2338,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     uploadMutationGeneration,
                 )
                 library = library.copy(syncProfiles = profiles.profiles)
+                val catalogSongs = applyingKnownRemoteSongMetadata(catalog.songs)
                 mutableState.value = mutableState.value.copy(
-                    remoteSongs = if (applyCatalog) catalog.songs else mutableState.value.remoteSongs,
+                    remoteSongs = if (applyCatalog) catalogSongs else mutableState.value.remoteSongs,
                     syncProfiles = profiles.profiles,
                     serverMessage = if (applyCatalog) {
                         "Connected • ${catalog.count} song${if (catalog.count == 1) "" else "s"}"
@@ -2326,7 +2348,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         "Connected"
                     },
                 )
-                if (applyCatalog && backfillDownloadedArtwork(client, catalog.songs)) {
+                if (applyCatalog) {
+                    beginRemoteSongMetadataHydration(catalogSnapshot.context, client)
+                }
+                if (applyCatalog && backfillDownloadedArtwork(client, catalogSongs)) {
                     persistLibrary()
                 } else {
                     saveSoon()
@@ -2343,34 +2368,166 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         mutableState.value = mutableState.value.copy(isRefreshingServer = false)
     }
 
-    private suspend fun resolveRemoteSongMetadata(songs: List<RemoteSong>): List<RemoteSong> {
+    private fun applyingKnownRemoteSongMetadata(songs: List<RemoteSong>): List<RemoteSong> {
+        val localTracksByRemoteID = library.tracks.asSequence()
+            .filter(::trackBelongsToActiveContext)
+            .mapNotNull { track -> track.remoteID?.let { it to track } }
+            .distinctBy { it.first }
+            .toMap()
         return songs.map { song ->
-            val source = song.sourceURL?.trim().orEmpty()
-            if (!song.isSourceLinkRecord || source.isEmpty()) return@map song
-            val key = "${song.mediaKind}:$source"
-            val resolution = remoteSourceResolutions[key] ?: runCatching {
-                linkImportService.resolve(source) { }
-            }.getOrNull()?.also { resolved ->
-                if (resolved.kind == LinkImportKind.Track) remoteSourceResolutions[key] = resolved
-            } ?: return@map song.copy(
-                title = if (song.requiresOriginalSourcePage) "Original source link needed" else "Metadata unavailable",
-                artist = if (song.requiresOriginalSourcePage) "Re-import on the original device" else "Refresh to retry",
-                album = if (song.requiresOriginalSourcePage) "Legacy expired link" else "Link only",
-            )
-            if (resolution.kind != LinkImportKind.Track) return@map song.copy(
-                title = "Metadata unavailable",
-                artist = "Refresh to retry",
-                album = "Link only",
-            )
-            song.copy(
-                title = resolution.track.title,
-                artist = resolution.track.artist,
-                album = resolution.track.album ?: "Imported",
-                durationSeconds = resolution.track.durationSeconds?.toDouble(),
-                artworkURL = resolution.track.artworkURL,
-            )
+            if (!song.isMetadataLoading) return@map song
+            localTracksByRemoteID[song.id]?.let { local ->
+                return@map song.copy(
+                    title = local.title,
+                    artist = local.artist,
+                    album = local.album,
+                    durationSeconds = local.durationMs.takeIf { it > 0 }?.div(1_000.0),
+                    isMetadataLoading = false,
+                )
+            }
+            val key = remoteSongMetadataCacheKey(song)
+                ?: return@map applyRemoteSongMetadataFailure(song)
+            library.remoteSongMetadataCache[key]?.let { cached ->
+                return@map applyRemoteSongMetadata(song, cached)
+            }
+            remoteSourceResolutions[key]
+                ?.takeIf { it.kind == LinkImportKind.Track }
+                ?.track
+                ?.let { return@map applyRemoteSongMetadata(song, it) }
+            song
         }
     }
+
+    private fun beginRemoteSongMetadataHydration(
+        context: ServerProfileContext,
+        client: ServerClient,
+    ) {
+        cancelRemoteSongMetadataHydration()
+        val requests = remoteSongMetadataRequests(mutableState.value.remoteSongs)
+        if (requests.isEmpty()) return
+
+        remoteSongMetadataHydrationGeneration += 1
+        val generation = remoteSongMetadataHydrationGeneration
+        remoteSongMetadataHydrationJob = viewModelScope.launch {
+            var cacheChanged = false
+            for (batch in requests.chunked(4)) {
+                val results = coroutineScope {
+                    batch.map { request ->
+                        async {
+                            val metadata = runCatching {
+                                linkImportService.resolveMetadata(request.source)
+                            }.getOrNull()
+                            RemoteSongMetadataResult(request, metadata)
+                        }
+                    }.awaitAll()
+                }
+                if (!isCurrentRemoteSongMetadataHydration(generation, context)) return@launch
+
+                var songs = mutableState.value.remoteSongs
+                results.forEach { result ->
+                    val songIDs = result.request.songIDs.toSet()
+                    songs = songs.map { song ->
+                        if (song.id !in songIDs || !song.isMetadataLoading) return@map song
+                        result.metadata?.let { applyRemoteSongMetadata(song, it) }
+                            ?: applyRemoteSongMetadataFailure(song)
+                    }
+                    result.metadata?.let { metadata ->
+                        library = library.copy(
+                            remoteSongMetadataCache = library.remoteSongMetadataCache + (
+                                result.request.cacheKey to RemoteSongMetadataCacheEntry(
+                                    sourceURL = result.request.source,
+                                    mediaKind = result.request.mediaKind,
+                                    title = metadata.title,
+                                    artist = metadata.artist,
+                                    album = metadata.album,
+                                    durationSeconds = metadata.durationSeconds?.toDouble(),
+                                    artworkURL = metadata.artworkURL,
+                                    cachedAtEpochMs = System.currentTimeMillis(),
+                                )
+                            ),
+                        )
+                        cacheChanged = true
+                    }
+                }
+                mutableState.value = mutableState.value.copy(remoteSongs = songs)
+            }
+
+            if (!isCurrentRemoteSongMetadataHydration(generation, context)) return@launch
+            val artworkChanged = backfillDownloadedArtwork(client, mutableState.value.remoteSongs)
+            if (cacheChanged || artworkChanged) {
+                library = library.copy(
+                    remoteSongMetadataCache = RemoteSongMetadataCachePolicy.normalized(
+                        library.remoteSongMetadataCache,
+                    ),
+                )
+                persistLibrary()
+            }
+            if (remoteSongMetadataHydrationGeneration == generation) {
+                remoteSongMetadataHydrationJob = null
+            }
+        }
+    }
+
+    private fun remoteSongMetadataRequests(songs: List<RemoteSong>): List<RemoteSongMetadataRequest> {
+        val requests = mutableListOf<RemoteSongMetadataRequest>()
+        val requestIndexByKey = mutableMapOf<String, Int>()
+        songs.filter(RemoteSong::isMetadataLoading).forEach { song ->
+            val source = song.sourceURL?.trim().orEmpty()
+            val key = remoteSongMetadataCacheKey(song) ?: return@forEach
+            val existingIndex = requestIndexByKey[key]
+            if (existingIndex == null) {
+                requestIndexByKey[key] = requests.size
+                requests += RemoteSongMetadataRequest(listOf(song.id), key, source, song.mediaKind)
+            } else {
+                val existing = requests[existingIndex]
+                requests[existingIndex] = existing.copy(songIDs = existing.songIDs + song.id)
+            }
+        }
+        return requests
+    }
+
+    private fun remoteSongMetadataCacheKey(song: RemoteSong): String? =
+        song.sourceURL?.let { RemoteSongMetadataCachePolicy.key(it, song.mediaKind) }
+
+    private fun isCurrentRemoteSongMetadataHydration(
+        generation: Long,
+        context: ServerProfileContext,
+    ): Boolean = generation == remoteSongMetadataHydrationGeneration &&
+        currentServerProfileContext() == context
+
+    private fun cancelRemoteSongMetadataHydration() {
+        remoteSongMetadataHydrationJob?.cancel()
+        remoteSongMetadataHydrationJob = null
+        remoteSongMetadataHydrationGeneration += 1
+    }
+
+    private fun applyRemoteSongMetadata(song: RemoteSong, metadata: LinkImportTrack): RemoteSong = song.copy(
+        title = metadata.title,
+        artist = metadata.artist,
+        album = metadata.album ?: "Imported",
+        durationSeconds = metadata.durationSeconds?.toDouble(),
+        artworkURL = metadata.artworkURL,
+        isMetadataLoading = false,
+    )
+
+    private fun applyRemoteSongMetadata(
+        song: RemoteSong,
+        metadata: RemoteSongMetadataCacheEntry,
+    ): RemoteSong = song.copy(
+        title = metadata.title,
+        artist = metadata.artist,
+        album = metadata.album ?: "Imported",
+        durationSeconds = metadata.durationSeconds,
+        artworkURL = metadata.artworkURL,
+        isMetadataLoading = false,
+    )
+
+    private fun applyRemoteSongMetadataFailure(song: RemoteSong): RemoteSong = song.copy(
+        title = if (song.requiresOriginalSourcePage) "Original source link needed" else "Metadata unavailable",
+        artist = if (song.requiresOriginalSourcePage) "Re-import on the original device" else "Refresh to retry",
+        album = if (song.requiresOriginalSourcePage) "Legacy expired link" else "Link only",
+        isMetadataLoading = false,
+    )
 
     private suspend fun backfillDownloadedArtwork(
         client: ServerClient,
@@ -3570,6 +3727,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private fun beginCatalogRequest(): Pair<CatalogRequestSnapshot, ServerClient>? {
         if (activeAccessToken().isBlank()) return null
         val context = currentServerProfileContext() ?: return null
+        cancelRemoteSongMetadataHydration()
         catalogRequestGeneration += 1
         return CatalogRequestSnapshot(
             context = context,
