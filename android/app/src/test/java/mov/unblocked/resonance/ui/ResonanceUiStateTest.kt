@@ -74,9 +74,9 @@ class ResonanceUiStateTest {
     @Test
     fun resolvesRelativeServerArtworkLikeTheIosCatalog() {
         assertEquals(
-            "https://music.unblocked.mov/api/v1/songs/song-1/artwork",
+            "https://resonance-core.blithe-haven-9710.chatgpt.site/api/v1/songs/song-1/artwork",
             resolveRemoteArtworkURL(
-                "https://music.unblocked.mov",
+                "https://resonance-core.blithe-haven-9710.chatgpt.site",
                 "/api/v1/songs/song-1/artwork",
             ),
         )

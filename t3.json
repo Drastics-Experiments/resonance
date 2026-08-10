@@ -1,0 +1,51 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "iconPath": "ios/Resonance/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
+  "scripts": [
+    {
+      "name": "Launch Windows Preview",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_launch_windows \"$PWD\"'",
+      "icon": "play"
+    },
+    {
+      "name": "Test Windows",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_test_windows \"$PWD\"'",
+      "icon": "test"
+    },
+    {
+      "name": "Launch macOS Preview",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_launch_macos \"$PWD\"'",
+      "icon": "play"
+    },
+    {
+      "name": "Test macOS",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_test_macos \"$PWD\"'",
+      "icon": "test"
+    },
+    {
+      "name": "Launch iOS Simulator",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_launch_ios \"$PWD\"'",
+      "icon": "play"
+    },
+    {
+      "name": "Test iOS",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_test_ios \"$PWD\"'",
+      "icon": "test"
+    },
+    {
+      "name": "Launch Android Emulator",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_launch_android \"$PWD\"'",
+      "icon": "play"
+    },
+    {
+      "name": "Test Android",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_test_android \"$PWD\"'",
+      "icon": "test"
+    },
+    {
+      "name": "Show Resonance Instance Names",
+      "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_show_instances \"$PWD\"'",
+      "icon": "test"
+    }
+  ]
+}

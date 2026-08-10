@@ -94,7 +94,7 @@ test("workflow discovery selects the newest exact-SHA run", () => {
 
 test("porcelain paths survive trimming of the first status line", () => {
   assert.deepEqual(
-    porcelainChangedPaths("M android/app/build.gradle.kts\n M ios/LikedSongsMobile/Info.plist"),
-    ["android/app/build.gradle.kts", "ios/LikedSongsMobile/Info.plist"],
+    porcelainChangedPaths("M android/app/build.gradle.kts\n M ios/Resonance/Info.plist"),
+    ["android/app/build.gradle.kts", "ios/Resonance/Info.plist"],
   );
 });

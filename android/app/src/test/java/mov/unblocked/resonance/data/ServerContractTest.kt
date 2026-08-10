@@ -11,6 +11,34 @@ class ServerContractTest {
     private val json = Json { ignoreUnknownKeys = true }
 
     @Test
+    fun accountEmailIsCensoredUntilExplicitlyRevealed() {
+        val email = "private@example.com"
+        assertEquals(AccountEmailPrivacy.CensoredAddress, AccountEmailPrivacy.displayedAddress(email, false))
+        assertEquals(email, AccountEmailPrivacy.displayedAddress(email, true))
+        assertEquals("Clerk account", AccountEmailPrivacy.safeDisplayName(email, email))
+    }
+
+    @Test
+    fun accountScopeFallsBackOnlyWhenTheDeployedServerOmitsItsNewProfileField() {
+        assertEquals(
+            "legacy-library",
+            AccountScopePolicy.resolvedProfileID("user_listener", null, "legacy-library"),
+        )
+        assertEquals(
+            "default",
+            AccountScopePolicy.resolvedProfileID("user_listener", null, null),
+        )
+        assertEquals(
+            "user_listener",
+            AccountScopePolicy.resolvedProfileID("user_listener", "user_listener", "legacy-library"),
+        )
+        assertEquals(
+            null,
+            AccountScopePolicy.resolvedProfileID("user_listener", "someone_else", "legacy-library"),
+        )
+    }
+
+    @Test
     fun uploadResponseAcceptsTheServersNameField() {
         val response = json.decodeFromString<RemoteUpload>(
             """{"id":"song-1","name":"Example.mp3","size":123}""",
@@ -22,12 +50,28 @@ class ServerContractTest {
     }
 
     @Test
+    fun audioLinkUploadsRetryOnlyTheExactOlderSchemaError() {
+        assertTrue(SourceLinkSchemaCompatibility.shouldRetryLegacy(
+            400,
+            "Unsupported source-link schema_version",
+            "audio",
+        ))
+        assertFalse(SourceLinkSchemaCompatibility.shouldRetryLegacy(
+            400,
+            "Unsupported source-link schema_version",
+            "video",
+        ))
+        assertFalse(SourceLinkSchemaCompatibility.shouldRetryLegacy(400, "Invalid source URL", "audio"))
+        assertFalse(SourceLinkSchemaCompatibility.shouldRetryLegacy(401, "Unsupported source-link schema_version", "audio"))
+    }
+
+    @Test
     fun artworkAuthorizationIsRestrictedToTheServerOrigin() {
-        val server = URL("https://music.unblocked.mov/api/v1/songs")
+        val server = URL("https://resonance-core.blithe-haven-9710.chatgpt.site/api/v1/songs")
 
         assertTrue(
             hasSameOrigin(
-                URL("https://music.unblocked.mov/api/v1/songs/track/artwork"),
+                URL("https://resonance-core.blithe-haven-9710.chatgpt.site/api/v1/songs/track/artwork"),
                 server,
             ),
         )

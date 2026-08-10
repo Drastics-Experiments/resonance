@@ -8,6 +8,23 @@ import org.junit.Test
 
 class RemoteIdentityPolicyTest {
     @Test
+    fun legacyProductionOriginKeepsTheSameRemoteIdentity() {
+        assertEquals(
+            RemoteTrackIdentityPolicy.contextKey(
+                "https://resonance-core.blithe-haven-9710.chatgpt.site",
+                "clerk-profile",
+            ),
+            RemoteTrackIdentityPolicy.contextKey("https://music.unblocked.mov", "clerk-profile"),
+        )
+        assertEquals(
+            "https://resonance-core.blithe-haven-9710.chatgpt.site:443#profile=clerk-profile",
+            RemoteTrackIdentityPolicy.canonicalContextKey(
+                "https://music.unblocked.mov:443#profile=clerk-profile",
+            ),
+        )
+    }
+
+    @Test
     fun sameSongIdFromDifferentServersAndProfilesRemainsDistinct() {
         val active = remoteTrack("active", "https://music.example", "default", "song-1")
         val otherProfile = remoteTrack("profile", "https://music.example", "family", "song-1")
@@ -128,6 +145,43 @@ class RemoteIdentityPolicyTest {
         assertEquals(setOf("mix"), restored.dirtyPlaylistIDs)
         assertEquals(setOf("deleted-remote-playlist"), restored.deletedPlaylistIDs)
         assertTrue(restored.likesDirty)
+    }
+
+    @Test
+    fun confirmedLegacyMigrationMovesOnlyTheMatchingDeviceContextToTheClerkAccount() {
+        val serverURL = "https://music.example"
+        val legacy = remoteTrack("legacy", serverURL, "default", "song-a")
+        val family = remoteTrack("family", serverURL, "family", "song-b")
+        val legacyKey = requireNotNull(RemoteTrackIdentityPolicy.contextKey(serverURL, "default"))
+        val accountKey = requireNotNull(RemoteTrackIdentityPolicy.contextKey(serverURL, "user_listener"))
+        val clipKey = "$legacyKey|remote:song-a"
+        val mix = Playlist(id = "mix", name = "Mix", trackIDs = listOf(legacy.id))
+        val library = StoredLibrary(
+            tracks = listOf(legacy, family),
+            playlists = listOf(Playlist(name = "Liked Songs", isSystem = true), mix),
+            favorites = setOf(legacy.id),
+            serverURL = serverURL,
+            syncProfileID = "default",
+            playlistSyncServerURL = legacyKey,
+            dirtyPlaylistIDs = setOf(mix.id),
+            clipRanges = mapOf(clipKey to ClipRange(1_000L, 9_000L)),
+            dirtyClipRangeKeys = setOf(clipKey),
+        )
+
+        val migrated = ProfileLibraryStatePolicy.migrateContext(
+            library,
+            serverURL,
+            "default",
+            "user_listener",
+        )
+
+        assertEquals("user_listener", migrated.syncProfileID)
+        assertEquals("user_listener", migrated.tracks.first { it.id == legacy.id }.syncProfileID)
+        assertEquals("family", migrated.tracks.first { it.id == family.id }.syncProfileID)
+        assertEquals(accountKey, migrated.playlistSyncServerURL)
+        assertTrue("$accountKey|remote:song-a" in migrated.clipRanges)
+        assertTrue(legacyKey !in migrated.profileStates)
+        assertEquals(setOf("mix"), migrated.profileStates.getValue(accountKey).dirtyPlaylistIDs)
     }
 
     @Test

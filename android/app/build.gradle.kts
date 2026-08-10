@@ -11,6 +11,10 @@ val releaseKeystorePath = providers.environmentVariable("RESONANCE_ANDROID_KEYST
 val releaseKeystorePassword = providers.environmentVariable("RESONANCE_ANDROID_KEYSTORE_PASSWORD").orNull
 val releaseKeyAlias = providers.environmentVariable("RESONANCE_ANDROID_KEY_ALIAS").orNull
 val releaseKeyPassword = providers.environmentVariable("RESONANCE_ANDROID_KEY_PASSWORD").orNull
+val developmentInstanceSuffix = providers.gradleProperty("resonanceInstanceSuffix").orNull
+    ?.takeIf { it.matches(Regex("\\.worktree\\.w[a-f0-9]{12}")) }
+val developmentInstanceName = providers.gradleProperty("resonanceInstanceName").orNull
+    ?.takeIf { it.matches(Regex("[A-Za-z0-9 ._\\-\\[\\]]{1,100}")) }
 val releaseSigningValues = listOf(
     releaseKeystorePath,
     releaseKeystorePassword,
@@ -54,8 +58,15 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            if (developmentInstanceSuffix != null) {
+                applicationIdSuffix = developmentInstanceSuffix
+            }
+            manifestPlaceholders["resonanceAppLabel"] = developmentInstanceName ?: "Resonance"
+        }
         getByName("release") {
             isMinifyEnabled = false
+            manifestPlaceholders["resonanceAppLabel"] = "Resonance"
             signingConfig = signingConfigs.findByName("release")
         }
     }
@@ -90,6 +101,7 @@ dependencies {
     implementation("androidx.media3:media3-session:1.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+    implementation("com.clerk:clerk-android-ui:1.0.39")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")

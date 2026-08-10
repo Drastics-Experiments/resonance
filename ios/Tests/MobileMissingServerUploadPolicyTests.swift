@@ -2,6 +2,129 @@ import Foundation
 import XCTest
 @testable import Resonance
 
+final class MobileUnlinkedDownloadMigrationPolicyTests: XCTestCase {
+    private func track(
+        sourceURL: String? = nil,
+        downloadSourceURL: String? = nil,
+        preservesUnlinkedImport: Bool? = nil
+    ) -> MobileTrack {
+        MobileTrack(
+            title: "Song",
+            artist: "Artist",
+            album: "Album",
+            duration: 120,
+            relativePath: "song.m4a",
+            remoteID: "remote-song",
+            sourceServer: "https://music.example",
+            sourceURL: sourceURL,
+            downloadSourceURL: downloadSourceURL,
+            preservesUnlinkedImport: preservesUnlinkedImport
+        )
+    }
+
+    func testUnlinkedManagedDownloadIsSelectedForCleanup() {
+        let decision = MobileUnlinkedDownloadMigrationPolicy.decision(
+            for: track(),
+            legacyDownloadOwned: true
+        )
+
+        XCTAssertTrue(decision.shouldDelete)
+        XCTAssertEqual(decision.track.preservesUnlinkedImport, false)
+    }
+
+    func testEitherPreservedSourceLinkKeepsDownload() {
+        XCTAssertFalse(MobileUnlinkedDownloadMigrationPolicy.decision(
+            for: track(sourceURL: "https://source.example/song"),
+            legacyDownloadOwned: true
+        ).shouldDelete)
+        XCTAssertFalse(MobileUnlinkedDownloadMigrationPolicy.decision(
+            for: track(downloadSourceURL: "https://media.example/song.m4a"),
+            legacyDownloadOwned: true
+        ).shouldDelete)
+    }
+
+    func testExplicitImportFlagWinsAfterRemoteAssociation() {
+        let decision = MobileUnlinkedDownloadMigrationPolicy.decision(
+            for: track(preservesUnlinkedImport: true),
+            legacyDownloadOwned: true
+        )
+
+        XCTAssertFalse(decision.shouldDelete)
+        XCTAssertEqual(decision.track.preservesUnlinkedImport, true)
+    }
+
+    func testLegacyNonDownloadFileBecomesProtectedImport() {
+        let decision = MobileUnlinkedDownloadMigrationPolicy.decision(
+            for: track(),
+            legacyDownloadOwned: false
+        )
+
+        XCTAssertFalse(decision.shouldDelete)
+        XCTAssertEqual(decision.track.preservesUnlinkedImport, true)
+    }
+}
+
+final class MobilePlaylistArtworkPolicyTests: XCTestCase {
+    func testUsesOnlyTheFirstFourCustomPlaylistTracks() {
+        let trackIDs = (0..<5).map { _ in UUID() }
+        let playlist = MobilePlaylist(name: "Mix", trackIDs: trackIDs)
+        let likedSongs = MobilePlaylist(name: "Liked Songs", trackIDs: trackIDs, isSystem: true)
+
+        XCTAssertEqual(playlist.automaticArtworkTrackIDs, Array(trackIDs.prefix(4)))
+        XCTAssertTrue(likedSongs.automaticArtworkTrackIDs.isEmpty)
+    }
+}
+
+final class MobileAccountEmailPrivacyTests: XCTestCase {
+    func testEmailIsCensoredUntilExplicitlyRevealed() {
+        let email = "private@example.com"
+        XCTAssertEqual(
+            ResonanceEmailPrivacy.displayedAddress(email, isRevealed: false),
+            ResonanceEmailPrivacy.censoredAddress
+        )
+        XCTAssertEqual(ResonanceEmailPrivacy.displayedAddress(email, isRevealed: true), email)
+        XCTAssertEqual(
+            ResonanceEmailPrivacy.safeDisplayName(email, email: email),
+            "Clerk account"
+        )
+    }
+
+
+    func testAccountScopeSupportsTheDeployedLegacyResponseUntilCoreMigratesIt() {
+        XCTAssertEqual(
+            ResonanceAccountScopePolicy.resolvedProfileID(
+                accountID: "user_listener",
+                serverProfileID: nil,
+                requestedLegacyProfileID: "legacy-library"
+            ),
+            "legacy-library"
+        )
+        XCTAssertEqual(
+            ResonanceAccountScopePolicy.resolvedProfileID(
+                accountID: "user_listener",
+                serverProfileID: nil,
+                requestedLegacyProfileID: nil
+            ),
+            "default"
+        )
+        XCTAssertEqual(
+            ResonanceAccountScopePolicy.resolvedProfileID(
+                accountID: "user_listener",
+                serverProfileID: "user_listener",
+                requestedLegacyProfileID: "legacy-library"
+            ),
+            "user_listener"
+        )
+        XCTAssertNil(
+            ResonanceAccountScopePolicy.resolvedProfileID(
+                accountID: "user_listener",
+                serverProfileID: "someone_else",
+                requestedLegacyProfileID: "legacy-library"
+            )
+        )
+    }
+}
+
 final class MobileServerEndpointPolicyTests: XCTestCase {
     func testRequiresHTTPSOutsideLoopback() throws {
         let secure = try MobileServerEndpointPolicy.resolve(" HTTPS://Music.Example.test/root/ ")
@@ -29,6 +152,25 @@ final class MobileServerEndpointPolicyTests: XCTestCase {
         XCTAssertNotEqual(
             MobileServerEndpointPolicy.normalizedOrigin(of: first),
             MobileServerEndpointPolicy.normalizedOrigin(of: URL(string: "https://music.example.test:8443")!)
+        )
+    }
+
+    func testLegacyProductionOriginMigratesWithoutChangingProfileIdentity() throws {
+        let legacy = try MobileServerEndpointPolicy.resolve("https://music.unblocked.mov")
+        XCTAssertEqual(
+            legacy.url.absoluteString,
+            "https://resonance-core.blithe-haven-9710.chatgpt.site"
+        )
+        let context = MobileServerContext(
+            origin: "https://music.unblocked.mov:443",
+            profileID: "clerk-profile"
+        )
+        XCTAssertEqual(
+            MobileServerEndpointPolicy.canonicalContext(context),
+            MobileServerContext(
+                origin: "https://resonance-core.blithe-haven-9710.chatgpt.site:443",
+                profileID: "clerk-profile"
+            )
         )
     }
 }
@@ -426,6 +568,32 @@ final class MobileTransferFailurePersistenceTests: XCTestCase {
 }
 
 final class MobileLibraryNormalizationTests: XCTestCase {
+    func testPlaybackCompletionWrapsTheLastQueueItemToTheFirst() {
+        XCTAssertEqual(MobileQueueCompletionPolicy.nextIndex(count: 3, currentIndex: 2), 0)
+        XCTAssertEqual(MobileQueueCompletionPolicy.nextIndex(count: 3, currentIndex: 0), 1)
+        XCTAssertEqual(MobileQueueCompletionPolicy.nextIndex(count: 1, currentIndex: 0), 0)
+        XCTAssertNil(MobileQueueCompletionPolicy.nextIndex(count: 0, currentIndex: 0))
+    }
+
+    func testPlaylistOrderMergeKeepsDeviceOnlyAndUnresolvedItemsInStableSlots() {
+        XCTAssertEqual(
+            MobilePlaylistOrderPolicy.merge(
+                previous: ["remote-a", "local", "remote-b"],
+                ordered: ["remote-b", "remote-c", "remote-a"],
+                preserving: ["local"]
+            ),
+            ["remote-b", "local", "remote-c", "remote-a"]
+        )
+        XCTAssertEqual(
+            MobilePlaylistOrderPolicy.merge(
+                previous: ["remote-a", "unresolved", "remote-b"],
+                ordered: ["remote-b", "remote-a"],
+                preserving: ["unresolved"]
+            ),
+            ["remote-b", "unresolved", "remote-a"]
+        )
+    }
+
     func testRepairsDuplicateTrackPlaylistAndCompoundRemoteIdentifiers() throws {
         let duplicateTrackID = UUID()
         let duplicatePlaylistID = UUID()

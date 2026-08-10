@@ -14,6 +14,7 @@ import {
   formatHistoryWindowLabel,
   formatTime,
   isInstalledVideoTrack,
+  listeningHistoryEntryQualifiesAsPlay,
   localImportCandidateCanAutoSelect,
   localImportOperationFingerprint,
   localImportOperationIsCurrent,
@@ -26,6 +27,7 @@ import {
   nextIndex,
   niceChartMaximum,
   normalizeServerUploadManifest,
+  normalizedAppPreferences,
   normalizedVolume,
   playbackGainForVolume,
   normalizeState,
@@ -33,18 +35,23 @@ import {
   persistentPlaybackIDs,
   physicalStorageClassForTrack,
   planMissingDownloadedUploads,
+  playlistArtworkTrackIDs,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
   reconcileUploadedTrack,
+  reorderPlaylistTrackIDs,
   resolveServerTransferModes,
   removeClipRangeForTrack,
   resolveSyncProfile,
   restoreProfileState,
+  migrateProfileContext,
   SAFE_CLIENT_CONFIG,
   serverUploadBlockedByActivity,
   serverUploadConfigurationError,
   serverTrackRemoteIDBelongsToContext,
   serverSongRequiresDownload,
+  serverSourceDisplayFallback,
+  serverSourceNeedsOriginalPage,
   serverUploadManifestRetryIDs,
   shuffledTrackIDs,
   storeActiveProfileState,
@@ -60,9 +67,11 @@ import {
   updatePlaylistRemoteSongIDs,
 } from "./core.js";
 
-const api = window.likedSongs;
+const api = window.resonance;
 const audio = document.querySelector("#audio");
 const clipEditorPreviewAudio = document.querySelector("#clipEditorPreview");
+const clipEditorVisualizerCanvas = document.querySelector("#clipEditorStageVisualizerCanvas");
+const clipEditorVisualizerContext = clipEditorVisualizerCanvas.getContext("2d", { alpha: true, desynchronized: true });
 const installedVideoPlayer = document.querySelector("#installedVideoPlayer");
 const localImportPreviewAudio = document.querySelector("#localImportPreview");
 const content = document.querySelector("#content");
@@ -73,6 +82,8 @@ let selectedPlaylistID = null;
 let libraryFilter = "all";
 let serverToken = "";
 let serverAdminToken = "";
+let accountSession = null;
+let isAccountEmailRevealed = false;
 let serverCatalog = [];
 let serverCatalogGeneration = 0;
 const serverArtworkCache = new Map();
@@ -89,6 +100,7 @@ let activePlaybackSourceQueueIDs = [];
 let activePlaybackPlaylistID = null;
 let pendingRestorePosition = null;
 let playbackProgressTimer = null;
+let playbackProgressAnimationFrame = null;
 let activeListeningEntryID = null;
 let lastListeningPosition = 0;
 let lastPersistedListeningSeconds = 0;
@@ -122,6 +134,7 @@ const INSTALLED_VIDEO_REVEAL_MS = 140;
 const INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS = 190;
 const INSTALLED_VIDEO_CHROME_RESTORE_LEAD_MS = 120;
 const INSTALLED_VIDEO_CONTROLS_TIMEOUT_MS = 2200;
+const INSTALLED_VIDEO_SYNC_TOLERANCE_SECONDS = 0.12;
 let navigationHistory = [{ section: "library", playlistID: null }];
 let navigationIndex = 0;
 let pendingPlaylistTrackID = null;
@@ -149,7 +162,6 @@ let serverConnected = false;
 let clientConfig = SAFE_CLIENT_CONFIG;
 let clientConfigRequestGeneration = 0;
 let clientConfigRenewalTimer = null;
-let clientConfigLeaseStatus = "safe-defaults";
 let activeServerStream = null;
 let serverStreamRequestGeneration = 0;
 let serverConnectInFlight = false;
@@ -164,6 +176,8 @@ let draggingPlaylistTargetID = null;
 let draggingPlaylistInsertAfter = false;
 let playlistDragPreviewKey = "";
 let playlistDragFloatingRow = null;
+let playlistPointerDrag = null;
+let suppressPlaylistRowClickUntil = 0;
 let localImportAvailable = false;
 let localImportResolution = null;
 let localImportRunning = false;
@@ -179,24 +193,73 @@ let localImportResolvedSourceKey = null;
 let localImportInteractionGeneration = 0;
 let localImportBatchContext = null;
 let localImportServerUploadMode = null;
+let localImportProviderFocus = "youtube";
 let availableWindowsUpdateVersion = null;
 let dismissedWindowsUpdateVersion = null;
 let windowsUpdateReady = false;
 const LOCAL_IMPORT_AUTO_RESOLVE_DELAY = 450;
+const LOCAL_IMPORT_PROVIDER_ORDER = Object.freeze([
+  ["youtube", "YouTube"],
+  ["spotify", "Spotify"],
+  ["soundcloud", "SoundCloud"],
+]);
 let clipEditorStartSeconds = 0;
 let clipEditorEndSeconds = 30;
 let clipEditorPreviewEndSeconds = 0;
 let clipEditorPreviewInterruptedPlayback = false;
 let clipEditorPreviewLoading = false;
 let clipEditorPreviewRequest = 0;
+let clipEditorWaveformRequest = 0;
+let clipEditorVideoFrameRequest = 0;
+let clipEditorVisualizerFrame = 0;
+const CLIP_EDITOR_VISUALIZER_BAR_COUNT = 112;
+let clipEditorVisualizerPreviousTimestamp = 0;
+let clipEditorVisualizerBinRanges = null;
+let clipEditorVisualizerStaticLevels = new Float32Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT).fill(.08);
+let clipEditorVisualizerDisplayedLevels = new Float32Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT);
+let clipEditorVisualizerTargetLevels = new Float32Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT);
+let clipEditorVisualizerGradient = null;
+let clipEditorVisualizerGradientSize = "";
+let clipEditorAudioContext = null;
+let clipEditorAudioSource = null;
+let clipEditorAnalyser = null;
+let clipEditorAnalyserData = null;
+let clipEditorSavedStartSeconds = 0;
+let clipEditorSavedEndSeconds = 0;
 let clipBoundaryTrackID = null;
 let profileGeneration = 0;
+let activeProfilePicture = null;
+let settingsPanel = "general";
+let settingsRecordingAction = null;
+let discordPresenceStatus = { state: "disabled", message: "Rich Presence is off.", applicationConfigured: false };
+let discordPresenceSyncTimer = null;
 const activeProfileID = () => state.syncProfileID || "default";
 
+const settingsKeybindActions = Object.freeze({
+  togglePlayback: { label: "Play / pause", description: "Toggle playback from anywhere in Resonance." },
+  previousTrack: { label: "Previous track", description: "Return to the previous song in the queue." },
+  nextTrack: { label: "Next track", description: "Advance to the next song in the queue." },
+  volumeDown: { label: "Volume down", description: "Lower playback volume by five percent." },
+  volumeUp: { label: "Volume up", description: "Raise playback volume by five percent." },
+});
+
+function settingsIcon(pathMarkup) {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">${pathMarkup}</svg>`;
+}
+
+const settingsIcons = Object.freeze({
+  general: settingsIcon('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.07.07-2.76 2.76-.07-.07a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.1 1.65V21h-3.8v-.1A1.8 1.8 0 0 0 9 19.25a1.8 1.8 0 0 0-2 .36l-.07.07-2.76-2.76.07-.07a1.8 1.8 0 0 0 .36-2A1.8 1.8 0 0 0 2.95 13H3v-3.8h-.05A1.8 1.8 0 0 0 4.6 8a1.8 1.8 0 0 0-.36-2l-.07-.07 2.76-2.76.07.07a1.8 1.8 0 0 0 2 .36A1.8 1.8 0 0 0 10.1 2H14v.05A1.8 1.8 0 0 0 15 3.7a1.8 1.8 0 0 0 2-.36l.07-.07 2.76 2.76-.07.07a1.8 1.8 0 0 0-.36 2A1.8 1.8 0 0 0 21.05 9H21v4h.05A1.8 1.8 0 0 0 19.4 15Z"/>'),
+  server: settingsIcon('<circle cx="12" cy="12" r="8"/><path d="M4.5 9h15M4.5 15h15M12 4c2 2.2 3 4.9 3 8s-1 5.8-3 8c-2-2.2-3-4.9-3-8s1-5.8 3-8Z"/>'),
+  keybinds: settingsIcon('<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h.01M11 14h6M18 10h.01"/>'),
+  background: settingsIcon('<path d="M4 7h16v11H4z"/><path d="M8 7V4h8v3M8 21h8"/>'),
+  discord: settingsIcon('<path d="M7.5 7.4A11 11 0 0 1 12 6.5a11 11 0 0 1 4.5.9c1.1 1.5 2 4.4 2 6.4-1.3 1.6-2.6 2.2-4 2.6l-1-1.3M16.5 7.4l.9-1.7M7.5 7.4l-.9-1.7M10 13h.01M14 13h.01M9.5 15.1c1.7.7 3.3.7 5 0"/>'),
+  update: settingsIcon('<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/>'),
+});
+
 const serverUploadModeOptions = Object.freeze({
-  local_file: "Local files",
-  server_source_link: "Source link (server import)",
-  reviewed_match: "Reviewed audio match",
+  local_file: "Preserved source links",
+  server_source_link: "Preserved source links",
+  reviewed_match: "Reviewed source links",
 });
 const serverDownloadModeOptions = Object.freeze({
   verified_file_cache: "Verified files on this device",
@@ -423,7 +486,7 @@ function refreshCustomSelect(control) {
   if (!controller) return;
   const selectedOption = controller.options.find((option) => option.value === controller.currentValue) || controller.options[0];
   if (selectedOption) controller.currentValue = selectedOption.value;
-  controller.value.textContent = selectedOption?.label || "Choose…";
+  controller.value.textContent = selectedOption?.triggerLabel || selectedOption?.label || "Choose…";
   controller.trigger.disabled = controller.disabled || !controller.options.length;
   controller.root.classList.toggle("disabled", controller.trigger.disabled);
   controller.root.dataset.value = controller.currentValue;
@@ -455,6 +518,7 @@ function setCustomSelectOptions(control, options, selectedValue = control?.value
   controller.options = (Array.isArray(options) ? options : []).map((option) => ({
     value: String(option?.value ?? ""),
     label: String(option?.label ?? option?.value ?? ""),
+    triggerLabel: String(option?.triggerLabel ?? ""),
     disabled: Boolean(option?.disabled),
   }));
   const requestedValue = String(selectedValue ?? "");
@@ -609,6 +673,15 @@ function initializeCustomSelects() {
   window.addEventListener("scroll", () => customSelectControllers.forEach(positionCustomSelect), true);
 }
 
+function disposeCustomSelects(root) {
+  root?.querySelectorAll("[data-custom-select]").forEach((control) => {
+    const controller = customSelectControllers.get(control);
+    if (!controller) return;
+    controller.menu.remove();
+    customSelectControllers.delete(control);
+  });
+}
+
 function playbackTrackByID(trackID) {
   const persistent = state.tracks.find((track) => track.id === trackID && trackBelongsToActiveProfile(state, track));
   if (persistent) return persistent;
@@ -719,18 +792,129 @@ function clearPlaylistDragFloatingRow() {
   document.querySelectorAll(".track-row.dragging").forEach((row) => row.classList.remove("dragging"));
 }
 
+function startPlaylistDragPreview(row, trackTable) {
+  draggingPlaylistTrackID = row.dataset.track;
+  draggingPlaylistTargetID = null;
+  draggingPlaylistInsertAfter = false;
+  clearPlaylistDragPreview();
+  clearPlaylistDragFloatingRow();
+  row.classList.add("dragging");
+  const floatingRow = row.cloneNode(true);
+  floatingRow.classList.remove("playlist-draggable", "dragging", "drag-preview-up", "drag-preview-down");
+  floatingRow.classList.add("playlist-drag-floating");
+  floatingRow.removeAttribute("data-track");
+  floatingRow.removeAttribute("data-playlist-draggable");
+  floatingRow.removeAttribute("aria-label");
+  floatingRow.removeAttribute("aria-keyshortcuts");
+  floatingRow.removeAttribute("tabindex");
+  floatingRow.setAttribute("aria-hidden", "true");
+  floatingRow.style.top = `${row.offsetTop}px`;
+  floatingRow.style.left = `${row.offsetLeft}px`;
+  floatingRow.style.width = `${row.offsetWidth}px`;
+  floatingRow.style.height = `${row.offsetHeight}px`;
+  floatingRow.style.setProperty("--playlist-drag-source-offset", "0px");
+  trackTable?.append(floatingRow);
+  playlistDragFloatingRow = floatingRow;
+}
+
+function updatePlaylistDragPreview(targetRow, clientY) {
+  if (!draggingPlaylistTrackID || draggingPlaylistTrackID === targetRow?.dataset.track) return;
+  const insertBefore = clientY < targetRow.getBoundingClientRect().top + targetRow.offsetHeight / 2;
+  const previewKey = `${targetRow.dataset.track}:${insertBefore ? "before" : "after"}`;
+  draggingPlaylistTargetID = targetRow.dataset.track;
+  draggingPlaylistInsertAfter = !insertBefore;
+  if (previewKey === playlistDragPreviewKey) return;
+  clearPlaylistDragPreview();
+  playlistDragPreviewKey = previewKey;
+  const rows = [...document.querySelectorAll("[data-playlist-draggable]")];
+  const sourceIndex = rows.findIndex((item) => item.dataset.track === draggingPlaylistTrackID);
+  const targetIndex = rows.indexOf(targetRow);
+  if (sourceIndex < 0 || targetIndex < 0) return;
+  const destinationIndex = targetIndex + (draggingPlaylistInsertAfter ? 1 : 0) - (sourceIndex < targetIndex ? 1 : 0);
+  const endIndex = sourceIndex < targetIndex ? targetIndex - (draggingPlaylistInsertAfter ? 0 : 1) : sourceIndex - 1;
+  const startIndex = sourceIndex < targetIndex ? sourceIndex + 1 : targetIndex + (draggingPlaylistInsertAfter ? 1 : 0);
+  const previewClass = sourceIndex < targetIndex ? "drag-preview-up" : "drag-preview-down";
+  const sourceRow = rows[sourceIndex];
+  const adjacentRow = rows[sourceIndex + 1] || rows[sourceIndex - 1];
+  const rowPitch = adjacentRow ? Math.abs(adjacentRow.offsetTop - sourceRow.offsetTop) : sourceRow.offsetHeight;
+  const destinationTop = rows[destinationIndex]?.offsetTop ?? sourceRow.offsetTop;
+  playlistDragFloatingRow?.style.setProperty("--playlist-drag-source-offset", `${destinationTop - sourceRow.offsetTop}px`);
+  for (let index = startIndex; index <= endIndex; index += 1) {
+    rows[index].classList.add(previewClass);
+    rows[index].style.setProperty("--playlist-drag-offset", `${rowPitch}px`);
+  }
+}
+
+function clearPlaylistPointerDrag() {
+  playlistPointerDrag = null;
+  draggingPlaylistTrackID = null;
+  draggingPlaylistTargetID = null;
+  draggingPlaylistInsertAfter = false;
+  clearPlaylistDragFloatingRow();
+  clearPlaylistDragPreview();
+}
+
+async function commitPlaylistTrackReorder(sourceID, targetID, insertAfter) {
+  const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
+  if (!playlist) return false;
+  const reordered = reorderPlaylistTrackIDs(playlist.trackIDs, sourceID, targetID, insertAfter);
+  if (reordered.every((trackID, index) => trackID === playlist.trackIDs[index])) return false;
+  playlist.trackIDs = reordered;
+  updatePlaylistRemoteSongIDs(state, playlist);
+  markPlaylistDirty(playlist);
+  if (activePlaybackPlaylistID === playlist.id) setPlaybackContext(tracksForPlaylist(state, playlist.id), playlist.id);
+  renderLibrary();
+  await persist();
+  schedulePlaylistSync();
+  return true;
+}
+
+function paintProfileAvatar(element, initial) {
+  if (!element) return;
+  element.textContent = initial;
+  element.classList.toggle("profile-avatar-image", Boolean(activeProfilePicture));
+  if (activeProfilePicture) element.style.backgroundImage = `url(${JSON.stringify(activeProfilePicture)})`;
+  else element.style.removeProperty("background-image");
+}
+
 function updateProfileControl() {
+  updateProfileControlView();
+}
+
+function displayedAccountEmail(email = accountSession?.email) {
+  return isAccountEmailRevealed && email ? email : "••••••@••••••.•••";
+}
+
+function safeAccountDisplayName(session = accountSession, fallback = "Account") {
+  const email = String(session?.email || "").trim();
+  const candidate = String(session?.displayName || fallback || "").trim();
+  const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate);
+  return candidate && !looksLikeEmail && candidate.toLocaleLowerCase() !== email.toLocaleLowerCase()
+    ? candidate
+    : "Clerk account";
+}
+
+function updateProfileControlView({ refreshPicture = true } = {}) {
   const control = $("#profileControl");
   const button = $("#profileButton");
   if (!control || !button) return;
-  const name = String(activeProfile().name || "Default").trim() || "Default";
+  const name = accountSession
+    ? safeAccountDisplayName(accountSession)
+    : safeAccountDisplayName(null, activeProfile().name || "Account");
   control.hidden = false;
   button.title = `Profile: ${name}`;
   button.setAttribute("aria-label", `Open profile menu for ${name}`);
   const initial = Array.from(name)[0]?.toLocaleUpperCase() || "D";
-  $("#profileInitial").textContent = initial;
-  $("#profileMenuInitial").textContent = initial;
+  activeProfilePicture = accountSession?.imageURL || null;
+  paintProfileAvatar($("#profileInitial"), initial);
+  paintProfileAvatar($("#profileMenuInitial"), initial);
   $("#profileMenuName").textContent = name;
+  const email = $("#profileMenuEmail");
+  email.textContent = accountSession?.email ? displayedAccountEmail() : "Clerk account";
+  email.title = accountSession?.email
+    ? (isAccountEmailRevealed ? "Click to hide email address" : "Click to reveal email address")
+    : "";
+  $("#profileMenuManage").setAttribute("aria-label", `Manage ${name} account`);
 }
 
 function closeProfileMenu({ restoreFocus = false } = {}) {
@@ -770,22 +954,290 @@ function clipEditorTrackIsVideo(track = clipEditorTrack()) {
   return /\.(?:mp4|mov|m4v|webm)$/i.test(source);
 }
 
-function clipEditorWaveBars(track) {
-  const seed = Array.from(`${track?.id || "resonance"}${track?.title || "clip"}`)
-    .reduce((total, character) => total + character.codePointAt(0), 0);
-  const phase = (seed % 31) / 6;
-  let randomState = seed || 1;
-  let previousAmplitude = .58;
-  return Array.from({ length: 112 }, (_, index) => {
-    randomState = (randomState * 1664525 + 1013904223) >>> 0;
-    const noise = randomState / 0xffffffff;
-    previousAmplitude = previousAmplitude * .54 + noise * .46;
-    const envelope = .58
-      + Math.sin(index * .083 + phase) * .16
-      + Math.sin(index * .029 + phase * .41) * .11;
-    const amplitude = previousAmplitude * .62 + envelope * .38;
-    const height = 22 + Math.round(Math.max(.12, Math.min(1, amplitude)) * 74);
-    return `<i class="wave-level-${Math.max(2, Math.min(9, Math.round(height / 10)))}"></i>`;
+function clipEditorWaveBars(levels = []) {
+  return Array.from({ length: CLIP_EDITOR_VISUALIZER_BAR_COUNT }, (_, index) => {
+    const sourceIndex = levels.length > 1
+      ? Math.min(levels.length - 1, Math.round(index / (CLIP_EDITOR_VISUALIZER_BAR_COUNT - 1) * (levels.length - 1)))
+      : 0;
+    const level = Number.isFinite(levels[sourceIndex]) ? levels[sourceIndex] : .08;
+    const height = 10 + Math.round(Math.max(.04, Math.min(1, level)) * 86);
+    return `<i style="height:${height}%"></i>`;
+  }).join("");
+}
+
+function sampledClipEditorVisualizerLevels(levels = []) {
+  const sampled = new Float32Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT);
+  for (let index = 0; index < sampled.length; index += 1) {
+    const sourceIndex = levels.length > 1
+      ? Math.min(levels.length - 1, Math.round(index / (sampled.length - 1) * (levels.length - 1)))
+      : 0;
+    sampled[index] = Number.isFinite(levels[sourceIndex])
+      ? Math.max(0, Math.min(1, levels[sourceIndex]))
+      : .08;
+  }
+  return sampled;
+}
+
+function drawClipEditorStageVisualizer(levels, { live = false } = {}) {
+  const canvas = clipEditorVisualizerCanvas;
+  const width = Math.max(0, canvas.clientWidth);
+  const height = Math.max(0, canvas.clientHeight);
+  if (!width || !height) return;
+
+  const pixelRatio = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+  const pixelWidth = Math.max(1, Math.round(width * pixelRatio));
+  const pixelHeight = Math.max(1, Math.round(height * pixelRatio));
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+    clipEditorVisualizerGradient = null;
+    clipEditorVisualizerGradientSize = "";
+  }
+
+  const context = clipEditorVisualizerContext;
+  if (!context) return;
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, width, height);
+  const gradientSize = `${pixelWidth}x${pixelHeight}`;
+  if (!clipEditorVisualizerGradient || clipEditorVisualizerGradientSize !== gradientSize) {
+    clipEditorVisualizerGradient = context.createLinearGradient(0, height, 0, 0);
+    clipEditorVisualizerGradient.addColorStop(0, "#4e1a95");
+    clipEditorVisualizerGradient.addColorStop(.72, "#bc5df8");
+    clipEditorVisualizerGradient.addColorStop(1, "#7140d4");
+    clipEditorVisualizerGradientSize = gradientSize;
+  }
+
+  const gap = 2;
+  const barWidth = Math.max((width - gap * (CLIP_EDITOR_VISUALIZER_BAR_COUNT - 1)) / CLIP_EDITOR_VISUALIZER_BAR_COUNT, 2);
+  context.beginPath();
+  for (let index = 0; index < CLIP_EDITOR_VISUALIZER_BAR_COUNT; index += 1) {
+    const level = Number.isFinite(levels[index]) ? levels[index] : 0;
+    const percentage = live
+      ? Math.max(5, Math.min(100, 7 + level * 93))
+      : 10 + Math.round(Math.max(.04, Math.min(1, level)) * 86);
+    const barHeight = height * percentage / 100;
+    const x = index * (barWidth + gap);
+    const top = height - barHeight;
+    const radius = Math.min(barWidth / 2, barHeight / 2);
+    context.moveTo(x, height);
+    context.lineTo(x, top + radius);
+    context.quadraticCurveTo(x, top, x + radius, top);
+    context.lineTo(x + barWidth - radius, top);
+    context.quadraticCurveTo(x + barWidth, top, x + barWidth, top + radius);
+    context.lineTo(x + barWidth, height);
+    context.closePath();
+  }
+  context.fillStyle = clipEditorVisualizerGradient;
+  context.fill();
+}
+
+function renderClipEditorWaveform(levels = []) {
+  const bars = clipEditorWaveBars(levels);
+  $("#clipEditorWaveBars").innerHTML = bars;
+  clipEditorVisualizerStaticLevels = sampledClipEditorVisualizerLevels(levels);
+  if (clipEditorPreviewAudio.paused || clipEditorPreviewAudio.ended) {
+    clipEditorVisualizerDisplayedLevels.set(clipEditorVisualizerStaticLevels);
+    drawClipEditorStageVisualizer(clipEditorVisualizerStaticLevels);
+  }
+  updateClipEditorRange();
+}
+
+function waitForClipEditorVideoEvent(video, eventName, timeout = 4_000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Video frame loading timed out."));
+    }, timeout);
+    const cleanup = () => {
+      clearTimeout(timer);
+      video.removeEventListener(eventName, finished);
+      video.removeEventListener("error", failed);
+    };
+    const finished = () => { cleanup(); resolve(); };
+    const failed = () => { cleanup(); reject(new Error("Video frames could not be loaded.")); };
+    video.addEventListener(eventName, finished, { once: true });
+    video.addEventListener("error", failed, { once: true });
+  });
+}
+
+async function loadClipEditorVideoFrames(track, count = 12) {
+  const request = ++clipEditorVideoFrameRequest;
+  const strip = $("#clipEditorVideoFrames");
+  strip.innerHTML = "";
+  if (!track?.fileUrl || !clipEditorTrackIsVideo(track)) return;
+  if (track.filePath && typeof api.videoFrames === "function") {
+    try {
+      const frames = await api.videoFrames({
+        filePath: track.filePath,
+        duration: clipEditorDuration(track),
+        count,
+      });
+      if (request !== clipEditorVideoFrameRequest || clipEditorTrack()?.id !== track.id) return;
+      if (Array.isArray(frames) && frames.length) {
+        strip.innerHTML = frames.map((source) => `<img src="${source}" alt="">`).join("");
+        updateClipEditorRange();
+        return;
+      }
+    } catch {
+      // The browser fallback below still works for media sources that permit
+      // pixel reads from the renderer's origin.
+    }
+  }
+  const video = document.createElement("video");
+  video.preload = "auto";
+  video.muted = true;
+  video.playsInline = true;
+  video.src = track.fileUrl;
+  try {
+    if (video.readyState < 1) {
+      video.load();
+      await waitForClipEditorVideoEvent(video, "loadedmetadata");
+    }
+    const duration = Number.isFinite(video.duration) && video.duration > 0
+      ? video.duration
+      : clipEditorDuration(track);
+    const frames = [];
+    const canvas = document.createElement("canvas");
+    canvas.width = 240;
+    canvas.height = 135;
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) return;
+    for (let index = 0; index < count; index += 1) {
+      if (request !== clipEditorVideoFrameRequest) return;
+      const target = Math.min(Math.max(duration * (index + .5) / count, 0), Math.max(duration - .02, 0));
+      if (Math.abs(video.currentTime - target) > .015) {
+        video.currentTime = target;
+        await waitForClipEditorVideoEvent(video, "seeked");
+      }
+      context.fillStyle = "#000";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      const scale = Math.max(canvas.width / Math.max(video.videoWidth, 1), canvas.height / Math.max(video.videoHeight, 1));
+      const width = video.videoWidth * scale;
+      const height = video.videoHeight * scale;
+      context.drawImage(video, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+      frames.push(canvas.toDataURL("image/jpeg", .72));
+    }
+    if (request !== clipEditorVideoFrameRequest || clipEditorTrack()?.id !== track.id) return;
+    strip.innerHTML = frames.map((source) => `<img src="${source}" alt="">`).join("");
+    updateClipEditorRange();
+  } catch {
+    if (request === clipEditorVideoFrameRequest) strip.innerHTML = "";
+  } finally {
+    video.removeAttribute("src");
+    video.load();
+  }
+}
+
+async function loadClipEditorWaveform(track) {
+  const request = ++clipEditorWaveformRequest;
+  if (!track?.fileUrl) return;
+  try {
+    const response = await fetch(track.fileUrl);
+    if (!response.ok) throw new Error("Could not read audio bytes.");
+    const bytes = await response.arrayBuffer();
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) throw new Error("Audio analysis is unavailable.");
+    const context = new AudioContextClass();
+    const buffer = await context.decodeAudioData(bytes.slice(0));
+    const levels = Array.from({ length: 224 }, (_, index) => {
+      const start = Math.floor(index / 224 * buffer.length);
+      const end = Math.max(start + 1, Math.floor((index + 1) / 224 * buffer.length));
+      let peak = 0;
+      for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+        const samples = buffer.getChannelData(channel);
+        const stride = Math.max(1, Math.floor((end - start) / 96));
+        for (let sample = start; sample < end; sample += stride) peak = Math.max(peak, Math.abs(samples[sample] || 0));
+      }
+      return Math.sqrt(peak);
+    });
+    await context.close().catch(() => {});
+    if (request !== clipEditorWaveformRequest || clipEditorTrack()?.id !== track.id) return;
+    const maximum = Math.max(...levels, .0001);
+    renderClipEditorWaveform(levels.map((level) => Math.max(.035, level / maximum)));
+  } catch {
+    // The live analyser below still renders actual audio during playback when
+    // a custom media protocol cannot be fetched by Web Audio.
+  }
+}
+
+async function ensureClipEditorLiveVisualizer() {
+  if (clipEditorAnalyser) {
+    if (clipEditorAudioContext?.state === "suspended") await clipEditorAudioContext.resume();
+    return true;
+  }
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return false;
+  try {
+    clipEditorAudioContext = new AudioContextClass();
+    clipEditorAudioSource = clipEditorAudioContext.createMediaElementSource(clipEditorPreviewAudio);
+    clipEditorAnalyser = clipEditorAudioContext.createAnalyser();
+    clipEditorAnalyser.fftSize = 512;
+    clipEditorAnalyser.smoothingTimeConstant = .72;
+    clipEditorAnalyserData = new Uint8Array(clipEditorAnalyser.frequencyBinCount);
+    clipEditorAudioSource.connect(clipEditorAnalyser);
+    clipEditorAnalyser.connect(clipEditorAudioContext.destination);
+    await clipEditorAudioContext.resume();
+    return true;
+  } catch {
+    clipEditorAnalyser = null;
+    clipEditorAnalyserData = null;
+    return false;
+  }
+}
+
+function animateClipEditorVisualizer() {
+  if (clipEditorVisualizerFrame) cancelAnimationFrame(clipEditorVisualizerFrame);
+  clipEditorVisualizerPreviousTimestamp = 0;
+  const draw = (timestamp) => {
+    if (clipEditorPreviewAudio.paused || clipEditorPreviewAudio.ended || !clipEditorAnalyser || !clipEditorAnalyserData) {
+      clipEditorVisualizerFrame = 0;
+      return;
+    }
+    clipEditorAnalyser.getByteFrequencyData(clipEditorAnalyserData);
+    if (clipEditorVisualizerBinRanges?.dataLength !== clipEditorAnalyserData.length) {
+      const usableBins = Math.max(1, Math.floor(clipEditorAnalyserData.length * .72));
+      const lower = new Uint16Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT);
+      const upper = new Uint16Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT);
+      for (let index = 0; index < CLIP_EDITOR_VISUALIZER_BAR_COUNT; index += 1) {
+        lower[index] = Math.floor(index / CLIP_EDITOR_VISUALIZER_BAR_COUNT * usableBins);
+        upper[index] = Math.max(lower[index] + 1, Math.floor((index + 1) / CLIP_EDITOR_VISUALIZER_BAR_COUNT * usableBins));
+      }
+      clipEditorVisualizerBinRanges = { dataLength: clipEditorAnalyserData.length, lower, upper };
+    }
+
+    for (let index = 0; index < CLIP_EDITOR_VISUALIZER_BAR_COUNT; index += 1) {
+      const low = clipEditorVisualizerBinRanges.lower[index];
+      const high = clipEditorVisualizerBinRanges.upper[index];
+      let energy = 0;
+      for (let bin = low; bin < high; bin += 1) energy = Math.max(energy, clipEditorAnalyserData[bin]);
+      clipEditorVisualizerTargetLevels[index] = energy / 255;
+    }
+
+    if (!clipEditorVisualizerPreviousTimestamp) {
+      clipEditorVisualizerDisplayedLevels.set(clipEditorVisualizerTargetLevels);
+    } else {
+      const elapsed = Math.min(Math.max((timestamp - clipEditorVisualizerPreviousTimestamp) / 1000, 1 / 240), 1 / 15);
+      for (let index = 0; index < CLIP_EDITOR_VISUALIZER_BAR_COUNT; index += 1) {
+        const current = clipEditorVisualizerDisplayedLevels[index];
+        const target = clipEditorVisualizerTargetLevels[index];
+        const responseTime = target >= current ? .015 : .07;
+        const blend = 1 - Math.exp(-elapsed / responseTime);
+        clipEditorVisualizerDisplayedLevels[index] = current + (target - current) * blend;
+      }
+    }
+    clipEditorVisualizerPreviousTimestamp = timestamp;
+    drawClipEditorStageVisualizer(clipEditorVisualizerDisplayedLevels, { live: true });
+    clipEditorVisualizerFrame = requestAnimationFrame(draw);
+  };
+  clipEditorVisualizerFrame = requestAnimationFrame(draw);
+}
+
+function renderClipEditorRuler(duration) {
+  const ruler = $("#clipEditorRuler");
+  const intervals = duration <= 30 ? 6 : duration <= 90 ? 6 : duration <= 300 ? 5 : 6;
+  ruler.innerHTML = Array.from({ length: intervals + 1 }, (_, index) => {
+    const seconds = Math.round(duration * index / intervals);
+    return `<span style="left:${index / intervals * 100}%">${escapeHTML(formatTime(seconds))}</span>`;
   }).join("");
 }
 
@@ -858,6 +1310,7 @@ function bindClipEditorHandle(boundary) {
   handle.onpointerup = finishDrag;
   handle.onpointercancel = finishDrag;
   handle.onkeydown = (event) => {
+    if (event.ctrlKey || event.altKey || event.metaKey) return;
     const duration = clipEditorDuration();
     const increment = event.shiftKey ? 5 : 1;
     let value = boundary === "start" ? clipEditorStartSeconds : clipEditorEndSeconds;
@@ -888,6 +1341,7 @@ function updateClipEditorRange() {
   waveform.style.setProperty("--clip-selection-start", `${startRatio * 100}%`);
   waveform.style.setProperty("--clip-selection-end", `${endRatio * 100}%`);
   waveform.style.setProperty("--clip-selection-width", `${(endRatio - startRatio) * 100}%`);
+  renderClipEditorRuler(duration);
   const startHandle = $("#clipEditorStartHandle");
   const endHandle = $("#clipEditorEndHandle");
   startHandle.setAttribute("aria-valuemin", "0");
@@ -903,8 +1357,24 @@ function updateClipEditorRange() {
     const position = (index + .5) / bars.length;
     bar.classList.toggle("selected", position >= startRatio && position <= endRatio);
   });
+  [...$("#clipEditorVideoFrames").children].forEach((frame, index, frames) => {
+    const position = (index + .5) / frames.length;
+    frame.classList.toggle("selected", position >= startRatio && position <= endRatio);
+  });
   clipEditorPreviewEndSeconds = end;
   syncClipRangePreviewTransport();
+  syncClipEditorSaveButton();
+}
+
+function clipEditorHasUnsavedChanges() {
+  return Math.abs(clipEditorStartSeconds - clipEditorSavedStartSeconds) > .001
+    || Math.abs(clipEditorEndSeconds - clipEditorSavedEndSeconds) > .001;
+}
+
+function syncClipEditorSaveButton() {
+  const button = $("#saveClipRange");
+  const track = clipEditorTrack();
+  button.disabled = !track || !clipEditorHasUnsavedChanges();
 }
 
 function renderClipEditorTrack({ resetRange = false } = {}) {
@@ -913,11 +1383,12 @@ function renderClipEditorTrack({ resetRange = false } = {}) {
   const empty = $("#clipEditorEmpty");
   workspace.hidden = !track;
   empty.hidden = Boolean(track);
-  $("#saveClipRange").disabled = !track;
   $("#previewClipRange").disabled = !track?.fileUrl;
   if (!track) {
     $("#clearClipRange").hidden = true;
     $("#clipEditorVideoFrame").hidden = true;
+    $("#clipEditorVideoFrames").hidden = true;
+    $("#clipEditorWaveBars").hidden = false;
     $("#clipEditorStatus").textContent = "Import or download a song before setting a clip range.";
     syncClipRangePreviewTransport();
     return;
@@ -927,8 +1398,20 @@ function renderClipEditorTrack({ resetRange = false } = {}) {
   $("#clipEditorTrackMeta").textContent = `${track.artist || "Unknown Artist"} · ${displayAlbum(track)}`;
   $("#clipEditorTrackDuration").textContent = formatTime(duration);
   $("#clipEditorArtwork").innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : "♪";
-  $("#clipEditorWaveBars").innerHTML = clipEditorWaveBars(track);
-  $("#clipEditorVideoFrame").hidden = !clipEditorTrackIsVideo(track);
+  $(".clip-editor-settings-artwork").innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : "♪";
+  renderClipEditorWaveform();
+  const isVideo = clipEditorTrackIsVideo(track);
+  $("#clipEditorVideoFrame").hidden = !isVideo;
+  $("#clipEditorAudioStage").hidden = isVideo;
+  $("#clipEditorVideoFrames").hidden = !isVideo;
+  $("#clipEditorWaveBars").hidden = isVideo;
+  if (isVideo) {
+    clipEditorWaveformRequest += 1;
+    void loadClipEditorVideoFrames(track);
+  } else {
+    clipEditorVideoFrameRequest += 1;
+    void loadClipEditorWaveform(track);
+  }
   clipEditorPreviewAudio.poster = track.artwork || "";
   if (track.artwork) {
     const trackID = track.id;
@@ -941,6 +1424,8 @@ function renderClipEditorTrack({ resetRange = false } = {}) {
     const defaultStart = duration > 60 ? 15 : 0;
     clipEditorStartSeconds = savedRange?.startSeconds ?? defaultStart;
     clipEditorEndSeconds = savedRange?.endSeconds ?? Math.min(duration, defaultStart + 45);
+    clipEditorSavedStartSeconds = savedRange?.startSeconds ?? 0;
+    clipEditorSavedEndSeconds = savedRange?.endSeconds ?? duration;
   }
   updateClipEditorRange();
   const savedRange = playbackRangeForTrack(state, track);
@@ -957,6 +1442,17 @@ function syncClipRangePreviewButton() {
   const button = $("#previewClipRange");
   const playing = !clipEditorPreviewAudio.paused && !clipEditorPreviewAudio.ended;
   button.classList.toggle("playing", playing);
+  $("#clipEditorStageVisualizer").classList.toggle("playing", playing);
+  if (playing) animateClipEditorVisualizer();
+  else if (clipEditorVisualizerFrame) {
+    cancelAnimationFrame(clipEditorVisualizerFrame);
+    clipEditorVisualizerFrame = 0;
+  }
+  if (!playing) {
+    clipEditorVisualizerPreviousTimestamp = 0;
+    clipEditorVisualizerDisplayedLevels.set(clipEditorVisualizerStaticLevels);
+    drawClipEditorStageVisualizer(clipEditorVisualizerStaticLevels);
+  }
   button.setAttribute("aria-pressed", String(playing));
   button.setAttribute("aria-label", playing ? "Pause preview" : "Play preview");
   button.disabled = clipEditorPreviewLoading || !clipEditorTrack()?.fileUrl;
@@ -982,6 +1478,8 @@ function syncClipRangePreviewTransport() {
   seek.setAttribute("aria-valuetext", `${formatTime(position)} of ${formatTime(end)}`);
   $("#clipEditorPreviewCurrent").textContent = formatTime(position);
   $("#clipEditorPreviewEnd").textContent = formatTime(end);
+  const duration = clipEditorDuration(track);
+  $("#clipEditorWaveform").style.setProperty("--clip-playhead", `${Math.max(0, Math.min(1, position / duration)) * 100}%`);
 }
 
 function waitForClipRangePreviewMetadata() {
@@ -1058,6 +1556,7 @@ async function toggleClipRangePreview() {
   }
   const track = clipEditorTrack();
   if (!track?.fileUrl) return;
+  void ensureClipEditorLiveVisualizer();
   const request = ++clipEditorPreviewRequest;
   clipEditorPreviewLoading = true;
   syncClipRangePreviewButton();
@@ -1088,6 +1587,31 @@ async function toggleClipRangePreview() {
   }
 }
 
+async function stepClipEditorTrack(direction) {
+  const tracks = tracksForActiveProfile(state);
+  if (!tracks.length) return;
+  const currentIndex = Math.max(0, tracks.findIndex((track) => track.id === clipEditorTrack()?.id));
+  const nextIndex = (currentIndex + direction + tracks.length) % tracks.length;
+  await stopClipRangePreview();
+  setCustomSelectValue($("#clipEditorTrack"), tracks[nextIndex].id);
+  renderClipEditorTrack({ resetRange: true });
+}
+
+function handleClipEditorKeybind(action) {
+  if (!$("#clipEditorDialog").open) return false;
+  if (action === "togglePlayback") void toggleClipRangePreview();
+  else if (action === "previousTrack") void stepClipEditorTrack(-1);
+  else if (action === "nextTrack") void stepClipEditorTrack(1);
+  else if (action === "volumeDown") {
+    setPlaybackVolume(state.volume - .05);
+    clipEditorPreviewAudio.volume = playbackGainForVolume(state.volume);
+  } else if (action === "volumeUp") {
+    setPlaybackVolume(state.volume + .05);
+    clipEditorPreviewAudio.volume = playbackGainForVolume(state.volume);
+  } else return false;
+  return true;
+}
+
 function openClipEditor() {
   closeProfileMenu();
   const select = $("#clipEditorTrack");
@@ -1096,10 +1620,20 @@ function openClipEditor() {
   setCustomSelectOptions(select, visibleTracks.map((track) => ({
     value: track.id,
     label: `${track.title} — ${track.artist || "Unknown Artist"}`,
+    triggerLabel: track.title || "Unknown title",
   })), preferredTrack?.id);
   renderClipEditorTrack({ resetRange: true });
+  $("#clipEditorSettings").hidden = true;
+  $("#clipEditorHelp").hidden = true;
+  $("#clipEditorSettingsButton").setAttribute("aria-expanded", "false");
+  $("#clipEditorHelpButton").setAttribute("aria-expanded", "false");
+  $("#clipEditorDialog").classList.remove("preview-expanded");
+  $("#clipEditorExpand").setAttribute("aria-pressed", "false");
   $("#clipEditorDialog").showModal();
-  requestAnimationFrame(() => (preferredTrack ? customSelectControllers.get(select)?.trigger : $("#closeClipEditor"))?.focus());
+  requestAnimationFrame(() => {
+    drawClipEditorStageVisualizer(clipEditorVisualizerStaticLevels);
+    (preferredTrack ? $("#previewClipRange") : $("#saveClipRange"))?.focus();
+  });
 }
 
 async function saveClipRange() {
@@ -1111,8 +1645,12 @@ async function saveClipRange() {
   button.disabled = true;
   button.textContent = "Saving…";
   try {
-    const range = setClipRangeForTrack(state, track, clipEditorStartSeconds, clipEditorEndSeconds);
-    if (!range) throw new Error("Choose a valid clip range.");
+    const duration = clipEditorDuration(track);
+    const usesFullSong = clipEditorStartSeconds <= .001 && clipEditorEndSeconds >= duration - .001;
+    const range = usesFullSong
+      ? (removeClipRangeForTrack(state, track), { startSeconds: 0, endSeconds: duration })
+      : setClipRangeForTrack(state, track, clipEditorStartSeconds, clipEditorEndSeconds);
+    if (!range) throw new Error("Choose a valid playback range.");
     clipRangeMutationGeneration += 1;
     if (currentID === track.id && (audio.currentTime < range.startSeconds || audio.currentTime >= range.endSeconds)) {
       audio.currentTime = range.startSeconds;
@@ -1120,31 +1658,58 @@ async function saveClipRange() {
     }
     await persist();
     if (track.remoteID) schedulePlaylistSync();
-    $("#clearClipRange").hidden = false;
+    clipEditorSavedStartSeconds = range.startSeconds;
+    clipEditorSavedEndSeconds = range.endSeconds;
+    $("#clearClipRange").hidden = usesFullSong;
     const profileName = state.syncProfiles.find((profile) => profile.id === activeProfileID())?.name || activeProfileID();
     status.textContent = track.remoteID
       ? `Saved for ${profileName}. Syncing this range to the server…`
       : `Saved for ${profileName} on this device. Upload the song to sync its range.`;
-    showNotice(`Playback for “${track.title}” is now limited to ${formatTime(range.startSeconds)}–${formatTime(range.endSeconds)}.`, "status");
+    showNotice(usesFullSong
+      ? `“${track.title}” now plays in full.`
+      : `Playback for “${track.title}” is now limited to ${formatTime(range.startSeconds)}–${formatTime(range.endSeconds)}.`, "status");
+    syncClipEditorSaveButton();
   } catch (error) {
     status.textContent = error.message || "Resonance could not save this clip range.";
   } finally {
-    button.disabled = false;
-    button.textContent = "Save range";
+    button.textContent = "Save";
+    syncClipEditorSaveButton();
   }
+}
+
+async function seekClipEditorPreview(seconds) {
+  const track = clipEditorTrack();
+  if (!track?.fileUrl) return;
+  try {
+    await prepareClipRangePreviewMedia(track);
+    clipEditorPreviewAudio.currentTime = Math.max(clipEditorStartSeconds, Math.min(seconds, clipEditorEndSeconds));
+    syncClipRangePreviewTransport();
+  } catch (error) {
+    $("#clipEditorStatus").textContent = error?.message || "Resonance could not seek this clip.";
+  }
+}
+
+function toggleClipEditorPopover(name) {
+  const settings = $("#clipEditorSettings");
+  const help = $("#clipEditorHelp");
+  const openSettings = name === "settings" && settings.hidden;
+  const openHelp = name === "help" && help.hidden;
+  settings.hidden = !openSettings;
+  help.hidden = !openHelp;
+  $("#clipEditorSettingsButton").setAttribute("aria-expanded", String(openSettings));
+  $("#clipEditorHelpButton").setAttribute("aria-expanded", String(openHelp));
+  if (openSettings) requestAnimationFrame(() => $("#clipEditorStartInput").focus());
+  if (openHelp) requestAnimationFrame(() => $("#closeClipEditorHelp").focus());
 }
 
 async function clearClipRange() {
   const track = clipEditorTrack();
-  if (!track || !removeClipRangeForTrack(state, track)) return;
+  if (!track) return;
   await stopClipRangePreview();
-  clipRangeMutationGeneration += 1;
-  await persist();
-  if (track.remoteID) schedulePlaylistSync();
   clipEditorStartSeconds = 0;
   clipEditorEndSeconds = clipEditorDuration(track);
   renderClipEditorTrack();
-  $("#clipEditorStatus").textContent = "This profile now plays the full song. The song file is unchanged.";
+  $("#clipEditorStatus").textContent = "Full-song playback is selected. Press Save to apply it.";
 }
 
 function listeningHistoryMetric(icon, tone, value, suffix, label) {
@@ -1517,18 +2082,7 @@ function openListeningHistory() {
 }
 
 function activePlaybackMedia() {
-  return installedVideoOwnsPlayback()
-    ? installedVideoPlayer
-    : audio;
-}
-
-function installedVideoOwnsPlayback() {
-  const videoDialog = $("#installedVideoDialog");
-  return Boolean(
-    installedVideoSession?.videoOwnsPlayback
-    && installedVideoSession.trackID === currentID
-    && videoDialog?.open,
-  );
+  return audio;
 }
 
 function playbackIsActive() {
@@ -1594,6 +2148,15 @@ function checkpointListeningSessionForContextChange() {
   return wasPlaying;
 }
 
+function finishListeningSessionForReplay() {
+  if (activeListeningEntryID) updateListeningSession();
+  persistInBackground({ refreshSidebar: false });
+  scheduleListeningHistorySync();
+  activeListeningEntryID = null;
+  lastListeningPosition = 0;
+  lastPersistedListeningSeconds = 0;
+}
+
 function pendingListeningHistoryBatches() {
   const serverOrigin = normalizedServerOrigin(state.serverURL);
   if (!serverOrigin) return [];
@@ -1607,28 +2170,23 @@ function pendingListeningHistoryBatches() {
     if (entry.originatedOnThisDevice === false) continue;
     if (normalizedServerOrigin(entry.serverOrigin) !== serverOrigin) continue;
     const listenedSeconds = Math.max(0, Number(entry.listenedSeconds) || 0);
-    if (listenedSeconds <= 0 || listenedSeconds > 31 * 24 * 60 * 60) continue;
+    if (!listeningHistoryEntryQualifiesAsPlay(state, entry)
+        || listenedSeconds > 31 * 24 * 60 * 60) continue;
     if (!entry.id || entry.id.length > 128 || !entry.trackID || entry.trackID.length > 128) continue;
     const profileID = entry.profileID || "default";
     const syncKey = `${serverOrigin}#profile=${profileID}#event=${entry.id}`;
     if ((listeningHistorySyncedSeconds.get(syncKey) || 0) >= listenedSeconds) continue;
     const track = tracksByID.get(entry.trackID);
-    const duration = Number(track?.duration);
+    const remoteID = optionalText(entry.remoteID || track?.remoteID, 128);
+    if (!remoteID) continue;
     const upload = {
       syncKey,
       listenedSeconds,
       entry: {
         id: entry.id,
-        trackID: entry.trackID,
-        remoteID: optionalText(entry.remoteID || track?.remoteID, 128),
+        remoteID,
         startedAt: entry.startedAt,
         listenedSeconds,
-        title: optionalText(entry.title || track?.title, 500),
-        artist: optionalText(entry.artist || track?.artist, 500),
-        album: optionalText(entry.album || track?.album, 500),
-        duration: Number.isFinite(Number(entry.duration))
-          ? Number(entry.duration)
-          : Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60 ? duration : null,
       },
     };
     if (!entriesByProfile.has(profileID)) entriesByProfile.set(profileID, []);
@@ -1890,63 +2448,17 @@ function currentServerTransferModes() {
   });
 }
 
-function renderServerTransferModeOptions() {
-  const uploadControl = $("#serverUploadMode");
-  const downloadControl = $("#serverDownloadMode");
-  if (!uploadControl || !downloadControl) return;
-  const modes = currentServerTransferModes();
-  setCustomSelectOptions(uploadControl, modes.available.upload.map((value) => ({
-    value,
-    label: serverUploadModeOptions[value] || value,
-  })), modes.uploadMode || "");
-  setCustomSelectOptions(downloadControl, modes.available.download.map((value) => ({
-    value,
-    label: serverDownloadModeOptions[value] || value,
-  })), modes.downloadMode);
-  uploadControl.disabled = modes.available.upload.length === 0;
-  downloadControl.disabled = modes.available.download.length < 2;
-  const help = $("#serverTransferModeHelp");
-  if (!help) return;
-  if (activeServerClientConfig(clientConfig) !== SAFE_CLIENT_CONFIG) {
-    help.textContent = modes.downloadMode === "stream_only"
-      ? "Stream-only plays authenticated media directly from this server and never saves the song bytes to this device."
-      : "Only modes enabled by this server's signed configuration are shown. Flags never replace access or admin authorization.";
-  } else if (clientConfigLeaseStatus === "unavailable") {
-    help.textContent = "The signed configuration could not be renewed. Safe file modes are active while Resonance retries.";
-  } else if (clientConfigLeaseStatus === "missing-credential") {
-    help.textContent = "Safe file modes are active until a server credential can verify this server's signed configuration.";
-  } else {
-    help.textContent = "Safe file transfer modes are in use because no valid signed server configuration is available.";
-  }
-}
-
-function saveServerTransferModeControls({ serverURL = state.serverURL, profileID = activeProfileID() } = {}) {
-  const uploadMode = $("#serverUploadMode")?.value;
-  const downloadMode = $("#serverDownloadMode")?.value;
-  return setServerTransferPreference(state, {
-    serverURL,
-    profileID,
-    uploadMode,
-    downloadMode,
-    config: clientConfig,
-  });
-}
-
 async function refreshClientConfig({ force = false } = {}) {
   const requestGeneration = ++clientConfigRequestGeneration;
-  const previousConfig = clientConfig;
   let context = null;
   try { context = { ...currentProfileContext(), configToken: serverToken || serverAdminToken }; }
   catch {
     clientConfig = SAFE_CLIENT_CONFIG;
-    clientConfigLeaseStatus = "invalid-context";
     scheduleClientConfigRenewal();
     return clientConfig;
   }
   if (!context.configToken) {
     clientConfig = SAFE_CLIENT_CONFIG;
-    clientConfigLeaseStatus = "missing-credential";
-    renderServerTransferModeOptions();
     scheduleClientConfigRenewal();
     return clientConfig;
   }
@@ -1963,17 +2475,12 @@ async function refreshClientConfig({ force = false } = {}) {
     clientConfig = response?.config && typeof response.config === "object"
       ? { ...response.config, source: response.source === "remote" ? "remote" : (response.source || "cache") }
       : SAFE_CLIENT_CONFIG;
-    clientConfigLeaseStatus = activeServerClientConfig(clientConfig) === SAFE_CLIENT_CONFIG
-      ? (force && previousConfig?.verified === true ? "unavailable" : "safe-defaults")
-      : (response.source || "cache");
   } catch {
     if (requestGeneration !== clientConfigRequestGeneration
       || !profileContextIsCurrent(context)
       || context.configToken !== (serverToken || serverAdminToken)) return clientConfig;
     clientConfig = SAFE_CLIENT_CONFIG;
-    clientConfigLeaseStatus = "unavailable";
   }
-  renderServerTransferModeOptions();
   scheduleClientConfigRenewal();
   if (activeServerStream && currentServerTransferModes().downloadMode !== "stream_only") {
     releaseActiveServerStream({ stopPlayback: true });
@@ -2057,7 +2564,7 @@ async function playRemoteStream(song) {
     return;
   }
   if (!song?.id || !serverToken.trim()) {
-    showNotice("Connect with a server access token before streaming this song.");
+    showNotice("Sign in to your Resonance account before streaming this song.");
     return;
   }
   if (serverSongRequiresDownload(song)) {
@@ -2099,6 +2606,7 @@ async function playRemoteStream(song) {
       album: song.album || "Server Library",
       duration: duration > 0 ? duration : 0,
       artwork: typeof song.artwork === "string" && song.artwork.startsWith("data:") ? song.artwork : null,
+      artworkURL: song.artwork_url || song.artworkURL || null,
       filePath: null,
       fileUrl: streamURL,
       available: true,
@@ -2232,9 +2740,70 @@ function hydrateServerCatalogArtwork(songs) {
   void Promise.allSettled(workers);
 }
 
+function hydrateServerCatalogMetadata(songs) {
+  const context = currentProfileContext();
+  const generation = serverCatalogGeneration;
+  const queue = songs.filter((song) =>
+    !activeRemoteTrack(song?.id)
+      && song?.source_url
+      && !serverSourceNeedsOriginalPage(song.source_url));
+  const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
+    while (queue.length) {
+      const song = queue.shift();
+      let metadata;
+      try {
+        metadata = await api.resolveServerSourceMetadata({
+          sourceURL: song.source_url,
+          mediaKind: song.media_kind,
+        });
+      } catch {
+        if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) return;
+        const current = serverCatalog.find((item) => item.id === song.id && item.source_url === song.source_url);
+        if (current) {
+          const fallback = serverSourceDisplayFallback(song.source_url, { failed: true });
+          Object.assign(current, fallback, { name: fallback.title });
+          if (section === "server") renderServer();
+        }
+        continue;
+      }
+      if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) return;
+      const current = serverCatalog.find((item) => item.id === song.id && item.source_url === song.source_url);
+      if (!current) continue;
+      current.title = metadata?.title || current.title;
+      current.name = metadata?.title || current.name;
+      current.artist = metadata?.artist || current.artist;
+      current.album = metadata?.album || "Imported";
+      current.duration = Number(metadata?.duration) > 0 ? Number(metadata.duration) : current.duration;
+      if (metadata?.artworkURL) {
+        const artwork = await api.fetchLocalImportArtwork(metadata.artworkURL).catch(() => null);
+        if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) return;
+        if (artwork) current.artwork = artwork;
+      }
+      if (section === "server") renderServer();
+    }
+  });
+  void Promise.allSettled(workers);
+}
+
 function replaceServerCatalog(songs) {
-  serverCatalog = Array.isArray(songs) ? songs : [];
+  serverCatalog = (Array.isArray(songs) ? songs : []).map((song) => {
+    const local = activeRemoteTrack(song?.id);
+    const sourceFallback = serverSourceDisplayFallback(song?.source_url);
+    const fallbackTitle = song?.source_url
+      ? sourceFallback.title
+      : `Saved song ${String(song?.id || "").slice(0, 8)}`;
+    return {
+      ...song,
+      name: local?.title || song?.name || song?.filename || fallbackTitle,
+      title: local?.title || song?.title || fallbackTitle,
+      artist: local?.artist || song?.artist || (song?.source_url ? sourceFallback.artist : "Unknown Artist"),
+      album: local?.album || song?.album || (song?.source_url ? sourceFallback.album : "Server Library"),
+      duration: Number(local?.duration) > 0 ? Number(local.duration) : Number(song?.duration) || null,
+      artwork: local?.artwork || song?.artwork || null,
+    };
+  });
   serverCatalogGeneration += 1;
+  hydrateServerCatalogMetadata(serverCatalog);
 }
 
 function markPlaylistDirty(playlist) {
@@ -2289,7 +2858,7 @@ async function syncPlaylistsNow({ automatic = false } = {}) {
   const context = currentProfileContext();
   playlistSyncInFlight = (async () => {
     if (!serverToken.trim()) {
-      if (!automatic) showNotice("Enter the server access token.");
+      if (!automatic) showNotice("Sign in to your Resonance account.");
       return;
     }
 
@@ -2400,6 +2969,22 @@ function artwork(track, { animateLoading = false } = {}) {
   </div>`;
 }
 
+function playlistArtworkMarkup(playlist, { className = "playlist-art", tagName = "div" } = {}) {
+  const trackIDs = playlistArtworkTrackIDs(playlist);
+  const classes = `playlist-artwork ${className}`;
+  if (!trackIDs.length) {
+    return `<${tagName} class="${classes} playlist-artwork-fallback" aria-hidden="true">${playlist?.isSystem ? "♥" : "♪"}</${tagName}>`;
+  }
+
+  const tracksByID = new Map(state.tracks.map((track) => [track.id, track]));
+  const cells = Array.from({ length: 4 }, (_, index) => {
+    const source = tracksByID.get(trackIDs[index])?.artwork;
+    const canRenderImage = typeof source === "string" && source && !/^https?:/i.test(source);
+    return `<span class="playlist-artwork-cell">${canRenderImage ? squareArtworkImageMarkup(source) : "♪"}</span>`;
+  }).join("");
+  return `<${tagName} class="${classes} playlist-artwork-collage" aria-hidden="true">${cells}</${tagName}>`;
+}
+
 function displayAlbum(track) {
   const album = String(track?.album || "").trim();
   return !album || album.toLocaleLowerCase() === "imported" ? "Unknown Album" : album;
@@ -2448,7 +3033,7 @@ function trackRow(track, index) {
     : `Play ${track.title || "Untitled"} by ${track.artist || "Unknown artist"}`;
   const reorderLabel = editablePlaylist ? ". Press Alt+Up or Alt+Down to reorder" : "";
   const draggableAttributes = editablePlaylist
-    ? ` draggable="true" data-playlist-draggable="true" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Shift+F10"`
+    ? ` data-playlist-draggable="true" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Shift+F10"`
     : ` aria-keyshortcuts="Enter Space Shift+F10"`;
   return `<div class="track-row ${track.id === currentID ? "playing" : ""}${editablePlaylist ? " playlist-draggable" : ""}${unavailable ? " unavailable" : ""}" data-track="${escapeHTML(track.id)}" tabindex="0" aria-label="${escapeHTML(actionLabel + reorderLabel)}" aria-disabled="${unavailable}"${draggableAttributes}>
     <span class="track-number" title="${track.id === currentID && !audio.paused ? "Now playing" : `Track ${index + 1}`}">${track.id === currentID && !audio.paused ? nowPlayingIcon : index + 1}</span>${artwork(track)}
@@ -2488,12 +3073,12 @@ function renderLibrary() {
   const playlistCapsule = selectedPlaylist
     ? `<div class="playlist-action-cluster"><button class="${shuffle ? "active" : ""}" id="heroShuffle" title="${currentTrack()?.transientStream ? "Unavailable for one-song server playback" : "Shuffle"}" aria-label="${currentTrack()?.transientStream ? "Unavailable for one-song server playback" : "Shuffle"}" aria-pressed="${shuffle}" ${tracks.length && !currentTrack()?.transientStream ? "" : "disabled"}>${shuffleIcon}</button><button id="heroAdd" title="Add songs" aria-label="Add songs">${plusIcon}</button>${playlistMoreMenu}</div>`
     : "";
-  const libraryFilters = `<div class="filters${selectedPlaylistID ? "" : " library-top-filters"}" role="group" aria-label="Library filter"><button class="${libraryFilter === "all" ? "active" : ""}" data-library-filter="all" aria-pressed="${libraryFilter === "all"}">All songs</button><button class="${libraryFilter === "recent" ? "active" : ""}" data-library-filter="recent" aria-pressed="${libraryFilter === "recent"}">Recently added</button><button class="${libraryFilter === "audio" ? "active" : ""}" data-library-filter="audio" aria-pressed="${libraryFilter === "audio"}">Audio</button></div>`;
+  const libraryFilters = `<div class="filters${selectedPlaylistID ? "" : " library-top-filters"}" role="group" aria-label="Library filter"><button class="${libraryFilter === "all" ? "active" : ""}" data-library-filter="all" aria-pressed="${libraryFilter === "all"}">All songs</button><button class="${libraryFilter === "recent" ? "active" : ""}" data-library-filter="recent" aria-pressed="${libraryFilter === "recent"}">Recently added</button><button class="${libraryFilter === "audio" ? "active" : ""}" data-library-filter="audio" aria-pressed="${libraryFilter === "audio"}">Audio</button><button class="${libraryFilter === "video" ? "active" : ""}" data-library-filter="video" aria-pressed="${libraryFilter === "video"}">Video</button></div>`;
   const hasLibraryFilter = Boolean(libraryQuery.trim()) || libraryFilter !== "all";
   const emptyLibraryTitle = hasLibraryFilter ? "No matching songs" : selectedPlaylistID ? "This playlist is empty" : "No songs yet";
   const emptyLibraryHelp = hasLibraryFilter ? "Try another search or filter." : selectedPlaylistID ? "Like songs or add them from your Library." : "Import audio files or connect your music server.";
   const collectionHeader = selectedPlaylistID
-    ? `<div class="hero"><div class="hero-art">≋</div><div><span class="eyebrow">PLAYLIST</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions"><button class="primary playlist-play" id="playCollection" ${tracks.length ? "" : "disabled"}><span class="button-icon">${collectionPlaying ? playbackPauseIcon : playbackPlayIcon}</span><span>${collectionPlaying ? "Pause" : "Play"}</span></button>${playlistCapsule}</div></div></div>`
+    ? `<div class="hero">${playlistArtworkMarkup(selectedPlaylist, { className: "hero-art" })}<div><span class="eyebrow">PLAYLIST</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / Stored locally</p><div class="hero-actions"><button class="primary playlist-play" id="playCollection" ${tracks.length ? "" : "disabled"}><span class="button-icon">${collectionPlaying ? playbackPauseIcon : playbackPlayIcon}</span><span>${collectionPlaying ? "Pause" : "Play"}</span></button>${playlistCapsule}</div></div></div>`
     : libraryFilters;
   content.innerHTML = `<div class="collection-scroll">${collectionHeader}
     ${recentTracks.length ? `<section class="recently-added" aria-labelledby="recentlyAddedTitle"><div class="section-heading"><div><span class="eyebrow">FRESH TO YOUR LIBRARY</span><h2 id="recentlyAddedTitle">Recently Added</h2></div><span>${recentTracks.length} newest</span></div><div class="recent-track-list">${recentTracks.map(recentTrackItem).join("")}</div></section>` : ""}
@@ -2558,7 +3143,7 @@ function renderLibrary() {
 function renderPlaylists() {
   updateTopSearch();
   const playlists = filterPlaylists(state.playlists, tracksForActiveProfile(state), playlistQuery);
-  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10"><div class="playlist-art">${playlist.isSystem ? "♥" : "♪"}</div><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
+  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10">${playlistArtworkMarkup(playlist)}<div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
   $("#pageNewPlaylist").onclick = () => newPlaylist();
   $("#pageSyncPlaylists").onclick = () => syncPlaylistsNow();
   document.querySelectorAll("[data-open-playlist]").forEach((button) => {
@@ -2840,7 +3425,7 @@ function serverUploadManifestMarkup() {
     const retryIDs = serverUploadManifestRetryIDs(manifest);
     const label = manifest.source === "missing-downloads"
       ? "Downloaded-song upload"
-      : manifest.source === "link-import" ? "Link-import upload" : "File upload";
+      : manifest.source === "link-import" ? "Link-import upload" : "Source-link upload";
     const timestamp = new Date(manifest.updatedAt).toLocaleString();
     const summary = failures.length
       ? `${uploaded} uploaded · ${failures.length} need attention`
@@ -3123,8 +3708,19 @@ function renderProfileOptions(selectedID = activeProfileID()) {
 
 async function refreshProfiles() {
   const url = $("#serverURL")?.value.trim() || state.serverURL;
-  const token = $("#serverToken")?.value || serverToken;
+  const token = serverToken;
   if (!url || !token) return;
+  if (accountSession?.profileID) {
+    const profile = {
+      id: accountSession.profileID,
+      name: safeAccountDisplayName(accountSession),
+      is_default: true,
+    };
+    state.syncProfiles = [profile];
+    await activateProfile(profile.id, accountSession.baseURL);
+    renderProfileOptions(profile.id);
+    return;
+  }
   const response = await api.fetchProfiles({ baseURL: url, token });
   state.syncProfiles = response.profiles || [];
   const resolution = resolveSyncProfile(state.syncProfiles, activeProfileID(), response.default_profile_id);
@@ -3132,64 +3728,6 @@ async function refreshProfiles() {
     await activateProfile(resolution.profile.id);
   }
   renderProfileOptions(resolution.profile?.id || activeProfileID());
-}
-
-function updateProfileSwitchDialog({ resetQuery = true } = {}) {
-  const profile = activeProfile();
-  const name = String(profile.name || "Default").trim() || "Default";
-  const initial = Array.from(name)[0]?.toLocaleUpperCase() || "D";
-  $("#profileSwitchInitial").textContent = initial;
-  $("#profileSwitchCurrentName").textContent = name;
-  if (resetQuery) $("#profileSwitchQuery").value = name;
-}
-
-function matchingSyncProfile(query) {
-  const key = String(query || "").trim().toLocaleLowerCase();
-  if (!key) return null;
-  return state.syncProfiles.find((profile) =>
-    String(profile.id || "").toLocaleLowerCase() === key
-    || String(profile.name || "").toLocaleLowerCase() === key) || null;
-}
-
-function updateProfileSwitchActions({ busy = false } = {}) {
-  const query = $("#profileSwitchQuery").value.trim();
-  const current = matchingSyncProfile(query);
-  const connected = Boolean(state.serverURL && serverToken);
-  $("#createProfileFromSwitcher").disabled = busy || !connected || !query || Boolean(current);
-  $("#confirmProfileSwitch").disabled = busy || !connected || !query || current?.id === activeProfileID();
-  if (busy) return;
-  const status = $("#profileSwitchStatus");
-  if (!connected) status.textContent = "Not connected";
-  else if (current?.id === activeProfileID()) status.textContent = "Current profile";
-  else if (current) status.textContent = "Existing profile";
-  else status.textContent = "New profile name";
-}
-
-async function openProfileSwitcher() {
-  closeProfileMenu();
-  updateProfileSwitchDialog();
-  const dialog = $("#profileSwitchDialog");
-  const status = $("#profileSwitchStatus");
-  dialog.showModal();
-  $("#profileSwitchQuery").focus();
-  $("#profileSwitchQuery").select();
-  if (!state.serverURL || !serverToken) {
-    updateProfileSwitchActions();
-    return;
-  }
-  status.textContent = "Checking server profiles…";
-  updateProfileSwitchActions({ busy: true });
-  try {
-    const response = await api.fetchProfiles({ baseURL: state.serverURL, token: serverToken });
-    state.syncProfiles = response.profiles || [];
-    renderProfileOptions();
-    updateProfileSwitchDialog({ resetQuery: false });
-    updateProfileSwitchActions();
-  } catch (error) {
-    status.textContent = error.message || "Could not load profiles";
-    $("#createProfileFromSwitcher").disabled = true;
-    $("#confirmProfileSwitch").disabled = true;
-  }
 }
 
 async function activateProfile(profileID, serverURL = state.serverURL) {
@@ -3232,70 +3770,283 @@ async function activateProfile(profileID, serverURL = state.serverURL) {
   if (resumeListeningSession && currentID && playbackIsActive()) beginListeningSession();
 }
 
-async function openServerSettings() {
-  $("#serverURL").value = state.serverURL || "";
-  $("#serverToken").value = serverToken;
-  $("#serverAdminToken").value = serverAdminToken;
-  renderProfileOptions();
-  renderServerTransferModeOptions();
-  $("#serverSettingsDialog").showModal();
-  await Promise.allSettled([refreshProfiles(), refreshClientConfig()]);
+function openServerSettings() {
+  openSettings("server");
 }
 
 async function saveServerForm() {
   ensureServerContextCanChange();
-  const settingsOpen = Boolean($("#serverSettingsDialog")?.open);
+  const settingsOpen = Boolean($("#settingsDialog")?.open && settingsPanel === "server" && $("#serverSettingsForm"));
   const nextServerURL = settingsOpen ? $("#serverURL").value.trim() : state.serverURL;
-  const nextProfileID = settingsOpen ? ($("#syncProfile")?.value || activeProfileID()) : activeProfileID();
-  const requestedUploadMode = settingsOpen ? $("#serverUploadMode")?.value : currentServerTransferModes().uploadMode;
-  const requestedDownloadMode = settingsOpen ? $("#serverDownloadMode")?.value : currentServerTransferModes().downloadMode;
-  const nextServerToken = settingsOpen ? $("#serverToken").value.trim() : serverToken.trim();
-  const nextServerAdminToken = settingsOpen ? $("#serverAdminToken").value.trim() : serverAdminToken.trim();
-  const accessTokenChanged = nextServerToken !== serverToken;
-  if (accessTokenChanged) releaseActiveServerStream({ stopPlayback: true });
-  if (settingsOpen) {
-    serverToken = nextServerToken;
-    serverAdminToken = nextServerAdminToken;
-    if (accessTokenChanged) {
-      serverConnected = false;
-      replaceServerCatalog([]);
-      selectedRemoteIDs.clear();
-    }
-  }
+  const nextProfileID = accountSession?.profileID
+    || (settingsOpen ? ($("#syncProfile")?.value || activeProfileID()) : activeProfileID());
   await activateProfile(nextProfileID, nextServerURL);
-  await api.saveServerCredentials({ clientToken: serverToken, adminToken: serverAdminToken });
   await refreshClientConfig({ force: true });
-  setServerTransferPreference(state, {
-    serverURL: state.serverURL,
-    profileID: activeProfileID(),
-    uploadMode: requestedUploadMode,
-    downloadMode: requestedDownloadMode,
-    config: clientConfig,
-  });
   await persist();
   updateProfileControl();
   schedulePlaylistSync();
   scheduleListeningHistorySync();
 }
 
+async function applyAccountSession(nextSession, error = null) {
+  const previousToken = serverToken;
+  const previousEmail = accountSession?.email || null;
+  accountSession = nextSession || null;
+  if ((accountSession?.email || null) !== previousEmail) isAccountEmailRevealed = false;
+  serverToken = String(accountSession?.accessToken || "").trim();
+  serverAdminToken = accountSession ? serverToken : "";
+  const migratedLocalContext = accountSession?.profileID && accountSession?.migratedProfileID
+    ? migrateProfileContext(
+        state,
+        accountSession.baseURL,
+        accountSession.migratedProfileID,
+        accountSession.profileID,
+      )
+    : false;
+  if (previousToken !== serverToken) {
+    releaseActiveServerStream({ stopPlayback: true });
+    serverConnected = false;
+    replaceServerCatalog([]);
+    selectedRemoteIDs.clear();
+  }
+  if (error) serverConnectionText = error;
+  else if (accountSession) serverConnectionText = "Signed in with Clerk";
+  else serverConnectionText = "Not signed in";
+  if ($("#settingsDialog")?.open && settingsPanel === "server") renderSettings();
+  if (accountSession?.profileID) {
+    state.serverURL = accountSession.baseURL;
+    state.syncProfiles = [{
+      id: accountSession.profileID,
+      name: safeAccountDisplayName(accountSession),
+      is_default: true,
+    }];
+    await activateProfile(accountSession.profileID, accountSession.baseURL);
+  }
+  if (migratedLocalContext) await persist();
+  updateProfileControlView({ refreshPicture: false });
+}
+
 function renderSettings() {
-  updateTopSearch();
   const profile = activeProfile();
-  const track = currentTrack();
-  content.innerHTML = `<div class="page settings-page">
-    <span class="eyebrow">RESONANCE</span><h1>Settings</h1><p>Manage this device, your music server, playback tools, and updates.</p>
-    <div class="settings-grid">
-      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">${serverDeviceIcon}</span><div><h2>Music Server</h2><p>${serverConnected ? "Connected" : "Not connected"} · ${escapeHTML(profile.name || "Default")}</p><small>${escapeHTML(state.serverURL || "No server configured")}</small></div><button id="settingsServer" class="secondary" type="button">Connection settings</button></section>
-      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">${historyClockIcon}</span><div><h2>Listening & clips</h2><p>${track ? escapeHTML(track.title) : "Nothing selected"}</p><small>${Math.round(state.volume * 100)}% volume · ${audio.playbackRate || 1}× speed</small></div><div class="settings-card-actions"><button id="settingsHistory" class="secondary" type="button">Listening History</button><button id="settingsClipEditor" class="secondary" type="button" ${track && !track.transientStream ? "" : "disabled"}>Clip Editor</button></div></section>
-      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">♪</span><div><h2>Local storage</h2><p>${tracksForActiveProfile(state).length} songs on this profile</p><small>Manage imports, downloads, and local files.</small></div><button id="settingsStorage" class="secondary" type="button">Manage storage</button></section>
-      <section class="settings-card"><span class="settings-card-icon" aria-hidden="true">↻</span><div><h2>Updates</h2><p id="settingsUpdateStatus">${escapeHTML($("#updateStatus").textContent || "Automatic in-app updates")}</p><small>Installed builds update through the GitHub release feed.</small></div><button id="settingsCheckUpdates" class="secondary" type="button">Check now</button></section>
+  state.appPreferences = normalizedAppPreferences(state.appPreferences);
+  const preferences = state.appPreferences;
+  const keybindRows = Object.entries(settingsKeybindActions).map(([action, metadata]) => {
+    const recording = settingsRecordingAction === action;
+    return `<div class="settings-row settings-keybind-row">
+      <span class="settings-row-icon" aria-hidden="true">${settingsIcons.keybinds}</span>
+      <span class="settings-row-copy"><strong>${metadata.label}</strong><small>${metadata.description}</small></span>
+      <button class="settings-keybind${recording ? " recording" : ""}" type="button" data-keybind-action="${action}" aria-label="Change ${metadata.label} keybind"><kbd>${recording ? "Press keys…" : escapeHTML(preferences.keybinds[action])}</kbd></button>
+    </div>`;
+  }).join("");
+  const settingsRoot = $("#settingsDialogContent");
+  disposeCustomSelects(settingsRoot);
+  settingsRoot.innerHTML = `<div class="settings-heading"><div><span class="eyebrow">RESONANCE</span><h1 id="settingsDialogTitle">Settings</h1><p>Manage how Resonance behaves on this Windows device.</p></div><button id="closeSettings" class="history-close" type="button" aria-label="Close settings">×</button></div>
+    <div class="settings-shell">
+      <nav class="settings-nav" aria-label="Settings sections">
+        <button class="${settingsPanel === "general" ? "active" : ""}" type="button" data-settings-panel="general" aria-current="${settingsPanel === "general" ? "page" : "false"}">${settingsIcons.general}<span>General</span></button>
+        <button class="${settingsPanel === "server" ? "active" : ""}" type="button" data-settings-panel="server" aria-current="${settingsPanel === "server" ? "page" : "false"}">${settingsIcons.server}<span>Server</span></button>
+        <button class="${settingsPanel === "keybinds" ? "active" : ""}" type="button" data-settings-panel="keybinds" aria-current="${settingsPanel === "keybinds" ? "page" : "false"}">${settingsIcons.keybinds}<span>Keybinds</span></button>
+      </nav>
+      <div class="settings-content">
+        <section class="settings-panel" data-settings-content="general" ${settingsPanel === "general" ? "" : "hidden"}>
+          <div class="settings-section-heading"><span>WINDOWS</span><p>Control desktop behavior and connected services.</p></div>
+          <div class="settings-grid">
+            <div class="settings-group">
+              <label class="settings-row" for="settingsRunInBackground">
+                <span class="settings-row-icon" aria-hidden="true">${settingsIcons.background}</span>
+                <span class="settings-row-copy"><strong>Running in the background</strong><small>Keep playback active in the system tray when the window closes.</small></span>
+                <span class="settings-toggle"><input id="settingsRunInBackground" type="checkbox" ${preferences.runInBackground ? "checked" : ""}><span aria-hidden="true"></span></span>
+              </label>
+              <label class="settings-row" for="settingsDiscordPresence">
+                <span class="settings-row-icon discord" aria-hidden="true">${settingsIcons.discord}</span>
+                <span class="settings-row-copy"><strong>Discord Rich Presence</strong><small id="settingsDiscordStatus">${escapeHTML(discordPresenceStatus.message || "Show Resonance playback on your signed-in Discord profile.")}</small></span>
+                <span class="settings-toggle"><input id="settingsDiscordPresence" type="checkbox" ${preferences.discordRichPresence && discordPresenceStatus.applicationConfigured ? "checked" : ""} ${discordPresenceStatus.applicationConfigured ? "" : "disabled"}><span aria-hidden="true"></span></span>
+              </label>
+            </div>
+            <div class="settings-section-heading compact"><span>APP</span><p>Existing Resonance connection and update tools.</p></div>
+            <div class="settings-group">
+              <div class="settings-row">
+                <span class="settings-row-icon" aria-hidden="true">${serverDeviceIcon}</span>
+                <span class="settings-row-copy"><strong>Music Server</strong><small>${serverConnected ? "Connected" : "Not connected"} · ${escapeHTML(profile.name || "Default")} · ${escapeHTML(state.serverURL || "No server configured")}</small></span>
+                <button id="settingsServer" class="settings-row-action" type="button">Configure</button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-row-icon" aria-hidden="true">${settingsIcons.update}</span>
+                <span class="settings-row-copy"><strong>Updates</strong><small id="settingsUpdateStatus">${escapeHTML($("#updateStatus").textContent || "Automatic in-app updates")}</small></span>
+                <button id="settingsCheckUpdates" class="settings-row-action" type="button">Check now</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="settings-panel" data-settings-content="server" ${settingsPanel === "server" ? "" : "hidden"}>
+          <form id="serverSettingsForm" class="settings-server-form">
+            <div class="settings-panel-title"><div><span class="eyebrow">ACCOUNT</span><h2>Music Server</h2><p>Clerk securely handles email, Google, Apple, and Discord sign-in for Resonance.</p></div></div>
+            <div class="settings-server-card">
+              <label class="settings-server-field settings-server-field-wide" for="serverURL"><span>Server URL</span><input id="serverURL" autocomplete="url" placeholder="https://music.example.com" required></label>
+              <div class="settings-account-card settings-server-field-wide">
+                ${accountSession
+                  ? `<div><strong>${escapeHTML(safeAccountDisplayName(accountSession))}</strong><small><button id="settingsAccountEmail" class="email-disclosure" type="button" aria-label="${isAccountEmailRevealed ? "Hide" : "Reveal"} email address">${escapeHTML(displayedAccountEmail())}</button> · ${accountSession.role === "admin" ? "Administrator" : "Member"}</small></div><button id="signOutAccount" class="secondary" type="button">Sign out</button>`
+                  : `<div><strong>${serverToken ? "Legacy connection" : "Sign in to Resonance"}</strong><small>${serverToken ? "Sign in to finish upgrading this device." : "Use email, Google, Apple, or Discord in your web browser."}</small></div><div class="settings-auth-grid"><button class="secondary" type="button" data-auth-provider="clerk">Sign in or create account</button></div>`}
+              </div>
+            </div>
+            <div class="settings-server-actions">
+              <span id="serverSettingsStatus" role="status">${escapeHTML(serverConnectionText || "Not connected")}</span>
+              <button id="saveServerSettings" class="primary" type="submit">Save & connect</button>
+            </div>
+          </form>
+        </section>
+        <section class="settings-panel" data-settings-content="keybinds" ${settingsPanel === "keybinds" ? "" : "hidden"}>
+          <div class="settings-panel-title"><div><span class="eyebrow">PLAYBACK</span><h2>Keybinds</h2><p>Choose a shortcut, then press the new key combination. These work while Resonance is focused.</p></div><button id="resetSettingsKeybinds" class="settings-row-action" type="button">Reset defaults</button></div>
+          <div class="settings-group settings-keybinds">${keybindRows}</div>
+        </section>
+      </div>
     </div>
-  </div>`;
-  $("#settingsServer").onclick = openServerSettings;
-  $("#settingsHistory").onclick = openListeningHistory;
-  $("#settingsClipEditor").onclick = openClipEditor;
-  $("#settingsStorage").onclick = () => navigate("storage");
-  $("#settingsCheckUpdates").onclick = checkForUpdates;
+    <footer class="settings-footer"><button id="doneSettings" class="primary" type="button">Done</button></footer>`;
+  const closeSettings = () => $("#settingsDialog").close();
+  $("#closeSettings").onclick = closeSettings;
+  $("#doneSettings").onclick = closeSettings;
+  document.querySelectorAll("[data-settings-panel]").forEach((button) => {
+    button.onclick = () => {
+      settingsPanel = button.dataset.settingsPanel;
+      settingsRecordingAction = null;
+      renderSettings();
+      if (settingsPanel === "server") void refreshServerSettingsControls();
+    };
+  });
+  const runInBackground = $("#settingsRunInBackground");
+  if (runInBackground) runInBackground.onchange = () => updateAppPreference("runInBackground", runInBackground.checked);
+  const discordPresence = $("#settingsDiscordPresence");
+  if (discordPresence) discordPresence.onchange = async () => {
+    await updateAppPreference("discordRichPresence", discordPresence.checked);
+    scheduleDiscordPresenceUpdate();
+  };
+  document.querySelectorAll("[data-keybind-action]").forEach((button) => {
+    button.onclick = () => {
+      settingsRecordingAction = button.dataset.keybindAction;
+      renderSettings();
+      requestAnimationFrame(() => document.querySelector(`[data-keybind-action="${settingsRecordingAction}"]`)?.focus());
+    };
+  });
+  const resetKeybinds = $("#resetSettingsKeybinds");
+  if (resetKeybinds) resetKeybinds.onclick = () => {
+    state.appPreferences.keybinds = normalizedAppPreferences({}).keybinds;
+    settingsRecordingAction = null;
+    persistInBackground({ refreshSidebar: false });
+    renderSettings();
+  };
+  if ($("#settingsServer")) $("#settingsServer").onclick = openServerSettings;
+  if ($("#settingsCheckUpdates")) $("#settingsCheckUpdates").onclick = checkForUpdates;
+
+  if (settingsPanel === "server") bindServerSettingsControls();
+}
+
+function bindServerSettingsControls() {
+  $("#serverURL").value = state.serverURL || "";
+  $("#serverURL").disabled = Boolean(accountSession);
+  renderProfileOptions();
+
+  document.querySelectorAll("[data-auth-provider]").forEach((button) => {
+    button.onclick = async () => {
+      const status = $("#serverSettingsStatus");
+      try {
+        status.textContent = "Opening secure sign-in…";
+        await api.signInAccount({
+          baseURL: $("#serverURL").value.trim(),
+          provider: button.dataset.authProvider,
+          profileID: activeProfileID(),
+        });
+        status.textContent = "Complete sign-in in your web browser.";
+      } catch (error) {
+        status.textContent = error.message || "Sign-in could not be started.";
+      }
+    };
+  });
+  const signOut = $("#signOutAccount");
+  if (signOut) signOut.onclick = async () => {
+    await api.signOutAccount();
+    await applyAccountSession(null);
+  };
+  const accountEmail = $("#settingsAccountEmail");
+  if (accountEmail) accountEmail.onclick = () => {
+    isAccountEmailRevealed = !isAccountEmailRevealed;
+    renderSettings();
+    updateProfileControlView({ refreshPicture: false });
+  };
+
+  $("#serverSettingsForm").onsubmit = async (event) => {
+    event.preventDefault();
+    serverAutoAttempted = true;
+    const saveButton = $("#saveServerSettings");
+    const status = $("#serverSettingsStatus");
+    saveButton.disabled = true;
+    status.textContent = "Saving server settings…";
+    try {
+      await saveServerForm();
+      if (!serverToken.trim()) {
+        serverConnected = false;
+        replaceServerCatalog([]);
+        serverConnectionText = "Server saved • sign in to connect";
+        if (section === "server") renderServer();
+        showNotice(serverConnectionText, "status");
+      } else {
+        await serverAction("catalog");
+      }
+      status.textContent = serverConnectionText;
+    } catch (error) {
+      const message = error.message || "The server settings could not be saved.";
+      status.textContent = message;
+      showNotice(message);
+    } finally {
+      saveButton.disabled = false;
+    }
+  };
+}
+
+async function refreshServerSettingsControls() {
+  await Promise.allSettled([refreshProfiles(), refreshClientConfig()]);
+}
+
+async function updateAppPreference(key, value) {
+  state.appPreferences = normalizedAppPreferences({
+    ...state.appPreferences,
+    [key]: value,
+  });
+  persistInBackground({ refreshSidebar: false });
+  await api.updateAppPreferences(state.appPreferences).catch(() => undefined);
+}
+
+function openSettings(initialPanel = "general") {
+  closeProfileMenu();
+  settingsPanel = initialPanel;
+  settingsRecordingAction = null;
+  renderSettings();
+  if (!$("#settingsDialog").open) $("#settingsDialog").showModal();
+  if (settingsPanel === "server") void refreshServerSettingsControls();
+}
+
+function discordPresenceActivity() {
+  const track = currentTrack();
+  if (!track || !state.appPreferences?.discordRichPresence || !playbackIsActive()) return null;
+  const media = activePlaybackMedia();
+  return {
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    playing: playbackIsActive(),
+    position: Number(media?.currentTime) || state.position || 0,
+    duration: currentPlaybackDuration(track),
+    artworkURL: track.artworkURL || null,
+  };
+}
+
+function scheduleDiscordPresenceUpdate() {
+  if (discordPresenceSyncTimer) clearTimeout(discordPresenceSyncTimer);
+  discordPresenceSyncTimer = setTimeout(async () => {
+    discordPresenceSyncTimer = null;
+    discordPresenceStatus = await api.updateDiscordPresence(discordPresenceActivity()).catch(() => discordPresenceStatus);
+    const status = $("#settingsDiscordStatus");
+    if (status) status.textContent = discordPresenceStatus.message || "Show Resonance playback on your signed-in Discord profile.";
+  }, 80);
 }
 
 function render() {
@@ -3303,7 +4054,7 @@ function render() {
   else if (section === "playlists") renderPlaylists();
   else if (section === "storage") renderStorage();
   else if (section === "server") renderServer();
-  else renderSettings();
+  else renderLibrary();
   renderSidebar();
   renderQueue();
   $("#navBack").disabled = navigationIndex === 0;
@@ -3313,44 +4064,12 @@ function render() {
 
 function bindTrackRows(playbackTracks = playlistTracks()) {
   const trackTable = document.querySelector(".track-table");
-  if (trackTable) {
-    trackTable.ondragover = (event) => {
-      if (!draggingPlaylistTrackID) return;
-      event.preventDefault();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-    };
-    trackTable.ondrop = async (event) => {
-      if (!draggingPlaylistTrackID || !draggingPlaylistTargetID) return;
-      event.preventDefault();
-      const sourceID = draggingPlaylistTrackID;
-      const targetID = draggingPlaylistTargetID;
-      const insertAfter = draggingPlaylistInsertAfter;
-      clearPlaylistDragFloatingRow();
-      draggingPlaylistTrackID = null;
-      draggingPlaylistTargetID = null;
-      draggingPlaylistInsertAfter = false;
-      clearPlaylistDragPreview();
-      const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
-      if (!playlist || sourceID === targetID) return;
-      const sourceIndex = playlist.trackIDs.indexOf(sourceID);
-      if (sourceIndex < 0) return;
-      playlist.trackIDs.splice(sourceIndex, 1);
-      const destinationIndex = playlist.trackIDs.indexOf(targetID);
-      if (destinationIndex < 0) {
-        playlist.trackIDs.splice(sourceIndex, 0, sourceID);
-        return;
-      }
-      playlist.trackIDs.splice(destinationIndex + (insertAfter ? 1 : 0), 0, sourceID);
-      updatePlaylistRemoteSongIDs(state, playlist);
-      markPlaylistDirty(playlist);
-      if (activePlaybackPlaylistID === playlist.id) setPlaybackContext(tracksForPlaylist(state, playlist.id), playlist.id);
-      await persist();
-      schedulePlaylistSync();
-      renderLibrary();
-    };
-  }
   document.querySelectorAll("[data-track]").forEach((row) => {
     row.onclick = (event) => {
+      if (performance.now() < suppressPlaylistRowClickUntil) {
+        event.preventDefault();
+        return;
+      }
       if (event.target.closest("button, select, input, a")) return;
       play(state.tracks.find((track) => track.id === row.dataset.track), playbackTracks, { playlistID: selectedPlaylistID });
     };
@@ -3374,82 +4093,92 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       const from = playlist.trackIDs.indexOf(row.dataset.track);
       const to = from + (event.key === "ArrowUp" ? -1 : 1);
       if (from < 0 || to < 0 || to >= playlist.trackIDs.length) return;
-      const [trackID] = playlist.trackIDs.splice(from, 1);
-      playlist.trackIDs.splice(to, 0, trackID);
-      updatePlaylistRemoteSongIDs(state, playlist);
-      markPlaylistDirty(playlist);
-      if (activePlaybackPlaylistID === playlist.id) setPlaybackContext(tracksForPlaylist(state, playlist.id), playlist.id);
-      await persist();
-      schedulePlaylistSync();
-      renderLibrary();
+      const trackID = row.dataset.track;
+      const targetID = playlist.trackIDs[to];
+      await commitPlaylistTrackReorder(trackID, targetID, event.key === "ArrowDown");
       document.querySelector(`[data-track="${CSS.escape(trackID)}"]`)?.focus();
     };
     if (row.dataset.playlistDraggable === "true") {
-      row.ondragstart = (event) => {
-        draggingPlaylistTrackID = row.dataset.track;
-        draggingPlaylistTargetID = null;
-        draggingPlaylistInsertAfter = false;
-        clearPlaylistDragPreview();
-        clearPlaylistDragFloatingRow();
-        row.classList.add("dragging");
-        const floatingRow = row.cloneNode(true);
-        floatingRow.classList.remove("playlist-draggable", "dragging", "drag-preview-up", "drag-preview-down");
-        floatingRow.classList.add("playlist-drag-floating");
-        floatingRow.removeAttribute("draggable");
-        floatingRow.removeAttribute("data-track");
-        floatingRow.removeAttribute("data-playlist-draggable");
-        floatingRow.removeAttribute("aria-label");
-        floatingRow.removeAttribute("aria-keyshortcuts");
-        floatingRow.removeAttribute("tabindex");
-        floatingRow.setAttribute("aria-hidden", "true");
-        floatingRow.style.top = `${row.offsetTop}px`;
-        floatingRow.style.left = `${row.offsetLeft}px`;
-        floatingRow.style.width = `${row.offsetWidth}px`;
-        floatingRow.style.height = `${row.offsetHeight}px`;
-        floatingRow.style.setProperty("--playlist-drag-source-offset", "0px");
-        trackTable?.append(floatingRow);
-        playlistDragFloatingRow = floatingRow;
-        if (event.dataTransfer) {
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", row.dataset.track);
+      const handlePlaylistMouseMove = (event) => {
+        const drag = playlistPointerDrag;
+        if (!drag || drag.input !== "mouse" || drag.sourceID !== row.dataset.track) return;
+        if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+        if (!drag.active) {
+          drag.active = true;
+          startPlaylistDragPreview(row, trackTable);
         }
-      };
-      row.ondragover = (event) => {
-        if (!draggingPlaylistTrackID || draggingPlaylistTrackID === row.dataset.track) return;
         event.preventDefault();
-        if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-        const insertBefore = event.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2;
-        const previewKey = `${row.dataset.track}:${insertBefore ? "before" : "after"}`;
-        draggingPlaylistTargetID = row.dataset.track;
-        draggingPlaylistInsertAfter = !insertBefore;
-        if (previewKey === playlistDragPreviewKey) return;
-        clearPlaylistDragPreview();
-        playlistDragPreviewKey = previewKey;
-        const rows = [...document.querySelectorAll("[data-playlist-draggable]")];
-        const sourceIndex = rows.findIndex((item) => item.dataset.track === draggingPlaylistTrackID);
-        const targetIndex = rows.indexOf(row);
-        if (sourceIndex < 0 || targetIndex < 0) return;
-        const destinationIndex = targetIndex + (draggingPlaylistInsertAfter ? 1 : 0) - (sourceIndex < targetIndex ? 1 : 0);
-        const endIndex = sourceIndex < targetIndex ? targetIndex - (draggingPlaylistInsertAfter ? 0 : 1) : sourceIndex - 1;
-        const startIndex = sourceIndex < targetIndex ? sourceIndex + 1 : targetIndex + (draggingPlaylistInsertAfter ? 1 : 0);
-        const previewClass = sourceIndex < targetIndex ? "drag-preview-up" : "drag-preview-down";
-        const sourceRow = rows[sourceIndex];
-        const adjacentRow = rows[sourceIndex + 1] || rows[sourceIndex - 1];
-        const rowPitch = adjacentRow ? Math.abs(adjacentRow.offsetTop - sourceRow.offsetTop) : sourceRow.offsetHeight;
-        const offset = `${rowPitch}px`;
-        const destinationTop = rows[destinationIndex]?.offsetTop ?? sourceRow.offsetTop;
-        playlistDragFloatingRow?.style.setProperty("--playlist-drag-source-offset", `${destinationTop - sourceRow.offsetTop}px`);
-        for (let index = startIndex; index <= endIndex; index += 1) {
-          rows[index].classList.add(previewClass);
-          rows[index].style.setProperty("--playlist-drag-offset", offset);
-        }
+        const targetRow = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-playlist-draggable]");
+        updatePlaylistDragPreview(targetRow, event.clientY);
       };
-      row.ondragend = () => {
-        draggingPlaylistTrackID = null;
-        draggingPlaylistTargetID = null;
-        draggingPlaylistInsertAfter = false;
-        clearPlaylistDragFloatingRow();
-        clearPlaylistDragPreview();
+      const handlePlaylistMouseUp = (event) => {
+        const drag = playlistPointerDrag;
+        if (!drag || drag.input !== "mouse" || drag.sourceID !== row.dataset.track) return;
+        if (drag.active) {
+          const targetRow = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-playlist-draggable]");
+          updatePlaylistDragPreview(targetRow, event.clientY);
+        }
+        const targetID = draggingPlaylistTargetID;
+        const insertAfter = draggingPlaylistInsertAfter;
+        document.removeEventListener("mousemove", handlePlaylistMouseMove);
+        document.removeEventListener("mouseup", handlePlaylistMouseUp);
+        clearPlaylistPointerDrag();
+        if (!drag.active) return;
+        event.preventDefault();
+        suppressPlaylistRowClickUntil = performance.now() + 300;
+        if (targetID) void commitPlaylistTrackReorder(drag.sourceID, targetID, insertAfter).catch(() => {});
+      };
+      row.onmousedown = (event) => {
+        if (event.button !== 0 || event.target.closest("button, select, input, a")) return;
+        playlistPointerDrag = {
+          input: "mouse",
+          sourceID: row.dataset.track,
+          startX: event.clientX,
+          startY: event.clientY,
+          active: false,
+        };
+        document.addEventListener("mousemove", handlePlaylistMouseMove);
+        document.addEventListener("mouseup", handlePlaylistMouseUp);
+      };
+      row.onpointerdown = (event) => {
+        if (event.pointerType === "mouse" || !event.isPrimary || event.button !== 0 || event.target.closest("button, select, input, a")) return;
+        playlistPointerDrag = {
+          input: "pointer",
+          pointerID: event.pointerId,
+          sourceID: row.dataset.track,
+          startX: event.clientX,
+          startY: event.clientY,
+          active: false,
+        };
+        row.setPointerCapture(event.pointerId);
+      };
+      row.onpointermove = (event) => {
+        const drag = playlistPointerDrag;
+        if (!drag || drag.pointerID !== event.pointerId || drag.sourceID !== row.dataset.track) return;
+        if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+        if (!drag.active) {
+          drag.active = true;
+          startPlaylistDragPreview(row, trackTable);
+        }
+        event.preventDefault();
+        const targetRow = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-playlist-draggable]");
+        updatePlaylistDragPreview(targetRow, event.clientY);
+      };
+      row.onpointerup = (event) => {
+        const drag = playlistPointerDrag;
+        if (!drag || drag.pointerID !== event.pointerId || drag.sourceID !== row.dataset.track) return;
+        const targetID = draggingPlaylistTargetID;
+        const insertAfter = draggingPlaylistInsertAfter;
+        if (row.hasPointerCapture(event.pointerId)) row.releasePointerCapture(event.pointerId);
+        clearPlaylistPointerDrag();
+        if (!drag.active) return;
+        event.preventDefault();
+        suppressPlaylistRowClickUntil = performance.now() + 300;
+        if (targetID) void commitPlaylistTrackReorder(drag.sourceID, targetID, insertAfter).catch(() => {});
+      };
+      row.onpointercancel = clearPlaylistPointerDrag;
+      row.onlostpointercapture = () => {
+        if (playlistPointerDrag?.sourceID === row.dataset.track) clearPlaylistPointerDrag();
       };
     }
   });
@@ -3732,7 +4461,28 @@ async function importAudio() {
 }
 
 function setLocalImportStage(value = { stage: "idle" }) {
-  $("#localImportStage").dataset.stage = value.stage || "idle";
+  const stage = value.stage || "idle";
+  $("#localImportStage").dataset.stage = stage;
+  $("#localImportDialog").classList.toggle("expanded", stage !== "idle");
+}
+
+function setLocalImportProviderFocus(provider, { scroll = false } = {}) {
+  if (!LOCAL_IMPORT_PROVIDER_ORDER.some(([candidate]) => candidate === provider)) return;
+  localImportProviderFocus = provider;
+  document.querySelectorAll("[data-local-import-provider]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.localImportProvider === provider));
+  });
+  if (scroll) {
+    document.querySelector(`[data-search-provider="${provider}"]`)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+}
+
+function localImportProviderForSource(value) {
+  const source = String(value || "").toLowerCase();
+  if (source.includes("spotify.com")) return "spotify";
+  if (source.includes("soundcloud.com") || source.includes("on.soundcloud.com")) return "soundcloud";
+  if (source.includes("youtube.com") || source.includes("youtu.be")) return "youtube";
+  return null;
 }
 
 function showLocalImportError(error) {
@@ -3793,6 +4543,7 @@ function requireCurrentLocalImportOperation(snapshot) {
 
 function setLocalImportOperationLocked(locked) {
   $("#localImportSource").disabled = locked;
+  $("#searchLocalImport").disabled = locked;
   $("#chooseLocalFiles").disabled = locked;
   setLocalImportMediaKindDisabled(locked);
   document.querySelectorAll('input[name="localImportCandidate"], input[name="localImportPlaylistItem"]').forEach((input) => {
@@ -3873,8 +4624,8 @@ function normalizeLocalImportMediaKindForSource() {
   const source = $("#localImportSource").value.trim();
   let hostname = "";
   try { hostname = new URL(source).hostname.toLowerCase(); }
-  catch { /* Plain-text searches are audio-only. */ }
-  const audioOnly = Boolean(source) && !localImportInputIsLink(source) || [
+  catch { /* A plain-text query can search for either audio or video. */ }
+  const audioOnly = [
     "open.spotify.com", "www.open.spotify.com", "spotify.link", "www.spotify.link",
     "soundcloud.com", "www.soundcloud.com", "m.soundcloud.com", "on.soundcloud.com",
   ].includes(hostname);
@@ -3907,10 +4658,6 @@ function updateDirectServerSourceImportState() {
 function scheduleLocalImportResolution({ immediate = false } = {}) {
   clearLocalImportAutoResolve();
   if (localImportRunning) return;
-  if (localImportServerUploadMode === "server_source_link") {
-    updateDirectServerSourceImportState();
-    return;
-  }
   const source = $("#localImportSource").value.trim();
   if (!localImportSourceIsReady(source)) return;
   const sourceKey = `${selectedLocalImportMediaKind()}:${source}`;
@@ -3935,6 +4682,7 @@ function resetLocalImport() {
   if (audioKind) audioKind.checked = true;
   setLocalImportMediaKindDisabled(false);
   $("#localImportSource").disabled = false;
+  $("#searchLocalImport").disabled = false;
   $("#localImportSource").removeAttribute("aria-busy");
   $("#localImportSource").closest(".local-import-source").classList.remove("searching");
   $("#localImportResolved").hidden = true;
@@ -3950,21 +4698,25 @@ function resetLocalImport() {
   setLocalImportStage({ stage: "idle" });
   updateLocalImportMediaKindUI();
   $("#localImportMediaKind").hidden = false;
+  $("#localImportProviderPill").hidden = false;
+  setLocalImportProviderFocus("youtube");
   $("#chooseLocalFiles").hidden = false;
-  $("#localImportTitle").textContent = "Import from link";
-  $("#localImportSource").placeholder = "Song, artist, album, or supported link…";
+  $("#localImportTitle").textContent = "Import from Link";
+  $("#localImportSource").placeholder = "Link or music search";
 }
 
 function openLocalImport({ serverUploadMode = null } = {}) {
   resetLocalImport();
-  if (["server_source_link", "reviewed_match"].includes(serverUploadMode)) {
+  if (["local_file", "server_source_link", "reviewed_match"].includes(serverUploadMode)) {
     localImportServerUploadMode = serverUploadMode;
-    $("#localImportTitle").textContent = serverUploadMode === "reviewed_match" ? "Upload reviewed match" : "Upload source link";
+    $("#localImportTitle").textContent = serverUploadMode === "reviewed_match" ? "Upload reviewed source" : "Upload source link";
     $("#localImportSource").placeholder = serverUploadMode === "reviewed_match"
       ? "YouTube song link or music search…"
-      : "Canonical YouTube song link…";
+      : "Song link or music search…";
     $("#localImportMediaKind").hidden = true;
+    $("#localImportProviderPill").hidden = true;
     $("#chooseLocalFiles").hidden = true;
+    $("#localImportSync").checked = true;
   }
   $("#localImportSource").value = "";
   $("#localImportDialog").showModal();
@@ -4001,7 +4753,9 @@ function localImportCandidateDetails(candidate) {
       metadata.artist || "Unknown artist",
       metadata.album,
       metadata.durationSeconds ? formatTime(metadata.durationSeconds) : null,
-      previewProvider !== resultProvider ? `Preview via ${previewProvider}` : null,
+      previewProvider !== resultProvider
+        ? `${localImportResolution?.mediaKind === "video" ? "Video" : "Preview"} via ${previewProvider}`
+        : null,
     ];
   }
   if (localImportResolution?.kind?.endsWith("_playlist")) {
@@ -4139,7 +4893,7 @@ function updateLocalImportSyncForSelection({ preserveChecked = false } = {}) {
     ? "This source is already saved to the active server profile."
     : canSync
       ? "Upload a copy to the active server profile after downloading."
-      : "Add a server admin key before importing to upload this copy.";
+      : "Sign in to your Resonance account before importing to upload this copy.";
   updateLocalImportConfirmLabel();
 }
 
@@ -4149,7 +4903,7 @@ function localImportUploadConfigurationError(serverBacked = false, context = nul
     return { stage: "syncing", code: "SERVER_URL_REQUIRED", message: "Add a server URL in Music Server settings before uploading." };
   }
   if (!String(context?.adminToken ?? serverAdminToken).trim()) {
-    return { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Add a server admin key in Music Server settings before uploading." };
+    return { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Sign in to your Resonance account before uploading." };
   }
   return null;
 }
@@ -4195,6 +4949,12 @@ async function uploadImportedTrackWithMode(track, context, mode) {
     profileID: context.profileID,
     filePath: track.filePath,
     title: track.title || "Untitled song",
+    artist: track.artist || "Unknown Artist",
+    album: track.album || "Unknown Album",
+    duration: Number(track.duration) || 0,
+    artworkURL: track.artworkURL || null,
+    mediaSourceURL: track.sourceIdentity?.sourcePageURL || track.sourceURL || track.sourceIdentity?.mediaSourceURL || null,
+    mediaKind: isInstalledVideoTrack(track) ? "video" : "audio",
     mode,
   });
   requireLocalImportServerContext(context);
@@ -4308,6 +5068,11 @@ async function uploadLocalImportTracks(tracks, context) {
       filePath: track.filePath,
       title: track.title || "Untitled song",
       artist: track.artist || "",
+      album: track.album || "",
+      duration: Number(track.duration) || 0,
+      artworkURL: track.artworkURL || null,
+      mediaSourceURL: track.sourceIdentity?.sourcePageURL || track.sourceURL || track.sourceIdentity?.mediaSourceURL || null,
+      mediaKind: isInstalledVideoTrack(track) ? "video" : "audio",
     })),
   });
   requireLocalImportServerContext(context);
@@ -4398,16 +5163,23 @@ function renderLocalImportResolution() {
   const selectedKind = document.querySelector(`input[name="localImportMediaKind"][value="${mediaKind}"]`);
   if (selectedKind) selectedKind.checked = true;
   $("#localImportResolved").hidden = false;
+  $("#localImportResolved").classList.toggle("is-search-results", searchResults);
+  $("#localImportResolved").classList.toggle("is-playlist", playlist);
   $("#localImportSyncRow").hidden = Boolean(localImportServerUploadMode);
   void renderLocalImportArtwork(track, candidates, mediaKind);
   $("#localImportTrackTitle").textContent = track.title || "Untitled";
   $("#localImportTrackMeta").textContent = searchResults
-    ? [track.artist, "Spotify • SoundCloud • YouTube"].filter(Boolean).join(" • ")
+    ? [track.artist, "YouTube • Spotify • SoundCloud"].filter(Boolean).join(" • ")
     : playlist
     ? [track.artist, `${candidates.length} available video${candidates.length === 1 ? "" : "s"}`, localImportResolution.playlist?.unavailableCount ? `${localImportResolution.playlist.unavailableCount} unavailable` : null].filter(Boolean).join(" • ")
     : [track.artist, track.album, track.durationSeconds ? formatTime(track.durationSeconds) : null]
     .filter(Boolean).join(" • ");
-  $("#localImportCandidateLegend").textContent = searchResults ? "Choose a result to import or preview" : playlist ? "Choose playlist songs to import" : "Choose the source to import";
+  $("#localImportCandidateLegend").textContent = searchResults ? "Search results" : playlist ? "Choose playlist songs to import" : "Choose the source to import";
+  $("#localImportResultSummary").textContent = searchResults
+    ? mediaKind === "video"
+      ? `${candidates.length} downloadable`
+      : `${candidates.filter(localImportCandidateCanPreview).length} previewable`
+    : playlist ? `${candidates.length} available` : `${candidates.length} source${candidates.length === 1 ? "" : "s"}`;
   $("#localImportCandidates").classList.toggle("playlist", playlist);
   $("#localImportCandidates").classList.toggle("search-results", searchResults);
   const candidateMarkup = (candidate, index) => `<label class="local-import-candidate${playlist ? " playlist-item" : ""}${searchResults ? " search-result" : ""}">
@@ -4418,12 +5190,13 @@ function renderLocalImportResolution() {
     ${showPreviews ? `<button class="local-import-preview-button" type="button" data-local-import-preview="${index}" aria-label="Preview ${escapeHTML(candidate.title || "source")}" aria-pressed="false" title="${localImportCandidateCanPreview(candidate) ? "Preview source" : "Preview unavailable for this source"}" ${localImportCandidateCanPreview(candidate) ? "" : "disabled"}><svg class="preview-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg><svg class="preview-pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M16 6v12"/></svg></button>` : ""}
   </label>`;
   if (searchResults) {
-    const providerNames = { spotify: "Spotify", soundcloud: "SoundCloud", youtube: "YouTube" };
-    $("#localImportCandidates").innerHTML = Object.entries(providerNames).map(([provider, name]) => {
+    $("#localImportCandidates").innerHTML = LOCAL_IMPORT_PROVIDER_ORDER.map(([provider, name]) => {
       const rows = candidates.map((candidate, index) => ({ candidate, index }))
         .filter(({ candidate }) => candidate.searchProvider === provider);
-      return `<section class="local-import-search-provider" data-search-provider="${provider}"><h3><span>${name}</span><small>${rows.length} result${rows.length === 1 ? "" : "s"}</small></h3>${rows.length ? rows.map(({ candidate, index }) => candidateMarkup(candidate, index)).join("") : '<p>No previewable results.</p>'}</section>`;
+      const emptyCopy = mediaKind === "video" ? "No downloadable videos." : "No previewable results.";
+      return `<section class="local-import-search-provider" data-search-provider="${provider}"><h3><span>${name}</span><small>${rows.length} result${rows.length === 1 ? "" : "s"}</small></h3>${rows.length ? rows.map(({ candidate, index }) => candidateMarkup(candidate, index)).join("") : `<p>${emptyCopy}</p>`}</section>`;
     }).join("");
+    setLocalImportProviderFocus(localImportProviderFocus);
   } else {
     $("#localImportCandidates").innerHTML = candidates.map(candidateMarkup).join("");
   }
@@ -4465,10 +5238,6 @@ function renderLocalImportResolution() {
 }
 
 async function resolveLinkImport() {
-  if (localImportServerUploadMode === "server_source_link") {
-    await confirmLinkImport();
-    return;
-  }
   if (localImportRunning) return;
   clearLocalImportAutoResolve();
   normalizeLocalImportMediaKindForSource();
@@ -4485,7 +5254,7 @@ async function resolveLinkImport() {
     try {
       reviewedContext = currentServerUploadContext();
       if (!reviewedContext.adminToken.trim()) {
-        throw { stage: "searching_candidates", code: "ADMIN_KEY_REQUIRED", message: "Add a server admin key before requesting reviewed matches." };
+        throw { stage: "searching_candidates", code: "ADMIN_KEY_REQUIRED", message: "Sign in to your Resonance account before requesting reviewed matches." };
       }
       reserveServerContext(reviewedContext);
     } catch (error) {
@@ -4510,7 +5279,7 @@ async function resolveLinkImport() {
     requireCurrentLocalImportOperation(operation);
     if (reviewedContext) {
       requireLocalImportServerContext(reviewedContext);
-      await requireCurrentServerUploadMode("reviewed_match", { requiresLocalFile: true });
+      await requireCurrentServerUploadMode("reviewed_match");
       requireCurrentLocalImportOperation(operation);
       requireLocalImportServerContext(reviewedContext);
     }
@@ -4747,16 +5516,9 @@ async function confirmPlaylistImport() {
   }
 }
 
-async function requireCurrentServerUploadMode(requestedMode, { requiresLocalFile = false } = {}) {
+async function requireCurrentServerUploadMode(requestedMode) {
   await refreshClientConfig({ force: true });
   const modes = currentServerTransferModes();
-  if (requiresLocalFile && !modes.available.upload.includes("local_file")) {
-    throw {
-      stage: "syncing",
-      code: "LOCAL_FILE_MODE_REQUIRED",
-      message: "Reviewed-match upload also requires Local files mode because Windows uploads the verified reviewed bytes.",
-    };
-  }
   if (modes.uploadMode !== requestedMode || !modes.available.upload.includes(requestedMode)) {
     throw { stage: "syncing", code: "MODE_DISABLED", message: "That upload mode is no longer enabled for this server and profile." };
   }
@@ -4772,7 +5534,7 @@ async function confirmServerSourceImport() {
   }
   const context = currentServerUploadContext();
   if (!context.adminToken.trim()) {
-    throw { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Add a server admin key before importing a source link." };
+    throw { stage: "syncing", code: "ADMIN_KEY_REQUIRED", message: "Sign in to your Resonance account before importing a source link." };
   }
   reserveServerContext(context);
   const operation = localImportOperationSnapshot();
@@ -4819,14 +5581,6 @@ async function confirmServerSourceImport() {
 
 async function confirmLinkImport() {
   if (localImportRunning) return;
-  if (localImportServerUploadMode === "server_source_link") {
-    try {
-      await confirmServerSourceImport();
-    } catch (error) {
-      showLocalImportError(error);
-    }
-    return;
-  }
   if (!localImportResolution) return;
   const resolution = localImportResolution;
   const reviewedUpload = localImportServerUploadMode === "reviewed_match";
@@ -4853,7 +5607,7 @@ async function confirmLinkImport() {
     });
     return;
   }
-  const uploadRequested = reviewedUpload || $("#localImportSync").checked;
+  const uploadRequested = Boolean(localImportServerUploadMode) || $("#localImportSync").checked;
   if (reviewedUpload) $("#localImportSync").checked = true;
   const serverBacked = Boolean(candidate.serverBacked);
   const needsServerContext = localImportNeedsServerContext({ serverBacked, uploadRequested });
@@ -4876,7 +5630,7 @@ async function confirmLinkImport() {
   setLocalImportOperationLocked(true);
   try {
     if (reviewedUpload) {
-      await requireCurrentServerUploadMode("reviewed_match", { requiresLocalFile: true });
+      await requireCurrentServerUploadMode("reviewed_match");
       requireCurrentLocalImportOperation(operation);
       if (importContext) requireLocalImportServerContext(importContext);
     }
@@ -5001,7 +5755,11 @@ async function confirmLinkImport() {
       setLocalImportStage({ stage: "syncing", profileID: importContext.profileID });
       const uploaded = reviewedUpload
         ? await uploadReviewedMatchTrack(importedTrack, importContext)
-        : await uploadLocalImportTrack(importedTrack, importContext);
+        : await uploadImportedTrackWithMode(
+            importedTrack,
+            importContext,
+            localImportServerUploadMode === "server_source_link" ? "server_source_link" : "local_file",
+          );
       if (!uploaded?.ok) {
         showLocalImportError(uploaded?.error || {
           stage: "syncing",
@@ -5266,7 +6024,7 @@ async function uploadServerSongs() {
   await saveServerForm();
   if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || Boolean(serverContextReservation) })) return;
   const uploadMode = currentServerTransferModes().uploadMode;
-  if (["server_source_link", "reviewed_match"].includes(uploadMode)) {
+  if (["local_file", "server_source_link", "reviewed_match"].includes(uploadMode)) {
     openLocalImport({ serverUploadMode: uploadMode });
     return;
   }
@@ -5370,6 +6128,11 @@ async function uploadMissingDownloadedSongs() {
         filePath: track.filePath,
         title: track.title,
         artist: track.artist,
+        album: track.album,
+        duration: Number(track.duration) || 0,
+        artworkURL: track.artworkURL || null,
+        mediaSourceURL: track.sourceIdentity?.sourcePageURL || track.sourceURL || track.sourceIdentity?.mediaSourceURL || null,
+        mediaKind: isInstalledVideoTrack(track) ? "video" : "audio",
       })),
     });
     if (!serverUploadContextIsCurrent(context)) return;
@@ -5416,6 +6179,7 @@ async function uploadMissingDownloadedSongs() {
 async function requestPlayback() {
   try {
     await audio.play();
+    synchronizeInstalledVideoWithAudio({ forceSeek: true });
   } catch (error) {
     if (error?.name === "AbortError") return;
     updateChrome();
@@ -5448,9 +6212,11 @@ function finishClipPlaybackIfNeeded() {
   updateListeningSession();
   scheduleListeningHistorySync();
   if (repeat) {
+    finishListeningSessionForReplay();
     audio.currentTime = range.startSeconds;
     state.position = range.startSeconds;
     void requestPlayback();
+    synchronizeInstalledVideoWithAudio({ forceSeek: true });
   } else if (!move(1)) {
     audio.pause();
     audio.currentTime = range.endSeconds;
@@ -5503,10 +6269,6 @@ function play(track, queue = null, options = {}) {
 }
 
 function toggle() {
-  if (installedVideoOwnsPlayback()) {
-    toggleInstalledVideoPlayback();
-    return;
-  }
   const track = currentTrack();
   if (!track) {
     const firstTrack = tracksForActiveProfile(state).find((candidate) => candidate.available !== false);
@@ -5526,9 +6288,6 @@ function toggle() {
 }
 
 function move(direction, recordHistory = direction > 0) {
-  if (installedVideoOwnsPlayback()) {
-    return advanceInstalledVideo(direction);
-  }
   if (currentTrack()?.transientStream) return false;
   const tracks = activePlaybackTracks();
   const index = nextIndex(tracks, currentID, direction);
@@ -5538,10 +6297,6 @@ function move(direction, recordHistory = direction > 0) {
 }
 
 function previous() {
-  if (installedVideoOwnsPlayback()) {
-    previousInstalledVideo();
-    return;
-  }
   if (currentTrack()?.transientStream) return;
   const range = activeClipRange();
   const start = range?.startSeconds ?? 0;
@@ -5583,7 +6338,7 @@ function newPlaylist(trackID = null) {
 
 function renderSidebar() {
   normalizeState(state);
-  $("#sidebarPlaylists").innerHTML = state.playlists.map((playlist) => `<button data-side-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10"><span>${playlist.isSystem ? "♥" : "♪"}</span><div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div></button>`).join("");
+  $("#sidebarPlaylists").innerHTML = state.playlists.map((playlist) => `<button data-side-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10">${playlistArtworkMarkup(playlist, { className: "playlist-sidebar-art", tagName: "span" })}<div><strong>${escapeHTML(playlist.name)}</strong><small>${playlist.trackIDs.length} tracks</small></div></button>`).join("");
   document.querySelectorAll("[data-side-playlist]").forEach((button) => {
     button.onclick = () => navigate("library", button.dataset.sidePlaylist);
     button.oncontextmenu = (event) => openPlaylistContextMenu(event, button.dataset.sidePlaylist);
@@ -5615,11 +6370,13 @@ function fullPlayerHistoryTracks() {
   const profileID = activeProfileID();
   const serverOrigin = normalizedServerOrigin(state.serverURL);
   const activeTracks = tracksForActiveProfile(state);
-  const syncedHistory = [...state.listeningHistory]
+  const scopedHistory = [...state.listeningHistory]
     .filter((entry) =>
       (entry.profileID || "default") === profileID
       && normalizedServerOrigin(entry.serverOrigin) === serverOrigin
-      && entry.id !== activeListeningEntryID)
+      && entry.id !== activeListeningEntryID);
+  const syncedHistory = scopedHistory
+    .filter((entry) => listeningHistoryEntryQualifiesAsPlay(state, entry))
     .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))
     .map((entry) => {
       const track = activeTracks.find((item) => item.id === entry.trackID)
@@ -5635,7 +6392,7 @@ function fullPlayerHistoryTracks() {
         historyOnly: true,
       };
     });
-  if (syncedHistory.length) return syncedHistory;
+  if (scopedHistory.length) return syncedHistory;
   const tracksByID = new Map(tracksForActiveProfile(state).map((track) => [track.id, track]));
   return [...history].reverse().map((trackID) => tracksByID.get(trackID)).filter(Boolean);
 }
@@ -5670,6 +6427,36 @@ function updateFullPlayerProgress() {
   paintRange(seek);
 }
 
+function updatePlaybackProgressUI() {
+  const elapsed = Number(audio.currentTime) || 0;
+  const duration = currentPlaybackDuration();
+  $("#elapsed").textContent = formatTime(elapsed);
+  $("#duration").textContent = formatTime(duration);
+  $("#seek").value = duration ? String(Math.round(elapsed / duration * 1000)) : "0";
+  $("#seek").setAttribute("aria-valuetext", `${formatTime(elapsed)} of ${formatTime(duration)}`);
+  paintRange($("#seek"));
+  updateFullPlayerProgress();
+}
+
+function stopPlaybackProgressAnimation() {
+  if (!playbackProgressAnimationFrame) return;
+  cancelAnimationFrame(playbackProgressAnimationFrame);
+  playbackProgressAnimationFrame = null;
+}
+
+function animatePlaybackProgress() {
+  playbackProgressAnimationFrame = null;
+  updatePlaybackProgressUI();
+  if (!audio.paused && !audio.ended) {
+    playbackProgressAnimationFrame = requestAnimationFrame(animatePlaybackProgress);
+  }
+}
+
+function startPlaybackProgressAnimation() {
+  if (playbackProgressAnimationFrame || audio.paused || audio.ended) return;
+  playbackProgressAnimationFrame = requestAnimationFrame(animatePlaybackProgress);
+}
+
 function setAudioSource(track) {
   audioSourceTrackID = track?.id || null;
   audioMetadataTrackID = null;
@@ -5685,19 +6472,20 @@ function currentPlaybackDuration(track = currentTrack()) {
 
 function syncFullPlayerTitleMarquee() {
   const viewport = $("#fullPlayerTitle");
+  const track = $("#fullPlayerTitleTrack");
   const text = $("#fullPlayerTitleText");
   if (fullPlayerTitleMarqueeFrame) cancelAnimationFrame(fullPlayerTitleMarqueeFrame);
   viewport.classList.remove("overflowing");
-  text.style.removeProperty("--full-player-title-travel");
-  text.style.removeProperty("--full-player-title-duration");
+  track.style.removeProperty("--full-player-title-cycle");
+  track.style.removeProperty("--full-player-title-duration");
 
   fullPlayerTitleMarqueeFrame = requestAnimationFrame(() => {
     fullPlayerTitleMarqueeFrame = null;
     if (!$("#nowPlayingDialog").open) return;
     const metrics = titleMarqueeMetrics(text.getBoundingClientRect().width, viewport.clientWidth);
     if (metrics.travel <= 1) return;
-    text.style.setProperty("--full-player-title-travel", `${-metrics.travel}px`);
-    text.style.setProperty("--full-player-title-duration", `${metrics.durationSeconds}s`);
+    track.style.setProperty("--full-player-title-cycle", `${metrics.cycleDistance}px`);
+    track.style.setProperty("--full-player-title-duration", `${metrics.durationSeconds}s`);
     viewport.classList.add("overflowing");
   });
 }
@@ -5706,7 +6494,10 @@ function setFullPlayerTitle(title) {
   const viewport = $("#fullPlayerTitle");
   const text = $("#fullPlayerTitleText");
   const changed = text.textContent !== title;
-  if (changed) text.textContent = title;
+  if (changed) {
+    text.textContent = title;
+    $("#fullPlayerTitleRepeat").textContent = title;
+  }
   viewport.setAttribute("aria-label", title);
   viewport.title = title;
   if (changed && $("#nowPlayingDialog").open) syncFullPlayerTitleMarquee();
@@ -5734,10 +6525,6 @@ function setInstalledVideoSourceGeometry(sourceRect, targetRect) {
   stage.style.setProperty("--video-source-top", `${sourceRect.top}px`);
   stage.style.setProperty("--video-source-width", `${sourceWidth}px`);
   stage.style.setProperty("--video-source-height", `${sourceHeight}px`);
-  stage.style.setProperty("--video-target-left", `${targetRect.left}px`);
-  stage.style.setProperty("--video-target-top", `${targetRect.top}px`);
-  stage.style.setProperty("--video-target-width", `${targetWidth}px`);
-  stage.style.setProperty("--video-target-height", `${targetHeight}px`);
   stage.style.setProperty("--video-source-translate-x", `${sourceRect.left - targetRect.left}px`);
   stage.style.setProperty("--video-source-translate-y", `${sourceRect.top - targetRect.top}px`);
   stage.style.setProperty("--video-source-scale-x", String(sourceScaleX));
@@ -5795,18 +6582,24 @@ function cancelInstalledVideoGeometryAnimation() {
   if (!installedVideoGeometryAnimation) return;
   installedVideoGeometryAnimation.cancel();
   installedVideoGeometryAnimation = null;
+  $(".installed-video-stage").classList.remove("video-geometry-animating");
 }
 
 function animateInstalledVideoStage(from, to, onFinish) {
   cancelInstalledVideoGeometryAnimation();
-  applyInstalledVideoStageGeometry(to);
+  const stage = $(".installed-video-stage");
+  stage.classList.add("video-geometry-animating");
+  applyInstalledVideoStageGeometry(from);
   const duration = installedVideoAnimationDuration(INSTALLED_VIDEO_TRANSITION_MS);
   if (duration <= 0) {
+    applyInstalledVideoStageGeometry(to);
+    if (to.transform === "translate3d(0, 0, 0) scale(1, 1)") clearInstalledVideoStageGeometry();
+    stage.classList.remove("video-geometry-animating");
     onFinish();
     return;
   }
 
-  const animation = $(".installed-video-stage").animate([from, to], {
+  const animation = stage.animate([from, to], {
     duration,
     easing: "cubic-bezier(.25, .1, .25, 1)",
     fill: "both",
@@ -5815,7 +6608,10 @@ function animateInstalledVideoStage(from, to, onFinish) {
   animation.onfinish = () => {
     if (installedVideoGeometryAnimation !== animation) return;
     installedVideoGeometryAnimation = null;
+    applyInstalledVideoStageGeometry(to);
     animation.cancel();
+    if (to.transform === "translate3d(0, 0, 0) scale(1, 1)") clearInstalledVideoStageGeometry();
+    stage.classList.remove("video-geometry-animating");
     onFinish();
   };
 }
@@ -5839,7 +6635,8 @@ function installedVideoBounds(track = installedVideoTrack()) {
 
 function syncInstalledVideoVolume() {
   const value = normalizedVolume(state.volume);
-  installedVideoPlayer.volume = playbackGainForVolume(value);
+  installedVideoPlayer.muted = true;
+  installedVideoPlayer.volume = 0;
   const input = $("#installedVideoVolume");
   input.value = String(value);
   input.setAttribute("aria-valuetext", `${Math.round(value * 100)} percent`);
@@ -5848,7 +6645,7 @@ function syncInstalledVideoVolume() {
 
 function syncInstalledVideoProgress() {
   const { start, end, duration } = installedVideoBounds();
-  const current = Math.max(start, Math.min(Number(installedVideoPlayer.currentTime) || 0, end || duration));
+  const current = Math.max(start, Math.min(Number(audio.currentTime) || 0, end || duration));
   const span = Math.max(0, end - start);
   const seek = $("#installedVideoSeek");
   seek.value = span > 0 ? String(Math.round((current - start) / span * 1000)) : "0";
@@ -5859,7 +6656,7 @@ function syncInstalledVideoProgress() {
 }
 
 function syncInstalledVideoTransport() {
-  const playing = !installedVideoPlayer.paused && !installedVideoPlayer.ended;
+  const playing = !audio.paused && !audio.ended;
   const toggleButton = $("#installedVideoToggle");
   toggleButton.innerHTML = playing ? playbackPauseIcon : playbackPlayIcon;
   toggleButton.setAttribute("aria-label", playing ? "Pause" : "Play");
@@ -5876,62 +6673,53 @@ function hideInstalledVideoControls() {
     clearTimeout(installedVideoControlsTimer);
     installedVideoControlsTimer = null;
   }
-  const controls = $("#installedVideoControls");
-  if (installedVideoPlayer.paused || controls.matches(":focus-within")) return;
-  $("#installedVideoDialog").classList.remove("video-controls-visible");
+  const dialog = $("#installedVideoDialog");
+  const keyboardFocusedControl = dialog.querySelector(
+    ".installed-video-return:focus-visible, .installed-video-window-actions :focus-visible, #installedVideoControls :focus-visible",
+  );
+  if (audio.paused || keyboardFocusedControl) return;
+  dialog.classList.remove("video-controls-visible");
 }
 
 function showInstalledVideoControls({ keepVisible = false } = {}) {
   if (installedVideoControlsTimer) clearTimeout(installedVideoControlsTimer);
   installedVideoControlsTimer = null;
   $("#installedVideoDialog").classList.add("video-controls-visible");
-  if (!keepVisible && !installedVideoPlayer.paused) {
+  if (!keepVisible && !audio.paused) {
     installedVideoControlsTimer = setTimeout(hideInstalledVideoControls, INSTALLED_VIDEO_CONTROLS_TIMEOUT_MS);
   }
 }
 
-function startInstalledVideoPlayback() {
+function synchronizeInstalledVideoWithAudio({ forceSeek = false } = {}) {
   const session = installedVideoSession;
   const track = installedVideoTrack();
   if (!session?.metadataReady || session.closing || !track) return;
-  const audioNeedsHandoff = !session.videoOwnsPlayback
-    && session.trackID === currentID
-    && !audio.paused
-    && !audio.ended;
-  if (audioNeedsHandoff) {
-    const audioTime = clippedPlaybackPosition(audio.currentTime, track);
-    if (Math.abs(installedVideoPlayer.currentTime - audioTime) > 0.02) {
-      installedVideoPlayer.currentTime = audioTime;
-    }
+  if (session.trackID !== currentID) return;
+  const audioTime = clippedPlaybackPosition(audio.currentTime, track);
+  if (forceSeek
+      || Math.abs((Number(installedVideoPlayer.currentTime) || 0) - audioTime)
+        > INSTALLED_VIDEO_SYNC_TOLERANCE_SECONDS) {
+    installedVideoPlayer.currentTime = audioTime;
   }
-  session.waitingForAudioHandoff = audioNeedsHandoff;
-  installedVideoPlayer.muted = audioNeedsHandoff;
-  void installedVideoPlayer.play().catch((error) => {
-    installedVideoPlayer.muted = false;
-    if (installedVideoSession === session) session.waitingForAudioHandoff = false;
-    showInstalledVideoControls({ keepVisible: true });
-    showNotice(error?.message ? `Could not play this video: ${error.message}` : "Resonance could not play this video.");
-  });
+  installedVideoPlayer.muted = true;
+  installedVideoPlayer.volume = 0;
+  installedVideoPlayer.playbackRate = Number(audio.playbackRate) || 1;
+  if (audio.paused || audio.ended) {
+    installedVideoPlayer.pause();
+  } else if (installedVideoPlayer.paused || installedVideoPlayer.ended) {
+    void installedVideoPlayer.play().catch((error) => {
+      showInstalledVideoControls({ keepVisible: true });
+      showNotice(error?.message ? `Could not play this video: ${error.message}` : "Resonance could not play this video.");
+    });
+  }
+  syncInstalledVideoTransport();
 }
 
 function updateInstalledVideoTime() {
   const session = installedVideoSession;
   const track = installedVideoTrack();
   if (!session || !track || session.closing) return;
-  if (!session.videoOwnsPlayback) {
-    syncInstalledVideoProgress();
-    return;
-  }
-  const { end } = installedVideoBounds(track);
-  if (end > 0 && installedVideoPlayer.currentTime + 0.02 >= end) {
-    installedVideoPlayer.pause();
-    handleInstalledVideoEnded();
-    return;
-  }
-  state.position = Number(installedVideoPlayer.currentTime) || 0;
-  updateListeningSession();
-  schedulePlaybackProgressSave();
-  syncInstalledVideoProgress();
+  synchronizeInstalledVideoWithAudio();
 }
 
 function installedVideoPlaybackStarted() {
@@ -5943,22 +6731,15 @@ function installedVideoPlaybackStarted() {
 function installedVideoPlaybackPlaying() {
   const session = installedVideoSession;
   if (!session || session.closing) return;
-  if (!session.videoOwnsPlayback) {
-    session.videoOwnsPlayback = true;
-    if (session.waitingForAudioHandoff && !audio.paused) audio.pause();
-  }
-  session.waitingForAudioHandoff = false;
-  installedVideoPlayer.muted = false;
-  beginListeningSession();
+  installedVideoPlayer.muted = true;
+  installedVideoPlayer.volume = 0;
   syncInstalledVideoTransport();
   updateChrome();
 }
 
 function installedVideoPlaybackPaused() {
-  updateListeningSession();
-  scheduleListeningHistorySync();
   syncInstalledVideoTransport();
-  if (!installedVideoSession?.closing) showInstalledVideoControls({ keepVisible: true });
+  if (!installedVideoSession?.closing && audio.paused) showInstalledVideoControls({ keepVisible: true });
   updateChrome();
 }
 
@@ -5966,10 +6747,7 @@ function configureInstalledVideoSource(track, startTime) {
   const dialog = $("#installedVideoDialog");
   if (!installedVideoSession || !isInstalledVideoTrack(track)) return;
   installedVideoSession.trackID = track.id;
-  installedVideoSession.videoOwnsPlayback = false;
-  installedVideoSession.waitingForAudioHandoff = false;
   installedVideoSession.metadataReady = false;
-  installedVideoSession.handlingEnd = false;
   $("#installedVideoArtwork").innerHTML = track.artwork
     ? squareArtworkImageMarkup(track.artwork)
     : '<span aria-hidden="true">♪</span>';
@@ -5977,6 +6755,8 @@ function configureInstalledVideoSource(track, startTime) {
   $("#installedVideoArtist").textContent = track.artist || "Unknown Artist";
   installedVideoPlayer.src = track.fileUrl;
   installedVideoPlayer.playbackRate = Number(state.playbackRate) || 1;
+  installedVideoPlayer.muted = true;
+  installedVideoPlayer.volume = 0;
   syncInstalledVideoVolume();
   installedVideoPlayer.onloadedmetadata = () => {
     if (installedVideoSession?.trackID !== track.id) return;
@@ -5985,7 +6765,7 @@ function configureInstalledVideoSource(track, startTime) {
     installedVideoPlayer.currentTime = Math.max(start, Math.min(requested, Math.max((end || duration) - 0.05, start)));
     installedVideoSession.metadataReady = true;
     syncInstalledVideoTransport();
-    if (dialog.classList.contains("video-revealed")) startInstalledVideoPlayback();
+    if (dialog.classList.contains("video-revealed")) synchronizeInstalledVideoWithAudio({ forceSeek: true });
   };
   installedVideoPlayer.onerror = () => {
     showInstalledVideoControls({ keepVisible: true });
@@ -5995,7 +6775,8 @@ function configureInstalledVideoSource(track, startTime) {
   installedVideoPlayer.onplay = installedVideoPlaybackStarted;
   installedVideoPlayer.onplaying = installedVideoPlaybackPlaying;
   installedVideoPlayer.onpause = installedVideoPlaybackPaused;
-  installedVideoPlayer.onended = handleInstalledVideoEnded;
+  installedVideoPlayer.onseeked = () => synchronizeInstalledVideoWithAudio();
+  installedVideoPlayer.onended = () => synchronizeInstalledVideoWithAudio({ forceSeek: true });
   installedVideoPlayer.load();
 }
 
@@ -6025,18 +6806,16 @@ function openInstalledVideo(track = currentTrack()) {
     "video-artwork-restored",
     "video-paused",
     "video-controls-visible",
+    "video-mini",
   );
   dialog.showModal();
   const targetRect = $(".installed-video-stage").getBoundingClientRect();
   const geometry = setInstalledVideoSourceGeometry(sourceRect, targetRect);
   installedVideoSession = {
     trackID: track.id,
-    resumeAudioOnClose: false,
-    videoOwnsPlayback: false,
-    waitingForAudioHandoff: false,
     metadataReady: false,
     closing: false,
-    handlingEnd: false,
+    mini: false,
     geometry,
   };
   configureInstalledVideoSource(track, startTime);
@@ -6049,7 +6828,7 @@ function openInstalledVideo(track = currentTrack()) {
     if (!installedVideoSession || installedVideoSession.closing) return;
     dialog.classList.remove("video-from-art");
     dialog.classList.add("video-expanded", "video-revealed");
-    startInstalledVideoPlayback();
+    synchronizeInstalledVideoWithAudio({ forceSeek: true });
     const session = installedVideoSession;
     animateInstalledVideoStage(geometry.source, geometry.target, () => {
       if (installedVideoSession !== session || session.closing) return;
@@ -6061,7 +6840,7 @@ function openInstalledVideo(track = currentTrack()) {
 
 function playInstalledVideoTrack(track, { recordHistory = true } = {}) {
   if (!isInstalledVideoTrack(track) || !installedVideoSession) return;
-  play(track, null, { recordHistory, autoplay: false });
+  play(track, null, { recordHistory });
   configureInstalledVideoSource(track, playbackRangeForTrack(state, track)?.startSeconds ?? 0);
   showInstalledVideoControls();
 }
@@ -6073,7 +6852,7 @@ function selectInstalledVideoTarget(track, { recordHistory = true } = {}) {
     return;
   }
   play(track, null, { recordHistory });
-  closeInstalledVideo({ resumePlayback: false });
+  closeInstalledVideo();
 }
 
 function advanceInstalledVideo(direction = 1) {
@@ -6086,7 +6865,8 @@ function advanceInstalledVideo(direction = 1) {
 
 function previousInstalledVideo() {
   const { start } = installedVideoBounds();
-  if (installedVideoPlayer.currentTime > start + 3) {
+  if (audio.currentTime > start + 3) {
+    audio.currentTime = start;
     installedVideoPlayer.currentTime = start;
     state.position = start;
     syncInstalledVideoProgress();
@@ -6100,36 +6880,58 @@ function previousInstalledVideo() {
 }
 
 function toggleInstalledVideoPlayback() {
-  if (!installedVideoSession?.metadataReady) return;
-  if (installedVideoPlayer.paused || installedVideoPlayer.ended) {
-    if (installedVideoPlayer.ended) {
-      const { start } = installedVideoBounds();
-      installedVideoPlayer.currentTime = start;
-      state.position = start;
-    }
-    startInstalledVideoPlayback();
-  } else installedVideoPlayer.pause();
+  toggle();
+  synchronizeInstalledVideoWithAudio({ forceSeek: true });
 }
 
-function handleInstalledVideoEnded() {
+function minimizeInstalledVideo() {
+  const dialog = $("#installedVideoDialog");
   const session = installedVideoSession;
-  const track = installedVideoTrack();
-  if (!session || !track || session.closing || session.handlingEnd) return;
-  session.handlingEnd = true;
-  updateListeningSession();
-  scheduleListeningHistorySync();
-  if (repeat) {
-    const { start } = installedVideoBounds(track);
-    installedVideoPlayer.currentTime = start;
-    state.position = start;
-    session.handlingEnd = false;
-    startInstalledVideoPlayback();
-    return;
-  }
-  if (!advanceInstalledVideo(1)) {
-    session.handlingEnd = false;
-    updateChrome();
-  }
+  if (!dialog.open || !session || session.closing || session.mini) return;
+  if (installedVideoTransitionTimer) clearTimeout(installedVideoTransitionTimer);
+  if (installedVideoChromeTimer) clearTimeout(installedVideoChromeTimer);
+  if (installedVideoArtworkTimer) clearTimeout(installedVideoArtworkTimer);
+  if (installedVideoControlsTimer) clearTimeout(installedVideoControlsTimer);
+  installedVideoTransitionTimer = null;
+  installedVideoChromeTimer = null;
+  installedVideoArtworkTimer = null;
+  installedVideoControlsTimer = null;
+  cancelInstalledVideoGeometryAnimation();
+  session.mini = true;
+  session.closing = false;
+  dialog.classList.remove(
+    "video-active",
+    "video-from-art",
+    "video-expanded",
+    "video-closing",
+    "video-artwork-restored",
+  );
+  dialog.classList.add("video-mini", "video-revealed", "video-controls-visible");
+  $("#nowPlayingDialog").classList.remove("video-active");
+  dialog.close();
+  finishNowPlayingClose();
+  dialog.show();
+  clearInstalledVideoStageGeometry();
+  synchronizeInstalledVideoWithAudio({ forceSeek: true });
+  showInstalledVideoControls();
+  requestAnimationFrame(() => $("#restoreInstalledVideo").focus());
+}
+
+function restoreInstalledVideo() {
+  const dialog = $("#installedVideoDialog");
+  const session = installedVideoSession;
+  if (!dialog.open || !session?.mini || session.closing) return;
+  dialog.close();
+  session.mini = false;
+  openNowPlaying();
+  dialog.classList.remove("video-mini", "video-closing", "video-artwork-restored");
+  dialog.classList.add("video-active", "video-expanded", "video-revealed", "video-controls-visible");
+  $("#nowPlayingDialog").classList.add("video-active");
+  clearInstalledVideoStageGeometry();
+  dialog.showModal();
+  synchronizeInstalledVideoWithAudio({ forceSeek: true });
+  showInstalledVideoControls();
+  requestAnimationFrame(() => $("#minimizeInstalledVideo").focus());
 }
 
 function finishInstalledVideoClose({ session }) {
@@ -6141,10 +6943,11 @@ function finishInstalledVideoClose({ session }) {
   installedVideoPlayer.onplay = null;
   installedVideoPlayer.onplaying = null;
   installedVideoPlayer.onpause = null;
+  installedVideoPlayer.onseeked = null;
   installedVideoPlayer.onended = null;
   installedVideoPlayer.removeAttribute("src");
   installedVideoPlayer.load();
-  installedVideoPlayer.muted = false;
+  installedVideoPlayer.muted = true;
   installedVideoSession = null;
   installedVideoTransitionTimer = null;
   if (installedVideoChromeTimer) clearTimeout(installedVideoChromeTimer);
@@ -6163,71 +6966,29 @@ function finishInstalledVideoClose({ session }) {
     "video-artwork-restored",
     "video-controls-visible",
     "video-paused",
+    "video-mini",
   );
   $("#nowPlayingDialog").classList.remove("video-active");
   $("#installedVideoArtwork").replaceChildren();
   $("#installedVideoArtwork").removeAttribute("style");
   clearInstalledVideoStageGeometry();
 
-  audio.muted = false;
   updateChrome();
 }
 
-function handOffInstalledVideoToAudio(session, { videoTime, shouldPlay }) {
-  const track = state.tracks.find((item) => item.id === session.trackID);
-  if (!session.videoOwnsPlayback || !track || track.id !== currentID || !Number.isFinite(videoTime)) return false;
-  const position = clippedPlaybackPosition(videoTime, track);
-  state.position = position;
-  pendingRestorePosition = position;
-  if (audio.currentSrc || audio.src) {
-    try {
-      audio.currentTime = position;
-    } catch {
-      // pendingRestorePosition applies the handoff once the audio source is seekable.
-    }
-  }
-  persistInBackground();
-  session.waitingForAudioHandoff = false;
-  if (!shouldPlay) {
-    session.videoOwnsPlayback = false;
-    return false;
-  }
-
-  audio.muted = true;
-  const completeHandoff = () => {
-    installedVideoPlayer.muted = true;
-    session.videoOwnsPlayback = false;
-    audio.muted = false;
-    updateChrome();
-  };
-  audio.addEventListener("playing", completeHandoff, { once: true });
-  void audio.play().catch((error) => {
-    audio.removeEventListener("playing", completeHandoff);
-    installedVideoPlayer.pause();
-    session.videoOwnsPlayback = false;
-    audio.muted = false;
-    updateChrome();
-    if (error?.name !== "AbortError") {
-      showNotice(error?.message ? `Could not resume this song: ${error.message}` : "Resonance could not resume this song.");
-    }
-  });
-  return true;
-}
-
-function closeInstalledVideo({ resumePlayback = null } = {}) {
+function closeInstalledVideo() {
   const dialog = $("#installedVideoDialog");
   const session = installedVideoSession;
   if (!dialog.open || !session || session.closing) return;
+  if (session.mini) {
+    session.closing = true;
+    installedVideoPlayer.pause();
+    finishInstalledVideoClose({ session });
+    return;
+  }
   session.closing = true;
 
-  const videoEnded = installedVideoPlayer.ended;
-  const videoTime = Number(installedVideoPlayer.currentTime);
-  session.resumeAudioOnClose = resumePlayback ?? (!installedVideoPlayer.paused && !videoEnded);
-  const audioHandoffPending = handOffInstalledVideoToAudio(session, {
-    videoTime,
-    shouldPlay: session.resumeAudioOnClose,
-  });
-  if (!audioHandoffPending) installedVideoPlayer.pause();
+  installedVideoPlayer.pause();
   if (installedVideoTransitionTimer) {
     clearTimeout(installedVideoTransitionTimer);
     installedVideoTransitionTimer = null;
@@ -6248,7 +7009,12 @@ function closeInstalledVideo({ resumePlayback = null } = {}) {
   const currentGeometry = installedVideoStageGeometry();
   const geometry = setInstalledVideoSourceGeometry(
     sourceRect,
-    session.geometry?.targetRect || $(".installed-video-stage").getBoundingClientRect(),
+    {
+      top: $(".installed-video-stage").offsetTop,
+      left: $(".installed-video-stage").offsetLeft,
+      width: $(".installed-video-stage").offsetWidth,
+      height: $(".installed-video-stage").offsetHeight,
+    },
   );
   session.geometry = geometry;
   dialog.classList.remove(
@@ -6293,8 +7059,15 @@ function renderFullPlayer() {
   const releaseYear = Number(track.year || track.releaseYear) || null;
   $("#fullPlayerAlbum").textContent = [displayAlbum(track), releaseYear].filter(Boolean).join(" • ");
   const artworkNode = $("#fullPlayerArtwork");
-  artworkNode.innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : '<span aria-hidden="true">♪</span>';
-  artworkNode.setAttribute("aria-label", `Artwork for ${track.title || "current song"}`);
+  const artworkContentNode = $("#fullPlayerArtworkContent");
+  artworkContentNode.innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : '<span aria-hidden="true">♪</span>';
+  artworkContentNode.setAttribute("aria-label", `Artwork for ${track.title || "current song"}`);
+  const videoLaunch = $("#fullPlayerVideoLaunch");
+  const videoAvailable = isInstalledVideoTrack(track);
+  artworkNode.classList.toggle("video-available", videoAvailable);
+  videoLaunch.hidden = !videoAvailable;
+  videoLaunch.disabled = !videoAvailable;
+  videoLaunch.setAttribute("aria-label", `Watch video for ${track.title || "current song"}`);
   const backdropNode = $("#fullPlayerBackdrop");
   backdropNode.innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : "";
   const favorite = $("#fullPlayerFavorite");
@@ -6408,6 +7181,21 @@ function updateChrome() {
   if ($("#installedVideoDialog").open) syncInstalledVideoTransport();
   renderFullPlayer();
   bindSquareArtworkImages();
+  scheduleDiscordPresenceUpdate();
+}
+
+function syncRepeatControls() {
+  for (const button of [$("#repeat"), $("#fullPlayerRepeat"), $("#installedVideoRepeat")].filter(Boolean)) {
+    button.classList.toggle("active", repeat);
+    button.setAttribute("aria-pressed", String(repeat));
+  }
+}
+
+function setRepeatEnabled(value) {
+  repeat = Boolean(value);
+  state.repeat = repeat;
+  persistInBackground({ refreshSidebar: false });
+  syncRepeatControls();
 }
 
 function setActiveNav() { document.querySelectorAll(".nav").forEach((button) => button.classList.toggle("active", button.dataset.section === section)); }
@@ -6438,25 +7226,33 @@ $("#navForward").onclick = () => { if (navigationIndex + 1 < navigationHistory.l
 document.querySelectorAll("[data-action=toggle]").forEach((button) => button.onclick = toggle);
 document.querySelectorAll("[data-action=next]").forEach((button) => button.onclick = () => move(1));
 document.querySelectorAll("[data-action=previous]").forEach((button) => button.onclick = previous);
-$("#openNowPlaying").onclick = openNowPlaying;
+$("#openNowPlaying").onclick = () => {
+  if (installedVideoSession?.mini) restoreInstalledVideo();
+  else openNowPlaying();
+};
 $("#closeNowPlaying").onclick = closeNowPlaying;
+$("#fullPlayerVideoLaunch").onclick = () => {
+  const track = currentTrack();
+  if (isInstalledVideoTrack(track)) openInstalledVideo(track);
+};
 $("#closeInstalledVideo").onclick = () => closeInstalledVideo();
+$("#minimizeInstalledVideo").onclick = minimizeInstalledVideo;
+$("#restoreInstalledVideo").onclick = restoreInstalledVideo;
+$("#dismissMiniVideo").onclick = () => closeInstalledVideo();
 $("#installedVideoToggle").onclick = toggleInstalledVideoPlayback;
 $("#installedVideoPrevious").onclick = previousInstalledVideo;
 $("#installedVideoNext").onclick = () => advanceInstalledVideo(1);
 $("#installedVideoRepeat").onclick = () => {
-  repeat = !repeat;
-  state.repeat = repeat;
-  persistInBackground();
-  syncInstalledVideoTransport();
-  updateChrome();
+  setRepeatEnabled(!repeat);
   showInstalledVideoControls();
 };
 $("#installedVideoSeek").oninput = (event) => {
   const { start, end } = installedVideoBounds();
   if (end > start) {
-    installedVideoPlayer.currentTime = start + (end - start) * Number(event.target.value) / 1000;
-    state.position = installedVideoPlayer.currentTime;
+    const position = start + (end - start) * Number(event.target.value) / 1000;
+    audio.currentTime = position;
+    installedVideoPlayer.currentTime = position;
+    state.position = position;
   }
   syncInstalledVideoProgress();
   showInstalledVideoControls();
@@ -6464,14 +7260,23 @@ $("#installedVideoSeek").oninput = (event) => {
 const installedVideoStage = $(".installed-video-stage");
 installedVideoStage.onpointermove = () => showInstalledVideoControls();
 installedVideoStage.onpointerenter = () => showInstalledVideoControls();
-installedVideoStage.onpointerleave = () => {
-  if (!installedVideoPlayer.paused) {
-    if (installedVideoControlsTimer) clearTimeout(installedVideoControlsTimer);
-    installedVideoControlsTimer = setTimeout(hideInstalledVideoControls, 450);
-  }
+installedVideoStage.onpointerleave = () => showInstalledVideoControls();
+const installedVideoControls = $("#installedVideoControls");
+installedVideoControls.onpointerenter = () => showInstalledVideoControls();
+installedVideoControls.onpointerleave = () => showInstalledVideoControls();
+installedVideoControls.onfocusin = (event) => {
+  showInstalledVideoControls({ keepVisible: event.target.matches(":focus-visible") });
 };
-$("#installedVideoControls").onpointerenter = () => showInstalledVideoControls({ keepVisible: true });
-$("#installedVideoControls").onpointerleave = () => showInstalledVideoControls();
+installedVideoControls.onfocusout = () => showInstalledVideoControls();
+$("#installedVideoDialog").addEventListener("focusin", (event) => {
+  if (!event.target.closest(".installed-video-return, .installed-video-window-actions")) return;
+  showInstalledVideoControls({ keepVisible: event.target.matches(":focus-visible") });
+});
+$("#installedVideoDialog").addEventListener("focusout", (event) => {
+  if (event.target.closest(".installed-video-return, .installed-video-window-actions")) {
+    showInstalledVideoControls();
+  }
+});
 $("#installedVideoDialog").addEventListener("cancel", (event) => {
   event.preventDefault();
   closeInstalledVideo();
@@ -6496,6 +7301,10 @@ $("#nowPlayingDialog").addEventListener("close", () => {
   $("#fullPlayerQueuePanel").hidden = true;
   $("#fullPlayerQueueToggle").setAttribute("aria-expanded", "false");
   $("#openNowPlaying").focus();
+});
+$("#settingsDialog").addEventListener("close", () => {
+  settingsRecordingAction = null;
+  $("#profileButton")?.focus();
 });
 $("#fullPlayerFavorite").onclick = () => currentID && toggleFavorite(currentID);
 $("#fullPlayerMore").onclick = (event) => currentID && openTrackContextMenu(event, currentID, {
@@ -6529,29 +7338,43 @@ $("#fullPlayerShuffle").onclick = () => {
   setShuffleEnabled(!shuffle);
 };
 $("#fullPlayerRepeat").onclick = () => {
-  repeat = !repeat;
-  state.repeat = repeat;
-  persistInBackground();
-  updateChrome();
+  setRepeatEnabled(!repeat);
 };
 $("#newPlaylist").onclick = () => newPlaylist();
 $("#profileButton").onclick = toggleProfileMenu;
-$("#profileSwitch").onclick = openProfileSwitcher;
+$("#profileMenuManage").onclick = () => openSettings("server");
+$("#profileMenuEmail").onclick = (event) => {
+  if (!accountSession?.email) return;
+  event.preventDefault();
+  event.stopPropagation();
+  isAccountEmailRevealed = !isAccountEmailRevealed;
+  updateProfileControlView({ refreshPicture: false });
+};
 $("#profileHistory").onclick = openListeningHistory;
 $("#profileClipEditor").onclick = openClipEditor;
 $("#profileSettings").onclick = () => {
-  closeProfileMenu();
-  navigate("settings");
+  openSettings();
 };
 $("#dismissServerTransfer").onclick = cancelServerTransfer;
 $("#dismissAppNotice").onclick = dismissNotice;
 $("#cancelPlaylist").onclick = () => { pendingPlaylistTrackID = null; $("#playlistDialog").close(); };
 $("#playlistName").oninput = () => { $("#createPlaylist").disabled = !$("#playlistName").value.trim(); };
 $("#closeAddSongs").onclick = () => $("#addSongsDialog").close();
-$("#closeClipEditor").onclick = async () => { await stopClipRangePreview(); $("#clipEditorDialog").close(); };
 $("#previewClipRange").onclick = toggleClipRangePreview;
 $("#saveClipRange").onclick = saveClipRange;
+$("#closeClipEditor").onclick = () => { void stopClipRangePreview().then(() => $("#clipEditorDialog").close()); };
 $("#clearClipRange").onclick = clearClipRange;
+$("#clipEditorSettingsButton").onclick = () => toggleClipEditorPopover("settings");
+$("#clipEditorHelpButton").onclick = () => toggleClipEditorPopover("help");
+$("#closeClipEditorSettings").onclick = () => toggleClipEditorPopover("settings");
+$("#closeClipEditorHelp").onclick = () => toggleClipEditorPopover("help");
+$("#clipEditorSkipStart").onclick = () => { void seekClipEditorPreview(clipEditorStartSeconds); };
+$("#clipEditorSkipEnd").onclick = () => { void seekClipEditorPreview(clipEditorEndSeconds - .01); };
+$("#clipEditorExpand").onclick = () => {
+  const expanded = $("#clipEditorDialog").classList.toggle("preview-expanded");
+  $("#clipEditorExpand").setAttribute("aria-pressed", String(expanded));
+  $("#clipEditorExpand").setAttribute("aria-label", expanded ? "Show clip timeline" : "Expand preview");
+};
 $("#clipEditorTrack").onchange = async () => { await stopClipRangePreview(); renderClipEditorTrack({ resetRange: true }); };
 bindClipEditorHandle("start");
 bindClipEditorHandle("end");
@@ -6574,6 +7397,18 @@ $("#clipEditorDialog").onclick = (event) => {
   if (event.target === $("#clipEditorDialog")) {
     void stopClipRangePreview().then(() => $("#clipEditorDialog").close());
   }
+};
+$("#clipEditorDialog").oncancel = () => { void stopClipRangePreview(); };
+const clipEditorVisualizerResizeObserver = new ResizeObserver(() => {
+  if (clipEditorPreviewAudio.paused || clipEditorPreviewAudio.ended) {
+    drawClipEditorStageVisualizer(clipEditorVisualizerStaticLevels);
+  }
+});
+clipEditorVisualizerResizeObserver.observe(clipEditorVisualizerCanvas);
+$("#clipEditorWaveform").onpointerdown = (event) => {
+  if (event.target.closest(".clip-editor-handle")) return;
+  const seconds = clipEditorSecondsAtPointer(event);
+  void seekClipEditorPreview(Math.max(clipEditorStartSeconds, Math.min(seconds, clipEditorEndSeconds)));
 };
 clipEditorPreviewAudio.onplay = syncClipRangePreviewButton;
 clipEditorPreviewAudio.onpause = () => {
@@ -6639,6 +7474,10 @@ $("#localImportSource").onkeydown = (event) => {
   clearLocalImportAutoResolve();
   void resolveLinkImport();
 };
+$("#searchLocalImport").onclick = () => {
+  clearLocalImportAutoResolve();
+  void resolveLinkImport();
+};
 $("#localImportSource").oninput = () => {
   localImportInteractionGeneration += 1;
   localImportResolvedSourceKey = null;
@@ -6652,6 +7491,8 @@ $("#localImportSource").oninput = () => {
     setLocalImportStage({ stage: "idle" });
   }
   normalizeLocalImportMediaKindForSource();
+  const sourceProvider = localImportProviderForSource($("#localImportSource").value);
+  if (sourceProvider) setLocalImportProviderFocus(sourceProvider);
   scheduleLocalImportResolution();
 };
 $("#localImportSync").onchange = () => {
@@ -6675,6 +7516,9 @@ document.querySelectorAll('input[name="localImportMediaKind"]').forEach((input) 
     updateLocalImportMediaKindUI();
     scheduleLocalImportResolution({ immediate: true });
   };
+});
+document.querySelectorAll("[data-local-import-provider]").forEach((button) => {
+  button.onclick = () => setLocalImportProviderFocus(button.dataset.localImportProvider, { scroll: true });
 });
 $("#localImportDialog").onclick = (event) => {
   if (event.target === $("#localImportDialog") && !localImportRunning) $("#localImportDialog").close();
@@ -6713,7 +7557,6 @@ $("#addSongsDialog").addEventListener("close", () => {
   addSongsPlaylistID = null;
   if (section === "library" && selectedPlaylistID) renderLibrary();
 });
-$("#cancelProfileSwitch").onclick = () => $("#profileSwitchDialog").close();
 $("#closeListeningHistory").onclick = () => $("#listeningHistoryDialog").close();
 $("#listeningHistoryRange").onchange = () => {
   listeningHistoryWindowOffset = 0;
@@ -6737,129 +7580,75 @@ $("#listeningHistoryDialog").addEventListener("close", () => {
   $("#listeningHistoryDialog").classList.remove("day-expanded");
   $("#listeningHistoryDayDetails").hidden = true;
 });
-$("#cancelServerSettings").onclick = () => $("#serverSettingsDialog").close();
-$("#newSyncProfile").onclick = async () => {
-  const name = prompt("Name this sync profile:");
-  if (!name?.trim()) return;
-  try {
-    const profile = await api.createProfile({
-      baseURL: $("#serverURL")?.value.trim() || state.serverURL,
-      token: $("#serverToken").value,
-      name: name.trim(),
-    });
-    state.syncProfiles = [...state.syncProfiles, profile];
-    renderProfileOptions(profile.id);
-  } catch (error) {
-    alert(error.message || "Could not create the sync profile.");
-  }
-};
-$("#serverSettingsForm").onsubmit = async (event) => {
-  event.preventDefault();
-  serverAutoAttempted = true;
-  try {
-    await saveServerForm();
-    $("#serverSettingsDialog").close();
-    if (!serverToken.trim()) {
-      serverConnected = false;
-      replaceServerCatalog([]);
-      serverConnectionText = serverAdminToken.trim()
-        ? "Upload ready • catalog sync off"
-        : "Saved • catalog sync off";
-      if (section === "server") renderServer();
-      showNotice(serverConnectionText, "status");
-    } else if (section === "server") {
-      await serverAction("catalog");
-    }
-  } catch (error) {
-    showNotice(error.message || "The server settings could not be saved.");
-  }
-};
-
-async function finishProfileSelection(profile) {
-  renderProfileOptions(profile.id);
-  const previousProfileID = activeProfileID();
-  await activateProfile(profile.id);
-  await persist();
-  updateProfileControl();
-  $("#profileSwitchDialog").close();
-  render();
-  if (profile.id !== previousProfileID) {
-    schedulePlaylistSync();
-    scheduleListeningHistorySync();
-    await serverAction("catalog");
-  }
+function keybindFromKeyboardEvent(event) {
+  if (["Control", "Alt", "Shift", "Meta"].includes(event.key)) return null;
+  let key = event.code === "Space" ? "Space" : event.key;
+  if (key === " ") key = "Space";
+  if (key.length === 1) key = key.toUpperCase();
+  return [
+    event.ctrlKey ? "Ctrl" : null,
+    event.altKey ? "Alt" : null,
+    event.shiftKey ? "Shift" : null,
+    event.metaKey ? "Meta" : null,
+    key,
+  ].filter(Boolean).join("+");
 }
 
-$("#createProfileFromSwitcher").onclick = async () => {
-  const name = $("#profileSwitchQuery").value.replace(/\s+/g, " ").trim();
-  const status = $("#profileSwitchStatus");
-  const create = $("#createProfileFromSwitcher");
-  const submit = $("#confirmProfileSwitch");
-  if (!name) {
-    status.textContent = "Enter a name for the new profile.";
-    return;
-  }
-  const existing = matchingSyncProfile(name);
-  if (existing) {
-    status.textContent = existing.id === activeProfileID() ? "That is already the current profile." : "That profile already exists. Use Switch instead.";
-    updateProfileSwitchActions();
-    return;
-  }
-  if (!state.serverURL || !serverToken) {
-    status.textContent = "Connect to the music server in Settings first.";
-    return;
-  }
-  create.disabled = true;
-  submit.disabled = true;
-  status.textContent = "Creating profile…";
-  try {
-    const profile = await api.createProfile({
-      baseURL: state.serverURL,
-      token: serverToken,
-      name,
-    });
-    state.syncProfiles = [...state.syncProfiles.filter((item) => item.id !== profile.id), profile];
-    await finishProfileSelection(profile);
-    showNotice(`Created and switched to ${profile.name || name}.`, "status");
-  } catch (error) {
-    status.textContent = error.message || "Could not create the profile.";
-  } finally {
-    if ($("#profileSwitchDialog").open) updateProfileSwitchActions();
-  }
-};
+function hasBlockingDialog() {
+  return [...document.querySelectorAll("dialog[open]")]
+    .some((dialog) => !dialog.matches("#installedVideoDialog.video-mini"));
+}
 
-$("#profileSwitchForm").onsubmit = async (event) => {
-  event.preventDefault();
-  const query = $("#profileSwitchQuery").value.trim();
-  const status = $("#profileSwitchStatus");
-  const submit = $("#confirmProfileSwitch");
-  if (!query) {
-    status.textContent = "Enter a profile name or ID.";
-    return;
-  }
-  if (!state.serverURL || !serverToken) {
-    status.textContent = "Connect to the music server in Settings first.";
-    return;
-  }
-  submit.disabled = true;
-  status.textContent = "Checking server profiles…";
-  try {
-    const response = await api.fetchProfiles({ baseURL: state.serverURL, token: serverToken });
-    state.syncProfiles = response.profiles || [];
-    const resolution = resolveSyncProfile(state.syncProfiles, query, response.default_profile_id);
-    const { profile } = resolution;
-    if (!profile) throw new Error(`No server profile matches “${query}”.`);
-    await finishProfileSelection(profile);
-    if (resolution.fellBackToDefault) {
-      showNotice(`Profile “${query}” was not found. Switched to ${profile.name || "Default"}.`, "status");
+document.addEventListener("keydown", (event) => {
+  if (settingsRecordingAction) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (event.key === "Escape") {
+      settingsRecordingAction = null;
+      renderSettings();
+      return;
     }
-  } catch (error) {
-    status.textContent = error.message || "Could not switch profiles.";
-  } finally {
-    if ($("#profileSwitchDialog").open) updateProfileSwitchActions();
+    const keybind = keybindFromKeyboardEvent(event);
+    if (!keybind) return;
+    const duplicate = Object.entries(state.appPreferences.keybinds).find(([action, value]) => action !== settingsRecordingAction && value === keybind);
+    if (duplicate) {
+      showNotice(`${keybind} is already assigned to ${settingsKeybindActions[duplicate[0]].label}.`);
+      return;
+    }
+    state.appPreferences.keybinds[settingsRecordingAction] = keybind;
+    settingsRecordingAction = null;
+    persistInBackground({ refreshSidebar: false });
+    renderSettings();
+    return;
   }
-};
-$("#profileSwitchQuery").oninput = () => updateProfileSwitchActions();
+  if (event.repeat || event.isComposing) return;
+  const clipEditorOpen = $("#clipEditorDialog")?.open;
+  const isTextEntry = event.target instanceof Element
+    && Boolean(event.target.closest("input:not([type=range]), textarea, select, [contenteditable=true], [role=menu], [role=listbox]"));
+  if (clipEditorOpen && !isTextEntry) {
+    const keybind = keybindFromKeyboardEvent(event);
+    const action = keybind
+      ? Object.entries(state.appPreferences?.keybinds || {}).find(([, value]) => value === keybind)?.[0]
+      : null;
+    if (action && handleClipEditorKeybind(action)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+    return;
+  }
+  if (event.defaultPrevented || hasBlockingDialog()) return;
+  if (event.target instanceof Element && event.target.closest("input, textarea, select, button, [contenteditable=true], [role=menu], [role=listbox]")) return;
+  const keybind = keybindFromKeyboardEvent(event);
+  if (!keybind) return;
+  const action = Object.entries(state.appPreferences?.keybinds || {}).find(([, value]) => value === keybind)?.[0];
+  if (!action) return;
+  event.preventDefault();
+  if (action === "togglePlayback") toggle();
+  else if (action === "previousTrack") previous();
+  else if (action === "nextTrack") move(1);
+  else if (action === "volumeDown") setPlaybackVolume(state.volume - .05);
+  else if (action === "volumeUp") setPlaybackVolume(state.volume + .05);
+});
 document.addEventListener("click", (event) => {
   if (!$("#profileControl")?.contains(event.target)) closeProfileMenu();
 });
@@ -6980,7 +7769,7 @@ playerTrackContextTarget.onkeydown = (event) => {
   }
 };
 $("#shuffle").onclick = () => setShuffleEnabled(!shuffle);
-$("#repeat").onclick = () => { repeat = !repeat; state.repeat = repeat; persistInBackground(); updateChrome(); };
+$("#repeat").onclick = () => setRepeatEnabled(!repeat);
 function paintRange(input) {
   const minimum = Number(input.min) || 0;
   const maximum = Number(input.max) || 100;
@@ -6992,9 +7781,9 @@ function setPlaybackVolume(value, { shouldPersist = true } = {}) {
   state.volume = normalizedVolume(value);
   const gain = playbackGainForVolume(state.volume);
   audio.volume = gain;
-  installedVideoPlayer.volume = gain;
+  installedVideoPlayer.muted = true;
+  installedVideoPlayer.volume = 0;
   const percent = Math.round(state.volume * 100);
-  $("#volumeText").textContent = `${percent}%`;
   [$("#volume"), $("#fullPlayerVolume"), $("#installedVideoVolume")].forEach((input) => {
     input.value = String(state.volume);
     input.setAttribute("aria-valuetext", `${percent} percent`);
@@ -7042,21 +7831,25 @@ $("#fullPlayerSeek").oninput = (event) => {
 audio.ontimeupdate = () => {
   if (pendingRestorePosition !== null) return;
   if (finishClipPlaybackIfNeeded()) return;
-  const duration = currentPlaybackDuration();
-  $("#elapsed").textContent = formatTime(audio.currentTime);
-  $("#duration").textContent = formatTime(duration);
-  $("#seek").value = duration ? String(Math.round(audio.currentTime / duration * 1000)) : "0";
-  $("#seek").setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(duration)}`);
-  paintRange($("#seek"));
-  updateFullPlayerProgress();
+  updatePlaybackProgressUI();
   state.position = audio.currentTime;
   updateListeningSession();
   schedulePlaybackProgressSave();
+  synchronizeInstalledVideoWithAudio();
 };
-audio.onplay = () => { beginListeningSession(); updateChrome(); renderQueue(); };
+audio.onplay = () => {
+  beginListeningSession();
+  startPlaybackProgressAnimation();
+  synchronizeInstalledVideoWithAudio({ forceSeek: true });
+  updateChrome();
+  renderQueue();
+};
 audio.onpause = () => {
+  stopPlaybackProgressAnimation();
+  updatePlaybackProgressUI();
   updateListeningSession();
   scheduleListeningHistorySync();
+  synchronizeInstalledVideoWithAudio({ forceSeek: true });
   updateChrome();
   if (playbackProgressTimer) {
     clearTimeout(playbackProgressTimer);
@@ -7065,17 +7858,26 @@ audio.onpause = () => {
   persistInBackground({ refreshSidebar: false });
 };
 audio.onended = () => {
+  stopPlaybackProgressAnimation();
+  updatePlaybackProgressUI();
   updateListeningSession();
   scheduleListeningHistorySync();
   const range = activeClipRange();
-  if (repeat && range) {
-    audio.currentTime = range.startSeconds;
-    state.position = range.startSeconds;
+  if (repeat) {
+    finishListeningSessionForReplay();
+    const start = range?.startSeconds ?? 0;
+    audio.currentTime = start;
+    state.position = start;
+    if (installedVideoSession?.metadataReady) installedVideoPlayer.currentTime = start;
     void requestPlayback();
-  } else if (repeat) play(currentTrack(), null, { recordHistory: false });
-  else if (!move(1) && currentTrack()?.transientStream) releaseActiveServerStream({ stopPlayback: true });
+  } else if ($("#installedVideoDialog").open && installedVideoSession) {
+    advanceInstalledVideo(1);
+  } else if (!move(1) && currentTrack()?.transientStream) {
+    releaseActiveServerStream({ stopPlayback: true });
+  }
 };
 audio.onerror = () => {
+  stopPlaybackProgressAnimation();
   const streamFailed = Boolean(currentTrack()?.transientStream);
   if (streamFailed) releaseActiveServerStream({ stopPlayback: true });
   updateChrome();
@@ -7106,9 +7908,17 @@ audio.onloadedmetadata = async () => {
   if (track.id === currentID) updateFullPlayerProgress();
 };
 
+api.onDiscordPresenceStatus((status) => {
+  discordPresenceStatus = status || discordPresenceStatus;
+  const statusCopy = $("#settingsDiscordStatus");
+  if (statusCopy) statusCopy.textContent = discordPresenceStatus.message || "Show Resonance playback on your signed-in Discord profile.";
+});
+discordPresenceStatus = await api.getDiscordPresenceStatus().catch(() => discordPresenceStatus);
 const libraryLoad = await api.loadLibrary();
 const loadedState = libraryLoad && Object.hasOwn(libraryLoad, "state") ? libraryLoad.state : libraryLoad;
 state = normalizeState(loadedState);
+await api.updateAppPreferences(state.appPreferences).catch(() => undefined);
+scheduleDiscordPresenceUpdate();
 let closeFlushStarted = false;
 api.onPrepareToClose(async () => {
   if (closeFlushStarted) return;
@@ -7128,9 +7938,33 @@ api.onPrepareToClose(async () => {
     api.readyToClose();
   }
 });
-({ clientToken: serverToken = "", adminToken: serverAdminToken = "" } = await api.loadServerCredentials());
-serverToken = serverToken.trim();
-serverAdminToken = serverAdminToken.trim();
+accountSession = await api.loadAccountSession({ profileID: activeProfileID() }).catch(() => null);
+if (accountSession) {
+  state.serverURL = accountSession.baseURL;
+  serverToken = String(accountSession.accessToken || "").trim();
+  serverAdminToken = serverToken;
+  if (accountSession.profileID) {
+    state.syncProfiles = [{
+      id: accountSession.profileID,
+      name: safeAccountDisplayName(accountSession),
+      is_default: true,
+    }];
+    await activateProfile(accountSession.profileID, accountSession.baseURL);
+  }
+} else {
+  ({ clientToken: serverToken = "", adminToken: serverAdminToken = "" } = await api.loadServerCredentials());
+  serverToken = serverToken.trim();
+  serverAdminToken = serverAdminToken.trim();
+}
+api.onAccountSession(({ session, error }) => {
+  void applyAccountSession(session, error).then(() => {
+    if (!session || !state.serverURL) return;
+    return refreshClientConfig({ force: true })
+      .then(() => refreshProfiles())
+      .then(() => serverAction("catalog"))
+      .catch((failure) => { serverConnectionText = failure.message || "Connection failed"; });
+  });
+});
 const localImportCapabilities = await api.localImportCapabilities().catch(() => ({ enabled: false }));
 localImportAvailable = Boolean(localImportCapabilities?.enabled);
 shuffle = Boolean(state.shuffle); repeat = Boolean(state.repeat);

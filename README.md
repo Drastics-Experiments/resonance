@@ -15,6 +15,47 @@ Resonance is a cross-platform music player. Platform implementations and their i
 | `installers/windows/` | Windows NSIS installer output and release documentation |
 | `installers/macos/` | macOS package installer, bootstrap installer, and release assets |
 
+## Git worktrees and development instances
+
+This directory is the primary Git checkout. Additional agent checkouts should be
+created with `git worktree`; each one remains attached to the same GitHub
+repository while keeping its branch and working files independent.
+
+The launch and test actions in `t3.json` are worktree-aware:
+
+```text
+Launch macOS Preview
+Launch Windows Preview
+Launch iOS Simulator
+Launch Android Emulator
+Test macOS
+Test Windows
+Test iOS
+Test Android
+Show Resonance Instance Names
+```
+
+Each action verifies that it runs at a Git worktree root, derives a stable
+identity from that root's canonical path, and includes the readable directory
+name plus the first 12 digits of the path's SHA-256 hash in every instance name.
+The same worktree path always produces the same names and selectors; moving the
+worktree deliberately gives it a new identity. Runtime paths, desktop bundle
+IDs and state, mobile app IDs, simulator devices, Android emulator IDs, test
+terminal titles, and test parent-process names are all scoped to that identity.
+Parallel agents can therefore identify and control their own Resonance instance
+without replacing or terminating another worktree's instance.
+
+Run `Show Resonance Instance Names` from T3 to print the complete
+credential-free selector registry. It is also written to the deterministic path
+`/private/tmp/resonance-dev-launchers-<uid>/<worktree-id>/instances.json` and
+contains the exact app or window-owner name, bundle/application ID, runtime path,
+simulator or emulator name, and test process name for that worktree. Agents
+should resolve targets through this registry instead of guessing a PID, dynamic
+Simulator UUID, emulator serial, or generic `Electron` process.
+
+`Test iOS` uses its own `Resonance iOS Tests <worktree-id>` Simulator, so a test
+run cannot replace the normal `Launch iOS Simulator` Preview instance.
+
 ## Windows development
 
 ```powershell
@@ -57,7 +98,7 @@ Release PRs remain the publication approval boundary. Trusted `main` builds warm
 ```bash
 cd mac
 swift test
-swift run LikedSongsFocus
+swift run Resonance
 ```
 
 Build the packaged application, `/Applications` installer, checksums, and updater manifest with:

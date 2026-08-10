@@ -95,6 +95,7 @@ data class LinkImportDownload(
     val metadata: LinkImportTrack,
     val artwork: ByteArray?,
     val durationMs: Long,
+    val downloadSourceURL: String,
     val sourceSHA256: String,
     val contentSHA256: String,
 )
@@ -105,6 +106,12 @@ class LinkImportException(
     val code: String,
     override val message: String,
 ) : Exception(message)
+
+internal object LinkImportSearchRequestPolicy {
+    const val USER_AGENT =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+}
 
 class LinkImportService(context: Context) {
     private data class SpotifyPlaylistResolution(
@@ -404,6 +411,7 @@ class LinkImportService(context: Context) {
                     ),
                     artwork,
                     ((metadata.durationSeconds ?: resolved.track.durationSeconds) ?: 0).coerceAtLeast(0) * 1_000L,
+                    resolved.url.toString(),
                     hash,
                     hash,
                 )
@@ -426,6 +434,7 @@ class LinkImportService(context: Context) {
                 ),
                 artwork,
                 ((metadata.durationSeconds ?: resolved.candidate.durationSeconds) ?: 0).coerceAtLeast(0) * 1_000L,
+                resolved.streamURL.toString(),
                 hash,
                 hash,
             )
@@ -746,7 +755,11 @@ class LinkImportService(context: Context) {
         val connection = open(
             url,
             "GET",
-            mapOf("Accept" to accept, "Accept-Language" to "en-US,en;q=0.8", "User-Agent" to webAgent),
+            mapOf(
+                "Accept" to accept,
+                "Accept-Language" to "en-US,en;q=0.8",
+                "User-Agent" to LinkImportSearchRequestPolicy.USER_AGENT,
+            ),
         )
         try {
             val status = connection.responseCode

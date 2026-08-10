@@ -191,7 +191,7 @@ private func writeIcon(to outputURL: URL) throws {
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
     ) else {
         throw NSError(
-            domain: "LikedSongsFocus.IconRenderer",
+            domain: "Resonance.IconRenderer",
             code: 1,
             userInfo: [NSLocalizedDescriptionKey: "Could not create a bitmap context"]
         )
@@ -201,7 +201,7 @@ private func writeIcon(to outputURL: URL) throws {
 
     guard let image = context.makeImage() else {
         throw NSError(
-            domain: "LikedSongsFocus.IconRenderer",
+            domain: "Resonance.IconRenderer",
             code: 2,
             userInfo: [NSLocalizedDescriptionKey: "Could not create the rendered image"]
         )
@@ -214,7 +214,7 @@ private func writeIcon(to outputURL: URL) throws {
         properties: [.compressionFactor: 1]
     ) else {
         throw NSError(
-            domain: "LikedSongsFocus.IconRenderer",
+            domain: "Resonance.IconRenderer",
             code: 3,
             userInfo: [NSLocalizedDescriptionKey: "Could not encode the icon as PNG"]
         )

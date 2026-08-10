@@ -77,24 +77,24 @@ function check({ quiet = false } = {}) {
   );
   expectValues(
     "iOS MARKETING_VERSION",
-    matches("ios/LikedSongsMobile.xcodeproj/project.pbxproj", /\bMARKETING_VERSION\s*=\s*([^;]+);/g),
+    matches("ios/Resonance.xcodeproj/project.pbxproj", /\bMARKETING_VERSION\s*=\s*([^;]+);/g),
     version,
     2,
   );
   expectValues(
     "iOS CURRENT_PROJECT_VERSION",
-    matches("ios/LikedSongsMobile.xcodeproj/project.pbxproj", /\bCURRENT_PROJECT_VERSION\s*=\s*([^;]+);/g),
+    matches("ios/Resonance.xcodeproj/project.pbxproj", /\bCURRENT_PROJECT_VERSION\s*=\s*([^;]+);/g),
     build,
     2,
   );
   expectValues(
     "iOS Info.plist version",
-    matches("ios/LikedSongsMobile/Info.plist", /<key>CFBundleShortVersionString<\/key><string>([^<]+)<\/string>/g),
+    matches("ios/Resonance/Info.plist", /<key>CFBundleShortVersionString<\/key><string>([^<]+)<\/string>/g),
     version,
   );
   expectValues(
     "iOS Info.plist build",
-    matches("ios/LikedSongsMobile/Info.plist", /<key>CFBundleVersion<\/key><string>([^<]+)<\/string>/g),
+    matches("ios/Resonance/Info.plist", /<key>CFBundleVersion<\/key><string>([^<]+)<\/string>/g),
     build,
   );
   expectValues(
@@ -152,24 +152,24 @@ function setVersion(version, buildText) {
     (_match, prefix, suffix) => `${prefix}${build}${suffix}`,
   );
   replace(
-    "ios/LikedSongsMobile.xcodeproj/project.pbxproj",
+    "ios/Resonance.xcodeproj/project.pbxproj",
     /\bMARKETING_VERSION\s*=\s*[^;]+;/g,
     `MARKETING_VERSION = ${version};`,
     2,
   );
   replace(
-    "ios/LikedSongsMobile.xcodeproj/project.pbxproj",
+    "ios/Resonance.xcodeproj/project.pbxproj",
     /\bCURRENT_PROJECT_VERSION\s*=\s*[^;]+;/g,
     `CURRENT_PROJECT_VERSION = ${build};`,
     2,
   );
   replace(
-    "ios/LikedSongsMobile/Info.plist",
+    "ios/Resonance/Info.plist",
     /(<key>CFBundleShortVersionString<\/key><string>)[^<]+(<\/string>)/,
     (_match, prefix, suffix) => `${prefix}${version}${suffix}`,
   );
   replace(
-    "ios/LikedSongsMobile/Info.plist",
+    "ios/Resonance/Info.plist",
     /(<key>CFBundleVersion<\/key><string>)[^<]+(<\/string>)/,
     (_match, prefix, suffix) => `${prefix}${build}${suffix}`,
   );

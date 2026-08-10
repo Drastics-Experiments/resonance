@@ -116,7 +116,7 @@ private fun PlaylistCollectionScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Artwork(null, Modifier.size(54.dp))
+                    PlaylistArtwork(playlist, state, Modifier.size(54.dp))
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text(playlist.name, fontWeight = FontWeight.SemiBold)
                         Text(

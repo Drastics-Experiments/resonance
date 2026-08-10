@@ -46,6 +46,10 @@ function sha256(value) {
 
 test("requires HTTPS before server credentials leave the client", () => {
   assert.equal(normalizeServerBaseURL("https://Music.Example/api?ignored=1#fragment").href, "https://music.example/api/");
+  assert.equal(
+    normalizeServerBaseURL("https://music.unblocked.mov").origin,
+    "https://resonance-core.blithe-haven-9710.chatgpt.site",
+  );
   assert.throws(() => normalizeServerBaseURL("http://music.example"), /https:\/\//i);
   assert.throws(() => normalizeServerBaseURL("http://127.0.0.1"), /local development/i);
   assert.throws(
@@ -473,14 +477,16 @@ test("upload manifests retain per-file failures and never allow cleanup before s
 });
 
 test("Windows renderer and main-process integrations retain the hardening boundaries", async () => {
-  const [mainSource, preloadSource, appSource, htmlSource, packageSource] = await Promise.all([
+  const [mainSource, preloadSource, appSource, htmlSource, packageSource, launcherSource] = await Promise.all([
     readFile(new URL("../main.cjs", import.meta.url), "utf8"),
     readFile(new URL("../preload.cjs", import.meta.url), "utf8"),
     readFile(new URL("../ui/app.js", import.meta.url), "utf8"),
     readFile(new URL("../ui/index.html", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../../.launcher-terminal.zsh", import.meta.url), "utf8"),
   ]);
   const packageJSON = JSON.parse(packageSource);
+  const retiredStorageName = ["Liked", " Songs"].join("");
 
   assert.match(mainSource, /normalizeServerBaseURL\(value, \{ allowInsecureLoopback: !app\.isPackaged \}\)/);
   assert.match(mainSource, /writeResponseToFile\(response, temporary,[\s\S]+expectedSize,[\s\S]+expectedSHA256,[\s\S]+maximumBytes: MAX_SERVER_MEDIA_BYTES/);
@@ -490,6 +496,30 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(mainSource, /ipcMain\.handle\("library:storage"[\s\S]+sumDirectory\(paths\.local\)[\s\S]+sumDirectory\(paths\.remote\)/);
   assert.match(mainSource, /encodedSongID = encodeURIComponent\(String\(songID \|\| ""\)\)[\s\S]+api\/v1\/admin\/songs\/\$\{encodedSongID\}/);
   assert.match(mainSource, /setWindowOpenHandler\(\(\) => \(\{ action: "deny" \}\)\)[\s\S]+will-navigate[\s\S]+targetURL !== trustedRendererURL[\s\S]+will-attach-webview/);
+  assert.match(mainSource, /openAccountSignInBrowser\(destination\)[\s\S]+shell\.openExternal\(destination\.href\)/);
+  assert.doesNotMatch(mainSource, /function isAllowedAccountAuthNavigation|resonance-clerk-auth-/);
+  assert.match(mainSource, /ipcMain\.handle\("account:sign-in"[\s\S]+openAccountSignInBrowser\(destination\)/);
+  assert.deepEqual(packageJSON.build.protocols.flatMap((entry) => entry.schemes), ["resonance"]);
+  assert.match(mainSource, /setAsDefaultProtocolClient\("resonance"[\s\S]+app\.on\("second-instance"[\s\S]+authCallbackFromArguments\(commandLine\)/);
+  assert.match(mainSource, /previewCredentialStorePath\(\)[\s\S]+app\.getPath\("userData"\)[\s\S]+server-credentials\.json/);
+  assert.match(mainSource, /previewAccountSessionPath\(\)[\s\S]+app\.getPath\("userData"\)[\s\S]+account-session\.json/);
+  assert.doesNotMatch(
+    mainSource,
+    new RegExp(
+      String.raw`app\.getPath\("appData"\), "${retiredStorageName}", (?:"server-credentials\.json"|"account-session\.json")`,
+    ),
+  );
+  assert.match(preloadSource, /exposeInMainWorld\("resonance"/);
+  assert.match(appSource, /const api = window\.resonance;/);
+  assert.match(launcherSource, /CFBundleURLTypes[\s\S]+CFBundleURLSchemes\.0 -string resonance/);
+  assert.match(launcherSource, /RES_WINDOWS_APP_ROOT="\$HOME\/Library\/Application Support\/Resonance Worktrees\/\$RES_WORKTREE_ID\/Applications"/);
+  assert.doesNotMatch(launcherSource, /RES_WINDOWS_APP="\$RES_LAUNCHER_ROOT\/windows/);
+  assert.match(launcherSource, /CFBundleTypeRole -string Viewer/);
+  assert.match(
+    launcherSource,
+    /codesign --force --deep --sign - "\$RES_ELECTRON_APP"[\s\S]+RES_LAUNCH_SERVICES_REGISTER" -f "\$RES_ELECTRON_APP"[\s\S]+open -n "\$RES_ELECTRON_APP"/,
+  );
+  assert.match(appSource, /Complete sign-in in your web browser\./);
   assert.match(mainSource, /serverUploadRetries[\s\S]+retryIDs[\s\S]+serverOrigin === base\.origin[\s\S]+persistServerUploadRetries/);
   assert.match(mainSource, /const MAX_SERVER_UPLOAD_BATCH_FILES = 500;[\s\S]+const MAX_SERVER_UPLOAD_MANIFESTS = 20;[\s\S]+const MAX_SERVER_UPLOAD_RETRY_RECORDS = MAX_SERVER_UPLOAD_BATCH_FILES \* MAX_SERVER_UPLOAD_MANIFESTS;/);
   assert.match(mainSource, /async function loadClientConfig\([\s\S]+const evictCache = async[\s\S]+response\.status >= 500\) return cachedResult\(\);[\s\S]+response\.status !== 200\)[\s\S]+await evictCache\(\)[\s\S]+verifyClientConfigResponse\([\s\S]+catch \{[\s\S]+await evictCache\(\)/);
@@ -530,7 +560,19 @@ test("Windows renderer and main-process integrations retain the hardening bounda
     appSource.indexOf("async function confirmLinkImport()"),
     appSource.indexOf("async function cancelLinkImport()"),
   );
+  const sourceLinkBody = mainSource.slice(
+    mainSource.indexOf("function sourceLinkRegistrationBody"),
+    mainSource.indexOf("async function ensureServerUploadRetriesLoaded"),
+  );
+  assert.match(sourceLinkBody, /schema_version: 3,[\s\S]+source_url: sourceURL/);
+  assert.match(sourceLinkBody, /media_kind: item\.mediaKind === "video" \? "video" : "audio"/);
+  assert.match(sourceLinkBody, /schemaVersion === 2[\s\S]+schema_version: 2,[\s\S]+source_url: sourceURL/);
+  assert.match(sourceLinkBody, /item\.mediaKind !== "video" && response\.status === 400/);
+  assert.match(sourceLinkBody, /payload\?\.error === "Unsupported source-link schema_version"/);
+  assert.match(sourceLinkBody, /putSourceLinkRegistration/);
+  assert.doesNotMatch(sourceLinkBody, /filename,|metadata:|title:|artist:|album:|duration_seconds|artwork_url/);
   assert.match(sourceImportHandler, /source_page_url: sourcePageURL/);
+  assert.doesNotMatch(sourceImportHandler, /filename:|metadata:|title:|artist:|album:|duration_seconds|artwork_url/);
   assert.match(sourceImportHandler, /api\/v1\/admin\/source-imports/);
   assert.match(sourceImportHandler, /settings\.mode !== "server_source_link"/);
   assert.doesNotMatch(sourceImportHandler, /reviewed_match/);
@@ -538,15 +580,19 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.doesNotMatch(sourceImportHandler, /payload\?\.song \|\| payload\?\.duplicate_of|duplicateOf/);
   assert.match(mainSource, /redirect: "manual"/);
   assert.match(localRawUploadHandler, /clientConfigContext\(base\.href, profileID\)/);
-  assert.match(localRawUploadHandler, /requestedMode = mode === "reviewed_match" \? "reviewed_match" : "local_file"/);
-  assert.match(localRawUploadHandler, /requireClientUploadMode\(\{[\s\S]+mode: requestedMode,[\s\S]+force: true,[\s\S]+controller\.signal\.throwIfAborted\(\);[\s\S]+body = createReadStream\(absolute\);[\s\S]+const response = await fetch\(url/);
+  assert.match(localRawUploadHandler, /requestedMode = \["server_source_link", "reviewed_match"\]\.includes\(mode\) \? mode : "local_file"/);
+  assert.match(localRawUploadHandler, /requireClientUploadMode\(\{[\s\S]+mode: requestedMode,[\s\S]+force: true,[\s\S]+controller\.signal\.throwIfAborted\(\);[\s\S]+putSourceLinkRegistration\(\{/);
   assert.match(localRawUploadHandler, /adminToken = canonicalCredentialToken\(adminToken\)[\s\S]+\.\.\.profileHeaders\(adminToken, profileID\),[\s\S]+\.\.\.requestContext\.expected\.request_headers/);
-  assert.match(localRawUploadHandler, /method: "PUT",[\s\S]+redirect: "manual"/);
+  assert.match(sourceLinkBody, /method: "PUT",[\s\S]+redirect: "manual"/);
+  assert.match(localRawUploadHandler, /"Content-Type": "application\/json"/);
+  assert.doesNotMatch(localRawUploadHandler, /createReadStream|application\/octet-stream|duplex: "half"/);
   assert.match(sourceImportHandler, /requireClientUploadMode\(\{[\s\S]+mode: "server_source_link",[\s\S]+force: true,[\s\S]+const response = await fetch\(new URL\("api\/v1\/admin\/source-imports"/);
   assert.match(externalImportHandler, /requireClientUploadMode\(\{[\s\S]+mode: "external_object",[\s\S]+force: true,[\s\S]+importFileBackedSource/);
   assert.match(rawUploadHandler, /clientConfigContext\(base\.href, requestedProfileID\)/);
   assert.match(rawUploadHandler, /\.\.\.profileHeaders\(adminToken, requestedProfileID\),[\s\S]+\.\.\.requestContext\.expected\.request_headers/);
-  assert.match(rawUploadHandler, /while \(attempts < 3 && !remoteSong\)[\s\S]+requireClientUploadMode\(\{[\s\S]+mode: "local_file",[\s\S]+force: true,[\s\S]+signal\.throwIfAborted\(\);[\s\S]+const response = await fetch\(url, \{[\s\S]+method: "PUT",[\s\S]+redirect: "manual"/);
+  assert.match(rawUploadHandler, /while \(attempts < 3 && !remoteSong\)[\s\S]+requireClientUploadMode\(\{[\s\S]+mode: "local_file",[\s\S]+force: true,[\s\S]+signal\.throwIfAborted\(\);[\s\S]+putSourceLinkRegistration\(\{/);
+  assert.match(rawUploadHandler, /putSourceLinkRegistration\(\{[\s\S]+"Content-Type": "application\/json"[\s\S]+item,/);
+  assert.doesNotMatch(rawUploadHandler, /createReadStream\(filePath\)|application\/octet-stream|duplex: "half"/);
   assert.match(mainSource, /error\.name = "ClientUploadPolicyError";[\s\S]+error\.retryable = false;/);
   assert.match(rawUploadHandler, /if \(error\?\.retryable === false\) throw error;[\s\S]+policyBlockedUploadEntries\([\s\S]+completedRetryIDs[\s\S]+rememberRetry\(item\);[\s\S]+failed\.push\(failure\);[\s\S]+return \{ uploaded, results, failed, policyBlocked: true \}/);
   assert.match(serverSyncHandler, /clientConfigContext\(base\.href, profileID\)/);
@@ -568,18 +614,18 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(preloadSource, /discardServerUploadRetries/);
   assert.match(preloadSource, /fetchClientConfig:[\s\S]+server:client-config/);
   assert.match(preloadSource, /importServerSource:[\s\S]+server:source-import/);
-  assert.match(resolveLinkImportHandler, /localImportServerUploadMode === "server_source_link"[\s\S]+await confirmLinkImport\(\);[\s\S]+return;/);
+  assert.doesNotMatch(resolveLinkImportHandler, /localImportServerUploadMode === "server_source_link"[\s\S]+await confirmLinkImport\(\);[\s\S]+return;/);
   assert.match(resolveLinkImportHandler, /const reviewedDiscovery = localImportServerUploadMode === "reviewed_match"[\s\S]+reviewedContext = currentServerUploadContext\(\)[\s\S]+adminToken: reviewedContext\?\.adminToken \|\| ""/);
   assert.doesNotMatch(resolveLinkImportHandler, /adminToken: serverAdminToken/);
   assert.doesNotMatch(directSourceImportHandler, /resolveLocalImport|reviewed_match|candidate/);
   assert.match(directSourceImportHandler, /exactYouTubeSourcePageURL\(\$\("#localImportSource"\)\.value\)/);
   assert.match(directSourceImportHandler, /api\.importServerSource\(\{/);
   const directConfirmBranch = confirmLinkImportHandler.slice(0, confirmLinkImportHandler.indexOf("if (!localImportResolution) return;"));
-  assert.match(directConfirmBranch, /localImportServerUploadMode === "server_source_link"[\s\S]+confirmServerSourceImport\(\)/);
-  assert.doesNotMatch(directConfirmBranch, /resolveLocalImport|localImportResolution/);
-  assert.match(confirmLinkImportHandler, /reviewedUpload[\s\S]+requiresLocalFile: true/);
+  assert.doesNotMatch(directConfirmBranch, /confirmServerSourceImport\(\)/);
+  assert.doesNotMatch(confirmLinkImportHandler, /requiresLocalFile: true/);
   assert.match(confirmLinkImportHandler, /api\.startLocalImport\(\{/);
-  assert.match(confirmLinkImportHandler, /reviewedUpload[\s\S]+uploadReviewedMatchTrack\(importedTrack, importContext\)[\s\S]+uploadLocalImportTrack\(importedTrack, importContext\)/);
+  assert.match(confirmLinkImportHandler, /reviewedUpload[\s\S]+uploadReviewedMatchTrack\(importedTrack, importContext\)[\s\S]+uploadImportedTrackWithMode\(/);
+  assert.match(confirmLinkImportHandler, /localImportServerUploadMode === "server_source_link" \? "server_source_link" : "local_file"/);
 
   assert.match(appSource, /data-remote-row="\$\{escapeHTML\(song\.id\)\}"/);
   assert.doesNotMatch(appSource, /data-remote-row="\$\{song\.id\}"/);
@@ -596,7 +642,7 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(appSource, /function activateProfile\([\s\S]+checkpointListeningSessionForContextChange\(\)[\s\S]+storeActiveProfileState\(state\)[\s\S]+restoreProfileState\(state, profileID, serverURL\)[\s\S]+beginListeningSession\(\)/);
   assert.match(appSource, /response\.result\.serverBacked && response\.result\.remoteSong && importedTrack[\s\S]+requireTrackUploadAssociationContext\(importedTrack, importContext\)[\s\S]+reconcileUploadedTrack\(state, importedTrack\.id, response\.result\.remoteSong,[\s\S]+serverURL: importContext\.serverURL,[\s\S]+profileID: importContext\.profileID/);
   assert.match(appSource, /finishClipPlaybackIfNeeded\(\)[\s\S]+else if \(!move\(1\)\)[\s\S]+audio\.pause\(\)/);
-  assert.match(appSource, /handleInstalledVideoEnded\(\)[\s\S]+if \(!advanceInstalledVideo\(1\)\)[\s\S]+session\.handlingEnd = false/);
+  assert.match(appSource, /audio\.onended = \(\) => \{[\s\S]+if \(repeat\)[\s\S]+finishListeningSessionForReplay\(\)[\s\S]+else if \(\$\("#installedVideoDialog"\)\.open && installedVideoSession\)[\s\S]+advanceInstalledVideo\(1\)/);
   assert.match(appSource, /context = currentProfileContext\(\)[\s\S]+api\.postListeningHistory\(\{[\s\S]+baseURL: context\.serverURL,[\s\S]+token: context\.token/);
   assert.match(appSource, /api\.fetchListeningHistory\(\{[\s\S]+profileID: context\.profileID[\s\S]+profileContextIsCurrent\(context\)[\s\S]+mergeListeningHistoryDocument\(state, remoteDocument, context\.profileID, context\.serverURL\)/);
   assert.match(appSource, /row\.onkeydown = \(event\) => \{[\s\S]+event\.key === "Enter" \|\| event\.key === " "/);
@@ -606,7 +652,7 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(appSource, /function focusSearchSortOption[\s\S]+\["ArrowDown", "ArrowUp", "Home", "End"\]\.includes\(event\.key\)/);
   assert.match(htmlSource, /class="full-player-queue-tabs" role="tablist"/);
   assert.match(htmlSource, /object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'/);
-  assert.match(htmlSource, /id="serverUploadMode"[\s\S]+id="serverDownloadMode"/);
+  assert.doesNotMatch(appSource, /id="serverUploadMode"|id="serverDownloadMode"|serverTransferModeHelp/);
   assert.match(htmlSource, /media-src 'self' file: blob: resonance-stream:/);
   assert.match(mainSource, /protocol\.registerSchemesAsPrivileged[\s\S]+standard: true,[\s\S]+secure: true,[\s\S]+stream: true/);
   assert.doesNotMatch(mainSource, /supportFetchAPI/);

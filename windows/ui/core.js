@@ -1,9 +1,12 @@
+const LEGACY_PRODUCTION_ORIGIN = "https://music.unblocked.mov";
+const PRODUCTION_ORIGIN = "https://resonance-core.blithe-haven-9710.chatgpt.site";
+
 export function createEmptyState() {
   return {
     tracks: [],
     playlists: [{ id: "liked", name: "Liked Songs", trackIDs: [], isSystem: true }],
     favorites: [],
-    serverURL: "https://music.unblocked.mov",
+    serverURL: "https://resonance-core.blithe-haven-9710.chatgpt.site",
     volume: 0.78,
     playbackRate: 1,
     shuffle: false,
@@ -28,8 +31,53 @@ export function createEmptyState() {
     dirtyClipRangeKeys: [],
     deletedClipRangeKeys: [],
     listeningHistory: [],
+    completedMigrations: [],
     serverUploadManifests: [],
     serverTransferPreferences: {},
+    appPreferences: {
+      runInBackground: false,
+      discordRichPresence: false,
+      keybinds: {
+        togglePlayback: "Space",
+        previousTrack: "Ctrl+ArrowLeft",
+        nextTrack: "Ctrl+ArrowRight",
+        volumeDown: "Ctrl+ArrowDown",
+        volumeUp: "Ctrl+ArrowUp",
+      },
+    },
+  };
+}
+
+export function playlistArtworkTrackIDs(playlist) {
+  if (!playlist || playlist.isSystem || !Array.isArray(playlist.trackIDs)) return [];
+  return playlist.trackIDs.slice(0, 4);
+}
+
+const DEFAULT_KEYBINDS = Object.freeze({
+  togglePlayback: "Space",
+  previousTrack: "Ctrl+ArrowLeft",
+  nextTrack: "Ctrl+ArrowRight",
+  volumeDown: "Ctrl+ArrowDown",
+  volumeUp: "Ctrl+ArrowUp",
+});
+
+function normalizedKeybind(value, fallback) {
+  const candidate = typeof value === "string" ? value.trim().slice(0, 80) : "";
+  return candidate || fallback;
+}
+
+export function normalizedAppPreferences(value) {
+  const preferences = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const keybinds = preferences.keybinds && typeof preferences.keybinds === "object" && !Array.isArray(preferences.keybinds)
+    ? preferences.keybinds
+    : {};
+  return {
+    runInBackground: Boolean(preferences.runInBackground),
+    discordRichPresence: Boolean(preferences.discordRichPresence),
+    keybinds: Object.fromEntries(Object.entries(DEFAULT_KEYBINDS).map(([action, fallback]) => [
+      action,
+      normalizedKeybind(keybinds[action], fallback),
+    ])),
   };
 }
 
@@ -194,13 +242,15 @@ export function setServerTransferPreference(state, { serverURL, profileID, uploa
   return resolveServerTransferModes({ state, serverURL, profileID, config, now });
 }
 
-export function titleMarqueeMetrics(contentWidth, availableWidth) {
+export function titleMarqueeMetrics(contentWidth, availableWidth, loopSpacing = 56) {
   const content = Number.isFinite(Number(contentWidth)) ? Math.max(Number(contentWidth), 0) : 0;
   const available = Number.isFinite(Number(availableWidth)) ? Math.max(Number(availableWidth), 0) : 0;
   const travel = Math.max(content - available, 0);
+  const cycleDistance = travel > 0 ? content + Math.max(Number(loopSpacing) || 0, 0) : 0;
   return {
     travel,
-    durationSeconds: travel > 0 ? Math.max(8, travel / 28) : 0,
+    cycleDistance,
+    durationSeconds: cycleDistance > 0 ? Math.max(8, cycleDistance / 28) : 0,
   };
 }
 
@@ -212,6 +262,7 @@ export function isInstalledVideoTrack(track) {
 }
 
 export function serverSongRequiresDownload(song) {
+  if (song?.media_kind === "video" || song?.mediaKind === "video") return true;
   const contentType = String(song?.content_type || song?.contentType || "")
     .split(";", 1)[0]
     .trim()
@@ -219,6 +270,31 @@ export function serverSongRequiresDownload(song) {
   if (contentType.startsWith("video/")) return true;
   const filename = String(song?.filename || song?.name || "").split(/[?#]/, 1)[0];
   return /\.(?:avi|mkv|mov|mp4|m4v|webm)$/i.test(filename);
+}
+
+export function serverSourceNeedsOriginalPage(sourceURL) {
+  try {
+    const url = new URL(String(sourceURL || ""));
+    const host = url.hostname.toLocaleLowerCase();
+    return host === "googlevideo.com"
+      || host.endsWith(".googlevideo.com")
+      || url.pathname.split("/").pop()?.toLocaleLowerCase() === "videoplayback";
+  } catch {
+    return false;
+  }
+}
+
+export function serverSourceDisplayFallback(sourceURL, { failed = false } = {}) {
+  if (serverSourceNeedsOriginalPage(sourceURL)) {
+    return {
+      title: "Original source link needed",
+      artist: "Re-import on the original device",
+      album: "Legacy expired link",
+    };
+  }
+  return failed
+    ? { title: "Metadata unavailable", artist: "Refresh to retry", album: "Link only" }
+    : { title: "Resolving metadata…", artist: "On-device lookup", album: "Link only" };
 }
 
 export function localImportOperationFingerprint({ source, mediaKind, selection = [], uploadRequested = false } = {}) {
@@ -348,10 +424,30 @@ function normalizedPlaylistID(value) {
 
 function normalizedServerOrigin(value) {
   try {
-    return new URL(String(value || "").trim()).origin;
+    const origin = new URL(String(value || "").trim()).origin;
+    return origin === LEGACY_PRODUCTION_ORIGIN ? PRODUCTION_ORIGIN : origin;
   } catch {
     return "";
   }
+}
+
+function canonicalServerURL(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    if (url.origin === LEGACY_PRODUCTION_ORIGIN && url.pathname === "/" && !url.search && !url.hash) {
+      return PRODUCTION_ORIGIN;
+    }
+  } catch {}
+  return value;
+}
+
+function canonicalProfileStateKey(value) {
+  const key = String(value || "");
+  const marker = "#profile=";
+  const boundary = key.indexOf(marker);
+  if (boundary < 0) return normalizedServerOrigin(key) || key;
+  const origin = normalizedServerOrigin(key.slice(0, boundary));
+  return origin ? origin + key.slice(boundary) : key;
 }
 
 function normalizedServerSongIdentityText(value) {
@@ -487,19 +583,37 @@ function listeningHistoryTrackSnapshot(state, entry) {
   const profileID = entry?.profileID || "default";
   const remoteID = optionalHistoryText(entry?.remoteID, 128);
   const activeTracks = tracksForActiveProfile(state);
-  const track = activeTracks.find((item) => item?.id === entry?.trackID)
+  const identityTrack = activeTracks.find((item) => item?.id === entry?.trackID)
     || (remoteID ? activeTracks.find((item) =>
       item?.remoteID === remoteID && (item.syncProfileID || "default") === profileID) : null);
+  const localMetadataMatches = identityTrack ? [] : activeTracks.filter((item) =>
+    !item?.remoteID
+      && (item?.filePath || item?.fileUrl)
+      && serverSongMetadataMatches(item, {
+        title: entry?.title,
+        artist: entry?.artist,
+        duration: entry?.duration,
+      }));
+  const track = identityTrack || (localMetadataMatches.length === 1 ? localMetadataMatches[0] : null);
+  const trackDuration = normalizedHistoryDuration(track?.duration);
+  const entryDuration = normalizedHistoryDuration(entry?.duration);
   return {
     id: track?.id || entry?.trackID,
     remoteID: track?.remoteID || remoteID,
     title: optionalHistoryText(track?.title) || optionalHistoryText(entry?.title) || "Unknown song",
     artist: optionalHistoryText(track?.artist) || optionalHistoryText(entry?.artist) || "Unknown artist",
     album: optionalHistoryText(track?.album) || optionalHistoryText(entry?.album) || "Unknown Album",
-    duration: normalizedHistoryDuration(track?.duration) ?? normalizedHistoryDuration(entry?.duration) ?? 0,
+    duration: trackDuration && trackDuration > 0 ? trackDuration : entryDuration ?? 0,
     artwork: track?.artwork || null,
     fileUrl: track?.fileUrl || null,
   };
+}
+
+export function listeningHistoryEntryQualifiesAsPlay(state, entry) {
+  const listenedSeconds = Number(entry?.listenedSeconds);
+  if (!Number.isFinite(listenedSeconds) || listenedSeconds <= 0) return false;
+  const duration = listeningHistoryTrackSnapshot(state, entry).duration;
+  return Number.isFinite(duration) && duration > 0 && listenedSeconds > duration * 0.1;
 }
 
 export function clipRangeKey(track) {
@@ -571,7 +685,9 @@ function normalizedProfileState(value = {}) {
     knownRemotePlaylistIDs: unique(Array.isArray(value.knownRemotePlaylistIDs) ? value.knownRemotePlaylistIDs.map(normalizedPlaylistID) : []),
     dirtyPlaylistIDs: unique(Array.isArray(value.dirtyPlaylistIDs) ? value.dirtyPlaylistIDs.map(normalizedPlaylistID) : []),
     deletedPlaylistIDs: unique(Array.isArray(value.deletedPlaylistIDs) ? value.deletedPlaylistIDs.map(normalizedPlaylistID) : []),
-    playlistSyncServerURL: typeof value.playlistSyncServerURL === "string" ? value.playlistSyncServerURL : null,
+    playlistSyncServerURL: typeof value.playlistSyncServerURL === "string"
+      ? canonicalProfileStateKey(value.playlistSyncServerURL)
+      : null,
     remoteLikedSongIDs: unique(Array.isArray(value.remoteLikedSongIDs) ? value.remoteLikedSongIDs.filter((id) => typeof id === "string" && id) : []),
     dirtyRemoteLikeSongIDs: unique(Array.isArray(value.dirtyRemoteLikeSongIDs) ? value.dirtyRemoteLikeSongIDs.filter((id) => typeof id === "string" && id) : []),
     likesDirty: Boolean(value.likesDirty),
@@ -625,6 +741,49 @@ export function restoreProfileState(state, profileID, serverURL = state.serverUR
   return state;
 }
 
+export function migrateProfileContext(state, serverURL, migratedProfileID, accountProfileID) {
+  const oldProfileID = String(migratedProfileID || "").trim();
+  const nextProfileID = String(accountProfileID || "").trim();
+  const migrationOrigin = normalizedServerOrigin(serverURL);
+  if (!oldProfileID || !nextProfileID || oldProfileID === nextProfileID || !migrationOrigin) return false;
+  if (normalizedServerOrigin(state.serverURL) !== migrationOrigin || state.syncProfileID !== oldProfileID) return false;
+
+  storeActiveProfileState(state);
+  const oldKey = profileStateKey(serverURL, oldProfileID);
+  const nextKey = profileStateKey(serverURL, nextProfileID);
+  const snapshot = normalizedProfileState(state.profileStates[oldKey]);
+  snapshot.playlistSyncServerURL = snapshot.playlistSyncServerURL === oldKey
+    ? nextKey
+    : snapshot.playlistSyncServerURL;
+  state.profileStates[nextKey] = snapshot;
+  delete state.profileStates[oldKey];
+
+  state.tracks = (state.tracks || []).map((track) =>
+    track?.remoteID
+      && normalizedServerOrigin(track.sourceServer) === migrationOrigin
+      && (track.syncProfileID || "default") === oldProfileID
+      ? { ...track, syncProfileID: nextProfileID }
+      : track);
+  state.listeningHistory = (state.listeningHistory || []).map((entry) =>
+    normalizedServerOrigin(entry?.serverOrigin) === migrationOrigin
+      && (entry.profileID || "default") === oldProfileID
+      ? { ...entry, profileID: nextProfileID }
+      : entry);
+  state.serverUploadManifests = (state.serverUploadManifests || []).map((manifest) =>
+    normalizedServerOrigin(manifest?.serverOrigin) === migrationOrigin
+      && (manifest.profileID || "default") === oldProfileID
+      ? { ...manifest, profileID: nextProfileID }
+      : manifest);
+  if (state.playlistSyncServerURL === oldKey) state.playlistSyncServerURL = nextKey;
+  if (state.serverTransferPreferences?.[oldKey]) {
+    state.serverTransferPreferences[nextKey] ??= state.serverTransferPreferences[oldKey];
+    delete state.serverTransferPreferences[oldKey];
+  }
+  state.syncProfileID = nextProfileID;
+  state.serverURL = serverURL;
+  return true;
+}
+
 export function trackBelongsToActiveProfile(state, track) {
   if (!track?.remoteID) return true;
   const activeServer = normalizedServerOrigin(state.serverURL);
@@ -658,6 +817,7 @@ export function normalizeState(value) {
   const hadRemoteLikedSongIDs = Array.isArray(value?.remoteLikedSongIDs);
   const hadDirtyRemoteLikeSongIDs = Array.isArray(value?.dirtyRemoteLikeSongIDs);
   const state = value && typeof value === "object" ? { ...base, ...value } : base;
+  state.serverURL = canonicalServerURL(state.serverURL);
   state.tracks = Array.isArray(state.tracks) ? state.tracks : [];
   state.playlists = Array.isArray(state.playlists) ? state.playlists : [];
   state.favorites = Array.isArray(state.favorites) ? state.favorites : [];
@@ -665,14 +825,27 @@ export function normalizeState(value) {
   state.knownRemotePlaylistIDs = unique(Array.isArray(state.knownRemotePlaylistIDs) ? state.knownRemotePlaylistIDs.map(normalizedPlaylistID) : []);
   state.dirtyPlaylistIDs = unique(Array.isArray(state.dirtyPlaylistIDs) ? state.dirtyPlaylistIDs.map(normalizedPlaylistID) : []);
   state.deletedPlaylistIDs = unique(Array.isArray(state.deletedPlaylistIDs) ? state.deletedPlaylistIDs.map(normalizedPlaylistID) : []);
-  state.playlistSyncServerURL = typeof state.playlistSyncServerURL === "string" ? state.playlistSyncServerURL : null;
+  state.playlistSyncServerURL = typeof state.playlistSyncServerURL === "string"
+    ? canonicalProfileStateKey(state.playlistSyncServerURL)
+    : null;
   state.syncProfileID = typeof state.syncProfileID === "string" && state.syncProfileID ? state.syncProfileID : "default";
   state.syncProfiles = Array.isArray(state.syncProfiles) && state.syncProfiles.length
     ? state.syncProfiles
     : [{ id: "default", name: "Default", is_default: true }];
-  state.profileStates = state.profileStates && typeof state.profileStates === "object"
-    ? Object.fromEntries(Object.entries(state.profileStates).map(([key, snapshot]) => [key, normalizedProfileState(snapshot)]))
-    : {};
+  if (state.profileStates && typeof state.profileStates === "object") {
+    const canonicalStates = {};
+    for (const [key, snapshot] of Object.entries(state.profileStates)) {
+      const canonicalKey = canonicalProfileStateKey(key);
+      if (canonicalKey === key) canonicalStates[canonicalKey] = normalizedProfileState(snapshot);
+    }
+    for (const [key, snapshot] of Object.entries(state.profileStates)) {
+      const canonicalKey = canonicalProfileStateKey(key);
+      if (!(canonicalKey in canonicalStates)) canonicalStates[canonicalKey] = normalizedProfileState(snapshot);
+    }
+    state.profileStates = canonicalStates;
+  } else {
+    state.profileStates = {};
+  }
   state.remoteLikedSongIDs = unique(Array.isArray(state.remoteLikedSongIDs) ? state.remoteLikedSongIDs.filter((id) => typeof id === "string" && id) : []);
   state.dirtyRemoteLikeSongIDs = unique(Array.isArray(state.dirtyRemoteLikeSongIDs) ? state.dirtyRemoteLikeSongIDs.filter((id) => typeof id === "string" && id) : []);
   state.likesDirty = Boolean(state.likesDirty);
@@ -715,11 +888,16 @@ export function normalizeState(value) {
       originatedOnThisDevice: entry.originatedOnThisDevice !== false,
     }))
     .slice(-2000);
+  state.completedMigrations = unique(
+    (Array.isArray(state.completedMigrations) ? state.completedMigrations : [])
+      .filter((item) => typeof item === "string" && item.length <= 100),
+  );
   state.serverUploadManifests = (Array.isArray(state.serverUploadManifests) ? state.serverUploadManifests : [])
     .map(normalizeServerUploadManifest)
     .filter(Boolean)
     .slice(-20);
   state.serverTransferPreferences = normalizedServerTransferPreferences(state.serverTransferPreferences);
+  state.appPreferences = normalizedAppPreferences(state.appPreferences);
   state.tracks = state.tracks.map((track) => track?.remoteID ? {
     ...track,
     // A source-less legacy remote record has ambiguous ownership. Keep it
@@ -838,15 +1016,16 @@ export function summarizeListeningHistory(state, dayCount = 30, now = new Date()
     const timestamp = Date.parse(entry.startedAt);
     if (!Number.isFinite(timestamp)) continue;
     const seconds = Math.max(0, Number(entry.listenedSeconds) || 0);
+    const qualifiesAsPlay = listeningHistoryEntryQualifiesAsPlay(state, entry);
     if (localDayKey(timestamp) === todayKey) {
       todaySeconds += seconds;
-      todayPlays += 1;
+      if (qualifiesAsPlay) todayPlays += 1;
     }
     const key = hourly ? hourKey(timestamp) : localDayKey(timestamp);
     const day = byKey.get(key);
     if (!day) continue;
     day.seconds += seconds;
-    day.plays += 1;
+    if (qualifiesAsPlay) day.plays += 1;
     if (entry.trackID) {
       const songKey = listeningHistorySongKey(entry);
       const snapshot = listeningHistoryTrackSnapshot(state, entry);
@@ -869,9 +1048,9 @@ export function summarizeListeningHistory(state, dayCount = 30, now = new Date()
       const series = songSeries.get(songKey);
       const seriesDay = series.days[dayIndexByKey.get(key)];
       series.seconds += seconds;
-      series.plays += 1;
+      if (qualifiesAsPlay) series.plays += 1;
       seriesDay.seconds += seconds;
-      seriesDay.plays += 1;
+      if (qualifiesAsPlay) seriesDay.plays += 1;
     }
   }
   return {
@@ -899,8 +1078,9 @@ export function summarizeListeningStats(state, now = new Date()) {
     const timestamp = Date.parse(entry.startedAt);
     if (!Number.isFinite(timestamp)) continue;
     const seconds = Math.max(0, Number(entry.listenedSeconds) || 0);
+    const qualifiesAsPlay = listeningHistoryEntryQualifiesAsPlay(state, entry);
     totalSeconds += seconds;
-    plays += 1;
+    if (qualifiesAsPlay) plays += 1;
     if (localDayKey(timestamp) === todayKey) todaySeconds += seconds;
     if (!entry.trackID) continue;
 
@@ -919,13 +1099,13 @@ export function summarizeListeningStats(state, now = new Date()) {
       plays: 0,
     };
     song.seconds += seconds;
-    song.plays += 1;
+    if (qualifiesAsPlay) song.plays += 1;
     songs.set(songKey, song);
 
     const artist = snapshot.artist;
     const artistStats = artists.get(artist) || { artist, seconds: 0, plays: 0 };
     artistStats.seconds += seconds;
-    artistStats.plays += 1;
+    if (qualifiesAsPlay) artistStats.plays += 1;
     artists.set(artist, artistStats);
   }
 
@@ -1074,6 +1254,8 @@ export function filterTracks(tracks, query, mode = "all") {
     : [...tracks];
   if (mode === "audio") {
     filtered = filtered.filter((track) => /\.(aac|aif|aiff|alac|flac|m4a|m4b|mp3|ogg|opus|wav)$/i.test(String(track.filePath || "")));
+  } else if (mode === "video") {
+    filtered = filtered.filter(isInstalledVideoTrack);
   } else if (mode === "recent") {
     filtered.sort((left, right) => Date.parse(right.dateAdded || 0) - Date.parse(left.dateAdded || 0));
   }
@@ -1108,15 +1290,45 @@ export function shuffledTrackIDs(tracks, currentID = null, random = Math.random)
 export function nextIndex(tracks, currentID, direction = 1) {
   if (!tracks.length) return -1;
   const current = tracks.findIndex((track) => track.id === currentID);
-  if (current < 0) return direction >= 0 ? 0 : -1;
-  const next = current + (direction >= 0 ? 1 : -1);
-  return next >= 0 && next < tracks.length ? next : -1;
+  if (current < 0) return direction >= 0 ? 0 : tracks.length - 1;
+  return (current + (direction >= 0 ? 1 : -1) + tracks.length) % tracks.length;
 }
 
 export function tracksForPlaylist(state, playlistID) {
   const playlist = state.playlists.find((item) => item.id === playlistID);
   if (!playlist) return [];
   return playlist.trackIDs.map((id) => state.tracks.find((track) => track.id === id)).filter(Boolean);
+}
+
+export function reorderPlaylistTrackIDs(trackIDs, sourceID, targetID, insertAfter = false) {
+  const reordered = Array.isArray(trackIDs) ? [...trackIDs] : [];
+  const sourceIndex = reordered.indexOf(sourceID);
+  if (sourceIndex < 0 || sourceID === targetID || !reordered.includes(targetID)) return reordered;
+  reordered.splice(sourceIndex, 1);
+  const targetIndex = reordered.indexOf(targetID);
+  reordered.splice(targetIndex + (insertAfter ? 1 : 0), 0, sourceID);
+  return reordered;
+}
+
+export function mergePlaylistOrderWithPreservedItems(previousIDs, orderedIDs, preservedIDs) {
+  const previous = unique(Array.isArray(previousIDs) ? previousIDs : []);
+  const ordered = unique(Array.isArray(orderedIDs) ? orderedIDs : []);
+  const orderedSet = new Set(ordered);
+  const preserved = new Set(unique(Array.isArray(preservedIDs) ? preservedIDs : [])
+    .filter((id) => previous.includes(id) && !orderedSet.has(id)));
+  const merged = [];
+  let orderedIndex = 0;
+
+  for (const previousID of previous) {
+    if (preserved.has(previousID)) {
+      merged.push(previousID);
+    } else if (orderedIndex < ordered.length) {
+      merged.push(ordered[orderedIndex]);
+      orderedIndex += 1;
+    }
+  }
+  merged.push(...ordered.slice(orderedIndex));
+  return unique(merged);
 }
 
 function uploadedRemoteSong(value) {
@@ -1282,9 +1494,9 @@ export function serverUploadConfigurationError({ serverURL, adminToken } = {}) {
   const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
   const hostname = parsedServerURL.hostname.toLocaleLowerCase().replace(/\.$/, "");
   if (parsedServerURL.protocol !== "https:" && !loopbackHosts.has(hostname)) {
-    return "Use an HTTPS server URL before sending an admin key. HTTP is only available for explicit loopback development.";
+    return "Use an HTTPS server URL before authenticating. HTTP is only available for explicit loopback development.";
   }
-  if (!String(adminToken || "").trim()) return "Enter the server admin key before uploading.";
+  if (!String(adminToken || "").trim()) return "Sign in to your Resonance account before uploading.";
   return null;
 }
 
@@ -1522,7 +1734,11 @@ export function updatePlaylistRemoteSongIDs(state, playlist) {
   const downloaded = playlist.trackIDs
     .map((trackID) => state.tracks.find((track) => track.id === trackID && trackBelongsToActiveProfile(state, track))?.remoteID)
     .filter(Boolean);
-  playlist.remoteSongIDs = unique([...downloaded, ...unresolved]);
+  playlist.remoteSongIDs = mergePlaylistOrderWithPreservedItems(
+    playlist.remoteSongIDs,
+    downloaded,
+    unresolved,
+  );
   return playlist;
 }
 
@@ -1535,7 +1751,11 @@ export function hydrateRemotePlaylistTracks(state) {
     const downloaded = playlist.remoteSongIDs
       .map((remoteID) => state.tracks.find((track) => track.remoteID === remoteID && trackBelongsToActiveProfile(state, track))?.id)
       .filter(Boolean);
-    playlist.trackIDs = unique([...downloaded, ...localOnly]);
+    playlist.trackIDs = mergePlaylistOrderWithPreservedItems(
+      playlist.trackIDs,
+      downloaded,
+      localOnly,
+    );
   }
   return state;
 }
@@ -1658,7 +1878,11 @@ export function applyRemotePlaylistDocument(state, document, options = {}) {
     return [{
       id,
       name: remote.name,
-      trackIDs: unique([...downloaded, ...localOnly]),
+      trackIDs: mergePlaylistOrderWithPreservedItems(
+        previous?.trackIDs,
+        downloaded,
+        localOnly,
+      ),
       remoteSongIDs,
       isSystem: false,
     }];

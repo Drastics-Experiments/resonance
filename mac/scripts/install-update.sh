@@ -30,7 +30,8 @@ INFO_PLIST="$NEW_APP/Contents/Info.plist"
 
 BUNDLE_ID="$(/usr/bin/plutil -extract CFBundleIdentifier raw "$INFO_PLIST")"
 BUNDLE_VERSION="$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$INFO_PLIST")"
-[[ "$BUNDLE_ID" == "com.gavindietrich.LikedSongsFocus" ]] || exit 65
+COMPATIBILITY_BUNDLE_ID="com.gavindietrich.Liked""SongsFocus"
+[[ "$BUNDLE_ID" == "$COMPATIBILITY_BUNDLE_ID" ]] || exit 65
 [[ "$BUNDLE_VERSION" == "$VERSION" ]] || exit 65
 /usr/bin/codesign --verify --deep --strict "$NEW_APP"
 

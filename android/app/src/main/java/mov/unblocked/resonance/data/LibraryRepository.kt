@@ -48,23 +48,95 @@ class LibraryRepository(
                     return@withLock normalize(StoredLibrary())
                 }
             }
-            normalize(decoded).also(::cleanupUnreferencedAppOwnedFiles)
+            val migration = migrateUnlinkedDownloads(decoded)
+            normalize(migration.library).also { library ->
+                if (migration.changed) writeState(library)
+                cleanupUnreferencedAppOwnedFiles(library)
+            }
         }
     }
 
     suspend fun save(library: StoredLibrary) = withContext(Dispatchers.IO) {
         stateMutex.withLock {
-            rootDirectory.mkdirs()
-            val temporary = File(rootDirectory, "${stateFile.name}.tmp")
-            FileOutputStream(temporary).bufferedWriter(Charsets.UTF_8).use { writer ->
-                writer.write(json.encodeToString(normalize(library)))
-                writer.flush()
-            }
-            if (!temporary.renameTo(stateFile)) {
-                temporary.copyTo(stateFile, overwrite = true)
-                temporary.delete()
-            }
+            writeState(normalize(library))
         }
+    }
+
+    private fun writeState(library: StoredLibrary) {
+        rootDirectory.mkdirs()
+        val temporary = File(rootDirectory, "${stateFile.name}.tmp")
+        FileOutputStream(temporary).bufferedWriter(Charsets.UTF_8).use { writer ->
+            writer.write(json.encodeToString(library))
+            writer.flush()
+        }
+        if (!temporary.renameTo(stateFile)) {
+            temporary.copyTo(stateFile, overwrite = true)
+            temporary.delete()
+        }
+    }
+
+    private data class LibraryMigration(
+        val library: StoredLibrary,
+        val changed: Boolean,
+    )
+
+    private fun migrateUnlinkedDownloads(library: StoredLibrary): LibraryMigration {
+        if (UnlinkedDownloadMigrationPolicy.Identifier in library.completedMigrations) {
+            return LibraryMigration(library, changed = false)
+        }
+
+        val retained = mutableListOf<Track>()
+        var completed = true
+        var changed = false
+        library.tracks.forEach { track ->
+            val legacyDownloadOwned = RepositoryFilePolicy.downloadID(track.relativePath) != null
+            val decision = UnlinkedDownloadMigrationPolicy.decision(track, legacyDownloadOwned)
+            changed = changed || decision.track != track
+            if (!decision.shouldDelete) {
+                retained += decision.track
+                return@forEach
+            }
+
+            val mediaFile = fileForTrack(decision.track)
+            if (!isDirectChild(mediaFile, musicDirectory)) {
+                retained += decision.track
+                completed = false
+                return@forEach
+            }
+            val deleted = !mediaFile.exists() || (mediaFile.isFile && mediaFile.delete())
+            if (!deleted) {
+                retained += decision.track
+                completed = false
+                return@forEach
+            }
+            artworkFile(decision.track)?.takeIf { isDirectChild(it, artworkDirectory) }?.delete()
+            changed = true
+        }
+
+        val retainedIDs = retained.mapTo(linkedSetOf(), Track::id)
+        val migrations = if (completed) {
+            changed = true
+            library.completedMigrations + UnlinkedDownloadMigrationPolicy.Identifier
+        } else {
+            library.completedMigrations
+        }
+        val migrated = library.copy(
+            tracks = retained,
+            playlists = library.playlists.map { playlist ->
+                playlist.copy(trackIDs = playlist.trackIDs.filter(retainedIDs::contains))
+            },
+            favorites = library.favorites.intersect(retainedIDs),
+            profileStates = library.profileStates.mapValues { (_, state) ->
+                state.copy(
+                    playlists = state.playlists.map { playlist ->
+                        playlist.copy(trackIDs = playlist.trackIDs.filter(retainedIDs::contains))
+                    },
+                    favorites = state.favorites.intersect(retainedIDs),
+                )
+            },
+            completedMigrations = migrations,
+        )
+        return LibraryMigration(migrated, changed)
     }
 
     suspend fun importAudio(uri: Uri, preferredFilename: String? = null): Track =
@@ -78,7 +150,11 @@ class LibraryRepository(
                 appContext.contentResolver.openInputStream(uri)?.use { input ->
                     destination.outputStream().use(input::copyTo)
                 } ?: error("Unable to open the selected audio file")
-                trackFromFile(destination, fallbackTitle = destination.nameWithoutExtension)
+                trackFromFile(
+                    destination,
+                    fallbackTitle = destination.nameWithoutExtension,
+                    preservesUnlinkedImport = true,
+                )
             } catch (error: Throwable) {
                 destination.delete()
                 throw error
@@ -115,8 +191,11 @@ class LibraryRepository(
                     fallbackAlbum = download.metadata.album ?: "Imported",
                     fallbackDurationMs = download.durationMs,
                     fallbackArtwork = download.artwork,
+                    sourceURL = download.metadata.sourceURL,
+                    downloadSourceURL = download.downloadSourceURL,
                     sourceSHA256 = download.sourceSHA256,
                     contentSHA256 = download.contentSHA256,
+                    preservesUnlinkedImport = true,
                 )
             } catch (error: Throwable) {
                 destination.delete()
@@ -151,8 +230,11 @@ class LibraryRepository(
                 remoteID = song.id,
                 sourceServer = sourceServer,
                 syncProfileID = syncProfileID,
+                sourceURL = song.sourceURL,
+                downloadSourceURL = song.sourceURL,
                 fallbackArtwork = fallbackArtwork,
                 contentSHA256 = verifiedContentSHA256,
+                preservesUnlinkedImport = false,
             )
         } catch (error: Throwable) {
             discardUncommittedDownload(file)
@@ -325,10 +407,13 @@ class LibraryRepository(
         remoteID: String? = null,
         sourceServer: String? = null,
         syncProfileID: String? = null,
+        sourceURL: String? = null,
+        downloadSourceURL: String? = null,
         fallbackArtwork: ByteArray? = null,
         fallbackDurationMs: Long = 0L,
         sourceSHA256: String? = null,
         contentSHA256: String? = null,
+        preservesUnlinkedImport: Boolean? = null,
     ): Track {
         val metadata = readMetadata(file)
         var artworkFilename: String? = null
@@ -346,10 +431,13 @@ class LibraryRepository(
                 remoteID = remoteID,
                 sourceServer = sourceServer,
                 syncProfileID = syncProfileID,
+                sourceURL = sourceURL,
+                downloadSourceURL = downloadSourceURL,
                 artworkFilename = artworkFilename,
                 artworkScanComplete = true,
                 sourceSHA256 = sourceSHA256,
                 contentSHA256 = contentSHA256,
+                preservesUnlinkedImport = preservesUnlinkedImport,
             )
         } catch (error: Throwable) {
             artworkFilename?.let { File(artworkDirectory, it).delete() }

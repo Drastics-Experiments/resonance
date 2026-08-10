@@ -16,7 +16,6 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
-import java.net.URLConnection
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
@@ -43,6 +42,15 @@ internal object ServerUploadNaming {
         .trim()
         .trimEnd('.', ' ')
         .take(180)
+}
+
+internal object SourceLinkSchemaCompatibility {
+    private const val UnsupportedSchema = "Unsupported source-link schema_version"
+
+    fun shouldRetryLegacy(status: Int, error: String?, mediaKind: String): Boolean =
+        status == HttpURLConnection.HTTP_BAD_REQUEST &&
+            error == UnsupportedSchema &&
+            mediaKind == "audio"
 }
 
 class ServerClient(
@@ -206,58 +214,67 @@ class ServerClient(
     )
 
     suspend fun upload(
-        file: File,
-        title: String? = null,
+        track: Track,
         authorize: () -> Unit,
     ): RemoteUpload = withContext(Dispatchers.IO) {
-        require(file.isFile) { "Upload file does not exist: ${file.name}" }
-        val uploadFilename = ServerUploadNaming.filename(file.name, title)
-        val encodedFilename = URLEncoder.encode(uploadFilename, Charsets.UTF_8.name())
-            .replace("+", "%20")
-        authorize()
-        val connection = open(
-            url = endpoint("/api/v1/admin/songs?filename=$encodedFilename"),
-            method = "PUT",
-            token = requireAdminToken(),
-        ).apply {
-            doOutput = true
-            connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = UPLOAD_TIMEOUT_MS
-            setRequestProperty(
-                "Content-Type",
-                URLConnection.guessContentTypeFromName(file.name) ?: "application/octet-stream",
+        val sourceURL = (track.sourceURL ?: track.downloadSourceURL)?.trim()?.takeIf(String::isNotEmpty)
+            ?: throw IllegalStateException(
+                "Only songs downloaded from a preserved source link can be uploaded. Download this song from its link again first.",
             )
-            setFixedLengthStreamingMode(file.length())
-            applyClientContextHeaders(requireInstallationCohortKey())
+        val sourceURI = runCatching { URI(sourceURL) }.getOrNull()
+        require(sourceURI?.scheme.equals("https", ignoreCase = true) && sourceURI?.rawUserInfo == null) {
+            "The preserved source link must be a public HTTPS URL without credentials"
         }
-        try {
-            file.inputStream().use { input ->
-                connection.outputStream.use { output -> input.copyTo(output, BUFFER_SIZE) }
-            }
-            val response = connection.response()
-            requireStatus(response, setOf(HttpURLConnection.HTTP_CREATED, HttpURLConnection.HTTP_CONFLICT))
-            if (response.status == HttpURLConnection.HTTP_CONFLICT) {
-                json.decodeFromString<DuplicateRemoteUpload>(response.body.toString(Charsets.UTF_8)).duplicateOf
-            } else {
-                json.decodeFromString<RemoteUpload>(response.body.toString(Charsets.UTF_8))
-            }
-        } finally {
-            connection.disconnect()
+        val mediaKind = if (track.relativePath.substringAfterLast('.', "").lowercase() in
+            setOf("mp4", "mov", "m4v", "webm")) "video" else "audio"
+        val payload = SourceLinkUploadRequest(
+            sourceURL = sourceURL,
+            mediaKind = mediaKind,
+        )
+        authorize()
+        var response = request(
+            method = "PUT",
+            url = endpoint("/api/v1/admin/songs"),
+            token = requireAdminToken(),
+            body = json.encodeToString(payload).toByteArray(Charsets.UTF_8),
+            contentType = "application/json",
+            accept = "application/json",
+            requestHeaders = clientContextHeaders(requireInstallationCohortKey()),
+            maxResponseBytes = MAX_SOURCE_IMPORT_RESPONSE_BYTES,
+        )
+        val error = runCatching {
+            json.decodeFromString<ServerErrorPayload>(response.body.toString(Charsets.UTF_8)).error
+        }.getOrNull()
+        if (SourceLinkSchemaCompatibility.shouldRetryLegacy(response.status, error, mediaKind)) {
+            authorize()
+            response = request(
+                method = "PUT",
+                url = endpoint("/api/v1/admin/songs"),
+                token = requireAdminToken(),
+                body = json.encodeToString(LegacySourceLinkUploadRequest(sourceURL))
+                    .toByteArray(Charsets.UTF_8),
+                contentType = "application/json",
+                accept = "application/json",
+                requestHeaders = clientContextHeaders(requireInstallationCohortKey()),
+                maxResponseBytes = MAX_SOURCE_IMPORT_RESPONSE_BYTES,
+            )
+        }
+        requireStatus(response, setOf(HttpURLConnection.HTTP_CREATED, HttpURLConnection.HTTP_CONFLICT))
+        if (response.status == HttpURLConnection.HTTP_CONFLICT) {
+            json.decodeFromString<DuplicateRemoteUpload>(response.body.toString(Charsets.UTF_8)).duplicateOf
+        } else {
+            json.decodeFromString<RemoteUpload>(response.body.toString(Charsets.UTF_8))
         }
     }
 
     suspend fun importSource(
         sourcePageURL: String,
         cohortKey: String,
-        filename: String? = null,
-        metadata: SourceImportMetadata? = null,
         authorize: () -> Unit,
     ): RemoteUpload = withContext(Dispatchers.IO) {
         val canonicalSource = SourceImportPolicy.canonicalYouTubePageURL(sourcePageURL)
         val payload = SourceImportRequest(
             sourcePageURL = canonicalSource,
-            filename = filename?.let { ServerUploadNaming.filename(it, metadata?.title) },
-            metadata = metadata,
         )
         authorize()
         val response = request(
@@ -710,16 +727,16 @@ class ServerClient(
 
     private fun requireAccessToken(): String =
         accessToken.trim().takeIf { it.isNotEmpty() }
-            ?: throw IllegalStateException("Enter the access token")
+            ?: throw IllegalStateException("Sign in to your Resonance account")
 
     private fun requireAdminToken(): String =
         adminToken.trim().takeIf { it.isNotEmpty() }
-            ?: throw IllegalStateException("Enter the server admin key")
+            ?: throw IllegalStateException("Sign in to your Resonance account")
 
     private fun requireClientConfigToken(): String =
         accessToken.trim().takeIf(String::isNotEmpty)
             ?: adminToken.trim().takeIf(String::isNotEmpty)
-            ?: throw IllegalStateException("Enter the access token or server admin key")
+            ?: throw IllegalStateException("Sign in to your Resonance account")
 
     private fun requireInstallationCohortKey(): String = installationCohortKey
         .takeIf(String::isNotBlank)
@@ -775,7 +792,6 @@ class ServerClient(
         private const val CONNECT_TIMEOUT_MS = 20_000
         private const val REQUEST_TIMEOUT_MS = 60_000
         private const val DOWNLOAD_TIMEOUT_MS = 120_000
-        private const val UPLOAD_TIMEOUT_MS = 600_000
         private const val CLIENT_CONFIG_TIMEOUT_MS = 15_000
         private const val MAX_ERROR_BYTES = 64 * 1_024
         private const val MAX_SOURCE_IMPORT_RESPONSE_BYTES = 256 * 1_024
@@ -839,7 +855,14 @@ internal object ServerNetworkPolicy {
         ) {
             "Server URL must use HTTPS outside local development"
         }
-        return trimmed
+        return if (
+            scheme == "https" && host == "music.unblocked.mov" &&
+            (uri.port == -1 || uri.port == 443) && uri.path.orEmpty().isEmpty()
+        ) {
+            "https://resonance-core.blithe-haven-9710.chatgpt.site"
+        } else {
+            trimmed
+        }
     }
 
     fun canonicalOrigin(value: String, allowCleartextDevelopment: Boolean): String {
@@ -1083,7 +1106,20 @@ internal fun hasSameOrigin(first: URL, second: URL): Boolean {
 data class RemoteUpload(
     val id: String,
     val filename: String = "",
-    val size: Long,
+    val size: Long = 0,
+)
+
+@Serializable
+private data class SourceLinkUploadRequest(
+    @SerialName("schema_version") val schemaVersion: Int = 3,
+    @SerialName("source_url") val sourceURL: String,
+    @SerialName("media_kind") val mediaKind: String,
+)
+
+@Serializable
+private data class LegacySourceLinkUploadRequest(
+    @SerialName("source_url") val sourceURL: String,
+    @SerialName("schema_version") val schemaVersion: Int = 2,
 )
 
 sealed interface ClientConfigFetchResult {
@@ -1095,14 +1131,6 @@ sealed interface ClientConfigFetchResult {
 
     data object Unsupported : ClientConfigFetchResult
 }
-
-@Serializable
-data class SourceImportMetadata(
-    val title: String? = null,
-    val artist: String? = null,
-    val album: String? = null,
-    @SerialName("duration_seconds") val durationSeconds: Int? = null,
-)
 
 @Serializable
 private data class ReviewedMatchResolveRequest(val source: String)
@@ -1206,8 +1234,6 @@ private fun String?.requireReviewedText(field: String): String = this
 private data class SourceImportRequest(
     @SerialName("schema_version") val schemaVersion: Int = 1,
     @SerialName("source_page_url") val sourcePageURL: String,
-    val filename: String? = null,
-    val metadata: SourceImportMetadata? = null,
 )
 
 @Serializable
@@ -1223,7 +1249,7 @@ private data class SourceImportSong(
     val id: String,
     val filename: String = "",
     val name: String = "",
-    val size: Long,
+    val size: Long = 0,
 ) {
     fun toRemoteUpload(): RemoteUpload = RemoteUpload(
         id = id,

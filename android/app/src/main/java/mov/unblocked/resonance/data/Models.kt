@@ -30,11 +30,14 @@ data class Track(
     val remoteID: String? = null,
     val sourceServer: String? = null,
     val syncProfileID: String? = null,
+    val downloadSourceURL: String? = null,
     val artworkFilename: String? = null,
     val artworkScanComplete: Boolean? = false,
     val dateAddedEpochMs: Long = System.currentTimeMillis(),
     val sourceSHA256: String? = null,
     val contentSHA256: String? = null,
+    val sourceURL: String? = null,
+    val preservesUnlinkedImport: Boolean? = null,
 ) {
     val durationText: String
         get() {
@@ -44,6 +47,32 @@ data class Track(
         }
 }
 
+object UnlinkedDownloadMigrationPolicy {
+    const val Identifier = "delete-unlinked-downloads-v1"
+
+    data class Decision(
+        val track: Track,
+        val shouldDelete: Boolean,
+    )
+
+    fun decision(track: Track, legacyDownloadOwned: Boolean): Decision {
+        val migrated = if (track.preservesUnlinkedImport == null) {
+            track.copy(preservesUnlinkedImport = !legacyDownloadOwned)
+        } else {
+            track
+        }
+        val hasRemoteIdentity = listOf(migrated.remoteID, migrated.sourceServer)
+            .any { !it.isNullOrBlank() }
+        val hasSourceLink = listOf(migrated.sourceURL, migrated.downloadSourceURL)
+            .any { !it.isNullOrBlank() }
+        return Decision(
+            track = migrated,
+            shouldDelete = (hasRemoteIdentity || legacyDownloadOwned) &&
+                !hasSourceLink && migrated.preservesUnlinkedImport != true,
+        )
+    }
+}
+
 @Serializable
 data class Playlist(
     val id: String = UUID.randomUUID().toString(),
@@ -51,7 +80,10 @@ data class Playlist(
     val trackIDs: List<String> = emptyList(),
     val isSystem: Boolean = false,
     val remoteSongIDs: List<String>? = null,
-)
+) {
+    val automaticArtworkTrackIDs: List<String>
+        get() = if (isSystem) emptyList() else trackIDs.take(4)
+}
 
 @Serializable
 data class ClipRange(
@@ -83,6 +115,9 @@ data class RemoteSong(
     val durationSeconds: Double? = null,
     val artworkURL: String? = null,
     val contentSHA256: String? = null,
+    val sourceURL: String? = null,
+    val mediaKind: String = "audio",
+    val isSourceLinkRecord: Boolean = false,
 ) {
     val durationText: String?
         get() = durationSeconds
@@ -91,8 +126,17 @@ data class RemoteSong(
             ?.let { seconds -> "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}" }
 
     val isVideoMedia: Boolean
-        get() = contentType.contains("video", ignoreCase = true) ||
+        get() = mediaKind == "video" || contentType.contains("video", ignoreCase = true) ||
             filename.substringAfterLast('.', "").lowercase() in setOf("mp4", "mov", "m4v", "webm")
+
+    val requiresOriginalSourcePage: Boolean
+        get() = sourceURL?.let { value ->
+            runCatching { java.net.URI(value) }.getOrNull()?.let { url ->
+                val host = url.host?.lowercase().orEmpty()
+                host == "googlevideo.com" || host.endsWith(".googlevideo.com") ||
+                    url.path.substringAfterLast('/').equals("videoplayback", ignoreCase = true)
+            }
+        } == true
 }
 
 @Serializable
@@ -138,7 +182,7 @@ data class StoredLibrary(
     val tracks: List<Track> = emptyList(),
     val playlists: List<Playlist> = listOf(Playlist(name = "Liked Songs", isSystem = true)),
     val favorites: Set<String> = emptySet(),
-    val serverURL: String = "https://music.unblocked.mov",
+    val serverURL: String = "https://resonance-core.blithe-haven-9710.chatgpt.site",
     val playlistRevision: Int? = 0,
     val knownRemotePlaylistIDs: Set<String>? = emptySet(),
     val dirtyPlaylistIDs: Set<String>? = emptySet(),
@@ -160,6 +204,7 @@ data class StoredLibrary(
      * save and restored when the server/profile context changes.
      */
     val profileStates: Map<String, ProfileLibraryState> = emptyMap(),
+    val completedMigrations: Set<String> = emptySet(),
 )
 
 @Serializable
@@ -224,15 +269,24 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
         fun double(key: String): Double? =
             objectValue[key]?.jsonPrimitive?.doubleOrNull
 
-        val filename = string("filename") ?: string("name")
-            ?: error("Remote song is missing filename")
+        val id = string("id") ?: error("Remote song is missing id")
+        val sourceURL = string("source_url")?.trim()?.takeIf(String::isNotEmpty)
+        val declaredMediaKind = string("media_kind")?.takeIf { it == "audio" || it == "video" }
+        val decodedSize = objectValue["size"]?.jsonPrimitive?.longOrNull ?: 0L
+        val sourceFilename = sourceURL
+            ?.let { runCatching { java.net.URI(it).path.substringAfterLast('/') }.getOrNull() }
+            ?.takeIf(String::isNotEmpty)
+        val usefulSourceFilename = sourceFilename?.takeUnless {
+            it.equals("watch", ignoreCase = true) || it.equals("videoplayback", ignoreCase = true)
+        }
+        val filename = string("filename") ?: string("name") ?: usefulSourceFilename ?: "Saved-${id.take(8)}"
         return RemoteSong(
-            id = string("id") ?: error("Remote song is missing id"),
+            id = id,
             filename = filename,
-            title = string("title") ?: filename.substringBeforeLast('.', filename),
-            artist = string("artist") ?: "Unknown Artist",
-            album = string("album") ?: "Server Library",
-            size = objectValue["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+            title = string("title") ?: if (sourceURL != null) "Resolving metadata…" else filename.substringBeforeLast('.', filename),
+            artist = string("artist") ?: if (sourceURL != null) "On-device lookup" else "Unknown Artist",
+            album = string("album") ?: if (sourceURL != null) "Link only" else "Server Library",
+            size = decodedSize,
             modifiedAt = string("modified_at")
                 ?: objectValue["modified_utc"]?.jsonPrimitive?.longOrNull?.toString()
                 ?: "0",
@@ -247,6 +301,12 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
                 ?.trim()
                 ?.takeIf(String::isNotEmpty),
             contentSHA256 = string("content_sha256")?.trim()?.lowercase()?.takeIf(String::isNotEmpty),
+            sourceURL = sourceURL,
+            mediaKind = declaredMediaKind ?: if (
+                (string("content_type") ?: "").startsWith("video/", ignoreCase = true) ||
+                filename.substringAfterLast('.', "").lowercase() in setOf("mp4", "mov", "m4v", "webm")
+            ) "video" else "audio",
+            isSourceLinkRecord = sourceURL != null && (declaredMediaKind != null || decodedSize == 0L),
         )
     }
 
@@ -267,6 +327,21 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
             value.durationSeconds?.let { put("duration_seconds", JsonPrimitive(it)) }
             value.artworkURL?.let { put("artwork_url", JsonPrimitive(it)) }
             value.contentSHA256?.let { put("content_sha256", JsonPrimitive(it)) }
+            value.sourceURL?.let { put("source_url", JsonPrimitive(it)) }
+            put("media_kind", JsonPrimitive(value.mediaKind))
         })
     }
+}
+
+internal fun Track.associatedWithLocalSource(
+    sourceURL: String?,
+    downloadSourceURL: String? = null,
+): Track {
+    fun normalized(value: String?): String? = value
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && it.length <= 8_192 }
+    return copy(
+        sourceURL = normalized(sourceURL) ?: this.sourceURL,
+        downloadSourceURL = normalized(downloadSourceURL) ?: this.downloadSourceURL,
+    )
 }

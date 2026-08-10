@@ -74,15 +74,15 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/ResonanceDerivedData
-          key: resonance-ios-derived-data-${{ runner.arch }}-${{ hashFiles('ios/LikedSongsMobile.xcodeproj/project.pbxproj', 'ios/LikedSongsMobile/**') }}
+          key: resonance-ios-derived-data-${{ runner.arch }}-${{ hashFiles('ios/Resonance.xcodeproj/project.pbxproj', 'ios/Resonance/**') }}
           restore-keys: |
             resonance-ios-derived-data-${{ runner.arch }}-
 
       - name: Build for iOS Simulator
         run: |
           xcodebuild \
-            -project ios/LikedSongsMobile.xcodeproj \
-            -scheme LikedSongsMobile \
+            -project ios/Resonance.xcodeproj \
+            -scheme Resonance \
             -configuration Debug \
             -sdk iphonesimulator \
             -derivedDataPath "$RUNNER_TEMP/ResonanceDerivedData" \

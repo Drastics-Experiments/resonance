@@ -527,7 +527,7 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
     provider: soundCloudSource ? "soundcloud" : "youtube",
     providerID: soundCloudSource ? null : youtubeVideoID(input.sourceURL),
     sourcePageURL: input.metadata?.sourceURL || input.sourceURL,
-    mediaSourceURL: input.sourceURL,
+    mediaSourceURL: null,
   });
   if (soundCloudSource && mediaKind === "video") {
     throw localImportError("inspecting_source", "SOUNDCLOUD_AUDIO_ONLY", "SoundCloud links can only be imported as audio.");
@@ -565,6 +565,9 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
       artworkURL: result.preview.thumbnailURL,
       sourceURL: result.preview.sourceURL,
     });
+    const completedSourceIdentity = normalizeSourceIdentity(sourceIdentity, {
+      mediaSourceURL: result.mediaSourceURL,
+    });
     assertNotAborted(signal);
     if (mediaKind === "video") {
       let sourceSha256 = result.download?.sha256 || null;
@@ -580,7 +583,7 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
       }
       if (!sourceSha256) throw localImportError("processing", "VIDEO_HASH_FAILED", "The completed video could not be verified.");
       const existingDuplicate = duplicateTrack(input.existing, sourceSha256);
-      if (existingDuplicate) return { kind: "duplicate", track: existingDuplicate, sourceIdentity };
+      if (existingDuplicate) return { kind: "duplicate", track: existingDuplicate, sourceIdentity: completedSourceIdentity };
       assertNotAborted(signal);
       onStage({ stage: "saving_local" });
       const artworkPath = await artworkFetch(metadata.artworkURL, temporary, signal).catch((error) => {
@@ -601,13 +604,13 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
         sourceSha256,
         contentSha256: sourceSha256,
         sourceURL: metadata.sourceURL,
-        sourceIdentity,
+        sourceIdentity: completedSourceIdentity,
         artwork,
         metadata,
       };
     }
     const existingDuplicate = duplicateTrack(input.existing, result.download.sha256);
-    if (existingDuplicate) return { kind: "duplicate", track: existingDuplicate, sourceIdentity };
+    if (existingDuplicate) return { kind: "duplicate", track: existingDuplicate, sourceIdentity: completedSourceIdentity };
     onStage({ stage: "processing", progress: null });
     const artwork = await artworkFetch(metadata.artworkURL, temporary, signal).catch((error) => {
       if (error?.name === "AbortError") throw error;
@@ -622,7 +625,7 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
     }
     const contentSha256 = await fileHash(outputPath);
     const processedDuplicate = duplicateTrack(input.existing, result.download.sha256, contentSha256);
-    if (processedDuplicate) return { kind: "duplicate", track: processedDuplicate, sourceIdentity };
+    if (processedDuplicate) return { kind: "duplicate", track: processedDuplicate, sourceIdentity: completedSourceIdentity };
     assertNotAborted(signal);
     onStage({ stage: "saving_local" });
     await fs.mkdir(input.destinationDirectory, { recursive: true });
@@ -638,7 +641,7 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
       sourceSha256: result.download.sha256,
       contentSha256,
       sourceURL: metadata.sourceURL,
-      sourceIdentity,
+      sourceIdentity: completedSourceIdentity,
       metadata,
     };
   } catch (error) {

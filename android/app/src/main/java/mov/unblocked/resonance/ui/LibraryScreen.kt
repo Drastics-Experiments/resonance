@@ -1,5 +1,8 @@
 package mov.unblocked.resonance.ui
 
+import android.graphics.BitmapFactory
+import java.net.HttpURLConnection
+import java.net.URL
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardActions
@@ -20,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MusicNote
@@ -42,11 +46,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -57,6 +64,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import mov.unblocked.resonance.data.Track
+import mov.unblocked.resonance.data.AccountEmailPrivacy
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: Modifier = Modifier) {
@@ -90,6 +100,7 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                 }
                 ProfileButton(
                     state = state,
+                    actions = actions,
                     onConnection = { connectionOpen = true },
                     onClipEditor = { clipEditorOpen = true },
                 )
@@ -188,11 +199,17 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
 @Composable
 private fun ProfileButton(
     state: ResonanceUiState,
+    actions: ResonanceActions,
     onConnection: () -> Unit,
     onClipEditor: () -> Unit,
 ) {
-    val profileName = activeSyncProfileName(state)
+    val profileName = AccountEmailPrivacy.safeDisplayName(
+        state.accountDisplayName ?: activeSyncProfileName(state),
+        state.accountEmail,
+    )
     var expanded by remember { mutableStateOf(false) }
+    var isEmailRevealed by remember(state.accountEmail) { mutableStateOf(false) }
+    val profileBitmap = rememberAccountImage(state.accountImageURL)
     Box {
         IconButton(
             onClick = { expanded = true },
@@ -203,15 +220,32 @@ private fun ProfileButton(
                     contentDescription = "Profile: $profileName. Open profile tools"
                 },
         ) {
-            Text(
-                text = syncProfileInitial(profileName),
-                color = Color.White,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.clearAndSetSemantics { },
-            )
+            if (profileBitmap != null) {
+                Image(
+                    bitmap = profileBitmap,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clearAndSetSemantics { },
+                )
+            } else {
+                Text(
+                    text = syncProfileInitial(profileName),
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.clearAndSetSemantics { },
+                )
+            }
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            if (state.accountEmail != null) {
+                DropdownMenuItem(
+                    text = {
+                        Text(AccountEmailPrivacy.displayedAddress(state.accountEmail, isEmailRevealed))
+                    },
+                    onClick = { isEmailRevealed = !isEmailRevealed },
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Clip Editor") },
                 leadingIcon = { Icon(Icons.Default.GraphicEq, null) },
@@ -221,7 +255,7 @@ private fun ProfileButton(
                 },
             )
             DropdownMenuItem(
-                text = { Text("Profile & Connection") },
+                text = { Text("Account & Connection") },
                 leadingIcon = { Icon(Icons.Default.Settings, null) },
                 onClick = {
                     expanded = false
@@ -230,6 +264,31 @@ private fun ProfileButton(
             )
         }
     }
+}
+
+@Composable
+private fun rememberAccountImage(imageURL: String?): androidx.compose.ui.graphics.ImageBitmap? {
+    val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, imageURL) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                val url = URL(imageURL?.takeIf(String::isNotBlank) ?: return@runCatching null)
+                require(url.protocol.equals("https", ignoreCase = true))
+                val connection = url.openConnection() as HttpURLConnection
+                try {
+                    connection.connectTimeout = 5_000
+                    connection.readTimeout = 5_000
+                    connection.instanceFollowRedirects = true
+                    connection.connect()
+                    require(connection.responseCode in 200..299)
+                    require(connection.contentLengthLong <= 5 * 1024 * 1024 || connection.contentLengthLong < 0)
+                    connection.inputStream.use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
+                } finally {
+                    connection.disconnect()
+                }
+            }.getOrNull()
+        }
+    }
+    return bitmap
 }
 
 @Composable
@@ -277,12 +336,15 @@ private fun RecentlyAddedSection(
 }
 
 internal fun activeSyncProfileName(state: ResonanceUiState): String =
-    state.syncProfiles
+    AccountEmailPrivacy.safeDisplayName(
+        state.syncProfiles
         .firstOrNull { it.id == state.syncProfileId }
         ?.name
         ?.trim()
         ?.takeIf(String::isNotEmpty)
-        ?: "Default"
+            ?: "Default",
+        state.accountEmail,
+    )
 
 internal fun syncProfileInitial(name: String): String =
     name.trim().firstOrNull(Char::isLetterOrDigit)?.uppercase() ?: "?"

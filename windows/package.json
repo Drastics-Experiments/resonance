@@ -2,6 +2,7 @@
   "name": "resonance-windows",
   "version": "1.1.5",
   "resonanceBuild": 16,
+  "resonanceDiscordApplicationID": "1535574125395841154",
   "private": true,
   "type": "module",
   "description": "Functional Resonance music player for Windows",
@@ -41,7 +42,9 @@
       "local-soundcloud.cjs",
       "local-youtube.cjs",
       "library-paths.cjs",
+      "library-update-migration.cjs",
       "crash-safe-file.cjs",
+      "discord-rpc.cjs",
       "download-file.cjs",
       "policy-lease.cjs",
       "filename-policy.cjs",
@@ -54,6 +57,7 @@
       "server-stream.cjs",
       "server-upload.cjs",
       "server-upload-response.cjs",
+      "social-auth.cjs",
       "updater-feed.cjs",
       "preload.cjs",
       "package.json",
@@ -62,6 +66,14 @@
     ],
     "asarUnpack": [
       "node_modules/ffmpeg-static/**"
+    ],
+    "protocols": [
+      {
+        "name": "Resonance Account Sign-In",
+        "schemes": [
+          "resonance"
+        ]
+      }
     ],
     "win": {
       "icon": "resonance.ico",

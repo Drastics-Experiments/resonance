@@ -7,6 +7,26 @@ import org.junit.Test
 
 class SyncSafetyPoliciesTest {
     @Test
+    fun playlistOrderMergeKeepsDeviceOnlyAndUnresolvedItemsInStableSlots() {
+        assertEquals(
+            listOf("remote-b", "local", "remote-c", "remote-a"),
+            PlaylistOrderPolicy.merge(
+                previous = listOf("remote-a", "local", "remote-b"),
+                ordered = listOf("remote-b", "remote-c", "remote-a"),
+                preserving = listOf("local"),
+            ),
+        )
+        assertEquals(
+            listOf("remote-b", "unresolved", "remote-a"),
+            PlaylistOrderPolicy.merge(
+                previous = listOf("remote-a", "unresolved", "remote-b"),
+                ordered = listOf("remote-b", "remote-a"),
+                preserving = listOf("unresolved"),
+            ),
+        )
+    }
+
+    @Test
     fun stablePlaylistSubmissionClearsOnlyItsOwnDirtySnapshot() {
         val result = PlaylistSyncMutationPolicy.reconcile(
             submitted = PlaylistMutationSnapshot(4, setOf("submitted"), setOf("deleted")),

@@ -54,6 +54,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -66,21 +67,22 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.clerk.ui.auth.AuthView
 import mov.unblocked.resonance.data.RemoteSong
 import mov.unblocked.resonance.data.ServerDownloadMode
 import mov.unblocked.resonance.data.ServerUploadMode
+import mov.unblocked.resonance.data.AccountEmailPrivacy
 import java.net.URI
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -182,8 +184,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                     selecting = false
                 },
                 onUpload = {
-                    if (state.serverUploadMode == ServerUploadMode.LocalFile) actions.uploadAudio()
-                    else linkImportOpen = true
+                    linkImportOpen = true
                 },
                 onUploadMissing = actions::uploadMissingDownloads,
                 onToggleSelection = {
@@ -401,7 +402,7 @@ private fun ServerActionBar(
             ActionDivider()
             ServerAction(
                 icon = Icons.Default.CloudUpload,
-                label = "Files",
+                label = "Link",
                 enabled = uploadEnabled,
                 onClick = onUpload,
                 modifier = Modifier.weight(1f),
@@ -675,27 +676,13 @@ private val RemoteSong.mediaKindLabel: String
 @Composable
 internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions, dismiss: () -> Unit) {
     var url by remember(state.serverUrl) { mutableStateOf(state.serverUrl) }
-    var token by remember(state.serverToken) { mutableStateOf(state.serverToken) }
-    var admin by remember(state.serverAdminKey) { mutableStateOf(state.serverAdminKey) }
-    var profileName by remember(state.syncProfileId, state.syncProfiles) {
-        mutableStateOf(activeSyncProfileName(state))
-    }
     var connectRequested by remember { mutableStateOf(false) }
-    val tokenFocus = remember { FocusRequester() }
-    val adminFocus = remember { FocusRequester() }
-    val profileFocus = remember { FocusRequester() }
+    var isEmailRevealed by remember(state.accountEmail) { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
-    val connecting = state.isApplyingServerConnection || state.isRefreshingServer
-    val editingConnection = url.trim() != state.serverUrl.trim() ||
-        token.trim() != state.serverToken.trim() ||
-        admin.trim() != state.serverAdminKey.trim() ||
-        profileName.trim() != activeSyncProfileName(state).trim()
+    val connecting = state.isApplyingServerConnection || state.isRefreshingServer || state.isSigningIn
 
     LaunchedEffect(connectRequested, connecting, state.isConnected, state.serverMessage) {
-        val uploadOnlyReady = state.hasServerUploadCredentials &&
-            state.serverToken.isBlank() &&
-            state.serverMessage.startsWith("Upload ready")
-        if (connectRequested && !connecting && (state.isConnected || uploadOnlyReady)) dismiss()
+        if (connectRequested && !connecting && state.isConnected) dismiss()
     }
 
     AlertDialog(
@@ -709,77 +696,78 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                 OutlinedTextField(
                     url,
                     { url = it },
+                    enabled = state.accountEmail == null,
                     label = { Text("Server URL") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                    keyboardActions = KeyboardActions(onNext = { tokenFocus.requestFocus() }),
-                )
-                OutlinedTextField(
-                    token,
-                    { token = it },
-                    modifier = Modifier.focusRequester(tokenFocus),
-                    label = { Text("Server access token") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                    keyboardActions = KeyboardActions(onNext = { adminFocus.requestFocus() }),
-                )
-                OutlinedTextField(
-                    admin,
-                    { admin = it },
-                    modifier = Modifier.focusRequester(adminFocus),
-                    label = { Text("Server admin key") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                    keyboardActions = KeyboardActions(onNext = { profileFocus.requestFocus() }),
-                )
-                OutlinedTextField(
-                    profileName,
-                    { profileName = it },
-                    modifier = Modifier.focusRequester(profileFocus),
-                    label = { Text("Profile name") },
-                    supportingText = { Text("Existing names reconnect; new names are created.") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
                 )
-                TransferModeSelector(
-                    title = "Upload mode",
-                    selected = if (editingConnection) "Connect first" else state.serverUploadMode?.label ?: "Disabled",
-                    options = if (editingConnection) emptyList() else state.availableServerUploadModes.map { mode ->
-                        mode.label to { actions.setServerUploadMode(mode) }
-                    },
-                )
-                TransferModeSelector(
-                    title = "Download mode",
-                    selected = if (editingConnection) "Connect first" else state.serverDownloadMode.label,
-                    options = if (editingConnection) emptyList() else state.availableServerDownloadModes.map { mode ->
-                        mode.label to { actions.setServerDownloadMode(mode) }
-                    },
-                )
-                if (editingConnection) {
+                if (state.accountEmail != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column {
+                            Text(
+                                AccountEmailPrivacy.safeDisplayName(state.accountDisplayName, state.accountEmail),
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            TextButton(
+                                onClick = { isEmailRevealed = !isEmailRevealed },
+                                contentPadding = PaddingValues(0.dp),
+                            ) {
+                                Text(
+                                    AccountEmailPrivacy.displayedAddress(state.accountEmail, isEmailRevealed),
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                                )
+                            }
+                            Text(
+                                if (state.accountRole == "admin") "Administrator" else "Member",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                            )
+                        }
+                        TextButton(onClick = actions::signOutAccount, enabled = !connecting) { Text("Sign out") }
+                    }
+                } else {
                     Text(
-                        "Connect this URL, credential, and profile first. Then reopen Connection to choose modes from that context's signed policy.",
+                        if (state.serverToken.isBlank()) "Sign in with your account" else "Legacy connection • continue with Clerk",
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    TextButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !connecting && url.isNotBlank(),
+                        onClick = {
+                            focusManager.clearFocus()
+                            actions.startNativeAccountSignIn(url.trim())
+                        },
+                    ) { Text("Sign in or create account") }
+                    Text(
+                        "Use email, Google, Apple, or Discord without leaving Resonance.",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
                 }
-                Text(
-                    state.clientConfigStatus,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f),
-                )
                 Text(state.serverMessage, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
             }
         },
         confirmButton = {
             TextButton(
-                enabled = !connecting && profileName.isNotBlank(),
+                enabled = !connecting && state.serverToken.isNotBlank(),
                 onClick = {
                     focusManager.clearFocus()
                     connectRequested = true
-                    actions.saveServerConnection(url.trim(), token.trim(), admin.trim(), profileName)
+                    actions.saveServerConnection(
+                        url.trim(),
+                        state.serverToken,
+                        state.serverAdminKey,
+                        AccountEmailPrivacy.safeDisplayName(
+                            state.accountDisplayName ?: activeSyncProfileName(state),
+                            state.accountEmail,
+                        ),
+                    )
                 },
             ) {
                 if (connecting) {
@@ -791,42 +779,20 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
         },
         dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
     )
-}
 
-@Composable
-private fun TransferModeSelector(
-    title: String,
-    selected: String,
-    options: List<Pair<String, () -> Unit>>,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    Box(Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, Color.White.copy(alpha = .16f), RoundedCornerShape(4.dp))
-                .clickable(enabled = options.isNotEmpty()) { expanded = true }
-                .padding(horizontal = 14.dp, vertical = 11.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
+    if (state.isNativeAccountSignInOpen) {
+        Dialog(
+            onDismissRequest = actions::dismissNativeAccountSignIn,
+            properties = DialogProperties(usePlatformDefaultWidth = false),
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
-                Text(selected, fontSize = 14.sp)
-            }
-            Icon(Icons.Default.Settings, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            options.forEach { (label, select) ->
-                DropdownMenuItem(
-                    text = { Text(label) },
-                    leadingIcon = {
-                        if (label == selected) Icon(Icons.Default.Check, null)
-                    },
-                    onClick = {
-                        select()
-                        expanded = false
-                    },
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.background,
+            ) {
+                AuthView(
+                    isDismissible = true,
+                    onDismiss = actions::dismissNativeAccountSignIn,
+                    onAuthComplete = actions::completeNativeAccountSignIn,
                 )
             }
         }

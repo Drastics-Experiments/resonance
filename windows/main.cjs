@@ -1,11 +1,13 @@
-const { app, BrowserWindow, dialog, ipcMain, protocol, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, shell, Tray } = require("electron");
 const { autoUpdater } = require("electron-updater");
+const { spawn } = require("node:child_process");
 const { createHash, createHmac, randomBytes, randomUUID } = require("node:crypto");
 const { createReadStream } = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { crashSafeReplace, crashSafeReplaceMirrored, readPrimaryOrBackup } = require("./crash-safe-file.cjs");
+const { DiscordRPCClient, validDiscordApplicationID } = require("./discord-rpc.cjs");
 const {
   cachedConfigMeetsRevisionFloor,
   clientConfigRevisionFloor,
@@ -25,6 +27,10 @@ const {
 const { MAX_SERVER_MEDIA_BYTES, adoptDownloadedFile, writeResponseToFile } = require("./download-file.cjs");
 const { sanitizeWindowsFilename, windowsCollisionFilename } = require("./filename-policy.cjs");
 const { isManagedLibraryFile } = require("./library-paths.cjs");
+const {
+  UNLINKED_DOWNLOAD_MIGRATION_ID,
+  migrateUnlinkedDownloads,
+} = require("./library-update-migration.cjs");
 const { readAudioMetadata } = require("./metadata.cjs");
 const { normalizeSourceIdentities, normalizeSourceIdentity } = require("./provenance.cjs");
 const { createRenewablePolicyLease } = require("./policy-lease.cjs");
@@ -43,15 +49,47 @@ const {
 } = require("./server-stream.cjs");
 const { catalogSHA256, normalizeServerBaseURL } = require("./server-policy.cjs");
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
-const { LocalImportError, searchYouTubeAudioSources } = require("./local-import-core.cjs");
+const { LocalImportError, searchYouTubeAudioSources, youtubeVideoID } = require("./local-import-core.cjs");
 const { importFileBackedSource, searchFileBackedSources } = require("./local-debrid.cjs");
-const { artworkFileDataURL, fetchArtwork, importConfirmedSource, resolveLocalImportSource } = require("./local-import-platform.cjs");
+const { artworkFileDataURL, fetchArtwork, importConfirmedSource, resolveLocalImportSource, safeArtworkURL } = require("./local-import-platform.cjs");
 const { looksLikeLink, searchAllPlatforms } = require("./local-search.cjs");
 const { downloadResolvedSoundCloudAudio, isSoundCloudURL, resolveSoundCloudAudio } = require("./local-soundcloud.cjs");
 const { downloadResolvedAudio, resolveYouTubeAudio } = require("./local-youtube.cjs");
 const { policyBlockedUploadEntries, serverUploadFilename } = require("./server-upload.cjs");
 const { readServerUploadResponse } = require("./server-upload-response.cjs");
+const {
+  authorizationURL,
+  createPKCE,
+  exchangeAuthCode,
+  fetchAuthConfiguration,
+  publicSession,
+  refreshAuthSession,
+  revokeAuthSession,
+} = require("./social-auth.cjs");
 const windowsPackage = require("./package.json");
+
+function developmentInstanceMetadata() {
+  if (app.isPackaged) return null;
+  const worktreeID = String(process.env.RESONANCE_WORKTREE_ID || "").trim();
+  if (!/^[a-z0-9-]{1,80}$/.test(worktreeID)) return null;
+  const requestedName = String(process.env.RESONANCE_INSTANCE_NAME || "").trim();
+  const displayName = /^[A-Za-z0-9 ._\-\[\]]{1,100}$/.test(requestedName)
+    ? requestedName
+    : `Resonance Windows [${worktreeID}]`;
+  return { displayName, worktreeID };
+}
+
+const developmentInstance = developmentInstanceMetadata();
+const resonanceApplicationName = developmentInstance?.displayName || "Resonance";
+if (developmentInstance) {
+  app.setName(resonanceApplicationName);
+  app.setPath("userData", path.join(
+    app.getPath("appData"),
+    "Resonance Worktrees",
+    developmentInstance.worktreeID,
+    "windows",
+  ));
+}
 
 protocol.registerSchemesAsPrivileged([{
   scheme: SERVER_STREAM_SCHEME,
@@ -77,8 +115,10 @@ protectDetachedOutput(process.stdout);
 protectDetachedOutput(process.stderr);
 
 const AUDIO_EXTENSIONS = new Set([".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".wav"]);
+const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v", ".webm"]);
 const SERVER_ARTWORK_TYPES = new Set(["image/avif", "image/gif", "image/jpeg", "image/png", "image/webp"]);
 const MAX_SERVER_ARTWORK_BYTES = 8 * 1024 * 1024;
+const MAX_PROFILE_PICTURE_SOURCE_BYTES = 32 * 1024 * 1024;
 const MAX_LOCAL_IMPORT_UPLOAD_BYTES = 256 * 1024 * 1024;
 const MAX_LOCAL_IMPORT_PREVIEW_BYTES = 32 * 1024 * 1024;
 const AUTOMATIC_UPDATE_CHECK_DELAY_MS = 10_000;
@@ -102,6 +142,9 @@ if (!Number.isSafeInteger(WINDOWS_APP_BUILD) || WINDOWS_APP_BUILD < 1) {
 
 let mainWindow;
 let applicationQuitRequested = false;
+let backgroundTray = null;
+let runtimeAppPreferences = { runInBackground: false, discordRichPresence: false };
+let currentDiscordPresenceStatus = { state: "disabled", message: "Rich Presence is off.", applicationConfigured: false };
 const activeServerTransfers = new Map();
 const activeLocalImports = new Map();
 const activeLocalImportPreviews = new Map();
@@ -109,6 +152,12 @@ const cachedLocalImportPreviews = new Map();
 const pendingExternalImports = new Map();
 let librarySaveQueue = Promise.resolve();
 let credentialSaveQueue = Promise.resolve();
+let accountSessionSaveQueue = Promise.resolve();
+let accountSession = null;
+let accountSessionGeneration = 0;
+let pendingAccountSignIn = null;
+let accountSessionRefreshTimer = null;
+let accountSessionRefreshInFlight = null;
 let serverUploadRetrySaveQueue = Promise.resolve();
 let serverUploadRetryLoadPromise = null;
 let clientConfigStateLoadPromise = null;
@@ -124,6 +173,22 @@ let currentWindowsUpdateStatus = { type: "idle" };
 let windowsUpdateCheckPromise = null;
 let automaticUpdateCheckTimer = null;
 let automaticUpdateCheckInterval = null;
+
+const bundledDiscordApplicationID = validDiscordApplicationID(
+  process.env.RESONANCE_DISCORD_CLIENT_ID || windowsPackage.resonanceDiscordApplicationID,
+);
+const discordRPC = new DiscordRPCClient({
+  onStatus(status) {
+    currentDiscordPresenceStatus = status;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("app:discord-presence:status", status);
+    }
+  },
+});
+currentDiscordPresenceStatus = discordRPC.configure({
+  enabled: false,
+  applicationID: bundledDiscordApplicationID,
+});
 
 async function atomicWriteFile(destination, data, options = "utf8") {
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
@@ -143,6 +208,55 @@ async function fileSHA256(filePath) {
     stream.on("data", (chunk) => hash.update(chunk));
     stream.on("error", reject);
     stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+function bundledFFmpegPath() {
+  let executable;
+  try { executable = require("ffmpeg-static"); }
+  catch { throw new Error("Video thumbnails are unavailable in this build."); }
+  if (typeof executable !== "string" || !executable) {
+    throw new Error("Video thumbnails are unavailable in this build.");
+  }
+  return executable.replace(/app\.asar([\\/])/i, "app.asar.unpacked$1");
+}
+
+function captureVideoFrame(filePath, seconds) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bundledFFmpegPath(), [
+      "-hide_banner", "-loglevel", "error",
+      "-ss", Math.max(0, seconds).toFixed(3),
+      "-i", filePath,
+      "-frames:v", "1",
+      "-vf", "scale=240:135:force_original_aspect_ratio=increase,crop=240:135",
+      "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+    ], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const chunks = [];
+    let byteCount = 0;
+    let stderr = "";
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    };
+    child.stdout.on("data", (chunk) => {
+      byteCount += chunk.length;
+      if (byteCount > 2 * 1024 * 1024) {
+        child.kill("SIGKILL");
+        finish(reject, new Error("A video thumbnail was unexpectedly large."));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-2_000); });
+    child.on("error", (error) => finish(reject, error));
+    child.on("close", (code) => {
+      if (settled) return;
+      const data = Buffer.concat(chunks);
+      if (code === 0 && data.length) finish(resolve, `data:image/jpeg;base64,${data.toString("base64")}`);
+      else finish(reject, new Error(stderr.trim() || "Video thumbnail extraction failed."));
+    });
   });
 }
 
@@ -166,7 +280,7 @@ function canonicalServerCredentials(value) {
 }
 
 function previewCredentialStorePath() {
-  return path.join(app.getPath("appData"), "Liked Songs", "server-credentials.json");
+  return path.join(app.getPath("userData"), "server-credentials.json");
 }
 
 async function readPreviewCredentials() {
@@ -216,6 +330,202 @@ async function persistServerCredentials(credentialsValue) {
     .then(() => crashSafeReplace(credentials, safeStorage.encryptString(payload), { backupPath: credentialsBackup }));
   credentialSaveQueue = save;
   await save;
+}
+
+function previewAccountSessionPath() {
+  return path.join(app.getPath("userData"), "account-session.json");
+}
+
+function canonicalStoredAccountSession(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const accessToken = canonicalCredentialToken(value.accessToken);
+  const refreshToken = canonicalCredentialToken(value.refreshToken);
+  const email = String(value.email || "").trim().toLowerCase();
+  const role = value.role === "admin" ? "admin" : value.role === "member" ? "member" : null;
+  const expiresAt = Number(value.expiresAt);
+  const baseURL = normalizeServerBaseURL(value.baseURL, { allowInsecureLoopback: !app.isPackaged }).origin;
+  if (!accessToken || !refreshToken || !email || !role || !Number.isFinite(expiresAt)) return null;
+  const accountID = String(value.accountID || "").trim() || null;
+  const profileID = String(value.profileID || "").trim() || null;
+  const displayName = String(value.displayName || "").trim() || null;
+  let imageURL = null;
+  if (value.imageURL) {
+    const candidate = new URL(value.imageURL);
+    if (candidate.protocol !== "https:" || candidate.username || candidate.password) return null;
+    imageURL = candidate.href;
+  }
+  return { accessToken, refreshToken, email, role, expiresAt, baseURL, accountID, profileID, displayName, imageURL };
+}
+
+async function readAccountSession() {
+  let rawValue = null;
+  if (usesPreviewCredentialStore()) {
+    try { rawValue = JSON.parse(await fs.readFile(previewAccountSessionPath(), "utf8")); }
+    catch { return null; }
+  } else {
+    const { accountSession: destination, accountSessionBackup } = await ensureDirectories();
+    const safeStorage = encryptedCredentialStorage();
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    try {
+      rawValue = (await readPrimaryOrBackup(destination, (encrypted) =>
+        JSON.parse(safeStorage.decryptString(encrypted)), { backupPath: accountSessionBackup })).value;
+    } catch {
+      return null;
+    }
+  }
+  try { return canonicalStoredAccountSession(rawValue); }
+  catch { return null; }
+}
+
+async function persistAccountSession(value) {
+  const session = canonicalStoredAccountSession(value);
+  if (!session) throw new Error("The account session is invalid.");
+  const save = accountSessionSaveQueue
+    .catch(() => {})
+    .then(async () => {
+      if (usesPreviewCredentialStore()) {
+        const destination = previewAccountSessionPath();
+        await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+        await atomicWriteFile(destination, JSON.stringify(session), { encoding: "utf8", mode: 0o600 });
+        await fs.chmod(destination, 0o600);
+        return;
+      }
+      const safeStorage = encryptedCredentialStorage();
+      if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows account encryption is unavailable.");
+      const { accountSession: destination, accountSessionBackup } = await ensureDirectories();
+      await crashSafeReplace(
+        destination,
+        safeStorage.encryptString(JSON.stringify(session)),
+        { backupPath: accountSessionBackup },
+      );
+    });
+  accountSessionSaveQueue = save;
+  await save;
+}
+
+async function clearPersistedAccountSession() {
+  accountSessionGeneration += 1;
+  accountSession = null;
+  if (accountSessionRefreshTimer) clearTimeout(accountSessionRefreshTimer);
+  accountSessionRefreshTimer = null;
+  const paths = applicationPaths();
+  const clear = accountSessionSaveQueue
+    .catch(() => {})
+    .then(() => Promise.all([
+      fs.rm(previewAccountSessionPath(), { force: true }).catch(() => undefined),
+      fs.rm(paths.accountSession, { force: true }).catch(() => undefined),
+      fs.rm(paths.accountSessionBackup, { force: true }).catch(() => undefined),
+    ]));
+  accountSessionSaveQueue = clear;
+  await clear;
+}
+
+async function purgeLegacyServerCredentials() {
+  const paths = applicationPaths();
+  await Promise.all([
+    fs.rm(previewCredentialStorePath(), { force: true }).catch(() => undefined),
+    fs.rm(paths.credentials, { force: true }).catch(() => undefined),
+    fs.rm(paths.credentialsBackup, { force: true }).catch(() => undefined),
+  ]);
+}
+
+function publishAccountSession(error = null) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("account:session-changed", {
+      session: publicSession(accountSession),
+      error: error ? String(error.message || error) : null,
+    });
+  }
+}
+
+function scheduleAccountSessionRefresh() {
+  if (accountSessionRefreshTimer) clearTimeout(accountSessionRefreshTimer);
+  accountSessionRefreshTimer = null;
+  if (!accountSession) return;
+  const delay = Math.max(5_000, Math.min(2_147_000_000, accountSession.expiresAt - Date.now() - 5 * 60_000));
+  accountSessionRefreshTimer = setTimeout(() => {
+    accountSessionRefreshTimer = null;
+    void refreshCurrentAccountSession().catch((error) => {
+      publishAccountSession(error);
+      if (accountSession && accountSession.expiresAt > Date.now()) {
+        accountSessionRefreshTimer = setTimeout(() => {
+          accountSessionRefreshTimer = null;
+          void refreshCurrentAccountSession().catch(publishAccountSession);
+        }, 60_000);
+        accountSessionRefreshTimer.unref?.();
+      }
+    });
+  }, delay);
+  accountSessionRefreshTimer.unref?.();
+}
+
+async function refreshCurrentAccountSession(migrationProfileID = null) {
+  if (!accountSession) return null;
+  if (accountSessionRefreshInFlight) return accountSessionRefreshInFlight;
+  const active = accountSession;
+  const generation = accountSessionGeneration;
+  const refresh = (async () => {
+    const configuration = await fetchAuthConfiguration(active.baseURL);
+    const refreshed = await refreshAuthSession(configuration, active, fetch, migrationProfileID);
+    if (accountSessionGeneration !== generation || accountSession !== active) {
+      return publicSession(accountSession);
+    }
+    await persistAccountSession(refreshed);
+    if (accountSessionGeneration !== generation || accountSession !== active) {
+      return publicSession(accountSession);
+    }
+    accountSession = refreshed;
+    scheduleAccountSessionRefresh();
+    publishAccountSession();
+    return publicSession(refreshed);
+  })();
+  accountSessionRefreshInFlight = refresh;
+  try {
+    return await refresh;
+  } finally {
+    if (accountSessionRefreshInFlight === refresh) accountSessionRefreshInFlight = null;
+  }
+}
+
+function authCallbackFromArguments(argumentsList) {
+  return (Array.isArray(argumentsList) ? argumentsList : [])
+    .find((value) => typeof value === "string" && value.startsWith("resonance://auth/callback"));
+}
+
+async function openAccountSignInBrowser(destination) {
+  await shell.openExternal(destination.href);
+}
+
+async function handleAccountAuthCallback(value) {
+  const pending = pendingAccountSignIn;
+  if (!pending || Date.now() - pending.startedAt > 10 * 60_000) {
+    pendingAccountSignIn = null;
+    throw new Error("The sign-in request expired. Please try again.");
+  }
+  const callback = new URL(value);
+  if (callback.protocol !== "resonance:" || callback.hostname !== "auth" || callback.pathname !== "/callback") {
+    throw new Error("The account callback is invalid.");
+  }
+  if (callback.searchParams.get("state") !== pending.state) {
+    throw new Error("The account sign-in state did not match. Please try again.");
+  }
+  pendingAccountSignIn = null;
+  const providerError = callback.searchParams.get("error_description") || callback.searchParams.get("error");
+  if (providerError) throw new Error(providerError);
+  const code = callback.searchParams.get("code");
+  accountSession = await exchangeAuthCode(
+    pending.configuration,
+    pending.baseURL,
+    code,
+    pending.verifier,
+    fetch,
+    pending.migrationProfileID,
+  );
+  await persistAccountSession(accountSession);
+  await purgeLegacyServerCredentials();
+  scheduleAccountSessionRefresh();
+  publishAccountSession();
+  return publicSession(accountSession);
 }
 
 function localImportEnabled() {
@@ -333,10 +643,13 @@ function applicationPaths() {
     state: path.join(root, "library.json"),
     credentials: path.join(root, "server-credentials.bin"),
     credentialsBackup: path.join(root, "server-credentials.bin.backup"),
+    accountSession: path.join(root, "account-session.bin"),
+    accountSessionBackup: path.join(root, "account-session.bin.backup"),
     uploadRetries: path.join(root, "server-upload-retries.json"),
     uploadRetriesBackup: path.join(root, "server-upload-retries.json.backup"),
     clientConfigState: path.join(root, "client-config-state.json"),
     clientConfigStateBackup: path.join(root, "client-config-state.json.backup"),
+    profilePictures: path.join(root, "ProfilePictures"),
     local: path.join(root, "LocalMusic"),
     remote: path.join(root, "ServerCache"),
   };
@@ -458,7 +771,10 @@ function safeServerUploadRetryRecord(value) {
     ? new Date(value.createdAt).toISOString()
     : null;
   const recordAge = createdAt ? Date.now() - Date.parse(createdAt) : Number.POSITIVE_INFINITY;
+  const mediaSourceURL = preservedMediaSourceURL(value.mediaSourceURL);
+  const mediaKind = value.mediaKind === "video" ? "video" : "audio";
   if (!retryID || !filePath || !serverOrigin || !createdAt
+      || !mediaSourceURL
       || recordAge < -5 * 60 * 1000
       || recordAge > SERVER_UPLOAD_RETRY_MAX_AGE_MS) return null;
   return {
@@ -467,11 +783,65 @@ function safeServerUploadRetryRecord(value) {
     trackID: boundedText(value.trackID, 128),
     title: boundedText(value.title) || path.basename(filePath, path.extname(filePath)),
     artist: boundedText(value.artist),
+    album: boundedText(value.album),
+    duration: Number.isFinite(Number(value.duration)) && Number(value.duration) >= 0 ? Number(value.duration) : 0,
+    artworkURL: safeArtworkURL(value.artworkURL)?.href || null,
+    mediaSourceURL,
+    mediaKind,
     uploadFilename: safeFilename(value.uploadFilename || path.basename(filePath)),
     serverOrigin,
     profileID: boundedText(value.profileID, 128) || "default",
     createdAt,
   };
+}
+
+function preservedMediaSourceURL(value) {
+  const source = typeof value === "string" ? value.trim() : "";
+  if (!source || source.length > 8192) return null;
+  try {
+    const url = new URL(source);
+    if (url.protocol !== "https:" || url.username || url.password || url.hash) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function sourceLinkRegistrationBody(item, { schemaVersion = 3 } = {}) {
+  const sourceURL = preservedMediaSourceURL(item.mediaSourceURL);
+  if (!sourceURL) {
+    throw new Error("Only songs downloaded from a preserved source link can be uploaded. Download this song from its link again first.");
+  }
+  if (schemaVersion === 2) {
+    return JSON.stringify({
+      schema_version: 2,
+      source_url: sourceURL,
+    });
+  }
+  return JSON.stringify({
+    schema_version: 3,
+    source_url: sourceURL,
+    media_kind: item.mediaKind === "video" ? "video" : "audio",
+  });
+}
+
+async function putSourceLinkRegistration({ url, headers, item, signal }) {
+  const options = (body) => ({
+    method: "PUT",
+    headers,
+    body,
+    redirect: "manual",
+    signal,
+  });
+  let response = await fetch(url, options(sourceLinkRegistrationBody(item)));
+  if (item.mediaKind !== "video" && response.status === 400) {
+    const payload = await response.clone().json().catch(() => null);
+    if (payload?.error === "Unsupported source-link schema_version") {
+      await response.body?.cancel?.().catch(() => undefined);
+      response = await fetch(url, options(sourceLinkRegistrationBody(item, { schemaVersion: 2 })));
+    }
+  }
+  return response;
 }
 
 async function ensureServerUploadRetriesLoaded() {
@@ -577,6 +947,24 @@ function storageLocationForPath(filePath) {
   return "external";
 }
 
+function isDirectServerCacheFile(filePath) {
+  if (typeof filePath !== "string" || !filePath) return false;
+  const remote = path.resolve(applicationPaths().remote);
+  const candidate = path.resolve(filePath);
+  return candidate !== remote && path.dirname(candidate) === remote;
+}
+
+async function deleteManagedServerCacheFile(track) {
+  if (!track?.filePath) return true;
+  if (!isDirectServerCacheFile(track.filePath)) return false;
+  try {
+    await fs.rm(path.resolve(track.filePath), { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function safeListeningHistory(value) {
   const optionalText = (candidate, maximumLength = 500) => {
     const text = typeof candidate === "string" ? candidate.trim() : "";
@@ -612,8 +1000,39 @@ function safeListeningHistory(value) {
 
 async function ensureDirectories() {
   const paths = applicationPaths();
-  await Promise.all([fs.mkdir(paths.local, { recursive: true }), fs.mkdir(paths.remote, { recursive: true })]);
+  await Promise.all([
+    fs.mkdir(paths.local, { recursive: true }),
+    fs.mkdir(paths.remote, { recursive: true }),
+    fs.mkdir(paths.profilePictures, { recursive: true }),
+  ]);
   return paths;
+}
+
+function profilePicturePath(serverURL, profileID) {
+  const serverOrigin = normalizedServerOrigin(serverURL);
+  const profile = String(profileID || "default").trim() || "default";
+  if (!serverOrigin || profile.length > 128 || /[\u0000-\u001f\u007f]/.test(profile)) {
+    throw new Error("Choose a valid profile before changing its picture.");
+  }
+  const digest = createHash("sha256")
+    .update(`${serverOrigin}#profile=${profile}`, "utf8")
+    .digest("hex");
+  return path.join(applicationPaths().profilePictures, `${digest}.jpg`);
+}
+
+function normalizedProfilePicture(image) {
+  if (!image || image.isEmpty()) throw new Error("The selected file is not a supported picture.");
+  const size = image.getSize();
+  const side = Math.min(size.width, size.height);
+  if (!Number.isSafeInteger(side) || side < 1) throw new Error("The selected picture is empty.");
+  const square = image.crop({
+    x: Math.floor((size.width - side) / 2),
+    y: Math.floor((size.height - side) / 2),
+    width: side,
+    height: side,
+  });
+  const target = Math.min(side, 512);
+  return square.resize({ width: target, height: target, quality: "best" }).toJPEG(88);
 }
 
 async function cleanupLocalImportTemporaryFiles() {
@@ -651,6 +1070,21 @@ function publicTrack(filePath, details = {}) {
   const sourceIdentities = normalizeSourceIdentities(details.sourceIdentities, sourceIdentity
     ? [sourceIdentity, ...(sourceIdentity.aliases || [])]
     : []);
+  let artworkURL = safeArtworkURL(details.artworkURL)?.href || null;
+  if (!artworkURL) {
+    const sourcePages = [details.sourceURL, sourceIdentity?.sourcePageURL, ...sourceIdentities.map((identity) => identity.sourcePageURL)];
+    for (const sourcePage of sourcePages) {
+      try {
+        const videoID = sourcePage ? youtubeVideoID(sourcePage) : null;
+        if (videoID) {
+          artworkURL = `https://img.youtube.com/vi/${videoID}/maxresdefault.jpg`;
+          break;
+        }
+      } catch {
+        // Source provenance is optional and must not make a stored track unloadable.
+      }
+    }
+  }
   const storedPath = typeof filePath === "string" ? filePath : "";
   return {
     id: details.id || randomUUID(),
@@ -659,6 +1093,7 @@ function publicTrack(filePath, details = {}) {
     album: details.album || "Unknown Album",
     duration: Number(details.duration) || 0,
     artwork: details.artwork || null,
+    artworkURL,
     size: Number(details.size) || 0,
     filePath: storedPath,
     fileUrl: storedPath ? pathToFileURL(storedPath).href : null,
@@ -674,6 +1109,9 @@ function publicTrack(filePath, details = {}) {
     sourceIdentities,
     sourceSha256: details.sourceSha256 || null,
     contentSha256: details.contentSha256 || null,
+    preservesUnlinkedImport: typeof details.preservesUnlinkedImport === "boolean"
+      ? details.preservesUnlinkedImport
+      : null,
     dateAdded: details.dateAdded || new Date().toISOString(),
   };
 }
@@ -756,7 +1194,7 @@ function createWindow() {
     minWidth: 980,
     minHeight: 650,
     backgroundColor: "#07101c",
-    title: "Resonance",
+    title: resonanceApplicationName,
     icon: path.join(__dirname, "resonance.ico"),
     autoHideMenuBar: true,
     webPreferences: {
@@ -767,6 +1205,10 @@ function createWindow() {
     },
   });
   mainWindow = window;
+  window.on("page-title-updated", (event) => {
+    event.preventDefault();
+    window.setTitle(resonanceApplicationName);
+  });
   window.resonanceCloseReady = false;
   window.resonanceCloseRequested = false;
   window.resonanceCloseTimer = null;
@@ -782,6 +1224,12 @@ function createWindow() {
     rendererCredentialEpochs.delete(windowWebContentsID);
   });
   window.on("close", (event) => {
+    if (runtimeAppPreferences.runInBackground && !applicationQuitRequested) {
+      event.preventDefault();
+      window.hide();
+      ensureBackgroundTray();
+      return;
+    }
     if (window.resonanceCloseReady || window.isDestroyed()) return;
     event.preventDefault();
     if (window.resonanceCloseRequested) return;
@@ -810,23 +1258,121 @@ ipcMain.on("app:close-ready", (event) => {
   else window.close();
 });
 
+function safeAppPreferences(value) {
+  const preferences = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const keybinds = preferences.keybinds && typeof preferences.keybinds === "object" && !Array.isArray(preferences.keybinds)
+    ? preferences.keybinds
+    : {};
+  const defaults = {
+    togglePlayback: "Space",
+    previousTrack: "Ctrl+ArrowLeft",
+    nextTrack: "Ctrl+ArrowRight",
+    volumeDown: "Ctrl+ArrowDown",
+    volumeUp: "Ctrl+ArrowUp",
+  };
+  return {
+    runInBackground: Boolean(preferences.runInBackground),
+    discordRichPresence: Boolean(preferences.discordRichPresence),
+    keybinds: Object.fromEntries(Object.entries(defaults).map(([action, fallback]) => {
+      const candidate = typeof keybinds[action] === "string" ? keybinds[action].trim().slice(0, 80) : "";
+      return [action, candidate || fallback];
+    })),
+  };
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function ensureBackgroundTray() {
+  if (backgroundTray || !app.isReady()) return backgroundTray;
+  const trayIcon = process.platform === "darwin"
+    ? nativeImage.createFromNamedImage("NSImageNameAudioOutputVolumeHighTemplate")
+    : path.join(__dirname, "resonance.ico");
+  backgroundTray = new Tray(trayIcon);
+  backgroundTray.setToolTip("Resonance");
+  backgroundTray.setContextMenu(Menu.buildFromTemplate([
+    { label: "Open Resonance", click: showMainWindow },
+    { type: "separator" },
+    {
+      label: "Quit Resonance",
+      click: () => {
+        applicationQuitRequested = true;
+        app.quit();
+      },
+    },
+  ]));
+  backgroundTray.on("click", showMainWindow);
+  return backgroundTray;
+}
+
+ipcMain.handle("app:preferences:update", (_event, value) => {
+  runtimeAppPreferences = safeAppPreferences(value);
+  if (runtimeAppPreferences.runInBackground) ensureBackgroundTray();
+  else if (backgroundTray) {
+    backgroundTray.destroy();
+    backgroundTray = null;
+  }
+  currentDiscordPresenceStatus = discordRPC.configure({
+    enabled: runtimeAppPreferences.discordRichPresence,
+    applicationID: bundledDiscordApplicationID,
+  });
+  return runtimeAppPreferences;
+});
+
+ipcMain.handle("app:discord-presence:update", (_event, value) => {
+  currentDiscordPresenceStatus = discordRPC.setActivity(value);
+  return currentDiscordPresenceStatus;
+});
+
+ipcMain.handle("app:discord-presence:status", () => discordRPC.status());
+
 app.on("before-quit", () => {
   applicationQuitRequested = true;
+  discordRPC.destroy();
+  if (backgroundTray) {
+    backgroundTray.destroy();
+    backgroundTray = null;
+  }
   revokeAllServerStreams();
   if (automaticUpdateCheckTimer) clearTimeout(automaticUpdateCheckTimer);
   if (automaticUpdateCheckInterval) clearInterval(automaticUpdateCheckInterval);
   automaticUpdateCheckTimer = null;
   automaticUpdateCheckInterval = null;
+  if (accountSessionRefreshTimer) clearTimeout(accountSessionRefreshTimer);
+  accountSessionRefreshTimer = null;
+  pendingAccountSignIn = null;
 });
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
-app.on("second-instance", () => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
+if (process.platform === "win32") {
+  if (process.defaultApp && process.argv[1]) {
+    app.setAsDefaultProtocolClient("resonance", process.execPath, [path.resolve(process.argv[1])]);
+  } else {
+    app.setAsDefaultProtocolClient("resonance");
+  }
+} else if (process.platform === "darwin" && !app.isPackaged) {
+  app.setAsDefaultProtocolClient("resonance");
+}
+
+app.on("second-instance", (_event, commandLine) => {
+  showMainWindow();
+  const callback = authCallbackFromArguments(commandLine);
+  if (callback) void handleAccountAuthCallback(callback).catch(publishAccountSession);
+});
+
+app.on("open-url", (event, value) => {
+  if (!String(value || "").startsWith("resonance://auth/callback")) return;
+  event.preventDefault();
+  void handleAccountAuthCallback(value).catch(publishAccountSession);
 });
 
 app.whenReady().then(async () => {
@@ -836,6 +1382,8 @@ app.whenReady().then(async () => {
   protocol.handle(SERVER_STREAM_SCHEME, handleServerStreamRequest);
   createWindow();
   startAutomaticUpdateChecks();
+  const startupCallback = authCallbackFromArguments(process.argv);
+  if (startupCallback) void handleAccountAuthCallback(startupCallback).catch(publishAccountSession);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
@@ -889,7 +1437,12 @@ function sanitizePersistentPlaybackReferences(value, persistentTrackIDs) {
 ipcMain.handle("library:load", async () => {
   const { state } = await ensureDirectories();
   try {
-    const stored = JSON.parse(await fs.readFile(state, "utf8"));
+    let stored = JSON.parse(await fs.readFile(state, "utf8"));
+    const migration = await migrateUnlinkedDownloads(stored, {
+      legacyDownloadOwned: (track) => isDirectServerCacheFile(track?.filePath),
+      deleteManagedDownload: deleteManagedServerCacheFile,
+    });
+    stored = migration.state;
     const storedTracks = Array.isArray(stored.tracks) ? stored.tracks.filter(persistableLibraryTrack) : [];
     const localUploadSizes = new Set(storedTracks
       .filter((track) => !track?.remoteID && track?.contentSha256 && Number.isFinite(Number(track?.size)))
@@ -930,7 +1483,9 @@ ipcMain.handle("library:load", async () => {
     }, null, 2), "utf8");
     return { state: stored, warning: null };
   } catch (error) {
-    if (error?.code === "ENOENT") return { state: null, warning: null };
+    if (error?.code === "ENOENT") {
+      return { state: { completedMigrations: [UNLINKED_DOWNLOAD_MIGRATION_ID] }, warning: null };
+    }
     const backup = `${state}.corrupt-${Date.now()}`;
     let warning = "Resonance could not read your saved library. A new empty library was opened.";
     try {
@@ -991,6 +1546,10 @@ ipcMain.handle("library:save", async (_event, state) => {
       .filter((entry) => typeof entry.trackID !== "string" || !entry.trackID.startsWith("stream:")),
     serverUploadManifests: safeServerUploadManifests(state.serverUploadManifests),
     serverTransferPreferences: safeServerTransferPreferences(state.serverTransferPreferences),
+    appPreferences: safeAppPreferences(state.appPreferences),
+    completedMigrations: Array.isArray(state.completedMigrations)
+      ? state.completedMigrations.filter((item) => typeof item === "string" && item.length <= 100)
+      : [],
   };
   const save = librarySaveQueue
     .catch(() => {})
@@ -998,6 +1557,26 @@ ipcMain.handle("library:save", async (_event, state) => {
   librarySaveQueue = save;
   await save;
   return true;
+});
+
+ipcMain.handle("library:video-frames", async (_event, value = {}) => {
+  const filePath = path.resolve(String(value.filePath || ""));
+  const duration = Math.max(0, Math.min(Number(value.duration) || 0, 7 * 24 * 60 * 60));
+  const count = Math.max(1, Math.min(Math.floor(Number(value.count) || 12), 12));
+  const paths = applicationPaths();
+  const managedRoots = [paths.local, paths.remote];
+  if (!VIDEO_EXTENSIONS.has(path.extname(filePath).toLowerCase())
+      || !isManagedLibraryFile(filePath, managedRoots)) {
+    throw new Error("Video thumbnails are limited to installed Resonance videos.");
+  }
+  const information = await fs.stat(filePath);
+  if (!information.isFile() || !duration) throw new Error("The video is unavailable.");
+  const frames = [];
+  for (let index = 0; index < count; index += 1) {
+    const seconds = Math.min(duration * (index + 0.5) / count, Math.max(duration - 0.02, 0));
+    frames.push(await captureVideoFrame(filePath, seconds));
+  }
+  return frames;
 });
 
 function credentialFingerprint(value) {
@@ -1060,6 +1639,63 @@ ipcMain.handle("server:credentials:save", async (event, value) => {
   return true;
 });
 
+ipcMain.handle("account:session:load", async (_event, value) => {
+  if (!accountSession) accountSession = await readAccountSession();
+  if (!accountSession) return null;
+  if (!accountSession.profileID || accountSession.profileID !== accountSession.accountID ||
+      !accountSession.displayName ||
+      accountSession.expiresAt <= Date.now() + 5 * 60_000) {
+    try { return await refreshCurrentAccountSession(value?.profileID); }
+    catch (error) {
+      if (accountSession.expiresAt <= Date.now()) {
+        await clearPersistedAccountSession();
+        publishAccountSession(error);
+        return null;
+      }
+    }
+  }
+  scheduleAccountSessionRefresh();
+  return publicSession(accountSession);
+});
+
+ipcMain.handle("account:sign-in", async (_event, value) => {
+  const baseURL = normalizeServerBaseURL(value?.baseURL, { allowInsecureLoopback: !app.isPackaged }).origin;
+  const configuration = await fetchAuthConfiguration(baseURL);
+  const provider = String(value?.provider || "").trim().toLowerCase();
+  const pkce = createPKCE();
+  const destination = authorizationURL(configuration, provider, pkce.challenge, pkce.state);
+  const pending = {
+    baseURL,
+    configuration,
+    verifier: pkce.verifier,
+    state: pkce.state,
+    startedAt: Date.now(),
+    migrationProfileID: String(value?.profileID || "").trim() || null,
+  };
+  pendingAccountSignIn = pending;
+  try {
+    await openAccountSignInBrowser(destination);
+  } catch (error) {
+    if (pendingAccountSignIn === pending) pendingAccountSignIn = null;
+    throw error;
+  }
+  return { started: true, provider };
+});
+
+ipcMain.handle("account:session:refresh", async () => refreshCurrentAccountSession());
+
+ipcMain.handle("account:sign-out", async () => {
+  const active = accountSession || await readAccountSession();
+  if (active) {
+    const configuration = await fetchAuthConfiguration(active.baseURL).catch(() => null);
+    if (configuration) await revokeAuthSession(configuration, active);
+  }
+  pendingAccountSignIn = null;
+  await clearPersistedAccountSession();
+  publishAccountSession();
+  return true;
+});
+
 ipcMain.handle("library:import", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Import audio",
@@ -1073,9 +1709,47 @@ ipcMain.handle("library:import", async () => {
     const destination = await uniqueDestination(paths.local, path.basename(source));
     await fs.copyFile(source, destination);
     const information = await fs.stat(destination);
-    tracks.push(await enrichedTrack(destination, { size: information.size }));
+    tracks.push(await enrichedTrack(destination, {
+      size: information.size,
+      preservesUnlinkedImport: true,
+    }));
   }
   return tracks;
+});
+
+ipcMain.handle("profile-picture:load", async (_event, { serverURL, profileID } = {}) => {
+  const destination = profilePicturePath(serverURL, profileID);
+  try {
+    const image = nativeImage.createFromPath(destination);
+    return image.isEmpty() ? null : image.toDataURL();
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle("profile-picture:choose", async (_event, { serverURL, profileID } = {}) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Choose a profile picture",
+    properties: ["openFile"],
+    filters: [{ name: "Pictures", extensions: ["avif", "gif", "jpeg", "jpg", "png", "webp"] }],
+  });
+  if (result.canceled || result.filePaths.length !== 1) return null;
+  const source = result.filePaths[0];
+  const information = await fs.stat(source);
+  if (!information.isFile() || information.size > MAX_PROFILE_PICTURE_SOURCE_BYTES) {
+    throw new Error("Profile pictures must be smaller than 32 MB.");
+  }
+  const bytes = normalizedProfilePicture(nativeImage.createFromPath(source));
+  const paths = await ensureDirectories();
+  const destination = profilePicturePath(serverURL, profileID);
+  if (path.dirname(destination) !== paths.profilePictures) throw new Error("Invalid profile-picture destination.");
+  await atomicWriteFile(destination, bytes);
+  return nativeImage.createFromBuffer(bytes).toDataURL();
+});
+
+ipcMain.handle("profile-picture:remove", async (_event, { serverURL, profileID } = {}) => {
+  await fs.rm(profilePicturePath(serverURL, profileID), { force: true });
+  return true;
 });
 
 ipcMain.handle("local-import:capabilities", () => ({
@@ -1167,7 +1841,7 @@ ipcMain.handle("local-import:resolve", async (event, { source, mediaKind, baseUR
     const sourceWarnings = [];
     const input = String(source || "").trim();
     const result = !looksLikeLink(input)
-      ? await searchAllPlatforms(input, controller.signal)
+      ? await searchAllPlatforms(input, controller.signal, fetch, { mediaKind })
       : await resolveLocalImportSource(input, controller.signal, publish, {
       searchYouTubeAudioSources: async (track, signal) => {
         const reviewedSearch = (async () => {
@@ -1206,6 +1880,27 @@ ipcMain.handle("local-import:resolve", async (event, { source, mediaKind, baseUR
   } finally {
     finishLocalImport(event, controller);
   }
+});
+
+ipcMain.handle("server:source-metadata", async (_event, { sourceURL, mediaKind } = {}) => {
+  if (!localImportEnabled()) throw new Error("Local link metadata resolution is disabled in this build.");
+  const source = preservedMediaSourceURL(sourceURL);
+  if (!source) throw new Error("The server returned an invalid saved source link.");
+  const normalizedMediaKind = mediaKind === "video" ? "video" : "audio";
+  const signal = AbortSignal.timeout(30_000);
+  const result = await resolveLocalImportSource(source, signal, () => {}, {
+    searchYouTubeAudioSources,
+  }, { mediaKind: normalizedMediaKind });
+  return {
+    title: boundedText(result?.track?.title, 500) || null,
+    artist: boundedText(result?.track?.artist, 500) || null,
+    album: boundedText(result?.track?.album, 500) || null,
+    duration: Number.isFinite(Number(result?.track?.durationSeconds))
+      ? Math.max(0, Number(result.track.durationSeconds))
+      : null,
+    artworkURL: safeArtworkURL(result?.track?.artworkURL)?.href || null,
+    mediaKind: normalizedMediaKind,
+  };
 });
 
 ipcMain.handle("local-import:start-external", async (event, value = {}) => {
@@ -1262,11 +1957,13 @@ ipcMain.handle("local-import:start-external", async (event, value = {}) => {
       artist: result.metadata.artist,
       album: result.metadata.album,
       artwork: result.artwork || null,
+      artworkURL: result.metadata.artworkURL,
       size: result.size,
       sourceURL: result.sourceURL,
       sourceIdentity: result.sourceIdentity || value.sourceIdentity,
       sourceSha256: result.sourceSha256,
       contentSha256: result.contentSha256,
+      preservesUnlinkedImport: true,
     });
     publish({ stage: "local_complete", song: track, serverBacked: true });
     return { ok: true, result: { kind: "created", track, serverBacked: true, remoteSong: result.remoteSong } };
@@ -1309,11 +2006,13 @@ ipcMain.handle("local-import:start", async (event, value = {}) => {
       artist: result.metadata.artist,
       album: result.metadata.album,
       artwork: result.artwork || null,
+      artworkURL: result.metadata.artworkURL,
       size: result.size,
       sourceURL: result.sourceURL,
       sourceIdentity: result.sourceIdentity || value.sourceIdentity,
       sourceSha256: result.sourceSha256,
       contentSha256: result.contentSha256,
+      preservesUnlinkedImport: true,
     });
     publish({ stage: "local_complete", song: track });
     return { ok: true, result: { kind: "created", track } };
@@ -1333,7 +2032,9 @@ ipcMain.handle("local-import:cancel", (event) => {
   return true;
 });
 
-ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profileID, filePath, title, mode } = {}) => {
+ipcMain.handle("local-import:upload", async (event, {
+  baseURL, adminToken, profileID, filePath, title, artist, album, duration, artworkURL, mediaSourceURL, mediaKind, mode,
+} = {}) => {
   if (!localImportEnabled()) {
     return { ok: false, error: { stage: "syncing", code: "FEATURE_DISABLED", message: "Local link import is disabled in this build." } };
   }
@@ -1347,20 +2048,18 @@ ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profi
       throw new LocalImportError("syncing", "INVALID_LOCAL_FILE", "Only a song already saved in the managed Resonance library can be uploaded.");
     }
     const information = await fs.stat(absolute);
-    if (!information.isFile() || information.size <= 0 || information.size > MAX_LOCAL_IMPORT_UPLOAD_BYTES) {
-      throw new LocalImportError("syncing", "INVALID_LOCAL_FILE", "The local song cannot be uploaded because its size is invalid.");
+    if (!information.isFile() || information.size <= 0) {
+      throw new LocalImportError("syncing", "INVALID_LOCAL_FILE", "The local song file is missing or empty.");
     }
     if (!adminToken) {
-      throw new LocalImportError("syncing", "ADMIN_KEY_REQUIRED", "Add a server admin key before uploading this local song.");
+      throw new LocalImportError("syncing", "ADMIN_KEY_REQUIRED", "Sign in to your Resonance account before uploading this local song.");
     }
     const base = normalizeBaseURL(baseURL);
-    const requestedMode = mode === "reviewed_match" ? "reviewed_match" : "local_file";
+    const requestedMode = ["server_source_link", "reviewed_match"].includes(mode) ? mode : "local_file";
     const requestContext = await clientConfigContext(base.href, profileID);
     const filename = serverUploadFilename(absolute, title);
     const url = new URL("api/v1/admin/songs", base);
-    url.searchParams.set("filename", filename);
     let completed = 0;
-    let body = null;
     const publishUploadProgress = () => {
       if (!event.sender.isDestroyed()) {
         event.sender.send("local-import:progress", {
@@ -1368,7 +2067,7 @@ ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profi
           profileID: String(profileID || "default"),
           currentFile: filename,
           completed,
-          total: information.size,
+          total: 1,
         });
       }
     };
@@ -1381,34 +2080,26 @@ ipcMain.handle("local-import:upload", async (event, { baseURL, adminToken, profi
       force: true,
     });
     controller.signal.throwIfAborted();
-    body = createReadStream(absolute);
-    body.on("data", (chunk) => {
-      completed += chunk.length;
-      publishUploadProgress();
-    });
-    controller.signal.addEventListener("abort", () => body.destroy(controller.signal.reason), { once: true });
-    const response = await fetch(url, {
-      method: "PUT",
+    const response = await putSourceLinkRegistration({
+      url,
       headers: {
         ...profileHeaders(adminToken, profileID),
         ...requestContext.expected.request_headers,
-        "Content-Type": "application/octet-stream",
-        "Content-Length": String(information.size),
+        "Content-Type": "application/json",
+        Accept: "application/json",
       },
-      body,
-      duplex: "half",
-      redirect: "manual",
+      item: { mediaSourceURL, mediaKind },
       signal: controller.signal,
     });
     const { song: remoteSong } = await readServerUploadResponse(response, { serverOrigin: base.origin });
-    completed = information.size;
+    completed = 1;
     publishUploadProgress();
     event.sender.send("local-import:progress", {
       stage: "complete",
       profileID: String(profileID || "default"),
       currentFile: filename,
       completed,
-      total: information.size,
+      total: 1,
     });
     return { ok: true, remoteSong };
   } catch (error) {
@@ -1752,7 +2443,7 @@ ipcMain.handle("server:source-import", async (event, settings = {}) => {
   const adminToken = canonicalCredentialToken(settings.adminToken);
   const configToken = canonicalCredentialToken(settings.token || adminToken);
   const profileID = String(settings.profileID || "default");
-  if (!adminToken) throw new Error("Add the server admin key before importing a source link.");
+  if (!adminToken) throw new Error("Sign in to your Resonance account before importing a source link.");
   if (!configToken) throw new Error("A server credential is required before importing a source link.");
   if (settings.mode !== "server_source_link") {
     throw new Error("The source-import endpoint is available only for server source-link mode.");
@@ -1762,23 +2453,9 @@ ipcMain.handle("server:source-import", async (event, settings = {}) => {
     throw new Error("Source import requires the original canonical HTTPS YouTube song page.");
   }
   const requestContext = await clientConfigContext(base.href, profileID);
-  const metadata = settings.metadata && typeof settings.metadata === "object" && !Array.isArray(settings.metadata)
-    ? settings.metadata
-    : {};
-  const duration = Number(metadata.durationSeconds);
-  const safeMetadata = {
-    ...(boundedText(metadata.title, 500) ? { title: boundedText(metadata.title, 500) } : {}),
-    ...(boundedText(metadata.artist, 500) ? { artist: boundedText(metadata.artist, 500) } : {}),
-    ...(boundedText(metadata.album, 500) ? { album: boundedText(metadata.album, 500) } : {}),
-    ...(Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60
-      ? { duration_seconds: duration }
-      : {}),
-  };
   const body = {
     schema_version: 1,
     source_page_url: sourcePageURL,
-    ...(boundedText(settings.filename, 500) ? { filename: safeFilename(settings.filename) } : {}),
-    ...(Object.keys(safeMetadata).length ? { metadata: safeMetadata } : {}),
   };
   await requireClientUploadMode({
     baseURL: base.href,
@@ -1841,7 +2518,7 @@ ipcMain.handle("server:source-import", async (event, settings = {}) => {
 });
 
 ipcMain.handle("server:profiles:get", async (_event, { baseURL, token }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const response = await fetch(new URL("api/v1/profiles", base), { headers: authorizationHeaders(token) });
   if (!response.ok) throw await serverResponseError(response);
@@ -1849,7 +2526,7 @@ ipcMain.handle("server:profiles:get", async (_event, { baseURL, token }) => {
 });
 
 ipcMain.handle("server:profiles:create", async (_event, { baseURL, token, name }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const response = await fetch(new URL("api/v1/profiles", base), {
     method: "POST",
@@ -1861,7 +2538,7 @@ ipcMain.handle("server:profiles:create", async (_event, { baseURL, token, name }
 });
 
 ipcMain.handle("server:artwork", async (_event, { baseURL, token, profileID, songID }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   if (!songID) throw new Error("Song artwork is unavailable.");
   const base = normalizeBaseURL(baseURL);
   const artworkURL = new URL(`api/v1/songs/${encodeURIComponent(songID)}/artwork`, base);
@@ -1878,7 +2555,7 @@ ipcMain.handle("server:artwork", async (_event, { baseURL, token, profileID, son
 });
 
 ipcMain.handle("server:catalog", async (_event, { baseURL, token, profileID }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const response = await fetch(new URL("api/v1/songs", base), {
     headers: { ...profileHeaders(token, profileID), Accept: "application/json" },
@@ -1904,7 +2581,7 @@ ipcMain.handle("server:catalog", async (_event, { baseURL, token, profileID }) =
 });
 
 ipcMain.handle("server:playlists:get", async (_event, { baseURL, token, profileID }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const response = await fetch(new URL("api/v1/playlists", base), { headers: profileHeaders(token, profileID) });
   if (!response.ok) throw await serverResponseError(response);
@@ -1912,7 +2589,7 @@ ipcMain.handle("server:playlists:get", async (_event, { baseURL, token, profileI
 });
 
 ipcMain.handle("server:playlists:put", async (_event, { baseURL, token, profileID, document }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const response = await fetch(new URL("api/v1/playlists", base), {
     method: "PUT",
@@ -1928,10 +2605,20 @@ ipcMain.handle("server:playlists:put", async (_event, { baseURL, token, profileI
 });
 
 ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token, profileID, entries }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   if (!Array.isArray(entries) || entries.length === 0 || entries.length > 500) {
     throw new Error("Listening history must contain between 1 and 500 entries.");
   }
+  const minimalEntries = entries.map((entry) => {
+    const id = boundedText(entry?.id, 128);
+    const songID = boundedText(entry?.remoteID || entry?.songID || entry?.song_id, 128);
+    const startedAt = new Date(entry?.startedAt || entry?.started_at || "").toISOString();
+    const listenedSeconds = Number(entry?.listenedSeconds ?? entry?.listened_seconds);
+    if (!id || !songID || !Number.isFinite(listenedSeconds) || listenedSeconds < 0) {
+      throw new Error("Listening history may sync only UUID-linked saved songs.");
+    }
+    return { id, song_id: songID, started_at: startedAt, listened_seconds: listenedSeconds };
+  });
   const base = normalizeBaseURL(baseURL);
   const response = await fetch(new URL("api/v1/listening-history", base), {
     method: "POST",
@@ -1940,7 +2627,7 @@ ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token,
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body: JSON.stringify({ client: "windows", entries }),
+    body: JSON.stringify({ entries: minimalEntries }),
   });
   if (response.status === 404 || response.status === 405) return { supported: false, accepted: 0 };
   if (!response.ok) throw await serverResponseError(response);
@@ -1948,7 +2635,7 @@ ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token,
 });
 
 ipcMain.handle("server:listening-history:get", async (_event, { baseURL, token, profileID, limit = 2000 }) => {
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const url = new URL("api/v1/listening-history", base);
   url.searchParams.set("limit", String(Math.max(1, Math.min(2000, Math.floor(Number(limit) || 2000)))));
@@ -2092,7 +2779,7 @@ function canonicalStreamCredential(value) {
   try { token = canonicalCredentialToken(value); }
   catch { token = ""; }
   if (!token) {
-    throw new ServerStreamValidationError("INVALID_CREDENTIAL", "A valid server access token is required.", 400);
+    throw new ServerStreamValidationError("INVALID_CREDENTIAL", "A signed-in Resonance account is required.", 400);
   }
   return token;
 }
@@ -2422,9 +3109,65 @@ ipcMain.handle("server:stream:release", (event, value) => {
   return revokeServerStreamSession(sessionID);
 });
 
+async function downloadSavedSourceSong(song, options) {
+  const sourceURL = preservedMediaSourceURL(song?.source_url);
+  if (!sourceURL) throw new Error("The server returned an invalid saved source link.");
+  const mediaKind = song?.media_kind === "video" ? "video" : "audio";
+  const resolution = await resolveLocalImportSource(sourceURL, options.signal, options.onProgress, {
+    searchYouTubeAudioSources,
+  }, { mediaKind });
+  if (resolution?.track?.type === "playlist") {
+    throw new Error("A saved song link resolved to a playlist instead of one song.");
+  }
+  const candidate = resolution?.candidates?.[0];
+  if (!candidate?.sourceURL) throw new Error("No downloadable source matched this saved song link.");
+  const metadata = {
+    ...(candidate.importMetadata || resolution.track || {}),
+    sourceURL,
+  };
+  const imported = await importConfirmedSource({
+    sourceURL: candidate.sourceURL,
+    sourceIdentity: normalizeSourceIdentity(candidate.sourceIdentity, {
+      provider: resolution?.track?.provider,
+      providerID: resolution?.track?.trackID,
+      sourcePageURL: sourceURL,
+    }),
+    mediaKind,
+    metadata,
+    existing: options.existing,
+    destinationDirectory: options.destinationDirectory,
+    temporaryRoot: app.getPath("temp"),
+  }, options.signal, options.onProgress);
+  const duplicate = imported.kind === "duplicate" ? imported.track : null;
+  const filePath = duplicate?.filePath || imported.filePath;
+  if (!filePath) throw new Error("The resolved song did not produce a local file.");
+  return enrichedTrack(filePath, {
+    ...(duplicate || {}),
+    title: metadata.title,
+    artist: metadata.artist,
+    album: metadata.album,
+    duration: metadata.durationSeconds,
+    artwork: imported.artwork || duplicate?.artwork || null,
+    artworkURL: metadata.artworkURL || duplicate?.artworkURL || null,
+    size: imported.size || duplicate?.size,
+    sourceSha256: imported.sourceSha256 || duplicate?.sourceSha256,
+    contentSha256: imported.contentSha256 || duplicate?.contentSha256,
+    sourceURL,
+    sourceIdentity: imported.sourceIdentity || duplicate?.sourceIdentity,
+    remoteID: song.id,
+    sourceServer: options.serverOrigin,
+    syncProfileID: options.profileID,
+    remoteModified: null,
+    storageLocation: "server-cache",
+    preservesUnlinkedImport: typeof duplicate?.preservesUnlinkedImport === "boolean"
+      ? duplicate.preservesUnlinkedImport
+      : storageLocationForPath(filePath) !== "server-cache",
+  });
+}
+
 ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existing = [], songIDs = null }) => {
   token = canonicalCredentialToken(token);
-  if (!token) throw new Error("Enter the server access token.");
+  if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   await requireOfflineDownloadMode({ baseURL: base.href, token, profileID });
   const requestContext = await clientConfigContext(base.href, profileID);
@@ -2471,7 +3214,8 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
     const remoteModified = song.modified_at || song.modified_utc || null;
     const expectedSize = Number(song.size);
     const expectedSHA256 = catalogSHA256(song);
-    const mediaLocation = validateCatalogMediaLocation(song);
+    const savedSourceURL = preservedMediaSourceURL(song.source_url);
+    const mediaLocation = savedSourceURL ? null : validateCatalogMediaLocation(song);
     const matching = existing.find((item) =>
       item.remoteID === song.id
       && matchesServerOrigin(item.sourceServer, base.origin)
@@ -2480,14 +3224,18 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
     if (matching?.filePath) {
       try {
         const information = await fs.stat(matching.filePath);
-        const correctSize = Number.isSafeInteger(expectedSize)
-          && expectedSize > 0
-          && expectedSize <= MAX_SERVER_MEDIA_BYTES
-          && information.size === expectedSize;
+        const correctSize = savedSourceURL
+          ? information.size > 0
+          : Number.isSafeInteger(expectedSize)
+            && expectedSize > 0
+            && expectedSize <= MAX_SERVER_MEDIA_BYTES
+            && information.size === expectedSize;
         const correctRevision = !matching.remoteModified || !remoteModified || matching.remoteModified === remoteModified;
-        const correctHash = information.isFile() && correctSize && expectedSHA256
-          ? await fileSHA256(matching.filePath) === expectedSHA256
-          : false;
+        const correctHash = savedSourceURL
+          ? true
+          : information.isFile() && correctSize && expectedSHA256
+            ? await fileSHA256(matching.filePath) === expectedSHA256
+            : false;
         alreadyDownloaded = information.isFile() && correctSize && correctRevision && correctHash;
       } catch {
         alreadyDownloaded = false;
@@ -2501,6 +3249,29 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
     }
     event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length, autoHide: false });
     try {
+      if (savedSourceURL) {
+        const downloadedTrack = await downloadSavedSourceSong(song, {
+          signal,
+          existing,
+          destinationDirectory: paths.remote,
+          serverOrigin: base.origin,
+          profileID: profileID || "default",
+          onProgress: (progress) => event.sender.send("server:transfer-progress", {
+            direction: "download",
+            currentFile: progress?.stage === "downloading" ? `Downloading ${remoteName}` : remoteName,
+            completed,
+            total: songs.length,
+            autoHide: false,
+          }),
+        });
+        if (matching?.id || existing.some((item) => item.id === downloadedTrack.id)) {
+          replacedTrackIDs.push(matching?.id || downloadedTrack.id);
+        }
+        downloaded.push(downloadedTrack);
+        completed += 1;
+        event.sender.send("server:transfer-progress", { direction: "download", currentFile: downloadedTrack.title, completed, total: songs.length, autoHide: false });
+        continue;
+      }
       let fileURL = sameOriginServerMediaURL(mediaLocation?.download_url || song.download_url, base, "download");
       let refreshedMediaLocation = false;
       const destination = matching?.filePath && path.dirname(path.resolve(matching.filePath)) === path.resolve(paths.remote)
@@ -2588,12 +3359,19 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
         title: song.title || path.basename(remoteName, path.extname(remoteName)),
         artist: song.artist || "Unknown Artist",
         album: song.album || "Server Library",
+        artworkURL: song.artwork_url || song.artworkURL || null,
         remoteID: song.id,
         sourceServer: base.origin,
         syncProfileID: profileID || "default",
         remoteModified,
         size: downloadedSize,
         contentSha256: downloadedSHA256,
+        sourceIdentity: song.source_url
+          ? normalizeSourceIdentity(matching?.sourceIdentity, { mediaSourceURL: song.source_url })
+          : matching?.sourceIdentity,
+        preservesUnlinkedImport: typeof matching?.preservesUnlinkedImport === "boolean"
+          ? matching.preservesUnlinkedImport
+          : false,
       }));
     } catch (error) {
       if (error?.name === "AbortError") throw error;
@@ -2621,7 +3399,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
 
 ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, files, retryIDs, associationConflictPaths } = {}) => {
   adminToken = canonicalCredentialToken(adminToken);
-  if (!adminToken) throw new Error("Enter the server admin key.");
+  if (!adminToken) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const requestedProfileID = String(profileID || "default");
   await requireClientUploadMode({ baseURL: base.href, token: String(adminToken), profileID: requestedProfileID, mode: "local_file", force: true });
@@ -2650,34 +3428,21 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
       filePath: path.resolve(String(item?.filePath || "")),
       title: String(item?.title || ""),
       artist: String(item?.artist || ""),
+      album: String(item?.album || ""),
+      duration: Number(item?.duration) || 0,
+      artworkURL: safeArtworkURL(item?.artworkURL)?.href || null,
+      mediaSourceURL: preservedMediaSourceURL(item?.mediaSourceURL),
+      mediaKind: item?.mediaKind === "video" ? "video" : "audio",
       uploadFilename: serverUploadFilename(item?.filePath, item?.title),
       serverOrigin: base.origin,
       profileID: requestedProfileID,
       createdAt: new Date().toISOString(),
     }));
-    if (requestedFiles.some((item) => !item.trackID || !isManagedLibraryFile(item.filePath, managedRoots))) {
+    if (requestedFiles.some((item) => !item.trackID || !item.mediaSourceURL || !isManagedLibraryFile(item.filePath, managedRoots))) {
       throw new Error("Only songs stored in the managed Resonance library can be batch uploaded.");
     }
   } else {
-    const selection = await dialog.showOpenDialog(mainWindow, {
-      title: "Upload music to Resonance Server",
-      properties: ["openFile", "multiSelections"],
-      filters: [{ name: "Audio", extensions: [...AUDIO_EXTENSIONS].map((item) => item.slice(1)) }],
-    });
-    if (selection.canceled) return { uploaded: 0, results: [], failed: [], selectionCancelled: true };
-    if (!selection.filePaths.length || selection.filePaths.length > MAX_SERVER_UPLOAD_BATCH_FILES) {
-      throw new Error(`Choose between 1 and ${MAX_SERVER_UPLOAD_BATCH_FILES} songs to upload.`);
-    }
-    requestedFiles = selection.filePaths.map((filePath) => ({
-      retryID: randomUUID(),
-      filePath,
-      title: path.basename(filePath, path.extname(filePath)),
-      artist: "",
-      uploadFilename: serverUploadFilename(filePath),
-      serverOrigin: base.origin,
-      profileID: requestedProfileID,
-      createdAt: new Date().toISOString(),
-    }));
+    throw new Error("File uploads are no longer accepted. Download a song from a link first, then upload its preserved source link.");
   }
   const rawAssociationConflictPaths = Array.isArray(associationConflictPaths) ? associationConflictPaths : [];
   if (rawAssociationConflictPaths.length > 50_000) {
@@ -2715,14 +3480,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
       attempts += 1;
       attemptsByRetryID.set(item.retryID, attempts);
       const url = new URL("api/v1/admin/songs", base);
-      url.searchParams.set("filename", filename);
-      let body = null;
-      const abortBody = () => body?.destroy(new Error("Upload cancelled"));
       try {
-        const information = await fs.stat(filePath);
-        if (!information.isFile() || information.size <= 0) throw new Error("The local song file is missing or empty.");
-        body = createReadStream(filePath);
-        signal.addEventListener("abort", abortBody, { once: true });
         await requireClientUploadMode({
           baseURL: base.href,
           token: String(adminToken),
@@ -2731,17 +3489,15 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
           force: true,
         });
         signal.throwIfAborted();
-        const response = await fetch(url, {
-          method: "PUT",
+        const response = await putSourceLinkRegistration({
+          url,
           headers: {
             ...profileHeaders(adminToken, requestedProfileID),
             ...requestContext.expected.request_headers,
-            "Content-Type": "application/octet-stream",
-            "Content-Length": String(information.size),
+            "Content-Type": "application/json",
+            Accept: "application/json",
           },
-          body,
-          duplex: "half",
-          redirect: "manual",
+          item,
           signal,
         });
         ({ song: remoteSong } = await readServerUploadResponse(response, { serverOrigin: base.origin }));
@@ -2750,9 +3506,6 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
         lastError = error;
         if (error?.retryable === false) throw error;
         if (attempts < 3) await new Promise((resolve) => setTimeout(resolve, attempts === 1 ? 400 : 1200));
-      } finally {
-        signal.removeEventListener("abort", abortBody);
-        body?.destroy();
       }
     }
     if (remoteSong) {
@@ -2853,7 +3606,10 @@ ipcMain.handle("server:delete", async (_event, { baseURL, adminToken, profileID,
   const encodedSongID = encodeURIComponent(String(songID || ""));
   if (!encodedSongID) throw new Error("Choose a server song to delete.");
   const response = await fetch(new URL(`api/v1/admin/songs/${encodedSongID}`, base), { method: "DELETE", headers: profileHeaders(adminToken, profileID) });
-  if (!response.ok) throw new Error(`Server returned HTTP ${response.status}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload?.error || `Server returned HTTP ${response.status}`);
+  }
   return true;
 });
 

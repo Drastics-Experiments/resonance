@@ -522,6 +522,7 @@ async function downloadSoundCloudAudio(source, destination, signal, onProgress =
       thumbnailURL: resolved.track.artworkURL,
       sourceURL: resolved.track.sourceURL,
     },
+    mediaSourceURL: resolved.streamingURL,
     download,
   };
 }
