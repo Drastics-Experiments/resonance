@@ -2,7 +2,7 @@ import AVFoundation
 import AppKit
 import Foundation
 import Testing
-@testable import LikedSongsFocus
+@testable import Resonance
 
 @Suite("Resonance Preview regressions")
 struct PreviewRegressionTests {
@@ -175,7 +175,7 @@ struct PreviewRegressionTests {
             bundleIdentifier: CredentialStorePolicy.previewBundleIdentifier + ".untrusted"
         ))
         #expect(!CredentialStorePolicy.usesPlaintextStore(
-            bundleIdentifier: "com.gavindietrich.LikedSongsFocus"
+            bundleIdentifier: "com.gavindietrich.Resonance"
         ))
         #expect(!CredentialStorePolicy.usesPlaintextStore(bundleIdentifier: nil))
     }

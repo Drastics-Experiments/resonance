@@ -573,7 +573,7 @@ final class MobileClientConfigurationTests: XCTestCase {
             isSymbolicLink: true
         ))
 
-        let staging = URL(fileURLWithPath: "/app/LikedSongsMobile/LocalImports", isDirectory: true)
+        let staging = URL(fileURLWithPath: "/app/Resonance/LocalImports", isDirectory: true)
         XCTAssertTrue(MobileLocalImportStagingPolicy.ownsStagedFile(
             staging.appendingPathComponent("finished.m4a"),
             stagingDirectory: staging,
@@ -581,7 +581,7 @@ final class MobileClientConfigurationTests: XCTestCase {
             isSymbolicLink: false
         ))
         XCTAssertFalse(MobileLocalImportStagingPolicy.ownsStagedFile(
-            URL(fileURLWithPath: "/app/LikedSongsMobile/Music/finished.m4a"),
+            URL(fileURLWithPath: "/app/Resonance/Music/finished.m4a"),
             stagingDirectory: staging,
             isRegularFile: true,
             isSymbolicLink: false
@@ -599,7 +599,7 @@ final class MobileClientConfigurationTests: XCTestCase {
         let testRoot = fileManager.temporaryDirectory
             .appendingPathComponent("resonance-cleaner-test-\(UUID().uuidString)", isDirectory: true)
         let temporaryDirectory = testRoot.appendingPathComponent("tmp", isDirectory: true)
-        let supportDirectory = testRoot.appendingPathComponent("LikedSongsMobile", isDirectory: true)
+        let supportDirectory = testRoot.appendingPathComponent("Resonance", isDirectory: true)
         let stagingDirectory = supportDirectory.appendingPathComponent("LocalImports", isDirectory: true)
         let musicDirectory = supportDirectory.appendingPathComponent("Music", isDirectory: true)
         defer { try? fileManager.removeItem(at: testRoot) }

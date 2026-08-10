@@ -1,5 +1,5 @@
 import Testing
-@testable import LikedSongsFocus
+@testable import Resonance
 
 struct PlaybackVolumePolicyTests {
     @Test

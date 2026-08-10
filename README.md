@@ -98,7 +98,7 @@ Release PRs remain the publication approval boundary. Trusted `main` builds warm
 ```bash
 cd mac
 swift test
-swift run LikedSongsFocus
+swift run Resonance
 ```
 
 Build the packaged application, `/Applications` installer, checksums, and updater manifest with:

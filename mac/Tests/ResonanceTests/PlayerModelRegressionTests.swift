@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 import Testing
-@testable import LikedSongsFocus
+@testable import Resonance
 
 private final class RegressionURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
@@ -283,7 +283,7 @@ struct PlayerModelRegressionTests {
                     originatedOnThisDevice: true
                 ),
             ]),
-            forKey: "LikedSongsFocus.listeningHistory.v1"
+            forKey: "Resonance.listeningHistory.v1"
         )
 
         let remoteEventID = UUID()
@@ -390,7 +390,7 @@ struct PlayerModelRegressionTests {
         )
         defaults.set(
             try JSONEncoder().encode([oldEntry]),
-            forKey: "LikedSongsFocus.listeningHistory.v1"
+            forKey: "Resonance.listeningHistory.v1"
         )
         let network = session()
         defer {
@@ -901,7 +901,7 @@ struct PlayerModelRegressionTests {
         )
         defaults.set(
             try JSONEncoder().encode([legacyEntry]),
-            forKey: "LikedSongsFocus.listeningHistory.v1"
+            forKey: "Resonance.listeningHistory.v1"
         )
 
         let relaunched = PlayerModel(
@@ -915,7 +915,7 @@ struct PlayerModelRegressionTests {
         #expect(relaunched.activeProfileListeningHistoryEntries.count == 1)
         relaunched.flushPersistence()
         let migratedData = try #require(
-            defaults.data(forKey: "LikedSongsFocus.listeningHistory.v1")
+            defaults.data(forKey: "Resonance.listeningHistory.v1")
         )
         let migrated = try JSONDecoder().decode(
             [ListeningHistoryEntry].self,
@@ -937,7 +937,7 @@ struct PlayerModelRegressionTests {
         await initial.importLocalFiles(at: [hero])
         initial.flushPersistence()
         let track = try #require(initial.tracks.first)
-        defaults.set("https://MUSIC.test:443/path", forKey: "LikedSongsFocus.serverURL.v1")
+        defaults.set("https://MUSIC.test:443/path", forKey: "Resonance.serverURL.v1")
         defaults.set(
             try JSONEncoder().encode([
                 LegacyListeningHistoryEntry(
@@ -947,7 +947,7 @@ struct PlayerModelRegressionTests {
                     listenedSeconds: 42
                 ),
             ]),
-            forKey: "LikedSongsFocus.listeningHistory.v1"
+            forKey: "Resonance.listeningHistory.v1"
         )
 
         let relaunched = PlayerModel(
@@ -1797,13 +1797,13 @@ struct PlayerModelRegressionTests {
         let (defaults, suiteName) = try isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let corrupt = Data("not valid library json".utf8)
-        defaults.set(corrupt, forKey: "LikedSongsFocus.library.v2")
+        defaults.set(corrupt, forKey: "Resonance.library.v2")
 
         let model = PlayerModel(loadPersistedLibrary: true, defaults: defaults, persistServerCredentials: false)
 
         #expect(model.tracks.isEmpty)
-        #expect(defaults.data(forKey: "LikedSongsFocus.library.v2") == corrupt)
-        #expect(defaults.data(forKey: "LikedSongsFocus.library.v2.recovery") == corrupt)
+        #expect(defaults.data(forKey: "Resonance.library.v2") == corrupt)
+        #expect(defaults.data(forKey: "Resonance.library.v2.recovery") == corrupt)
     }
 
     @Test

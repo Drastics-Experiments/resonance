@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
-contextBridge.exposeInMainWorld("likedSongs", {
+contextBridge.exposeInMainWorld("resonance", {
   loadLibrary: () => ipcRenderer.invoke("library:load"),
   saveLibrary: (state) => ipcRenderer.invoke("library:save", state),
   videoFrames: (value) => ipcRenderer.invoke("library:video-frames", value),

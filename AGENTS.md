@@ -53,7 +53,7 @@ Resonance/
 └── .github/workflows/       Platform CI plus centralized candidate/publish workflows
 ```
 
-Some internal target and source names still say `LikedSongsMobile`, `LikedSongsFocus`, or `LikedSongsFocusApp`. These are legacy implementation names. The user-facing product is **Resonance**. Do not casually rename internal targets, bundle identifiers, or storage directories because installed apps depend on those identities for upgrades and data preservation.
+Internal projects, targets, modules, executables, source folders, storage folders, defaults, credential services, and renderer APIs use the **Resonance** name. The production Apple bundle identifiers remain compatibility identities because changing them would install a separate app instead of updating live users. One-time migrations move legacy Application Support data and credentials before deleting the obsolete artifacts.
 
 ## Playlist synchronization contract
 
@@ -90,13 +90,13 @@ Before changing an endpoint shape, update and test every client and coordinate t
 Do not replace secure credential storage with plaintext settings just to avoid password prompts, except for the explicitly documented Preview-only local store below.
 
 - macOS: server URL in preferences; access/admin secrets use the existing credential-store/keychain compatibility path in `PlayerModel.swift`.
-- macOS Preview: launching or relaunching `/private/tmp/Resonance Preview.app` must never show a macOS password, passcode, Keychain-access, or Keychain-permission-change prompt. The Preview-only build must not read, write, migrate, or delete server credentials through Keychain or `/usr/bin/security`. It persists access/admin values in `~/Library/Application Support/Liked Songs/server-credentials.json`, with the directory restricted to mode `0700` and the file to mode `0600`. This exception applies only to the disposable native Preview app; keep the production macOS app on its secure credential-store path. Verify by rebuilding/re-signing and relaunching at least twice with different executable hashes; neither launch may show either kind of authorization prompt.
+- macOS Preview: launching or relaunching `/private/tmp/Resonance Preview.app` must never show a macOS password, passcode, Keychain-access, or Keychain-permission-change prompt. The Preview-only build must not read, write, migrate, or delete server credentials through Keychain or `/usr/bin/security`. It persists access/admin values in `~/Library/Application Support/Resonance/server-credentials.json`, with the directory restricted to mode `0700` and the file to mode `0600`. This exception applies only to the disposable native Preview app; keep the production macOS app on its secure credential-store path. Verify by rebuilding/re-signing and relaunching at least twice with different executable hashes; neither launch may show either kind of authorization prompt.
 - macOS Preview must preserve the ability to switch between existing server profiles from `Switch Profile` in the top-right local-profile menu. Keep that interaction to one profile-name-or-ID field and resolve it through `/api/v1/profiles`; do not add profile creation, deletion, management lists, or a dropdown, and do not put the profile field back in the server-credentials sheet. Persist the selected profile and keep local imports visible while scoping server-backed songs, likes, and playlists to it.
 - iOS: access and admin keys are stored separately in Keychain; library files live in the app's private Application Support directory.
 - Android: `CredentialStore.kt` owns credential persistence; library data is managed by `LibraryRepository.kt`.
 - Windows: credentials are handled through Electron main-process IPC and encrypted OS-backed storage; state lives under Electron's per-user `userData` directory.
 
-Preserve existing bundle/application IDs and persistence paths so updates do not wipe libraries, playlists, downloaded music, or credentials.
+Preserve existing production bundle/application IDs. Persistence paths may be renamed only through a copy-or-move, verify, then delete migration so updates do not wipe libraries, playlists, downloaded music, or credentials.
 
 ## CI, installers, and releases
 

@@ -147,7 +147,7 @@ actor LocalDeviceImportService {
         } else {
             let support = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             self.localRoot = support
-                .appendingPathComponent("LikedSongsMobile", isDirectory: true)
+                .appendingPathComponent(MobileLegacyAppMigration.applicationSupportName, isDirectory: true)
                 .appendingPathComponent("LocalImports", isDirectory: true)
         }
     }

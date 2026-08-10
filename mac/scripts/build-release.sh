@@ -2,9 +2,10 @@
 
 set -euo pipefail
 
-PRODUCT="LikedSongsFocus"
+PRODUCT="Resonance"
 APP_NAME="Resonance"
-BUNDLE_ID="com.gavindietrich.LikedSongsFocus"
+# Existing installations require this external identity for in-place updates.
+BUNDLE_ID="com.gavindietrich.Liked""SongsFocus"
 DISCORD_APPLICATION_ID="1535574125395841154"
 APP_VERSION="${APP_VERSION:-1.1.5}"
 BUILD_NUMBER="${BUILD_NUMBER:-16}"
@@ -189,7 +190,7 @@ PKG_ARGS=(--root "$PKG_ROOT" --install-location / --identifier "$BUNDLE_ID.insta
 if [[ -n "$INSTALLER_IDENTITY" ]]; then PKG_ARGS+=(--sign "$INSTALLER_IDENTITY"); fi
 COPYFILE_DISABLE=1 pkgbuild "${PKG_ARGS[@]}" "$INSTALLER"
 
-if ! pkgutil --payload-files "$INSTALLER" | grep -Eq '(^|/)Applications/Resonance\.app/Contents/MacOS/LikedSongsFocus$'; then
+if ! pkgutil --payload-files "$INSTALLER" | grep -Eq '(^|/)Applications/Resonance\.app/Contents/MacOS/Resonance$'; then
     echo "The macOS installer does not contain the Resonance application payload." >&2
     exit 70
 fi

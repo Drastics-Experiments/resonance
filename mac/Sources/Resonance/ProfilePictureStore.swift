@@ -100,7 +100,7 @@ enum MacProfilePictureStore {
 
     private static var profilePicturesDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Liked Songs", isDirectory: true)
+            .appendingPathComponent("Resonance", isDirectory: true)
             .appendingPathComponent("Profile Pictures", isDirectory: true)
     }
 

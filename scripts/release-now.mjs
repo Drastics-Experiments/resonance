@@ -34,8 +34,8 @@ const requiredWindowsSecrets = [
 ];
 const versionFiles = [
   "android/app/build.gradle.kts",
-  "ios/LikedSongsMobile.xcodeproj/project.pbxproj",
-  "ios/LikedSongsMobile/Info.plist",
+  "ios/Resonance.xcodeproj/project.pbxproj",
+  "ios/Resonance/Info.plist",
   "mac/scripts/build-release.sh",
   "release/version.json",
   "windows/package.json",

@@ -6,7 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A10000000000000000000001 /* LikedSongsMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* LikedSongsMobileApp.swift */; };
+		A10000000000000000000001 /* ResonanceApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* ResonanceApp.swift */; };
 		A10000000000000000000002 /* MusicModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* MusicModels.swift */; };
 		A10000000000000000000003 /* MusicLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* MusicLibrary.swift */; };
 		A10000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* RootView.swift */; };
@@ -23,8 +23,10 @@
 		A1000000000000000000000F /* ClerkNativeAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000011 /* ClerkNativeAuth.swift */; };
 		A10000000000000000000010 /* ClerkKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000001 /* ClerkKit */; };
 		A10000000000000000000011 /* ClerkKitUI in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000002 /* ClerkKitUI */; };
+		A10000000000000000000012 /* MobileLegacyAppMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* MobileLegacyAppMigration.swift */; };
 		B10000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift */; };
 		B10000000000000000000002 /* MobileClientConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000003 /* MobileClientConfigurationTests.swift */; };
+		B10000000000000000000003 /* MobileLegacyAppMigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000004 /* MobileLegacyAppMigrationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -33,12 +35,12 @@
 			containerPortal = A70000000000000000000001 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = A50000000000000000000001;
-			remoteInfo = LikedSongsMobile;
+			remoteInfo = Resonance;
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		A20000000000000000000001 /* LikedSongsMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LikedSongsMobileApp.swift; sourceTree = "<group>"; };
+		A20000000000000000000001 /* ResonanceApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResonanceApp.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* MusicModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicModels.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* MusicLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicLibrary.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -55,9 +57,11 @@
 		A2000000000000000000000F /* MobileProfilePictureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileProfilePictureStore.swift; sourceTree = "<group>"; };
 		A20000000000000000000010 /* SocialAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocialAuth.swift; sourceTree = "<group>"; };
 		A20000000000000000000011 /* ClerkNativeAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClerkNativeAuth.swift; sourceTree = "<group>"; };
+		A20000000000000000000012 /* MobileLegacyAppMigration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileLegacyAppMigration.swift; sourceTree = "<group>"; };
 		B20000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileMissingServerUploadPolicyTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000002 /* ResonanceTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ResonanceTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B20000000000000000000003 /* MobileClientConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileClientConfigurationTests.swift; sourceTree = "<group>"; };
+		B20000000000000000000004 /* MobileLegacyAppMigrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileLegacyAppMigrationTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -69,16 +73,16 @@
 		A40000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
-				A40000000000000000000002 /* LikedSongsMobile */,
+				A40000000000000000000002 /* Resonance */,
 				B40000000000000000000001 /* Tests */,
 				A40000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
-		A40000000000000000000002 /* LikedSongsMobile */ = {
+		A40000000000000000000002 /* Resonance */ = {
 			isa = PBXGroup;
 			children = (
-				A20000000000000000000001 /* LikedSongsMobileApp.swift */,
+				A20000000000000000000001 /* ResonanceApp.swift */,
 				A20000000000000000000002 /* MusicModels.swift */,
 				A20000000000000000000003 /* MusicLibrary.swift */,
 				A20000000000000000000004 /* RootView.swift */,
@@ -92,10 +96,11 @@
 				A2000000000000000000000F /* MobileProfilePictureStore.swift */,
 				A20000000000000000000010 /* SocialAuth.swift */,
 				A20000000000000000000011 /* ClerkNativeAuth.swift */,
+				A20000000000000000000012 /* MobileLegacyAppMigration.swift */,
 				A20000000000000000000005 /* Info.plist */,
 				A20000000000000000000007 /* Assets.xcassets */,
 			);
-			path = LikedSongsMobile;
+			path = Resonance;
 			sourceTree = "<group>";
 		};
 		A40000000000000000000003 /* Products */ = {
@@ -112,6 +117,7 @@
 			children = (
 				B20000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift */,
 				B20000000000000000000003 /* MobileClientConfigurationTests.swift */,
+				B20000000000000000000004 /* MobileLegacyAppMigrationTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -119,7 +125,7 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A50000000000000000000001 /* LikedSongsMobile */ = {
+		A50000000000000000000001 /* Resonance */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = A90000000000000000000002 /* Build configuration list for PBXNativeTarget */;
 			buildPhases = (
@@ -129,18 +135,18 @@
 			);
 			buildRules = ();
 			dependencies = ();
-			name = LikedSongsMobile;
+			name = Resonance;
 			packageProductDependencies = (
 				AA0000000000000000000001 /* ClerkKit */,
 				AA0000000000000000000002 /* ClerkKitUI */,
 			);
-			productName = LikedSongsMobile;
+			productName = Resonance;
 			productReference = A20000000000000000000006 /* Resonance.app */;
 			productType = "com.apple.product-type.application";
 		};
-		B50000000000000000000001 /* LikedSongsMobileTests */ = {
+		B50000000000000000000001 /* ResonanceTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = B90000000000000000000001 /* Build configuration list for PBXNativeTarget "LikedSongsMobileTests" */;
+			buildConfigurationList = B90000000000000000000001 /* Build configuration list for PBXNativeTarget "ResonanceTests" */;
 			buildPhases = (
 				B60000000000000000000001 /* Sources */,
 				B30000000000000000000001 /* Frameworks */,
@@ -149,7 +155,7 @@
 			dependencies = (
 				B70000000000000000000002 /* PBXTargetDependency */,
 			);
-			name = LikedSongsMobileTests;
+			name = ResonanceTests;
 			productName = ResonanceTests;
 			productReference = B20000000000000000000002 /* ResonanceTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
@@ -181,8 +187,8 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				A50000000000000000000001 /* LikedSongsMobile */,
-				B50000000000000000000001 /* LikedSongsMobileTests */,
+				A50000000000000000000001 /* Resonance */,
+				B50000000000000000000001 /* ResonanceTests */,
 			);
 		};
 /* End PBXProject section */
@@ -196,7 +202,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A10000000000000000000001 /* LikedSongsMobileApp.swift in Sources */,
+				A10000000000000000000001 /* ResonanceApp.swift in Sources */,
 				A10000000000000000000002 /* MusicModels.swift in Sources */,
 				A10000000000000000000003 /* MusicLibrary.swift in Sources */,
 				A10000000000000000000004 /* RootView.swift in Sources */,
@@ -210,6 +216,7 @@
 				A1000000000000000000000D /* MobileProfilePictureStore.swift in Sources */,
 				A1000000000000000000000E /* SocialAuth.swift in Sources */,
 				A1000000000000000000000F /* ClerkNativeAuth.swift in Sources */,
+				A10000000000000000000012 /* MobileLegacyAppMigration.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -219,6 +226,7 @@
 			files = (
 				B10000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift in Sources */,
 				B10000000000000000000002 /* MobileClientConfigurationTests.swift in Sources */,
+				B10000000000000000000003 /* MobileLegacyAppMigrationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -227,7 +235,7 @@
 /* Begin PBXTargetDependency section */
 		B70000000000000000000002 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = A50000000000000000000001 /* LikedSongsMobile */;
+			target = A50000000000000000000001 /* Resonance */;
 			targetProxy = B70000000000000000000001 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -235,16 +243,16 @@
 /* Begin XCBuildConfiguration section */
 		A80000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_TESTABILITY = YES; GCC_OPTIMIZATION_LEVEL = 0; IPHONEOS_DEPLOYMENT_TARGET = 17.0; ONLY_ACTIVE_ARCH = YES; SDKROOT = iphoneos; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; }; name = Debug; };
 		A80000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; VALIDATE_PRODUCT = YES; }; name = Release; };
-		A80000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 16; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = LikedSongsMobile/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; MARKETING_VERSION = 1.1.5; PRODUCT_BUNDLE_IDENTIFIER = com.gavindietrich.LikedSongsMobile; PRODUCT_NAME = Resonance; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
-		A80000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 16; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = LikedSongsMobile/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; MARKETING_VERSION = 1.1.5; PRODUCT_BUNDLE_IDENTIFIER = com.gavindietrich.LikedSongsMobile; PRODUCT_NAME = Resonance; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
-		B80000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.gavindietrich.LikedSongsMobileTests; PRODUCT_NAME = ResonanceTests; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Resonance.app/Resonance"; }; name = Debug; };
-		B80000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.gavindietrich.LikedSongsMobileTests; PRODUCT_NAME = ResonanceTests; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Resonance.app/Resonance"; }; name = Release; };
+		A80000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 16; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Resonance/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; MARKETING_VERSION = 1.1.5; RESONANCE_COMPATIBILITY_PREFIX = Liked; RESONANCE_COMPATIBILITY_SUFFIX = SongsMobile; PRODUCT_BUNDLE_IDENTIFIER = "com.gavindietrich.$(RESONANCE_COMPATIBILITY_PREFIX)$(RESONANCE_COMPATIBILITY_SUFFIX)"; PRODUCT_NAME = Resonance; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
+		A80000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 16; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Resonance/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; MARKETING_VERSION = 1.1.5; RESONANCE_COMPATIBILITY_PREFIX = Liked; RESONANCE_COMPATIBILITY_SUFFIX = SongsMobile; PRODUCT_BUNDLE_IDENTIFIER = "com.gavindietrich.$(RESONANCE_COMPATIBILITY_PREFIX)$(RESONANCE_COMPATIBILITY_SUFFIX)"; PRODUCT_NAME = Resonance; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
+		B80000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.gavindietrich.ResonanceTests; PRODUCT_NAME = ResonanceTests; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Resonance.app/Resonance"; }; name = Debug; };
+		B80000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.gavindietrich.ResonanceTests; PRODUCT_NAME = ResonanceTests; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Resonance.app/Resonance"; }; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
 		A90000000000000000000001 /* Build configuration list for PBXProject */ = {isa = XCConfigurationList; buildConfigurations = (A80000000000000000000001 /* Debug */, A80000000000000000000002 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		A90000000000000000000002 /* Build configuration list for PBXNativeTarget */ = {isa = XCConfigurationList; buildConfigurations = (A80000000000000000000003 /* Debug */, A80000000000000000000004 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-		B90000000000000000000001 /* Build configuration list for PBXNativeTarget "LikedSongsMobileTests" */ = {isa = XCConfigurationList; buildConfigurations = (B80000000000000000000001 /* Debug */, B80000000000000000000002 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		B90000000000000000000001 /* Build configuration list for PBXNativeTarget "ResonanceTests" */ = {isa = XCConfigurationList; buildConfigurations = (B80000000000000000000001 /* Debug */, B80000000000000000000002 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */

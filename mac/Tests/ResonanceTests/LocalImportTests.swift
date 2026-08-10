@@ -3,7 +3,7 @@ import CoreVideo
 import CryptoKit
 import Foundation
 import Testing
-@testable import LikedSongsFocus
+@testable import Resonance
 
 private final class LocalImportMockURLProtocol: URLProtocol {
     static let lock = NSLock()

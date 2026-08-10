@@ -36,7 +36,7 @@ res_prepare_worktree_identity() {
   typeset -g RES_MACOS_INSTANCE_NAME="Resonance Preview [${RES_WORKTREE_LABEL}]"
   typeset -g RES_MACOS_BUNDLE_ID="com.gavindietrich.ResonancePreview.worktree.w${RES_WORKTREE_HASH}"
   typeset -g RES_MACOS_APP="$RES_LAUNCHER_ROOT/macos/Resonance-Preview-${RES_WORKTREE_ID}.app"
-  typeset -g RES_MACOS_EXECUTABLE="$RES_MACOS_APP/Contents/MacOS/LikedSongsFocus"
+  typeset -g RES_MACOS_EXECUTABLE="$RES_MACOS_APP/Contents/MacOS/Resonance"
 
   typeset -g RES_WINDOWS_INSTANCE_NAME="Resonance Windows [${RES_WORKTREE_LABEL}]"
   typeset -g RES_WINDOWS_BUNDLE_ID="mov.unblocked.resonance.windows-preview.worktree.w${RES_WORKTREE_HASH}"
@@ -46,7 +46,7 @@ res_prepare_worktree_identity() {
   typeset -g RES_WINDOWS_USER_DATA="$HOME/Library/Application Support/Resonance Worktrees/$RES_WORKTREE_ID/windows"
 
   typeset -g RES_IOS_INSTANCE_NAME="Resonance iOS [${RES_WORKTREE_LABEL}]"
-  typeset -g RES_IOS_BUNDLE_ID="com.gavindietrich.LikedSongsMobile.worktree.w${RES_WORKTREE_HASH}"
+  typeset -g RES_IOS_BUNDLE_ID="com.gavindietrich.Resonance.worktree.w${RES_WORKTREE_HASH}"
   typeset -g RES_IOS_SIMULATOR_NAME="Resonance iOS ${RES_WORKTREE_LABEL}"
   typeset -g RES_IOS_DERIVED_DATA="$RES_LAUNCHER_ROOT/ios-derived-data"
 
@@ -402,8 +402,6 @@ RES_PREVIEW_PLIST="$RES_PREVIEW_APP/Contents/Info.plist"
 RES_PREVIEW_BUNDLE_ID="$RES_MACOS_BUNDLE_ID"
 RES_DISCORD_APPLICATION_ID="1535574125395841154"
 RES_SWIFT_SCRATCH_PATH="$RES_LAUNCHER_ROOT/macos-swift-build"
-RES_OLD_PREVIEW_EXECUTABLE="/private/tmp/Resonance Preview.app/Contents/MacOS/LikedSongsFocus"
-RES_LEGACY_PREVIEW_EXECUTABLE="/private/tmp/ResonancePreview.app/Contents/MacOS/LikedSongsFocus"
 RES_ICON_WORK_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/resonance-preview-icon.XXXXXX")"
 res_write_instance_registry
 res_set_terminal_title "$RES_MACOS_INSTANCE_NAME"
@@ -417,11 +415,11 @@ trap cleanup HUP INT TERM
 echo "Building the macOS development app…"
 /usr/bin/xcrun swift build --package-path "$RES_APP_DIR/mac" \
   --scratch-path "$RES_SWIFT_SCRATCH_PATH" \
-  --product LikedSongsFocus
+  --product Resonance
 RES_BIN_DIR="$(/usr/bin/xcrun swift build --package-path "$RES_APP_DIR/mac" \
   --scratch-path "$RES_SWIFT_SCRATCH_PATH" \
   --show-bin-path)"
-RES_BINARY="$RES_BIN_DIR/LikedSongsFocus"
+RES_BINARY="$RES_BIN_DIR/Resonance"
 
 [[ -x "$RES_BINARY" ]] || { echo "macOS build did not produce $RES_BINARY" >&2; exit 1; }
 
@@ -430,23 +428,20 @@ RES_BINARY="$RES_BIN_DIR/LikedSongsFocus"
 
 RES_OLD_PREVIEW_PIDS="$({
   /usr/bin/pgrep -f "^$RES_PREVIEW_EXECUTABLE$" || true
-  /usr/bin/pgrep -f "^$RES_OLD_PREVIEW_EXECUTABLE$" || true
-  /usr/bin/pgrep -f "^$RES_LEGACY_PREVIEW_EXECUTABLE$" || true
 } | /usr/bin/sort -u)"
 if [[ -n "$RES_OLD_PREVIEW_PIDS" ]]; then
   for RES_OLD_PREVIEW_PID in ${(f)RES_OLD_PREVIEW_PIDS}; do
     /bin/kill "$RES_OLD_PREVIEW_PID" 2>/dev/null || true
   done
   for RES_ATTEMPT in {1..50}; do
-    if ! /usr/bin/pgrep -f "^$RES_PREVIEW_EXECUTABLE$" >/dev/null \
-      && ! /usr/bin/pgrep -f "^$RES_OLD_PREVIEW_EXECUTABLE$" >/dev/null \
-      && ! /usr/bin/pgrep -f "^$RES_LEGACY_PREVIEW_EXECUTABLE$" >/dev/null; then
+    if ! /usr/bin/pgrep -f "^$RES_PREVIEW_EXECUTABLE$" >/dev/null; then
       break
     fi
     sleep 0.1
   done
 fi
 
+/bin/rm -rf "$RES_PREVIEW_APP"
 mkdir -p "$RES_PREVIEW_APP/Contents/MacOS" "$RES_PREVIEW_APP/Contents/Resources" "$RES_ICON_WORK_DIR/AppIcon.iconset"
 /usr/bin/install -m 0755 "$RES_BINARY" "$RES_PREVIEW_EXECUTABLE"
 
@@ -475,7 +470,7 @@ RES_BUILD_NUMBER="$(/usr/bin/plutil -extract build raw "$RES_APP_DIR/release/ver
 /usr/bin/plutil -create xml1 "$RES_PREVIEW_PLIST"
 /usr/bin/plutil -insert CFBundleDevelopmentRegion -string en "$RES_PREVIEW_PLIST"
 /usr/bin/plutil -insert CFBundleDisplayName -string "$RES_PREVIEW_NAME" "$RES_PREVIEW_PLIST"
-/usr/bin/plutil -insert CFBundleExecutable -string LikedSongsFocus "$RES_PREVIEW_PLIST"
+/usr/bin/plutil -insert CFBundleExecutable -string Resonance "$RES_PREVIEW_PLIST"
 /usr/bin/plutil -insert CFBundleIconFile -string AppIcon.icns "$RES_PREVIEW_PLIST"
 /usr/bin/plutil -insert CFBundleIdentifier -string "$RES_PREVIEW_BUNDLE_ID" "$RES_PREVIEW_PLIST"
 /usr/bin/plutil -insert CFBundleInfoDictionaryVersion -string 6.0 "$RES_PREVIEW_PLIST"
@@ -543,8 +538,8 @@ RES_DEVICE_ID="$RES_IOS_DEVICE_ID"
 
 echo "Building the iOS Simulator development app…"
 /usr/bin/xcodebuild -quiet \
-  -project "$RES_APP_DIR/ios/LikedSongsMobile.xcodeproj" \
-  -scheme LikedSongsMobile \
+  -project "$RES_APP_DIR/ios/Resonance.xcodeproj" \
+  -scheme Resonance \
   -configuration Debug \
   -sdk iphonesimulator \
   -destination "id=$RES_DEVICE_ID" \
@@ -587,8 +582,8 @@ res_ensure_ios_simulator "$RES_IOS_TEST_SIMULATOR_NAME"
 /usr/bin/xcrun simctl bootstatus "$RES_IOS_DEVICE_ID" -b
 
 res_run_named_process "$RES_IOS_TEST_NAME" /usr/bin/xcodebuild -quiet \
-  -project "$RES_PROJECT_DIR/ios/LikedSongsMobile.xcodeproj" \
-  -scheme LikedSongsMobile \
+  -project "$RES_PROJECT_DIR/ios/Resonance.xcodeproj" \
+  -scheme Resonance \
   -configuration Debug \
   -sdk iphonesimulator \
   -destination "id=$RES_IOS_DEVICE_ID" \

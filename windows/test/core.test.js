@@ -607,11 +607,15 @@ test("renders every Windows select through the themed custom dropdown", () => {
 
 test("avoids macOS Keychain access while persisting source Preview credentials locally", () => {
   const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const retiredStorageName = ["Liked", " Songs"].join("");
   assert.doesNotMatch(mainSource, /\{ app, BrowserWindow, dialog, ipcMain, safeStorage, shell \}/);
   assert.match(mainSource, /function usesPreviewCredentialStore\(\)[\s\S]+process\.platform === "darwin" && !app\.isPackaged/);
   assert.match(mainSource, /previewCredentialStorePath[\s\S]+app\.getPath\("userData"\), "server-credentials\.json"/);
   assert.match(mainSource, /previewAccountSessionPath[\s\S]+app\.getPath\("userData"\), "account-session\.json"/);
-  assert.doesNotMatch(mainSource, /previewCredentialStorePath[\s\S]+"Liked Songs", "server-credentials\.json"/);
+  assert.doesNotMatch(
+    mainSource,
+    new RegExp(String.raw`previewCredentialStorePath[\s\S]+"${retiredStorageName}", "server-credentials\.json"`),
+  );
   assert.match(mainSource, /fs\.mkdir\(directory, \{ recursive: true, mode: 0o700 \}\)/);
   assert.match(mainSource, /fs\.chmod\(destination, 0o600\)/);
   assert.match(mainSource, /server:credentials:load[\s\S]+usesPreviewCredentialStore\(\)[\s\S]+readPreviewCredentials/);

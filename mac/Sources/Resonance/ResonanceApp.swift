@@ -2,20 +2,26 @@ import AppKit
 import SwiftUI
 
 @main
-struct LikedSongsFocusApp: App {
+struct ResonanceApp: App {
     @NSApplicationDelegateAdaptor(ResonanceAppDelegate.self) private var appDelegate
     @StateObject private var model: PlayerModel
     @StateObject private var localImportModel: MacLocalImportViewModel
-    @StateObject private var updateManager = UpdateManager()
-    @StateObject private var desktopPreferences = MacDesktopPreferences()
+    @StateObject private var updateManager: UpdateManager
+    @StateObject private var desktopPreferences: MacDesktopPreferences
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
-        let model = PlayerModel(systemPlaybackController: MacSystemPlaybackController())
+        let migration = LegacyAppMigration.run()
+        let model = PlayerModel(
+            systemPlaybackController: MacSystemPlaybackController(),
+            legacyApplicationSupportMigration: migration
+        )
         _model = StateObject(wrappedValue: model)
         _localImportModel = StateObject(
             wrappedValue: MacLocalImportViewModel(model: model)
         )
+        _updateManager = StateObject(wrappedValue: UpdateManager())
+        _desktopPreferences = StateObject(wrappedValue: MacDesktopPreferences())
     }
 
     var body: some Scene {

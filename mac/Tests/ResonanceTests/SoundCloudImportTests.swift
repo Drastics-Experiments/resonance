@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 import Testing
-@testable import LikedSongsFocus
+@testable import Resonance
 
 private final class SoundCloudMockURLProtocol: URLProtocol {
     static let lock = NSLock()

@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import LikedSongsFocus
+@testable import Resonance
 
 @Suite
 struct AuthenticatedStreamTests {

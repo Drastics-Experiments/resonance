@@ -88,7 +88,7 @@ private final class PersistenceCoordinator: @unchecked Sendable {
     }
 
     private let queue = DispatchQueue(
-        label: "com.gavindietrich.LikedSongsFocus.persistence",
+        label: "com.gavindietrich.Resonance.persistence",
         qos: .utility
     )
     private let lock = NSLock()
@@ -288,27 +288,27 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         }
     }
 
-    private static let libraryKey = "LikedSongsFocus.library.v2"
-    private static let libraryRecoveryKey = "LikedSongsFocus.library.v2.recovery"
-    private static let legacyTracksKey = "LikedSongsFocus.importedTracks.v1"
-    private static let serverURLKey = "LikedSongsFocus.serverURL.v1"
+    private static let libraryKey = "Resonance.library.v2"
+    private static let libraryRecoveryKey = "Resonance.library.v2.recovery"
+    private static let legacyTracksKey = "Resonance.importedTracks.v1"
+    private static let serverURLKey = "Resonance.serverURL.v1"
     private static let clientCredentialAccount = "music-server-client-token"
     private static let adminCredentialAccount = "music-server-admin-token"
     private static let accountSessionCredentialAccount = "music-server-account-session-v1"
-    private static let productionCredentialService = "com.gavindietrich.LikedSongsFocus.music-server"
+    private static let productionCredentialService = "com.gavindietrich.Resonance.music-server"
     private static let knownDrasticProfileID = "4f633616-9cf0-44db-8864-09358970c8f9"
-    private static let volumeKey = "LikedSongsFocus.volume.v1"
-    private static let playbackRateKey = "LikedSongsFocus.playbackRate.v1"
-    private static let shuffleKey = "LikedSongsFocus.shuffle.v1"
-    private static let repeatKey = "LikedSongsFocus.repeat.v1"
-    private static let currentTrackKey = "LikedSongsFocus.currentTrack.v1"
-    private static let positionKey = "LikedSongsFocus.position.v1"
-    private static let historyKey = "LikedSongsFocus.history.v1"
-    private static let listeningHistoryKey = "LikedSongsFocus.listeningHistory.v1"
-    private static let playbackContextKey = "LikedSongsFocus.playbackContext.v1"
-    private static let shuffleQueueKey = "LikedSongsFocus.shuffleQueue.v1"
-    private static let uploadModeKeyPrefix = "LikedSongsFocus.transferMode.upload.v1."
-    private static let downloadModeKeyPrefix = "LikedSongsFocus.transferMode.download.v1."
+    private static let volumeKey = "Resonance.volume.v1"
+    private static let playbackRateKey = "Resonance.playbackRate.v1"
+    private static let shuffleKey = "Resonance.shuffle.v1"
+    private static let repeatKey = "Resonance.repeat.v1"
+    private static let currentTrackKey = "Resonance.currentTrack.v1"
+    private static let positionKey = "Resonance.position.v1"
+    private static let historyKey = "Resonance.history.v1"
+    private static let listeningHistoryKey = "Resonance.listeningHistory.v1"
+    private static let playbackContextKey = "Resonance.playbackContext.v1"
+    private static let shuffleQueueKey = "Resonance.shuffleQueue.v1"
+    private static let uploadModeKeyPrefix = "Resonance.transferMode.upload.v1."
+    private static let downloadModeKeyPrefix = "Resonance.transferMode.download.v1."
 
     @Published var section: AppSection = .library
     @Published var tracks: [Track]
@@ -621,7 +621,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         networkSession: URLSession = .shared,
         serverCacheRoot: URL? = nil,
         persistServerCredentials: Bool = true,
-        systemPlaybackController: (any MacSystemPlaybackControlling)? = nil
+        systemPlaybackController: (any MacSystemPlaybackControlling)? = nil,
+        legacyApplicationSupportMigration: LegacyApplicationSupportMigration? = nil
     ) {
         Self.persistenceCoordinator.flush()
         self.defaults = defaults
@@ -657,8 +658,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             ?? ServerSongIdentity.normalizedOrigin(defaults.string(forKey: Self.serverURLKey))
         // A file can be temporarily unavailable when an external or network volume is
         // disconnected. Keep its library record and let playback surface availability.
+        var migratedPersistedFileURLs = false
         let existingTracks = (stored?.tracks ?? []).map { track in
             var migrated = track
+            if let fileURL = migrated.fileURL,
+               let migratedURL = legacyApplicationSupportMigration?.migratedFileURL(fileURL) {
+                migrated.fileURL = migratedURL
+                migratedPersistedFileURLs = true
+            }
             if migrated.remoteID != nil, migrated.syncProfileID == nil {
                 migrated.syncProfileID = restoredSyncProfileID
             }
@@ -852,6 +859,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
         if loadPersistedLibrary, stored == nil, !libraryWasCorrupt {
             migrateLegacyLibraryIfNeeded()
+        } else if migratedPersistedFileURLs {
+            persistLibrary()
         }
         didFinishInitialization = true
         resetClientConfigurationForCurrentContext()
@@ -5547,7 +5556,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             .map { String(format: "%02x", $0) }
             .joined()
         let directory = root
-            .appendingPathComponent("Liked Songs", isDirectory: true)
+            .appendingPathComponent("Resonance", isDirectory: true)
             .appendingPathComponent("ServerCache", isDirectory: true)
             .appendingPathComponent(safeName, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -5557,7 +5566,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private static var credentialStoreURL: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return support
-            .appendingPathComponent("Liked Songs", isDirectory: true)
+            .appendingPathComponent("Resonance", isDirectory: true)
             .appendingPathComponent("server-credentials.json")
     }
 
@@ -5567,6 +5576,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private static var keychainCredentialStore: KeychainServerCredentialStore {
         KeychainServerCredentialStore(service: productionCredentialService)
+    }
+
+    private static var legacyKeychainCredentialStore: KeychainServerCredentialStore {
+        KeychainServerCredentialStore(service: MacAppCompatibility.legacyCredentialService)
     }
 
     private static var usesPreviewCredentialStore: Bool {
@@ -5583,9 +5596,23 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private static func prepareCredentialStore() {
         if !usesPreviewCredentialStore {
+            migrateLegacyKeychainCredentialsIfNeeded()
             migratePlaintextCredentialsToKeychainIfNeeded()
         }
         bootstrapCredentialStoreFromEnvironment()
+    }
+
+    private static func migrateLegacyKeychainCredentialsIfNeeded() {
+        for account in [clientCredentialAccount, adminCredentialAccount, accountSessionCredentialAccount] {
+            guard let legacyValue = legacyKeychainCredentialStore.read(account: account),
+                  !legacyValue.isEmpty else { continue }
+            let currentValue = keychainCredentialStore.read(account: account)
+            if currentValue != nil
+                || (keychainCredentialStore.save(legacyValue, account: account)
+                    && keychainCredentialStore.read(account: account) == legacyValue) {
+                _ = legacyKeychainCredentialStore.delete(account: account)
+            }
+        }
     }
 
     private static func migratePlaintextCredentialsToKeychainIfNeeded() {
@@ -5602,13 +5629,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private static func bootstrapCredentialStoreFromEnvironment() {
         let environment = ProcessInfo.processInfo.environment
-        guard let client = environment["LIKED_SONGS_CLIENT_TOKEN"],
-              let admin = environment["LIKED_SONGS_ADMIN_TOKEN"],
+        guard let client = environment["RESONANCE_CLIENT_TOKEN"],
+              let admin = environment["RESONANCE_ADMIN_TOKEN"],
               !client.isEmpty, !admin.isEmpty else { return }
         _ = activeCredentialStore.save(client, account: clientCredentialAccount)
         _ = activeCredentialStore.save(admin, account: adminCredentialAccount)
-        unsetenv("LIKED_SONGS_CLIENT_TOKEN")
-        unsetenv("LIKED_SONGS_ADMIN_TOKEN")
+        unsetenv("RESONANCE_CLIENT_TOKEN")
+        unsetenv("RESONANCE_ADMIN_TOKEN")
     }
 
     private static func readServerToken() -> String {

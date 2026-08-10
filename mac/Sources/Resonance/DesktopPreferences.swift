@@ -4,9 +4,9 @@ import Foundation
 import Network
 
 enum MacDesktopPreferenceKeys {
-    static let runInBackground = "LikedSongsFocus.desktop.runInBackground.v1"
-    static let discordRichPresence = "LikedSongsFocus.desktop.discordRichPresence.v1"
-    static let keybinds = "LikedSongsFocus.desktop.keybinds.v1"
+    static let runInBackground = "Resonance.desktop.runInBackground.v1"
+    static let discordRichPresence = "Resonance.desktop.discordRichPresence.v1"
+    static let keybinds = "Resonance.desktop.keybinds.v1"
 }
 
 enum MacShortcutAction: String, CaseIterable, Identifiable, Codable {

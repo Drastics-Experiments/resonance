@@ -73,7 +73,7 @@ enum MobileProfilePictureStore {
 
     private static var profilePicturesDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("LikedSongsMobile", isDirectory: true)
+            .appendingPathComponent(MobileLegacyAppMigration.applicationSupportName, isDirectory: true)
             .appendingPathComponent("Profile Pictures", isDirectory: true)
     }
 

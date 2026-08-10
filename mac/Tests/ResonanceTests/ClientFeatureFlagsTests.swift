@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import LikedSongsFocus
+@testable import Resonance
 
 private final class ClientConfigURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?

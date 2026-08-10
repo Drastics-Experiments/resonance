@@ -1,6 +1,6 @@
 import CoreGraphics
 import XCTest
-@testable import LikedSongsFocus
+@testable import Resonance
 
 final class ArtworkCroppingTests: XCTestCase {
     func testSquareArtworkIsLeftUnchanged() throws {

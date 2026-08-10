@@ -3,7 +3,7 @@ import AVFoundation
 import Foundation
 import MediaPlayer
 import Testing
-@testable import LikedSongsFocus
+@testable import Resonance
 
 private final class MockMusicURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
@@ -62,7 +62,7 @@ private final class RecordingMacSystemPlaybackController: MacSystemPlaybackContr
 
 @MainActor
 @Suite(.serialized)
-struct LikedSongsFocusTests {
+struct ResonanceTests {
     @Test
     func accountEmailIsCensoredUntilExplicitlyRevealed() {
         let email = "private@example.com"
@@ -124,7 +124,7 @@ struct LikedSongsFocusTests {
     private let hero = URL(fileURLWithPath: "/System/Library/Sounds/Hero.aiff")
 
     private func defaults() throws -> (UserDefaults, String) {
-        let suiteName = "LikedSongsFocusTests.\(UUID().uuidString)"
+        let suiteName = "ResonanceTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         return (defaults, suiteName)

@@ -653,7 +653,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     override init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        root = support.appendingPathComponent("LikedSongsMobile", isDirectory: true)
+        MobileLegacyAppMigration.run(applicationSupportRoot: support)
+        root = support.appendingPathComponent(MobileLegacyAppMigration.applicationSupportName, isDirectory: true)
         musicDirectory = root.appendingPathComponent("Music", isDirectory: true)
         artworkDirectory = root.appendingPathComponent("Artwork", isDirectory: true)
         stateURL = root.appendingPathComponent("library.json")
@@ -5367,7 +5368,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
     }
 
-    private static let keychainService = "com.gavindietrich.LikedSongsMobile"
+    private static let keychainService = MobileLegacyAppMigration.keychainService
     private static let accountSessionKey = "account-session-v1"
 
     private static func readAccountSession() -> ResonanceAccountSession? {

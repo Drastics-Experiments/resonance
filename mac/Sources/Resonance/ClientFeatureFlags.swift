@@ -200,7 +200,7 @@ struct MacClientConfigContext: Codable, Equatable, Hashable, Sendable {
             tokenFingerprint,
         ]
             .joined(separator: "\u{0}")
-        return "LikedSongsFocus.clientConfig.cache.v1.\(Self.sha256Hex(scope))"
+        return "Resonance.clientConfig.cache.v1.\(Self.sha256Hex(scope))"
     }
 
     var highestRevisionKey: String {
@@ -469,7 +469,7 @@ struct MacEffectiveClientConfig: Sendable {
 }
 
 enum MacClientConfigIdentity {
-    static let cohortKeyDefaultsKey = "LikedSongsFocus.clientConfig.cohortKey.v1"
+    static let cohortKeyDefaultsKey = "Resonance.clientConfig.cohortKey.v1"
 
     static func cohortKey(defaults: UserDefaults) -> String {
         if let stored = defaults.string(forKey: cohortKeyDefaultsKey),

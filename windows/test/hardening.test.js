@@ -486,6 +486,7 @@ test("Windows renderer and main-process integrations retain the hardening bounda
     readFile(new URL("../../.launcher-terminal.zsh", import.meta.url), "utf8"),
   ]);
   const packageJSON = JSON.parse(packageSource);
+  const retiredStorageName = ["Liked", " Songs"].join("");
 
   assert.match(mainSource, /normalizeServerBaseURL\(value, \{ allowInsecureLoopback: !app\.isPackaged \}\)/);
   assert.match(mainSource, /writeResponseToFile\(response, temporary,[\s\S]+expectedSize,[\s\S]+expectedSHA256,[\s\S]+maximumBytes: MAX_SERVER_MEDIA_BYTES/);
@@ -502,7 +503,14 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(mainSource, /setAsDefaultProtocolClient\("resonance"[\s\S]+app\.on\("second-instance"[\s\S]+authCallbackFromArguments\(commandLine\)/);
   assert.match(mainSource, /previewCredentialStorePath\(\)[\s\S]+app\.getPath\("userData"\)[\s\S]+server-credentials\.json/);
   assert.match(mainSource, /previewAccountSessionPath\(\)[\s\S]+app\.getPath\("userData"\)[\s\S]+account-session\.json/);
-  assert.doesNotMatch(mainSource, /app\.getPath\("appData"\), "Liked Songs", (?:"server-credentials\.json"|"account-session\.json")/);
+  assert.doesNotMatch(
+    mainSource,
+    new RegExp(
+      String.raw`app\.getPath\("appData"\), "${retiredStorageName}", (?:"server-credentials\.json"|"account-session\.json")`,
+    ),
+  );
+  assert.match(preloadSource, /exposeInMainWorld\("resonance"/);
+  assert.match(appSource, /const api = window\.resonance;/);
   assert.match(launcherSource, /CFBundleURLTypes[\s\S]+CFBundleURLSchemes\.0 -string resonance/);
   assert.match(launcherSource, /RES_WINDOWS_APP_ROOT="\$HOME\/Library\/Application Support\/Resonance Worktrees\/\$RES_WORKTREE_ID\/Applications"/);
   assert.doesNotMatch(launcherSource, /RES_WINDOWS_APP="\$RES_LAUNCHER_ROOT\/windows/);

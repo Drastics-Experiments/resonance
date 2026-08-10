@@ -67,7 +67,7 @@ import {
   updatePlaylistRemoteSongIDs,
 } from "./core.js";
 
-const api = window.likedSongs;
+const api = window.resonance;
 const audio = document.querySelector("#audio");
 const clipEditorPreviewAudio = document.querySelector("#clipEditorPreview");
 const clipEditorVisualizerCanvas = document.querySelector("#clipEditorStageVisualizerCanvas");
