@@ -304,6 +304,8 @@ struct ResonanceTests {
         #expect(ServerEndpointPolicy.normalizedURL("https://music.unblocked.mov")?.absoluteString
             == "https://resonance-core.blithe-haven-9710.chatgpt.site")
         #expect(ServerEndpointPolicy.normalizedURL("https://user:secret@music.test") == nil)
+        #expect(ResonanceSocialAuthClient.accountSignInBaseURL.absoluteString
+            == "https://resonance-core.blithe-haven-9710.chatgpt.site/")
     }
 
     @Test

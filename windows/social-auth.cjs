@@ -5,6 +5,7 @@ const CALLBACK_URL = "resonance://auth/callback";
 const MAX_AUTH_VALUE_LENGTH = 16 * 1024;
 const LEGACY_PRODUCTION_ORIGIN = "https://music.unblocked.mov";
 const PRODUCTION_ORIGIN = "https://resonance-core.blithe-haven-9710.chatgpt.site";
+const ACCOUNT_SIGN_IN_URL = "https://resonance-core.blithe-haven-9710.chatgpt.site/";
 
 function boundedAuthText(value, label) {
   const text = String(value || "").trim();
@@ -267,6 +268,7 @@ function publicSession(session) {
 }
 
 module.exports = {
+  ACCOUNT_SIGN_IN_URL,
   CALLBACK_URL,
   SOCIAL_AUTH_PROVIDERS,
   accountForAccessToken,

@@ -1,5 +1,6 @@
 const LEGACY_PRODUCTION_ORIGIN = "https://music.unblocked.mov";
 const PRODUCTION_ORIGIN = "https://resonance-core.blithe-haven-9710.chatgpt.site";
+export const RESONANCE_ACCOUNT_SERVER_URL = `${PRODUCTION_ORIGIN}/`;
 
 export function createEmptyState() {
   return {

@@ -499,6 +499,13 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(mainSource, /openAccountSignInBrowser\(destination\)[\s\S]+shell\.openExternal\(destination\.href\)/);
   assert.doesNotMatch(mainSource, /function isAllowedAccountAuthNavigation|resonance-clerk-auth-/);
   assert.match(mainSource, /ipcMain\.handle\("account:sign-in"[\s\S]+openAccountSignInBrowser\(destination\)/);
+  assert.match(
+    mainSource,
+    /ipcMain\.handle\("account:sign-in", async \(_event, value\) => \{\s+const baseURL = normalizeServerBaseURL\(ACCOUNT_SIGN_IN_URL\)\.origin;/,
+  );
+  assert.doesNotMatch(appSource, /signInAccount\(\{\s*baseURL:/);
+  assert.match(appSource, /serverURL"\)\.value = RESONANCE_ACCOUNT_SERVER_URL;/);
+  assert.match(appSource, /serverURL"\)\.readOnly = true;/);
   assert.deepEqual(packageJSON.build.protocols.flatMap((entry) => entry.schemes), ["resonance"]);
   assert.match(mainSource, /setAsDefaultProtocolClient\("resonance"[\s\S]+app\.on\("second-instance"[\s\S]+authCallbackFromArguments\(commandLine\)/);
   assert.match(mainSource, /previewCredentialStorePath\(\)[\s\S]+app\.getPath\("userData"\)[\s\S]+server-credentials\.json/);

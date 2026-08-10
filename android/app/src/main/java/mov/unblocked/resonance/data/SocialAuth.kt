@@ -22,6 +22,7 @@ val ResonanceSocialAuthProviders = listOf("clerk")
 const val ResonanceAuthCallback = "resonance://auth/callback"
 const val ResonanceLegacyProductionServerURL = "https://music.unblocked.mov"
 const val ResonanceProductionServerURL = "https://resonance-core.blithe-haven-9710.chatgpt.site"
+const val ResonanceAccountSignInServerURL = "https://resonance-core.blithe-haven-9710.chatgpt.site/"
 
 object AccountEmailPrivacy {
     const val CensoredAddress = "••••••@••••••.•••"

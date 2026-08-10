@@ -2188,29 +2188,21 @@ private struct ServerSongRow: View {
 private struct ServerConnectionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
-    @FocusState private var focusedField: ConnectionField?
-    @State private var serverURLDraft = ""
     @State private var isConnecting = false
     @State private var validationMessage: String?
     @State private var isEmailRevealed = false
 
-    private enum ConnectionField: Hashable {
-        case url
+    private var accountServerURL: String {
+        ResonanceSocialAuthClient.accountSignInBaseURL.absoluteString
     }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("Server") {
-                    TextField("https://resonance-core.blithe-haven-9710.chatgpt.site", text: $serverURLDraft)
-                        .focused($focusedField, equals: .url)
-                        .submitLabel(.done)
-                        .onSubmit { focusedField = nil }
+                    TextField("Server URL", text: .constant(accountServerURL))
                         .textContentType(.URL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .disabled(library.accountEmail != nil)
+                        .disabled(true)
                 }
                 .disabled(library.isProfileTransitionBusy)
                 Section {
@@ -2240,15 +2232,13 @@ private struct ServerConnectionSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                         Button("Sign in or create account") {
-                            focusedField = nil
                             Task {
-                                await library.signIn(with: .clerk, serverURL: serverURLDraft)
-                                serverURLDraft = library.serverURL
+                                await library.signIn(with: .clerk)
                                 validationMessage = library.serverConfigurationMessage
                             }
                         }
-                        .disabled(library.isAuthenticatingAccount || normalizedServerURL == nil)
-                        Text("Use email, Google, Apple, or Discord in the secure system browser.")
+                        .disabled(library.isAuthenticatingAccount)
+                        Text("Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/ in the secure system browser.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -2257,7 +2247,6 @@ private struct ServerConnectionSheet: View {
                 }
                 Section {
                     Button {
-                        focusedField = nil
                         guard saveServerDraft() else { return }
                         Task {
                             isConnecting = true
@@ -2294,7 +2283,6 @@ private struct ServerConnectionSheet: View {
             }
             .onChange(of: library.accountEmail) { _, _ in isEmailRevealed = false }
             .onAppear {
-                serverURLDraft = library.serverURL
                 validationMessage = nil
             }
             .task {
@@ -2306,7 +2294,6 @@ private struct ServerConnectionSheet: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
-                        focusedField = nil
                         guard saveServerDraft() else { return }
                         Task {
                             isConnecting = true
@@ -2317,24 +2304,14 @@ private struct ServerConnectionSheet: View {
                     }
                     .disabled(isConnecting || library.isProfileTransitionBusy || library.serverToken.isEmpty)
                 }
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("Done") { focusedField = nil }
-                }
             }
         }
-    }
-
-    private var normalizedServerURL: URL? {
-        let value = serverURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: value), url.scheme?.lowercased() == "https", url.host != nil else { return nil }
-        return url
     }
 
     @discardableResult
     private func saveServerDraft() -> Bool {
         let saved = library.applyServerConfiguration(
-            serverURL: serverURLDraft,
+            serverURL: accountServerURL,
             accessToken: library.serverToken,
             adminToken: library.serverAdminToken
         )

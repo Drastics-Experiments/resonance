@@ -13,6 +13,14 @@ class ServerNetworkIntegrityPolicyTest {
     @Test
     fun productionServerURLsRequireHTTPS() {
         assertEquals(
+            "https://resonance-core.blithe-haven-9710.chatgpt.site/",
+            ResonanceAccountSignInServerURL,
+        )
+        assertEquals(
+            ResonanceProductionServerURL,
+            canonicalHTTPSOrigin(ResonanceAccountSignInServerURL),
+        )
+        assertEquals(
             "https://resonance-core.blithe-haven-9710.chatgpt.site",
             ServerClient.normalizeServerURL(" https://resonance-core.blithe-haven-9710.chatgpt.site/ "),
         )
