@@ -22,6 +22,7 @@ const {
   downloadYouTubeVideo,
   inspectYouTubeAudio,
   inspectYouTubeVideo,
+  resolveYouTubeMetadata,
 } = require("./local-youtube.cjs");
 const {
   directSoundCloudCandidate,
@@ -291,6 +292,52 @@ function directYouTubeMetadata(preview) {
 function publicSoundCloudMetadata(track) {
   const { directlyImportable: _directlyImportable, ...metadata } = track;
   return metadata;
+}
+
+async function resolveLocalImportMetadata(source, signal, adapters = {}, options = {}) {
+  const mediaKind = normalizedMediaKind(options.mediaKind);
+  assertNotAborted(signal);
+  if (isSoundCloudURL(source)) {
+    if (mediaKind === "video") {
+      throw localImportError("resolving_metadata", "SOUNDCLOUD_AUDIO_ONLY", "SoundCloud links can only be imported as audio.");
+    }
+    const soundCloudResolve = adapters.resolveSoundCloudSource || resolveSoundCloudSource;
+    const resolved = await soundCloudResolve(source, signal);
+    if (resolved.kind !== "track") {
+      throw localImportError(
+        "resolving_metadata",
+        "PLAYLIST_METADATA_UNSUPPORTED",
+        "A saved server song must identify one track, not a playlist.",
+      );
+    }
+    return publicSoundCloudMetadata(resolved.track);
+  }
+  if (isSpotifyURL(source)) {
+    if (mediaKind === "video") {
+      throw localImportError("resolving_metadata", "YOUTUBE_VIDEO_REQUIRED", "Video downloads require a direct YouTube video URL. Spotify links can only be imported as audio.");
+    }
+    if (spotifyPlaylistURL(source)) {
+      throw localImportError(
+        "resolving_metadata",
+        "PLAYLIST_METADATA_UNSUPPORTED",
+        "A saved server song must identify one track, not a playlist.",
+      );
+    }
+    const spotifyResolve = adapters.resolveSpotifyTrack || resolveSpotifyTrack;
+    return spotifyResolve(source, signal);
+  }
+  if (youtubePlaylistID(source)) {
+    throw localImportError(
+      "resolving_metadata",
+      "PLAYLIST_METADATA_UNSUPPORTED",
+      "A saved server song must identify one video, not a playlist.",
+    );
+  }
+  if (!youtubeVideoID(source)) {
+    throw localImportError("resolving_metadata", "UNSUPPORTED_SOURCE", "Enter a Spotify, SoundCloud, or supported YouTube track URL.");
+  }
+  const youtubeMetadata = adapters.resolveYouTubeMetadata || resolveYouTubeMetadata;
+  return youtubeMetadata(source, signal);
 }
 
 async function resolveLocalImportSource(source, signal, onStage = () => {}, adapters = {}, options = {}) {
@@ -660,6 +707,7 @@ module.exports = {
   m4aTagArguments,
   mp4MuxArguments,
   normalizedMetadata,
+  resolveLocalImportMetadata,
   resolveLocalImportSource,
   runFFmpeg,
   safeArtworkURL,

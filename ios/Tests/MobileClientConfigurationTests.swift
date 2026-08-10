@@ -70,6 +70,69 @@ final class MobileClientConfigurationTests: XCTestCase {
         XCTAssertEqual(song.sourceURL, "https://media.example/Local%20Title.m4a?token=preserved")
         XCTAssertEqual(song.mediaKind, "audio")
         XCTAssertTrue(song.isSourceLinkRecord)
+        XCTAssertTrue(song.isMetadataLoading)
+    }
+
+    func testRichServerCatalogDoesNotShowMetadataPlaceholder() throws {
+        let data = try XCTUnwrap("""
+        {
+          "id": "saved-song-uuid",
+          "filename": "Example.m4a",
+          "title": "Example",
+          "artist": "Artist",
+          "album": "Album",
+          "source_url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+          "media_kind": "audio",
+          "download_url": "/api/v1/songs/saved-song-uuid/file",
+          "stream_url": "/api/v1/songs/saved-song-uuid/stream"
+        }
+        """.data(using: .utf8))
+        let song = try JSONDecoder().decode(MobileRemoteSong.self, from: data)
+
+        XCTAssertTrue(song.isSourceLinkRecord)
+        XCTAssertFalse(song.isMetadataLoading)
+    }
+
+    func testRemoteMetadataCacheKeepsOnlyFreshMatchingSafeEntries() throws {
+        let source = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+        let key = try XCTUnwrap(MobileRemoteSongMetadataCachePolicy.key(sourceURL: source, mediaKind: "audio"))
+        let metadata = LocalImportSpotifyTrack(
+            provider: "youtube",
+            type: "track",
+            trackID: "jNQXAC9IVRw",
+            title: "Me at the zoo",
+            artist: "jawed",
+            album: nil,
+            trackNumber: nil,
+            durationSeconds: nil,
+            artworkURL: "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg",
+            embedURL: "",
+            sourceURL: source
+        )
+        let fresh = MobileRemoteSongMetadataCacheEntry(
+            sourceURL: source,
+            mediaKind: "audio",
+            metadata: metadata,
+            cachedAt: now.addingTimeInterval(-60)
+        )
+        let stale = MobileRemoteSongMetadataCacheEntry(
+            sourceURL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            mediaKind: "audio",
+            metadata: metadata,
+            cachedAt: now.addingTimeInterval(-MobileRemoteSongMetadataCachePolicy.lifetime - 1)
+        )
+
+        let normalized = MobileRemoteSongMetadataCachePolicy.normalized(
+            [
+                key: fresh,
+                "audio:https://www.youtube.com/watch?v=dQw4w9WgXcQ": stale,
+                "audio:https://wrong.example/track": fresh,
+            ],
+            now: now
+        )
+
+        XCTAssertEqual(normalized, [key: fresh])
+        XCTAssertNil(MobileRemoteSongMetadataCachePolicy.key(sourceURL: "http://example.com/song", mediaKind: "audio"))
     }
 
     func testOrdinaryTextSearchFallsBackToDeviceOnlyForServerLinkModes() {
@@ -112,6 +175,27 @@ final class MobileClientConfigurationTests: XCTestCase {
         XCTAssertTrue(userAgent.contains("Chrome/"))
         XCTAssertFalse(userAgent.contains("iPhone"))
         XCTAssertFalse(userAgent.contains(" Mobile/"))
+    }
+
+    func testYouTubeMetadataResolutionUsesOneLightweightOEmbedRequest() async throws {
+        MobileMetadataURLProtocol.state.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MobileMetadataURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let service = LocalDeviceImportService(
+            sessions: .testing(session),
+            localRoot: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+            temporaryRoot: FileManager.default.temporaryDirectory
+        )
+
+        let metadata = try await service.resolveMetadata(
+            source: "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+        )
+
+        XCTAssertEqual(metadata.title, "Me at the zoo")
+        XCTAssertEqual(metadata.artist, "jawed")
+        XCTAssertEqual(metadata.durationSeconds, nil)
+        XCTAssertEqual(MobileMetadataURLProtocol.state.requestedPaths, ["/oembed"])
     }
 
     func testProfilePicturesUseCanonicalPerProfileScopes() {
@@ -1330,6 +1414,71 @@ private struct SignedResponse {
     let body: Data
     let digest: String
     let signature: String
+}
+
+private final class MobileMetadataURLProtocolState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var paths: [String] = []
+
+    var requestedPaths: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return paths
+    }
+
+    func reset() {
+        lock.lock()
+        paths = []
+        lock.unlock()
+    }
+
+    func record(_ path: String) {
+        lock.lock()
+        paths.append(path)
+        lock.unlock()
+    }
+}
+
+private final class MobileMetadataURLProtocol: URLProtocol, @unchecked Sendable {
+    static let state = MobileMetadataURLProtocolState()
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        Self.state.record(url.path)
+        let body = Data("""
+        {
+          "type": "video",
+          "provider_name": "YouTube",
+          "title": "Me at the zoo",
+          "author_name": "jawed",
+          "thumbnail_url": "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg"
+        }
+        """.utf8)
+        guard let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: [
+                "Content-Type": "application/json",
+                "Content-Length": String(body.count),
+            ]
+        ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 private final class MobileChunkedDownloadProtocolState: @unchecked Sendable {

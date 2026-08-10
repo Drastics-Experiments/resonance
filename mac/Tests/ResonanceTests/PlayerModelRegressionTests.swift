@@ -52,6 +52,23 @@ private final class AsyncSignal: @unchecked Sendable {
     }
 }
 
+private final class LockedRegressionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    @discardableResult
+    func increment() -> Int {
+        lock.withLock {
+            count += 1
+            return count
+        }
+    }
+
+    var value: Int {
+        lock.withLock { count }
+    }
+}
+
 private final class DelayedCatalogRegressionURLProtocol: URLProtocol {
     static var catalogStarted: AsyncSignal?
     static var releaseCatalog: DispatchSemaphore?
@@ -581,6 +598,149 @@ struct PlayerModelRegressionTests {
         #expect(requests.count == 1)
         #expect(requests.first?.method == "GET")
         #expect(requests.first?.path == "/api/v1/songs")
+    }
+
+    @Test
+    func catalogRefreshPublishesLinkOnlyRowsBeforeDeviceMetadataFinishes() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        let metadataStarted = AsyncSignal()
+        let releaseMetadata = AsyncSignal()
+        defer {
+            releaseMetadata.signal()
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        RegressionURLProtocol.handler = { request in
+            #expect(request.url?.path == "/api/v1/songs")
+            let data = Data(#"{"count":1,"songs":[{"id":"link-only","source_url":"https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8","media_kind":"audio","size":0,"modified_at":"now","content_type":"application/octet-stream","download_url":"/api/v1/songs/link-only/file","stream_url":"/api/v1/songs/link-only/stream"}]}"#.utf8)
+            return (try response(for: request), data)
+        }
+
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false,
+            remoteSongMetadataResolver: { source, mediaMode in
+                #expect(source == "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8")
+                #expect(mediaMode == .audio)
+                metadataStarted.signal()
+                await releaseMetadata.wait()
+                return LocalImportSpotifyTrack(
+                    provider: "spotify",
+                    type: "track",
+                    trackID: "4PTG3Z6ehGkBFwjybzWkR8",
+                    title: "Resolved Song",
+                    artist: "Resolved Artist",
+                    album: "Resolved Album",
+                    trackNumber: 1,
+                    durationSeconds: 123,
+                    artworkURL: "https://i.scdn.co/image/resolved",
+                    embedURL: "https://open.spotify.com/embed/track/4PTG3Z6ehGkBFwjybzWkR8",
+                    sourceURL: source
+                )
+            }
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+
+        await model.refreshServerCatalogNow()
+        await metadataStarted.wait()
+
+        #expect(!model.isRefreshingServerCatalog)
+        #expect(model.remoteSongs.count == 1)
+        #expect(model.remoteSongs.first?.id == "link-only")
+        #expect(model.remoteSongs.first?.isMetadataLoading == true)
+        #expect(model.remoteSongs.first?.title == "Resolving metadata…")
+        #expect(model.pendingRemoteSongMetadataCount == 1)
+
+        releaseMetadata.signal()
+        for _ in 0..<100 where model.pendingRemoteSongMetadataCount > 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(model.pendingRemoteSongMetadataCount == 0)
+        #expect(model.remoteSongs.first?.isMetadataLoading == false)
+        #expect(model.remoteSongs.first?.title == "Resolved Song")
+        #expect(model.remoteSongs.first?.artist == "Resolved Artist")
+        #expect(model.remoteSongs.first?.durationSeconds == 123)
+    }
+
+    @Test
+    func catalogRefreshReusesPersistedDeviceMetadataWithoutResolvingAgain() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        let resolverCalls = LockedRegressionCounter()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        let source = "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8"
+        RegressionURLProtocol.handler = { request in
+            #expect(request.url?.path == "/api/v1/songs")
+            let data = Data(
+                #"{"count":1,"songs":[{"id":"cached-link","source_url":"https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8","media_kind":"audio","size":0,"modified_at":"now","content_type":"application/octet-stream","download_url":"/api/v1/songs/cached-link/file","stream_url":"/api/v1/songs/cached-link/stream"}]}"#.utf8
+            )
+            return (try response(for: request), data)
+        }
+        let resolver: PlayerModel.RemoteSongMetadataResolver = { receivedSource, mediaMode in
+            resolverCalls.increment()
+            #expect(receivedSource == source)
+            #expect(mediaMode == .audio)
+            return LocalImportSpotifyTrack(
+                provider: "spotify",
+                type: "track",
+                trackID: "4PTG3Z6ehGkBFwjybzWkR8",
+                title: "Cached Song",
+                artist: "Cached Artist",
+                album: "Cached Album",
+                trackNumber: 1,
+                durationSeconds: 321,
+                artworkURL: "https://i.scdn.co/image/cached",
+                embedURL: "https://open.spotify.com/embed/track/4PTG3Z6ehGkBFwjybzWkR8",
+                sourceURL: receivedSource
+            )
+        }
+
+        let initial = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false,
+            remoteSongMetadataResolver: resolver
+        )
+        initial.serverURLString = "https://music.test"
+        initial.serverToken = "access-token"
+        await initial.refreshServerCatalogNow()
+        for _ in 0..<100 where initial.pendingRemoteSongMetadataCount > 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        initial.flushPersistence()
+        #expect(resolverCalls.value == 1)
+        #expect(initial.remoteSongs.first?.title == "Cached Song")
+
+        let relaunched = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false,
+            remoteSongMetadataResolver: resolver
+        )
+        relaunched.serverURLString = "https://music.test"
+        relaunched.serverToken = "access-token"
+        await relaunched.refreshServerCatalogNow()
+
+        #expect(resolverCalls.value == 1)
+        #expect(relaunched.pendingRemoteSongMetadataCount == 0)
+        #expect(relaunched.remoteSongs.first?.isMetadataLoading == false)
+        #expect(relaunched.remoteSongs.first?.title == "Cached Song")
+        #expect(relaunched.remoteSongs.first?.artist == "Cached Artist")
+        #expect(relaunched.remoteSongs.first?.durationSeconds == 321)
     }
 
     @Test

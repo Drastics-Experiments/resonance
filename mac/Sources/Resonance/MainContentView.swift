@@ -93,13 +93,19 @@ private struct ServerLibraryView: View {
         .sorted { lhs, rhs in
             switch sort {
             case .title:
-                lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+                if model.pendingRemoteSongMetadataCount > 0 {
+                    return lhs.filename.localizedStandardCompare(rhs.filename) == .orderedAscending
+                }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
             case .artist:
-                lhs.artist.localizedStandardCompare(rhs.artist) == .orderedAscending
+                if model.pendingRemoteSongMetadataCount > 0 {
+                    return lhs.filename.localizedStandardCompare(rhs.filename) == .orderedAscending
+                }
+                return lhs.artist.localizedStandardCompare(rhs.artist) == .orderedAscending
             case .fileSize:
-                lhs.size > rhs.size
+                return lhs.size > rhs.size
             case .recentlyUpdated:
-                lhs.modifiedAt > rhs.modifiedAt
+                return lhs.modifiedAt > rhs.modifiedAt
             }
         }
     }
@@ -134,6 +140,18 @@ private struct ServerLibraryView: View {
                             .font(.system(size: 11))
                             .foregroundStyle(Color.appMuted)
 
+                        if model.pendingRemoteSongMetadataCount > 0 {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .tint(Color.appViolet)
+                            Text(
+                                "Loading metadata for \(model.pendingRemoteSongMetadataCount) "
+                                    + (model.pendingRemoteSongMetadataCount == 1 ? "song" : "songs")
+                            )
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Color.appMuted)
+                        }
+
                         if scope != .all {
                             Text(scope.rawValue)
                                 .font(.system(size: 9, weight: .semibold))
@@ -154,7 +172,15 @@ private struct ServerLibraryView: View {
 
                     MacServerCatalogHeader(showAlbum: showAlbum)
 
-                    if visibleSongs.isEmpty {
+                    if visibleSongs.isEmpty,
+                       model.remoteSongs.isEmpty,
+                       model.isRefreshingServerCatalog {
+                        LazyVStack(spacing: 0) {
+                            ForEach(0..<7, id: \.self) { index in
+                                MacServerCatalogPlaceholderRow(number: index + 1, showAlbum: showAlbum)
+                            }
+                        }
+                    } else if visibleSongs.isEmpty {
                         ContentUnavailableView(
                             model.remoteSongs.isEmpty ? "No Server Songs" : "No Results",
                             systemImage: model.remoteSongs.isEmpty ? "network.slash" : "magnifyingglass",
@@ -507,6 +533,10 @@ private struct MacServerSongRow: View {
     let onDelete: () -> Void
     @State private var isHovering = false
 
+    private var showsMetadataPlaceholder: Bool {
+        song.isMetadataLoading && localTrack == nil
+    }
+
     private var displayTitle: String {
         guard let localTitle = localTrack?.title.trimmingCharacters(in: .whitespacesAndNewlines),
               !localTitle.isEmpty else { return song.title }
@@ -593,24 +623,29 @@ private struct MacServerSongRow: View {
                         .frame(width: 38, height: 38)
 
                         VStack(alignment: .leading, spacing: 5) {
-                            HStack(spacing: 7) {
-                                Text(displayTitle)
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(Color(hex: 0xF5F6FB))
-                                    .lineLimit(1)
+                            if showsMetadataPlaceholder {
+                                MacServerMetadataPlaceholder(width: 148, height: 11)
+                                MacServerMetadataPlaceholder(width: 96, height: 8)
+                            } else {
+                                HStack(spacing: 7) {
+                                    Text(displayTitle)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(Color(hex: 0xF5F6FB))
+                                        .lineLimit(1)
 
-                                if isSynced {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 8))
-                                        .foregroundStyle(Color(hex: 0x55D98B))
-                                        .help("On this Mac")
+                                    if isSynced {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 8))
+                                            .foregroundStyle(Color(hex: 0x55D98B))
+                                            .help("On this Mac")
+                                    }
                                 }
-                            }
 
-                            Text("\(displayArtist) / \(mediaKind)")
-                                .font(.system(size: 9))
-                                .foregroundStyle(Color(hex: 0x8F96A7))
-                                .lineLimit(1)
+                                Text("\(displayArtist) / \(mediaKind)")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Color(hex: 0x8F96A7))
+                                    .lineLimit(1)
+                            }
                         }
 
                         Spacer(minLength: 8)
@@ -618,14 +653,24 @@ private struct MacServerSongRow: View {
                     .frame(minWidth: 210, maxWidth: .infinity, alignment: .leading)
 
                     if showAlbum {
-                        Text(displayAlbum)
-                            .lineLimit(1)
-                            .frame(width: 135, alignment: .leading)
+                        Group {
+                            if showsMetadataPlaceholder {
+                                MacServerMetadataPlaceholder(width: 88, height: 9)
+                            } else {
+                                Text(displayAlbum).lineLimit(1)
+                            }
+                        }
+                        .frame(width: 135, alignment: .leading)
                     }
 
-                    Text(sizeOrDurationText)
-                        .monospacedDigit()
-                        .frame(width: 72, alignment: .trailing)
+                    Group {
+                        if showsMetadataPlaceholder {
+                            MacServerMetadataPlaceholder(width: 42, height: 9)
+                        } else {
+                            Text(sizeOrDurationText).monospacedDigit()
+                        }
+                    }
+                    .frame(width: 72, alignment: .trailing)
                 }
                 .font(.system(size: 11))
                 .foregroundStyle(Color(hex: 0xAEB4C2))
@@ -733,6 +778,13 @@ private struct MacServerArtwork: View {
                 fallbackArtwork
             }
         }
+        .overlay {
+            if song.isMetadataLoading && localTrack == nil {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(Color.white.opacity(0.72))
+            }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 5, style: .continuous)
@@ -753,6 +805,58 @@ private struct MacServerArtwork: View {
                 cornerRadius: 5
             )
         }
+    }
+}
+
+private struct MacServerCatalogPlaceholderRow: View {
+    let number: Int
+    let showAlbum: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("\(number)")
+                .font(.system(size: 12))
+                .foregroundStyle(Color(hex: 0xAEB4C2).opacity(0.45))
+                .frame(width: 28, alignment: .leading)
+
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color.white.opacity(0.07))
+                .frame(width: 38, height: 38)
+                .overlay {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .tint(Color.white.opacity(0.55))
+                }
+
+            VStack(alignment: .leading, spacing: 7) {
+                MacServerMetadataPlaceholder(width: 148, height: 11)
+                MacServerMetadataPlaceholder(width: 96, height: 8)
+            }
+            .frame(minWidth: 210, maxWidth: .infinity, alignment: .leading)
+
+            if showAlbum {
+                MacServerMetadataPlaceholder(width: 88, height: 9)
+                    .frame(width: 135, alignment: .leading)
+            }
+            MacServerMetadataPlaceholder(width: 42, height: 9)
+                .frame(width: 72, alignment: .trailing)
+            Color.clear.frame(width: 44)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 61)
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.appLine).frame(height: 1) }
+        .accessibilityLabel("Loading server song")
+    }
+}
+
+private struct MacServerMetadataPlaceholder: View {
+    let width: CGFloat
+    let height: CGFloat
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: height / 2, style: .continuous)
+            .fill(Color.white.opacity(0.09))
+            .frame(width: width, height: height)
     }
 }
 

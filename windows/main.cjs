@@ -51,7 +51,14 @@ const { catalogSHA256, normalizeServerBaseURL } = require("./server-policy.cjs")
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
 const { LocalImportError, searchYouTubeAudioSources, youtubeVideoID } = require("./local-import-core.cjs");
 const { importFileBackedSource, searchFileBackedSources } = require("./local-debrid.cjs");
-const { artworkFileDataURL, fetchArtwork, importConfirmedSource, resolveLocalImportSource, safeArtworkURL } = require("./local-import-platform.cjs");
+const {
+  artworkFileDataURL,
+  fetchArtwork,
+  importConfirmedSource,
+  resolveLocalImportMetadata,
+  resolveLocalImportSource,
+  safeArtworkURL,
+} = require("./local-import-platform.cjs");
 const { looksLikeLink, searchAllPlatforms } = require("./local-search.cjs");
 const { downloadResolvedSoundCloudAudio, isSoundCloudURL, resolveSoundCloudAudio } = require("./local-soundcloud.cjs");
 const { downloadResolvedAudio, resolveYouTubeAudio } = require("./local-youtube.cjs");
@@ -128,6 +135,8 @@ const MAX_SERVER_UPLOAD_BATCH_FILES = 500;
 const MAX_SERVER_UPLOAD_MANIFESTS = 20;
 const MAX_SERVER_UPLOAD_RETRY_RECORDS = MAX_SERVER_UPLOAD_BATCH_FILES * MAX_SERVER_UPLOAD_MANIFESTS;
 const SERVER_UPLOAD_RETRY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const REMOTE_SONG_METADATA_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_REMOTE_SONG_METADATA_CACHE_RECORDS = 2_000;
 const MAX_SERVER_STREAM_SESSIONS = 32;
 const MAX_SERVER_STREAM_SESSIONS_PER_OWNER = 2;
 const MAX_SERVER_STREAM_REQUESTS_PER_SESSION = 4;
@@ -1281,6 +1290,42 @@ function safeAppPreferences(value) {
   };
 }
 
+function safeRemoteSongMetadataCache(value, now = Date.now()) {
+  const cutoff = now - REMOTE_SONG_METADATA_CACHE_MAX_AGE_MS;
+  const entries = [];
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const item of Object.values(value)) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const sourceURL = preservedMediaSourceURL(item.sourceURL);
+      const mediaKind = item.mediaKind === "video" ? "video" : "audio";
+      const title = boundedText(item.title, 500);
+      const artist = boundedText(item.artist, 500);
+      const cachedAtTime = Date.parse(item.cachedAt);
+      if (!sourceURL || !title || !artist || !Number.isFinite(cachedAtTime) || cachedAtTime < cutoff) continue;
+      const duration = Number(item.duration);
+      entries.push([`${mediaKind}:${sourceURL}`, {
+        sourceURL,
+        mediaKind,
+        title,
+        artist,
+        album: boundedText(item.album, 500),
+        duration: Number.isFinite(duration) && duration > 0 ? duration : null,
+        artworkURL: safeArtworkURL(item.artworkURL)?.href || null,
+        cachedAt: new Date(cachedAtTime).toISOString(),
+      }]);
+    }
+  }
+  const normalized = {};
+  let normalizedCount = 0;
+  for (const [key, item] of entries.sort((left, right) => Date.parse(right[1].cachedAt) - Date.parse(left[1].cachedAt))) {
+    if (Object.hasOwn(normalized, key)) continue;
+    normalized[key] = item;
+    normalizedCount += 1;
+    if (normalizedCount >= MAX_REMOTE_SONG_METADATA_CACHE_RECORDS) break;
+  }
+  return normalized;
+}
+
 function showMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow();
@@ -1478,6 +1523,7 @@ ipcMain.handle("library:load", async () => {
     sanitizePersistentPlaybackReferences(stored, new Set(tracks.map((track) => track.id).filter(Boolean)));
     stored.serverUploadManifests = safeServerUploadManifests(stored.serverUploadManifests);
     stored.serverTransferPreferences = safeServerTransferPreferences(stored.serverTransferPreferences);
+    stored.remoteSongMetadataCache = safeRemoteSongMetadataCache(stored.remoteSongMetadataCache);
     await atomicWriteFile(state, JSON.stringify({
       ...stored,
       tracks: stored.tracks.map(({ fileUrl, ...track }) => track),
@@ -1547,6 +1593,7 @@ ipcMain.handle("library:save", async (_event, state) => {
       .filter((entry) => typeof entry.trackID !== "string" || !entry.trackID.startsWith("stream:")),
     serverUploadManifests: safeServerUploadManifests(state.serverUploadManifests),
     serverTransferPreferences: safeServerTransferPreferences(state.serverTransferPreferences),
+    remoteSongMetadataCache: safeRemoteSongMetadataCache(state.remoteSongMetadataCache),
     appPreferences: safeAppPreferences(state.appPreferences),
     completedMigrations: Array.isArray(state.completedMigrations)
       ? state.completedMigrations.filter((item) => typeof item === "string" && item.length <= 100)
@@ -1888,18 +1935,16 @@ ipcMain.handle("server:source-metadata", async (_event, { sourceURL, mediaKind }
   const source = preservedMediaSourceURL(sourceURL);
   if (!source) throw new Error("The server returned an invalid saved source link.");
   const normalizedMediaKind = mediaKind === "video" ? "video" : "audio";
-  const signal = AbortSignal.timeout(30_000);
-  const result = await resolveLocalImportSource(source, signal, () => {}, {
-    searchYouTubeAudioSources,
-  }, { mediaKind: normalizedMediaKind });
+  const signal = AbortSignal.timeout(15_000);
+  const track = await resolveLocalImportMetadata(source, signal, {}, { mediaKind: normalizedMediaKind });
   return {
-    title: boundedText(result?.track?.title, 500) || null,
-    artist: boundedText(result?.track?.artist, 500) || null,
-    album: boundedText(result?.track?.album, 500) || null,
-    duration: Number.isFinite(Number(result?.track?.durationSeconds))
-      ? Math.max(0, Number(result.track.durationSeconds))
+    title: boundedText(track?.title, 500) || null,
+    artist: boundedText(track?.artist, 500) || null,
+    album: boundedText(track?.album, 500) || null,
+    duration: Number.isFinite(Number(track?.durationSeconds))
+      ? Math.max(0, Number(track.durationSeconds))
       : null,
-    artworkURL: safeArtworkURL(result?.track?.artworkURL)?.href || null,
+    artworkURL: safeArtworkURL(track?.artworkURL)?.href || null,
     mediaKind: normalizedMediaKind,
   };
 });

@@ -17,6 +17,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import java.net.URI
 import java.util.UUID
 
 @Serializable
@@ -118,6 +119,7 @@ data class RemoteSong(
     val sourceURL: String? = null,
     val mediaKind: String = "audio",
     val isSourceLinkRecord: Boolean = false,
+    val isMetadataLoading: Boolean = false,
 ) {
     val durationText: String?
         get() = durationSeconds
@@ -137,6 +139,51 @@ data class RemoteSong(
                     url.path.substringAfterLast('/').equals("videoplayback", ignoreCase = true)
             }
         } == true
+}
+
+@Serializable
+data class RemoteSongMetadataCacheEntry(
+    val sourceURL: String,
+    val mediaKind: String,
+    val title: String,
+    val artist: String,
+    val album: String? = null,
+    val durationSeconds: Double? = null,
+    val artworkURL: String? = null,
+    val cachedAtEpochMs: Long,
+)
+
+object RemoteSongMetadataCachePolicy {
+    const val MaxAgeMs = 30L * 24 * 60 * 60 * 1_000
+    const val Limit = 2_000
+
+    fun key(sourceURL: String, mediaKind: String): String? {
+        val source = sourceURL.trim()
+        if (source.isEmpty() || source.length > 8_192) return null
+        val uri = runCatching { URI(source) }.getOrNull() ?: return null
+        if (uri.scheme?.lowercase() != "https" || uri.host.isNullOrBlank() || uri.userInfo != null) return null
+        return "${if (mediaKind == "video") "video" else "audio"}:$source"
+    }
+
+    fun normalized(
+        cache: Map<String, RemoteSongMetadataCacheEntry>,
+        nowEpochMs: Long = System.currentTimeMillis(),
+    ): Map<String, RemoteSongMetadataCacheEntry> {
+        val cutoff = nowEpochMs - MaxAgeMs
+        return cache.entries.asSequence()
+            .filter { (_, entry) ->
+                entry.cachedAtEpochMs in cutoff..(nowEpochMs + 5 * 60_000) &&
+                    entry.title.isNotBlank() && entry.title.length <= 512 &&
+                    entry.artist.isNotBlank() && entry.artist.length <= 512
+            }
+            .mapNotNull { (storedKey, entry) ->
+                val key = key(entry.sourceURL, entry.mediaKind)
+                if (key == null || key != storedKey) null else key to entry
+            }
+            .sortedByDescending { it.second.cachedAtEpochMs }
+            .take(Limit)
+            .toMap(linkedMapOf())
+    }
 }
 
 @Serializable
@@ -205,6 +252,7 @@ data class StoredLibrary(
      */
     val profileStates: Map<String, ProfileLibraryState> = emptyMap(),
     val completedMigrations: Set<String> = emptySet(),
+    val remoteSongMetadataCache: Map<String, RemoteSongMetadataCacheEntry> = emptyMap(),
 )
 
 @Serializable
@@ -280,12 +328,15 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
             it.equals("watch", ignoreCase = true) || it.equals("videoplayback", ignoreCase = true)
         }
         val filename = string("filename") ?: string("name") ?: usefulSourceFilename ?: "Saved-${id.take(8)}"
+        val decodedTitle = string("title")?.trim()?.takeIf(String::isNotEmpty)
+        val decodedArtist = string("artist")?.trim()?.takeIf(String::isNotEmpty)
         return RemoteSong(
             id = id,
             filename = filename,
-            title = string("title") ?: if (sourceURL != null) "Resolving metadata…" else filename.substringBeforeLast('.', filename),
-            artist = string("artist") ?: if (sourceURL != null) "On-device lookup" else "Unknown Artist",
-            album = string("album") ?: if (sourceURL != null) "Link only" else "Server Library",
+            title = decodedTitle ?: if (sourceURL != null) "Resolving metadata…" else filename.substringBeforeLast('.', filename),
+            artist = decodedArtist ?: if (sourceURL != null) "On-device lookup" else "Unknown Artist",
+            album = string("album")?.trim()?.takeIf(String::isNotEmpty)
+                ?: if (sourceURL != null) "Link only" else "Server Library",
             size = decodedSize,
             modifiedAt = string("modified_at")
                 ?: objectValue["modified_utc"]?.jsonPrimitive?.longOrNull?.toString()
@@ -307,6 +358,9 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
                 filename.substringAfterLast('.', "").lowercase() in setOf("mp4", "mov", "m4v", "webm")
             ) "video" else "audio",
             isSourceLinkRecord = sourceURL != null && (declaredMediaKind != null || decodedSize == 0L),
+            isMetadataLoading = sourceURL != null &&
+                (declaredMediaKind != null || decodedSize == 0L) &&
+                (decodedTitle == null || decodedArtist == null),
         )
     }
 

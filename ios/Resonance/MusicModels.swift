@@ -783,6 +783,7 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable, Sendable {
     let sourceURL: String?
     let mediaKind: String
     let isSourceLinkRecord: Bool
+    var isMetadataLoading: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, filename, name, title, artist, album, size
@@ -820,11 +821,19 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable, Sendable {
             ?? values.decodeIfPresent(String.self, forKey: .name)
             ?? usefulSourceFilename.flatMap { $0.isEmpty ? nil : $0 }
             ?? "Saved-\(id.prefix(8))"
-        title = try values.decodeIfPresent(String.self, forKey: .title)
+        let decodedTitle = try values.decodeIfPresent(String.self, forKey: .title).flatMap { value in
+            value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+        }
+        let decodedArtist = try values.decodeIfPresent(String.self, forKey: .artist).flatMap { value in
+            value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+        }
+        title = decodedTitle
             ?? (isSourceLinkRecord ? "Resolving metadata…" : (filename as NSString).deletingPathExtension)
-        artist = try values.decodeIfPresent(String.self, forKey: .artist)
+        artist = decodedArtist
             ?? (isSourceLinkRecord ? "On-device lookup" : "Unknown Artist")
-        album = try values.decodeIfPresent(String.self, forKey: .album)
+        album = try values.decodeIfPresent(String.self, forKey: .album).flatMap { value in
+            value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+        }
             ?? (isSourceLinkRecord ? "Link only" : "Server Library")
         size = decodedSize
         modifiedAt = try values.decodeIfPresent(String.self, forKey: .modifiedAt)
@@ -851,6 +860,7 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable, Sendable {
             return trimmed.isEmpty ? nil : URL(string: trimmed)
         }
         contentSHA256 = try values.decodeIfPresent(String.self, forKey: .contentSHA256)
+        isMetadataLoading = isSourceLinkRecord && (decodedTitle == nil || decodedArtist == nil)
     }
 
     var durationText: String? {
@@ -872,6 +882,51 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable, Sendable {
 struct MobileRemoteCatalog: Decodable {
     let songs: [MobileRemoteSong]
     let count: Int
+}
+
+struct MobileRemoteSongMetadataCacheEntry: Codable, Equatable, Sendable {
+    let sourceURL: String
+    let mediaKind: String
+    let metadata: LocalImportSpotifyTrack
+    let cachedAt: Date
+}
+
+enum MobileRemoteSongMetadataCachePolicy {
+    static let lifetime: TimeInterval = 30 * 24 * 60 * 60
+    static let limit = 2_000
+
+    static func key(sourceURL: String, mediaKind: String) -> String? {
+        let source = sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty,
+              source.utf8.count <= 8_192,
+              let url = URL(string: source),
+              url.scheme?.lowercased() == "https",
+              url.host != nil,
+              url.user == nil,
+              url.password == nil else { return nil }
+        return "\(mediaKind == "video" ? "video" : "audio"):\(source)"
+    }
+
+    static func normalized(
+        _ cache: [String: MobileRemoteSongMetadataCacheEntry],
+        now: Date = Date()
+    ) -> [String: MobileRemoteSongMetadataCacheEntry] {
+        let cutoff = now.addingTimeInterval(-lifetime)
+        let entries = cache.compactMap { storedKey, entry -> (String, MobileRemoteSongMetadataCacheEntry)? in
+            guard entry.cachedAt >= cutoff,
+                  entry.cachedAt <= now.addingTimeInterval(5 * 60),
+                  !entry.metadata.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !entry.metadata.artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  entry.metadata.title.utf8.count <= 512,
+                  entry.metadata.artist.utf8.count <= 512,
+                  let key = key(sourceURL: entry.sourceURL, mediaKind: entry.mediaKind),
+                  key == storedKey else { return nil }
+            return (key, entry)
+        }
+        .sorted { $0.1.cachedAt > $1.1.cachedAt }
+        .prefix(limit)
+        return Dictionary(uniqueKeysWithValues: entries)
+    }
 }
 
 struct MobileProfileSyncState: Codable, Equatable {
@@ -910,6 +965,7 @@ struct MobileStoredLibrary: Codable, Equatable {
     var playbackSnapshot: MobilePlaybackSnapshot? = nil
     var transferFailures: [MobileTransferFailure]? = nil
     var completedMigrations: Set<String>? = nil
+    var remoteSongMetadataCache: [String: MobileRemoteSongMetadataCacheEntry]? = nil
 }
 
 struct MobileLibraryNormalizationResult: Equatable {

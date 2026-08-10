@@ -1245,13 +1245,19 @@ private struct ServerView: View {
         .sorted { lhs, rhs in
             switch sort {
             case .title:
-                lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+                if library.pendingRemoteSongMetadataCount > 0 {
+                    return lhs.filename.localizedStandardCompare(rhs.filename) == .orderedAscending
+                }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
             case .artist:
-                lhs.artist.localizedStandardCompare(rhs.artist) == .orderedAscending
+                if library.pendingRemoteSongMetadataCount > 0 {
+                    return lhs.filename.localizedStandardCompare(rhs.filename) == .orderedAscending
+                }
+                return lhs.artist.localizedStandardCompare(rhs.artist) == .orderedAscending
             case .fileSize:
-                lhs.size > rhs.size
+                return lhs.size > rhs.size
             case .recentlyUpdated:
-                lhs.modifiedAt > rhs.modifiedAt
+                return lhs.modifiedAt > rhs.modifiedAt
             }
         }
     }
@@ -1334,9 +1340,33 @@ private struct ServerView: View {
                     .padding(.top, 14)
                     .padding(.bottom, 10)
 
+                    if library.pendingRemoteSongMetadataCount > 0 {
+                        HStack(spacing: 7) {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .tint(Color.violet)
+                            Text(
+                                "Loading metadata for \(library.pendingRemoteSongMetadataCount) "
+                                    + (library.pendingRemoteSongMetadataCount == 1 ? "song" : "songs")
+                            )
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 6)
+                    }
+
                     MobileSongListHeader()
 
-                    if visibleSongs.isEmpty {
+                    if visibleSongs.isEmpty,
+                       library.remoteSongs.isEmpty,
+                       library.isRefreshingCatalog {
+                        LazyVStack(spacing: 0) {
+                            ForEach(0..<7, id: \.self) { index in
+                                MobileServerCatalogPlaceholderRow(number: index + 1)
+                            }
+                        }
+                    } else if visibleSongs.isEmpty {
                         ContentUnavailableView(
                             library.remoteSongs.isEmpty ? "No Server Songs" : "No Results",
                             systemImage: library.remoteSongs.isEmpty ? "network.slash" : "magnifyingglass",
@@ -2049,6 +2079,10 @@ private struct ServerSongRow: View {
     let onToggleSelection: () -> Void
     let onDelete: () -> Void
 
+    private var showsMetadataPlaceholder: Bool {
+        song.isMetadataLoading && localTrack == nil
+    }
+
     private var displayTitle: String {
         guard let localTrack, !localTrack.title.isEmpty else { return song.title }
         return localTrack.title
@@ -2101,40 +2135,54 @@ private struct ServerSongRow: View {
                     .frame(width: 52, height: 52)
 
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Text(displayTitle)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                            if isSynced {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .font(.system(size: 8))
-                                    .foregroundStyle(Color.green)
+                        if showsMetadataPlaceholder {
+                            MobileServerMetadataPlaceholder(width: 148, height: 11)
+                            MobileServerMetadataPlaceholder(width: 96, height: 8)
+                            MobileServerMetadataPlaceholder(width: 88, height: 9)
+                        } else {
+                            HStack(spacing: 6) {
+                                Text(displayTitle)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                if isSynced {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(Color.green)
+                                }
                             }
-                        }
-                        Text("\(displayArtist) / \(mediaKind)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        if !displayAlbum.isEmpty {
-                            Text(displayAlbum)
+                            Text("\(displayArtist) / \(mediaKind)")
                                 .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(.secondary)
                                 .lineLimit(1)
+                            if !displayAlbum.isEmpty {
+                                Text(displayAlbum)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
                         }
                     }
                     Spacer(minLength: 8)
-                    Text(trailingDetail)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                        .frame(width: 44, alignment: .trailing)
+                    Group {
+                        if showsMetadataPlaceholder {
+                            MobileServerMetadataPlaceholder(width: 42, height: 9)
+                        } else {
+                            Text(trailingDetail)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                    .frame(width: 44, alignment: .trailing)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(
-                isSelecting
+                showsMetadataPlaceholder
+                    ? "Loading server song metadata"
+                    : isSelecting
                     ? (isSelected ? "Deselect \(song.title)" : "Select \(song.title)")
                     : (isSynced ? "Play \(song.title)" : "\(remoteActionTitle) \(song.title)")
             )
@@ -2182,6 +2230,50 @@ private struct ServerSongRow: View {
         return library.activeDownloadMode == .streamOnly
             ? "dot.radiowaves.left.and.right"
             : "icloud.and.arrow.down"
+    }
+}
+
+private struct MobileServerCatalogPlaceholderRow: View {
+    let number: Int
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("\(number)")
+                .font(.caption)
+                .foregroundStyle(.secondary.opacity(0.45))
+                .frame(width: 24, alignment: .leading)
+
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.white.opacity(0.07))
+                .frame(width: 52, height: 52)
+                .overlay {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white.opacity(0.65))
+                }
+
+            VStack(alignment: .leading, spacing: 7) {
+                MobileServerMetadataPlaceholder(width: 148, height: 11)
+                MobileServerMetadataPlaceholder(width: 96, height: 8)
+                MobileServerMetadataPlaceholder(width: 88, height: 9)
+            }
+            Spacer(minLength: 8)
+            MobileServerMetadataPlaceholder(width: 42, height: 9)
+                .frame(width: 44, alignment: .trailing)
+        }
+        .mobileCatalogRow()
+        .accessibilityLabel("Loading server song")
+    }
+}
+
+private struct MobileServerMetadataPlaceholder: View {
+    let width: CGFloat
+    let height: CGFloat
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: height / 2, style: .continuous)
+            .fill(Color.white.opacity(0.09))
+            .frame(width: width, height: height)
     }
 }
 
@@ -2828,7 +2920,14 @@ private struct ServerArtwork: View {
 
     var body: some View {
         SquareArtworkContainer { size in
-            if let artworkURL = song.artworkURL {
+            if song.isMetadataLoading {
+                ZStack {
+                    ArtworkTile(symbol: "music.note")
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white.opacity(0.72))
+                }
+            } else if let artworkURL = song.artworkURL {
                 AsyncImage(url: artworkURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
                     switch phase {
                     case .success(let image):

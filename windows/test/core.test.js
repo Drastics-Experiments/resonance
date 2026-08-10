@@ -29,6 +29,7 @@ import {
   nextIndex,
   niceChartMaximum,
   normalizedAppPreferences,
+  normalizedRemoteSongMetadataCache,
   normalizedVolume,
   playbackGainForVolume,
   normalizeState,
@@ -39,6 +40,7 @@ import {
   preservedUploadSourceURL,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
+  remoteSongMetadataCacheKey,
   serverSongMetadataMatches,
   reconcileServerBackedTrackDuplicates,
   reconcileUploadedTrack,
@@ -207,6 +209,53 @@ test("uses honest on-device states instead of URL pathnames for saved links", ()
     artist: "Re-import on the original device",
     album: "Legacy expired link",
   });
+});
+
+test("keeps a bounded fresh device-only server metadata cache", () => {
+  const now = Date.now();
+  const sourceURL = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+  const key = remoteSongMetadataCacheKey(sourceURL, "video");
+  const cache = normalizedRemoteSongMetadataCache({
+    arbitraryInputKey: {
+      sourceURL,
+      mediaKind: "video",
+      title: "  Me at the zoo  ",
+      artist: "jawed",
+      album: null,
+      duration: 19,
+      artworkURL: "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg",
+      cachedAt: new Date(now - 1_000).toISOString(),
+    },
+    expired: {
+      sourceURL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      mediaKind: "audio",
+      title: "Expired",
+      artist: "Expired",
+      cachedAt: new Date(now - 31 * 24 * 60 * 60 * 1_000).toISOString(),
+    },
+  }, now);
+  assert.deepEqual(Object.keys(cache), [key]);
+  assert.equal(cache[key].title, "Me at the zoo");
+  assert.equal(cache[key].duration, 19);
+  assert.equal(cache[key].mediaKind, "video");
+});
+
+test("uses lightweight batched Windows metadata hydration and mac-like song skeletons", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const handler = mainSource.slice(
+    mainSource.indexOf('ipcMain.handle("server:source-metadata"'),
+    mainSource.indexOf('ipcMain.handle("local-import:start-external"'),
+  );
+  assert.match(handler, /resolveLocalImportMetadata\(source, signal/);
+  assert.doesNotMatch(handler, /resolveLocalImportSource|searchYouTubeAudioSources/);
+  assert.match(appSource, /Array\.from\(\{ length: 7 \}/);
+  assert.match(appSource, /server-metadata-title[\s\S]+server-metadata-subtitle/);
+  assert.match(appSource, /Math\.min\(4, queue\.length\)/);
+  assert.match(appSource, /bufferedResults\.length >= 4/);
+  assert.match(styleSource, /\.server-metadata-title\s*\{ width: 148px; height: 11px; \}/);
+  assert.match(styleSource, /\.server-metadata-artwork \.server-artwork-placeholder[\s\S]+border-top-color/);
 });
 
 test("requires explicit review before selecting metadata-only audio matches", () => {
@@ -1075,7 +1124,7 @@ test("ports playback reliability, recovery notices, and keyboard operation into 
 test("animates server artwork placeholders until each image loads", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
-  assert.match(appSource, /artwork\(song, \{ animateLoading: true \}\)/);
+  assert.match(appSource, /artwork\(song, \{ animateLoading: true, forceLoading: artworkLoading \}\)/);
   assert.match(appSource, /function updateServerArtworkNode\(song\)/);
   assert.match(appSource, /data-server-artwork-id/);
   assert.doesNotMatch(appSource, /scheduleServerArtworkRender/);

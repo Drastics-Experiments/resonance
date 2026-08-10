@@ -132,6 +132,40 @@ class LinkImportService(context: Context) {
     private val webAgent = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36"
     private val playerAgent = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L) gzip"
 
+    suspend fun resolveMetadata(source: String): LinkImportTrack = withContext(Dispatchers.IO) {
+        val input = source.trim()
+        if (SoundCloudImportUrls.source(input) != null) {
+            return@withContext when (val resolved = SoundCloudImport.resolve(input)) {
+                is SoundCloudSource.Track -> resolved.value.metadata
+                is SoundCloudSource.Playlist -> throw LinkImportException(
+                    LinkImportStage.ResolvingMetadata,
+                    "PLAYLIST_METADATA_UNSUPPORTED",
+                    "A saved server song must identify one track, not a playlist.",
+                )
+            }
+        }
+
+        val spotify = spotifyURL(input)
+        if (spotify != null) {
+            val parts = spotify.path.split('/').filter(String::isNotBlank).let {
+                if (it.firstOrNull()?.startsWith("intl-") == true) it.drop(1) else it
+            }
+            if (parts.firstOrNull() == "playlist") throw LinkImportException(
+                LinkImportStage.ResolvingMetadata,
+                "PLAYLIST_METADATA_UNSUPPORTED",
+                "A saved server song must identify one track, not a playlist.",
+            )
+            return@withContext resolveSpotify(spotify)
+        }
+
+        val videoID = youtubeID(input) ?: throw LinkImportException(
+            LinkImportStage.ResolvingMetadata,
+            "UNSUPPORTED_SOURCE",
+            "Enter a Spotify, SoundCloud, or supported YouTube track URL.",
+        )
+        resolveYouTubeMetadata(videoID)
+    }
+
     suspend fun resolve(source: String, progress: (LinkImportProgress) -> Unit): LinkImportResolution =
         withContext(Dispatchers.IO) {
             if (SoundCloudImportUrls.source(source.trim()) != null) {
@@ -369,6 +403,39 @@ class LinkImportService(context: Context) {
             )
             LinkImportSearchResponse(query, results)
         }
+    }
+
+    private suspend fun resolveYouTubeMetadata(videoID: String): LinkImportTrack {
+        val canonical = "https://www.youtube.com/watch?v=$videoID"
+        val metadataURL = URL(
+            "https://www.youtube.com/oembed?url=" + URLEncoder.encode(canonical, "UTF-8") + "&format=json",
+        )
+        val payload = json.parseToJsonElement(
+            request(metadataURL, 256 * 1_024, "application/json") { finalURL ->
+                finalURL.protocol.equals("https", ignoreCase = true) &&
+                    finalURL.host.equals("www.youtube.com", ignoreCase = true) &&
+                    finalURL.path == "/oembed"
+            },
+        ) as? JsonObject ?: throw LinkImportException(
+            LinkImportStage.ResolvingMetadata,
+            "YOUTUBE_INVALID_METADATA",
+            "YouTube returned invalid video metadata.",
+        )
+        val title = payload.string("title")?.trim().orEmpty()
+        val artist = payload.string("author_name")?.trim().orEmpty()
+        if (payload.string("provider_name") != "YouTube" ||
+            payload.string("type") != "video" || title.isEmpty() || artist.isEmpty()
+        ) throw LinkImportException(
+            LinkImportStage.ResolvingMetadata,
+            "YOUTUBE_INVALID_METADATA",
+            "YouTube returned invalid video metadata.",
+        )
+        return LinkImportTrack(
+            title = title,
+            artist = artist,
+            artworkURL = payload.string("thumbnail_url")?.takeIf(::isArtwork),
+            sourceURL = canonical,
+        )
     }
 
     suspend fun preview(candidate: LinkImportCandidate): LinkImportPreview = withContext(Dispatchers.IO) {
@@ -1011,8 +1078,17 @@ class LinkImportService(context: Context) {
         return id?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{11}")) }
     }
 
-    private suspend fun request(url: URL, limit: Int, accept: String): String =
-        requestBytes(url, limit, accept).decodeToString()
+    private suspend fun request(
+        url: URL,
+        limit: Int,
+        accept: String,
+        validatesFinalURL: ((URL) -> Boolean)? = null,
+    ): String = requestBytes(
+        url,
+        limit,
+        accept,
+        validatesFinalURL = validatesFinalURL,
+    ).decodeToString()
 
     private suspend fun requestBytes(
         url: URL,
@@ -1021,6 +1097,7 @@ class LinkImportService(context: Context) {
         method: String = "GET",
         body: ByteArray? = null,
         headers: Map<String, String> = emptyMap(),
+        validatesFinalURL: ((URL) -> Boolean)? = null,
     ): ByteArray {
         val connection = open(
             url,
@@ -1033,6 +1110,11 @@ class LinkImportService(context: Context) {
                 connection.outputStream.use { it.write(body) }
             }
             val status = connection.responseCode
+            if (validatesFinalURL?.invoke(connection.url) == false) throw LinkImportException(
+                LinkImportStage.ResolvingMetadata,
+                "UNSAFE_PROVIDER_REDIRECT",
+                "The media provider redirected metadata to an untrusted destination.",
+            )
             if (status !in 200..299) throw LinkImportException(
                 LinkImportStage.InspectingSource,
                 "PROVIDER_HTTP_" + status,

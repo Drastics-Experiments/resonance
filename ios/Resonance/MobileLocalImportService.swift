@@ -103,6 +103,21 @@ enum LocalImportRangeVerifier {
 }
 
 actor LocalDeviceImportService {
+    private struct YouTubeOEmbedResponse: Decodable, Sendable {
+        let type: String
+        let providerName: String
+        let title: String
+        let authorName: String
+        let thumbnailURL: String?
+
+        enum CodingKeys: String, CodingKey {
+            case type, title
+            case providerName = "provider_name"
+            case authorName = "author_name"
+            case thumbnailURL = "thumbnail_url"
+        }
+    }
+
     private struct ResolvedYouTubeAudio: Sendable {
         let preview: LocalImportYouTubePreview
         let streamingURL: URL
@@ -155,6 +170,44 @@ actor LocalDeviceImportService {
     func search(query: String) async throws -> LocalImportSearchResponse {
         try Task.checkCancellation()
         return try await LocalImportSearchEngine(sessions: sessions).search(query)
+    }
+
+    func resolveMetadata(source: String) async throws -> LocalImportSpotifyTrack {
+        try Task.checkCancellation()
+
+        if LocalImportURL.isSoundCloud(source) {
+            switch try await LocalImportSoundCloud.resolve(source: source, session: sessions.soundcloud) {
+            case .track(let track):
+                return track.metadata
+            case .playlist:
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "PLAYLIST_METADATA_UNSUPPORTED",
+                    message: "A saved server song must identify one track, not a playlist."
+                )
+            }
+        }
+
+        if LocalImportURL.isSpotify(source) {
+            let canonicalSource = try await canonicalSpotifySource(source)
+            guard try LocalImportURL.spotifyPlaylist(canonicalSource.absoluteString) == nil else {
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "PLAYLIST_METADATA_UNSUPPORTED",
+                    message: "A saved server song must identify one track, not a playlist."
+                )
+            }
+            return try await resolveSpotify(canonicalSource.absoluteString)
+        }
+
+        guard let videoID = try LocalImportURL.youtubeVideoID(source) else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "UNSUPPORTED_SOURCE",
+                message: "Enter a Spotify, SoundCloud, or supported YouTube track URL."
+            )
+        }
+        return try await resolveYouTubeMetadata(videoID: videoID)
     }
 
     func resolve(source: String, progress: LocalImportProgressHandler) async throws -> LocalImportResolution {
@@ -308,6 +361,63 @@ actor LocalDeviceImportService {
             match: .init(title: 1, artist: 1, album: nil, duration: 1, durationDeltaSeconds: 0)
         )
         return LocalImportResolution(kind: .youtube, track: track, candidates: [candidate])
+    }
+
+    private func resolveYouTubeMetadata(videoID: String) async throws -> LocalImportSpotifyTrack {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "www.youtube.com"
+        components.path = "/oembed"
+        components.queryItems = [
+            URLQueryItem(name: "url", value: "https://www.youtube.com/watch?v=\(videoID)"),
+            URLQueryItem(name: "format", value: "json"),
+        ]
+        guard let url = components.url else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "YOUTUBE_INVALID_METADATA_URL",
+                message: "YouTube metadata could not be requested safely."
+            )
+        }
+        var request = URLRequest(url: url)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(Self.webUserAgent, forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await responseData(
+            session: sessions.youtube,
+            request: request,
+            limit: 256 * 1_024
+        )
+        guard (200..<300).contains(response.statusCode),
+              response.url?.host?.lowercased() == "www.youtube.com",
+              response.url?.path == "/oembed" else {
+            throw youtubeMetadataFailure(response)
+        }
+        let metadata = try JSONDecoder().decode(YouTubeOEmbedResponse.self, from: data)
+        let title = metadata.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let artist = metadata.authorName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard metadata.type == "video",
+              metadata.providerName == "YouTube",
+              !title.isEmpty,
+              !artist.isEmpty else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "YOUTUBE_INVALID_METADATA",
+                message: "YouTube returned invalid video metadata."
+            )
+        }
+        return LocalImportSpotifyTrack(
+            provider: "youtube",
+            type: "track",
+            trackID: videoID,
+            title: title,
+            artist: artist,
+            album: nil,
+            trackNumber: nil,
+            durationSeconds: nil,
+            artworkURL: LocalImportURL.youtubeArtwork(metadata.thumbnailURL)?.absoluteString,
+            embedURL: "",
+            sourceURL: "https://www.youtube.com/watch?v=\(videoID)"
+        )
     }
 
     func importCandidate(
@@ -808,6 +918,29 @@ actor LocalDeviceImportService {
             return LocalImportError(stage: .resolvingMetadata, code: "SPOTIFY_INVALID_REDIRECT", message: "Spotify returned an unsafe track redirect.")
         }
         return LocalImportError(stage: .resolvingMetadata, code: "SPOTIFY_PROVIDER_FAILED", message: "Spotify could not load that track.")
+    }
+
+    private func youtubeMetadataFailure(_ response: HTTPURLResponse) -> LocalImportError {
+        if response.statusCode == 404 {
+            return LocalImportError(
+                stage: .resolvingMetadata,
+                code: "YOUTUBE_UNAVAILABLE",
+                message: "YouTube could not find that video."
+            )
+        }
+        if response.statusCode == 429 {
+            return LocalImportError(
+                stage: .resolvingMetadata,
+                code: "YOUTUBE_RATE_LIMITED",
+                message: "YouTube rate-limited this metadata request.",
+                retryAfter: response.value(forHTTPHeaderField: "Retry-After")
+            )
+        }
+        return LocalImportError(
+            stage: .resolvingMetadata,
+            code: "YOUTUBE_PROVIDER_FAILED",
+            message: "YouTube could not load that video's metadata."
+        )
     }
 
     private func searchCandidates(for track: LocalImportSpotifyTrack) async throws -> [LocalImportAudioSourceMatch] {

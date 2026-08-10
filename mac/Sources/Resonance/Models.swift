@@ -1120,6 +1120,7 @@ struct RemoteSong: Identifiable, Hashable, Decodable, Sendable {
     let sourceURL: String?
     let mediaKind: String
     let isSourceLinkRecord: Bool
+    var isMetadataLoading: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, filename, name, title, artist, album, size, duration, artwork
@@ -1155,13 +1156,21 @@ struct RemoteSong: Identifiable, Hashable, Decodable, Sendable {
             ?? values.decodeIfPresent(String.self, forKey: .name)
             ?? usefulSourceFilename.flatMap { $0.isEmpty ? nil : $0 }
             ?? "Saved-\(id.prefix(8))"
-        title = try values.decodeIfPresent(String.self, forKey: .title)
+        let decodedTitle = try values.decodeIfPresent(String.self, forKey: .title).flatMap { value in
+            value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+        }
+        let decodedArtist = try values.decodeIfPresent(String.self, forKey: .artist).flatMap { value in
+            value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+        }
+        title = decodedTitle
             ?? (isSourceLinkRecord
                 ? "Resolving metadata…"
                 : URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent)
-        artist = try values.decodeIfPresent(String.self, forKey: .artist)
+        artist = decodedArtist
             ?? (isSourceLinkRecord ? "On-device lookup" : "Unknown Artist")
-        album = try values.decodeIfPresent(String.self, forKey: .album)
+        album = try values.decodeIfPresent(String.self, forKey: .album).flatMap { value in
+            value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+        }
             ?? (isSourceLinkRecord ? "Link only" : "Server Library")
         size = decodedSize
         if let timestamp = try values.decodeIfPresent(String.self, forKey: .modifiedAt) {
@@ -1183,6 +1192,7 @@ struct RemoteSong: Identifiable, Hashable, Decodable, Sendable {
         downloadURL = try values.decode(String.self, forKey: .downloadURL)
         streamURL = try values.decode(String.self, forKey: .streamURL)
         contentSHA256 = try values.decodeIfPresent(String.self, forKey: .contentSHA256)
+        isMetadataLoading = isSourceLinkRecord && (decodedTitle == nil || decodedArtist == nil)
     }
 
     var kind: SongFilter {

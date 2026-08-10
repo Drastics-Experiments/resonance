@@ -32,6 +32,61 @@ class RemoteSongSerializationTest {
         assertEquals("https://media.example/Local%20Title.m4a?token=preserved", song.sourceURL)
         assertEquals("audio", song.mediaKind)
         assertTrue(song.isSourceLinkRecord)
+        assertTrue(song.isMetadataLoading)
+    }
+
+    @Test
+    fun richSourceLinkCatalogDoesNotShowMetadataPlaceholder() {
+        val song = json.decodeFromString<RemoteSong>(
+            """
+            {
+              "id": "saved-song-uuid",
+              "filename": "Example.m4a",
+              "title": "Example",
+              "artist": "Artist",
+              "album": "Album",
+              "source_url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+              "media_kind": "audio",
+              "download_url": "/api/v1/songs/saved-song-uuid/file",
+              "stream_url": "/api/v1/songs/saved-song-uuid/stream"
+            }
+            """.trimIndent(),
+        )
+
+        assertTrue(song.isSourceLinkRecord)
+        assertFalse(song.isMetadataLoading)
+    }
+
+    @Test
+    fun metadataCacheKeepsOnlyFreshMatchingSafeEntries() {
+        val now = 1_800_000_000_000L
+        val source = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+        val key = RemoteSongMetadataCachePolicy.key(source, "audio")!!
+        val fresh = RemoteSongMetadataCacheEntry(
+            sourceURL = source,
+            mediaKind = "audio",
+            title = "Me at the zoo",
+            artist = "jawed",
+            artworkURL = "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg",
+            cachedAtEpochMs = now - 60_000,
+        )
+        val staleSource = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        val stale = fresh.copy(
+            sourceURL = staleSource,
+            cachedAtEpochMs = now - RemoteSongMetadataCachePolicy.MaxAgeMs - 1,
+        )
+
+        val normalized = RemoteSongMetadataCachePolicy.normalized(
+            mapOf(
+                key to fresh,
+                RemoteSongMetadataCachePolicy.key(staleSource, "audio")!! to stale,
+                "audio:https://wrong.example/track" to fresh,
+            ),
+            nowEpochMs = now,
+        )
+
+        assertEquals(mapOf(key to fresh), normalized)
+        assertNull(RemoteSongMetadataCachePolicy.key("http://example.com/song", "audio"))
     }
 
     @Test
