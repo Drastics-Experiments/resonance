@@ -1676,6 +1676,24 @@ export function remoteAssociationConflictFilePaths(tracks, context = {}) {
   }));
 }
 
+export function preservedUploadSourceURL(track) {
+  const candidates = [
+    track?.sourceIdentity?.sourcePageURL,
+    track?.sourceURL,
+    track?.downloadSourceURL,
+    track?.sourceIdentity?.mediaSourceURL,
+  ];
+  for (const value of candidates) {
+    const source = typeof value === "string" ? value.trim() : "";
+    if (!source || source.length > 8_192) continue;
+    try {
+      const url = new URL(source);
+      if (url.protocol === "https:" && !url.username && !url.password && !url.hash) return url.href;
+    } catch { /* Try the next preserved source candidate. */ }
+  }
+  return null;
+}
+
 export function mergeUploadedSongsIntoCatalog(catalog, results) {
   const merged = Array.isArray(catalog) ? [...catalog] : [];
   for (const result of Array.isArray(results) ? results : []) {
@@ -1698,17 +1716,25 @@ export function planMissingDownloadedUploads(state, catalog) {
     return [hash, song];
   }).filter(([hash]) => validSHA256(hash)));
   const uploadTracks = [];
+  const alreadyPresent = [];
   const matches = [];
   const ambiguous = [];
+  const missingSource = [];
   const activeServer = normalizedServerOrigin(state?.serverURL);
   const activeProfileID = String(state?.syncProfileID || "default");
 
   for (const track of state.tracks || []) {
-    if (!track?.filePath || track.available === false || (!track.remoteID && !track.sourceServer)) continue;
+    if (!track?.filePath || track.available === false) continue;
+    const sourceURL = preservedUploadSourceURL(track);
     const sourceServer = normalizedServerOrigin(track.sourceServer);
     const profileID = String(track.syncProfileID || "default");
-    if (!activeServer || sourceServer !== activeServer || profileID !== activeProfileID) continue;
-    if (track.remoteID && remoteIDs.has(String(track.remoteID))) continue;
+    const hasRemoteAssociation = Boolean(String(track.remoteID || "").trim() || String(track.sourceServer || "").trim());
+    if (hasRemoteAssociation && (!activeServer || sourceServer !== activeServer || profileID !== activeProfileID)) continue;
+    if (!hasRemoteAssociation && !sourceURL) continue;
+    if (track.remoteID && remoteIDs.has(String(track.remoteID))) {
+      alreadyPresent.push(track);
+      continue;
+    }
     const hash = String(track.contentSha256 || "").trim().toLocaleLowerCase();
     const exactMatch = validSHA256(hash) ? remoteByHash.get(hash) : null;
     if (exactMatch) {
@@ -1720,9 +1746,13 @@ export function planMissingDownloadedUploads(state, catalog) {
       ambiguous.push({ track, candidates: metadataMatches });
       continue;
     }
+    if (!sourceURL) {
+      missingSource.push(track);
+      continue;
+    }
     uploadTracks.push(track);
   }
-  return { uploadTracks, matches, ambiguous };
+  return { uploadTracks, alreadyPresent, matches, ambiguous, missingSource };
 }
 
 export function formatServerUploadFailureNotice(failures) {

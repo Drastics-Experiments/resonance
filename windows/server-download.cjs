@@ -1,6 +1,13 @@
 const SERVER_DOWNLOAD_ATTEMPTS = 3;
 const SERVER_DOWNLOAD_RETRY_DELAYS_MS = Object.freeze([400, 1_200]);
 
+function serverDownloadDisplayName(song, remoteName) {
+  const title = typeof song?.title === "string" ? song.title.trim() : "";
+  if (title) return title;
+  const name = typeof song?.name === "string" ? song.name.trim() : "";
+  return name || String(remoteName || "").trim() || "Untitled song";
+}
+
 function waitForServerDownloadRetry(milliseconds, signal) {
   signal?.throwIfAborted();
   if (!milliseconds) return Promise.resolve();
@@ -48,5 +55,6 @@ module.exports = {
   SERVER_DOWNLOAD_ATTEMPTS,
   SERVER_DOWNLOAD_RETRY_DELAYS_MS,
   retryServerDownload,
+  serverDownloadDisplayName,
   waitForServerDownloadRetry,
 };
