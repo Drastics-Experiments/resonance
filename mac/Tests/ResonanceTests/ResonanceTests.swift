@@ -848,7 +848,9 @@ struct ResonanceTests {
         }
         let startingPosition = model.playbackPositionState.position
 
-        try await Task.sleep(for: .milliseconds(650))
+        for _ in 0..<100 where positionUpdates < 2 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
 
         #expect(modelUpdates == 0)
         #expect(positionUpdates >= 2)

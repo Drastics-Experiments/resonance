@@ -882,7 +882,9 @@ struct ClientFeatureFlagsTests {
         #expect(model.clientConfiguration.document?.revision == 40)
         #expect(model.clientConfiguration.allowsStreamOnlyPlayback)
 
-        try await Task.sleep(for: .seconds(4))
+        for _ in 0..<500 where model.clientConfiguration.document?.revision != 41 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
 
         #expect(defaults.integer(forKey: "request-count") >= 2)
         #expect(model.clientConfiguration.document?.revision == 41)
