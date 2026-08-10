@@ -9,8 +9,8 @@
     <key>CFBundleName</key><string>Resonance</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>CFBundleShortVersionString</key><string>1.1.5</string>
-    <key>CFBundleVersion</key><string>16</string>
+    <key>CFBundleShortVersionString</key><string>2.0.0</string>
+    <key>CFBundleVersion</key><string>17</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
