@@ -1294,10 +1294,53 @@ export function nextIndex(tracks, currentID, direction = 1) {
   return (current + (direction >= 0 ? 1 : -1) + tracks.length) % tracks.length;
 }
 
-export function tracksForPlaylist(state, playlistID) {
+export function tracksForPlaylist(state, playlistID, catalog = []) {
   const playlist = state.playlists.find((item) => item.id === playlistID);
   if (!playlist) return [];
-  return playlist.trackIDs.map((id) => state.tracks.find((track) => track.id === id)).filter(Boolean);
+  const localTracks = playlist.trackIDs.map((id) => state.tracks.find((track) => track.id === id)).filter(Boolean);
+  if (playlist.isSystem || !Array.isArray(playlist.remoteSongIDs)) return localTracks;
+
+  const orderedRemoteIDs = unique(playlist.remoteSongIDs.map((id) => String(id || "").trim()).filter(Boolean));
+  const remoteIDSet = new Set(orderedRemoteIDs);
+  const downloadedByRemoteID = new Map();
+  const previousKeys = localTracks.map((track) => {
+    const remoteID = String(track?.remoteID || "").trim();
+    if (!remoteID || !remoteIDSet.has(remoteID) || !trackBelongsToActiveProfile(state, track)) {
+      return `local\0${track.id}`;
+    }
+    if (!downloadedByRemoteID.has(remoteID)) downloadedByRemoteID.set(remoteID, track);
+    return `remote\0${remoteID}`;
+  });
+  const orderedKeys = orderedRemoteIDs.map((remoteID) => `remote\0${remoteID}`);
+  const preservedKeys = previousKeys.filter((key) => key.startsWith("local\0"));
+  const catalogByID = new Map((Array.isArray(catalog) ? catalog : [])
+    .filter((song) => song?.id)
+    .map((song) => [String(song.id), song]));
+
+  return mergePlaylistOrderWithPreservedItems(previousKeys, orderedKeys, preservedKeys).map((key) => {
+    if (key.startsWith("local\0")) {
+      return state.tracks.find((track) => track.id === key.slice("local\0".length));
+    }
+    const remoteID = key.slice("remote\0".length);
+    const downloaded = downloadedByRemoteID.get(remoteID);
+    if (downloaded) return downloaded;
+    const song = catalogByID.get(remoteID);
+    return {
+      id: `playlist-remote:${remoteID}`,
+      remoteID,
+      title: song?.title || song?.name || song?.filename || "Unavailable song",
+      artist: song?.artist || "Not downloaded on this device",
+      album: song?.album || "Server playlist",
+      duration: Number(song?.duration_seconds ?? song?.duration) || 0,
+      artwork: song?.artwork || null,
+      filePath: song?.filename || "",
+      sourceServer: state.serverURL,
+      syncProfileID: state.syncProfileID || "default",
+      available: false,
+      missing: false,
+      playlistUnavailable: true,
+    };
+  }).filter(Boolean);
 }
 
 export function reorderPlaylistTrackIDs(trackIDs, sourceID, targetID, insertAfter = false) {

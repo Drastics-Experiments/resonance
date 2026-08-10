@@ -2311,6 +2311,18 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         playlist.trackIDs.compactMap { id in tracks.first { $0.id == id } }
     }
 
+    func playlistEntries(in playlist: MobilePlaylist) -> [MobilePlaylistPresentationEntry] {
+        MobilePlaylistPresentationPolicy.entries(
+            in: playlist,
+            tracks: tracks,
+            remoteSongs: remoteSongs
+        )
+    }
+
+    func playlistEntryCount(_ playlist: MobilePlaylist) -> Int {
+        playlistEntries(in: playlist).count
+    }
+
     func remove(_ track: MobileTrack) {
         let removedClipKey = clipRangeKey(for: track)
         let removedCurrentTrack = currentTrackID == track.id

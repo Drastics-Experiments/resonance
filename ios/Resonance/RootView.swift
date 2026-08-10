@@ -424,7 +424,7 @@ private struct PlaylistsView: View {
                                     .accessibilityHidden(true)
                                 VStack(alignment: .leading) {
                                     Text(playlist.name).font(.headline)
-                                    Text("\(library.tracks(in: playlist).count) tracks").font(.caption).foregroundStyle(.secondary)
+                                    Text("\(library.playlistEntryCount(playlist)) tracks").font(.caption).foregroundStyle(.secondary)
                                 }
                             }
                         }
@@ -494,11 +494,17 @@ private struct PlaylistDetailView: View {
     let playlistID: UUID
     private var playlist: MobilePlaylist? { library.playlists.first { $0.id == playlistID } }
     private var playlistTracks: [MobileTrack] { playlist.map(library.tracks(in:)) ?? [] }
+    private var playlistEntries: [MobilePlaylistPresentationEntry] {
+        playlist.map(library.playlistEntries(in:)) ?? []
+    }
+    private var hasUnavailableEntries: Bool {
+        playlistEntries.contains { !$0.isDownloaded }
+    }
 
     var body: some View {
         ZStack {
             AppBackground()
-            if let playlist, playlistTracks.isEmpty {
+            if let playlist, playlistEntries.isEmpty {
                 ContentUnavailableView {
                     Label("No Songs", systemImage: "music.note.list")
                 } description: {
@@ -529,6 +535,8 @@ private struct PlaylistDetailView: View {
                         }
                         .buttonStyle(.plain)
                         .contentShape(Capsule())
+                        .disabled(playlistTracks.isEmpty)
+                        .opacity(playlistTracks.isEmpty ? 0.5 : 1)
                         Button {
                             library.shuffleEnabled.toggle()
                         } label: {
@@ -536,6 +544,8 @@ private struct PlaylistDetailView: View {
                         }
                         .buttonStyle(.plain)
                         .contentShape(Circle())
+                        .disabled(playlistTracks.isEmpty)
+                        .opacity(playlistTracks.isEmpty ? 0.5 : 1)
                         Spacer()
                     }
                     .padding(.vertical, 6)
@@ -548,13 +558,19 @@ private struct PlaylistDetailView: View {
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
 
-                    ForEach(Array(playlistTracks.enumerated()), id: \.element.id) { index, track in
-                        TrackRow(
-                            track: track,
-                            number: index + 1,
-                            playbackQueue: playlistTracks,
-                            playbackPlaylistID: playlistID
-                        )
+                    ForEach(Array(playlistEntries.enumerated()), id: \.element.id) { index, entry in
+                        Group {
+                            if let track = entry.track {
+                                TrackRow(
+                                    track: track,
+                                    number: index + 1,
+                                    playbackQueue: playlistTracks,
+                                    playbackPlaylistID: playlistID
+                                )
+                            } else {
+                                UnavailableMobilePlaylistRow(entry: entry, number: index + 1)
+                            }
+                        }
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
@@ -576,7 +592,7 @@ private struct PlaylistDetailView: View {
                     Button { addingToPlaylist = playlist } label: {
                         Label("Add Songs", systemImage: "plus")
                     }
-                    if playlistTracks.count > 1 {
+                    if playlistTracks.count > 1 && !hasUnavailableEntries {
                         EditButton()
                     }
                     Menu {
@@ -1937,6 +1953,58 @@ private struct LocalSongRowContent: View {
                 .frame(width: 44, alignment: .trailing)
         }
         .contentShape(Rectangle())
+    }
+}
+
+private struct UnavailableMobilePlaylistRow: View {
+    let entry: MobilePlaylistPresentationEntry
+    let number: Int
+
+    private var mediaKind: String {
+        entry.remoteSong?.mediaKind == "video" ? "Video" : "Audio"
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("\(number)")
+                .font(.caption)
+                .frame(width: 24, alignment: .leading)
+
+            Group {
+                if let song = entry.remoteSong {
+                    ServerArtwork(song: song)
+                } else {
+                    ArtworkTile(symbol: "icloud.slash")
+                }
+            }
+            .frame(width: 52, height: 52)
+            .grayscale(0.9)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(entry.title)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Text("\(entry.artist) / \(mediaKind) / Not downloaded")
+                    .font(.caption2)
+                    .lineLimit(1)
+                Text(entry.album)
+                    .font(.caption2)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 5) {
+                Image(systemName: "icloud.slash")
+                Text(entry.durationText)
+                    .monospacedDigit()
+            }
+            .font(.caption2)
+            .frame(width: 44, alignment: .trailing)
+        }
+        .foregroundStyle(.secondary)
+        .opacity(0.55)
+        .mobileCatalogRow()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(entry.title) by \(entry.artist), not downloaded on this device")
     }
 }
 

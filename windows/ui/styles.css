@@ -1267,6 +1267,21 @@ main {
 .storage-list.redesigned .storage-row.unavailable .track-details small {
   color: #ff8b96;
 }
+.track-row.playlist-unavailable {
+  opacity: .52;
+  filter: grayscale(.9);
+  background: transparent;
+}
+.track-row.playlist-unavailable .track-time,
+.track-row.playlist-unavailable .track-copy small,
+.playlist-cloud-status {
+  color: var(--muted);
+}
+.playlist-cloud-status {
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+}
 .track-number {
   display: grid;
   place-items: center;

@@ -792,6 +792,7 @@ private struct PlaylistsOverviewView: View {
                 LazyVGrid(columns: columns, spacing: 14) {
                     ForEach(model.playlists) { playlist in
                         Button { model.selectPlaylist(playlist) } label: {
+                            let trackCount = model.playlistEntryCount(playlist)
                             HStack(spacing: 12) {
                                 PlaylistArtworkView(
                                     playlist: playlist,
@@ -803,7 +804,7 @@ private struct PlaylistsOverviewView: View {
                                     Text(playlist.name)
                                         .font(.system(size: 13, weight: .semibold))
                                         .lineLimit(1)
-                                    Text("\(playlist.count) \(playlist.count == 1 ? "track" : "tracks")")
+                                    Text("\(trackCount) \(trackCount == 1 ? "track" : "tracks")")
                                         .font(.system(size: 10))
                                         .foregroundStyle(Color.appMuted)
                                 }
@@ -3125,7 +3126,7 @@ private struct CollectionHeroView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.bottom, 8)
 
-                        Text("\(model.collectionTrackCount) \(model.collectionTrackCount == 1 ? "track" : "tracks") / Stored locally")
+                        Text("\(model.collectionTrackCount) \(model.collectionTrackCount == 1 ? "track" : "tracks") / \(model.collectionDownloadedTrackCount) stored locally")
                             .font(.system(size: 13))
                             .foregroundStyle(Color(hex: 0xADB2C1))
 
@@ -3143,8 +3144,8 @@ private struct CollectionHeroView: View {
                                 .shadow(color: Color.appAccent.opacity(0.18), radius: 18, y: 9)
                             }
                             .buttonStyle(PressableScaleStyle())
-                            .disabled(model.collectionTrackCount == 0)
-                            .opacity(model.collectionTrackCount == 0 ? 0.55 : 1)
+                            .disabled(model.collectionDownloadedTrackCount == 0)
+                            .opacity(model.collectionDownloadedTrackCount == 0 ? 0.55 : 1)
 
                             HStack(spacing: 8) {
                                 CircleIconButton(
@@ -3237,7 +3238,8 @@ private struct TrackAreaView: View {
 
     private var reorderablePlaylistID: UUID? {
         guard model.section == .playlists,
-              let playlist = model.selectedPlaylist else { return nil }
+              let playlist = model.selectedPlaylist,
+              !model.selectedPlaylistHasUnavailableEntries else { return nil }
         return playlist.id
     }
 
@@ -3249,7 +3251,7 @@ private struct TrackAreaView: View {
 
                 TrackHeaderRow(showAlbum: showAlbum)
 
-                if model.unfilteredCollectionTracks.isEmpty {
+                if model.unfilteredCollectionEntries.isEmpty {
                     VStack(spacing: 14) {
                         Image(systemName: model.selectedPlaylist?.isSystem == false ? "music.note.list" : (model.section == .playlists ? "heart" : "music.note.house"))
                             .font(.system(size: 34, weight: .light))
@@ -3304,7 +3306,7 @@ private struct TrackAreaView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if model.displayedTracks.isEmpty {
+                } else if model.displayedCollectionEntries.isEmpty {
                     VStack(spacing: 10) {
                         Image(systemName: "magnifyingglass")
                             .font(.system(size: 22))
@@ -3315,67 +3317,75 @@ private struct TrackAreaView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     LazyVStack(spacing: 0) {
-                        ForEach(Array(model.displayedTracks.enumerated()), id: \.element.id) { index, track in
-                            let row = TrackRowView(
-                                track: track,
-                                number: index + 1,
-                                showAlbum: showAlbum
-                            )
-                            let previewEdge = playlistDropPreviewEdge(for: track.id)
+                        ForEach(Array(model.displayedCollectionEntries.enumerated()), id: \.element.id) { index, entry in
+                            if let track = entry.track {
+                                let row = TrackRowView(
+                                    track: track,
+                                    number: index + 1,
+                                    showAlbum: showAlbum
+                                )
+                                let previewEdge = playlistDropPreviewEdge(for: track.id)
 
-                            if let playlistID = reorderablePlaylistID {
-                                row
-                                    .frame(height: draggedTrackID == track.id ? 0 : 61)
-                                    .padding(
-                                        .top,
-                                        previewEdge == .top ? 61 : 0
-                                    )
-                                    .padding(
-                                        .bottom,
-                                        previewEdge == .bottom ? 61 : 0
-                                    )
-                                    .overlay(alignment: .top) {
-                                        if previewEdge == .top {
-                                            playlistDropPreview(number: dropPreviewNumber)
-                                                .transition(.move(edge: .top).combined(with: .opacity))
-                                        }
-                                    }
-                                    .overlay(alignment: .bottom) {
-                                        if previewEdge == .bottom {
-                                            playlistDropPreview(number: dropPreviewNumber)
-                                                .transition(.move(edge: .bottom).combined(with: .opacity))
-                                        }
-                                    }
-                                    .animation(.spring(response: 0.24, dampingFraction: 0.84), value: dropPreviewIndex)
-                                    .offset(y: draggedTrackID == track.id ? draggedRowOffset : 0)
-                                    .scaleEffect(draggedTrackID == track.id ? 1.015 : 1)
-                                    .shadow(
-                                        color: draggedTrackID == track.id ? Color.black.opacity(0.38) : .clear,
-                                        radius: draggedTrackID == track.id ? 12 : 0,
-                                        y: draggedTrackID == track.id ? 6 : 0
-                                    )
-                                    .zIndex(draggedTrackID == track.id ? 2 : 0)
-                                    .animation(.easeOut(duration: 0.12), value: draggedTrackID)
-                                    .highPriorityGesture(
-                                        DragGesture(minimumDistance: 5)
-                                            .onChanged { value in
-                                                updatePlaylistDrag(
-                                                    trackID: track.id,
-                                                    translation: value.translation.height
-                                                )
+                                if let playlistID = reorderablePlaylistID {
+                                    row
+                                        .frame(height: draggedTrackID == track.id ? 0 : 61)
+                                        .padding(
+                                            .top,
+                                            previewEdge == .top ? 61 : 0
+                                        )
+                                        .padding(
+                                            .bottom,
+                                            previewEdge == .bottom ? 61 : 0
+                                        )
+                                        .overlay(alignment: .top) {
+                                            if previewEdge == .top {
+                                                playlistDropPreview(number: dropPreviewNumber)
+                                                    .transition(.move(edge: .top).combined(with: .opacity))
                                             }
-                                            .onEnded { _ in
-                                                finishPlaylistDrag(trackID: track.id, playlistID: playlistID)
+                                        }
+                                        .overlay(alignment: .bottom) {
+                                            if previewEdge == .bottom {
+                                                playlistDropPreview(number: dropPreviewNumber)
+                                                    .transition(.move(edge: .bottom).combined(with: .opacity))
                                             }
-                                    )
+                                        }
+                                        .animation(.spring(response: 0.24, dampingFraction: 0.84), value: dropPreviewIndex)
+                                        .offset(y: draggedTrackID == track.id ? draggedRowOffset : 0)
+                                        .scaleEffect(draggedTrackID == track.id ? 1.015 : 1)
+                                        .shadow(
+                                            color: draggedTrackID == track.id ? Color.black.opacity(0.38) : .clear,
+                                            radius: draggedTrackID == track.id ? 12 : 0,
+                                            y: draggedTrackID == track.id ? 6 : 0
+                                        )
+                                        .zIndex(draggedTrackID == track.id ? 2 : 0)
+                                        .animation(.easeOut(duration: 0.12), value: draggedTrackID)
+                                        .highPriorityGesture(
+                                            DragGesture(minimumDistance: 5)
+                                                .onChanged { value in
+                                                    updatePlaylistDrag(
+                                                        trackID: track.id,
+                                                        translation: value.translation.height
+                                                    )
+                                                }
+                                                .onEnded { _ in
+                                                    finishPlaylistDrag(trackID: track.id, playlistID: playlistID)
+                                                }
+                                        )
+                                } else {
+                                    row
+                                }
                             } else {
-                                row
+                                UnavailablePlaylistTrackRow(
+                                    entry: entry,
+                                    number: index + 1,
+                                    showAlbum: showAlbum
+                                )
                             }
                         }
                     }
                     .animation(
                         .spring(response: 0.26, dampingFraction: 0.86),
-                        value: model.displayedTracks.map(\.id)
+                        value: model.displayedCollectionEntries.map(\.id)
                     )
                 }
         }
@@ -3621,6 +3631,77 @@ private struct TrackHeaderRow: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.appLine).frame(height: 1)
         }
+    }
+}
+
+private struct UnavailablePlaylistTrackRow: View {
+    let entry: PlaylistPresentationEntry
+    let number: Int
+    let showAlbum: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("\(number)")
+                .font(.system(size: 12))
+                .foregroundStyle(Color(hex: 0x7D8391))
+                .frame(width: 28, alignment: .leading)
+
+            HStack(spacing: 12) {
+                Group {
+                    if let song = entry.remoteSong {
+                        MacServerArtwork(
+                            song: song,
+                            localTrack: nil,
+                            mediaKind: entry.kind == .video ? "Video" : "Audio"
+                        )
+                    } else {
+                        ArtworkView(
+                            style: .weightless,
+                            symbol: "icloud.slash",
+                            symbolSize: 14,
+                            cornerRadius: 5
+                        )
+                    }
+                }
+                .frame(width: 38, height: 38)
+                .grayscale(0.9)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(entry.title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    Text("\(entry.artist) / Not downloaded")
+                        .font(.system(size: 9))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(minWidth: 210, maxWidth: .infinity, alignment: .leading)
+
+            if showAlbum {
+                Text(entry.album)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                    .frame(width: 135, alignment: .leading)
+            }
+
+            HStack(spacing: 5) {
+                Image(systemName: "icloud.slash")
+                Text(entry.durationText)
+            }
+            .font(.system(size: 10))
+            .frame(width: 74, alignment: .trailing)
+        }
+        .foregroundStyle(Color(hex: 0x858B98))
+        .padding(.horizontal, 10)
+        .frame(height: 61)
+        .opacity(0.58)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.appLine).frame(height: 1)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(entry.title) by \(entry.artist), not downloaded on this Mac")
+        .help("Not downloaded on this Mac")
     }
 }
 
