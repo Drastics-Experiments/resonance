@@ -50,6 +50,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -114,6 +115,7 @@ import mov.unblocked.resonance.data.LinkImportStage
 import mov.unblocked.resonance.data.LinkImportInput
 import mov.unblocked.resonance.data.ServerUploadMode
 import mov.unblocked.resonance.data.LinkImportKind
+import mov.unblocked.resonance.data.LinkImportMediaMode
 import mov.unblocked.resonance.data.LinkImportSearchProvider
 import mov.unblocked.resonance.data.LinkImportSearchResponse
 import mov.unblocked.resonance.data.LinkImportSearchResult
@@ -1458,6 +1460,7 @@ fun LinkImportDialog(
     val focus = LocalFocusManager.current
     val clipboard = LocalClipboardManager.current
     val importState = state.linkImport
+    val mediaLabel = importState.mediaMode.name.lowercase()
     val reviewedMatchPolicyBound = importState.resolution?.reviewedMatchPolicyBound == true
     val uploadInputAccepted = when (state.serverUploadMode) {
         ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink -> source.isNotBlank()
@@ -1466,7 +1469,7 @@ fun LinkImportDialog(
     }
     val modeSubtitle = when (state.serverUploadMode) {
         ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink ->
-            "Resonance downloads locally first and registers only the preserved direct media link with the server."
+            "Resonance downloads the selected $mediaLabel locally first and registers only its preserved source link with the server."
         ServerUploadMode.ReviewedMatch ->
             "For server upload, paste one full Spotify track or individual YouTube video link. Search text and SoundCloud stay device-only."
         else -> "Search Spotify, SoundCloud, and YouTube, or inspect a supported link directly."
@@ -1537,6 +1540,28 @@ fun LinkImportDialog(
                             }
                         }) { Text("Paste") }
                     }
+                    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Eyebrow("Download as")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            LinkImportMediaMode.entries.forEach { mode ->
+                                FilterChip(
+                                    selected = importState.mediaMode == mode,
+                                    onClick = { actions.setLinkImportMediaMode(mode) },
+                                    enabled = !importState.isRunning,
+                                    label = { Text(mode.name) },
+                                )
+                            }
+                        }
+                        Text(
+                            if (importState.mediaMode == LinkImportMediaMode.Video) {
+                                "YouTube links and video search results download as verified MP4 video. Spotify and SoundCloud links are audio-only."
+                            } else {
+                                "Downloads a verified local audio file."
+                            },
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                        )
+                    }
                     Surface(color = Color.White.copy(alpha = .045f), shape = RoundedCornerShape(13.dp)) {
                         Row(
                             Modifier.fillMaxWidth().padding(14.dp),
@@ -1600,6 +1625,7 @@ fun LinkImportDialog(
                                     state.remoteSongs,
                                     state.serverUrl,
                                     state.syncProfileId,
+                                    importState.mediaMode,
                                 )
                                 if (!isPlaylist && (existing.isOnDevice || existing.isOnServer)) {
                                     Text(
@@ -1633,7 +1659,7 @@ fun LinkImportDialog(
                             when {
                                 reviewedMatchPolicyBound -> "Review-only candidates • explicit choice required"
                                 isPlaylist -> "Tracks to Import"
-                                else -> "Audio Source"
+                                else -> "${importState.mediaMode.name} Source"
                             },
                         )
                         resolution.candidates.forEach { candidate ->
@@ -1679,6 +1705,7 @@ fun LinkImportDialog(
                                                 state.remoteSongs,
                                                 state.serverUrl,
                                                 state.syncProfileId,
+                                                importState.mediaMode,
                                             )
                                             if (existing.isOnDevice || existing.isOnServer) {
                                                 Text(
@@ -1732,7 +1759,7 @@ fun LinkImportDialog(
                         ) {
                             Icon(Icons.Default.Search, null)
                             Spacer(Modifier.size(6.dp))
-                            Text("Find Audio")
+                            Text(if (importState.mediaMode == LinkImportMediaMode.Video) "Find Video" else "Find Audio")
                         }
                     } else {
                         Button(
@@ -1766,7 +1793,7 @@ private fun LinkSearchResults(
             Eyebrow("Search Results")
             Spacer(Modifier.weight(1f))
             Text(
-                "${response.results.size} previewable",
+                "${response.results.size} ${if (state.linkImport.mediaMode == LinkImportMediaMode.Video) "downloadable" else "previewable"}",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = Violet,
@@ -1848,6 +1875,7 @@ private fun LinkSearchResultRow(
                     state.remoteSongs,
                     state.serverUrl,
                     state.syncProfileId,
+                    importState.mediaMode,
                 )
                 if (existing.isOnDevice || existing.isOnServer) {
                     Text(
@@ -1882,16 +1910,20 @@ private fun LinkStageCard(state: LinkImportUiState) {
         Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    if (state.stage == LinkImportStage.Complete) Icons.Default.CheckCircle else Icons.Default.MusicNote,
+                    when {
+                        state.stage == LinkImportStage.Complete -> Icons.Default.CheckCircle
+                        state.mediaMode == LinkImportMediaMode.Video -> Icons.Default.PlayArrow
+                        else -> Icons.Default.MusicNote
+                    },
                     null,
                     tint = if (state.stage == LinkImportStage.Complete) SuccessGreen else Violet,
                 )
                 Spacer(Modifier.size(8.dp))
-                Text(linkStageTitle(state.stage), fontWeight = FontWeight.Bold)
+                Text(linkStageTitle(state.stage, state.mediaMode), fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
                 if (state.isRunning) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
             }
-            Text(linkStageDetail(state.stage), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
+            Text(linkStageDetail(state.stage, state.mediaMode), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
             if (state.totalBytes > 0) {
                 LinearProgressIndicator(
                     progress = { state.completedBytes.toFloat() / state.totalBytes.coerceAtLeast(1) },
@@ -1981,11 +2013,11 @@ private fun clipTime(valueMs: Long): String {
     return if (tenth == 0L) base else base + "." + tenth
 }
 
-private fun linkStageTitle(stage: LinkImportStage): String = when (stage) {
+private fun linkStageTitle(stage: LinkImportStage, mediaMode: LinkImportMediaMode): String = when (stage) {
     LinkImportStage.Idle -> "Ready"
     LinkImportStage.ResolvingMetadata -> "Resolving Metadata"
-    LinkImportStage.SearchingCandidates -> "Searching Audio Sources"
-    LinkImportStage.AwaitingSelection -> "Choose an Audio Source"
+    LinkImportStage.SearchingCandidates -> "Searching ${mediaMode.name} Sources"
+    LinkImportStage.AwaitingSelection -> "Choose a ${mediaMode.name} Source"
     LinkImportStage.InspectingSource -> "Inspecting Source"
     LinkImportStage.Downloading -> "Downloading"
     LinkImportStage.SavingLocal -> "Saving on Device"
@@ -1995,18 +2027,21 @@ private fun linkStageTitle(stage: LinkImportStage): String = when (stage) {
     LinkImportStage.Cancelled -> "Cancelled"
 }
 
-private fun linkStageDetail(stage: LinkImportStage): String = when (stage) {
-    LinkImportStage.Idle -> "Enter text to search Spotify, SoundCloud, and YouTube, or paste a supported link."
-    LinkImportStage.ResolvingMetadata -> "Reading title, artist, artwork, and duration."
-    LinkImportStage.SearchingCandidates -> "Querying Spotify, SoundCloud, and YouTube for previewable audio."
-    LinkImportStage.AwaitingSelection -> "Review the match before saving audio locally."
-    LinkImportStage.InspectingSource -> "Verifying a direct audio stream."
-    LinkImportStage.Downloading -> "Downloading verified audio directly to this device."
-    LinkImportStage.SavingLocal -> "Adding the finished file to Resonance."
-    LinkImportStage.Syncing -> "Uploading locally saved songs to the active server profile."
-    LinkImportStage.Complete -> "The song is stored locally and ready to play."
-    LinkImportStage.Failed -> "Review the error below and try another source."
-    LinkImportStage.Cancelled -> "No unfinished import was kept."
+private fun linkStageDetail(stage: LinkImportStage, mediaMode: LinkImportMediaMode): String {
+    val media = mediaMode.name.lowercase()
+    return when (stage) {
+        LinkImportStage.Idle -> "Enter text to search Spotify, SoundCloud, and YouTube, or paste a supported link."
+        LinkImportStage.ResolvingMetadata -> "Reading title, artist, artwork, and duration."
+        LinkImportStage.SearchingCandidates -> "Querying Spotify, SoundCloud, and YouTube for downloadable $media."
+        LinkImportStage.AwaitingSelection -> "Review the match before saving $media locally."
+        LinkImportStage.InspectingSource -> "Verifying direct $media streams."
+        LinkImportStage.Downloading -> "Downloading verified $media directly to this device."
+        LinkImportStage.SavingLocal -> "Adding the finished file to Resonance."
+        LinkImportStage.Syncing -> "Uploading locally saved songs to the active server profile."
+        LinkImportStage.Complete -> "The song is stored locally and ready to play."
+        LinkImportStage.Failed -> "Review the error below and try another source."
+        LinkImportStage.Cancelled -> "No unfinished import was kept."
+    }
 }
 
 private fun linkExistingStatus(onDevice: Boolean, onServer: Boolean): String = when {

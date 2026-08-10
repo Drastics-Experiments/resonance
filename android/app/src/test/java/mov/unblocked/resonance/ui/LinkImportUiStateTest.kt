@@ -4,6 +4,7 @@ import mov.unblocked.resonance.data.LinkImportCandidate
 import mov.unblocked.resonance.data.LinkImportResolution
 import mov.unblocked.resonance.data.LinkImportStage
 import mov.unblocked.resonance.data.LinkImportTrack
+import mov.unblocked.resonance.data.LinkImportMediaMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -24,6 +25,7 @@ class LinkImportUiStateTest {
             score = 1.0,
         )
         val state = LinkImportUiState(
+            mediaMode = LinkImportMediaMode.Video,
             requestedSource = sourceA,
             stage = LinkImportStage.AwaitingSelection,
             resolution = LinkImportResolution(
@@ -45,6 +47,7 @@ class LinkImportUiStateTest {
         assertNull(invalidated.selectedVideoId)
         assertTrue(invalidated.selectedVideoIds.isEmpty())
         assertNull(invalidated.previewingVideoId)
+        assertEquals(LinkImportMediaMode.Video, invalidated.mediaMode)
     }
 
     @Test

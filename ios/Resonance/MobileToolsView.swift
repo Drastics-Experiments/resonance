@@ -1331,6 +1331,11 @@ private final class MobileLocalImportViewModel: ObservableObject {
             if source != oldValue { invalidateResolvedSource() }
         }
     }
+    @Published var mediaMode: LocalImportMediaMode = .audio {
+        didSet {
+            if mediaMode != oldValue { invalidateResolvedSource() }
+        }
+    }
     @Published var syncAfterImport = true
     @Published private(set) var stage: LocalImportStage = .idle
     @Published private(set) var completedBytes: Int64 = 0
@@ -1388,6 +1393,20 @@ private final class MobileLocalImportViewModel: ObservableObject {
         resolution?.playlist?.items.filter { selectedPlaylistTrackIDs.contains($0.track.trackID) } ?? []
     }
 
+    var resolveButtonTitle: String {
+        if !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !LocalImportInput.looksLikeLink(source) {
+            return mediaMode == .video ? "Search Videos" : "Search Music"
+        }
+        return mediaMode == .video ? "Find Video" : "Find Audio"
+    }
+
+    func normalizeMediaModeForSource() {
+        if (LocalImportURL.isSpotify(source) || LocalImportURL.isSoundCloud(source)), mediaMode == .video {
+            mediaMode = .audio
+        }
+    }
+
     var continuesAfterSheetDismissal: Bool {
         switch stage {
         case .inspectingSource, .downloading, .processing, .savingLocal, .localComplete, .syncing:
@@ -1399,6 +1418,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
 
     func resolve(using library: MusicLibrary, reviewedServerMatch: Bool) {
         guard !isRunning else { return }
+        normalizeMediaModeForSource()
         let rawInput = source
         let value = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else {
@@ -1472,7 +1492,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     return
                 }
                 if searchesProviders {
-                    let response = try await service.search(query: value)
+                    let response = try await service.search(query: value, mediaMode: mediaMode)
                     try Task.checkCancellation()
                     guard generation == sourceGeneration, source == rawInput else {
                         throw CancellationError()
@@ -1491,7 +1511,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     task = nil
                     return
                 }
-                let result = try await service.resolve(source: value) { [weak self] progress in
+                let result = try await service.resolve(source: value, mediaMode: mediaMode) { [weak self] progress in
                     self?.apply(progress)
                 }
                 try Task.checkCancellation()
@@ -1630,12 +1650,14 @@ private final class MobileLocalImportViewModel: ObservableObject {
             : [candidate] + resolution.candidates.filter { $0.videoID != candidate.videoID }
         let shouldSync = syncAfterImport
         let reviewLease = usesReviewedUpload ? reviewedMatchLease : nil
+        let selectedMediaMode = mediaMode
         reserveTransfer(library)
         task = Task { [self, library] in
             await runSingleImport(
                 spotifyTrack: resolution.track,
                 metadata: metadata,
                 candidates: candidates,
+                mediaMode: selectedMediaMode,
                 shouldSync: shouldSync,
                 reviewedMatchLease: reviewLease,
                 library: library
@@ -1663,9 +1685,16 @@ private final class MobileLocalImportViewModel: ObservableObject {
         completedSummary = nil
         stage = .inspectingSource
         let shouldSync = syncAfterImport
+        let selectedMediaMode = mediaMode
         reserveTransfer(library)
         task = Task { [self, library] in
-            await runPlaylistImport(items: items, playlist: playlist, shouldSync: shouldSync, library: library)
+            await runPlaylistImport(
+                items: items,
+                playlist: playlist,
+                mediaMode: selectedMediaMode,
+                shouldSync: shouldSync,
+                library: library
+            )
             task = nil
         }
     }
@@ -1709,7 +1738,8 @@ private final class MobileLocalImportViewModel: ObservableObject {
             deviceTracks: library.tracks,
             activeServerSongs: library.cachedRemoteSongsForUploadPlanning,
             activeServerURL: library.activeServerURLForUploadPlanning,
-            activeProfileID: library.syncProfileID
+            activeProfileID: library.syncProfileID,
+            mediaMode: mediaMode
         )
         switch (match.isOnDevice, match.isOnServer) {
         case (true, true): return "On device and server — both transfers will be skipped"
@@ -1770,6 +1800,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
         spotifyTrack: LocalImportSpotifyTrack,
         metadata: LocalImportMetadata,
         candidates: [LocalImportAudioSourceMatch],
+        mediaMode: LocalImportMediaMode,
         shouldSync: Bool,
         reviewedMatchLease: MobileReviewedMatchLease?,
         library: MusicLibrary
@@ -1784,7 +1815,8 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     deviceTracks: library.tracks,
                     activeServerSongs: library.cachedRemoteSongsForUploadPlanning,
                     activeServerURL: library.activeServerURLForUploadPlanning,
-                    activeProfileID: library.syncProfileID
+                    activeProfileID: library.syncProfileID,
+                    mediaMode: mediaMode
                 )
             var track = match.deviceTrackID.flatMap { id in library.tracks.first { $0.id == id } }
             if let existingTrack = track {
@@ -1804,6 +1836,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     spotifyTrack,
                     metadata: metadata,
                     candidates: candidates,
+                    mediaMode: mediaMode,
                     completedBefore: 0,
                     total: plannedDownloads,
                     library: library
@@ -1822,7 +1855,8 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     deviceTracks: library.tracks,
                     activeServerSongs: library.cachedRemoteSongsForUploadPlanning,
                     activeServerURL: library.activeServerURLForUploadPlanning,
-                    activeProfileID: library.syncProfileID
+                    activeProfileID: library.syncProfileID,
+                    mediaMode: mediaMode
                 )
             if let serverID = match.serverSongID {
                 guard library.reconcileLocalImportWithServer(trackID: track.id, remoteID: serverID) else {
@@ -1889,6 +1923,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
     private func runPlaylistImport(
         items: [LocalImportPlaylistItem],
         playlist: LocalImportPlaylist,
+        mediaMode: LocalImportMediaMode,
         shouldSync: Bool,
         library: MusicLibrary
     ) async {
@@ -1905,7 +1940,8 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     deviceTracks: library.tracks,
                     activeServerSongs: library.cachedRemoteSongsForUploadPlanning,
                     activeServerURL: library.activeServerURLForUploadPlanning,
-                    activeProfileID: library.syncProfileID
+                    activeProfileID: library.syncProfileID,
+                    mediaMode: mediaMode
                 )
             }
             let downloadItems = items.filter { initialMatches[$0.track.trackID]?.deviceTrackID == nil }
@@ -1938,6 +1974,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
                             item.track,
                             metadata: metadata,
                             candidates: item.downloadCandidates,
+                            mediaMode: mediaMode,
                             completedBefore: completedDownloads,
                             total: downloadItems.count,
                             library: library
@@ -1974,7 +2011,8 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     deviceTracks: library.tracks,
                     activeServerSongs: library.cachedRemoteSongsForUploadPlanning,
                     activeServerURL: library.activeServerURLForUploadPlanning,
-                    activeProfileID: library.syncProfileID
+                    activeProfileID: library.syncProfileID,
+                    mediaMode: mediaMode
                 ).serverSongID == nil
             } : []
             if !uploadQueue.isEmpty {
@@ -2043,6 +2081,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
         _ spotifyTrack: LocalImportSpotifyTrack,
         metadata: LocalImportMetadata,
         candidates: [LocalImportAudioSourceMatch],
+        mediaMode: LocalImportMediaMode,
         completedBefore: Int,
         total: Int,
         library: MusicLibrary
@@ -2054,7 +2093,8 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 let outcome = try await service.importCandidate(
                     candidate,
                     metadata: metadata,
-                    existingTracks: library.tracks
+                    existingTracks: library.tracks,
+                    mediaMode: mediaMode
                 ) { [weak self, weak library] progress in
                     self?.apply(progress)
                     guard let library else { return }
@@ -2081,7 +2121,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 lastError = error
             }
         }
-        throw lastError ?? LocalImportError(stage: .downloading, code: "ALL_SOURCES_FAILED", message: "Every matched audio source failed.")
+        throw lastError ?? LocalImportError(stage: .downloading, code: "ALL_SOURCES_FAILED", message: "Every matched \(mediaMode.rawValue) source failed.")
     }
 
     private func uploadWithRetry(
@@ -2185,11 +2225,35 @@ struct MobileLocalImportSheet: View {
                             }
                         }
 
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("DOWNLOAD AS").eyebrow()
+                            Picker("Download as", selection: Binding(
+                                get: { viewModel.mediaMode },
+                                set: { mode in
+                                    viewModel.mediaMode = mode
+                                    viewModel.normalizeMediaModeForSource()
+                                }
+                            )) {
+                                ForEach(LocalImportMediaMode.allCases) { mode in
+                                    Label(
+                                        mode.title,
+                                        systemImage: mode == .video ? "play.rectangle.fill" : "music.note"
+                                    )
+                                    .tag(mode)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .disabled(viewModel.isRunning)
+                            Text("Video downloads use YouTube results or direct YouTube links. Spotify and SoundCloud links remain audio-only.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
                         if reviewedServerMatch {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text("Reviewed server upload")
                                     .font(.subheadline.weight(.semibold))
-                                Text("Select exactly one server-reviewed audio candidate. Resonance downloads and verifies it locally, then registers the preserved direct source link.")
+                                Text("Select exactly one server-reviewed source. Resonance downloads and verifies the chosen audio or video locally, then registers its preserved source link and media type.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -2226,7 +2290,7 @@ struct MobileLocalImportSheet: View {
 
                         if let error = viewModel.error {
                             VStack(alignment: .leading, spacing: 5) {
-                                Text("Import stopped at \(stageTitle(error.stage).lowercased())")
+                                Text("Import stopped at \(stageTitle(error.stage, mediaMode: viewModel.mediaMode).lowercased())")
                                     .font(.headline)
                                 Text(error.message).font(.subheadline)
                                 Text(error.code).font(.caption.monospaced()).foregroundStyle(.secondary)
@@ -2256,7 +2320,7 @@ struct MobileLocalImportSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     if viewModel.resolution == nil {
-                        Button("Find Audio") {
+                        Button(viewModel.resolveButtonTitle) {
                             viewModel.resolve(
                                 using: library,
                                 reviewedServerMatch: reviewedServerMatch
@@ -2293,11 +2357,11 @@ struct MobileLocalImportSheet: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: stageSymbol(viewModel.stage)).foregroundStyle(Color.violet)
-                Text(stageTitle(viewModel.stage)).font(.headline)
+                Text(stageTitle(viewModel.stage, mediaMode: viewModel.mediaMode)).font(.headline)
                 Spacer()
                 if viewModel.isRunning { ProgressView() }
             }
-            Text(stageDetail(viewModel.stage))
+            Text(stageDetail(viewModel.stage, mediaMode: viewModel.mediaMode))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if viewModel.totalBytes > 0 {
@@ -2325,7 +2389,7 @@ struct MobileLocalImportSheet: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("SEARCH RESULTS").eyebrow()
                 Spacer()
-                Text("\(response.results.count) previewable")
+                Text("\(response.results.count) \(viewModel.mediaMode == .video ? "downloadable" : "previewable")")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Color.violet)
             }
@@ -2341,7 +2405,7 @@ struct MobileLocalImportSheet: View {
                             .foregroundStyle(.secondary)
                     }
                     if results.isEmpty {
-                        Text("No previewable results.")
+                        Text(viewModel.mediaMode == .video ? "No downloadable videos." : "No previewable results.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(12)
@@ -2419,7 +2483,8 @@ struct MobileLocalImportSheet: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            Image(systemName: "music.note").foregroundStyle(.white.opacity(0.8))
+            Image(systemName: viewModel.mediaMode == .video ? "play.rectangle.fill" : "music.note")
+                .foregroundStyle(.white.opacity(0.8))
             if let artworkURL {
                 AsyncImage(url: artworkURL) { phase in
                     if case .success(let image) = phase {
@@ -2471,7 +2536,7 @@ struct MobileLocalImportSheet: View {
 
     private func candidateList(_ candidates: [LocalImportAudioSourceMatch]) -> some View {
         VStack(alignment: .leading, spacing: 9) {
-            Text("AUDIO SOURCE").eyebrow()
+            Text(viewModel.mediaMode == .video ? "VIDEO SOURCE" : "AUDIO SOURCE").eyebrow()
             ForEach(candidates) { candidate in
                 HStack(spacing: 8) {
                     Button {
@@ -2630,15 +2695,18 @@ private func formatTime(_ value: TimeInterval) -> String {
     return tenth == 0 ? base : "\(base).\(tenth)"
 }
 
-private func stageTitle(_ stage: LocalImportStage) -> String {
+private func stageTitle(
+    _ stage: LocalImportStage,
+    mediaMode: LocalImportMediaMode = .audio
+) -> String {
     switch stage {
     case .idle: "Ready"
     case .resolvingMetadata: "Resolving Metadata"
-    case .searchingCandidates: "Searching Audio Sources"
-    case .awaitingSelection: "Choose an Audio Source"
+    case .searchingCandidates: mediaMode == .video ? "Searching Video Sources" : "Searching Audio Sources"
+    case .awaitingSelection: mediaMode == .video ? "Choose a Video Source" : "Choose an Audio Source"
     case .inspectingSource: "Inspecting Source"
     case .downloading: "Downloading"
-    case .processing: "Processing Audio"
+    case .processing: mediaMode == .video ? "Processing Video" : "Processing Audio"
     case .savingLocal: "Saving on Device"
     case .localComplete, .complete: "Import Complete"
     case .syncing: "Syncing"
@@ -2647,15 +2715,22 @@ private func stageTitle(_ stage: LocalImportStage) -> String {
     }
 }
 
-private func stageDetail(_ stage: LocalImportStage) -> String {
+private func stageDetail(
+    _ stage: LocalImportStage,
+    mediaMode: LocalImportMediaMode = .audio
+) -> String {
     switch stage {
     case .idle: "Enter text to search Spotify, SoundCloud, and YouTube, or paste a supported link."
     case .resolvingMetadata: "Reading the track title, artist, artwork, and duration."
-    case .searchingCandidates: "Finding direct provider audio or a close alternate source."
-    case .awaitingSelection: "Review the match before saving audio on this device."
-    case .inspectingSource: "Verifying a direct audio stream."
-    case .downloading: "Downloading verified audio directly to this device."
-    case .processing: "Preserving metadata and artwork in the local M4A."
+    case .searchingCandidates: mediaMode == .video
+        ? "Finding a downloadable YouTube video source."
+        : "Finding direct provider audio or a close alternate source."
+    case .awaitingSelection: "Review the match before saving \(mediaMode.rawValue) on this device."
+    case .inspectingSource: "Verifying direct \(mediaMode.rawValue) streams."
+    case .downloading: "Downloading verified \(mediaMode.rawValue) directly to this device."
+    case .processing: mediaMode == .video
+        ? "Combining compatible MP4 video and audio while preserving metadata."
+        : "Preserving metadata and artwork in the local M4A."
     case .savingLocal: "Adding the finished file to Resonance."
     case .localComplete, .complete: "The song is stored locally and ready to play."
     case .syncing: "Uploading the local import to the active profile."
