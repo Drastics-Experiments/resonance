@@ -35,6 +35,7 @@ import {
   playbackRangeForTrack,
   planMissingDownloadedUploads,
   playlistArtworkTrackIDs,
+  playlistInsertionIndex,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
   serverSongMetadataMatches,
@@ -2298,12 +2299,22 @@ test("reorders playlist tracks before or after a drop target", () => {
   assert.deepEqual(reorderPlaylistTrackIDs(original, "one", "three", true), ["two", "three", "one", "four"]);
   assert.deepEqual(reorderPlaylistTrackIDs(original, "two", "missing"), original);
   assert.deepEqual(original, ["one", "two", "three", "four"]);
+  assert.equal(playlistInsertionIndex([110, 170, 230], 40), 0);
+  assert.equal(playlistInsertionIndex([110, 170, 230], 109), 0);
+  assert.equal(playlistInsertionIndex([110, 170, 230], 110), 1);
+  assert.equal(playlistInsertionIndex([110, 170, 230], 229), 2);
+  assert.equal(playlistInsertionIndex([110, 170, 230], 230), 3);
+  assert.equal(playlistInsertionIndex([110, 170, 230], 400), 3);
+  assert.equal(playlistInsertionIndex([], 100), -1);
 
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
-  assert.match(appSource, /row\.onmousedown = \(event\) => \{[\s\S]+document\.addEventListener\("mousemove", handlePlaylistMouseMove\)/);
-  assert.match(appSource, /handlePlaylistMouseUp[\s\S]+commitPlaylistTrackReorder/);
-  assert.match(appSource, /row\.onpointerdown = \(event\) => \{[\s\S]+setPointerCapture/);
-  assert.match(appSource, /row\.onpointermove = \(event\) => \{[\s\S]+document\.elementFromPoint/);
+  const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
+  assert.doesNotMatch(appSource, /row\.onmousedown\s*=/);
+  assert.match(appSource, /row\.onpointerdown = \(event\) => \{\s+if \(!event\.isPrimary[\s\S]+row\.setPointerCapture\(event\.pointerId\)/);
+  assert.match(appSource, /function playlistDragDestination[\s\S]+playlistInsertionIndex\([\s\S]+row\.offsetTop/);
+  assert.match(appSource, /row\.onpointermove = \(event\) => \{[\s\S]+playlistDragDestination\(trackTable, event\.clientY\)/);
+  assert.match(appSource, /row\.onpointerup = \(event\) => \{[\s\S]+playlistDragDestination\(trackTable, event\.clientY\)/);
+  assert.match(styleSource, /\.track-row\.playlist-draggable\s*\{[\s\S]+touch-action: none/);
   assert.match(appSource, /function commitPlaylistTrackReorder[\s\S]+renderLibrary\(\);[\s\S]+await persist\(\)/);
   assert.doesNotMatch(appSource, /draggable="true" data-playlist-draggable/);
 });

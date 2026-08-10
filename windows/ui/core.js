@@ -1310,6 +1310,13 @@ export function reorderPlaylistTrackIDs(trackIDs, sourceID, targetID, insertAfte
   return reordered;
 }
 
+export function playlistInsertionIndex(rowMidpoints, pointerY) {
+  if (!Array.isArray(rowMidpoints) || !rowMidpoints.length
+    || !rowMidpoints.every(Number.isFinite) || !Number.isFinite(pointerY)) return -1;
+  const index = rowMidpoints.findIndex((midpoint) => pointerY < midpoint);
+  return index < 0 ? rowMidpoints.length : index;
+}
+
 export function mergePlaylistOrderWithPreservedItems(previousIDs, orderedIDs, preservedIDs) {
   const previous = unique(Array.isArray(previousIDs) ? previousIDs : []);
   const ordered = unique(Array.isArray(orderedIDs) ? orderedIDs : []);

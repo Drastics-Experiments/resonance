@@ -36,6 +36,7 @@ import {
   physicalStorageClassForTrack,
   planMissingDownloadedUploads,
   playlistArtworkTrackIDs,
+  playlistInsertionIndex,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
   reconcileUploadedTrack,
@@ -817,12 +818,31 @@ function startPlaylistDragPreview(row, trackTable) {
   playlistDragFloatingRow = floatingRow;
 }
 
-function updatePlaylistDragPreview(targetRow, clientY) {
-  if (!draggingPlaylistTrackID || draggingPlaylistTrackID === targetRow?.dataset.track) return;
-  const insertBefore = clientY < targetRow.getBoundingClientRect().top + targetRow.offsetHeight / 2;
-  const previewKey = `${targetRow.dataset.track}:${insertBefore ? "before" : "after"}`;
+function playlistDragDestination(trackTable, clientY) {
+  const rows = [...(trackTable?.querySelectorAll("[data-playlist-draggable]") || [])];
+  if (!rows.length) return null;
+  const tableTop = trackTable.getBoundingClientRect().top;
+  const insertionIndex = playlistInsertionIndex(
+    rows.map((row) => tableTop + row.offsetTop + row.offsetHeight / 2),
+    clientY,
+  );
+  if (insertionIndex < 0) return null;
+  if (insertionIndex === rows.length) return { targetRow: rows.at(-1), insertAfter: true };
+  return { targetRow: rows[insertionIndex], insertAfter: false };
+}
+
+function updatePlaylistDragPreview(targetRow, insertAfter = false) {
+  if (!draggingPlaylistTrackID) return;
+  if (!targetRow || draggingPlaylistTrackID === targetRow.dataset.track) {
+    draggingPlaylistTargetID = null;
+    draggingPlaylistInsertAfter = false;
+    clearPlaylistDragPreview();
+    playlistDragFloatingRow?.style.setProperty("--playlist-drag-source-offset", "0px");
+    return;
+  }
+  const previewKey = `${targetRow.dataset.track}:${insertAfter ? "after" : "before"}`;
   draggingPlaylistTargetID = targetRow.dataset.track;
-  draggingPlaylistInsertAfter = !insertBefore;
+  draggingPlaylistInsertAfter = insertAfter;
   if (previewKey === playlistDragPreviewKey) return;
   clearPlaylistDragPreview();
   playlistDragPreviewKey = previewKey;
@@ -846,7 +866,12 @@ function updatePlaylistDragPreview(targetRow, clientY) {
 }
 
 function clearPlaylistPointerDrag() {
+  const drag = playlistPointerDrag;
   playlistPointerDrag = null;
+  if (drag?.pointerID != null) {
+    const sourceRow = document.querySelector(`[data-track="${CSS.escape(drag.sourceID)}"]`);
+    if (sourceRow?.hasPointerCapture(drag.pointerID)) sourceRow.releasePointerCapture(drag.pointerID);
+  }
   draggingPlaylistTrackID = null;
   draggingPlaylistTargetID = null;
   draggingPlaylistInsertAfter = false;
@@ -4099,51 +4124,11 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       document.querySelector(`[data-track="${CSS.escape(trackID)}"]`)?.focus();
     };
     if (row.dataset.playlistDraggable === "true") {
-      const handlePlaylistMouseMove = (event) => {
-        const drag = playlistPointerDrag;
-        if (!drag || drag.input !== "mouse" || drag.sourceID !== row.dataset.track) return;
-        if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
-        if (!drag.active) {
-          drag.active = true;
-          startPlaylistDragPreview(row, trackTable);
-        }
-        event.preventDefault();
-        const targetRow = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-playlist-draggable]");
-        updatePlaylistDragPreview(targetRow, event.clientY);
-      };
-      const handlePlaylistMouseUp = (event) => {
-        const drag = playlistPointerDrag;
-        if (!drag || drag.input !== "mouse" || drag.sourceID !== row.dataset.track) return;
-        if (drag.active) {
-          const targetRow = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-playlist-draggable]");
-          updatePlaylistDragPreview(targetRow, event.clientY);
-        }
-        const targetID = draggingPlaylistTargetID;
-        const insertAfter = draggingPlaylistInsertAfter;
-        document.removeEventListener("mousemove", handlePlaylistMouseMove);
-        document.removeEventListener("mouseup", handlePlaylistMouseUp);
-        clearPlaylistPointerDrag();
-        if (!drag.active) return;
-        event.preventDefault();
-        suppressPlaylistRowClickUntil = performance.now() + 300;
-        if (targetID) void commitPlaylistTrackReorder(drag.sourceID, targetID, insertAfter).catch(() => {});
-      };
-      row.onmousedown = (event) => {
-        if (event.button !== 0 || event.target.closest("button, select, input, a")) return;
-        playlistPointerDrag = {
-          input: "mouse",
-          sourceID: row.dataset.track,
-          startX: event.clientX,
-          startY: event.clientY,
-          active: false,
-        };
-        document.addEventListener("mousemove", handlePlaylistMouseMove);
-        document.addEventListener("mouseup", handlePlaylistMouseUp);
-      };
+      // Capture mouse pointers too so crossing header controls cannot strand a drag.
       row.onpointerdown = (event) => {
-        if (event.pointerType === "mouse" || !event.isPrimary || event.button !== 0 || event.target.closest("button, select, input, a")) return;
+        if (!event.isPrimary || event.button !== 0 || event.target.closest("button, select, input, a")) return;
+        clearPlaylistPointerDrag();
         playlistPointerDrag = {
-          input: "pointer",
           pointerID: event.pointerId,
           sourceID: row.dataset.track,
           startX: event.clientX,
@@ -4161,15 +4146,18 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
           startPlaylistDragPreview(row, trackTable);
         }
         event.preventDefault();
-        const targetRow = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-playlist-draggable]");
-        updatePlaylistDragPreview(targetRow, event.clientY);
+        const destination = playlistDragDestination(trackTable, event.clientY);
+        updatePlaylistDragPreview(destination?.targetRow, destination?.insertAfter);
       };
       row.onpointerup = (event) => {
         const drag = playlistPointerDrag;
         if (!drag || drag.pointerID !== event.pointerId || drag.sourceID !== row.dataset.track) return;
+        if (drag.active) {
+          const destination = playlistDragDestination(trackTable, event.clientY);
+          updatePlaylistDragPreview(destination?.targetRow, destination?.insertAfter);
+        }
         const targetID = draggingPlaylistTargetID;
         const insertAfter = draggingPlaylistInsertAfter;
-        if (row.hasPointerCapture(event.pointerId)) row.releasePointerCapture(event.pointerId);
         clearPlaylistPointerDrag();
         if (!drag.active) return;
         event.preventDefault();
