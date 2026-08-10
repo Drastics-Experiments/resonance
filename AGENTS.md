@@ -118,18 +118,20 @@ Current workflows:
 - iOS PRs build an unsigned Simulator `.app`; the candidate workflow packages it as a Simulator ZIP. This is not an installable App Store, Ad Hoc, or physical-device release.
 - Android PRs run lint/tests/build. The candidate workflow packages the release-signed APK and its Android updater manifest; it is not a Play Store bundle.
 
-### Fast GitHub Release workflow
+### Direct GitHub Release workflow
 
-The release pipeline is build-once and promote-on-merge. Do not restore per-platform tag publishing or let multiple platform jobs write to one public release.
+The release pipeline builds once, validates one combined candidate, and lets only Release Studio write the public release. Do not restore per-platform publishing or let multiple platform jobs write to one public release.
 
-The authoritative release version is `release/version.json`. It contains the semantic version and monotonically increasing cross-platform build number. The version synchronization tool updates and validates Windows, Android, iOS, and macOS metadata:
+The preferred interactive publisher is the local native app at `local-projects/release-publisher/`. It reads the latest public semantic release and annotated direct-release tag to choose the next patch version and monotonically increasing build number, then dispatches `.github/workflows/direct-release-build.yml` at the exact latest `main` SHA. GitHub Actions applies those version values only inside the four isolated platform runners, validates the combined twelve-file candidate, and returns the artifacts to Release Studio. Release Studio creates the final annotated version tag and GitHub Release with the user-supplied title and notes.
+
+This direct release path creates no PR, branch, merge, source commit, or change to `main`. `release/version.json` remains the checked-in baseline floor for version synchronization; newer direct releases record their build number in the annotated release tag. The version synchronization tool still updates and validates Windows, Android, iOS, and macOS metadata inside build workspaces:
 
 ```bash
 node scripts/release-version.mjs --check
 node scripts/release-version.mjs --set 1.1.2 13
 ```
 
-From a clean committed branch containing the desired app updates, the canonical one-command release is:
+The legacy PR-based release command remains available for recovery or an explicitly requested source-version commit:
 
 ```bash
 /Users/lilydietrich/Documents/Resonance/scripts/release-now.mjs
@@ -137,7 +139,7 @@ From a clean committed branch containing the desired app updates, the canonical 
 
 The command increments the patch version and build number, creates exactly one `release/v<version>` PR, waits for all four platform builds in parallel, merges only after the bundled candidate passes, publishes the already-built artifacts without a second build, and verifies the exact public release. It can be run from any working directory because it resolves the repository relative to the script. Use `--dry-run` for a mutation-free preflight or `--version <version> --build <number>` for explicit metadata. Rerun it on an existing release branch to resume an interrupted release; add `--retry-failed` to rerun failed jobs.
 
-Executing this command is publication approval. Agents must still wait for an explicit user request before running it without `--dry-run`. A failed or incomplete platform build must never create a tag or GitHub Release. Do not manually create or push the version tag, and do not rebuild after merge.
+Pressing **Publish release** in Release Studio or executing the legacy command without `--dry-run` is publication approval. Agents must still wait for an explicit user request. A failed or incomplete platform build must never create a tag or GitHub Release. The direct publisher creates its annotated final tag only after the candidate succeeds and local validation passes; do not manually create, replace, or push release tags.
 
 The expected public release contains exactly these twelve assets:
 
@@ -156,7 +158,7 @@ Resonance-iOS-Simulator-<version>.zip
 Resonance-iOS-Simulator-<version>.zip.sha256
 ```
 
-Candidate workflow artifacts are retained for 14 days. If candidate packaging fails, rerun the candidate workflow before merging. If automatic publication misses the merged event, manually dispatch `publish-release.yml` with the exact tag, candidate SHA, and merge SHA. Never substitute a newer commit, a different run's artifacts, or a manually rebuilt binary. If publication fails after GitHub has created a draft or tag, inspect the remote state and ask the user before deleting, retagging, clobbering, or replacing anything. If the release is already public, diagnose first rather than modifying its assets.
+Candidate workflow artifacts are retained for 14 days. Release Studio resumes a matching direct workflow run and may rerun only its failed jobs before publication. The legacy PR path may still use `publish-release.yml` with an exact tag, candidate SHA, and merge SHA. Never substitute a newer commit, a different run's artifacts, or a manually rebuilt binary. If publication fails after GitHub has created a tag or partial release, inspect the remote state and ask the user before deleting, retagging, clobbering, or replacing anything. If the release is already public, diagnose first rather than modifying its assets.
 
 Before merging or releasing, verify the checks for every platform changed. Do not create, merge, tag, push, publish, or make a GitHub Release unless the user explicitly requests it.
 
