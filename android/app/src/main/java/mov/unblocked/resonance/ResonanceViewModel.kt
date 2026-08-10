@@ -58,6 +58,7 @@ import mov.unblocked.resonance.data.LinkImportService
 import mov.unblocked.resonance.data.LinkImportStage
 import mov.unblocked.resonance.data.LinkImportTrack
 import mov.unblocked.resonance.data.LinkImportKind
+import mov.unblocked.resonance.data.LinkImportMediaMode
 import mov.unblocked.resonance.data.LinkImportInput
 import mov.unblocked.resonance.data.LinkImportResolution
 import mov.unblocked.resonance.data.ReviewedMatchResolutionPolicy
@@ -625,12 +626,23 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         mutableState.value = mutableState.value.copy(linkImport = invalidated)
     }
 
+    override fun setLinkImportMediaMode(mode: LinkImportMediaMode) {
+        val current = mutableState.value.linkImport
+        if (current.mediaMode == mode || current.isRunning) return
+        stopLinkImportPreview()
+        linkImportJob?.cancel()
+        linkImportJob = null
+        mutableState.value = mutableState.value.copy(linkImport = LinkImportUiState(mediaMode = mode))
+    }
+
     override fun resolveLinkImport(source: String) {
         stopLinkImportPreview()
         val value = source.trim()
+        val requestedMode = mutableState.value.linkImport.mediaMode
         if (value.isEmpty()) {
             mutableState.value = mutableState.value.copy(
                 linkImport = LinkImportUiState(
+                    mediaMode = requestedMode,
                     stage = LinkImportStage.Failed,
                     errorCode = "MISSING_SOURCE",
                     errorMessage = "Enter a song, artist, album, or supported Spotify, SoundCloud, or YouTube link first.",
@@ -642,13 +654,14 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val searchesProviders = !LinkImportInput.looksLikeLink(value)
         mutableState.value = mutableState.value.copy(
             linkImport = LinkImportUiState(
+                mediaMode = requestedMode,
                 requestedSource = value,
                 stage = if (searchesProviders) LinkImportStage.SearchingCandidates else LinkImportStage.ResolvingMetadata,
             ),
         )
         linkImportJob = viewModelScope.launch {
             if (searchesProviders) {
-                runCatching { linkImportService.search(value) }
+                runCatching { linkImportService.search(value, requestedMode) }
                     .onSuccess { response ->
                         val first = response.results.first()
                         mutableState.value = mutableState.value.copy(
@@ -665,7 +678,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         )
                     }.onFailure(::applyLinkImportFailure)
             } else {
-                runCatching { linkImportService.resolve(value, ::applyLinkImportProgress) }
+                runCatching { linkImportService.resolve(value, requestedMode, ::applyLinkImportProgress) }
                     .onSuccess { resolution ->
                         mutableState.value = mutableState.value.copy(
                             linkImport = mutableState.value.linkImport.copy(
@@ -755,7 +768,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         ) {
             applyLinkUploadModeFailure(
                 current,
-                "Link-derived audio requires the Reviewed match mode, or Source link mode for an original YouTube page. Turn off server upload to keep it only on this device.",
+                "Link-derived media requires the Reviewed match mode, or Source link mode for an original YouTube page. Turn off server upload to keep it only on this device.",
             )
             return false
         }
@@ -798,6 +811,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             runSingleLinkImport(
                 resolution,
                 candidate,
+                current.mediaMode,
                 uploadAfterImport,
                 sourcePageURL,
                 uploadMode,
@@ -901,7 +915,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             errorMessage = null,
         )
         linkImportJob = viewModelScope.launch {
-            runSpotifyPlaylistImport(resolution, selected, uploadAfterImport, uploadSnapshot)
+            runSpotifyPlaylistImport(resolution, selected, current.mediaMode, uploadAfterImport, uploadSnapshot)
         }
         return true
     }
@@ -982,6 +996,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private suspend fun runSingleLinkImport(
         resolution: LinkImportResolution,
         selectedCandidate: LinkImportCandidate,
+        mediaMode: LinkImportMediaMode,
         uploadAfterImport: Boolean,
         sourcePageURL: String?,
         uploadMode: ServerUploadMode?,
@@ -1003,6 +1018,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 mutableState.value.remoteSongs,
                 mutableState.value.serverUrl,
                 library.syncProfileID,
+                mediaMode,
             )
             // A metadata match is not proof that existing bytes are the requested
             // source. Both source-bound modes resolve the exact sole candidate and
@@ -1022,7 +1038,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     listOf(selectedCandidate) + selectedCandidate.fallbackCandidates +
                         resolution.candidates.filter { it.videoID != selectedCandidate.videoID }
                 }
-                track = downloadLinkTrack(metadata, candidates.distinctBy(LinkImportCandidate::videoID), 0, 1)
+                track = downloadLinkTrack(metadata, candidates.distinctBy(LinkImportCandidate::videoID), mediaMode, 0, 1)
                 mutableState.value = mutableState.value.copy(downloadProgress = 1f)
             }
             requireNotNull(track) { "The imported song could not be found on this device." }
@@ -1033,6 +1049,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 mutableState.value.remoteSongs,
                 mutableState.value.serverUrl,
                 library.syncProfileID,
+                mediaMode,
             )
             val existingServerSongID = match.serverSongID.takeUnless { strictSourceIdentity }
             existingServerSongID?.let { adoptUploadedDownload(track.id, it, client?.baseURL ?: mutableState.value.serverUrl) }
@@ -1102,6 +1119,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private suspend fun runSpotifyPlaylistImport(
         resolution: LinkImportResolution,
         selected: List<LinkImportCandidate>,
+        mediaMode: LinkImportMediaMode,
         uploadAfterImport: Boolean,
         uploadSnapshot: ServerUploadPolicySnapshot?,
     ) {
@@ -1118,6 +1136,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     mutableState.value.remoteSongs,
                     mutableState.value.serverUrl,
                     library.syncProfileID,
+                    mediaMode,
                 )
             }
             val downloadItems = selected.filter { initialMatches[it]?.deviceTrackID == null }
@@ -1141,6 +1160,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         track = downloadLinkTrack(
                             metadata,
                             (listOf(candidate) + candidate.fallbackCandidates).distinctBy(LinkImportCandidate::videoID),
+                            mediaMode,
                             completedDownloads,
                             downloadItems.size,
                         )
@@ -1171,6 +1191,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     mutableState.value.remoteSongs,
                     mutableState.value.serverUrl,
                     library.syncProfileID,
+                    mediaMode,
                 ).serverSongID == null
             }
             if (client != null && uploadQueue.isNotEmpty()) {
@@ -1288,6 +1309,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private suspend fun downloadLinkTrack(
         metadata: LinkImportTrack,
         candidates: List<LinkImportCandidate>,
+        mediaMode: LinkImportMediaMode,
         completedBefore: Int,
         total: Int,
     ): Track {
@@ -1295,7 +1317,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         candidates.forEachIndexed { candidateIndex, candidate ->
             try {
                 if (candidateIndex > 0) delay(400)
-                val download = linkImportService.download(candidate, metadata) { progress ->
+                val download = linkImportService.download(candidate, metadata, mediaMode) { progress ->
                     applyLinkImportProgress(progress)
                     val byteFraction = if (progress.totalBytes > 0) {
                         (progress.completedBytes.toFloat() / progress.totalBytes).coerceIn(0f, 1f)
@@ -1334,7 +1356,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         throw lastError ?: LinkImportException(
             LinkImportStage.Downloading,
             "ALL_SOURCES_FAILED",
-            "Every matched audio source failed.",
+            "Every matched ${mediaMode.name.lowercase()} source failed.",
         )
     }
 
@@ -2601,19 +2623,18 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 var sourceDownloads = 0
                 for (song in sourceSongs) {
                     requireDownloadPolicySnapshot(snapshot)
-                    check(!song.isVideoMedia) {
-                        "Video source-link downloads are not available on this Android build."
-                    }
                     val source = requireNotNull(song.sourceURL)
+                    val mediaMode = if (song.isVideoMedia) LinkImportMediaMode.Video else LinkImportMediaMode.Audio
                     val key = "${song.mediaKind}:$source"
                     val resolution = remoteSourceResolutions[key]
-                        ?: linkImportService.resolve(source) { }.also { remoteSourceResolutions[key] = it }
+                        ?: linkImportService.resolve(source, mediaMode) { }.also { remoteSourceResolutions[key] = it }
                     check(resolution.kind == LinkImportKind.Track) {
                         "A saved song link resolved to a playlist instead of one song."
                     }
                     val track = downloadLinkTrack(
                         metadata = resolution.track,
                         candidates = resolution.candidates,
+                        mediaMode = mediaMode,
                         completedBefore = sourceDownloads,
                         total = requestedSongs.size,
                     )

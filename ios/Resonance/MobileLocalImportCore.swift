@@ -1,5 +1,14 @@
 import Foundation
 
+enum LocalImportMediaMode: String, CaseIterable, Hashable, Identifiable, Sendable {
+    case audio
+    case video
+
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+    var fileExtension: String { self == .video ? "mp4" : "m4a" }
+}
+
 struct LocalImportSpotifyTrack: Codable, Hashable, Sendable {
     let provider: String
     let type: String
@@ -151,10 +160,11 @@ enum LocalImportExistingSongPolicy {
         deviceTracks: [MobileTrack],
         activeServerSongs: [MobileRemoteSong],
         activeServerURL: URL?,
-        activeProfileID: String
+        activeProfileID: String,
+        mediaMode: LocalImportMediaMode = .audio
     ) -> LocalImportExistingSongMatch {
         let deviceTrack = deviceTracks.first { candidate in
-            metadataMatches(
+            trackMediaMode(for: candidate) == mediaMode && metadataMatches(
                 expectedTitle: spotifyTrack.title,
                 expectedArtist: spotifyTrack.artist,
                 expectedDuration: spotifyTrack.durationSeconds.map(Double.init),
@@ -173,12 +183,21 @@ enum LocalImportExistingSongPolicy {
             return candidate.remoteID
         }
         let serverSong = trustedDeviceRemoteID.flatMap { remoteID in
-            activeServerSongs.first { $0.id == remoteID }
+            activeServerSongs.first {
+                $0.id == remoteID && LocalImportMediaMode(rawValue: $0.mediaKind) == mediaMode
+            }
         }
         return LocalImportExistingSongMatch(
             deviceTrackID: deviceTrack?.id,
             serverSongID: serverSong?.id
         )
+    }
+
+    private static func trackMediaMode(for track: MobileTrack) -> LocalImportMediaMode {
+        let videoExtensions = Set(["mp4", "mov", "m4v", "webm"])
+        return videoExtensions.contains(
+            URL(fileURLWithPath: track.relativePath).pathExtension.lowercased()
+        ) ? .video : .audio
     }
 
     private static func metadataMatches(
@@ -209,6 +228,7 @@ struct LocalImportedAudio: Hashable, Sendable {
     var downloadSourceURL: URL? = nil
     let sourceSHA256: String
     let contentSHA256: String
+    var mediaMode: LocalImportMediaMode = .audio
 }
 
 struct LocalImportSourceAssociation: Hashable, Sendable {

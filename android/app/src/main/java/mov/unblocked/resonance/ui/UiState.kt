@@ -6,6 +6,7 @@ import mov.unblocked.resonance.data.Track
 import mov.unblocked.resonance.data.SyncProfile
 import mov.unblocked.resonance.data.ClipRange
 import mov.unblocked.resonance.data.LinkImportResolution
+import mov.unblocked.resonance.data.LinkImportMediaMode
 import mov.unblocked.resonance.data.LinkImportSearchResponse
 import mov.unblocked.resonance.data.LinkImportStage
 import mov.unblocked.resonance.data.EffectiveClientConfig
@@ -13,6 +14,7 @@ import mov.unblocked.resonance.data.ServerDownloadMode
 import mov.unblocked.resonance.data.ServerUploadMode
 
 data class LinkImportUiState(
+    val mediaMode: LinkImportMediaMode = LinkImportMediaMode.Audio,
     val requestedSource: String? = null,
     val stage: LinkImportStage = LinkImportStage.Idle,
     val resolution: LinkImportResolution? = null,
@@ -194,5 +196,5 @@ data class ResonanceUiState(
 internal fun LinkImportUiState.invalidatedForSourceEdit(source: String): LinkImportUiState {
     val resolvedSource = requestedSource ?: return this
     if (source.trim() == resolvedSource.trim()) return this
-    return LinkImportUiState()
+    return LinkImportUiState(mediaMode = mediaMode)
 }

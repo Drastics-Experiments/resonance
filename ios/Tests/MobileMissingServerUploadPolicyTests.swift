@@ -488,6 +488,38 @@ final class MobileMissingServerUploadPolicyTests: XCTestCase {
     }
 }
 
+final class MobileLocalImportMediaModeTests: XCTestCase {
+    func testVideoImportDoesNotReuseMatchingAudioBytes() {
+        let expected = spotifyTrack(title: "Example", artist: "Artist")
+        let audio = MobileTrack(
+            title: expected.title,
+            artist: expected.artist,
+            album: expected.album ?? "Imported",
+            duration: 180,
+            relativePath: "example.m4a"
+        )
+        let video = MobileTrack(
+            title: expected.title,
+            artist: expected.artist,
+            album: expected.album ?? "Imported",
+            duration: 180,
+            relativePath: "example.mp4"
+        )
+
+        let match = LocalImportExistingSongPolicy.match(
+            spotifyTrack: expected,
+            deviceTracks: [audio, video],
+            activeServerSongs: [],
+            activeServerURL: URL(string: "https://music.example")!,
+            activeProfileID: "default",
+            mediaMode: .video
+        )
+
+        XCTAssertEqual(match.deviceTrackID, video.id)
+        XCTAssertEqual(LocalImportMediaMode.video.fileExtension, "mp4")
+    }
+}
+
 final class MobileDownloadIntegrityPolicyTests: XCTestCase {
     func testAcceptsMatchingSizeAndHash() throws {
         XCTAssertNoThrow(try MobileDownloadIntegrityPolicy.validate(

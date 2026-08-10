@@ -2447,7 +2447,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
               !source.isEmpty else { throw SourceLinkRequiredError() }
         let key = "\(song.mediaKind):\(source)"
         if let cached = remoteSourceResolutions[key] { return cached }
-        let resolution = try await serverLinkImportService.resolve(source: source) { _ in }
+        let mediaMode = LocalImportMediaMode(rawValue: song.mediaKind) ?? .audio
+        let resolution = try await serverLinkImportService.resolve(
+            source: source,
+            mediaMode: mediaMode
+        ) { _ in }
         guard resolution.playlist == nil else { throw URLError(.cannotParseResponse) }
         remoteSourceResolutions[key] = resolution
         return resolution
@@ -2496,7 +2500,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         let outcome = try await serverLinkImportService.importCandidate(
             candidate,
             metadata: metadata,
-            existingTracks: tracks
+            existingTracks: tracks,
+            mediaMode: LocalImportMediaMode(rawValue: song.mediaKind) ?? .audio
         ) { [weak self] progress in
             self?.downloadDetail = progress.stage == .downloading
                 ? "Downloading \(song.title)"
@@ -2627,22 +2632,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                     downloadDetail = "Downloading \(completed + 1) of \(songs.count) • \(song.filename)"
                     if song.isSourceLinkRecord {
                         do {
-                            guard song.mediaKind == "audio" else {
-                                throw URLError(.dataNotAllowed)
-                            }
                             _ = try await importSavedRemoteSource(song, baseURL: baseURL)
                             downloadedSongIDs.insert(song.id)
                             completed += 1
                             save()
                         } catch {
                             failed += 1
-                            let reason = song.mediaKind == "video"
-                                ? "Video source-link downloads are not available on this iOS build."
-                                : error.localizedDescription
                             recordTransferFailure(
                                 .download,
                                 item: song.title,
-                                reason: reason,
+                                reason: error.localizedDescription,
                                 retryTarget: .download(remoteSongID: song.id)
                             )
                         }
@@ -2715,7 +2714,24 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                             actualSHA256: downloaded.sha256
                         )
 
-                        let audio = try AVAudioPlayer(contentsOf: temporaryURL)
+                        let mediaDuration: TimeInterval
+                        if song.mediaKind == "video" || song.contentType.lowercased().hasPrefix("video/") {
+                            let asset = AVURLAsset(url: temporaryURL)
+                            guard try await !asset.loadTracks(withMediaType: .video).isEmpty else {
+                                throw CocoaError(.fileReadCorruptFile, userInfo: [
+                                    NSLocalizedDescriptionKey: "The downloaded video does not contain a playable video track."
+                                ])
+                            }
+                            let duration = try await asset.load(.duration).seconds
+                            guard duration.isFinite, duration > 0 else {
+                                throw CocoaError(.fileReadCorruptFile, userInfo: [
+                                    NSLocalizedDescriptionKey: "The downloaded video has an invalid duration."
+                                ])
+                            }
+                            mediaDuration = duration
+                        } else {
+                            mediaDuration = try AVAudioPlayer(contentsOf: temporaryURL).duration
+                        }
                         let metadata = await embeddedMetadata(at: temporaryURL)
                         let artworkData: Data?
                         if let embeddedArtwork = metadata.artworkData {
@@ -2746,7 +2762,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                             title: metadata.title ?? song.title,
                             artist: metadata.artist ?? usefulFallback(song.artist, default: "Unknown Artist"),
                             album: metadata.album ?? usefulFallback(song.album, default: "Server Library"),
-                            duration: metadata.duration ?? audio.duration,
+                            duration: metadata.duration ?? mediaDuration,
                             relativePath: filename,
                             remoteID: song.id,
                             sourceServer: baseURL.absoluteString,

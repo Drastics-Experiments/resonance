@@ -47,8 +47,10 @@ object LinkImportExistingPolicy {
         activeServerSongs: List<RemoteSong>,
         activeServerURL: String,
         activeProfileID: String,
+        mediaMode: LinkImportMediaMode = LinkImportMediaMode.Audio,
     ): LinkImportExistingMatch {
         val device = deviceTracks.firstOrNull { candidate ->
+            trackMediaMode(candidate) == mediaMode &&
             RemoteTrackIdentityPolicy.visibleInContext(
                 candidate,
                 activeServerURL,
@@ -69,8 +71,11 @@ object LinkImportExistingPolicy {
                 (device.syncProfileID ?: "default") == activeProfileID
         }
         val server = trustedDeviceRemoteID?.let { remoteID ->
-            activeServerSongs.firstOrNull { it.id == remoteID }
+            activeServerSongs.firstOrNull {
+                it.id == remoteID && (it.isVideoMedia == (mediaMode == LinkImportMediaMode.Video))
+            }
         } ?: activeServerSongs.filter { candidate ->
+            (candidate.isVideoMedia == (mediaMode == LinkImportMediaMode.Video)) &&
             ServerSongIdentityPolicy.metadataMatches(
                 expected.title,
                 expected.artist,
@@ -82,6 +87,13 @@ object LinkImportExistingPolicy {
         }.singleOrNull()
         return LinkImportExistingMatch(device?.id, server?.id)
     }
+
+    private fun trackMediaMode(track: Track): LinkImportMediaMode =
+        if (track.relativePath.substringAfterLast('.', "").lowercase() in setOf("mp4", "mov", "m4v", "webm")) {
+            LinkImportMediaMode.Video
+        } else {
+            LinkImportMediaMode.Audio
+        }
 
     private fun serverOrigin(value: String): String? = runCatching {
         val uri = URI(value)
