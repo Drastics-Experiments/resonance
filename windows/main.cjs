@@ -58,6 +58,7 @@ const { downloadResolvedAudio, resolveYouTubeAudio } = require("./local-youtube.
 const { policyBlockedUploadEntries, serverUploadFilename } = require("./server-upload.cjs");
 const { readServerUploadResponse } = require("./server-upload-response.cjs");
 const {
+  ACCOUNT_SIGN_IN_URL,
   authorizationURL,
   createPKCE,
   exchangeAuthCode,
@@ -1659,7 +1660,7 @@ ipcMain.handle("account:session:load", async (_event, value) => {
 });
 
 ipcMain.handle("account:sign-in", async (_event, value) => {
-  const baseURL = normalizeServerBaseURL(value?.baseURL, { allowInsecureLoopback: !app.isPackaged }).origin;
+  const baseURL = normalizeServerBaseURL(ACCOUNT_SIGN_IN_URL).origin;
   const configuration = await fetchAuthConfiguration(baseURL);
   const provider = String(value?.provider || "").trim().toLowerCase();
   const pkce = createPKCE();

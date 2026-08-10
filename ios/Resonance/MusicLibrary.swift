@@ -716,14 +716,15 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
     }
 
-    func signIn(with provider: ResonanceSocialAuthProvider, serverURL rawServerURL: String) async {
+    func signIn(with provider: ResonanceSocialAuthProvider) async {
         guard !isAuthenticatingAccount else { return }
         isAuthenticatingAccount = true
         serverMessage = "Opening \(provider.title) sign-in…"
         defer { isAuthenticatingAccount = false }
         do {
-            let resolution = try MobileServerEndpointPolicy.resolve(rawServerURL)
-            let client = try ResonanceSocialAuthClient(baseURL: resolution.url)
+            let client = try ResonanceSocialAuthClient(
+                baseURL: ResonanceSocialAuthClient.accountSignInBaseURL
+            )
             let session = try await client.signIn(
                 with: provider,
                 migrationProfileID: syncProfileID

@@ -119,10 +119,12 @@ struct MacSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var recorder = MacShortcutRecorder()
     @State private var panel: Panel
-    @State private var serverURLDraft = ""
-    @State private var didLoadServerDrafts = false
     @State private var confirmingCredentialRemoval = false
     @State private var isEmailRevealed = false
+
+    private var accountServerURL: String {
+        ResonanceSocialAuthClient.accountSignInBaseURL.absoluteString
+    }
 
     init(opensServerPanel: Bool = false) {
         _panel = State(initialValue: opensServerPanel ? .server : .general)
@@ -222,21 +224,16 @@ struct MacSettingsSheet: View {
             )
         )
         .preferredColorScheme(.dark)
-        .task { loadServerDraftsIfNeeded() }
-        .onChange(of: panel) { _, nextPanel in
-            if nextPanel == .server { loadServerDraftsIfNeeded() }
-        }
         .onDisappear { recorder.cancel() }
         .alert("Sign out and forget this server?", isPresented: $confirmingCredentialRemoval) {
             Button("Cancel", role: .cancel) {}
             Button("Sign Out", role: .destructive) {
                 Task {
                     await model.signOutAccount()
-                    serverURLDraft = ""
                 }
             }
         } message: {
-            Text("The Resonance account session and server URL will be removed from this Mac. Downloaded songs stay in your library.")
+            Text("The Resonance account session will be removed from this Mac. Downloaded songs stay in your library.")
         }
     }
 
@@ -306,9 +303,9 @@ struct MacSettingsSheet: View {
 
                 VStack(alignment: .leading, spacing: 12) {
                     serverFieldLabel("Server URL", symbol: "network")
-                    TextField("https://music.example.com", text: $serverURLDraft)
+                    TextField("Server URL", text: .constant(accountServerURL))
                         .textFieldStyle(.roundedBorder)
-                        .disabled(model.accountEmail != nil)
+                        .disabled(true)
 
                     if let email = model.accountEmail {
                         HStack {
@@ -336,13 +333,15 @@ struct MacSettingsSheet: View {
                                 .foregroundStyle(Color.appMuted)
                         }
                         Button("Sign in or create account") {
-                            Task { await model.signIn(with: .clerk, serverURL: serverURLDraft) }
+                            Task {
+                                await model.signIn(with: .clerk)
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(Color.appViolet)
                         .frame(maxWidth: .infinity)
-                        .disabled(model.isAuthenticatingAccount || normalizedServerURL == nil)
-                        Text("Use email, Google, Apple, or Discord in the secure system browser.")
+                        .disabled(model.isAuthenticatingAccount)
+                        Text("Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/ in the secure system browser.")
                             .font(.system(size: 9))
                             .foregroundStyle(Color.appMuted)
                     }
@@ -376,7 +375,7 @@ struct MacSettingsSheet: View {
                     .buttonStyle(.borderedProminent)
                     .tint(Color.appViolet)
                     .disabled(model.serverUploadActionsDisabled || !ServerConnectionPolicy.canSave(
-                        serverURL: serverURLDraft,
+                        serverURL: accountServerURL,
                         accessToken: model.serverToken,
                         adminToken: model.serverAdminToken,
                         allowsInsecurePreviewLoopback: model.allowsInsecurePreviewLoopback
@@ -388,12 +387,6 @@ struct MacSettingsSheet: View {
             .onChange(of: model.accountEmail) { _, _ in isEmailRevealed = false }
         }
         .scrollIndicators(.hidden)
-    }
-
-    private var normalizedServerURL: URL? {
-        let value = serverURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: value), url.scheme?.lowercased() == "https", url.host != nil else { return nil }
-        return url
     }
 
     private var keybindPanel: some View {
@@ -519,19 +512,13 @@ struct MacSettingsSheet: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func loadServerDraftsIfNeeded() {
-        guard !didLoadServerDrafts else { return }
-        serverURLDraft = model.serverURLString
-        didLoadServerDrafts = true
-    }
-
     private func saveServerSettings() {
         Task {
             guard !model.serverUploadActionsDisabled else {
                 model.serverMessage = "Wait for the current transfer to finish"
                 return
             }
-            model.serverURLString = serverURLDraft
+            model.serverURLString = accountServerURL
             await model.refreshClientConfigurationNow()
             if model.serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 model.serverMessage = "Server saved • Sign in to connect"

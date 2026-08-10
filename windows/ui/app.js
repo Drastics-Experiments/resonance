@@ -44,6 +44,7 @@ import {
   reorderPlaylistTrackIDs,
   resolveServerTransferModes,
   removeClipRangeForTrack,
+  RESONANCE_ACCOUNT_SERVER_URL,
   resolveSyncProfile,
   restoreProfileState,
   migrateProfileContext,
@@ -3870,7 +3871,6 @@ async function applyAccountSession(nextSession, error = null) {
   if (error) serverConnectionText = error;
   else if (accountSession) serverConnectionText = "Signed in with Clerk";
   else serverConnectionText = "Not signed in";
-  if ($("#settingsDialog")?.open && settingsPanel === "server") renderSettings();
   if (accountSession?.profileID) {
     state.serverURL = accountSession.baseURL;
     state.syncProfiles = [{
@@ -3880,6 +3880,7 @@ async function applyAccountSession(nextSession, error = null) {
     }];
     await activateProfile(accountSession.profileID, accountSession.baseURL);
   }
+  if ($("#settingsDialog")?.open && settingsPanel === "server") renderSettings();
   if (migratedLocalContext) await persist();
   updateProfileControlView({ refreshPicture: false });
 }
@@ -3940,11 +3941,11 @@ function renderSettings() {
           <form id="serverSettingsForm" class="settings-server-form">
             <div class="settings-panel-title"><div><span class="eyebrow">ACCOUNT</span><h2>Music Server</h2><p>Clerk securely handles email, Google, Apple, and Discord sign-in for Resonance.</p></div></div>
             <div class="settings-server-card">
-              <label class="settings-server-field settings-server-field-wide" for="serverURL"><span>Server URL</span><input id="serverURL" autocomplete="url" placeholder="https://music.example.com" required></label>
+              <label class="settings-server-field settings-server-field-wide" for="serverURL"><span>Server URL</span><input id="serverURL" autocomplete="url" value="${RESONANCE_ACCOUNT_SERVER_URL}" readonly required></label>
               <div class="settings-account-card settings-server-field-wide">
                 ${accountSession
                   ? `<div><strong>${escapeHTML(safeAccountDisplayName(accountSession))}</strong><small><button id="settingsAccountEmail" class="email-disclosure" type="button" aria-label="${isAccountEmailRevealed ? "Hide" : "Reveal"} email address">${escapeHTML(displayedAccountEmail())}</button> · ${accountSession.role === "admin" ? "Administrator" : "Member"}</small></div><button id="signOutAccount" class="secondary" type="button">Sign out</button>`
-                  : `<div><strong>${serverToken ? "Legacy connection" : "Sign in to Resonance"}</strong><small>${serverToken ? "Sign in to finish upgrading this device." : "Use email, Google, Apple, or Discord in your web browser."}</small></div><div class="settings-auth-grid"><button class="secondary" type="button" data-auth-provider="clerk">Sign in or create account</button></div>`}
+                  : `<div><strong>${serverToken ? "Legacy connection" : "Sign in to Resonance"}</strong><small>${serverToken ? "Sign in to finish upgrading this device." : "Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/."}</small></div><div class="settings-auth-grid"><button class="secondary" type="button" data-auth-provider="clerk">Sign in or create account</button></div>`}
               </div>
             </div>
             <div class="settings-server-actions">
@@ -3999,8 +4000,8 @@ function renderSettings() {
 }
 
 function bindServerSettingsControls() {
-  $("#serverURL").value = state.serverURL || "";
-  $("#serverURL").disabled = Boolean(accountSession);
+  $("#serverURL").value = RESONANCE_ACCOUNT_SERVER_URL;
+  $("#serverURL").readOnly = true;
   renderProfileOptions();
 
   document.querySelectorAll("[data-auth-provider]").forEach((button) => {
@@ -4009,7 +4010,6 @@ function bindServerSettingsControls() {
       try {
         status.textContent = "Opening secure sign-in…";
         await api.signInAccount({
-          baseURL: $("#serverURL").value.trim(),
           provider: button.dataset.authProvider,
           profileID: activeProfileID(),
         });

@@ -83,6 +83,7 @@ import mov.unblocked.resonance.data.RemoteSong
 import mov.unblocked.resonance.data.ServerDownloadMode
 import mov.unblocked.resonance.data.ServerUploadMode
 import mov.unblocked.resonance.data.AccountEmailPrivacy
+import mov.unblocked.resonance.data.ResonanceAccountSignInServerURL
 import java.net.URI
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -675,7 +676,6 @@ private val RemoteSong.mediaKindLabel: String
 
 @Composable
 internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions, dismiss: () -> Unit) {
-    var url by remember(state.serverUrl) { mutableStateOf(state.serverUrl) }
     var connectRequested by remember { mutableStateOf(false) }
     var isEmailRevealed by remember(state.accountEmail) { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
@@ -694,9 +694,9 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 OutlinedTextField(
-                    url,
-                    { url = it },
-                    enabled = state.accountEmail == null,
+                    ResonanceAccountSignInServerURL,
+                    {},
+                    readOnly = true,
                     label = { Text("Server URL") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
@@ -738,14 +738,14 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                     )
                     TextButton(
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = !connecting && url.isNotBlank(),
+                        enabled = !connecting,
                         onClick = {
                             focusManager.clearFocus()
-                            actions.startNativeAccountSignIn(url.trim())
+                            actions.startNativeAccountSignIn()
                         },
                     ) { Text("Sign in or create account") }
                     Text(
-                        "Use email, Google, Apple, or Discord without leaving Resonance.",
+                        "Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/.",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
@@ -760,7 +760,7 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                     focusManager.clearFocus()
                     connectRequested = true
                     actions.saveServerConnection(
-                        url.trim(),
+                        ResonanceAccountSignInServerURL,
                         state.serverToken,
                         state.serverAdminKey,
                         AccountEmailPrivacy.safeDisplayName(

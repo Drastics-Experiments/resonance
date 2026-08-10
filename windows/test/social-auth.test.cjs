@@ -2,12 +2,17 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  ACCOUNT_SIGN_IN_URL,
   authorizationURL,
   canonicalAuthConfiguration,
   canonicalSession,
   createPKCE,
   publicSession,
 } = require("../social-auth.cjs");
+
+test("uses the Resonance Core production URL for every account sign-in", () => {
+  assert.equal(ACCOUNT_SIGN_IN_URL, "https://resonance-core.blithe-haven-9710.chatgpt.site/");
+});
 
 const configuration = canonicalAuthConfiguration({
   version: 3,

@@ -171,6 +171,7 @@ private struct ResonanceAuthConfiguration {
 
 struct ResonanceSocialAuthClient {
     static let callbackURL = "resonance://auth/callback"
+    static let accountSignInBaseURL = URL(string: "https://resonance-core.blithe-haven-9710.chatgpt.site/")!
     private static let supportedProviders = Set(ResonanceSocialAuthProvider.allCases.map(\.rawValue))
 
     let baseURL: URL

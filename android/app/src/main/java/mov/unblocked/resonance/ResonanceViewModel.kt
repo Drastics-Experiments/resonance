@@ -73,6 +73,7 @@ import mov.unblocked.resonance.data.RemotePlaylist
 import mov.unblocked.resonance.data.RemoteClipRange
 import mov.unblocked.resonance.data.RemotePlaylistsDocument
 import mov.unblocked.resonance.data.RemoteSong
+import mov.unblocked.resonance.data.ResonanceAccountSignInServerURL
 import mov.unblocked.resonance.data.ServerClient
 import mov.unblocked.resonance.data.ServerProfileContext
 import mov.unblocked.resonance.data.RemoteTrackIdentityPolicy
@@ -189,12 +190,12 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         mutableState.value = mutableState.value.copy(errorMessage = null)
     }
 
-    override fun signInWithProvider(url: String, provider: String) {
+    override fun signInWithProvider(provider: String) {
         if (mutableState.value.isSigningIn) return
         mutableState.value = mutableState.value.copy(isSigningIn = true, serverMessage = "Opening account sign-in…")
         viewModelScope.launch {
             runCatching {
-                val (destination, pending) = SocialAuthClient(url).begin(provider)
+                val (destination, pending) = SocialAuthClient(ResonanceAccountSignInServerURL).begin(provider)
                 credentials.pendingAccountSignIn = pending
                 mutableAccountBrowserRequests.emit(destination.toString())
             }.onFailure { error ->
@@ -206,15 +207,15 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    override fun startNativeAccountSignIn(url: String) {
+    override fun startNativeAccountSignIn() {
         if (mutableState.value.isSigningIn) return
         mutableState.value = mutableState.value.copy(isSigningIn = true, serverMessage = "Preparing secure sign-in…")
         viewModelScope.launch {
             runCatching {
-                val client = SocialAuthClient(url)
+                val client = SocialAuthClient(ResonanceAccountSignInServerURL)
                 val configuration = client.nativeConfiguration()
                 configureClerk(configuration)
-                nativeAuthServerURL = url
+                nativeAuthServerURL = ResonanceAccountSignInServerURL
             }.onSuccess {
                 mutableState.value = mutableState.value.copy(
                     isSigningIn = false,

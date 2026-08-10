@@ -1440,16 +1440,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         resetClientConfigurationForCurrentContext()
     }
 
-    func signIn(with provider: ResonanceSocialAuthProvider, serverURL rawServerURL: String) async {
+    func signIn(with provider: ResonanceSocialAuthProvider) async {
         guard !isAuthenticatingAccount else { return }
         isAuthenticatingAccount = true
         serverMessage = "Opening \(provider.title) sign-in…"
         defer { isAuthenticatingAccount = false }
         do {
-            guard let rawURL = URL(string: rawServerURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-                throw ResonanceSocialAuthError.invalidConfiguration
-            }
-            let client = try ResonanceSocialAuthClient(baseURL: rawURL, session: networkSession)
+            let client = try ResonanceSocialAuthClient(
+                baseURL: ResonanceSocialAuthClient.accountSignInBaseURL,
+                session: networkSession
+            )
             let session = try await client.signIn(
                 with: provider,
                 migrationProfileID: syncProfileID

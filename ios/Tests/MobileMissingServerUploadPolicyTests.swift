@@ -127,6 +127,10 @@ final class MobileAccountEmailPrivacyTests: XCTestCase {
 
 final class MobileServerEndpointPolicyTests: XCTestCase {
     func testRequiresHTTPSOutsideLoopback() throws {
+        XCTAssertEqual(
+            ResonanceSocialAuthClient.accountSignInBaseURL.absoluteString,
+            "https://resonance-core.blithe-haven-9710.chatgpt.site/"
+        )
         let secure = try MobileServerEndpointPolicy.resolve(" HTTPS://Music.Example.test/root/ ")
         XCTAssertEqual(secure.url.absoluteString, "https://music.example.test/root")
         XCTAssertFalse(secure.usesInsecureLocalHTTP)
