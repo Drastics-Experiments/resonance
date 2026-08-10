@@ -330,7 +330,7 @@ class SocialAuthClient(private val baseURL: String) {
                 "Content-Type" to "application/x-www-form-urlencoded",
             ),
             fields.entries.joinToString("&") { (key, value) ->
-                "${URLEncoder.encode(key, Charsets.UTF_8)}=${URLEncoder.encode(value, Charsets.UTF_8)}"
+                "${URLEncoder.encode(key, Charsets.UTF_8.name())}=${URLEncoder.encode(value, Charsets.UTF_8.name())}"
             },
         )
         val payload = authJSON.decodeFromString<TokenPayload>(response.body)
