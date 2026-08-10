@@ -44,7 +44,7 @@ enum LocalImportTransferContextError: LocalizedError {
         case .serverBusy:
             "Wait for the current server transfer to finish."
         case .missingUploadConfiguration:
-            "Sign in with a Resonance administrator account before uploading."
+            "Sign in to your Resonance account or configure a legacy admin key before uploading."
         case .uploadModeUnavailable:
             "The selected upload mode is disabled by the verified server configuration. Choose an available mode and try again."
         case .unsupportedSourceLink:
@@ -306,9 +306,14 @@ struct LocalImportedAudio: Hashable, Sendable {
     var mediaMode: LocalImportMediaMode = .audio
 }
 
+struct LocalImportSourceAssociation: Hashable, Sendable {
+    let sourceURL: String
+    let downloadSourceURL: URL?
+}
+
 enum LocalImportOutcome: Hashable, Sendable {
     case created(LocalImportedAudio)
-    case duplicate(UUID)
+    case duplicate(UUID, source: LocalImportSourceAssociation)
 }
 
 enum LocalImportStage: String, Codable, Hashable, Sendable {

@@ -211,9 +211,14 @@ struct LocalImportedAudio: Hashable, Sendable {
     let contentSHA256: String
 }
 
+struct LocalImportSourceAssociation: Hashable, Sendable {
+    let sourceURL: String
+    let downloadSourceURL: URL?
+}
+
 enum LocalImportOutcome: Hashable, Sendable {
     case created(LocalImportedAudio)
-    case duplicate(UUID)
+    case duplicate(UUID, source: LocalImportSourceAssociation)
 }
 
 enum LocalImportStage: String, Codable, Hashable, Sendable {

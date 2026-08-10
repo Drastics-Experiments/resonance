@@ -199,7 +199,7 @@ final class MacLocalImportViewModel: ObservableObject {
     var uploadUnavailableMessage: String? {
         guard !model.serverURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !model.serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return "Sign in with a Resonance administrator account to enable upload."
+            return "Sign in to your Resonance account or configure a legacy admin key to enable upload."
         }
         guard !model.clientConfiguration.permittedUploadModes.isEmpty else {
             return "Uploads are disabled by the verified server configuration."
@@ -539,7 +539,13 @@ final class MacLocalImportViewModel: ObservableObject {
                 var track: Track
                 if let deviceTrackID = existingMatch.deviceTrackID,
                    let deviceTrack = model.tracks.first(where: { $0.id == deviceTrackID }) {
-                    track = deviceTrack
+                    track = model.associateLocalImportSource(
+                        trackID: deviceTrackID,
+                        source: LocalImportSourceAssociation(
+                            sourceURL: metadata.sourceURL,
+                            downloadSourceURL: nil
+                        )
+                    ) ?? deviceTrack
                 } else {
                     let outcome = try await service.importCandidate(
                         candidate,
@@ -553,15 +559,19 @@ final class MacLocalImportViewModel: ObservableObject {
                     switch outcome {
                     case .created(let imported):
                         track = model.insertLocalImportedAudio(imported)
-                    case .duplicate(let id):
+                    case .duplicate(let id, let source):
                         guard let duplicate = model.tracks.first(where: { $0.id == id }) else {
                             throw LocalImportError(stage: .savingLocal, code: "DUPLICATE_CHANGED", message: "The matching local song changed while the import was running.")
                         }
+                        let associated = model.associateLocalImportSource(
+                            trackID: id,
+                            source: source
+                        ) ?? duplicate
                         if let artworkData = await service.artworkData(for: metadata.artworkURL),
                            let repaired = model.repairLocalImportArtwork(trackID: id, artworkData: artworkData) {
                             track = repaired
                         } else {
-                            track = duplicate
+                            track = associated
                         }
                     }
                 }
@@ -693,7 +703,13 @@ final class MacLocalImportViewModel: ObservableObject {
                         if let deviceTrackID = existingMatch.deviceTrackID,
                            let deviceTrack = self.model.tracks.first(where: { $0.id == deviceTrackID }) {
                             skippedDeviceDownloads += 1
-                            track = deviceTrack
+                            track = self.model.associateLocalImportSource(
+                                trackID: deviceTrackID,
+                                source: LocalImportSourceAssociation(
+                                    sourceURL: item.track.sourceURL,
+                                    downloadSourceURL: nil
+                                )
+                            ) ?? deviceTrack
                         } else {
                             let transferIndex = completedDownloadTransfers
                             self.batchPhase = .downloading
@@ -734,18 +750,22 @@ final class MacLocalImportViewModel: ObservableObject {
                             switch outcome {
                             case .created(let imported):
                                 track = self.model.insertLocalImportedAudio(imported)
-                            case .duplicate(let id):
+                            case .duplicate(let id, let source):
                                 guard let duplicate = self.model.tracks.first(where: { $0.id == id }) else {
                                     failures.append("\(item.track.title) — \(item.track.artist) (the matching local song changed)")
                                     return nil
                                 }
+                                let associated = self.model.associateLocalImportSource(
+                                    trackID: id,
+                                    source: source
+                                ) ?? duplicate
                                 if let artworkData = await self.service.artworkData(
                                     for: item.track.artworkURL ?? item.candidate.thumbnailURL
                                 ),
                                    let repaired = self.model.repairLocalImportArtwork(trackID: id, artworkData: artworkData) {
                                     track = repaired
                                 } else {
-                                    track = duplicate
+                                    track = associated
                                 }
                             }
                         }

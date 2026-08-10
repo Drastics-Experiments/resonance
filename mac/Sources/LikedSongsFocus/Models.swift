@@ -158,6 +158,13 @@ enum ServerUploadNaming {
 }
 
 enum ServerSongIdentityPolicy {
+    static func metadataLookupKey(title: String, artist: String) -> String? {
+        let normalizedTitle = normalize(title)
+        let normalizedArtists = artistTokens(artist).sorted().joined(separator: "\u{1F}")
+        guard !normalizedTitle.isEmpty, !normalizedArtists.isEmpty else { return nil }
+        return "\(normalizedTitle)\u{0}\(normalizedArtists)"
+    }
+
     static func metadataMatches(
         expectedTitle: String,
         expectedArtist: String,
@@ -534,10 +541,26 @@ enum ListeningHistoryTrackResolver {
         "\(serverOrigin ?? "local")#profile:\(profileID ?? "default")#remote:\(remoteSongID)"
     }
 
+    static func localTracksByMetadataKey(_ tracks: [Track]) -> [String: [Track]] {
+        let keyedTracks = tracks.compactMap { track -> (String, Track)? in
+            guard track.remoteID == nil,
+                  track.fileURL != nil,
+                  let key = ServerSongIdentityPolicy.metadataLookupKey(
+                      title: track.title,
+                      artist: track.artist
+                  ) else { return nil }
+            return (key, track)
+        }
+        return Dictionary(grouping: keyedTracks, by: \.0).mapValues { values in
+            values.map(\.1)
+        }
+    }
+
     static func track(
         for entry: ListeningHistoryEntry,
         tracksByID: [UUID: Track],
-        tracksByRemoteIdentity: [String: Track]
+        tracksByRemoteIdentity: [String: Track],
+        localTracksByMetadataKey: [String: [Track]] = [:]
     ) -> Track {
         if let remoteSongID = nonempty(entry.remoteSongID),
            let track = tracksByRemoteIdentity[remoteIdentity(
@@ -548,6 +571,22 @@ enum ListeningHistoryTrackResolver {
             return track
         }
         if let track = tracksByID[entry.trackID] { return track }
+        if let title = nonempty(entry.title),
+           let artist = nonempty(entry.artist),
+           let key = ServerSongIdentityPolicy.metadataLookupKey(title: title, artist: artist),
+           let candidates = localTracksByMetadataKey[key] {
+            let matches = candidates.filter { candidate in
+                ServerSongIdentityPolicy.metadataMatches(
+                    expectedTitle: title,
+                    expectedArtist: artist,
+                    expectedDuration: entry.duration,
+                    actualTitle: candidate.title,
+                    actualArtist: candidate.artist,
+                    actualDuration: candidate.duration
+                )
+            }
+            if matches.count == 1, let match = matches.first { return match }
+        }
 
         let duration = entry.duration.flatMap { value in
             value.isFinite && value >= 0 ? value : nil
@@ -683,6 +722,7 @@ struct ListeningHistoryCalendarSummary: Hashable {
             }
         )
         let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        let localTracksByMetadataKey = ListeningHistoryTrackResolver.localTracksByMetadataKey(tracks)
         var tracksByRemoteIdentity: [String: Track] = [:]
         for track in tracks {
             guard let remoteID = track.remoteID else { continue }
@@ -711,7 +751,8 @@ struct ListeningHistoryCalendarSummary: Hashable {
             let track = ListeningHistoryTrackResolver.track(
                 for: entry,
                 tracksByID: tracksByID,
-                tracksByRemoteIdentity: tracksByRemoteIdentity
+                tracksByRemoteIdentity: tracksByRemoteIdentity,
+                localTracksByMetadataKey: localTracksByMetadataKey
             )
             let qualifiesAsPlay = ListeningHistoryPlayPolicy.qualifies(entry, track: track)
             if calendar.isDate(entry.startedAt, inSameDayAs: now) {
@@ -803,6 +844,7 @@ struct ListeningHistoryStatsSummary: Hashable {
 
     init(entries: [ListeningHistoryEntry], tracks: [Track]) {
         let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        let localTracksByMetadataKey = ListeningHistoryTrackResolver.localTracksByMetadataKey(tracks)
         var tracksByRemoteIdentity: [String: Track] = [:]
         for track in tracks {
             guard let remoteID = track.remoteID else { continue }
@@ -827,7 +869,8 @@ struct ListeningHistoryStatsSummary: Hashable {
             let track = ListeningHistoryTrackResolver.track(
                 for: entry,
                 tracksByID: tracksByID,
-                tracksByRemoteIdentity: tracksByRemoteIdentity
+                tracksByRemoteIdentity: tracksByRemoteIdentity,
+                localTracksByMetadataKey: localTracksByMetadataKey
             )
             let qualifiesAsPlay = ListeningHistoryPlayPolicy.qualifies(entry, track: track)
             if qualifiesAsPlay { playCount += 1 }
@@ -1028,21 +1071,23 @@ struct SyncProfilesResponse: Codable {
     }
 }
 
-struct RemoteSong: Identifiable, Hashable, Decodable {
+struct RemoteSong: Identifiable, Hashable, Decodable, Sendable {
     let id: String
     let filename: String
-    let title: String
-    let artist: String
-    let album: String
+    var title: String
+    var artist: String
+    var album: String
     let size: Int64
     let modifiedAt: String
     let contentType: String
-    let durationSeconds: TimeInterval?
-    let artworkURL: String?
+    var durationSeconds: TimeInterval?
+    var artworkURL: String?
     let downloadURL: String
     let streamURL: String
     let contentSHA256: String?
     let sourceURL: String?
+    let mediaKind: String
+    let isSourceLinkRecord: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, filename, name, title, artist, album, size, duration, artwork
@@ -1055,18 +1100,38 @@ struct RemoteSong: Identifiable, Hashable, Decodable {
         case streamURL = "stream_url"
         case contentSHA256 = "content_sha256"
         case sourceURL = "source_url"
+        case mediaKind = "media_kind"
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(String.self, forKey: .id)
+        let decodedSourceURL = try values.decodeIfPresent(String.self, forKey: .sourceURL)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        sourceURL = decodedSourceURL.flatMap { $0.isEmpty ? nil : $0 }
+        let declaredMediaKind = try values.decodeIfPresent(String.self, forKey: .mediaKind)
+        let decodedSize = try values.decodeIfPresent(Int64.self, forKey: .size) ?? 0
+        isSourceLinkRecord = sourceURL != nil && (declaredMediaKind != nil || decodedSize == 0)
+        let sourceFilename = sourceURL
+            .flatMap(URL.init(string:))?
+            .lastPathComponent
+            .removingPercentEncoding
+        let usefulSourceFilename = sourceFilename.flatMap { candidate in
+            ["watch", "videoplayback"].contains(candidate.lowercased()) ? nil : candidate
+        }
         filename = try values.decodeIfPresent(String.self, forKey: .filename)
-            ?? values.decode(String.self, forKey: .name)
+            ?? values.decodeIfPresent(String.self, forKey: .name)
+            ?? usefulSourceFilename.flatMap { $0.isEmpty ? nil : $0 }
+            ?? "Saved-\(id.prefix(8))"
         title = try values.decodeIfPresent(String.self, forKey: .title)
-            ?? URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
-        artist = try values.decodeIfPresent(String.self, forKey: .artist) ?? "Unknown Artist"
-        album = try values.decodeIfPresent(String.self, forKey: .album) ?? "Server Library"
-        size = try values.decode(Int64.self, forKey: .size)
+            ?? (isSourceLinkRecord
+                ? "Resolving metadata…"
+                : URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent)
+        artist = try values.decodeIfPresent(String.self, forKey: .artist)
+            ?? (isSourceLinkRecord ? "On-device lookup" : "Unknown Artist")
+        album = try values.decodeIfPresent(String.self, forKey: .album)
+            ?? (isSourceLinkRecord ? "Link only" : "Server Library")
+        size = decodedSize
         if let timestamp = try values.decodeIfPresent(String.self, forKey: .modifiedAt) {
             modifiedAt = timestamp
         } else if let timestamp = try values.decodeIfPresent(Int64.self, forKey: .modifiedUTC) {
@@ -1075,6 +1140,10 @@ struct RemoteSong: Identifiable, Hashable, Decodable {
             modifiedAt = ""
         }
         contentType = try values.decodeIfPresent(String.self, forKey: .contentType) ?? "application/octet-stream"
+        mediaKind = declaredMediaKind == "video"
+            || (declaredMediaKind == nil && MediaKindClassifier.kind(contentType: contentType, filename: filename) == .video)
+            ? "video"
+            : "audio"
         durationSeconds = try values.decodeIfPresent(TimeInterval.self, forKey: .durationSeconds)
             ?? values.decodeIfPresent(TimeInterval.self, forKey: .duration)
         artworkURL = try values.decodeIfPresent(String.self, forKey: .artworkURL)
@@ -1082,16 +1151,25 @@ struct RemoteSong: Identifiable, Hashable, Decodable {
         downloadURL = try values.decode(String.self, forKey: .downloadURL)
         streamURL = try values.decode(String.self, forKey: .streamURL)
         contentSHA256 = try values.decodeIfPresent(String.self, forKey: .contentSHA256)
-        sourceURL = try values.decodeIfPresent(String.self, forKey: .sourceURL)
     }
 
     var kind: SongFilter {
-        MediaKindClassifier.kind(contentType: contentType, filename: filename)
+        if mediaKind == "video" { return .video }
+        return MediaKindClassifier.kind(contentType: contentType, filename: filename)
     }
 
     var durationText: String? {
         guard let durationSeconds, durationSeconds.isFinite, durationSeconds > 0 else { return nil }
         return Track.timeText(durationSeconds)
+    }
+
+    var requiresOriginalSourcePage: Bool {
+        guard let sourceURL,
+              let url = URL(string: sourceURL),
+              let host = url.host?.lowercased() else { return false }
+        return host == "googlevideo.com"
+            || host.hasSuffix(".googlevideo.com")
+            || url.lastPathComponent.lowercased() == "videoplayback"
     }
 }
 

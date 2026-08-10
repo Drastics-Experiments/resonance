@@ -72,6 +72,53 @@ struct LikedSongsFocusTests {
         #expect(ResonanceEmailPrivacy.safeDisplayName(email, email: email) == "Clerk account")
     }
 
+    @Test
+    func accountScopeSupportsTheDeployedLegacyResponseUntilCoreMigratesIt() {
+        #expect(ResonanceAccountScopePolicy.resolvedProfileID(
+            accountID: "user_listener",
+            serverProfileID: nil,
+            requestedLegacyProfileID: "legacy-library"
+        ) == "legacy-library")
+        #expect(ResonanceAccountScopePolicy.resolvedProfileID(
+            accountID: "user_listener",
+            serverProfileID: nil,
+            requestedLegacyProfileID: nil
+        ) == "default")
+        #expect(ResonanceAccountScopePolicy.resolvedProfileID(
+            accountID: "user_listener",
+            serverProfileID: "user_listener",
+            requestedLegacyProfileID: "legacy-library"
+        ) == "user_listener")
+        #expect(ResonanceAccountScopePolicy.resolvedProfileID(
+            accountID: "user_listener",
+            serverProfileID: "someone_else",
+            requestedLegacyProfileID: "legacy-library"
+        ) == nil)
+    }
+
+    @Test
+    func confirmedProfileMigrationSignalIsNeverPersistedWithTheClerkSession() throws {
+        let session = ResonanceAccountSession(
+            accessToken: "access",
+            refreshToken: "refresh",
+            expiresAt: Date(timeIntervalSince1970: 1_900_000_000),
+            email: "listener@example.com",
+            role: "admin",
+            baseURL: try #require(URL(string: "https://music.example")),
+            accountID: "user_listener",
+            profileID: "user_listener",
+            displayName: "Listener",
+            imageURL: nil,
+            migratedProfileID: "default"
+        )
+
+        let encoded = try JSONEncoder().encode(session)
+        let decoded = try JSONDecoder().decode(ResonanceAccountSession.self, from: encoded)
+        #expect(decoded.profileID == "user_listener")
+        #expect(decoded.migratedProfileID == nil)
+        #expect(!String(decoding: encoded, as: UTF8.self).contains("migratedProfileID"))
+    }
+
     private let glass = URL(fileURLWithPath: "/System/Library/Sounds/Glass.aiff")
     private let ping = URL(fileURLWithPath: "/System/Library/Sounds/Ping.aiff")
     private let hero = URL(fileURLWithPath: "/System/Library/Sounds/Hero.aiff")

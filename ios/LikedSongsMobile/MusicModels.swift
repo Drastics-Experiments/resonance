@@ -195,6 +195,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
     var remoteID: String?
     var sourceServer: String?
     var syncProfileID: String?
+    var sourceURL: String?
     var downloadSourceURL: String?
     var artworkFilename: String?
     var artworkScanComplete: Bool?
@@ -212,6 +213,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         remoteID: String? = nil,
         sourceServer: String? = nil,
         syncProfileID: String? = nil,
+        sourceURL: String? = nil,
         downloadSourceURL: String? = nil,
         artworkFilename: String? = nil,
         artworkScanComplete: Bool? = false,
@@ -228,6 +230,7 @@ struct MobileTrack: Identifiable, Codable, Hashable {
         self.remoteID = remoteID
         self.sourceServer = sourceServer
         self.syncProfileID = syncProfileID
+        self.sourceURL = sourceURL
         self.downloadSourceURL = downloadSourceURL
         self.artworkFilename = artworkFilename
         self.artworkScanComplete = artworkScanComplete
@@ -731,21 +734,23 @@ struct MobileSyncProfilesResponse: Codable {
     }
 }
 
-struct MobileRemoteSong: Identifiable, Decodable, Hashable {
+struct MobileRemoteSong: Identifiable, Decodable, Hashable, Sendable {
     let id: String
     let filename: String
-    let title: String
-    let artist: String
-    let album: String
+    var title: String
+    var artist: String
+    var album: String
     let size: Int64
     let modifiedAt: String
     let contentType: String
     let downloadURL: String
     let streamURL: String
-    let duration: TimeInterval?
-    let artworkURL: URL?
+    var duration: TimeInterval?
+    var artworkURL: URL?
     let contentSHA256: String?
     let sourceURL: String?
+    let mediaKind: String
+    let isSourceLinkRecord: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, filename, name, title, artist, album, size
@@ -760,19 +765,46 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
         case artwork
         case contentSHA256 = "content_sha256"
         case sourceURL = "source_url"
+        case mediaKind = "media_kind"
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(String.self, forKey: .id)
-        filename = try values.decodeIfPresent(String.self, forKey: .filename) ?? values.decode(String.self, forKey: .name)
-        title = try values.decodeIfPresent(String.self, forKey: .title) ?? (filename as NSString).deletingPathExtension
-        artist = try values.decodeIfPresent(String.self, forKey: .artist) ?? "Unknown Artist"
-        album = try values.decodeIfPresent(String.self, forKey: .album) ?? "Server Library"
-        size = try values.decode(Int64.self, forKey: .size)
+        let decodedSourceURL = try values.decodeIfPresent(String.self, forKey: .sourceURL)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        sourceURL = decodedSourceURL.flatMap { $0.isEmpty ? nil : $0 }
+        let declaredMediaKind = try values.decodeIfPresent(String.self, forKey: .mediaKind)
+        let decodedSize = try values.decodeIfPresent(Int64.self, forKey: .size) ?? 0
+        isSourceLinkRecord = sourceURL != nil && (declaredMediaKind != nil || decodedSize == 0)
+        let sourceFilename = sourceURL
+            .flatMap(URL.init(string:))?
+            .lastPathComponent
+            .removingPercentEncoding
+        let usefulSourceFilename = sourceFilename.flatMap { candidate in
+            ["watch", "videoplayback"].contains(candidate.lowercased()) ? nil : candidate
+        }
+        filename = try values.decodeIfPresent(String.self, forKey: .filename)
+            ?? values.decodeIfPresent(String.self, forKey: .name)
+            ?? usefulSourceFilename.flatMap { $0.isEmpty ? nil : $0 }
+            ?? "Saved-\(id.prefix(8))"
+        title = try values.decodeIfPresent(String.self, forKey: .title)
+            ?? (isSourceLinkRecord ? "Resolving metadata…" : (filename as NSString).deletingPathExtension)
+        artist = try values.decodeIfPresent(String.self, forKey: .artist)
+            ?? (isSourceLinkRecord ? "On-device lookup" : "Unknown Artist")
+        album = try values.decodeIfPresent(String.self, forKey: .album)
+            ?? (isSourceLinkRecord ? "Link only" : "Server Library")
+        size = decodedSize
         modifiedAt = try values.decodeIfPresent(String.self, forKey: .modifiedAt)
             ?? String(try values.decodeIfPresent(Int64.self, forKey: .modifiedUTC) ?? 0)
         contentType = try values.decodeIfPresent(String.self, forKey: .contentType) ?? "application/octet-stream"
+        let fileExtension = URL(fileURLWithPath: filename).pathExtension.lowercased()
+        mediaKind = declaredMediaKind == "video"
+            || (declaredMediaKind == nil
+                && (contentType.lowercased().hasPrefix("video/")
+                    || ["mp4", "mov", "m4v", "webm"].contains(fileExtension)))
+            ? "video"
+            : "audio"
         downloadURL = try values.decode(String.self, forKey: .downloadURL)
         streamURL = try values.decode(String.self, forKey: .streamURL)
         let decodedDuration = try values.decodeIfPresent(Double.self, forKey: .durationSeconds)
@@ -787,13 +819,21 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable {
             return trimmed.isEmpty ? nil : URL(string: trimmed)
         }
         contentSHA256 = try values.decodeIfPresent(String.self, forKey: .contentSHA256)
-        sourceURL = try values.decodeIfPresent(String.self, forKey: .sourceURL)
     }
 
     var durationText: String? {
         guard let duration else { return nil }
         let seconds = Int(duration)
         return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
+    }
+
+    var requiresOriginalSourcePage: Bool {
+        guard let sourceURL,
+              let url = URL(string: sourceURL),
+              let host = url.host?.lowercased() else { return false }
+        return host == "googlevideo.com"
+            || host.hasSuffix(".googlevideo.com")
+            || url.lastPathComponent.lowercased() == "videoplayback"
     }
 }
 

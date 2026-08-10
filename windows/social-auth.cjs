@@ -118,7 +118,25 @@ function authorizationURL(configuration, provider, challenge, state) {
   return url;
 }
 
-function canonicalSession(value, account, baseURL, fallbackRefreshToken = "") {
+function resolvedAccountProfileID(accountID, serverProfileID, requestedLegacyProfileID) {
+  const accountScope = boundedAuthText(accountID, "Clerk account ID");
+  const serverScope = String(serverProfileID || "").trim();
+  if (serverScope) {
+    return boundedAuthText(serverScope, "Clerk profile ID") === accountScope ? accountScope : null;
+  }
+  return boundedAuthText(
+    String(requestedLegacyProfileID || "").trim() || "default",
+    "legacy profile ID",
+  );
+}
+
+function canonicalSession(
+  value,
+  account,
+  baseURL,
+  fallbackRefreshToken = "",
+  requestedLegacyProfileID = null,
+) {
   const expiresIn = Number(value?.expires_in);
   if (!Number.isFinite(expiresIn) || expiresIn <= 0 || expiresIn > 7 * 24 * 60 * 60) {
     throw new Error("The authentication server returned an invalid session lifetime.");
@@ -127,8 +145,13 @@ function canonicalSession(value, account, baseURL, fallbackRefreshToken = "") {
   const role = account?.role === "admin" ? "admin" : account?.role === "member" ? "member" : null;
   if (!role) throw new Error("The Resonance server returned an invalid account role.");
   const accountID = boundedAuthText(account?.id, "Clerk account ID");
-  const profileID = boundedAuthText(account?.profile_id, "Clerk profile ID");
-  const displayName = boundedAuthText(account?.display_name, "Clerk display name");
+  const profileID = resolvedAccountProfileID(accountID, account?.profile_id, requestedLegacyProfileID);
+  if (!profileID) {
+    throw new Error("The Resonance server returned a legacy profile instead of this Clerk account library.");
+  }
+  const displayName = account?.display_name
+    ? boundedAuthText(account.display_name, "Clerk display name")
+    : null;
   let imageURL = null;
   if (account?.image_url) {
     const candidate = new URL(account.image_url);
@@ -148,6 +171,9 @@ function canonicalSession(value, account, baseURL, fallbackRefreshToken = "") {
     profileID,
     displayName,
     imageURL,
+    migratedProfileID: account?.migrated_profile_id
+      ? boundedAuthText(account.migrated_profile_id, "migrated profile ID")
+      : null,
   });
 }
 
@@ -188,7 +214,7 @@ async function exchangeAuthCode(configuration, baseURL, code, verifier, fetchImp
     code_verifier: boundedAuthText(verifier, "sign-in verifier"),
   }, fetchImpl);
   const account = await accountForAccessToken(baseURL, payload.id_token, fetchImpl, migrationProfileID);
-  return canonicalSession(payload, account, baseURL);
+  return canonicalSession(payload, account, baseURL, "", migrationProfileID);
 }
 
 async function refreshAuthSession(configuration, session, fetchImpl = fetch, migrationProfileID = null) {
@@ -203,7 +229,13 @@ async function refreshAuthSession(configuration, session, fetchImpl = fetch, mig
     fetchImpl,
     session.profileID || migrationProfileID,
   );
-  return canonicalSession(payload, account, session.baseURL, session.refreshToken);
+  return canonicalSession(
+    payload,
+    account,
+    session.baseURL,
+    session.refreshToken,
+    session.profileID || migrationProfileID,
+  );
 }
 
 async function revokeAuthSession(configuration, session, fetchImpl = fetch) {
@@ -230,6 +262,7 @@ function publicSession(session) {
     profileID: session.profileID || null,
     displayName: session.displayName || session.email,
     imageURL: session.imageURL || null,
+    migratedProfileID: session.migratedProfileID || null,
   });
 }
 
@@ -245,5 +278,6 @@ module.exports = {
   fetchAuthConfiguration,
   publicSession,
   refreshAuthSession,
+  resolvedAccountProfileID,
   revokeAuthSession,
 };

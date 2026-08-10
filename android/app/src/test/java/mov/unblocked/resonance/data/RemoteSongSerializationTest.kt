@@ -11,6 +11,30 @@ class RemoteSongSerializationTest {
     private val json = Json { ignoreUnknownKeys = true }
 
     @Test
+    fun decodesMinimalCatalogWithoutServerMetadata() {
+        val song = json.decodeFromString<RemoteSong>(
+            """
+            {
+              "id": "saved-song-uuid",
+              "source_url": "https://media.example/Local%20Title.m4a?token=preserved",
+              "download_url": "/api/v1/songs/saved-song-uuid/file",
+              "stream_url": "/api/v1/songs/saved-song-uuid/stream"
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals("saved-song-uuid", song.id)
+        assertEquals("Local Title.m4a", song.filename)
+        assertEquals("Resolving metadata…", song.title)
+        assertEquals("On-device lookup", song.artist)
+        assertEquals("Link only", song.album)
+        assertEquals(0L, song.size)
+        assertEquals("https://media.example/Local%20Title.m4a?token=preserved", song.sourceURL)
+        assertEquals("audio", song.mediaKind)
+        assertTrue(song.isSourceLinkRecord)
+    }
+
+    @Test
     fun decodesIosCatalogArtworkAndDurationFields() {
         val song = json.decodeFromString<RemoteSong>(
             """
@@ -77,5 +101,6 @@ class RemoteSongSerializationTest {
         assertFalse(audio.isVideoMedia)
         assertTrue(audio.copy(filename = "clip.MP4").isVideoMedia)
         assertTrue(audio.copy(contentType = "video/webm", filename = "clip.bin").isVideoMedia)
+        assertTrue(audio.copy(mediaKind = "video").isVideoMedia)
     }
 }

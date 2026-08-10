@@ -254,6 +254,8 @@ struct PlayerModelRegressionTests {
         let localTrack = try #require(seed.tracks.first)
         let defaultEventID = UUID()
         let otherProfileEventID = UUID()
+        let defaultSongID = UUID().uuidString.lowercased()
+        let otherProfileSongID = UUID().uuidString.lowercased()
         let startedAt = Date(timeIntervalSince1970: 1_800_000_000)
         defaults.set(
             try JSONEncoder().encode([
@@ -264,6 +266,7 @@ struct PlayerModelRegressionTests {
                     listenedSeconds: 42,
                     serverOrigin: "https://music.test",
                     syncProfileID: "default",
+                    remoteSongID: defaultSongID,
                     title: "Mac song",
                     artist: "Mac artist",
                     originatedOnThisDevice: true
@@ -275,6 +278,7 @@ struct PlayerModelRegressionTests {
                     listenedSeconds: 18,
                     serverOrigin: "https://music.test",
                     syncProfileID: "profile-b",
+                    remoteSongID: otherProfileSongID,
                     title: "Other profile song",
                     originatedOnThisDevice: true
                 ),
@@ -296,10 +300,13 @@ struct PlayerModelRegressionTests {
                 let body = try #require(
                     try JSONSerialization.jsonObject(with: regressionRequestBody(request)) as? [String: Any]
                 )
-                #expect(body["client"] as? String == "macos")
-                #expect(!(body["device_id"] as? String ?? "").isEmpty)
+                #expect(Set(body.keys) == ["entries"])
                 let entries = try #require(body["entries"] as? [[String: Any]])
                 #expect(entries.count == 1)
+                #expect(Set(entries[0].keys) == ["id", "song_id", "started_at", "listened_seconds"])
+                #expect(entries[0]["song_id"] as? String == (
+                    profileID == "default" ? defaultSongID : otherProfileSongID
+                ))
                 #expect(((entries[0]["listened_seconds"] as? Double) ?? 0) > 0)
                 return (
                     try response(for: request),
@@ -316,11 +323,9 @@ struct PlayerModelRegressionTests {
                 "entries": [[
                     "id": remoteEventID.uuidString.lowercased(),
                     "track_id": remoteTrackID.uuidString.lowercased(),
+                    "song_id": remoteTrackID.uuidString.lowercased(),
                     "started_at": formatter.string(from: startedAt.addingTimeInterval(60)),
                     "listened_seconds": 75,
-                    "title": "Windows song",
-                    "artist": "Windows artist",
-                    "duration_seconds": 180,
                 ]],
             ]
             return (
@@ -348,13 +353,12 @@ struct PlayerModelRegressionTests {
             model.listeningHistoryEntries.first(where: { $0.id == remoteEventID })
         )
         #expect(remoteEntry.originatedOnThisDevice == false)
-        #expect(remoteEntry.title == "Windows song")
+        #expect(remoteEntry.remoteSongID == remoteTrackID.uuidString.lowercased())
+        #expect(remoteEntry.title == nil)
+        #expect(remoteEntry.artist == nil)
         model.queueTab = .history
-        let serverOnlyQueueTrack = try #require(model.queueTracks.first)
-        #expect(serverOnlyQueueTrack.id == remoteTrackID)
-        #expect(serverOnlyQueueTrack.title == "Windows song")
-        #expect(serverOnlyQueueTrack.artist == "Windows artist")
-        #expect(serverOnlyQueueTrack.fileURL == nil)
+        #expect(!model.queueTracks.contains(where: { $0.id == remoteTrackID }))
+        #expect(model.queueTracks.contains(where: { $0.id == localTrack.id }))
 
         let reloaded = PlayerModel(
             loadPersistedLibrary: true,
@@ -577,6 +581,71 @@ struct PlayerModelRegressionTests {
         #expect(requests.count == 1)
         #expect(requests.first?.method == "GET")
         #expect(requests.first?.path == "/api/v1/songs")
+    }
+
+    @Test
+    func repairsAnExpiredSavedDownloadLinkFromTheAssociatedLocalSourcePage() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+        let songID = "0a9b8b5c-19f0-4be0-bca0-b3b3c9418353"
+        let sourcePage = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+        var patchCount = 0
+        RegressionURLProtocol.handler = { request in
+            patchCount += 1
+            #expect(request.httpMethod == "PATCH")
+            #expect(request.url?.path == "/api/v1/admin/songs/\(songID)")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer admin-token")
+            #expect(request.value(forHTTPHeaderField: "X-Resonance-Profile") == "default")
+            let body = try regressionRequestBody(request)
+            let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(object["schema_version"] as? Int == 3)
+            #expect(object["source_url"] as? String == sourcePage)
+            #expect(object["media_kind"] as? String == "audio")
+            return (try response(for: request), Data(#"{"status":"updated"}"#.utf8))
+        }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+        model.serverAdminToken = "admin-token"
+        model.tracks = [Track(
+            title: "Recovered title",
+            artist: "Recovered artist",
+            album: "Imported",
+            duration: 120,
+            artwork: .liked,
+            remoteID: songID,
+            sourceServer: "https://music.test",
+            syncProfileID: "default",
+            sourceURL: sourcePage
+        )]
+        let song = try JSONDecoder().decode(RemoteSong.self, from: Data(
+            """
+            {
+              "id": "\(songID)",
+              "source_url": "https://rr1.example.googlevideo.com/videoplayback?expire=1",
+              "download_url": "/api/v1/songs/\(songID)/file",
+              "stream_url": "/api/v1/songs/\(songID)/stream"
+            }
+            """.utf8
+        ))
+
+        let repaired = await model.repairLegacyRemoteSourceLinks(
+            in: [song],
+            base: try #require(URL(string: "https://music.test"))
+        )
+
+        #expect(repaired)
+        #expect(patchCount == 1)
     }
 
     @Test

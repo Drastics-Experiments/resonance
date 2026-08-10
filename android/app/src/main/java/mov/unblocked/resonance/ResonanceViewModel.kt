@@ -87,6 +87,7 @@ import mov.unblocked.resonance.data.StoredLibrary
 import mov.unblocked.resonance.data.SyncProfile
 import mov.unblocked.resonance.data.ProfilePictureStore
 import mov.unblocked.resonance.data.Track
+import mov.unblocked.resonance.data.associatedWithLocalSource
 import mov.unblocked.resonance.playback.PlaybackService
 import mov.unblocked.resonance.playback.DownloadPolicy
 import mov.unblocked.resonance.playback.PlaybackFailurePolicy
@@ -121,6 +122,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private val context = application.applicationContext
     private val repository = LibraryRepository(context)
     private val linkImportService = LinkImportService(context)
+    private val remoteSourceResolutions = mutableMapOf<String, LinkImportResolution>()
     private val credentials = CredentialStore(context)
     private var accountSession: AccountSession? = credentials.accountSession
     private val clientConfigStore = ClientConfigStore(context)
@@ -130,7 +132,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         ResonanceUiState(
             serverUrl = accountSession?.baseURL ?: credentials.serverURL,
             serverToken = accountSession?.accessToken ?: credentials.clientToken,
-            serverAdminKey = accountSession?.takeIf { it.role == "admin" }?.accessToken ?: credentials.adminToken,
+            serverAdminKey = accountSession?.accessToken ?: credentials.adminToken,
             accountEmail = accountSession?.email,
             accountRole = accountSession?.role,
             accountDisplayName = accountSession?.profileDisplayName,
@@ -339,7 +341,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     fun refreshAccountSessionIfNeeded() {
         val current = accountSession ?: return
         val refreshLead = if (current.usesNativeClerkSession) 15_000L else 5 * 60_000L
-        val needsProfileHydration = current.profileID.isNullOrBlank() || current.displayName.isNullOrBlank()
+        val needsProfileHydration = current.profileID.isNullOrBlank() ||
+            current.profileID != current.accountID ||
+            current.displayName.isNullOrBlank()
         if (!needsProfileHydration && current.expiresAt > System.currentTimeMillis() + refreshLead) {
             scheduleAccountRefresh(current)
             return
@@ -358,6 +362,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     SocialAuthClient(current.baseURL).refresh(current, library.syncProfileID)
                 }
                 if (accountSession != current) return@launch
+                migrateConfirmedLegacyProfile(refreshed)
                 accountSession = refreshed
                 credentials.accountSession = refreshed
                 applyAccountSession(refreshed)
@@ -387,7 +392,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         mutableState.value = mutableState.value.copy(
             serverUrl = session.baseURL,
             serverToken = session.accessToken,
-            serverAdminKey = session.accessToken.takeIf { session.role == "admin" }.orEmpty(),
+            serverAdminKey = session.accessToken,
             accountEmail = session.email,
             accountRole = session.role,
             accountDisplayName = session.profileDisplayName,
@@ -408,6 +413,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun acceptAccountSession(session: AccountSession) {
+        migrateConfirmedLegacyProfile(session)
         accountSession = session
         credentials.accountSession = session
         credentials.serverURL = session.baseURL
@@ -417,9 +423,28 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         saveServerConnection(
             session.baseURL,
             session.accessToken,
-            session.accessToken.takeIf { session.role == "admin" }.orEmpty(),
+            session.accessToken,
             session.profileDisplayName,
         )
+    }
+
+    private fun migrateConfirmedLegacyProfile(session: AccountSession) {
+        val migratedProfileID = session.migratedProfileID?.trim().orEmpty()
+        val accountProfileID = session.profileID?.trim().orEmpty()
+        if (migratedProfileID.isEmpty() || accountProfileID.isEmpty()) return
+        val migrated = ProfileLibraryStatePolicy.migrateContext(
+            library,
+            session.baseURL,
+            migratedProfileID,
+            accountProfileID,
+        )
+        if (migrated == library) return
+        library = normalizeLiked(migrated.copy(
+            syncProfiles = listOf(SyncProfile(accountProfileID, session.profileDisplayName, true)),
+        ))
+        rebuildPlaybackQueueForActiveContext()
+        refreshLibraryState()
+        saveSoon()
     }
 
     private suspend fun configureClerk(configuration: NativeAuthConfiguration) {
@@ -528,6 +553,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             rebuildPlaybackQueueForActiveContext()
             refreshLibraryState()
             refreshStorage()
+            refreshAccountSessionIfNeeded()
             syncPlaylistsAutomatically()
         }
         viewModelScope.launch {
@@ -712,7 +738,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 linkImport = current.copy(
                     stage = LinkImportStage.Failed,
                     errorCode = "SERVER_UPLOAD_NOT_CONFIGURED",
-                    errorMessage = "Sign in with an administrator account, or turn off server upload.",
+                    errorMessage = "Sign in to your Resonance account, or turn off server upload.",
                 ),
             )
             return false
@@ -982,7 +1008,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             // may reuse only a cryptographic duplicate discovered after those
             // bytes have been downloaded and hashed.
             var track = if (strictSourceIdentity) null else {
-                match.deviceTrackID?.let { id -> library.tracks.firstOrNull { it.id == id } }
+                match.deviceTrackID
+                    ?.let { id -> library.tracks.firstOrNull { it.id == id } }
+                    ?.let { existing -> associateLocalImportSource(existing, metadata.sourceURL) }
             }
             val plannedDownloads = if (track == null) 1 else 0
             if (track == null) {
@@ -1099,7 +1127,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     artworkURL = candidate.importTrack.artworkURL ?: candidate.thumbnailURL,
                 )
                 val initial = initialMatches[candidate]
-                var track = initial?.deviceTrackID?.let { id -> library.tracks.firstOrNull { it.id == id } }
+                var track = initial?.deviceTrackID
+                    ?.let { id -> library.tracks.firstOrNull { it.id == id } }
+                    ?.let { existing -> associateLocalImportSource(existing, metadata.sourceURL) }
                 if (track == null) {
                     mutableState.value = mutableState.value.copy(
                         linkImport = mutableState.value.linkImport.copy(
@@ -1238,6 +1268,22 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    private suspend fun associateLocalImportSource(
+        track: Track,
+        sourceURL: String?,
+        downloadSourceURL: String? = null,
+    ): Track {
+        val associated = track.associatedWithLocalSource(sourceURL, downloadSourceURL)
+        if (associated == track) return track
+        library = normalizeLiked(library.copy(
+            tracks = library.tracks.map { current ->
+                if (current.id == track.id) associated else current
+            },
+        ))
+        persistLibrary()
+        return associated
+    }
+
     private suspend fun downloadLinkTrack(
         metadata: LinkImportTrack,
         candidates: List<LinkImportCandidate>,
@@ -1265,7 +1311,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 val track = if (duplicate != null) {
                     download.file.parentFile?.deleteRecursively()
-                    duplicate
+                    associateLocalImportSource(
+                        duplicate,
+                        download.metadata.sourceURL,
+                        download.downloadSourceURL,
+                    )
                 } else {
                     applyLinkImportProgress(LinkImportProgress(LinkImportStage.SavingLocal))
                     repository.registerLocalImport(download).also { imported ->
@@ -1326,7 +1376,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 // Capture and revalidate immediately before every request. A retry
                 // is a new request and therefore needs a still-current lease.
                 requireUploadPolicySnapshot(snapshot)
-                client.upload(track, repository.fileForTrack(track).name) {
+                client.upload(track) {
                     requireUploadPolicySnapshot(snapshot)
                 }
             } catch (error: CancellationException) {
@@ -1561,7 +1611,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         if (uploadedID == null) {
                             runCatching {
                                 requireUploadPolicySnapshot(uploadSnapshot)
-                                client.upload(track, file.name) {
+                                client.upload(track) {
                                     requireUploadPolicySnapshot(uploadSnapshot)
                                 }
                             }
@@ -1640,7 +1690,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                             uploadMutationGeneration,
                         )
                     ) {
-                        mutableState.value = mutableState.value.copy(remoteSongs = catalog.songs)
+                        mutableState.value = mutableState.value.copy(
+                            remoteSongs = resolveRemoteSongMetadata(catalog.songs),
+                        )
                     }
                 }
         }
@@ -2226,7 +2278,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         mutableState.value = mutableState.value.copy(isRefreshingServer = true, serverMessage = "Connecting…")
         runCatching {
             val profiles = client.fetchProfiles()
-            val catalog = client.fetchCatalog()
+            val fetchedCatalog = client.fetchCatalog()
+            val catalog = fetchedCatalog.copy(
+                songs = resolveRemoteSongMetadata(fetchedCatalog.songs),
+                count = fetchedCatalog.count,
+            )
             catalog to profiles
         }
             .onSuccess { (catalog, profiles) ->
@@ -2262,6 +2318,35 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
         mutableState.value = mutableState.value.copy(isRefreshingServer = false)
+    }
+
+    private suspend fun resolveRemoteSongMetadata(songs: List<RemoteSong>): List<RemoteSong> {
+        return songs.map { song ->
+            val source = song.sourceURL?.trim().orEmpty()
+            if (!song.isSourceLinkRecord || source.isEmpty()) return@map song
+            val key = "${song.mediaKind}:$source"
+            val resolution = remoteSourceResolutions[key] ?: runCatching {
+                linkImportService.resolve(source) { }
+            }.getOrNull()?.also { resolved ->
+                if (resolved.kind == LinkImportKind.Track) remoteSourceResolutions[key] = resolved
+            } ?: return@map song.copy(
+                title = if (song.requiresOriginalSourcePage) "Original source link needed" else "Metadata unavailable",
+                artist = if (song.requiresOriginalSourcePage) "Re-import on the original device" else "Refresh to retry",
+                album = if (song.requiresOriginalSourcePage) "Legacy expired link" else "Link only",
+            )
+            if (resolution.kind != LinkImportKind.Track) return@map song.copy(
+                title = "Metadata unavailable",
+                artist = "Refresh to retry",
+                album = "Link only",
+            )
+            song.copy(
+                title = resolution.track.title,
+                artist = resolution.track.artist,
+                album = resolution.track.album ?: "Imported",
+                durationSeconds = resolution.track.durationSeconds?.toDouble(),
+                artworkURL = resolution.track.artworkURL,
+            )
+        }
     }
 
     private suspend fun backfillDownloadedArtwork(
@@ -2311,7 +2396,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         }.getOrDefault(true)
         val previousServerURL = credentials.serverURL
         val previousAccessToken = accountSession?.accessToken ?: credentials.clientToken
-        val previousAdminKey = accountSession?.takeIf { it.role == "admin" }?.accessToken ?: credentials.adminToken
+        val previousAdminKey = accountSession?.accessToken ?: credentials.adminToken
         val previousRemoteSongs = state.remoteSongs
         val previousSelection = state.selectedRemoteSongIds
         connectionGeneration += 1
@@ -2510,18 +2595,46 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         remoteDownloadExpiryJob?.cancel()
         val job = viewModelScope.launch {
             try {
-                val catalog = mov.unblocked.resonance.data.RemoteCatalog(mutableState.value.remoteSongs)
+                val requestedSongs = mutableState.value.remoteSongs.filter { it.id in ids }
+                val sourceSongs = requestedSongs.filter(RemoteSong::isSourceLinkRecord)
+                var sourceDownloads = 0
+                for (song in sourceSongs) {
+                    requireDownloadPolicySnapshot(snapshot)
+                    check(!song.isVideoMedia) {
+                        "Video source-link downloads are not available on this Android build."
+                    }
+                    val source = requireNotNull(song.sourceURL)
+                    val key = "${song.mediaKind}:$source"
+                    val resolution = remoteSourceResolutions[key]
+                        ?: linkImportService.resolve(source) { }.also { remoteSourceResolutions[key] = it }
+                    check(resolution.kind == LinkImportKind.Track) {
+                        "A saved song link resolved to a playlist instead of one song."
+                    }
+                    val track = downloadLinkTrack(
+                        metadata = resolution.track,
+                        candidates = resolution.candidates,
+                        completedBefore = sourceDownloads,
+                        total = requestedSongs.size,
+                    )
+                    requireDownloadPolicySnapshot(snapshot)
+                    adoptUploadedDownload(track.id, song.id, transferContext.serverURL)
+                    sourceDownloads += 1
+                }
+                val catalog = mov.unblocked.resonance.data.RemoteCatalog(
+                    requestedSongs.filterNot(RemoteSong::isSourceLinkRecord),
+                )
                 val tracks = serverClient(transferContext).downloadSelected(
                     catalog = catalog,
-                    selectedIDs = ids,
+                    selectedIDs = catalog.songs.mapTo(mutableSetOf(), RemoteSong::id),
                     repository = repository,
                     existingRemoteIDs = library.tracks
                         .filter(::trackBelongsToActiveContext)
                         .mapNotNullTo(mutableSetOf(), Track::remoteID),
                     onProgress = { progress ->
                         mutableState.value = mutableState.value.copy(
-                            downloadProgress = progress.fraction,
-                            downloadDetail = "Downloading ${progress.completed.coerceAtMost(progress.total)} of ${progress.total} • ${progress.currentFilename}",
+                            downloadProgress = (sourceDownloads + progress.completed).toFloat() /
+                                requestedSongs.size.coerceAtLeast(1),
+                            downloadDetail = "Downloading ${(sourceDownloads + progress.completed).coerceAtMost(requestedSongs.size)} of ${requestedSongs.size} • ${progress.currentFilename}",
                         )
                     },
                     beforeEach = { requireDownloadPolicySnapshot(snapshot) },
@@ -2529,9 +2642,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 requireDownloadPolicySnapshot(snapshot)
                 library = hydrateRemoteLikes(hydrateRemotePlaylists(library.copy(tracks = library.tracks + tracks)))
                 persistLibrary()
+                val downloadedCount = sourceDownloads + tracks.size
                 mutableState.value = mutableState.value.copy(
                     selectedRemoteSongIds = emptySet(),
-                    downloadDetail = "Downloaded ${tracks.size} song${if (tracks.size == 1) "" else "s"}",
+                    downloadDetail = "Downloaded $downloadedCount song${if (downloadedCount == 1) "" else "s"}",
                 )
                 syncPlaylistsNow()
             } catch (_: CancellationException) {
@@ -3216,7 +3330,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             downloadedRemoteSongIds = visibleTracks.mapNotNullTo(mutableSetOf(), Track::remoteID),
             serverUrl = credentials.serverURL,
             serverToken = accountSession?.accessToken ?: credentials.clientToken,
-            serverAdminKey = accountSession?.takeIf { it.role == "admin" }?.accessToken ?: credentials.adminToken,
+            serverAdminKey = accountSession?.accessToken ?: credentials.adminToken,
             accountEmail = accountSession?.email,
             accountRole = accountSession?.role,
             accountDisplayName = accountSession?.profileDisplayName,
@@ -3408,10 +3522,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun activeAccessToken(): String = accountSession?.accessToken ?: credentials.clientToken
 
-    private fun activeAdminToken(): String = accountSession
-        ?.takeIf { it.role == "admin" }
-        ?.accessToken
-        ?: credentials.adminToken
+    private fun activeAdminToken(): String = accountSession?.accessToken ?: credentials.adminToken
 
     private fun serverClient() = ServerClient(
         credentials.serverURL,

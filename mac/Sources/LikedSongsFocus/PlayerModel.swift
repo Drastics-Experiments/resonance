@@ -188,61 +188,38 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     private struct SourceLinkUploadDocument: Encodable {
-        struct Metadata: Encodable {
-            let title: String
-            let artist: String
-            let album: String
-            let durationSeconds: TimeInterval?
-            let artworkURL: String?
+        let schemaVersion: Int
+        let sourceURL: String
+        let mediaKind: String?
 
-            enum CodingKeys: String, CodingKey {
-                case title, artist, album
-                case durationSeconds = "duration_seconds"
-                case artworkURL = "artwork_url"
-            }
+        init(sourceURL: String, mediaKind: String, schemaVersion: Int = 3) {
+            self.schemaVersion = schemaVersion
+            self.sourceURL = sourceURL
+            self.mediaKind = schemaVersion == 3 ? mediaKind : nil
         }
 
-        let schemaVersion = 1
-        let sourceURL: String
-        let filename: String
-        let metadata: Metadata
-
         enum CodingKeys: String, CodingKey {
-            case filename, metadata
             case schemaVersion = "schema_version"
             case sourceURL = "source_url"
+            case mediaKind = "media_kind"
         }
     }
 
     private struct ListeningHistoryUploadDocument: Encodable {
-        let client = "macos"
-        let deviceID: String
         let entries: [ListeningHistoryUploadEntry]
-
-        enum CodingKeys: String, CodingKey {
-            case client, entries
-            case deviceID = "device_id"
-        }
     }
 
     private struct ListeningHistoryUploadEntry: Encodable {
         let id: String
-        let trackID: String
-        let songID: String?
+        let songID: String
         let startedAt: String
         let listenedSeconds: TimeInterval
-        let title: String?
-        let artist: String?
-        let album: String?
-        let durationSeconds: TimeInterval?
 
         enum CodingKeys: String, CodingKey {
-            case id, title, artist, album
-            case trackID = "track_id"
+            case id
             case songID = "song_id"
             case startedAt = "started_at"
             case listenedSeconds = "listened_seconds"
-            case durationSeconds = "duration_seconds"
         }
     }
 
@@ -296,7 +273,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             switch self {
             case .invalidURL: "Enter a complete HTTPS server URL. Preview builds may use HTTP only for localhost."
             case .missingToken: "Sign in to your Resonance account."
-            case .missingAdminToken: "Sign in with an administrator account to upload songs."
+            case .missingAdminToken: "Sign in to your Resonance account or configure a legacy admin key."
             case .invalidResponse: "The server returned an invalid response."
             case .invalidSongIdentifier: "The server returned an unsafe song identifier."
             case .crossOriginDownload: "The server returned a download URL from another server."
@@ -328,7 +305,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private static let positionKey = "LikedSongsFocus.position.v1"
     private static let historyKey = "LikedSongsFocus.history.v1"
     private static let listeningHistoryKey = "LikedSongsFocus.listeningHistory.v1"
-    private static let listeningHistoryDeviceIDKey = "LikedSongsFocus.listeningHistory.deviceID.v1"
     private static let playbackContextKey = "LikedSongsFocus.playbackContext.v1"
     private static let shuffleQueueKey = "LikedSongsFocus.shuffleQueue.v1"
     private static let uploadModeKeyPrefix = "LikedSongsFocus.transferMode.upload.v1."
@@ -572,10 +548,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private let defaults: UserDefaults
     private let networkSession: URLSession
+    private let serverLinkImportService = LocalDeviceImportService()
+    private var remoteSourceResolutions: [String: LocalImportResolution] = [:]
     private let serverCacheRoot: URL?
     private let shouldPersistServerCredentials: Bool
     nonisolated private static let persistenceCoordinator = PersistenceCoordinator()
-    private let listeningHistoryDeviceID: String
     private let systemPlaybackController: (any MacSystemPlaybackControlling)?
     private var audioPlayer: AVAudioPlayer?
     private var loadedAudioTrackID: UUID?
@@ -652,15 +629,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         self.serverCacheRoot = serverCacheRoot
         self.shouldPersistServerCredentials = persistServerCredentials
         self.systemPlaybackController = systemPlaybackController
-        if let storedDeviceID = defaults.string(forKey: Self.listeningHistoryDeviceIDKey),
-           !storedDeviceID.isEmpty {
-            listeningHistoryDeviceID = storedDeviceID
-        } else {
-            let generatedDeviceID = UUID().uuidString.lowercased()
-            listeningHistoryDeviceID = generatedDeviceID
-            defaults.set(generatedDeviceID, forKey: Self.listeningHistoryDeviceIDKey)
-        }
-
         if persistServerCredentials {
             Self.prepareCredentialStore()
         }
@@ -764,7 +732,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         )?.absoluteString ?? restoredServerURLString
         serverToken = restoredAccountSession?.accessToken
             ?? (persistServerCredentials ? Self.readServerToken() : "")
-        serverAdminToken = restoredAccountSession.map { $0.isAdmin ? $0.accessToken : "" }
+        serverAdminToken = restoredAccountSession?.accessToken
             ?? (persistServerCredentials ? Self.readServerToken(account: Self.adminCredentialAccount) : "")
         accountEmail = restoredAccountSession?.email
         accountRole = restoredAccountSession?.role
@@ -997,6 +965,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     var historyTracks: [Track] {
         let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        let localTracksByMetadataKey = ListeningHistoryTrackResolver.localTracksByMetadataKey(tracks)
         var tracksByRemoteIdentity: [String: Track] = [:]
         for track in tracks {
             guard let remoteID = track.remoteID else { continue }
@@ -1013,7 +982,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 let track = ListeningHistoryTrackResolver.track(
                     for: entry,
                     tracksByID: tracksByID,
-                    tracksByRemoteIdentity: tracksByRemoteIdentity
+                    tracksByRemoteIdentity: tracksByRemoteIdentity,
+                    localTracksByMetadataKey: localTracksByMetadataKey
                 )
                 return ListeningHistoryPlayPolicy.qualifies(entry, track: track)
             }
@@ -1023,7 +993,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 ListeningHistoryTrackResolver.track(
                     for: $0,
                     tracksByID: tracksByID,
-                    tracksByRemoteIdentity: tracksByRemoteIdentity
+                    tracksByRemoteIdentity: tracksByRemoteIdentity,
+                    localTracksByMetadataKey: localTracksByMetadataKey
                 )
             }
         }
@@ -1481,6 +1452,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     private func applyAccountSession(_ session: ResonanceAccountSession) async throws {
+        migrateConfirmedLegacyProfile(for: session)
         guard !shouldPersistServerCredentials || Self.saveAccountSession(session) else {
             throw ResonanceSocialAuthError.rejected("The account session could not be saved securely.")
         }
@@ -1491,7 +1463,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         accountImageURL = session.imageURL
         serverURLString = session.baseURL.absoluteString
         serverToken = session.accessToken
-        serverAdminToken = session.isAdmin ? session.accessToken : ""
+        serverAdminToken = session.accessToken
         if let profileID = session.profileID, !profileID.isEmpty {
             activateSyncProfile(SyncProfile(
                 id: profileID,
@@ -1522,6 +1494,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         guard let current = accountSession,
               !isRefreshingAccountSession else { return }
         let needsProfileHydration = current.profileID?.isEmpty != false
+            || current.profileID != current.accountID
             || current.displayName?.isEmpty != false
         guard current.usesLegacyProductionServer
             || needsProfileHydration
@@ -1539,6 +1512,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 )
                 : try await client.refresh(current, migrationProfileID: syncProfileID)
             guard accountSession == current else { return }
+            migrateConfirmedLegacyProfile(for: refreshed)
             guard !shouldPersistServerCredentials || Self.saveAccountSession(refreshed) else {
                 throw ResonanceSocialAuthError.rejected("The refreshed account session could not be saved securely.")
             }
@@ -1549,7 +1523,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             accountImageURL = refreshed.imageURL
             serverURLString = refreshed.baseURL.absoluteString
             serverToken = refreshed.accessToken
-            serverAdminToken = refreshed.isAdmin ? refreshed.accessToken : ""
+            serverAdminToken = refreshed.accessToken
             if let profileID = refreshed.profileID, !profileID.isEmpty {
                 activateSyncProfile(SyncProfile(
                     id: profileID,
@@ -1583,6 +1557,66 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             guard !Task.isCancelled else { return }
             await self?.refreshAccountSessionIfNeeded()
         }
+    }
+
+    private func migrateConfirmedLegacyProfile(for session: ResonanceAccountSession) {
+        guard let migratedProfileID = session.migratedProfileID?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !migratedProfileID.isEmpty,
+              let accountProfileID = session.profileID?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !accountProfileID.isEmpty,
+              migratedProfileID != accountProfileID,
+              syncProfileID == migratedProfileID,
+              let currentBase = try? normalizedServerURL(),
+              ServerSongIdentity.normalizedOrigin(currentBase)
+                == ServerSongIdentity.normalizedOrigin(session.baseURL),
+              let origin = ServerSongIdentity.normalizedOrigin(session.baseURL) else { return }
+
+        let oldClipPrefix = "origin=\(origin)|profile=\(migratedProfileID)|remote:"
+        let newClipPrefix = "origin=\(origin)|profile=\(accountProfileID)|remote:"
+        func migratedClipKey(_ key: String) -> String {
+            guard key.hasPrefix(oldClipPrefix) else { return key }
+            return newClipPrefix + key.dropFirst(oldClipPrefix.count)
+        }
+
+        for index in tracks.indices
+        where tracks[index].remoteID != nil
+            && (tracks[index].syncProfileID ?? "default") == migratedProfileID
+            && ServerSongIdentity.normalizedOrigin(tracks[index].sourceServer) == origin {
+            tracks[index].syncProfileID = accountProfileID
+        }
+        for index in listeningHistoryEntries.indices
+        where (listeningHistoryEntries[index].syncProfileID ?? "default") == migratedProfileID
+            && ServerSongIdentity.normalizedOrigin(listeningHistoryEntries[index].serverOrigin) == origin {
+            listeningHistoryEntries[index].syncProfileID = accountProfileID
+        }
+        clipRanges = clipRanges.reduce(into: [:]) { result, pair in
+            result[migratedClipKey(pair.key)] = pair.value
+        }
+        dirtyClipRangeKeys = Set(dirtyClipRangeKeys.map(migratedClipKey))
+        deletedClipRangeKeys = Set(deletedClipRangeKeys.map(migratedClipKey))
+
+        let oldServerKey = Self.serverContextKey(base: session.baseURL, profileID: migratedProfileID)
+        if playlistSyncServerURL == oldServerKey {
+            playlistSyncServerURL = Self.serverContextKey(base: session.baseURL, profileID: accountProfileID)
+        }
+        let oldTransferScope = MacClientConfigContext.transferModeScope(
+            origin: origin,
+            profileID: migratedProfileID
+        )
+        let newTransferScope = MacClientConfigContext.transferModeScope(
+            origin: origin,
+            profileID: accountProfileID
+        )
+        for prefix in [Self.uploadModeKeyPrefix, Self.downloadModeKeyPrefix]
+        where defaults.object(forKey: prefix + newTransferScope) == nil {
+            defaults.set(defaults.object(forKey: prefix + oldTransferScope), forKey: prefix + newTransferScope)
+        }
+        syncProfileID = accountProfileID
+        activeSyncProfileName = session.profileDisplayName
+        persistListeningHistory()
+        persistLibrary()
     }
 
     func selectUploadMode(_ mode: MacUploadMode) {
@@ -2095,6 +2129,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             let requestGeneration = serverCatalogRequestGeneration
             let uploadGeneration = serverUploadMutationGeneration
             var catalog = try await fetchRemoteCatalog(base: base)
+            if await repairLegacyRemoteSourceLinks(in: catalog, base: base) {
+                catalog = try await fetchRemoteCatalog(base: base)
+            }
             guard requestGeneration == serverCatalogRequestGeneration,
                   profileID == syncProfileID,
                   let currentBase = try? normalizedServerURL(),
@@ -2105,7 +2142,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             where mutation.generation > uploadGeneration && mutation.contextKey == contextKey {
                 catalog = [mutation.song] + catalog.filter { $0.id != mutation.song.id }
             }
-            remoteSongs = catalog
+            remoteSongs = await resolveRemoteSongMetadata(in: catalog)
             await reconcileCachedUploadedLocalTracks()
             selectedRemoteSongIDs.formIntersection(Set(remoteSongs.map(\.id)))
             serverMessage = "Connected • \(remoteSongs.count) \(remoteSongs.count == 1 ? "song" : "songs") available"
@@ -2153,7 +2190,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             offlineDownloadAuthorizationLease = lease
             offlineDownloadRequiresVerifiedConfiguration = clientConfiguration.document != nil
                 && (clientConfiguration.source == .verifiedServer || clientConfiguration.source == .verifiedCache)
-            let catalogSongs = try await fetchRemoteCatalog(base: base)
+            var fetchedCatalog = try await fetchRemoteCatalog(base: base)
+            if await repairLegacyRemoteSourceLinks(in: fetchedCatalog, base: base) {
+                fetchedCatalog = try await fetchRemoteCatalog(base: base)
+            }
+            let catalogSongs = await resolveRemoteSongMetadata(in: fetchedCatalog)
             remoteSongs = catalogSongs
             reconcileDownloadedMediaKinds(with: catalogSongs)
             let songs = songIDs.map { ids in catalogSongs.filter { ids.contains($0.id) } } ?? catalogSongs
@@ -2168,6 +2209,23 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 downloadStatus = "Downloading \(index + 1) of \(songs.count)"
                 var stagingURL: URL?
                 do {
+                    if remote.isSourceLinkRecord {
+                        let remoteIdentity = ServerSongIdentity(
+                            serverURL: base,
+                            profileID: syncProfileID,
+                            songID: remote.id
+                        )
+                        if let existing = tracks.first(where: { $0.remoteIdentity == remoteIdentity }),
+                           let fileURL = existing.fileURL,
+                           FileManager.default.fileExists(atPath: fileURL.path) {
+                            downloadProgress = Double(index + 1) / Double(max(songs.count, 1))
+                            continue
+                        }
+                        _ = try await importSavedRemoteSource(remote, base: base)
+                        changedCount += 1
+                        downloadProgress = Double(index + 1) / Double(max(songs.count, 1))
+                        continue
+                    }
                     let maximumDownloadSize: Int64 = remote.kind == .video
                         ? 1_024 * 1_024 * 1_024
                         : 256 * 1_024 * 1_024
@@ -2532,7 +2590,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         profileID: String,
         capturedUploadMode: MacUploadMode
     ) async throws -> RemoteSong {
-        guard let rawSource = track.downloadSourceURL,
+        guard let rawSource = track.sourceURL ?? track.downloadSourceURL,
               let sourceURL = URL(string: rawSource),
               sourceURL.scheme?.lowercased() == "https",
               sourceURL.user == nil,
@@ -2552,32 +2610,36 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.timeoutInterval = 90
-        let filename = track.fileURL.map {
-            ServerUploadNaming.filename(for: $0, title: track.title)
-        } ?? ServerUploadNaming.filename(
-            for: URL(fileURLWithPath: track.title + (track.kind == .video ? ".mp4" : ".m4a")),
-            title: track.title
-        )
         request.httpBody = try JSONEncoder().encode(SourceLinkUploadDocument(
             sourceURL: sourceURL.absoluteString,
-            filename: filename,
-            metadata: .init(
-                title: track.title,
-                artist: track.artist,
-                album: track.album,
-                durationSeconds: track.duration > 0 ? track.duration : nil,
-                artworkURL: track.artworkURL
-            )
+            mediaKind: track.kind == .video ? "video" : "audio"
         ))
         request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         setProfileHeader(on: &request, profileID: profileID)
         applyCurrentClientConfigHeaders(to: &request, base: base, fallbackToken: adminToken)
-        let (data, response) = try await networkSession.data(
+        var (data, response) = try await networkSession.data(
             for: request,
             delegate: MacRejectRedirectDelegate()
         )
+        if track.kind != .video,
+           Self.requiresLegacySourceLinkSchema(response: response, data: data) {
+            guard matchesGenericFileUploadContext(
+                base: base,
+                profileID: profileID,
+                adminToken: adminToken
+            ) else { throw LocalImportTransferContextError.contextChanged }
+            request.httpBody = try JSONEncoder().encode(SourceLinkUploadDocument(
+                sourceURL: sourceURL.absoluteString,
+                mediaKind: "audio",
+                schemaVersion: 2
+            ))
+            (data, response) = try await networkSession.data(
+                for: request,
+                delegate: MacRejectRedirectDelegate()
+            )
+        }
         guard matchesGenericFileUploadContext(
             base: base,
             profileID: profileID,
@@ -2922,6 +2984,28 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     @discardableResult
+    func associateLocalImportSource(
+        trackID: UUID,
+        source: LocalImportSourceAssociation
+    ) -> Track? {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }),
+              tracks[index].fileURL != nil else { return nil }
+        let sourceURL = source.sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let downloadSourceURL = source.downloadSourceURL?.absoluteString
+        var changed = false
+        if !sourceURL.isEmpty, tracks[index].sourceURL != sourceURL {
+            tracks[index].sourceURL = sourceURL
+            changed = true
+        }
+        if let downloadSourceURL, tracks[index].downloadSourceURL != downloadSourceURL {
+            tracks[index].downloadSourceURL = downloadSourceURL
+            changed = true
+        }
+        if changed { persistLibrary() }
+        return tracks[index]
+    }
+
+    @discardableResult
     func insertLocalImportedAudio(_ imported: LocalImportedAudio) -> Track {
         if let duplicate = tracks.first(where: {
             $0.sourceSHA256 == imported.sourceSHA256
@@ -2931,7 +3015,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             if duplicate.fileURL?.standardizedFileURL != imported.fileURL.standardizedFileURL {
                 try? FileManager.default.removeItem(at: imported.fileURL)
             }
-            return duplicate
+            return associateLocalImportSource(
+                trackID: duplicate.id,
+                source: LocalImportSourceAssociation(
+                    sourceURL: imported.metadata.sourceURL,
+                    downloadSourceURL: imported.downloadSourceURL
+                )
+            ) ?? duplicate
         }
 
         let styles: [ArtworkStyle] = [.midnight, .electric, .echoes, .golden, .weightless, .falling]
@@ -3069,18 +3159,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         guard let sourcePage = MacSourceImportPolicy.exactCanonicalYouTubePage(rawUserInput) else {
             throw LocalImportTransferContextError.unsupportedSourceLink
         }
-        let filename = track.fileURL.map {
-            ServerUploadNaming.filename(for: $0, title: track.title)
-        }
         let payload = MacSourceImportRequest(
-            sourcePageURL: sourcePage.absoluteString,
-            filename: filename,
-            metadata: .init(
-                title: track.title,
-                artist: track.artist,
-                album: track.album.isEmpty ? nil : track.album,
-                durationSeconds: track.duration > 0 ? track.duration : nil
-            )
+            sourcePageURL: sourcePage.absoluteString
         )
         let body = try JSONEncoder().encode(payload)
         let endpoint = base.appendingPathComponent("api/v1/admin/source-imports")
@@ -4243,9 +4323,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                             return (listeningHistorySyncedSeconds[key] ?? -1) < entry.listenedSeconds
                         }
                         guard !pendingEntries.isEmpty else { continue }
-                        let uploadEntries = pendingEntries.map {
+                        let uploadEntries = pendingEntries.compactMap {
                             listeningHistoryUploadEntry($0, track: tracksByID[$0.trackID])
                         }
+                        guard !uploadEntries.isEmpty else { continue }
                         guard try await postListeningHistory(
                             uploadEntries,
                             profileID: profileID,
@@ -4304,7 +4385,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private func listeningHistoryUploadEntry(
         _ entry: ListeningHistoryEntry,
         track: Track?
-    ) -> ListeningHistoryUploadEntry {
+    ) -> ListeningHistoryUploadEntry? {
         let scopedTrackRemoteID: String? = {
             guard let track, let remoteID = track.remoteID,
                   let entryIdentity = ServerSongIdentity(
@@ -4315,20 +4396,15 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                   track.remoteIdentity == entryIdentity else { return nil }
             return remoteID
         }()
+        guard let songID = Self.limitedHistoryText(
+            entry.remoteSongID ?? scopedTrackRemoteID,
+            maximum: 128
+        ) else { return nil }
         return ListeningHistoryUploadEntry(
             id: entry.id.uuidString.lowercased(),
-            trackID: entry.trackID.uuidString.lowercased(),
-            songID: Self.limitedHistoryText(entry.remoteSongID ?? scopedTrackRemoteID, maximum: 128),
+            songID: songID,
             startedAt: Self.listeningHistoryTimestamp(entry.startedAt),
-            listenedSeconds: min(max(entry.listenedSeconds, 0), 31 * 24 * 60 * 60),
-            title: Self.limitedHistoryText(entry.title ?? track?.title, maximum: 500),
-            artist: Self.limitedHistoryText(entry.artist ?? track?.artist, maximum: 500),
-            album: Self.limitedHistoryText(entry.album ?? track?.album, maximum: 500),
-            durationSeconds: {
-                let duration = entry.duration ?? track?.duration
-                guard let duration, duration.isFinite, duration >= 0 else { return nil }
-                return min(duration, 7 * 24 * 60 * 60)
-            }()
+            listenedSeconds: min(max(entry.listenedSeconds, 0), 31 * 24 * 60 * 60)
         )
     }
 
@@ -4343,10 +4419,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         )
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(ListeningHistoryUploadDocument(
-            deviceID: listeningHistoryDeviceID,
-            entries: entries
-        ))
+        request.httpBody = try JSONEncoder().encode(ListeningHistoryUploadDocument(entries: entries))
         let (data, response) = try await networkSession.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw ServerSyncError.invalidResponse
@@ -4908,6 +4981,141 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         return try JSONDecoder().decode(RemoteCatalog.self, from: data).songs
     }
 
+    func repairLegacyRemoteSourceLinks(in songs: [RemoteSong], base: URL) async -> Bool {
+        let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !adminToken.isEmpty else { return false }
+        let profileID = syncProfileID
+        var repairedAny = false
+
+        for song in songs where song.isSourceLinkRecord && song.requiresOriginalSourcePage {
+            guard let remoteIdentity = ServerSongIdentity(
+                serverURL: base,
+                profileID: profileID,
+                songID: song.id
+            ),
+            let local = tracks.first(where: { track in
+                guard track.remoteIdentity == remoteIdentity,
+                      let source = track.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      let url = URL(string: source),
+                      url.scheme?.lowercased() == "https",
+                      url.user == nil,
+                      url.password == nil else { return false }
+                let host = url.host?.lowercased() ?? ""
+                return host != "googlevideo.com"
+                    && !host.hasSuffix(".googlevideo.com")
+                    && url.lastPathComponent.lowercased() != "videoplayback"
+            }),
+            let sourceURL = local.sourceURL else { continue }
+
+            do {
+                let songID = try Self.validatedRemoteSongIdentifier(song.id)
+                let endpoint = base
+                    .appendingPathComponent("api/v1/admin/songs", isDirectory: true)
+                    .appendingPathComponent(songID, isDirectory: false)
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "PATCH"
+                request.httpBody = try JSONEncoder().encode(SourceLinkUploadDocument(
+                    sourceURL: sourceURL,
+                    mediaKind: local.kind == .video ? "video" : "audio"
+                ))
+                request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
+                setProfileHeader(on: &request, profileID: profileID)
+                applyCurrentClientConfigHeaders(to: &request, base: base, fallbackToken: adminToken)
+                let (_, response) = try await networkSession.data(for: request)
+                try Self.validate(response)
+                repairedAny = true
+            } catch {
+                // The local metadata remains usable. A future refresh can retry
+                // after the compatible server route is deployed.
+            }
+        }
+        return repairedAny
+    }
+
+    private func remoteSourceResolution(for song: RemoteSong) async throws -> LocalImportResolution {
+        guard let source = song.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !source.isEmpty else { throw ServerSyncError.missingSourceLink }
+        let mediaMode: LocalImportMediaMode = song.mediaKind == "video" ? .video : .audio
+        let key = "\(mediaMode.rawValue):\(source)"
+        if let cached = remoteSourceResolutions[key] { return cached }
+        let resolution = try await serverLinkImportService.resolve(
+            source: source,
+            mediaMode: mediaMode
+        ) { _ in }
+        guard resolution.playlist == nil else { throw ServerSyncError.invalidMedia }
+        remoteSourceResolutions[key] = resolution
+        return resolution
+    }
+
+    private func resolveRemoteSongMetadata(in songs: [RemoteSong]) async -> [RemoteSong] {
+        var resolvedSongs = songs
+        for index in resolvedSongs.indices where resolvedSongs[index].isSourceLinkRecord {
+            do {
+                let resolution = try await remoteSourceResolution(for: resolvedSongs[index])
+                resolvedSongs[index].title = resolution.track.title
+                resolvedSongs[index].artist = resolution.track.artist
+                resolvedSongs[index].album = resolution.track.album ?? "Imported"
+                resolvedSongs[index].durationSeconds = resolution.track.durationSeconds.map(TimeInterval.init)
+                resolvedSongs[index].artworkURL = resolution.track.artworkURL
+            } catch {
+                if resolvedSongs[index].requiresOriginalSourcePage {
+                    resolvedSongs[index].title = "Original source link needed"
+                    resolvedSongs[index].artist = "Re-import on the original device"
+                    resolvedSongs[index].album = "Legacy expired link"
+                } else {
+                    resolvedSongs[index].title = "Metadata unavailable"
+                    resolvedSongs[index].artist = "Refresh to retry"
+                    resolvedSongs[index].album = "Link only"
+                }
+            }
+        }
+        return resolvedSongs
+    }
+
+    @discardableResult
+    private func importSavedRemoteSource(_ remote: RemoteSong, base: URL) async throws -> Track {
+        let resolution = try await remoteSourceResolution(for: remote)
+        guard let candidate = resolution.candidates.first,
+              let source = remote.sourceURL else { throw ServerSyncError.invalidMedia }
+        let metadata = LocalImportMetadata(
+            title: resolution.track.title,
+            artist: resolution.track.artist,
+            album: resolution.track.album,
+            artworkURL: resolution.track.artworkURL,
+            sourceURL: source
+        )
+        let mediaMode: LocalImportMediaMode = remote.mediaKind == "video" ? .video : .audio
+        let outcome = try await serverLinkImportService.importCandidate(
+            candidate,
+            metadata: metadata,
+            existingTracks: tracks,
+            mediaMode: mediaMode
+        ) { [weak self] progress in
+            self?.downloadStatus = progress.stage == .downloading
+                ? "Downloading \(remote.title)"
+                : "Resolving \(remote.title)"
+        }
+        let track: Track
+        switch outcome {
+        case .created(let imported):
+            track = insertLocalImportedAudio(imported)
+        case .duplicate(let id, let sourceAssociation):
+            guard let duplicate = tracks.first(where: { $0.id == id }) else {
+                throw ServerSyncError.invalidMedia
+            }
+            track = associateLocalImportSource(trackID: id, source: sourceAssociation) ?? duplicate
+        }
+        _ = reconcileUploadedLocalTrack(
+            trackID: track.id,
+            remoteID: remote.id,
+            sourceServer: ServerSongIdentity.normalizedOrigin(base),
+            profileID: syncProfileID
+        )
+        return tracks.first(where: { $0.id == track.id }) ?? track
+    }
+
     @discardableResult
     func reconcileUploadedLocalTrackForImport(
         trackID: UUID,
@@ -5317,6 +5525,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             return duplicate.duplicateOf
         }
         throw Self.serverError(status: http.statusCode, data: data)
+    }
+
+    private static func requiresLegacySourceLinkSchema(response: URLResponse, data: Data) -> Bool {
+        struct ErrorPayload: Decodable { let error: String }
+        guard let http = response as? HTTPURLResponse,
+              http.statusCode == 400,
+              let payload = try? JSONDecoder().decode(ErrorPayload.self, from: data) else { return false }
+        return payload.error == "Unsupported source-link schema_version"
     }
 
     private func serverCacheDirectory(for base: URL, profileID: String) throws -> URL {

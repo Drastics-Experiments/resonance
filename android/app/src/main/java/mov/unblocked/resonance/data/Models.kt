@@ -36,6 +36,7 @@ data class Track(
     val dateAddedEpochMs: Long = System.currentTimeMillis(),
     val sourceSHA256: String? = null,
     val contentSHA256: String? = null,
+    val sourceURL: String? = null,
 ) {
     val durationText: String
         get() {
@@ -88,6 +89,8 @@ data class RemoteSong(
     val artworkURL: String? = null,
     val contentSHA256: String? = null,
     val sourceURL: String? = null,
+    val mediaKind: String = "audio",
+    val isSourceLinkRecord: Boolean = false,
 ) {
     val durationText: String?
         get() = durationSeconds
@@ -96,8 +99,17 @@ data class RemoteSong(
             ?.let { seconds -> "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}" }
 
     val isVideoMedia: Boolean
-        get() = contentType.contains("video", ignoreCase = true) ||
+        get() = mediaKind == "video" || contentType.contains("video", ignoreCase = true) ||
             filename.substringAfterLast('.', "").lowercase() in setOf("mp4", "mov", "m4v", "webm")
+
+    val requiresOriginalSourcePage: Boolean
+        get() = sourceURL?.let { value ->
+            runCatching { java.net.URI(value) }.getOrNull()?.let { url ->
+                val host = url.host?.lowercase().orEmpty()
+                host == "googlevideo.com" || host.endsWith(".googlevideo.com") ||
+                    url.path.substringAfterLast('/').equals("videoplayback", ignoreCase = true)
+            }
+        } == true
 }
 
 @Serializable
@@ -229,15 +241,24 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
         fun double(key: String): Double? =
             objectValue[key]?.jsonPrimitive?.doubleOrNull
 
-        val filename = string("filename") ?: string("name")
-            ?: error("Remote song is missing filename")
+        val id = string("id") ?: error("Remote song is missing id")
+        val sourceURL = string("source_url")?.trim()?.takeIf(String::isNotEmpty)
+        val declaredMediaKind = string("media_kind")?.takeIf { it == "audio" || it == "video" }
+        val decodedSize = objectValue["size"]?.jsonPrimitive?.longOrNull ?: 0L
+        val sourceFilename = sourceURL
+            ?.let { runCatching { java.net.URI(it).path.substringAfterLast('/') }.getOrNull() }
+            ?.takeIf(String::isNotEmpty)
+        val usefulSourceFilename = sourceFilename?.takeUnless {
+            it.equals("watch", ignoreCase = true) || it.equals("videoplayback", ignoreCase = true)
+        }
+        val filename = string("filename") ?: string("name") ?: usefulSourceFilename ?: "Saved-${id.take(8)}"
         return RemoteSong(
-            id = string("id") ?: error("Remote song is missing id"),
+            id = id,
             filename = filename,
-            title = string("title") ?: filename.substringBeforeLast('.', filename),
-            artist = string("artist") ?: "Unknown Artist",
-            album = string("album") ?: "Server Library",
-            size = objectValue["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+            title = string("title") ?: if (sourceURL != null) "Resolving metadata…" else filename.substringBeforeLast('.', filename),
+            artist = string("artist") ?: if (sourceURL != null) "On-device lookup" else "Unknown Artist",
+            album = string("album") ?: if (sourceURL != null) "Link only" else "Server Library",
+            size = decodedSize,
             modifiedAt = string("modified_at")
                 ?: objectValue["modified_utc"]?.jsonPrimitive?.longOrNull?.toString()
                 ?: "0",
@@ -252,7 +273,12 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
                 ?.trim()
                 ?.takeIf(String::isNotEmpty),
             contentSHA256 = string("content_sha256")?.trim()?.lowercase()?.takeIf(String::isNotEmpty),
-            sourceURL = string("source_url")?.trim()?.takeIf(String::isNotEmpty),
+            sourceURL = sourceURL,
+            mediaKind = declaredMediaKind ?: if (
+                (string("content_type") ?: "").startsWith("video/", ignoreCase = true) ||
+                filename.substringAfterLast('.', "").lowercase() in setOf("mp4", "mov", "m4v", "webm")
+            ) "video" else "audio",
+            isSourceLinkRecord = sourceURL != null && (declaredMediaKind != null || decodedSize == 0L),
         )
     }
 
@@ -274,6 +300,20 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
             value.artworkURL?.let { put("artwork_url", JsonPrimitive(it)) }
             value.contentSHA256?.let { put("content_sha256", JsonPrimitive(it)) }
             value.sourceURL?.let { put("source_url", JsonPrimitive(it)) }
+            put("media_kind", JsonPrimitive(value.mediaKind))
         })
     }
+}
+
+internal fun Track.associatedWithLocalSource(
+    sourceURL: String?,
+    downloadSourceURL: String? = null,
+): Track {
+    fun normalized(value: String?): String? = value
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && it.length <= 8_192 }
+    return copy(
+        sourceURL = normalized(sourceURL) ?: this.sourceURL,
+        downloadSourceURL = normalized(downloadSourceURL) ?: this.downloadSourceURL,
+    )
 }

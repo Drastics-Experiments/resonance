@@ -338,11 +338,15 @@ actor LocalDeviceImportService {
             throw LocalImportError(stage: .inspectingSource, code: "INVALID_YOUTUBE_VIDEO", message: "The selected source is not a supported YouTube video.")
         }
         let resolved = try await resolveYouTubeAudio(videoID: videoID)
+        let sourceAssociation = LocalImportSourceAssociation(
+            sourceURL: inputMetadata.sourceURL,
+            downloadSourceURL: resolved.streamingURL
+        )
         let sourceHash = try await download(resolved, to: source, progress: progress)
         if let duplicate = existingTracks.first(where: {
             $0.sourceSHA256 == sourceHash || $0.contentSHA256 == sourceHash
         }) {
-            return .duplicate(duplicate.id)
+            return .duplicate(duplicate.id, source: sourceAssociation)
         }
 
         try Task.checkCancellation()
@@ -368,7 +372,7 @@ actor LocalDeviceImportService {
         if let duplicate = existingTracks.first(where: {
             $0.sourceSHA256 == sourceHash || $0.contentSHA256 == sourceHash || $0.contentSHA256 == contentHash
         }) {
-            return .duplicate(duplicate.id)
+            return .duplicate(duplicate.id, source: sourceAssociation)
         }
 
         try Task.checkCancellation()
@@ -386,7 +390,7 @@ actor LocalDeviceImportService {
                 metadata: metadata,
                 duration: player.duration,
                 artworkData: artwork,
-                downloadSourceURL: resolved.streamingURL,
+                downloadSourceURL: sourceAssociation.downloadSourceURL,
                 sourceSHA256: sourceHash,
                 contentSHA256: contentHash
             ))
@@ -413,6 +417,10 @@ actor LocalDeviceImportService {
             source: candidate.sourceURL,
             session: sessions.soundcloud
         )
+        let sourceAssociation = LocalImportSourceAssociation(
+            sourceURL: inputMetadata.sourceURL,
+            downloadSourceURL: stream.streamingURL
+        )
         let sourceHash = try await LocalImportSoundCloud.download(
             stream,
             to: source,
@@ -423,7 +431,7 @@ actor LocalDeviceImportService {
         if let duplicate = existingTracks.first(where: {
             $0.sourceSHA256 == sourceHash || $0.contentSHA256 == sourceHash
         }) {
-            return .duplicate(duplicate.id)
+            return .duplicate(duplicate.id, source: sourceAssociation)
         }
 
         try Task.checkCancellation()
@@ -449,7 +457,7 @@ actor LocalDeviceImportService {
         if let duplicate = existingTracks.first(where: {
             $0.sourceSHA256 == sourceHash || $0.contentSHA256 == sourceHash || $0.contentSHA256 == contentHash
         }) {
-            return .duplicate(duplicate.id)
+            return .duplicate(duplicate.id, source: sourceAssociation)
         }
 
         try Task.checkCancellation()
@@ -471,7 +479,7 @@ actor LocalDeviceImportService {
                 metadata: metadata,
                 duration: player.duration,
                 artworkData: artwork,
-                downloadSourceURL: stream.streamingURL,
+                downloadSourceURL: sourceAssociation.downloadSourceURL,
                 sourceSHA256: sourceHash,
                 contentSHA256: contentHash
             ))

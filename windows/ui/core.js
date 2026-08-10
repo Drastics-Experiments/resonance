@@ -261,6 +261,7 @@ export function isInstalledVideoTrack(track) {
 }
 
 export function serverSongRequiresDownload(song) {
+  if (song?.media_kind === "video" || song?.mediaKind === "video") return true;
   const contentType = String(song?.content_type || song?.contentType || "")
     .split(";", 1)[0]
     .trim()
@@ -268,6 +269,31 @@ export function serverSongRequiresDownload(song) {
   if (contentType.startsWith("video/")) return true;
   const filename = String(song?.filename || song?.name || "").split(/[?#]/, 1)[0];
   return /\.(?:avi|mkv|mov|mp4|m4v|webm)$/i.test(filename);
+}
+
+export function serverSourceNeedsOriginalPage(sourceURL) {
+  try {
+    const url = new URL(String(sourceURL || ""));
+    const host = url.hostname.toLocaleLowerCase();
+    return host === "googlevideo.com"
+      || host.endsWith(".googlevideo.com")
+      || url.pathname.split("/").pop()?.toLocaleLowerCase() === "videoplayback";
+  } catch {
+    return false;
+  }
+}
+
+export function serverSourceDisplayFallback(sourceURL, { failed = false } = {}) {
+  if (serverSourceNeedsOriginalPage(sourceURL)) {
+    return {
+      title: "Original source link needed",
+      artist: "Re-import on the original device",
+      album: "Legacy expired link",
+    };
+  }
+  return failed
+    ? { title: "Metadata unavailable", artist: "Refresh to retry", album: "Link only" }
+    : { title: "Resolving metadata…", artist: "On-device lookup", album: "Link only" };
 }
 
 export function localImportOperationFingerprint({ source, mediaKind, selection = [], uploadRequested = false } = {}) {
@@ -556,9 +582,18 @@ function listeningHistoryTrackSnapshot(state, entry) {
   const profileID = entry?.profileID || "default";
   const remoteID = optionalHistoryText(entry?.remoteID, 128);
   const activeTracks = tracksForActiveProfile(state);
-  const track = activeTracks.find((item) => item?.id === entry?.trackID)
+  const identityTrack = activeTracks.find((item) => item?.id === entry?.trackID)
     || (remoteID ? activeTracks.find((item) =>
       item?.remoteID === remoteID && (item.syncProfileID || "default") === profileID) : null);
+  const localMetadataMatches = identityTrack ? [] : activeTracks.filter((item) =>
+    !item?.remoteID
+      && (item?.filePath || item?.fileUrl)
+      && serverSongMetadataMatches(item, {
+        title: entry?.title,
+        artist: entry?.artist,
+        duration: entry?.duration,
+      }));
+  const track = identityTrack || (localMetadataMatches.length === 1 ? localMetadataMatches[0] : null);
   const trackDuration = normalizedHistoryDuration(track?.duration);
   const entryDuration = normalizedHistoryDuration(entry?.duration);
   return {
@@ -703,6 +738,49 @@ export function restoreProfileState(state, profileID, serverURL = state.serverUR
   hydrateRemotePlaylistTracks(state);
   hydrateRemoteLikedTracks(state);
   return state;
+}
+
+export function migrateProfileContext(state, serverURL, migratedProfileID, accountProfileID) {
+  const oldProfileID = String(migratedProfileID || "").trim();
+  const nextProfileID = String(accountProfileID || "").trim();
+  const migrationOrigin = normalizedServerOrigin(serverURL);
+  if (!oldProfileID || !nextProfileID || oldProfileID === nextProfileID || !migrationOrigin) return false;
+  if (normalizedServerOrigin(state.serverURL) !== migrationOrigin || state.syncProfileID !== oldProfileID) return false;
+
+  storeActiveProfileState(state);
+  const oldKey = profileStateKey(serverURL, oldProfileID);
+  const nextKey = profileStateKey(serverURL, nextProfileID);
+  const snapshot = normalizedProfileState(state.profileStates[oldKey]);
+  snapshot.playlistSyncServerURL = snapshot.playlistSyncServerURL === oldKey
+    ? nextKey
+    : snapshot.playlistSyncServerURL;
+  state.profileStates[nextKey] = snapshot;
+  delete state.profileStates[oldKey];
+
+  state.tracks = (state.tracks || []).map((track) =>
+    track?.remoteID
+      && normalizedServerOrigin(track.sourceServer) === migrationOrigin
+      && (track.syncProfileID || "default") === oldProfileID
+      ? { ...track, syncProfileID: nextProfileID }
+      : track);
+  state.listeningHistory = (state.listeningHistory || []).map((entry) =>
+    normalizedServerOrigin(entry?.serverOrigin) === migrationOrigin
+      && (entry.profileID || "default") === oldProfileID
+      ? { ...entry, profileID: nextProfileID }
+      : entry);
+  state.serverUploadManifests = (state.serverUploadManifests || []).map((manifest) =>
+    normalizedServerOrigin(manifest?.serverOrigin) === migrationOrigin
+      && (manifest.profileID || "default") === oldProfileID
+      ? { ...manifest, profileID: nextProfileID }
+      : manifest);
+  if (state.playlistSyncServerURL === oldKey) state.playlistSyncServerURL = nextKey;
+  if (state.serverTransferPreferences?.[oldKey]) {
+    state.serverTransferPreferences[nextKey] ??= state.serverTransferPreferences[oldKey];
+    delete state.serverTransferPreferences[oldKey];
+  }
+  state.syncProfileID = nextProfileID;
+  state.serverURL = serverURL;
+  return true;
 }
 
 export function trackBelongsToActiveProfile(state, track) {
@@ -1413,7 +1491,7 @@ export function serverUploadConfigurationError({ serverURL, adminToken } = {}) {
   if (parsedServerURL.protocol !== "https:" && !loopbackHosts.has(hostname)) {
     return "Use an HTTPS server URL before authenticating. HTTP is only available for explicit loopback development.";
   }
-  if (!String(adminToken || "").trim()) return "Sign in with an administrator account before uploading.";
+  if (!String(adminToken || "").trim()) return "Sign in to your Resonance account before uploading.";
   return null;
 }
 

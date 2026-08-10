@@ -60,6 +60,7 @@ test("rejects cross-origin Clerk endpoints and hides refresh tokens from the ren
       email: "listener@example.com",
       role: "member",
       profile_id: "user_listener",
+      migrated_profile_id: "default",
       display_name: "Listener",
       image_url: "https://images.clerk.dev/listener.jpg",
     },
@@ -68,7 +69,46 @@ test("rejects cross-origin Clerk endpoints and hides refresh tokens from the ren
   assert.equal(publicSession(session).accessToken, "identity");
   assert.equal(publicSession(session).profileID, "user_listener");
   assert.equal(publicSession(session).displayName, "Listener");
+  assert.equal(publicSession(session).migratedProfileID, "default");
   assert.equal(Object.hasOwn(publicSession(session), "refreshToken"), false);
+
+  assert.throws(() => canonicalSession(
+    { id_token: "identity", refresh_token: "refresh", expires_in: 3600 },
+    {
+      id: "user_listener",
+      email: "listener@example.com",
+      role: "member",
+      profile_id: "default",
+      display_name: "Listener",
+    },
+    "https://music.example",
+  ), /legacy profile/);
+});
+
+test("accepts the deployed legacy account shape only through the requested profile scope", () => {
+  const session = canonicalSession(
+    { id_token: "identity", refresh_token: "refresh", expires_in: 3600 },
+    {
+      id: "user_listener",
+      email: "listener@example.com",
+      role: "admin",
+    },
+    "https://music.example",
+    "",
+    "legacy-library",
+  );
+
+  assert.equal(session.accountID, "user_listener");
+  assert.equal(session.profileID, "legacy-library");
+  assert.equal(session.displayName, null);
+  assert.equal(publicSession(session).displayName, "listener@example.com");
+
+  const defaultSession = canonicalSession(
+    { id_token: "identity", refresh_token: "refresh", expires_in: 3600 },
+    { id: "user_listener", email: "listener@example.com", role: "admin" },
+    "https://music.example",
+  );
+  assert.equal(defaultSession.profileID, "default");
 });
 
 test("rejects a native publishable key for a different Clerk instance", () => {

@@ -276,7 +276,7 @@ function canonicalServerCredentials(value) {
 }
 
 function previewCredentialStorePath() {
-  return path.join(app.getPath("appData"), "Liked Songs", "server-credentials.json");
+  return path.join(app.getPath("userData"), "server-credentials.json");
 }
 
 async function readPreviewCredentials() {
@@ -329,7 +329,7 @@ async function persistServerCredentials(credentialsValue) {
 }
 
 function previewAccountSessionPath() {
-  return path.join(app.getPath("appData"), "Liked Songs", "account-session.json");
+  return path.join(app.getPath("userData"), "account-session.json");
 }
 
 function canonicalStoredAccountSession(value) {
@@ -768,6 +768,7 @@ function safeServerUploadRetryRecord(value) {
     : null;
   const recordAge = createdAt ? Date.now() - Date.parse(createdAt) : Number.POSITIVE_INFINITY;
   const mediaSourceURL = preservedMediaSourceURL(value.mediaSourceURL);
+  const mediaKind = value.mediaKind === "video" ? "video" : "audio";
   if (!retryID || !filePath || !serverOrigin || !createdAt
       || !mediaSourceURL
       || recordAge < -5 * 60 * 1000
@@ -782,6 +783,7 @@ function safeServerUploadRetryRecord(value) {
     duration: Number.isFinite(Number(value.duration)) && Number(value.duration) >= 0 ? Number(value.duration) : 0,
     artworkURL: safeArtworkURL(value.artworkURL)?.href || null,
     mediaSourceURL,
+    mediaKind,
     uploadFilename: safeFilename(value.uploadFilename || path.basename(filePath)),
     serverOrigin,
     profileID: boundedText(value.profileID, 128) || "default",
@@ -801,24 +803,41 @@ function preservedMediaSourceURL(value) {
   }
 }
 
-function sourceLinkRegistrationBody(item, filename) {
+function sourceLinkRegistrationBody(item, { schemaVersion = 3 } = {}) {
   const sourceURL = preservedMediaSourceURL(item.mediaSourceURL);
   if (!sourceURL) {
     throw new Error("Only songs downloaded from a preserved source link can be uploaded. Download this song from its link again first.");
   }
-  const duration = Number(item.duration);
+  if (schemaVersion === 2) {
+    return JSON.stringify({
+      schema_version: 2,
+      source_url: sourceURL,
+    });
+  }
   return JSON.stringify({
-    schema_version: 1,
+    schema_version: 3,
     source_url: sourceURL,
-    filename,
-    metadata: {
-      title: boundedText(item.title, 500) || path.basename(filename, path.extname(filename)),
-      artist: boundedText(item.artist, 500) || "Unknown Artist",
-      album: boundedText(item.album, 500) || "Unknown Album",
-      ...(Number.isFinite(duration) && duration > 0 ? { duration_seconds: duration } : {}),
-      ...(safeArtworkURL(item.artworkURL)?.href ? { artwork_url: safeArtworkURL(item.artworkURL).href } : {}),
-    },
+    media_kind: item.mediaKind === "video" ? "video" : "audio",
   });
+}
+
+async function putSourceLinkRegistration({ url, headers, item, signal }) {
+  const options = (body) => ({
+    method: "PUT",
+    headers,
+    body,
+    redirect: "manual",
+    signal,
+  });
+  let response = await fetch(url, options(sourceLinkRegistrationBody(item)));
+  if (item.mediaKind !== "video" && response.status === 400) {
+    const payload = await response.clone().json().catch(() => null);
+    if (payload?.error === "Unsupported source-link schema_version") {
+      await response.body?.cancel?.().catch(() => undefined);
+      response = await fetch(url, options(sourceLinkRegistrationBody(item, { schemaVersion: 2 })));
+    }
+  }
+  return response;
 }
 
 async function ensureServerUploadRetriesLoaded() {
@@ -1315,6 +1334,8 @@ if (process.platform === "win32") {
   } else {
     app.setAsDefaultProtocolClient("resonance");
   }
+} else if (process.platform === "darwin" && !app.isPackaged) {
+  app.setAsDefaultProtocolClient("resonance");
 }
 
 app.on("second-instance", (_event, commandLine) => {
@@ -1586,7 +1607,8 @@ ipcMain.handle("server:credentials:save", async (event, value) => {
 ipcMain.handle("account:session:load", async (_event, value) => {
   if (!accountSession) accountSession = await readAccountSession();
   if (!accountSession) return null;
-  if (!accountSession.profileID || !accountSession.displayName ||
+  if (!accountSession.profileID || accountSession.profileID !== accountSession.accountID ||
+      !accountSession.displayName ||
       accountSession.expiresAt <= Date.now() + 5 * 60_000) {
     try { return await refreshCurrentAccountSession(value?.profileID); }
     catch (error) {
@@ -1822,6 +1844,27 @@ ipcMain.handle("local-import:resolve", async (event, { source, mediaKind, baseUR
   }
 });
 
+ipcMain.handle("server:source-metadata", async (_event, { sourceURL, mediaKind } = {}) => {
+  if (!localImportEnabled()) throw new Error("Local link metadata resolution is disabled in this build.");
+  const source = preservedMediaSourceURL(sourceURL);
+  if (!source) throw new Error("The server returned an invalid saved source link.");
+  const normalizedMediaKind = mediaKind === "video" ? "video" : "audio";
+  const signal = AbortSignal.timeout(30_000);
+  const result = await resolveLocalImportSource(source, signal, () => {}, {
+    searchYouTubeAudioSources,
+  }, { mediaKind: normalizedMediaKind });
+  return {
+    title: boundedText(result?.track?.title, 500) || null,
+    artist: boundedText(result?.track?.artist, 500) || null,
+    album: boundedText(result?.track?.album, 500) || null,
+    duration: Number.isFinite(Number(result?.track?.durationSeconds))
+      ? Math.max(0, Number(result.track.durationSeconds))
+      : null,
+    artworkURL: safeArtworkURL(result?.track?.artworkURL)?.href || null,
+    mediaKind: normalizedMediaKind,
+  };
+});
+
 ipcMain.handle("local-import:start-external", async (event, value = {}) => {
   if (!localImportEnabled()) {
     return {
@@ -1950,7 +1993,7 @@ ipcMain.handle("local-import:cancel", (event) => {
 });
 
 ipcMain.handle("local-import:upload", async (event, {
-  baseURL, adminToken, profileID, filePath, title, artist, album, duration, artworkURL, mediaSourceURL, mode,
+  baseURL, adminToken, profileID, filePath, title, artist, album, duration, artworkURL, mediaSourceURL, mediaKind, mode,
 } = {}) => {
   if (!localImportEnabled()) {
     return { ok: false, error: { stage: "syncing", code: "FEATURE_DISABLED", message: "Local link import is disabled in this build." } };
@@ -1969,7 +2012,7 @@ ipcMain.handle("local-import:upload", async (event, {
       throw new LocalImportError("syncing", "INVALID_LOCAL_FILE", "The local song file is missing or empty.");
     }
     if (!adminToken) {
-      throw new LocalImportError("syncing", "ADMIN_KEY_REQUIRED", "Sign in with an administrator account before uploading this local song.");
+      throw new LocalImportError("syncing", "ADMIN_KEY_REQUIRED", "Sign in to your Resonance account before uploading this local song.");
     }
     const base = normalizeBaseURL(baseURL);
     const requestedMode = ["server_source_link", "reviewed_match"].includes(mode) ? mode : "local_file";
@@ -1997,19 +2040,15 @@ ipcMain.handle("local-import:upload", async (event, {
       force: true,
     });
     controller.signal.throwIfAborted();
-    const body = sourceLinkRegistrationBody({
-      title, artist, album, duration, artworkURL, mediaSourceURL,
-    }, filename);
-    const response = await fetch(url, {
-      method: "PUT",
+    const response = await putSourceLinkRegistration({
+      url,
       headers: {
         ...profileHeaders(adminToken, profileID),
         ...requestContext.expected.request_headers,
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      body,
-      redirect: "manual",
+      item: { mediaSourceURL, mediaKind },
       signal: controller.signal,
     });
     const { song: remoteSong } = await readServerUploadResponse(response, { serverOrigin: base.origin });
@@ -2364,7 +2403,7 @@ ipcMain.handle("server:source-import", async (event, settings = {}) => {
   const adminToken = canonicalCredentialToken(settings.adminToken);
   const configToken = canonicalCredentialToken(settings.token || adminToken);
   const profileID = String(settings.profileID || "default");
-  if (!adminToken) throw new Error("Sign in with an administrator account before importing a source link.");
+  if (!adminToken) throw new Error("Sign in to your Resonance account before importing a source link.");
   if (!configToken) throw new Error("A server credential is required before importing a source link.");
   if (settings.mode !== "server_source_link") {
     throw new Error("The source-import endpoint is available only for server source-link mode.");
@@ -2374,23 +2413,9 @@ ipcMain.handle("server:source-import", async (event, settings = {}) => {
     throw new Error("Source import requires the original canonical HTTPS YouTube song page.");
   }
   const requestContext = await clientConfigContext(base.href, profileID);
-  const metadata = settings.metadata && typeof settings.metadata === "object" && !Array.isArray(settings.metadata)
-    ? settings.metadata
-    : {};
-  const duration = Number(metadata.durationSeconds);
-  const safeMetadata = {
-    ...(boundedText(metadata.title, 500) ? { title: boundedText(metadata.title, 500) } : {}),
-    ...(boundedText(metadata.artist, 500) ? { artist: boundedText(metadata.artist, 500) } : {}),
-    ...(boundedText(metadata.album, 500) ? { album: boundedText(metadata.album, 500) } : {}),
-    ...(Number.isFinite(duration) && duration >= 0 && duration <= 7 * 24 * 60 * 60
-      ? { duration_seconds: duration }
-      : {}),
-  };
   const body = {
     schema_version: 1,
     source_page_url: sourcePageURL,
-    ...(boundedText(settings.filename, 500) ? { filename: safeFilename(settings.filename) } : {}),
-    ...(Object.keys(safeMetadata).length ? { metadata: safeMetadata } : {}),
   };
   await requireClientUploadMode({
     baseURL: base.href,
@@ -2544,6 +2569,16 @@ ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token,
   if (!Array.isArray(entries) || entries.length === 0 || entries.length > 500) {
     throw new Error("Listening history must contain between 1 and 500 entries.");
   }
+  const minimalEntries = entries.map((entry) => {
+    const id = boundedText(entry?.id, 128);
+    const songID = boundedText(entry?.remoteID || entry?.songID || entry?.song_id, 128);
+    const startedAt = new Date(entry?.startedAt || entry?.started_at || "").toISOString();
+    const listenedSeconds = Number(entry?.listenedSeconds ?? entry?.listened_seconds);
+    if (!id || !songID || !Number.isFinite(listenedSeconds) || listenedSeconds < 0) {
+      throw new Error("Listening history may sync only UUID-linked saved songs.");
+    }
+    return { id, song_id: songID, started_at: startedAt, listened_seconds: listenedSeconds };
+  });
   const base = normalizeBaseURL(baseURL);
   const response = await fetch(new URL("api/v1/listening-history", base), {
     method: "POST",
@@ -2552,7 +2587,7 @@ ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token,
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body: JSON.stringify({ client: "windows", entries }),
+    body: JSON.stringify({ entries: minimalEntries }),
   });
   if (response.status === 404 || response.status === 405) return { supported: false, accepted: 0 };
   if (!response.ok) throw await serverResponseError(response);
@@ -3034,6 +3069,59 @@ ipcMain.handle("server:stream:release", (event, value) => {
   return revokeServerStreamSession(sessionID);
 });
 
+async function downloadSavedSourceSong(song, options) {
+  const sourceURL = preservedMediaSourceURL(song?.source_url);
+  if (!sourceURL) throw new Error("The server returned an invalid saved source link.");
+  const mediaKind = song?.media_kind === "video" ? "video" : "audio";
+  const resolution = await resolveLocalImportSource(sourceURL, options.signal, options.onProgress, {
+    searchYouTubeAudioSources,
+  }, { mediaKind });
+  if (resolution?.track?.type === "playlist") {
+    throw new Error("A saved song link resolved to a playlist instead of one song.");
+  }
+  const candidate = resolution?.candidates?.[0];
+  if (!candidate?.sourceURL) throw new Error("No downloadable source matched this saved song link.");
+  const metadata = {
+    ...(candidate.importMetadata || resolution.track || {}),
+    sourceURL,
+  };
+  const imported = await importConfirmedSource({
+    sourceURL: candidate.sourceURL,
+    sourceIdentity: normalizeSourceIdentity(candidate.sourceIdentity, {
+      provider: resolution?.track?.provider,
+      providerID: resolution?.track?.trackID,
+      sourcePageURL: sourceURL,
+    }),
+    mediaKind,
+    metadata,
+    existing: options.existing,
+    destinationDirectory: options.destinationDirectory,
+    temporaryRoot: app.getPath("temp"),
+  }, options.signal, options.onProgress);
+  const duplicate = imported.kind === "duplicate" ? imported.track : null;
+  const filePath = duplicate?.filePath || imported.filePath;
+  if (!filePath) throw new Error("The resolved song did not produce a local file.");
+  return enrichedTrack(filePath, {
+    ...(duplicate || {}),
+    title: metadata.title,
+    artist: metadata.artist,
+    album: metadata.album,
+    duration: metadata.durationSeconds,
+    artwork: imported.artwork || duplicate?.artwork || null,
+    artworkURL: metadata.artworkURL || duplicate?.artworkURL || null,
+    size: imported.size || duplicate?.size,
+    sourceSha256: imported.sourceSha256 || duplicate?.sourceSha256,
+    contentSha256: imported.contentSha256 || duplicate?.contentSha256,
+    sourceURL,
+    sourceIdentity: imported.sourceIdentity || duplicate?.sourceIdentity,
+    remoteID: song.id,
+    sourceServer: options.serverOrigin,
+    syncProfileID: options.profileID,
+    remoteModified: null,
+    storageLocation: "server-cache",
+  });
+}
+
 ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existing = [], songIDs = null }) => {
   token = canonicalCredentialToken(token);
   if (!token) throw new Error("Sign in to your Resonance account.");
@@ -3083,7 +3171,8 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
     const remoteModified = song.modified_at || song.modified_utc || null;
     const expectedSize = Number(song.size);
     const expectedSHA256 = catalogSHA256(song);
-    const mediaLocation = validateCatalogMediaLocation(song);
+    const savedSourceURL = preservedMediaSourceURL(song.source_url);
+    const mediaLocation = savedSourceURL ? null : validateCatalogMediaLocation(song);
     const matching = existing.find((item) =>
       item.remoteID === song.id
       && matchesServerOrigin(item.sourceServer, base.origin)
@@ -3092,14 +3181,18 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
     if (matching?.filePath) {
       try {
         const information = await fs.stat(matching.filePath);
-        const correctSize = Number.isSafeInteger(expectedSize)
-          && expectedSize > 0
-          && expectedSize <= MAX_SERVER_MEDIA_BYTES
-          && information.size === expectedSize;
+        const correctSize = savedSourceURL
+          ? information.size > 0
+          : Number.isSafeInteger(expectedSize)
+            && expectedSize > 0
+            && expectedSize <= MAX_SERVER_MEDIA_BYTES
+            && information.size === expectedSize;
         const correctRevision = !matching.remoteModified || !remoteModified || matching.remoteModified === remoteModified;
-        const correctHash = information.isFile() && correctSize && expectedSHA256
-          ? await fileSHA256(matching.filePath) === expectedSHA256
-          : false;
+        const correctHash = savedSourceURL
+          ? true
+          : information.isFile() && correctSize && expectedSHA256
+            ? await fileSHA256(matching.filePath) === expectedSHA256
+            : false;
         alreadyDownloaded = information.isFile() && correctSize && correctRevision && correctHash;
       } catch {
         alreadyDownloaded = false;
@@ -3113,6 +3206,29 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
     }
     event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length, autoHide: false });
     try {
+      if (savedSourceURL) {
+        const downloadedTrack = await downloadSavedSourceSong(song, {
+          signal,
+          existing,
+          destinationDirectory: paths.remote,
+          serverOrigin: base.origin,
+          profileID: profileID || "default",
+          onProgress: (progress) => event.sender.send("server:transfer-progress", {
+            direction: "download",
+            currentFile: progress?.stage === "downloading" ? `Downloading ${remoteName}` : remoteName,
+            completed,
+            total: songs.length,
+            autoHide: false,
+          }),
+        });
+        if (matching?.id || existing.some((item) => item.id === downloadedTrack.id)) {
+          replacedTrackIDs.push(matching?.id || downloadedTrack.id);
+        }
+        downloaded.push(downloadedTrack);
+        completed += 1;
+        event.sender.send("server:transfer-progress", { direction: "download", currentFile: downloadedTrack.title, completed, total: songs.length, autoHide: false });
+        continue;
+      }
       let fileURL = sameOriginServerMediaURL(mediaLocation?.download_url || song.download_url, base, "download");
       let refreshedMediaLocation = false;
       const destination = matching?.filePath && path.dirname(path.resolve(matching.filePath)) === path.resolve(paths.remote)
@@ -3237,7 +3353,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
 
 ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, files, retryIDs, associationConflictPaths } = {}) => {
   adminToken = canonicalCredentialToken(adminToken);
-  if (!adminToken) throw new Error("Sign in with an administrator account.");
+  if (!adminToken) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
   const requestedProfileID = String(profileID || "default");
   await requireClientUploadMode({ baseURL: base.href, token: String(adminToken), profileID: requestedProfileID, mode: "local_file", force: true });
@@ -3270,6 +3386,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
       duration: Number(item?.duration) || 0,
       artworkURL: safeArtworkURL(item?.artworkURL)?.href || null,
       mediaSourceURL: preservedMediaSourceURL(item?.mediaSourceURL),
+      mediaKind: item?.mediaKind === "video" ? "video" : "audio",
       uploadFilename: serverUploadFilename(item?.filePath, item?.title),
       serverOrigin: base.origin,
       profileID: requestedProfileID,
@@ -3326,17 +3443,15 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
           force: true,
         });
         signal.throwIfAborted();
-        const body = sourceLinkRegistrationBody(item, filename);
-        const response = await fetch(url, {
-          method: "PUT",
+        const response = await putSourceLinkRegistration({
+          url,
           headers: {
             ...profileHeaders(adminToken, requestedProfileID),
             ...requestContext.expected.request_headers,
             "Content-Type": "application/json",
             Accept: "application/json",
           },
-          body,
-          redirect: "manual",
+          item,
           signal,
         });
         ({ song: remoteSong } = await readServerUploadResponse(response, { serverOrigin: base.origin }));
@@ -3445,7 +3560,10 @@ ipcMain.handle("server:delete", async (_event, { baseURL, adminToken, profileID,
   const encodedSongID = encodeURIComponent(String(songID || ""));
   if (!encodedSongID) throw new Error("Choose a server song to delete.");
   const response = await fetch(new URL(`api/v1/admin/songs/${encodedSongID}`, base), { method: "DELETE", headers: profileHeaders(adminToken, profileID) });
-  if (!response.ok) throw new Error(`Server returned HTTP ${response.status}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload?.error || `Server returned HTTP ${response.status}`);
+  }
   return true;
 });
 

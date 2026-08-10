@@ -104,6 +104,35 @@ struct PreviewRegressionTests {
         #expect(MacLocalImportChrome.mediaIcon(for: .video) == "play.rectangle.fill")
     }
 
+    @Test
+    func minimalServerCatalogKeepsMetadataOnDevice() throws {
+        let data = try #require("""
+        {
+          "id": "saved-song-uuid",
+          "source_url": "https://media.example/Local%20Title.m4a?token=preserved",
+          "download_url": "/api/v1/songs/saved-song-uuid/file",
+          "stream_url": "/api/v1/songs/saved-song-uuid/stream"
+        }
+        """.data(using: .utf8))
+        let song = try JSONDecoder().decode(RemoteSong.self, from: data)
+
+        #expect(song.id == "saved-song-uuid")
+        #expect(song.filename == "Local Title.m4a")
+        #expect(song.title == "Resolving metadata…")
+        #expect(song.artist == "On-device lookup")
+        #expect(song.album == "Link only")
+        #expect(song.size == 0)
+        #expect(song.sourceURL == "https://media.example/Local%20Title.m4a?token=preserved")
+        #expect(song.mediaKind == "audio")
+        #expect(song.isSourceLinkRecord)
+
+        let encoded = try JSONEncoder().encode(MacSourceImportRequest(
+            sourcePageURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+        ))
+        let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        #expect(Set(object.keys) == ["schema_version", "source_page_url"])
+    }
+
     @MainActor
     @Test
     func macDesktopPreferencesPersistBackgroundPresenceAndKeybinds() throws {
@@ -943,6 +972,64 @@ struct PreviewRegressionTests {
             dayCount: 1,
             now: now
         ).plays == 1)
+    }
+
+    @Test
+    func downloadedLocalCopyHydratesLegacyListeningHistoryWithoutGuessing() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let artwork = Data([0x89, 0x50, 0x4E, 0x47])
+        let downloaded = Track(
+            title: "Candle - Light/Speed (Geometry Dash / FUNHOUSE)",
+            artist: "EDMS and Candle / Audio",
+            album: "Current Local Metadata",
+            duration: 276,
+            artwork: .electric,
+            artworkData: artwork,
+            fileURL: URL(fileURLWithPath: "/private/tmp/candle-history-copy.m4a")
+        )
+        let entry = ListeningHistoryEntry(
+            trackID: UUID(),
+            startedAt: now,
+            listenedSeconds: 120,
+            serverOrigin: "https://resonance.example",
+            syncProfileID: "default",
+            remoteSongID: "old-server-song",
+            title: "Candle - Light/Speed (Geometry Dash / FUNHOUSE)",
+            artist: "Candle and EDMS / Audio",
+            album: "Imported",
+            duration: 276,
+            originatedOnThisDevice: false
+        )
+
+        let summary = ListeningHistoryCalendarSummary(
+            entries: [entry],
+            tracks: [downloaded],
+            dayCount: 1,
+            now: now
+        )
+        let hydrated = try #require(summary.songSeries.first?.track)
+        #expect(hydrated.id == downloaded.id)
+        #expect(hydrated.artworkData == artwork)
+        #expect(hydrated.album == "Current Local Metadata")
+        #expect(ListeningHistoryStatsSummary(entries: [entry], tracks: [downloaded]).songRanking.first?.track.id == downloaded.id)
+
+        let ambiguousCopy = Track(
+            title: downloaded.title,
+            artist: downloaded.artist,
+            album: "Different Copy",
+            duration: downloaded.duration,
+            artwork: .golden,
+            artworkData: Data([0x01]),
+            fileURL: URL(fileURLWithPath: "/private/tmp/candle-history-copy-2.m4a")
+        )
+        let unresolved = ListeningHistoryCalendarSummary(
+            entries: [entry],
+            tracks: [downloaded, ambiguousCopy],
+            dayCount: 1,
+            now: now
+        )
+        #expect(unresolved.songSeries.first?.track.id == entry.trackID)
+        #expect(unresolved.songSeries.first?.track.artworkData == nil)
     }
 
     @Test
