@@ -2124,7 +2124,6 @@ private struct ServerConnectionSheet: View {
     @State private var serverURLDraft = ""
     @State private var isConnecting = false
     @State private var validationMessage: String?
-    @State private var showingNativeAccountSignIn = false
     @State private var isEmailRevealed = false
 
     private enum ConnectionField: Hashable {
@@ -2174,10 +2173,14 @@ private struct ServerConnectionSheet: View {
                         }
                         Button("Sign in or create account") {
                             focusedField = nil
-                            showingNativeAccountSignIn = true
+                            Task {
+                                await library.signIn(with: .clerk, serverURL: serverURLDraft)
+                                serverURLDraft = library.serverURL
+                                validationMessage = library.serverConfigurationMessage
+                            }
                         }
                         .disabled(library.isAuthenticatingAccount || normalizedServerURL == nil)
-                        Text("Use email, Google, Apple, or Discord without leaving Resonance.")
+                        Text("Use email, Google, Apple, or Discord in the secure system browser.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -2251,13 +2254,6 @@ private struct ServerConnectionSheet: View {
                     Button("Done") { focusedField = nil }
                 }
             }
-            .sheet(isPresented: $showingNativeAccountSignIn, onDismiss: finishNativeSignInIfNeeded) {
-                if let serverURL = normalizedServerURL {
-                    ResonanceNativeAuthView(serverURL: serverURL)
-                } else {
-                    ContentUnavailableView("Invalid server URL", systemImage: "network.slash")
-                }
-            }
         }
     }
 
@@ -2265,15 +2261,6 @@ private struct ServerConnectionSheet: View {
         let value = serverURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: value), url.scheme?.lowercased() == "https", url.host != nil else { return nil }
         return url
-    }
-
-    private func finishNativeSignInIfNeeded() {
-        guard ResonanceClerkAuthCoordinator.shared.hasActiveSession else { return }
-        Task {
-            await library.completeNativeSignIn(serverURL: serverURLDraft)
-            serverURLDraft = library.serverURL
-            validationMessage = library.serverConfigurationMessage
-        }
     }
 
     @discardableResult

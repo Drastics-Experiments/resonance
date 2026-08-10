@@ -23,6 +23,8 @@ Outputs are written to `installers/macos/dist/`:
 - `Resonance-macOS.pkg` and its SHA-256 file
 - `latest-mac.json`, consumed by the in-app updater
 
-The app retains the original external bundle identifier so existing installations update in place. On first launch, it migrates old Application Support data, preferences, and Keychain entries to Resonance names, verifies the replacement, and removes the obsolete artifacts without losing the library or server keys.
+The app retains the original external bundle identifier so existing installations update in place. On first launch, it migrates old Application Support data and preferences to Resonance names, verifies the replacement, and removes obsolete filesystem artifacts without losing the library. Account sessions and legacy server secrets are kept in the app-private `server-credentials.json` file with user-only permissions.
 
-For signed production builds, provide `MACOS_APP_IDENTITY`, `MACOS_INSTALLER_IDENTITY`, and optionally a `NOTARY_PROFILE` configured for `xcrun notarytool`.
+Users upgrading from a build that did not use this private credential file must sign in once after updating.
+
+For signed production builds, provide `MACOS_APP_IDENTITY`, `MACOS_INSTALLER_IDENTITY`, `NOTARY_KEY_PATH`, `NOTARY_KEY_ID`, and `NOTARY_ISSUER_ID`.

@@ -3,7 +3,6 @@ import Combine
 import CryptoKit
 import Foundation
 import MediaPlayer
-import Security
 import UIKit
 import UniformTypeIdentifiers
 
@@ -682,13 +681,13 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             if session.profileID == syncProfileID {
                 syncProfileName = session.profileDisplayName
             }
-            try? Self.storeToken("", account: "client")
-            try? Self.storeToken("", account: "admin")
+            try? Self.storeToken("", key: "client")
+            try? Self.storeToken("", key: "admin")
             scheduleAccountRefresh(session)
         } else {
-            serverToken = Self.readToken(account: "client")
+            serverToken = Self.readToken(key: "client")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            serverAdminToken = Self.readToken(account: "admin")
+            serverAdminToken = Self.readToken(key: "admin")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
         configureAudioSession()
@@ -736,46 +735,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             accountRole = session.role
             accountDisplayName = session.profileDisplayName
             accountImageURL = session.imageURL
-            try? Self.storeToken("", account: "client")
-            try? Self.storeToken("", account: "admin")
-            guard applyServerConfiguration(
-                serverURL: session.baseURL.absoluteString,
-                accessToken: session.accessToken,
-                adminToken: session.accessToken
-            ) else { return }
-            if let profileID = session.profileID, !profileID.isEmpty {
-                selectSyncProfile(profileID, name: session.profileDisplayName)
-            }
-            scheduleAccountRefresh(session)
-            serverMessage = "Signed in with Clerk"
-            await refreshClientConfiguration()
-        } catch {
-            serverMessage = error.localizedDescription
-            serverConfigurationMessage = error.localizedDescription
-        }
-    }
-
-    func completeNativeSignIn(serverURL rawServerURL: String) async {
-        guard !isAuthenticatingAccount else { return }
-        isAuthenticatingAccount = true
-        serverMessage = "Finishing account sign-in…"
-        defer { isAuthenticatingAccount = false }
-        do {
-            let resolution = try MobileServerEndpointPolicy.resolve(rawServerURL)
-            let client = try ResonanceSocialAuthClient(baseURL: resolution.url)
-            let session = try await ResonanceClerkAuthCoordinator.shared.accountSession(
-                for: client,
-                migrationProfileID: syncProfileID
-            )
-            migrateConfirmedLegacyProfile(for: session)
-            try Self.storeAccountSession(session)
-            accountSession = session
-            accountEmail = session.email
-            accountRole = session.role
-            accountDisplayName = session.profileDisplayName
-            accountImageURL = session.imageURL
-            try? Self.storeToken("", account: "client")
-            try? Self.storeToken("", account: "admin")
+            try? Self.storeToken("", key: "client")
+            try? Self.storeToken("", key: "admin")
             guard applyServerConfiguration(
                 serverURL: session.baseURL.absoluteString,
                 accessToken: session.accessToken,
@@ -798,9 +759,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         accountSession = nil
         accountRefreshTask?.cancel()
         accountRefreshTask = nil
-        try? Self.storeToken("", account: Self.accountSessionKey)
-        try? Self.storeToken("", account: "client")
-        try? Self.storeToken("", account: "admin")
+        try? Self.storeToken("", key: Self.accountSessionKey)
+        try? Self.storeToken("", key: "client")
+        try? Self.storeToken("", key: "admin")
         accountEmail = nil
         accountRole = nil
         accountDisplayName = nil
@@ -811,9 +772,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         remoteSongs.removeAll()
         selectedRemoteSongIDs.removeAll()
         serverMessage = "Signed out"
-        if active?.usesNativeClerkSession == true {
-            await ResonanceClerkAuthCoordinator.shared.signOut()
-        } else if let active, let client = try? ResonanceSocialAuthClient(baseURL: active.baseURL) {
+        if let active, let client = try? ResonanceSocialAuthClient(baseURL: active.baseURL) {
             await client.signOut(active)
         }
     }
@@ -826,19 +785,13 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             || current.displayName?.isEmpty != false
         guard current.usesLegacyProductionServer
             || needsProfileHydration
-            || current.expiresAt <= Date().addingTimeInterval(current.usesNativeClerkSession ? 15 : 5 * 60)
+            || current.expiresAt <= Date().addingTimeInterval(5 * 60)
         else { return }
         isRefreshingAccountSession = true
         defer { isRefreshingAccountSession = false }
         do {
             let client = try ResonanceSocialAuthClient(baseURL: current.baseURL)
-            let refreshed = current.usesNativeClerkSession
-                ? try await ResonanceClerkAuthCoordinator.shared.accountSession(
-                    for: client,
-                    forceRefresh: true,
-                    migrationProfileID: current.profileID ?? syncProfileID
-                )
-                : try await client.refresh(current, migrationProfileID: syncProfileID)
+            let refreshed = try await client.refresh(current, migrationProfileID: syncProfileID)
             guard accountSession == current else { return }
             migrateConfirmedLegacyProfile(for: refreshed)
             try Self.storeAccountSession(refreshed)
@@ -872,8 +825,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private func scheduleAccountRefresh(_ session: ResonanceAccountSession) {
         accountRefreshTask?.cancel()
-        let leadTime: TimeInterval = session.usesNativeClerkSession ? 15 : 5 * 60
-        let delay = max(5, session.expiresAt.timeIntervalSinceNow - leadTime)
+        let delay = max(5, session.expiresAt.timeIntervalSinceNow - 5 * 60)
         accountRefreshTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
@@ -3679,15 +3631,15 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         let previousAdminToken = serverAdminToken
         do {
             if accountSession?.accessToken == accessToken {
-                try Self.storeToken("", account: "client")
-                try Self.storeToken("", account: "admin")
+                try Self.storeToken("", key: "client")
+                try Self.storeToken("", key: "admin")
             } else {
-                try Self.storeToken(accessToken, account: "client")
-                try Self.storeToken(adminToken, account: "admin")
+                try Self.storeToken(accessToken, key: "client")
+                try Self.storeToken(adminToken, key: "admin")
             }
         } catch {
-            try? Self.storeToken(previousAccessToken, account: "client")
-            try? Self.storeToken(previousAdminToken, account: "admin")
+            try? Self.storeToken(previousAccessToken, key: "client")
+            try? Self.storeToken(previousAdminToken, key: "admin")
             serverToken = previousAccessToken
             serverAdminToken = previousAdminToken
             serverConfigurationMessage = "Could not save the account session securely: \(error.localizedDescription)"
@@ -5463,11 +5415,18 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
     }
 
-    private static let keychainService = MobileLegacyAppMigration.keychainService
     private static let accountSessionKey = "account-session-v1"
 
+    private static var credentialStore: MobileFileCredentialStore {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let storeURL = support
+            .appendingPathComponent(MobileLegacyAppMigration.applicationSupportName, isDirectory: true)
+            .appendingPathComponent("server-credentials.json")
+        return MobileFileCredentialStore(storeURL: storeURL)
+    }
+
     private static func readAccountSession() -> ResonanceAccountSession? {
-        let raw = readToken(account: accountSessionKey)
+        let raw = readToken(key: accountSessionKey)
         guard let data = raw.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(ResonanceAccountSession.self, from: data)
     }
@@ -5477,63 +5436,15 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         guard let raw = String(data: data, encoding: .utf8) else {
             throw ResonanceSocialAuthError.invalidConfiguration
         }
-        try storeToken(raw, account: accountSessionKey)
+        try storeToken(raw, key: accountSessionKey)
     }
 
-    private struct KeychainStoreError: LocalizedError {
-        let operation: String
-        let status: OSStatus
-
-        var errorDescription: String? {
-            let detail = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
-            return "Keychain \(operation) failed: \(detail)"
-        }
+    private static func storeToken(_ token: String, key: String) throws {
+        try credentialStore.save(token, key: key)
     }
 
-    private static func storeToken(_ token: String, account: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: account,
-        ]
-        if token.isEmpty {
-            let status = SecItemDelete(query as CFDictionary)
-            guard status == errSecSuccess || status == errSecItemNotFound else {
-                throw KeychainStoreError(operation: "delete", status: status)
-            }
-            return
-        }
-
-        let data = Data(token.utf8)
-        let updateStatus = SecItemUpdate(
-            query as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
-        )
-        if updateStatus == errSecSuccess { return }
-        guard updateStatus == errSecItemNotFound else {
-            throw KeychainStoreError(operation: "update", status: updateStatus)
-        }
-
-        var newItem = query
-        newItem[kSecValueData as String] = data
-        let addStatus = SecItemAdd(newItem as CFDictionary, nil)
-        guard addStatus == errSecSuccess else {
-            throw KeychainStoreError(operation: "add", status: addStatus)
-        }
-    }
-
-    private static func readToken(account: String) -> String {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return "" }
-        return (String(data: data, encoding: .utf8) ?? "")
+    private static func readToken(key: String) -> String {
+        (credentialStore.read(key: key) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

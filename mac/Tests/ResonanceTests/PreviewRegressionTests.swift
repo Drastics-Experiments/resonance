@@ -164,20 +164,20 @@ struct PreviewRegressionTests {
     }
 
     @Test
-    func plaintextCredentialsAreLimitedToPreviewBundles() {
-        #expect(CredentialStorePolicy.usesPlaintextStore(
+    func previewBundlePolicyRecognizesOnlyExpectedIdentifiers() {
+        #expect(CredentialStorePolicy.isPreviewBundle(
             bundleIdentifier: CredentialStorePolicy.previewBundleIdentifier
         ))
-        #expect(CredentialStorePolicy.usesPlaintextStore(
+        #expect(CredentialStorePolicy.isPreviewBundle(
             bundleIdentifier: CredentialStorePolicy.previewBundleIdentifier + ".worktree.w0123456789ab"
         ))
-        #expect(!CredentialStorePolicy.usesPlaintextStore(
+        #expect(!CredentialStorePolicy.isPreviewBundle(
             bundleIdentifier: CredentialStorePolicy.previewBundleIdentifier + ".untrusted"
         ))
-        #expect(!CredentialStorePolicy.usesPlaintextStore(
+        #expect(!CredentialStorePolicy.isPreviewBundle(
             bundleIdentifier: "com.gavindietrich.Resonance"
         ))
-        #expect(!CredentialStorePolicy.usesPlaintextStore(bundleIdentifier: nil))
+        #expect(!CredentialStorePolicy.isPreviewBundle(bundleIdentifier: nil))
     }
 
     @MainActor
@@ -1067,19 +1067,19 @@ struct PreviewRegressionTests {
         let storeURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("ResonancePreviewTests-\(UUID().uuidString)", isDirectory: true)
             .appendingPathComponent("server-credentials.json")
-        let account = "credential-round-trip"
-        let store = LocalServerCredentialStore(storeURL: storeURL)
+        let key = "credential-round-trip"
+        let store = FileServerCredentialStore(storeURL: storeURL)
         defer { try? FileManager.default.removeItem(at: storeURL.deletingLastPathComponent()) }
 
-        #expect(store.save("preview-test-token", account: account))
-        #expect(store.read(account: account) == "preview-test-token")
-        #expect(store.save("preview-test-token", account: account))
-        #expect(store.save("updated-preview-test-token", account: account))
-        #expect(store.read(account: account) == "updated-preview-test-token")
+        #expect(store.save("preview-test-token", key: key))
+        #expect(store.read(key: key) == "preview-test-token")
+        #expect(store.save("preview-test-token", key: key))
+        #expect(store.save("updated-preview-test-token", key: key))
+        #expect(store.read(key: key) == "updated-preview-test-token")
         let permissions = try? FileManager.default.attributesOfItem(atPath: storeURL.path)[.posixPermissions] as? NSNumber
         #expect(permissions?.intValue == 0o600)
-        #expect(store.delete(account: account))
-        #expect(store.read(account: account) == nil)
+        #expect(store.delete(key: key))
+        #expect(store.read(key: key) == nil)
     }
 
     @Test
@@ -1094,9 +1094,9 @@ struct PreviewRegressionTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: storeURL.path)
 
-        let store = LocalServerCredentialStore(storeURL: storeURL)
-        #expect(store.read(account: "music-server-client-token") == "legacy-client")
-        #expect(store.read(account: "music-server-admin-token") == "legacy-admin")
+        let store = FileServerCredentialStore(storeURL: storeURL)
+        #expect(store.read(key: "music-server-client-token") == "legacy-client")
+        #expect(store.read(key: "music-server-admin-token") == "legacy-admin")
         let directoryPermissions = try #require(
             FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber
         )

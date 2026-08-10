@@ -58,8 +58,6 @@ enum ResonanceSocialAuthProvider: String, CaseIterable, Identifiable {
 }
 
 struct ResonanceAccountSession: Codable, Equatable {
-    static let nativeRefreshMarker = "clerk-native-session"
-
     let accessToken: String
     let refreshToken: String
     let expiresAt: Date
@@ -78,7 +76,6 @@ struct ResonanceAccountSession: Codable, Equatable {
     }
 
     var isAdmin: Bool { role == "admin" }
-    var usesNativeClerkSession: Bool { refreshToken == Self.nativeRefreshMarker }
     var usesLegacyProductionServer: Bool {
         baseURL.scheme?.lowercased() == "https"
             && baseURL.host?.lowercased() == resonanceLegacyProductionHost
@@ -87,11 +84,6 @@ struct ResonanceAccountSession: Codable, Equatable {
     var profileDisplayName: String {
         ResonanceEmailPrivacy.safeDisplayName(displayName, email: email)
     }
-}
-
-struct ResonanceNativeAuthConfiguration: Equatable {
-    let publishableKey: String
-    let tokenTemplate: String
 }
 
 enum ResonanceSocialAuthError: LocalizedError {
@@ -111,8 +103,6 @@ enum ResonanceSocialAuthError: LocalizedError {
 private struct ResonanceAuthConfigurationPayload: Decodable {
     let version: Int
     let issuer: URL
-    let publishableKey: String?
-    let tokenTemplate: String?
     let authorizationEndpoint: URL
     let tokenEndpoint: URL
     let userEndpoint: URL
@@ -124,8 +114,6 @@ private struct ResonanceAuthConfigurationPayload: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case version, issuer, scope, providers
-        case publishableKey = "publishable_key"
-        case tokenTemplate = "token_template"
         case authorizationEndpoint = "authorization_endpoint"
         case tokenEndpoint = "token_endpoint"
         case userEndpoint = "user_endpoint"
@@ -179,7 +167,6 @@ private struct ResonanceAuthConfiguration {
     let clientID: String
     let scope: String
     let providers: Set<String>
-    let native: ResonanceNativeAuthConfiguration?
 }
 
 struct ResonanceSocialAuthClient {
@@ -242,46 +229,6 @@ struct ResonanceSocialAuthClient {
         return try await authorizedSession(token, migrationProfileID: migrationProfileID)
     }
 
-    func nativeConfiguration() async throws -> ResonanceNativeAuthConfiguration {
-        guard let native = try await configuration().native else {
-            throw ResonanceSocialAuthError.rejected("This Resonance server has not enabled native account sign-in.")
-        }
-        return native
-    }
-
-    func accountSession(
-        nativeToken: String,
-        migrationProfileID: String? = nil
-    ) async throws -> ResonanceAccountSession {
-        let expiration = try Self.jwtExpiration(nativeToken)
-        let account = try await account(accessToken: nativeToken, migrationProfileID: migrationProfileID)
-        let profileID = ResonanceAccountScopePolicy.resolvedProfileID(
-            accountID: account.id,
-            serverProfileID: account.profileID,
-            requestedLegacyProfileID: migrationProfileID
-        )
-        let displayName = try account.displayName.map { try Self.bounded($0) }
-        guard let email = account.email?.lowercased(), !email.isEmpty,
-              let role = account.role, role == "member" || role == "admin",
-              let accountID = account.id, !accountID.isEmpty,
-              let profileID else {
-            throw ResonanceSocialAuthError.rejected(account.error ?? "This account could not access this Resonance server.")
-        }
-        return ResonanceAccountSession(
-            accessToken: try Self.bounded(nativeToken),
-            refreshToken: ResonanceAccountSession.nativeRefreshMarker,
-            expiresAt: expiration,
-            email: email,
-            role: role,
-            baseURL: baseURL,
-            accountID: accountID,
-            profileID: profileID,
-            displayName: displayName,
-            imageURL: account.imageURL,
-            migratedProfileID: account.migratedProfileID
-        )
-    }
-
     func refresh(
         _ current: ResonanceAccountSession,
         migrationProfileID: String? = nil
@@ -335,21 +282,6 @@ struct ResonanceSocialAuthClient {
         }
         let providers = Set(payload.providers).intersection(Self.supportedProviders)
         guard !providers.isEmpty else { throw ResonanceSocialAuthError.invalidConfiguration }
-        let native: ResonanceNativeAuthConfiguration?
-        if payload.version == 3 {
-            guard let publishableKey = payload.publishableKey,
-                  let tokenTemplate = payload.tokenTemplate,
-                  Self.validPublishableKey(publishableKey, issuer: issuer),
-                  tokenTemplate == "resonance" else {
-                throw ResonanceSocialAuthError.invalidConfiguration
-            }
-            native = ResonanceNativeAuthConfiguration(
-                publishableKey: try Self.bounded(publishableKey),
-                tokenTemplate: tokenTemplate
-            )
-        } else {
-            native = nil
-        }
         return ResonanceAuthConfiguration(
             issuer: issuer,
             authorizationEndpoint: payload.authorizationEndpoint,
@@ -357,8 +289,7 @@ struct ResonanceSocialAuthClient {
             logoutEndpoint: payload.logoutEndpoint,
             clientID: try Self.bounded(payload.clientID),
             scope: payload.scope,
-            providers: providers,
-            native: native
+            providers: providers
         )
     }
 
@@ -439,34 +370,6 @@ struct ResonanceSocialAuthClient {
             throw ResonanceSocialAuthError.rejected(account.error ?? "This account could not access this Resonance server.")
         }
         return account
-    }
-
-    private static func validPublishableKey(_ value: String, issuer: URL) -> Bool {
-        let parts = value.split(separator: "_", maxSplits: 2, omittingEmptySubsequences: false)
-        guard parts.count == 3, parts[0] == "pk", parts[1] == "test" || parts[1] == "live" else { return false }
-        var encoded = String(parts[2]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        encoded += String(repeating: "=", count: (4 - encoded.count % 4) % 4)
-        guard let data = Data(base64Encoded: encoded),
-              let frontend = String(data: data, encoding: .utf8)?.trimmingCharacters(in: CharacterSet(charactersIn: "$")),
-              let url = URL(string: "https://\(frontend)") else { return false }
-        return httpsOrigin(url) == issuer
-    }
-
-    private static func jwtExpiration(_ token: String) throws -> Date {
-        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 3 else { throw ResonanceSocialAuthError.invalidConfiguration }
-        var encoded = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        encoded += String(repeating: "=", count: (4 - encoded.count % 4) % 4)
-        guard let data = Data(base64Encoded: encoded),
-              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let seconds = payload["exp"] as? TimeInterval else {
-            throw ResonanceSocialAuthError.invalidConfiguration
-        }
-        let expiration = Date(timeIntervalSince1970: seconds)
-        guard expiration > Date(), expiration < Date().addingTimeInterval(7 * 24 * 60 * 60) else {
-            throw ResonanceSocialAuthError.invalidConfiguration
-        }
-        return expiration
     }
 
     private static func httpsOrigin(_ url: URL) -> URL? {

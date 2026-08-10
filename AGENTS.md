@@ -87,16 +87,16 @@ Before changing an endpoint shape, update and test every client and coordinate t
 
 ## Credentials and persistence
 
-Do not replace secure credential storage with plaintext settings just to avoid password prompts, except for the explicitly documented Preview-only local store below.
+Do not add or use Keychain accounts in application runtime code. Apple clients must keep account sessions and legacy server secrets only in their app-private credential files; do not use `/usr/bin/security`, Security-framework item APIs, or a dependency that persists authentication sessions outside those files.
 
-- macOS: server URL in preferences; access/admin secrets use the existing credential-store/keychain compatibility path in `PlayerModel.swift`.
-- macOS Preview: launching or relaunching `/private/tmp/Resonance Preview.app` must never show a macOS password, passcode, Keychain-access, or Keychain-permission-change prompt. The Preview-only build must not read, write, migrate, or delete server credentials through Keychain or `/usr/bin/security`. It persists access/admin values in `~/Library/Application Support/Resonance/server-credentials.json`, with the directory restricted to mode `0700` and the file to mode `0600`. This exception applies only to the disposable native Preview app; keep the production macOS app on its secure credential-store path. Verify by rebuilding/re-signing and relaunching at least twice with different executable hashes; neither launch may show either kind of authorization prompt.
+- macOS: the server URL remains in preferences; account sessions and legacy access/admin secrets persist in `~/Library/Application Support/Resonance/server-credentials.json`, with the directory restricted to mode `0700` and the file to mode `0600`.
+- macOS Preview: launching or relaunching `/private/tmp/Resonance Preview.app` must never show a macOS password, passcode, credential-access, or permission-change prompt. It uses the same private credential-file policy as production. Verify by rebuilding/re-signing and relaunching at least twice with different executable hashes; neither launch may show an authorization prompt.
 - macOS Preview must preserve the ability to switch between existing server profiles from `Switch Profile` in the top-right local-profile menu. Keep that interaction to one profile-name-or-ID field and resolve it through `/api/v1/profiles`; do not add profile creation, deletion, management lists, or a dropdown, and do not put the profile field back in the server-credentials sheet. Persist the selected profile and keep local imports visible while scoping server-backed songs, likes, and playlists to it.
-- iOS: access and admin keys are stored separately in Keychain; library files live in the app's private Application Support directory.
+- iOS: account sessions and legacy access/admin secrets persist in the app's private Application Support credential file with iOS file protection; library files remain in the same private Application Support container.
 - Android: `CredentialStore.kt` owns credential persistence; library data is managed by `LibraryRepository.kt`.
 - Windows: credentials are handled through Electron main-process IPC and encrypted OS-backed storage; state lives under Electron's per-user `userData` directory.
 
-Preserve existing production bundle/application IDs. Persistence paths may be renamed only through a copy-or-move, verify, then delete migration so updates do not wipe libraries, playlists, downloaded music, or credentials.
+Preserve existing production bundle/application IDs. Filesystem persistence paths may be renamed only through a copy-or-move, verify, then delete migration so updates do not wipe libraries, playlists, or downloaded music. Do not access a prohibited credential store for migration; require the user to sign in again instead.
 
 ## CI, installers, and releases
 

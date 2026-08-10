@@ -24,8 +24,7 @@ final class MobileLegacyAppMigrationTests: XCTestCase {
 
         XCTAssertTrue(MobileLegacyAppMigration.run(
             fileManager: fileManager,
-            applicationSupportRoot: temporaryRoot,
-            migrateCredentials: false
+            applicationSupportRoot: temporaryRoot
         ))
         XCTAssertFalse(fileManager.fileExists(atPath: legacyRoot.path))
         let migratedSong = temporaryRoot
@@ -53,8 +52,7 @@ final class MobileLegacyAppMigrationTests: XCTestCase {
 
         XCTAssertTrue(MobileLegacyAppMigration.run(
             fileManager: fileManager,
-            applicationSupportRoot: temporaryRoot,
-            migrateCredentials: false
+            applicationSupportRoot: temporaryRoot
         ))
         XCTAssertFalse(fileManager.fileExists(atPath: legacyRoot.path))
         XCTAssertEqual(
@@ -67,5 +65,30 @@ final class MobileLegacyAppMigrationTests: XCTestCase {
                 .appendingPathComponent("library.json")),
             Data("legacy".utf8)
         )
+    }
+
+    func testCredentialFileRoundTripsAndUsesPrivatePermissions() throws {
+        let fileManager = FileManager.default
+        let temporaryRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("resonance-mobile-credentials-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporaryRoot) }
+
+        let storeURL = temporaryRoot.appendingPathComponent("server-credentials.json")
+        let store = MobileFileCredentialStore(storeURL: storeURL)
+        try store.save("session-value", key: "account-session-v1")
+
+        XCTAssertEqual(store.read(key: "account-session-v1"), "session-value")
+        XCTAssertEqual(
+            (try fileManager.attributesOfItem(atPath: temporaryRoot.path)[.posixPermissions] as? NSNumber)?.intValue,
+            0o700
+        )
+        XCTAssertEqual(
+            (try fileManager.attributesOfItem(atPath: storeURL.path)[.posixPermissions] as? NSNumber)?.intValue,
+            0o600
+        )
+
+        try store.delete(key: "account-session-v1")
+        XCTAssertNil(store.read(key: "account-session-v1"))
+        XCTAssertFalse(fileManager.fileExists(atPath: storeURL.path))
     }
 }

@@ -606,7 +606,7 @@ test("renders every Windows select through the themed custom dropdown", () => {
   assert.doesNotMatch(styleSource, /\.resonance-select-native\s*\{/);
 });
 
-test("avoids macOS Keychain access while persisting source Preview credentials locally", () => {
+test("persists source Preview credentials without system credential commands", () => {
   const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
   const retiredStorageName = ["Liked", " Songs"].join("");
   assert.doesNotMatch(mainSource, /\{ app, BrowserWindow, dialog, ipcMain, safeStorage, shell \}/);

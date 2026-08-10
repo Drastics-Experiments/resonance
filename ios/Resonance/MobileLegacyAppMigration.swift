@@ -1,21 +1,16 @@
 import Foundation
-import Security
 
 enum MobileAppCompatibility {
     static let legacyApplicationSupportName = ["Liked", "SongsMobile"].joined()
-    static let legacyKeychainService = "com.gavindietrich." + legacyApplicationSupportName
 }
 
 enum MobileLegacyAppMigration {
     static let applicationSupportName = "Resonance"
-    static let keychainService = "com.gavindietrich.Resonance"
-    private static let credentialAccounts = ["client", "admin", "account-session-v1"]
 
     @discardableResult
     static func run(
         fileManager: FileManager = .default,
-        applicationSupportRoot: URL? = nil,
-        migrateCredentials: Bool = true
+        applicationSupportRoot: URL? = nil
     ) -> Bool {
         let support = applicationSupportRoot
             ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -27,54 +22,7 @@ enum MobileLegacyAppMigration {
             to: support.appendingPathComponent(applicationSupportName, isDirectory: true),
             fileManager: fileManager
         )
-        if migrateCredentials { migrateKeychainCredentials() }
         return storageMigrated
-    }
-
-    private static func migrateKeychainCredentials() {
-        for account in credentialAccounts {
-            guard let legacyData = readKeychainData(
-                service: MobileAppCompatibility.legacyKeychainService,
-                account: account
-            ) else { continue }
-            let currentData = readKeychainData(service: keychainService, account: account)
-            if currentData != nil
-                || (saveKeychainData(legacyData, service: keychainService, account: account)
-                    && readKeychainData(service: keychainService, account: account) == legacyData) {
-                deleteKeychainData(
-                    service: MobileAppCompatibility.legacyKeychainService,
-                    account: account
-                )
-            }
-        }
-    }
-
-    private static func readKeychainData(service: String, account: String) -> Data? {
-        var query = keychainQuery(service: service, account: account)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
-        return result as? Data
-    }
-
-    private static func saveKeychainData(_ data: Data, service: String, account: String) -> Bool {
-        var query = keychainQuery(service: service, account: account)
-        query[kSecValueData as String] = data
-        let status = SecItemAdd(query as CFDictionary, nil)
-        return status == errSecSuccess || status == errSecDuplicateItem
-    }
-
-    private static func deleteKeychainData(service: String, account: String) {
-        SecItemDelete(keychainQuery(service: service, account: account) as CFDictionary)
-    }
-
-    private static func keychainQuery(service: String, account: String) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
     }
 
     private static func migrateDirectory(
@@ -161,5 +109,101 @@ enum MobileLegacyAppMigration {
             counter += 1
         }
         return candidate
+    }
+}
+
+struct MobileFileCredentialStore {
+    let storeURL: URL
+
+    private struct StoredCredentials: Codable {
+        var values: [String: String] = [:]
+    }
+
+    func read(key: String) -> String? {
+        (try? load())?.values[key]
+    }
+
+    func save(_ value: String, key: String) throws {
+        guard !value.isEmpty else {
+            try delete(key: key)
+            return
+        }
+        guard !value.contains("\n"), !value.contains("\r") else {
+            throw CocoaError(.fileWriteInapplicableStringEncoding)
+        }
+        var stored = try load()
+        guard stored.values[key] != value else { return }
+        stored.values[key] = value
+        try persist(stored)
+    }
+
+    func delete(key: String) throws {
+        var stored = try load()
+        guard stored.values.removeValue(forKey: key) != nil else { return }
+        if stored.values.isEmpty {
+            if FileManager.default.fileExists(atPath: storeURL.path) {
+                try FileManager.default.removeItem(at: storeURL)
+            }
+            return
+        }
+        try persist(stored)
+    }
+
+    private func load() throws -> StoredCredentials {
+        try hardenExistingPermissions()
+        guard FileManager.default.fileExists(atPath: storeURL.path) else {
+            return StoredCredentials()
+        }
+        let data = try Data(contentsOf: storeURL)
+        return try JSONDecoder().decode(StoredCredentials.self, from: data)
+    }
+
+    private func hardenExistingPermissions() throws {
+        let directory = storeURL.deletingLastPathComponent()
+        if FileManager.default.fileExists(atPath: directory.path) {
+            try FileManager.default.setAttributes(
+                [
+                    .posixPermissions: 0o700,
+                    .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
+                ],
+                ofItemAtPath: directory.path
+            )
+        }
+        if FileManager.default.fileExists(atPath: storeURL.path) {
+            try FileManager.default.setAttributes(
+                [
+                    .posixPermissions: 0o600,
+                    .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
+                ],
+                ofItemAtPath: storeURL.path
+            )
+        }
+    }
+
+    private func persist(_ stored: StoredCredentials) throws {
+        let directory = storeURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [
+                .posixPermissions: 0o700,
+                .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
+            ]
+        )
+        try FileManager.default.setAttributes(
+            [
+                .posixPermissions: 0o700,
+                .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
+            ],
+            ofItemAtPath: directory.path
+        )
+        try JSONEncoder().encode(stored).write(to: storeURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [
+                .posixPermissions: 0o600,
+                .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
+            ],
+            ofItemAtPath: storeURL.path
+        )
     }
 }

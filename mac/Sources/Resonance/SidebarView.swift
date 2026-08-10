@@ -122,7 +122,6 @@ struct MacSettingsSheet: View {
     @State private var serverURLDraft = ""
     @State private var didLoadServerDrafts = false
     @State private var confirmingCredentialRemoval = false
-    @State private var showingNativeAccountSignIn = false
     @State private var isEmailRevealed = false
 
     init(opensServerPanel: Bool = false) {
@@ -239,14 +238,6 @@ struct MacSettingsSheet: View {
         } message: {
             Text("The Resonance account session and server URL will be removed from this Mac. Downloaded songs stay in your library.")
         }
-        .sheet(isPresented: $showingNativeAccountSignIn, onDismiss: finishNativeSignInIfNeeded) {
-            if let serverURL = normalizedServerURL {
-                ResonanceNativeAuthView(serverURL: serverURL)
-            } else {
-                ContentUnavailableView("Invalid server URL", systemImage: "network.slash")
-                    .frame(width: 560, height: 620)
-            }
-        }
     }
 
     private var generalPanel: some View {
@@ -308,9 +299,7 @@ struct MacSettingsSheet: View {
                     Text("Music Server")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                         .foregroundStyle(Color.appInk)
-                    Text(model.usesPreviewCredentialStore
-                        ? "The disposable Preview keeps its account session in its private local store."
-                        : "Your Resonance account session is stored securely in Keychain.")
+                    Text("Your Resonance account session is kept in private app storage on this Mac.")
                         .font(.system(size: 10))
                         .foregroundStyle(Color.appMuted)
                 }
@@ -346,20 +335,14 @@ struct MacSettingsSheet: View {
                                 .font(.system(size: 9, weight: .semibold))
                                 .foregroundStyle(Color.appMuted)
                         }
-                        Button(model.usesPreviewCredentialStore ? "Sign in securely" : "Sign in or create account") {
-                            if model.usesPreviewCredentialStore {
-                                Task { await model.signIn(with: .clerk, serverURL: serverURLDraft) }
-                            } else {
-                                showingNativeAccountSignIn = true
-                            }
+                        Button("Sign in or create account") {
+                            Task { await model.signIn(with: .clerk, serverURL: serverURLDraft) }
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(Color.appViolet)
                         .frame(maxWidth: .infinity)
                         .disabled(model.isAuthenticatingAccount || normalizedServerURL == nil)
-                        Text(model.usesPreviewCredentialStore
-                            ? "Preview uses the secure system browser so it never touches Keychain."
-                            : "Use email, Google, Apple, or Discord without leaving Resonance.")
+                        Text("Use email, Google, Apple, or Discord in the secure system browser.")
                             .font(.system(size: 9))
                             .foregroundStyle(Color.appMuted)
                     }
@@ -411,11 +394,6 @@ struct MacSettingsSheet: View {
         let value = serverURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: value), url.scheme?.lowercased() == "https", url.host != nil else { return nil }
         return url
-    }
-
-    private func finishNativeSignInIfNeeded() {
-        guard ResonanceClerkAuthCoordinator.shared.hasActiveSession else { return }
-        Task { await model.completeNativeSignIn(serverURL: serverURLDraft) }
     }
 
     private var keybindPanel: some View {

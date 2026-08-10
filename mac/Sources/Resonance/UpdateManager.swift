@@ -90,7 +90,7 @@ final class UpdateManager: ObservableObject {
         self.session = session
         updateDirectoryOverride = updateDirectory
         self.updatesEnabled = updatesEnabled
-            ?? !CredentialStorePolicy.usesPlaintextStore(bundleIdentifier: Bundle.main.bundleIdentifier)
+            ?? !CredentialStorePolicy.isPreviewBundle(bundleIdentifier: Bundle.main.bundleIdentifier)
     }
 
     var canInstall: Bool { downloadedArchive != nil && manifest != nil && !isBusy }
