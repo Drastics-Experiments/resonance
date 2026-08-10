@@ -592,9 +592,10 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(rawUploadHandler, /\.\.\.profileHeaders\(adminToken, requestedProfileID\),[\s\S]+\.\.\.requestContext\.expected\.request_headers/);
   assert.match(rawUploadHandler, /while \(attempts < 3 && !remoteSong\)[\s\S]+requireClientUploadMode\(\{[\s\S]+mode: "local_file",[\s\S]+force: true,[\s\S]+signal\.throwIfAborted\(\);[\s\S]+putSourceLinkRegistration\(\{/);
   assert.match(rawUploadHandler, /putSourceLinkRegistration\(\{[\s\S]+"Content-Type": "application\/json"[\s\S]+item,/);
+  assert.match(rawUploadHandler, /for \(const item of requestedFiles\)[\s\S]+\{ song: remoteSong, duplicate \}[\s\S]+if \(duplicate\) duplicates \+= 1;[\s\S]+completed \+= 1;/);
   assert.doesNotMatch(rawUploadHandler, /createReadStream\(filePath\)|application\/octet-stream|duplex: "half"/);
   assert.match(mainSource, /error\.name = "ClientUploadPolicyError";[\s\S]+error\.retryable = false;/);
-  assert.match(rawUploadHandler, /if \(error\?\.retryable === false\) throw error;[\s\S]+policyBlockedUploadEntries\([\s\S]+completedRetryIDs[\s\S]+rememberRetry\(item\);[\s\S]+failed\.push\(failure\);[\s\S]+return \{ uploaded, results, failed, policyBlocked: true \}/);
+  assert.match(rawUploadHandler, /if \(error\?\.retryable === false\) throw error;[\s\S]+policyBlockedUploadEntries\([\s\S]+completedRetryIDs[\s\S]+rememberRetry\(item\);[\s\S]+failed\.push\(failure\);[\s\S]+return \{ uploaded, duplicates, results, failed, policyBlocked: true \}/);
   assert.match(serverSyncHandler, /clientConfigContext\(base\.href, profileID\)/);
   assert.match(serverSyncHandler, /const downloadHeaders = \{[\s\S]+\.\.\.profileHeaders\(token, profileID\),[\s\S]+\.\.\.requestContext\.expected\.request_headers/);
   assert.equal([...serverSyncHandler.matchAll(/headers: downloadHeaders/g)].length, 2);

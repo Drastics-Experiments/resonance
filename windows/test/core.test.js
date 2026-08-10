@@ -36,6 +36,7 @@ import {
   planMissingDownloadedUploads,
   playlistArtworkTrackIDs,
   playlistInsertionIndex,
+  preservedUploadSourceURL,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
   serverSongMetadataMatches,
@@ -70,7 +71,7 @@ import discordRPC from "../discord-rpc.cjs";
 
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = updaterFeed;
 const { isManagedLibraryFile } = libraryPaths;
-const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload } = serverDownload;
+const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload, serverDownloadDisplayName } = serverDownload;
 const { discordArtworkURL, sanitizeDiscordActivity } = discordRPC;
 
 test("playlist artwork uses only the first four custom-playlist songs", () => {
@@ -999,6 +1000,9 @@ test("hides inline playlist row buttons while preserving drag and context contro
   assert.match(appSource, /function renderTrackPlaylistContextMenu\(track, options\)/);
   assert.match(appSource, /label: "Add to playlist"/);
   assert.match(appSource, /label: `Remove from \$\{activePlaylist\.name\}`,[\s\S]+danger: true/);
+  assert.match(appSource, /label: "Remove from device",[\s\S]+deleteStoredTracks\(\[track\.id\]\)/);
+  assert.doesNotMatch(appSource, /options\.source === "storage"[\s\S]{0,300}label: "Remove from device"/);
+  assert.match(appSource, /async function deleteStoredTracks[\s\S]+audio\.removeAttribute\("src"\)[\s\S]+audio\.load\(\)[\s\S]+await api\.deleteAudio\(track\.filePath\)/);
   assert.match(appSource, /activePlaybackPlaylistID === activePlaylist\.id/);
   assert.match(appSource, /button\.oncontextmenu = \(event\) => openTrackContextMenu/);
   assert.match(appSource, /data-storage-track/);
@@ -1157,6 +1161,12 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /function toggleLocalImportPreview\(index\)/);
   assert.match(appSource, /localImportPreviewAudio\.ontimeupdate/);
   assert.match(appSource, /api\.previewLocalImport\(candidate\.sourceURL\)/);
+  assert.match(appSource, /function setLocalImportOperationLocked\(locked, \{ keepSourceEditable = false \} = \{\}\)[\s\S]+disabled = locked && !keepSourceEditable/);
+  assert.match(appSource, /setLocalImportOperationLocked\(true, \{ keepSourceEditable: true \}\)/);
+  assert.match(appSource, /localImportResolutionRestartPending = true;[\s\S]+api\.cancelLocalImport\(\)/);
+  assert.match(appSource, /const restartResolution = localImportResolutionRestartPending[\s\S]+if \(restartResolution\) scheduleLocalImportResolution\(\)/);
+  assert.match(appSource, /function updateLocalImportTransfer\(value = \{\}\)[\s\S]+if \(\$\("#localImportDialog"\)\.open\) return/);
+  assert.match(appSource, /if \(!localImportResolution\) \$\("#cancelLocalImport"\)\.hidden = true;[\s\S]+hideServerTransfer\("local-import"\)/);
   assert.match(preloadSource, /previewLocalImport: \(sourceURL\) => ipcRenderer\.invoke\("local-import:preview"/);
   assert.match(preloadSource, /cancelLocalImportPreview: \(\) => ipcRenderer\.invoke\("local-import:preview:cancel"\)/);
   assert.match(mainSource, /ipcMain\.handle\("local-import:preview"/);
@@ -2021,6 +2031,19 @@ test("retries individual server downloads and reports every song that still fail
   assert.ok(packageJSON.build.files.includes("server-download.cjs"));
 });
 
+test("shows catalog song titles instead of internal server download filenames", () => {
+  assert.equal(
+    serverDownloadDisplayName({
+      title: "Actual Song Name",
+      name: "Track-0ae24d3e-3e34-4230-9775-39eb40a744d8.mp3",
+      filename: "Track-0ae24d3e-3e34-4230-9775-39eb40a744d8.mp3",
+    }, "Track-0ae24d3e-3e34-4230-9775-39eb40a744d8.mp3"),
+    "Actual Song Name",
+  );
+  assert.equal(serverDownloadDisplayName({ title: "  Trimmed Name  " }, "Track-id.mp3"), "Trimmed Name");
+  assert.equal(serverDownloadDisplayName({ name: "Legacy Song" }, "Track-id.mp3"), "Legacy Song");
+});
+
 test("replaces stale synced tracks instead of discarding the fresh download", () => {
   const state = normalizeState({
     ...createEmptyState(),
@@ -2119,20 +2142,25 @@ test("reconciling a stale downloaded identity removes its old playlist, like, an
   assert.deepEqual(state.deletedClipRangeKeys, ["remote:old-song"]);
 });
 
-test("plans only exact-context downloads and leaves metadata-only matches ambiguous", () => {
+test("plans every eligible link download while preserving server and profile boundaries", () => {
   const exactHash = "a".repeat(64);
+  const sourceURL = "https://media.example/song.m4a";
   const state = normalizeState({
     ...createEmptyState(),
     serverURL: "https://music.example",
     syncProfileID: "profile-a",
     tracks: [
       { id: "present", filePath: "/music/present.mp3", remoteID: "remote-present", sourceServer: "https://music.example", syncProfileID: "profile-a" },
-      { id: "missing", filePath: "/music/missing.mp3", remoteID: "remote-gone", sourceServer: "https://music.example", syncProfileID: "profile-a" },
+      { id: "missing", filePath: "/music/missing.mp3", remoteID: "remote-gone", sourceServer: "https://music.example", syncProfileID: "profile-a", sourceURL },
       { id: "hash-match", filePath: "/music/hash.mp3", remoteID: "old-id", sourceServer: "https://music.example", syncProfileID: "profile-a", contentSha256: exactHash },
       { id: "local", filePath: "/music/local.mp3", remoteID: null },
+      { id: "local-link", filePath: "/music/local-link.mp3", remoteID: null, sourceIdentity: { sourcePageURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw" } },
+      { id: "local-download-link", filePath: "/music/local-download.mp3", remoteID: null, downloadSourceURL: "https://media.example/downloaded.m4a" },
+      { id: "local-invalid-link", filePath: "/music/local-invalid.mp3", remoteID: null, sourceURL: "http://media.example/song.m4a" },
       { id: "other-profile", filePath: "/music/other.mp3", remoteID: "gone", sourceServer: "https://music.example", syncProfileID: "profile-b" },
-      { id: "metadata-match", title: "All for You - Radio Version", artist: "Ace of Base", duration: 217.1, filePath: "/music/metadata.mp3", remoteID: "old-metadata-id", sourceServer: "https://music.example", syncProfileID: "profile-a" },
-      { id: "source-only-current", title: "Actually Missing", artist: "Artist", duration: 180, filePath: "/music/source.mp3", sourceServer: "https://music.example", syncProfileID: "profile-a" },
+      { id: "metadata-match", title: "All for You - Radio Version", artist: "Ace of Base", duration: 217.1, filePath: "/music/metadata.mp3", remoteID: "old-metadata-id", sourceServer: "https://music.example", syncProfileID: "profile-a", sourceURL },
+      { id: "source-only-current", title: "Actually Missing", artist: "Artist", duration: 180, filePath: "/music/source.mp3", sourceServer: "https://music.example", syncProfileID: "profile-a", sourceURL },
+      { id: "missing-preserved-source", title: "Unavailable Source", filePath: "/music/unavailable.mp3", remoteID: "old-unavailable", sourceServer: "https://music.example", syncProfileID: "profile-a" },
       { id: "source-only-other-profile", filePath: "/music/profile.mp3", sourceServer: "https://music.example", syncProfileID: "profile-b" },
       { id: "source-only-other-server", filePath: "/music/server.mp3", sourceServer: "https://other.example", syncProfileID: "profile-a" },
       { id: "cross-server-id-collision", filePath: "/music/collision.mp3", remoteID: "remote-present", sourceServer: "https://other.example", syncProfileID: "profile-b" },
@@ -2146,14 +2174,57 @@ test("plans only exact-context downloads and leaves metadata-only matches ambigu
   ]);
   assert.deepEqual(plan.uploadTracks.map((track) => track.id), [
     "missing",
+    "local-link",
+    "local-download-link",
     "source-only-current",
   ]);
+  assert.deepEqual(plan.alreadyPresent.map((track) => track.id), ["present"]);
   assert.deepEqual(plan.matches.map((match) => [match.trackID, match.remoteSong.id]), [
     ["hash-match", "replacement"],
   ]);
   assert.deepEqual(plan.ambiguous.map((match) => [match.track.id, match.candidates[0].id]), [
     ["metadata-match", "metadata-replacement"],
   ]);
+  assert.deepEqual(plan.missingSource.map((track) => track.id), ["missing-preserved-source"]);
+  assert.equal(preservedUploadSourceURL(state.tracks.find((track) => track.id === "local-link")), "https://www.youtube.com/watch?v=jNQXAC9IVRw");
+  assert.equal(preservedUploadSourceURL(state.tracks.find((track) => track.id === "local-download-link")), "https://media.example/downloaded.m4a");
+  assert.equal(preservedUploadSourceURL(state.tracks.find((track) => track.id === "local-invalid-link")), null);
+});
+
+test("continues planning after the first downloaded song is already on the server", () => {
+  const state = normalizeState({
+    ...createEmptyState(),
+    serverURL: "https://music.example",
+    syncProfileID: "profile-a",
+    tracks: [
+      {
+        id: "already-present-first",
+        filePath: "/music/present.mp3",
+        remoteID: "remote-present",
+        sourceServer: "https://music.example",
+        syncProfileID: "profile-a",
+        sourceURL: "https://media.example/present.m4a",
+      },
+      {
+        id: "missing-second",
+        filePath: "/music/missing.mp3",
+        remoteID: "remote-deleted",
+        sourceServer: "https://music.example",
+        syncProfileID: "profile-a",
+        sourceURL: "https://media.example/missing.m4a",
+      },
+      {
+        id: "local-link-third",
+        filePath: "/music/local.mp3",
+        sourceIdentity: { sourcePageURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw" },
+      },
+    ],
+  });
+
+  const plan = planMissingDownloadedUploads(state, [{ id: "remote-present" }]);
+
+  assert.deepEqual(plan.alreadyPresent.map((track) => track.id), ["already-present-first"]);
+  assert.deepEqual(plan.uploadTracks.map((track) => track.id), ["missing-second", "local-link-third"]);
 });
 
 test("does not hold uploads behind catalog, playlist, likes, profile, or history synchronization", () => {

@@ -34,7 +34,7 @@ const {
 const { readAudioMetadata } = require("./metadata.cjs");
 const { normalizeSourceIdentities, normalizeSourceIdentity } = require("./provenance.cjs");
 const { createRenewablePolicyLease } = require("./policy-lease.cjs");
-const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload } = require("./server-download.cjs");
+const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload, serverDownloadDisplayName } = require("./server-download.cjs");
 const {
   SERVER_STREAM_SCHEME,
   ServerStreamValidationError,
@@ -3211,6 +3211,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
   for (const song of songs) {
     signal.throwIfAborted();
     const remoteName = song.filename || song.name || `Track-${song.id}.mp3`;
+    const displayName = serverDownloadDisplayName(song, remoteName);
     const remoteModified = song.modified_at || song.modified_utc || null;
     const expectedSize = Number(song.size);
     const expectedSHA256 = catalogSHA256(song);
@@ -3243,11 +3244,11 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
     }
     if (alreadyDownloaded) {
       completed += 1;
-      event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length, autoHide: false });
+      event.sender.send("server:transfer-progress", { direction: "download", currentFile: displayName, completed, total: songs.length, autoHide: false });
       // Skip only this song. The rest of a Download All batch must still run.
       continue;
     }
-    event.sender.send("server:transfer-progress", { direction: "download", currentFile: remoteName, completed, total: songs.length, autoHide: false });
+    event.sender.send("server:transfer-progress", { direction: "download", currentFile: displayName, completed, total: songs.length, autoHide: false });
     try {
       if (savedSourceURL) {
         const downloadedTrack = await downloadSavedSourceSong(song, {
@@ -3258,7 +3259,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
           profileID: profileID || "default",
           onProgress: (progress) => event.sender.send("server:transfer-progress", {
             direction: "download",
-            currentFile: progress?.stage === "downloading" ? `Downloading ${remoteName}` : remoteName,
+            currentFile: displayName,
             completed,
             total: songs.length,
             autoHide: false,
@@ -3269,7 +3270,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
         }
         downloaded.push(downloadedTrack);
         completed += 1;
-        event.sender.send("server:transfer-progress", { direction: "download", currentFile: downloadedTrack.title, completed, total: songs.length, autoHide: false });
+        event.sender.send("server:transfer-progress", { direction: "download", currentFile: displayName, completed, total: songs.length, autoHide: false });
         continue;
       }
       let fileURL = sameOriginServerMediaURL(mediaLocation?.download_url || song.download_url, base, "download");
@@ -3347,7 +3348,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
         signal,
         onRetry: ({ nextAttempt }) => event.sender.send("server:transfer-progress", {
           direction: "download",
-          currentFile: `Retrying ${remoteName} (${nextAttempt}/${SERVER_DOWNLOAD_ATTEMPTS})`,
+          currentFile: `Retrying ${displayName} (${nextAttempt}/${SERVER_DOWNLOAD_ATTEMPTS})`,
           completed,
           total: songs.length,
           autoHide: false,
@@ -3386,7 +3387,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
       });
     }
     completed += 1;
-    event.sender.send("server:transfer-progress", { direction: "download", currentFile: song.filename || song.name, completed, total: songs.length, autoHide: false });
+    event.sender.send("server:transfer-progress", { direction: "download", currentFile: displayName, completed, total: songs.length, autoHide: false });
   }
   return { catalog, downloaded, replacedTrackIDs, failed };
   } catch (error) {
@@ -3458,6 +3459,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
   const controller = beginServerTransfer(event);
   const { signal } = controller;
   let uploaded = 0;
+  let duplicates = 0;
   let completed = 0;
   const results = [];
   const failed = [];
@@ -3474,6 +3476,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
     const filename = item.uploadFilename || serverUploadFilename(filePath, item.title);
     event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed, total: requestedFiles.length, autoHide: false });
     let remoteSong = null;
+    let duplicate = false;
     let lastError = null;
     let attempts = 0;
     while (attempts < 3 && !remoteSong) {
@@ -3500,7 +3503,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
           item,
           signal,
         });
-        ({ song: remoteSong } = await readServerUploadResponse(response, { serverOrigin: base.origin }));
+        ({ song: remoteSong, duplicate } = await readServerUploadResponse(response, { serverOrigin: base.origin }));
       } catch (error) {
         if (signal.aborted || error?.name === "AbortError") throw error;
         lastError = error;
@@ -3510,6 +3513,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
     }
     if (remoteSong) {
       uploaded += 1;
+      if (duplicate) duplicates += 1;
       completedRetryIDs.add(item.retryID);
       serverUploadRetries.delete(item.retryID);
       results.push({
@@ -3520,6 +3524,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
         artist: item.artist || "",
         filename,
         attempts,
+        duplicate,
         remoteSong,
       });
     } else {
@@ -3531,7 +3536,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
     event.sender.send("server:transfer-progress", { direction: "upload", currentFile: filename, completed, total: requestedFiles.length, autoHide: false });
   }
   await persistServerUploadRetries().catch((error) => console.error("Could not persist server upload retries", error));
-  return { uploaded, results, failed };
+  return { uploaded, duplicates, results, failed };
   } catch (error) {
     if (error?.name === "AbortError" || signal.aborted) {
       for (const item of requestedFiles) {
@@ -3549,7 +3554,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
         });
       }
       await persistServerUploadRetries().catch((persistError) => console.error("Could not persist server upload retries", persistError));
-      return { uploaded, results, failed, cancelled: true };
+      return { uploaded, duplicates, results, failed, cancelled: true };
     }
     if (error?.retryable === false) {
       const blockedEntries = policyBlockedUploadEntries(
@@ -3571,7 +3576,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
         total: requestedFiles.length,
         autoHide: false,
       });
-      return { uploaded, results, failed, policyBlocked: true };
+      return { uploaded, duplicates, results, failed, policyBlocked: true };
     }
     throw error;
   } finally {

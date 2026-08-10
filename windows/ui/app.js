@@ -37,6 +37,7 @@ import {
   planMissingDownloadedUploads,
   playlistArtworkTrackIDs,
   playlistInsertionIndex,
+  preservedUploadSourceURL,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
   reconcileUploadedTrack,
@@ -190,6 +191,7 @@ let localImportPreviewRequest = 0;
 let localImportPreviewLimitSeconds = 30;
 let localImportPreviewInterruptedPlayback = false;
 let localImportAutoResolveTimer = null;
+let localImportResolutionRestartPending = false;
 let localImportResolvedSourceKey = null;
 let localImportInteractionGeneration = 0;
 let localImportBatchContext = null;
@@ -3215,6 +3217,32 @@ function storageTracks() {
 async function deleteStoredTracks(trackIDs) {
   const tracks = state.tracks.filter((track) => trackIDs.includes(track.id));
   if (!tracks.length) return;
+  const targetIDs = new Set(tracks.map((track) => track.id));
+  const releasedCurrentTrack = targetIDs.has(currentID)
+    ? {
+        track: currentTrack(),
+        position: Math.max(0, Number(audio.currentTime) || Number(state.position) || 0),
+        wasPlaying: playbackIsActive(),
+      }
+    : null;
+
+  if (targetIDs.has($("#clipEditorTrack")?.value)) {
+    await stopClipRangePreview({ resumeMain: false, unload: true });
+  }
+  if (installedVideoSession && targetIDs.has(installedVideoSession.trackID)) {
+    const session = installedVideoSession;
+    installedVideoPlayer.pause();
+    finishInstalledVideoClose({ session });
+  }
+  if (releasedCurrentTrack) {
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+    audioSourceTrackID = null;
+    audioMetadataTrackID = null;
+    pendingRestorePosition = null;
+  }
+
   const deleted = [];
   const failed = [];
   for (const track of tracks) {
@@ -3244,11 +3272,16 @@ async function deleteStoredTracks(trackIDs) {
   state.playbackQueueIDs = [...activePlaybackQueueIDs];
   state.playbackSourceQueueIDs = [...activePlaybackSourceQueueIDs];
   if (removed.has(currentID)) {
-    audio.pause();
-    audio.removeAttribute("src");
     currentID = null;
     state.currentTrackID = null;
     state.position = 0;
+  } else if (releasedCurrentTrack?.track) {
+    state.position = releasedCurrentTrack.position;
+    pendingRestorePosition = releasedCurrentTrack.position;
+    setAudioSource(releasedCurrentTrack.track);
+    audio.volume = playbackGainForVolume(state.volume);
+    audio.playbackRate = Number($("#speed").value) || 1;
+    if (releasedCurrentTrack.wasPlaying) void requestPlayback();
   }
   selectedStorageIDs = new Set(failed.map(({ track }) => track.id));
   if (removed.size) {
@@ -4331,19 +4364,17 @@ function renderTrackContextMenu(track, options = {}) {
   actions.push(
     { label: "Add to playlist", icon: contextPlaylistIcon, trailing: "›", keepOpen: true, onSelect: () => renderTrackPlaylistContextMenu(track, options) },
   );
-  if (options.source === "storage") {
-    actions.push(
-      { divider: true },
-      {
-        label: "Remove from device",
-        icon: contextTrashIcon,
-        danger: true,
-        onSelect: async () => {
-          if (confirm(`Remove ${track.title} from this device?`)) await deleteStoredTracks([track.id]);
-        },
+  actions.push(
+    { divider: true },
+    {
+      label: "Remove from device",
+      icon: contextTrashIcon,
+      danger: true,
+      onSelect: async () => {
+        if (confirm(`Remove ${track.title || "this song"} from this device?`)) await deleteStoredTracks([track.id]);
       },
-    );
-  }
+    },
+  );
   renderContextMenu({
     title: track.title || "Untitled",
     subtitle: track.artist || "Unknown artist",
@@ -4529,8 +4560,8 @@ function requireCurrentLocalImportOperation(snapshot) {
   }
 }
 
-function setLocalImportOperationLocked(locked) {
-  $("#localImportSource").disabled = locked;
+function setLocalImportOperationLocked(locked, { keepSourceEditable = false } = {}) {
+  $("#localImportSource").disabled = locked && !keepSourceEditable;
   $("#searchLocalImport").disabled = locked;
   $("#chooseLocalFiles").disabled = locked;
   setLocalImportMediaKindDisabled(locked);
@@ -4661,6 +4692,7 @@ function resetLocalImport() {
   void stopLocalImportPreview({ release: true, resumeMain: true });
   clearLocalImportAutoResolve();
   localImportResolution = null;
+  localImportResolutionRestartPending = false;
   localImportResolvedSourceKey = null;
   localImportBatchContext = null;
   localImportServerUploadMode = null;
@@ -4941,7 +4973,7 @@ async function uploadImportedTrackWithMode(track, context, mode) {
     album: track.album || "Unknown Album",
     duration: Number(track.duration) || 0,
     artworkURL: track.artworkURL || null,
-    mediaSourceURL: track.sourceIdentity?.sourcePageURL || track.sourceURL || track.sourceIdentity?.mediaSourceURL || null,
+    mediaSourceURL: preservedUploadSourceURL(track),
     mediaKind: isInstalledVideoTrack(track) ? "video" : "audio",
     mode,
   });
@@ -5059,7 +5091,7 @@ async function uploadLocalImportTracks(tracks, context) {
       album: track.album || "",
       duration: Number(track.duration) || 0,
       artworkURL: track.artworkURL || null,
-      mediaSourceURL: track.sourceIdentity?.sourcePageURL || track.sourceURL || track.sourceIdentity?.mediaSourceURL || null,
+      mediaSourceURL: preservedUploadSourceURL(track),
       mediaKind: isInstalledVideoTrack(track) ? "video" : "audio",
     })),
   });
@@ -5252,7 +5284,7 @@ async function resolveLinkImport() {
   }
   const operation = localImportOperationSnapshot();
   localImportRunning = true;
-  setLocalImportOperationLocked(true);
+  setLocalImportOperationLocked(true, { keepSourceEditable: true });
   localImportResolution = null;
   localImportResolvedSourceKey = null;
   $("#localImportError").hidden = true;
@@ -5285,14 +5317,18 @@ async function resolveLinkImport() {
     localImportResolvedSourceKey = sourceKey;
     renderLocalImportResolution();
   } catch (error) {
-    showLocalImportError(error);
+    if (localImportOperationCurrent(operation) && error?.code !== "CANCELLED") showLocalImportError(error);
   } finally {
     if (reviewedContext) releaseServerContext(reviewedContext);
+    const restartResolution = localImportResolutionRestartPending && $("#localImportDialog").open;
+    localImportResolutionRestartPending = false;
     localImportRunning = false;
     setLocalImportOperationLocked(false);
     $("#localImportSource").removeAttribute("aria-busy");
     $("#localImportSource").closest(".local-import-source").classList.remove("searching");
     if (!localImportResolution) $("#cancelLocalImport").hidden = true;
+    hideServerTransfer("local-import");
+    if (restartResolution) scheduleLocalImportResolution();
   }
 }
 
@@ -5874,6 +5910,7 @@ function localImportTransferName() {
 function updateLocalImportTransfer(value = {}) {
   const stage = value.stage || "inspecting_source";
   setLocalImportStage(value);
+  if ($("#localImportDialog").open) return;
   if (["idle", "resolving_metadata", "searching_candidates", "awaiting_selection", "failed", "cancelled"].includes(stage)) return;
   const currentFile = value.currentFile || localImportTransferName();
   const completed = Number(value.completed) || 0;
@@ -6096,14 +6133,29 @@ async function uploadMissingDownloadedSongs() {
       await persist();
       schedulePlaylistSync();
     }
+    const checkedCount = plan.alreadyPresent.length
+      + plan.matches.length
+      + plan.uploadTracks.length
+      + plan.ambiguous.length
+      + plan.missingSource.length;
+    const catalogMatchCount = plan.alreadyPresent.length + plan.matches.length;
+    const reviewCount = plan.ambiguous.length + plan.missingSource.length;
+    const reviewNotices = [
+      plan.ambiguous.length
+        ? `${plan.ambiguous.length} metadata-only match${plan.ambiguous.length === 1 ? "" : "es"} cannot be associated automatically.`
+        : "",
+      plan.missingSource.length
+        ? `${plan.missingSource.length} downloaded song${plan.missingSource.length === 1 ? " has" : "s have"} no preserved HTTPS source link.`
+        : "",
+    ].filter(Boolean);
     if (!plan.uploadTracks.length) {
-      serverConnectionText = plan.ambiguous.length
-        ? `${plan.ambiguous.length} downloaded song${plan.ambiguous.length === 1 ? " needs" : "s need"} review before upload`
-        : "All downloaded songs are already on the server";
+      serverConnectionText = checkedCount === 0
+        ? "No link-downloaded songs are available to upload"
+        : reviewCount
+          ? `Checked ${checkedCount} downloaded song${checkedCount === 1 ? "" : "s"} • ${catalogMatchCount} already on the server • ${reviewCount} ${reviewCount === 1 ? "needs" : "need"} review`
+          : `Checked ${checkedCount} downloaded song${checkedCount === 1 ? "" : "s"} • all already on the server`;
       if (status) status.textContent = serverConnectionText;
-      showNotice(plan.ambiguous.length
-        ? `${serverConnectionText}. Resonance found metadata-only catalog matches and did not automatically associate or upload them.`
-        : serverConnectionText, plan.ambiguous.length ? "error" : "status");
+      showNotice(reviewNotices.length ? `${serverConnectionText}. ${reviewNotices.join(" ")}` : serverConnectionText, reviewNotices.length ? "error" : "status");
       if (section === "server") renderServer();
       return;
     }
@@ -6119,7 +6171,7 @@ async function uploadMissingDownloadedSongs() {
         album: track.album,
         duration: Number(track.duration) || 0,
         artworkURL: track.artworkURL || null,
-        mediaSourceURL: track.sourceIdentity?.sourcePageURL || track.sourceURL || track.sourceIdentity?.mediaSourceURL || null,
+        mediaSourceURL: preservedUploadSourceURL(track),
         mediaKind: isInstalledVideoTrack(track) ? "video" : "audio",
       })),
     });
@@ -6133,18 +6185,19 @@ async function uploadMissingDownloadedSongs() {
     }
     await retainServerUploadManifest(result, context, "missing-downloads");
     const failureNotice = formatServerUploadFailureNotice(result.failed);
-    const ambiguousNotice = plan.ambiguous.length
-      ? `${plan.ambiguous.length} metadata-only match${plan.ambiguous.length === 1 ? " was" : "es were"} left unchanged for review.`
-      : "";
+    const reviewNotice = reviewNotices.join(" ");
+    const duplicateCount = Math.max(0, Math.min(result.uploaded, Number(result.duplicates) || 0));
+    const createdCount = Math.max(0, result.uploaded - duplicateCount);
+    const alreadyCount = catalogMatchCount + duplicateCount;
     const cancelled = Boolean(result.cancelled || serverTransferCancelRequested);
     if (cancelled) {
       serverConnectionText = `Upload cancelled${result.uploaded ? ` • ${result.uploaded} completed` : ""}`;
     } else if (failureNotice) {
-      serverConnectionText = `Uploaded ${result.uploaded}; ${(result.failed || []).length} failed`;
-      showNotice(`${failureNotice}${ambiguousNotice ? ` ${ambiguousNotice}` : ""}`);
+      serverConnectionText = `Checked ${checkedCount} • uploaded ${createdCount} • ${alreadyCount} already on the server • ${(result.failed || []).length} failed`;
+      showNotice(`${failureNotice}${reviewNotice ? ` ${reviewNotice}` : ""}`);
     } else {
-      serverConnectionText = `Uploaded ${result.uploaded} missing song${result.uploaded === 1 ? "" : "s"}`;
-      showNotice(`${serverConnectionText}.${ambiguousNotice ? ` ${ambiguousNotice}` : ""}`, ambiguousNotice ? "error" : "status");
+      serverConnectionText = `Checked ${checkedCount} • uploaded ${createdCount} • ${alreadyCount} already on the server`;
+      showNotice(`${serverConnectionText}.${reviewNotice ? ` ${reviewNotice}` : ""}`, reviewNotice ? "error" : "status");
     }
     if (status) status.textContent = serverConnectionText;
     serverConnected = true;
@@ -7468,6 +7521,10 @@ $("#searchLocalImport").onclick = () => {
 };
 $("#localImportSource").oninput = () => {
   localImportInteractionGeneration += 1;
+  if (localImportRunning) {
+    localImportResolutionRestartPending = true;
+    void api.cancelLocalImport();
+  }
   localImportResolvedSourceKey = null;
   if (localImportResolution || !$("#localImportError").hidden) {
     void stopLocalImportPreview({ release: true, resumeMain: true });
