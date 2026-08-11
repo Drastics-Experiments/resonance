@@ -39,6 +39,8 @@ export function createEmptyState() {
     appPreferences: {
       runInBackground: false,
       discordRichPresence: false,
+      crossfadeEnabled: false,
+      crossfadeSeconds: 5,
       keybinds: {
         togglePlayback: "Space",
         previousTrack: "Ctrl+ArrowLeft",
@@ -151,11 +153,24 @@ export function normalizedAppPreferences(value) {
   return {
     runInBackground: Boolean(preferences.runInBackground),
     discordRichPresence: Boolean(preferences.discordRichPresence),
+    crossfadeEnabled: Boolean(preferences.crossfadeEnabled),
+    crossfadeSeconds: normalizedCrossfadeSeconds(preferences.crossfadeSeconds),
     keybinds: Object.fromEntries(Object.entries(DEFAULT_KEYBINDS).map(([action, fallback]) => [
       action,
       normalizedKeybind(keybinds[action], fallback),
     ])),
   };
+}
+
+export function normalizedCrossfadeSeconds(value) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? Math.max(1, Math.min(12, Math.round(seconds))) : 5;
+}
+
+export function crossfadeProgress(remainingSeconds, durationSeconds) {
+  const duration = Number(durationSeconds);
+  if (!Number.isFinite(duration) || duration <= 0) return 0;
+  return Math.max(0, Math.min(1, 1 - (Number(remainingSeconds) || 0) / duration));
 }
 
 export const SAFE_CLIENT_CONFIG = Object.freeze({

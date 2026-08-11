@@ -17,6 +17,8 @@ interface ResonanceActions {
     fun setRepeatEnabled(enabled: Boolean)
     fun setPlaybackSpeed(speed: Float)
     fun setVolume(volume: Float)
+    fun setCrossfadeEnabled(enabled: Boolean)
+    fun setCrossfadeSeconds(seconds: Float)
     fun toggleFavorite(trackId: String)
     fun deleteTracksFromDevice(trackIds: Set<String>)
     fun saveClipRange(trackId: String, startMs: Long, endMs: Long)

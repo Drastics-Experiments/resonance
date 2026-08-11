@@ -12,4 +12,16 @@ struct PlaybackVolumePolicyTests {
         #expect(PlaybackVolumePolicy.gain(for: 2) == 1)
         #expect(PlaybackVolumePolicy.gain(for: .nan) == 0)
     }
+
+    @Test
+    func crossfadeUsesSpotifyStyleRangeAndProtectsShortTracks() {
+        #expect(MacCrossfadePolicy.normalizedSeconds(-2) == 1)
+        #expect(MacCrossfadePolicy.normalizedSeconds(30) == 12)
+        #expect(MacCrossfadePolicy.effectiveDuration(
+            requestedSeconds: 12,
+            currentDuration: 4,
+            nextDuration: 20
+        ) == 2)
+        #expect(MacCrossfadePolicy.progress(remaining: 2.5, duration: 5) == 0.5)
+    }
 }

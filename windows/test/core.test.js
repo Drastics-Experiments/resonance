@@ -29,6 +29,8 @@ import {
   nextIndex,
   niceChartMaximum,
   normalizedAppPreferences,
+  normalizedCrossfadeSeconds,
+  crossfadeProgress,
   normalizedRemoteSongMetadataCache,
   normalizedVolume,
   playbackGainForVolume,
@@ -736,6 +738,8 @@ test("adds focused keybinds, Discord presence, close-to-tray settings, custom sc
   const defaults = normalizedAppPreferences({});
   assert.equal(defaults.runInBackground, false);
   assert.equal(defaults.discordRichPresence, false);
+  assert.equal(defaults.crossfadeEnabled, false);
+  assert.equal(defaults.crossfadeSeconds, 5);
   assert.equal(Object.hasOwn(defaults, "discordApplicationID"), false);
   assert.equal(defaults.keybinds.togglePlayback, "Space");
   assert.deepEqual(normalizedAppPreferences({
@@ -748,6 +752,13 @@ test("adds focused keybinds, Discord presence, close-to-tray settings, custom sc
     discordRichPresence: true,
     keybinds: { ...defaults.keybinds, togglePlayback: "Ctrl+K" },
   });
+  assert.equal(normalizedCrossfadeSeconds(-2), 1);
+  assert.equal(normalizedCrossfadeSeconds(30), 12);
+  assert.equal(normalizedCrossfadeSeconds("nope"), 5);
+  assert.equal(crossfadeProgress(2.5, 5), .5);
+  assert.match(appSource, /id="settingsCrossfadeEnabled"[\s\S]+id="settingsCrossfadeSeconds"/);
+  assert.match(appSource, /function prepareCrossfade\(track\)[\s\S]+crossfadeAudio\.play\(\)[\s\S]+function promoteCrossfade\(\)/);
+  assert.match(htmlSource, /id="audio"[\s\S]+id="crossfadeAudio"/);
   assert.match(appSource, /id="settingsRunInBackground"[\s\S]+id="settingsDiscordPresence"/);
   assert.doesNotMatch(appSource, /settingsDiscordApplicationID|Paste the Resonance Application ID/);
   assert.match(appSource, /signed-in Discord profile/);
@@ -760,6 +771,7 @@ test("adds focused keybinds, Discord presence, close-to-tray settings, custom sc
   assert.equal(packageMetadata.resonanceDiscordApplicationID, "1535574125395841154");
   assert.doesNotMatch(discordSource, /botToken|Authorization|\bBot\s/);
   assert.match(mainSource, /runtimeAppPreferences\.runInBackground[\s\S]+window\.hide\(\)[\s\S]+ensureBackgroundTray\(\)/);
+  assert.match(mainSource, /function safeAppPreferences\(value\)[\s\S]+crossfadeEnabled:[\s\S]+crossfadeSeconds:/);
   assert.match(mainSource, /new Tray[\s\S]+Open Resonance[\s\S]+Quit Resonance/);
   assert.match(styleSource, /\*::\-webkit-scrollbar[\s\S]+\*::\-webkit-scrollbar-thumb/);
   assert.doesNotMatch(htmlSource, /id="volumeText"/);
@@ -998,7 +1010,7 @@ test("opens a synchronized full-screen Now Playing viewer from the mini-player",
   assert.match(appSource, /function setPlaybackVolume\([\s\S]+#volume[\s\S]+#fullPlayerVolume[\s\S]+#installedVideoVolume/);
   assert.match(appSource, /#fullPlayerSpeed"\)\.onchange[\s\S]+#speed/);
   assert.match(appSource, /#fullPlayerMore"\)\.onclick[\s\S]+openTrackContextMenu/);
-  assert.match(appSource, /audio\.ontimeupdate = \(\) => \{[\s\S]+updateFullPlayerProgress\(\)/);
+  assert.match(appSource, /function bindPrimaryAudioEvents\(media\)[\s\S]+media\.ontimeupdate = \(\) => \{[\s\S]+updateFullPlayerProgress\(\)/);
   assert.match(styleSource, /\.full-player-dialog\s*\{[\s\S]*?position: fixed;[\s\S]*?inset: 0;[\s\S]*?width: auto;[\s\S]*?height: auto;/);
   assert.match(styleSource, /\.full-player-shell\s*\{[\s\S]*?position: absolute;[\s\S]*?inset: 0;[\s\S]*?min-width: 0;[\s\S]*?min-height: 0;/);
   assert.match(appSource, /const FULL_PLAYER_TRANSITION_MS = 380/);
@@ -1025,7 +1037,7 @@ test("opens a synchronized full-screen Now Playing viewer from the mini-player",
   assert.doesNotMatch(styleSource, /full-player-title-marquee[^;]+alternate/);
   assert.match(styleSource, /@keyframes full-player-title-marquee\s*\{[\s\S]+from[^}]+translateX\(0\)[\s\S]+to[^}]+calc\(-1 \* var\(--full-player-title-cycle\)\)/);
   assert.match(appSource, /function currentPlaybackDuration\([^]*?audioMetadataTrackID !== track\.id[^]*?isInstalledVideoTrack\(track\)/);
-  assert.match(appSource, /audio\.onloadedmetadata = async \(\) => \{[^]*?audioSourceTrackID[^]*?!isInstalledVideoTrack\(track\)/);
+  assert.match(appSource, /media\.onloadedmetadata = async \(\) => \{[^]*?audioSourceTrackID[^]*?!isInstalledVideoTrack\(track\)/);
   assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]+#fullPlayerTitle\.overflowing #fullPlayerTitleTrack/);
   assert.match(styleSource, /\.full-player-transport \.full-player-play\s*\{/);
   assert.match(styleSource, /\.full-player-queue-panel\s*\{/);
@@ -1345,7 +1357,7 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /function beginListeningSession\(\)/);
   assert.match(appSource, /entry\.listenedSeconds \+= delta/);
   assert.match(appSource, /function finishListeningSessionForReplay\(\)[\s\S]+activeListeningEntryID = null/);
-  assert.match(appSource, /audio\.onended = \(\) => \{[\s\S]+if \(repeat\) \{[\s\S]+finishListeningSessionForReplay\(\)[\s\S]+requestPlayback\(\)/);
+  assert.match(appSource, /media\.onended = \(\) => \{[\s\S]+if \(repeat\) \{[\s\S]+finishListeningSessionForReplay\(\)[\s\S]+requestPlayback\(\)/);
   assert.match(appSource, /function pendingListeningHistoryBatches\(\)[\s\S]+listeningHistoryEntryQualifiesAsPlay\(state, entry\)/);
   assert.match(appSource, /api\.onPrepareToClose\(async \(\) =>[\s\S]+updateListeningSession\(\)[\s\S]+await persist\(\{ refreshSidebar: false \}\)[\s\S]+api\.readyToClose\(\)/);
   assert.match(preloadSource, /onPrepareToClose:[\s\S]+app:prepare-close/);
@@ -2492,8 +2504,9 @@ test("playlist presentation includes undownloaded server songs in order", () => 
 test("animates playback progress independently of media timeupdate events", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   assert.match(appSource, /function animatePlaybackProgress\(\)[\s\S]+updatePlaybackProgressUI\(\)[\s\S]+requestAnimationFrame\(animatePlaybackProgress\)/);
-  assert.match(appSource, /audio\.onplay = \(\) => \{[\s\S]+startPlaybackProgressAnimation\(\)/);
-  assert.match(appSource, /audio\.onpause = \(\) => \{[\s\S]+stopPlaybackProgressAnimation\(\)/);
+  assert.match(appSource, /media\.onplay = \(\) => \{[\s\S]+startPlaybackProgressAnimation\(\)/);
+  assert.match(appSource, /media\.onpause = \(\) => \{[\s\S]+stopPlaybackProgressAnimation\(\)/);
+  assert.match(appSource, /bindPrimaryAudioEvents\(audio\)/);
   assert.match(appSource, /function setRepeatEnabled\(value\)[\s\S]+syncRepeatControls\(\)/);
   assert.doesNotMatch(appSource, /#fullPlayerRepeat"\)\.onclick = \(\) => \{[\s\S]{0,160}updateChrome\(\)/);
 });

@@ -6,6 +6,34 @@ import MediaPlayer
 import UIKit
 import UniformTypeIdentifiers
 
+enum MobileCrossfadePolicy {
+    static let defaultSeconds: TimeInterval = 5
+    static let minimumSeconds: TimeInterval = 1
+    static let maximumSeconds: TimeInterval = 12
+
+    static func normalizedSeconds(_ value: TimeInterval) -> TimeInterval {
+        guard value.isFinite else { return defaultSeconds }
+        return min(max(value, minimumSeconds), maximumSeconds)
+    }
+
+    static func effectiveDuration(
+        requestedSeconds: TimeInterval,
+        currentDuration: TimeInterval,
+        nextDuration: TimeInterval
+    ) -> TimeInterval {
+        guard currentDuration > 0, nextDuration > 0 else { return 0 }
+        return min(
+            normalizedSeconds(requestedSeconds),
+            min(currentDuration / 2, nextDuration / 2)
+        )
+    }
+
+    static func progress(remaining: TimeInterval, duration: TimeInterval) -> Double {
+        guard duration > 0 else { return 0 }
+        return min(max(1 - remaining / duration, 0), 1)
+    }
+}
+
 actor MobileAsyncSerialGate {
     private var isHeld = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -496,7 +524,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published var volume: Double = 0.8 {
         didSet {
             let gain = PlaybackVolumePolicy.gain(for: volume)
-            player?.volume = gain
+            applyCrossfadeVolumes()
             streamingPlayer?.volume = gain
             UserDefaults.standard.set(volume, forKey: "Resonance.volume")
         }
@@ -504,6 +532,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published var playbackRate: Float = 1 {
         didSet {
             player?.rate = playbackRate
+            crossfadePlayer?.rate = playbackRate
             streamingPlayer?.defaultRate = playbackRate
             if streamingPlayer?.timeControlStatus == .playing {
                 streamingPlayer?.rate = playbackRate
@@ -512,7 +541,26 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
     }
     @Published var shuffleEnabled = false { didSet { UserDefaults.standard.set(shuffleEnabled, forKey: "Resonance.shuffle") } }
-    @Published var repeatEnabled = false { didSet { UserDefaults.standard.set(repeatEnabled, forKey: "Resonance.repeat") } }
+    @Published var repeatEnabled = false {
+        didSet {
+            UserDefaults.standard.set(repeatEnabled, forKey: "Resonance.repeat")
+            if repeatEnabled { cancelCrossfade() }
+        }
+    }
+    @Published var crossfadeEnabled = false {
+        didSet {
+            UserDefaults.standard.set(crossfadeEnabled, forKey: "Resonance.crossfade.enabled")
+            if !crossfadeEnabled { cancelCrossfade() }
+        }
+    }
+    @Published var crossfadeSeconds: Double = MobileCrossfadePolicy.defaultSeconds {
+        didSet {
+            UserDefaults.standard.set(
+                MobileCrossfadePolicy.normalizedSeconds(crossfadeSeconds),
+                forKey: "Resonance.crossfade.seconds"
+            )
+        }
+    }
     @Published var searchText = ""
     @Published private(set) var serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site"
     @Published private(set) var serverToken = ""
@@ -617,6 +665,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private let stateURL: URL
     private let backupStateURL: URL
     private var player: AVAudioPlayer?
+    private var crossfadePlayer: AVAudioPlayer?
+    private var crossfadeTrackID: UUID?
+    private var activeCrossfadeDuration: TimeInterval = 0
     private var timer: Timer?
     private var history: [UUID] = []
     private var playbackQueue: [UUID] = []
@@ -686,6 +737,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         load()
         if UserDefaults.standard.object(forKey: "Resonance.volume") != nil { volume = UserDefaults.standard.double(forKey: "Resonance.volume") }
         if UserDefaults.standard.object(forKey: "Resonance.rate") != nil { playbackRate = Float(UserDefaults.standard.double(forKey: "Resonance.rate")) }
+        crossfadeEnabled = UserDefaults.standard.bool(forKey: "Resonance.crossfade.enabled")
+        if UserDefaults.standard.object(forKey: "Resonance.crossfade.seconds") != nil {
+            crossfadeSeconds = MobileCrossfadePolicy.normalizedSeconds(
+                UserDefaults.standard.double(forKey: "Resonance.crossfade.seconds")
+            )
+        }
         shuffleEnabled = UserDefaults.standard.bool(forKey: "Resonance.shuffle")
         repeatEnabled = UserDefaults.standard.bool(forKey: "Resonance.repeat")
         if let session = Self.readAccountSession() {
@@ -730,6 +787,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         if let streamingFailureObserver { NotificationCenter.default.removeObserver(streamingFailureObserver) }
         streamingStatusObservation?.invalidate()
         streamingPlayer?.pause()
+        crossfadePlayer?.stop()
         streamingResourceLoader?.invalidate()
         streamingAuthorizationLease?.invalidate()
         for observer in audioSessionObservers {
@@ -1960,6 +2018,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         startingAt requestedPosition: TimeInterval = 0
     ) {
         stopTimer()
+        cancelCrossfade()
         if streamingTrack != nil {
             discardStreamingPlayback()
         }
@@ -2054,6 +2113,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func pausePlayback() {
+        cancelCrossfade()
         if isTransientStreamActive, let streamingPlayer {
             streamingPlayer.pause()
             let currentTime = streamingPlayer.currentTime().seconds
@@ -2074,6 +2134,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func seek(to fraction: Double) {
+        cancelCrossfade()
         if isTransientStreamActive,
            let streamingPlayer,
            let track = streamingTrack {
@@ -5599,6 +5660,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             wasPlayingBeforeInterruption = player?.isPlaying == true
                 || streamingPlayer?.timeControlStatus == .playing
                 || isPlaying
+            cancelCrossfade()
             streamingPlayer?.pause()
             stopTimer()
             isPlaying = false
@@ -5708,6 +5770,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 }
                 if let track = self.currentTrack {
                     let bounds = self.playbackBounds(for: track, duration: player.duration)
+                    if self.updateCrossfade(currentPlayer: player, currentTrack: track, bounds: bounds) {
+                        return
+                    }
                     if player.currentTime + 0.02 >= bounds.end {
                         self.advanceAfterFinishing()
                         return
@@ -5726,6 +5791,121 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private func stopTimer() {
         timer?.invalidate()
         timer = nil
+    }
+
+    private func automaticCrossfadeTrack() -> MobileTrack? {
+        let queue = activeQueue
+        guard queue.count > 1 else { return nil }
+        if shuffleEnabled {
+            return queue.filter { $0.id != currentTrackID }.randomElement()
+        }
+        let currentIndex = queue.firstIndex { $0.id == currentTrackID } ?? -1
+        guard let nextIndex = MobileQueueCompletionPolicy.nextIndex(
+            count: queue.count,
+            currentIndex: currentIndex
+        ) else { return nil }
+        return queue[nextIndex]
+    }
+
+    private func updateCrossfade(
+        currentPlayer: AVAudioPlayer,
+        currentTrack: MobileTrack,
+        bounds: (start: TimeInterval, end: TimeInterval)
+    ) -> Bool {
+        guard crossfadeEnabled, !repeatEnabled, streamingTrack == nil else {
+            cancelCrossfade()
+            return false
+        }
+
+        if crossfadePlayer == nil {
+            guard let nextTrack = automaticCrossfadeTrack(),
+                  let nextPlayer = try? AVAudioPlayer(contentsOf: fileURL(for: nextTrack)) else {
+                return false
+            }
+            let nextBounds = playbackBounds(for: nextTrack, duration: nextPlayer.duration)
+            let duration = MobileCrossfadePolicy.effectiveDuration(
+                requestedSeconds: crossfadeSeconds,
+                currentDuration: bounds.end - bounds.start,
+                nextDuration: nextBounds.end - nextBounds.start
+            )
+            let remaining = bounds.end - currentPlayer.currentTime
+            guard duration >= 0.25, remaining <= duration else { return false }
+            nextPlayer.delegate = self
+            nextPlayer.enableRate = true
+            nextPlayer.rate = playbackRate
+            nextPlayer.volume = 0
+            nextPlayer.currentTime = nextBounds.start
+            nextPlayer.prepareToPlay()
+            guard nextPlayer.play() else { return false }
+            crossfadePlayer = nextPlayer
+            crossfadeTrackID = nextTrack.id
+            activeCrossfadeDuration = duration
+        }
+
+        guard let crossfadePlayer else { return false }
+        let remaining = bounds.end - currentPlayer.currentTime
+        let progress = MobileCrossfadePolicy.progress(
+            remaining: remaining,
+            duration: activeCrossfadeDuration
+        )
+        applyCrossfadeVolumes(progress: progress)
+        if remaining <= 0.02 {
+            completeCrossfade()
+            return true
+        }
+        return false
+    }
+
+    private func applyCrossfadeVolumes(progress: Double? = nil) {
+        let gain = PlaybackVolumePolicy.gain(for: volume)
+        guard let crossfadePlayer else {
+            player?.volume = gain
+            return
+        }
+        let resolvedProgress = progress ?? {
+            guard let player, let track = currentTrack else { return 0.0 }
+            let bounds = playbackBounds(for: track, duration: player.duration)
+            return MobileCrossfadePolicy.progress(
+                remaining: bounds.end - player.currentTime,
+                duration: activeCrossfadeDuration
+            )
+        }()
+        player?.volume = gain * Float(1 - resolvedProgress)
+        crossfadePlayer.volume = gain * Float(resolvedProgress)
+    }
+
+    private func cancelCrossfade() {
+        crossfadePlayer?.delegate = nil
+        crossfadePlayer?.stop()
+        crossfadePlayer = nil
+        crossfadeTrackID = nil
+        activeCrossfadeDuration = 0
+        player?.volume = PlaybackVolumePolicy.gain(for: volume)
+    }
+
+    private func completeCrossfade() {
+        guard let nextPlayer = crossfadePlayer,
+              let nextTrackID = crossfadeTrackID,
+              let nextTrack = activeQueue.first(where: { $0.id == nextTrackID }) else {
+            cancelCrossfade()
+            return
+        }
+        let outgoingPlayer = player
+        if let currentTrackID, currentTrackID != nextTrackID { history.append(currentTrackID) }
+        outgoingPlayer?.delegate = nil
+        outgoingPlayer?.stop()
+        player = nextPlayer
+        crossfadePlayer = nil
+        crossfadeTrackID = nil
+        activeCrossfadeDuration = 0
+        nextPlayer.volume = PlaybackVolumePolicy.gain(for: volume)
+        currentTrackID = nextTrack.id
+        position = nextPlayer.currentTime
+        UserDefaults.standard.set(nextTrack.id.uuidString, forKey: "Resonance.currentTrack")
+        UserDefaults.standard.set(position, forKey: "Resonance.position")
+        isPlaying = nextPlayer.isPlaying
+        updateNowPlaying()
+        save()
     }
 
     private func updateNowPlaying() {
@@ -5805,8 +5985,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.advanceAfterFinishing()
+            guard let self, self.player === player else { return }
+            if self.crossfadePlayer != nil {
+                self.completeCrossfade()
+            } else {
+                self.advanceAfterFinishing()
+            }
         }
     }
 

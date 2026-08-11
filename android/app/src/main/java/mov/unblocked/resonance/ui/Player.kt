@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.CircularProgressIndicator
@@ -44,6 +45,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -340,6 +342,41 @@ fun NowPlayingScreen(
                         value = state.volume,
                         onValueChange = actions::setVolume,
                         valueRange = 0f..1f,
+                    )
+                }
+            }
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(Color.White.copy(alpha = .06f))
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.GraphicEq, null, Modifier.size(18.dp), tint = Accent)
+                        Spacer(Modifier.size(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Crossfade", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                if (state.crossfadeEnabled) "Overlap songs by ${state.crossfadeSeconds.roundToInt()} seconds" else "Blend the end of one song into the next",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                            )
+                        }
+                        Switch(
+                            checked = state.crossfadeEnabled,
+                            onCheckedChange = actions::setCrossfadeEnabled,
+                            enabled = !isServerStream,
+                        )
+                    }
+                    Slider(
+                        value = state.crossfadeSeconds,
+                        onValueChange = actions::setCrossfadeSeconds,
+                        valueRange = 1f..12f,
+                        steps = 10,
+                        enabled = state.crossfadeEnabled && !isServerStream,
                     )
                 }
             }
