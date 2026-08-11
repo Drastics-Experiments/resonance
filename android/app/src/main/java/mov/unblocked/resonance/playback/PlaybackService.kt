@@ -2,9 +2,6 @@ package mov.unblocked.resonance.playback
 
 import android.app.PendingIntent
 import android.content.Intent
-import android.content.SharedPreferences
-import android.os.Handler
-import android.os.Looper
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -19,40 +16,11 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import mov.unblocked.resonance.MainActivity
 
-@UnstableApi
 class PlaybackService : MediaSessionService() {
     private var player: ExoPlayer? = null
     private var session: MediaSession? = null
-    private lateinit var audioAttributes: AudioAttributes
-    private lateinit var mediaSourceFactory: DefaultMediaSourceFactory
-    private val crossfadeHandler = Handler(Looper.getMainLooper())
-    private var crossfadePlayer: ExoPlayer? = null
-    private var crossfadeNextMediaID: String? = null
-    private var crossfadeDurationMs = 0L
-    private var crossfadeStarted = false
-    private var crossfadeUpdatesRunning = false
-    private val playbackPreferences by lazy { getSharedPreferences("resonance.playback", 0) }
-    private val playbackPreferenceListener =
-        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            if (key == "crossfadeEnabled") {
-                refreshCrossfadeUpdateSchedule()
-            }
-        }
-    private val crossfadeRunnable = object : Runnable {
-        override fun run() {
-            if (!crossfadeUpdatesRunning) return
-            updateCrossfade()
-            if (crossfadeUpdatesRunning) {
-                crossfadeHandler.postDelayed(
-                    this,
-                    if (crossfadeStarted) CrossfadeTickMs else CrossfadePreparationTickMs,
-                )
-            }
-        }
-    }
     private val clipListener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            handlePrimaryTransition(mediaItem, reason)
             seekToClipStartIfNeeded(mediaItem)
         }
 
@@ -61,24 +29,7 @@ class PlaybackService : MediaSessionService() {
             newPosition: Player.PositionInfo,
             reason: Int,
         ) {
-            if (reason == Player.DISCONTINUITY_REASON_SEEK) cancelCrossfade()
             seekToClipStartIfNeeded(player?.currentMediaItem)
-        }
-
-        override fun onIsPlayingChanged(isPlaying: Boolean) {
-            refreshCrossfadeUpdateSchedule()
-        }
-
-        override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
-            refreshCrossfadeUpdateSchedule()
-        }
-
-        override fun onRepeatModeChanged(repeatMode: Int) {
-            refreshCrossfadeUpdateSchedule()
-        }
-
-        override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) {
-            crossfadePlayer?.playbackParameters = playbackParameters
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -99,9 +50,10 @@ class PlaybackService : MediaSessionService() {
         )
     }
 
+    @UnstableApi
     override fun onCreate() {
         super.onCreate()
-        audioAttributes = AudioAttributes.Builder()
+        val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
@@ -109,9 +61,8 @@ class PlaybackService : MediaSessionService() {
             this,
             AuthenticatedStreamDataSource.Factory(),
         )
-        mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
         val exoPlayer = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(mediaSourceFactory)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build()
@@ -128,7 +79,6 @@ class PlaybackService : MediaSessionService() {
             .setSessionActivity(pendingIntent)
             .setCallback(sessionCallback)
             .build()
-        playbackPreferences.registerOnSharedPreferenceChangeListener(playbackPreferenceListener)
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
@@ -165,165 +115,7 @@ class PlaybackService : MediaSessionService() {
     private fun clipStartMs(mediaItem: MediaItem?): Long =
         mediaItem?.mediaMetadata?.extras?.getLong(CLIP_START_MS, 0L)?.coerceAtLeast(0L) ?: 0L
 
-    private fun clipEndMs(owner: Player, mediaItem: MediaItem?): Long {
-        val configuredEnd = mediaItem?.mediaMetadata?.extras?.getLong(CLIP_END_MS, C.TIME_UNSET)
-            ?: C.TIME_UNSET
-        if (configuredEnd != C.TIME_UNSET && configuredEnd > 0L) return configuredEnd
-        return owner.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
-    }
-
-    private fun crossfadeEnabled(): Boolean = playbackPreferences.getBoolean("crossfadeEnabled", false)
-
-    private fun requestedCrossfadeSeconds(): Float = CrossfadePolicy.normalizedSeconds(
-        playbackPreferences.getFloat("crossfadeSeconds", CrossfadePolicy.DefaultSeconds),
-    )
-
-    private fun userPlaybackGain(): Float = PlaybackVolumePolicy.gainForSlider(
-        playbackPreferences.getFloat("volume", .8f).coerceIn(0f, 1f),
-    )
-
-    private fun startCrossfadeUpdates() {
-        if (crossfadeUpdatesRunning) return
-        crossfadeUpdatesRunning = true
-        crossfadeHandler.post(crossfadeRunnable)
-    }
-
-    private fun refreshCrossfadeUpdateSchedule() {
-        val primary = player
-        val shouldRun = crossfadeEnabled()
-            && primary?.isPlaying == true
-            && primary.repeatMode != Player.REPEAT_MODE_ONE
-            && primary.mediaItemCount > 1
-            && primary.nextMediaItemIndex != C.INDEX_UNSET
-        if (shouldRun) {
-            startCrossfadeUpdates()
-        } else {
-            stopCrossfadeUpdates()
-            if (crossfadePlayer != null) cancelCrossfade()
-        }
-    }
-
-    private fun stopCrossfadeUpdates() {
-        crossfadeUpdatesRunning = false
-        crossfadeHandler.removeCallbacks(crossfadeRunnable)
-    }
-
-    private fun prepareCrossfadePlayer(primary: ExoPlayer, nextIndex: Int) {
-        val nextItem = primary.getMediaItemAt(nextIndex)
-        val secondary = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(mediaSourceFactory)
-            .setAudioAttributes(audioAttributes, false)
-            .setHandleAudioBecomingNoisy(false)
-            .build()
-        secondary.volume = 0f
-        secondary.playbackParameters = primary.playbackParameters
-        secondary.setMediaItem(nextItem)
-        secondary.seekTo(clipStartMs(nextItem))
-        secondary.prepare()
-        crossfadePlayer = secondary
-        crossfadeNextMediaID = nextItem.mediaId
-        crossfadeDurationMs = 0L
-        crossfadeStarted = false
-    }
-
-    private fun updateCrossfade() {
-        val primary = player ?: return
-        if (!crossfadeEnabled()
-            || primary.repeatMode == Player.REPEAT_MODE_ONE
-            || !primary.isPlaying
-            || primary.mediaItemCount < 2
-            || primary.nextMediaItemIndex == C.INDEX_UNSET
-        ) {
-            cancelCrossfade()
-            return
-        }
-
-        val currentItem = primary.currentMediaItem ?: return
-        val currentEnd = clipEndMs(primary, currentItem)
-        if (currentEnd <= 0L) return
-        val remainingMs = currentEnd - primary.currentPosition
-        if (remainingMs <= 0L) return
-
-        val nextIndex = primary.nextMediaItemIndex
-        val nextItem = primary.getMediaItemAt(nextIndex)
-        if (crossfadeNextMediaID != null && crossfadeNextMediaID != nextItem.mediaId) {
-            cancelCrossfade()
-        }
-
-        var secondary = crossfadePlayer
-        val requestedMs = (requestedCrossfadeSeconds() * 1_000L).toLong()
-        if (secondary == null) {
-            if (remainingMs <= requestedMs + CrossfadePreloadLeadMs) {
-                prepareCrossfadePlayer(primary, nextIndex)
-            }
-            return
-        }
-        if (secondary.playbackState != Player.STATE_READY) return
-
-        val currentStart = clipStartMs(currentItem)
-        val nextStart = clipStartMs(nextItem)
-        val nextEnd = clipEndMs(secondary, nextItem)
-        crossfadeDurationMs = CrossfadePolicy.effectiveDurationMs(
-            requestedSeconds = requestedCrossfadeSeconds(),
-            currentDurationMs = currentEnd - currentStart,
-            nextDurationMs = nextEnd - nextStart,
-        )
-        if (crossfadeDurationMs < MinimumUsefulCrossfadeMs) {
-            cancelCrossfade()
-            return
-        }
-
-        if (!crossfadeStarted) {
-            if (remainingMs > crossfadeDurationMs) return
-            secondary.seekTo(nextStart)
-            secondary.play()
-            crossfadeStarted = true
-        }
-
-        val progress = CrossfadePolicy.progress(remainingMs, crossfadeDurationMs)
-        val gain = userPlaybackGain()
-        primary.volume = gain * (1f - progress)
-        secondary.volume = gain * progress
-    }
-
-    private fun handlePrimaryTransition(mediaItem: MediaItem?, reason: Int) {
-        val primary = player ?: return
-        val secondary = crossfadePlayer ?: return
-        if (crossfadeStarted
-            && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO
-            && mediaItem?.mediaId == crossfadeNextMediaID
-        ) {
-            val carriedPosition = secondary.currentPosition
-            secondary.pause()
-            secondary.release()
-            clearCrossfadeState()
-            if (carriedPosition > clipStartMs(mediaItem)) primary.seekTo(carriedPosition)
-            primary.volume = userPlaybackGain()
-        } else {
-            cancelCrossfade()
-        }
-    }
-
-    private fun clearCrossfadeState() {
-        crossfadePlayer = null
-        crossfadeNextMediaID = null
-        crossfadeDurationMs = 0L
-        crossfadeStarted = false
-    }
-
-    private fun cancelCrossfade() {
-        crossfadePlayer?.run {
-            pause()
-            release()
-        }
-        clearCrossfadeState()
-        player?.volume = userPlaybackGain()
-    }
-
     override fun onDestroy() {
-        playbackPreferences.unregisterOnSharedPreferenceChangeListener(playbackPreferenceListener)
-        stopCrossfadeUpdates()
-        cancelCrossfade()
         player?.removeListener(clipListener)
         session?.release()
         session = null
@@ -336,9 +128,5 @@ class PlaybackService : MediaSessionService() {
     companion object {
         const val CLIP_START_MS = "resonance.clip.start_ms"
         const val CLIP_END_MS = "resonance.clip.end_ms"
-        private const val CrossfadeTickMs = 50L
-        private const val CrossfadePreparationTickMs = 250L
-        private const val CrossfadePreloadLeadMs = 2_000L
-        private const val MinimumUsefulCrossfadeMs = 250L
     }
 }

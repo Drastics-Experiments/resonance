@@ -108,8 +108,6 @@ data class ResonanceUiState(
     val repeatEnabled: Boolean = false,
     val playbackSpeed: Float = 1f,
     val volume: Float = .8f,
-    val crossfadeEnabled: Boolean = false,
-    val crossfadeSeconds: Float = 5f,
     val librarySearch: String = "",
     val serverUrl: String = "https://resonance-core.blithe-haven-9710.chatgpt.site",
     val serverToken: String = "",

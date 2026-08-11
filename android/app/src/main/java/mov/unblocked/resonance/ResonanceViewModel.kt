@@ -100,7 +100,6 @@ import mov.unblocked.resonance.playback.PlaybackService
 import mov.unblocked.resonance.playback.DownloadPolicy
 import mov.unblocked.resonance.playback.PlaybackFailurePolicy
 import mov.unblocked.resonance.playback.PlaybackVolumePolicy
-import mov.unblocked.resonance.playback.CrossfadePolicy
 import mov.unblocked.resonance.playback.QueuePolicy
 import mov.unblocked.resonance.playback.UploadMissingPolicy
 import mov.unblocked.resonance.playback.AuthenticatedStreamHandle
@@ -167,10 +166,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             repeatEnabled = preferences.getBoolean("repeat", false),
             playbackSpeed = preferences.getFloat("speed", 1f),
             volume = preferences.getFloat("volume", .8f).coerceIn(0f, 1f),
-            crossfadeEnabled = preferences.getBoolean("crossfadeEnabled", false),
-            crossfadeSeconds = CrossfadePolicy.normalizedSeconds(
-                preferences.getFloat("crossfadeSeconds", CrossfadePolicy.DefaultSeconds),
-            ),
         ),
     )
     val uiState = mutableState.asStateFlow()
@@ -1920,17 +1915,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         controller?.volume = PlaybackVolumePolicy.gainForSlider(clamped)
         mutableState.value = mutableState.value.copy(volume = clamped)
         preferences.edit().putFloat("volume", clamped).apply()
-    }
-
-    override fun setCrossfadeEnabled(enabled: Boolean) {
-        mutableState.value = mutableState.value.copy(crossfadeEnabled = enabled)
-        preferences.edit().putBoolean("crossfadeEnabled", enabled).apply()
-    }
-
-    override fun setCrossfadeSeconds(seconds: Float) {
-        val normalized = CrossfadePolicy.normalizedSeconds(seconds)
-        mutableState.value = mutableState.value.copy(crossfadeSeconds = normalized)
-        preferences.edit().putFloat("crossfadeSeconds", normalized).apply()
     }
 
     override fun toggleFavorite(trackId: String) {

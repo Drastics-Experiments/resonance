@@ -3,22 +3,6 @@ import Foundation
 import XCTest
 @testable import Resonance
 
-final class MobileCrossfadePolicyTests: XCTestCase {
-    func testCrossfadeRangeAndShortTrackLimit() {
-        XCTAssertEqual(MobileCrossfadePolicy.normalizedSeconds(-2), 1)
-        XCTAssertEqual(MobileCrossfadePolicy.normalizedSeconds(30), 12)
-        XCTAssertEqual(
-            MobileCrossfadePolicy.effectiveDuration(
-                requestedSeconds: 12,
-                currentDuration: 4,
-                nextDuration: 20
-            ),
-            2
-        )
-        XCTAssertEqual(MobileCrossfadePolicy.progress(remaining: 2.5, duration: 5), 0.5)
-    }
-}
-
 final class MobileClientConfigurationTests: XCTestCase {
     private let token = "test-access-token"
     private let cohortKey = "AAECAwQFBgcICQoLDA0ODw"

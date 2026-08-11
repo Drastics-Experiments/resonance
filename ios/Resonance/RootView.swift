@@ -2589,7 +2589,6 @@ private struct NowPlayingView: View {
                         progress(for: track)
                         transportControls
                         volumeControl
-                        crossfadeControl
                         playbackOptions
                         trackDetails(track)
                     }
@@ -2752,29 +2751,6 @@ private struct NowPlayingView: View {
         .font(.subheadline.weight(.semibold))
         .labelStyle(.iconOnly)
         .padding(.horizontal, 10)
-    }
-
-    private var crossfadeControl: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Label("Crossfade", systemImage: "waveform.path")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text("\(Int(library.crossfadeSeconds.rounded())) sec")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Toggle("Crossfade", isOn: $library.crossfadeEnabled)
-                    .labelsHidden()
-                    .disabled(library.isTransientStreamActive)
-            }
-            Slider(value: $library.crossfadeSeconds, in: 1...12, step: 1)
-                .tint(.accent)
-                .disabled(!library.crossfadeEnabled || library.isTransientStreamActive)
-                .accessibilityLabel("Crossfade duration")
-                .accessibilityValue("\(Int(library.crossfadeSeconds.rounded())) seconds")
-        }
-        .padding(14)
-        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16))
     }
 
     private func trackDetails(_ track: MobileTrack) -> some View {
