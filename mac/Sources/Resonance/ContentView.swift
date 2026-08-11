@@ -11,6 +11,7 @@ enum MacUpdateAlertState {
 }
 
 struct ContentView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     @EnvironmentObject private var localImportModel: MacLocalImportViewModel
     @EnvironmentObject private var updateManager: UpdateManager
@@ -40,7 +41,7 @@ struct ContentView: View {
                             .frame(width: sidebarWidth)
 
                         Rectangle()
-                            .fill(Color.appLine)
+                            .fill(palette.divider)
                             .frame(width: 1)
                     }
 
@@ -50,7 +51,7 @@ struct ContentView: View {
                 .frame(maxHeight: .infinity)
 
                 Rectangle()
-                    .fill(Color.appLine)
+                    .fill(palette.divider)
                     .frame(height: 1)
 
                 PlayerBarView(
@@ -69,7 +70,7 @@ struct ContentView: View {
                             status: model.downloadStatus,
                             progress: model.downloadProgress,
                             symbol: "arrow.down.to.line",
-                            color: Color.appViolet,
+                            color: palette.secondary,
                             cancel: model.cancelServerDownload
                         )
                         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -82,7 +83,7 @@ struct ContentView: View {
                             status: model.uploadStatus,
                             progress: model.uploadProgress,
                             symbol: "arrow.up.to.line",
-                            color: Color.appAccent,
+                            color: palette.accent,
                             cancel: model.cancelServerUpload
                         )
                         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -95,7 +96,7 @@ struct ContentView: View {
                             status: model.uploadStatus,
                             progress: model.uploadProgress,
                             symbol: "wrench.and.screwdriver",
-                            color: Color.appAccent,
+                            color: palette.accent,
                             cancel: model.cancelServerUpload
                         )
                         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -111,8 +112,8 @@ struct ContentView: View {
                                 ? "arrow.up.to.line"
                                 : "arrow.down.to.line",
                             color: localImportModel.stage == .syncing
-                                ? Color.appAccent
-                                : Color.appViolet,
+                                ? palette.accent
+                                : palette.secondary,
                             cancel: localImportModel.cancel
                         )
                         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -123,7 +124,7 @@ struct ContentView: View {
                             title: localImportModel.failurePopupTitle,
                             detail: error.message,
                             symbol: "exclamationmark.triangle.fill",
-                            color: Color.appAccent,
+                            color: palette.accent,
                             dismiss: localImportModel.reset
                         )
                         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -207,9 +208,9 @@ struct ContentView: View {
         .environmentObject(model.playbackPositionState)
         .background {
             ZStack {
-                Color.appBackground
+                palette.background
                 RadialGradient(
-                    colors: [Color.appViolet.opacity(0.14), .clear],
+                    colors: [palette.secondary.opacity(0.14), .clear],
                     center: UnitPoint(x: 0.72, y: 0.05),
                     startRadius: 10,
                     endRadius: 520
@@ -217,7 +218,7 @@ struct ContentView: View {
             }
             .ignoresSafeArea()
         }
-        .foregroundStyle(Color.appInk)
+        .foregroundStyle(palette.ink)
         .preferredColorScheme(.dark)
         .ignoresSafeArea(.container, edges: .top)
         .task { await updateManager.automaticCheck() }
@@ -268,6 +269,7 @@ struct ContentView: View {
 }
 
 private struct UpdateAvailableAlert: View {
+    @Environment(\.resonancePalette) private var palette
     let version: String
     let isBusy: Bool
     let canInstall: Bool
@@ -293,9 +295,9 @@ private struct UpdateAvailableAlert: View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "arrow.down.circle.fill")
                 .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(Color.appAccent)
+                .foregroundStyle(palette.foregroundAccent)
                 .frame(width: 38, height: 38)
-                .background(Color.appAccent.opacity(0.14), in: Circle())
+                .background(palette.accent.opacity(0.14), in: Circle())
 
             VStack(alignment: .leading, spacing: 5) {
                 Text("Update Available")
@@ -305,12 +307,12 @@ private struct UpdateAvailableAlert: View {
                     ? "Resonance \(version) is ready to install."
                     : "Resonance \(version) is available.")
                     .font(.system(size: 10))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
 
                 Button(canInstall ? "Restart to Install" : "Update and Restart", action: onPrimaryAction)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .tint(Color.appAccent)
+                    .tint(palette.accent)
                     .disabled(isBusy)
             }
 
@@ -319,7 +321,7 @@ private struct UpdateAvailableAlert: View {
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .frame(width: 24, height: 24)
                     .contentShape(Rectangle())
             }
@@ -333,7 +335,7 @@ private struct UpdateAvailableAlert: View {
     private var fallbackAlert: some View {
         alertContent
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .background(Color.appPanel.opacity(0.88), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(palette.panel.opacity(0.88), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(Color.white.opacity(0.10))

@@ -4,6 +4,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct MainContentView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     @State private var serverSearchText = ""
     @State private var serverScope: MacServerScope = .all
@@ -36,7 +37,7 @@ struct MainContentView: View {
         }
         .background {
             LinearGradient(
-                colors: [Color(hex: 0x080910).opacity(0.68), Color.appBackground],
+                colors: [palette.panel.opacity(0.68), palette.background],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -46,6 +47,7 @@ struct MainContentView: View {
 }
 
 private struct ServerLibraryView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     @Binding var searchText: String
     @Binding var scope: MacServerScope
@@ -138,27 +140,27 @@ private struct ServerLibraryView: View {
                             .foregroundStyle(Color(hex: 0xD4D7E0))
                         Text("\(visibleSongs.count) \(visibleSongs.count == 1 ? "song" : "songs")")
                             .font(.system(size: 11))
-                            .foregroundStyle(Color.appMuted)
+                            .foregroundStyle(palette.muted)
 
                         if model.pendingRemoteSongMetadataCount > 0 {
                             ProgressView()
                                 .controlSize(.mini)
-                                .tint(Color.appViolet)
+                                .tint(palette.foregroundAccent)
                             Text(
                                 "Loading metadata for \(model.pendingRemoteSongMetadataCount) "
                                     + (model.pendingRemoteSongMetadataCount == 1 ? "song" : "songs")
                             )
                                 .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(Color.appMuted)
+                                .foregroundStyle(palette.muted)
                         }
 
                         if scope != .all {
                             Text(scope.rawValue)
                                 .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(Color.appViolet)
+                                .foregroundStyle(palette.foregroundAccent)
                                 .padding(.horizontal, 8)
                                 .frame(height: 22)
-                                .background(Color.appViolet.opacity(0.12), in: Capsule())
+                                .background(palette.secondary.opacity(0.12), in: Capsule())
                         }
 
                         Spacer(minLength: 8)
@@ -167,7 +169,7 @@ private struct ServerLibraryView: View {
                     }
                     .padding(.bottom, 10)
                     .overlay(alignment: .bottom) {
-                        Rectangle().fill(Color.appLine).frame(height: 1)
+                        Rectangle().fill(palette.divider).frame(height: 1)
                     }
 
                     MacServerCatalogHeader(showAlbum: showAlbum)
@@ -215,13 +217,13 @@ private struct ServerLibraryView: View {
             .background {
                 ZStack {
                     RadialGradient(
-                        colors: [Color.appViolet.opacity(0.10), .clear],
+                        colors: [palette.secondary.opacity(0.10), .clear],
                         center: UnitPoint(x: 0.83, y: 0.04),
                         startRadius: 10,
                         endRadius: 520
                     )
                     RadialGradient(
-                        colors: [Color.appViolet.opacity(0.055), .clear],
+                        colors: [palette.secondary.opacity(0.055), .clear],
                         center: UnitPoint(x: 0.48, y: 0.88),
                         startRadius: 10,
                         endRadius: 520
@@ -276,10 +278,10 @@ private struct ServerLibraryView: View {
         HStack(spacing: 10) {
             Label(isConnected ? "Connected" : "Offline", systemImage: "circle.fill")
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(isConnected ? Color(hex: 0x55D98B) : Color.appMuted)
+                .foregroundStyle(isConnected ? Color(hex: 0x55D98B) : palette.muted)
                 .padding(.horizontal, 10)
                 .frame(height: 27)
-                .background((isConnected ? Color(hex: 0x55D98B) : Color.appMuted).opacity(0.12), in: Capsule())
+                .background((isConnected ? Color(hex: 0x55D98B) : palette.muted).opacity(0.12), in: Capsule())
 
             Button { presentedSheet = .settings } label: {
                 HStack(spacing: 8) {
@@ -289,7 +291,7 @@ private struct ServerLibraryView: View {
                         .font(.system(size: 10, weight: .semibold))
                 }
                 .font(.system(size: 11))
-                .foregroundStyle(Color.appMuted)
+                .foregroundStyle(palette.muted)
             }
             .buttonStyle(.plain)
             .help("Edit server connection")
@@ -298,14 +300,14 @@ private struct ServerLibraryView: View {
 
     private var serverMetrics: some View {
         HStack(spacing: 12) {
-            Text("•").foregroundStyle(Color.appMuted)
-            MacServerInlineMetric(symbol: "music.note", color: Color.appViolet, value: "\(model.remoteSongs.count)", label: "songs")
-            Text("•").foregroundStyle(Color.appMuted)
-            MacServerInlineMetric(symbol: "list.bullet", color: Color.appViolet, value: "\(model.customPlaylists.count)", label: "playlists")
-            Text("•").foregroundStyle(Color.appMuted)
+            Text("•").foregroundStyle(palette.muted)
+            MacServerInlineMetric(symbol: "music.note", color: palette.foregroundAccent, value: "\(model.remoteSongs.count)", label: "songs")
+            Text("•").foregroundStyle(palette.muted)
+            MacServerInlineMetric(symbol: "list.bullet", color: palette.foregroundAccent, value: "\(model.customPlaylists.count)", label: "playlists")
+            Text("•").foregroundStyle(palette.muted)
             MacServerInlineMetric(
                 symbol: allSynced ? "checkmark" : "icloud.and.arrow.down",
-                color: allSynced ? Color(hex: 0x55D98B) : Color.appAccent,
+                color: allSynced ? Color(hex: 0x55D98B) : palette.foregroundAccent,
                 value: "\(syncedCount)",
                 label: "on device"
             )
@@ -429,6 +431,7 @@ private enum MacServerSort: String, CaseIterable, Identifiable {
 }
 
 private struct MacServerInlineMetric: View {
+    @Environment(\.resonancePalette) private var palette
     let symbol: String
     let color: Color
     let value: String
@@ -446,13 +449,14 @@ private struct MacServerInlineMetric: View {
                     .font(.system(size: 12, weight: .semibold))
                 Text(label)
                     .font(.system(size: 11))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
             }
         }
     }
 }
 
 private struct MacServerCircleActionButton: View {
+    @Environment(\.resonancePalette) private var palette
     let symbol: String
     let label: String
     var valueText: String? = nil
@@ -474,7 +478,7 @@ private struct MacServerCircleActionButton: View {
                         .rotationEffect(.degrees(rotationDegrees))
                 }
             }
-            .foregroundStyle(Color.appAccent)
+            .foregroundStyle(palette.foregroundAccent)
             .frame(width: 42, height: 42)
             .background(Color.white.opacity(0.045), in: Circle())
             .overlay { Circle().stroke(Color.white.opacity(0.035)) }
@@ -494,6 +498,7 @@ private struct MacServerCircleActionButton: View {
 }
 
 private struct MacServerCatalogHeader: View {
+    @Environment(\.resonancePalette) private var palette
     let showAlbum: Bool
 
     var body: some View {
@@ -515,12 +520,13 @@ private struct MacServerCatalogHeader: View {
         .padding(.horizontal, 10)
         .frame(height: 38)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.appLine).frame(height: 1)
+            Rectangle().fill(palette.divider).frame(height: 1)
         }
     }
 }
 
 private struct MacServerSongRow: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     let song: RemoteSong
     let number: Int
@@ -607,7 +613,7 @@ private struct MacServerSongRow: View {
                     Group {
                         if isSelecting {
                             Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(isSelected ? Color.appAccent : Color.appMuted)
+                                .foregroundStyle(isSelected ? palette.foregroundAccent : palette.muted)
                         } else if isCurrent && model.isPlaying {
                             EqualizerGlyph(isAnimating: true)
                         } else {
@@ -685,7 +691,7 @@ private struct MacServerSongRow: View {
                     } label: {
                         Image(systemName: isFavorite ? "heart.fill" : "heart")
                             .font(.system(size: 11))
-                            .foregroundStyle(isFavorite ? Color.appAccent : Color(hex: 0xAEB4C2))
+                            .foregroundStyle(isFavorite ? palette.foregroundAccent : Color(hex: 0xAEB4C2))
                     }
                     .buttonStyle(.plain)
                     .help(isFavorite ? "Remove from Liked Songs" : "Add to Liked Songs")
@@ -719,7 +725,7 @@ private struct MacServerSongRow: View {
         .frame(height: 61)
         .background(isHovering || isSelected || isCurrent ? Color.white.opacity(0.055) : .clear)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.appLine).frame(height: 1) }
+        .overlay(alignment: .bottom) { Rectangle().fill(palette.divider).frame(height: 1) }
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .contextMenu {
@@ -809,6 +815,7 @@ private struct MacServerArtwork: View {
 }
 
 private struct MacServerCatalogPlaceholderRow: View {
+    @Environment(\.resonancePalette) private var palette
     let number: Int
     let showAlbum: Bool
 
@@ -844,7 +851,7 @@ private struct MacServerCatalogPlaceholderRow: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 61)
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.appLine).frame(height: 1) }
+        .overlay(alignment: .bottom) { Rectangle().fill(palette.divider).frame(height: 1) }
         .accessibilityLabel("Loading server song")
     }
 }
@@ -861,6 +868,7 @@ private struct MacServerMetadataPlaceholder: View {
 }
 
 private struct PlaylistsOverviewView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     private let columns = [GridItem(.adaptive(minimum: 170), spacing: 14)]
 
@@ -877,7 +885,7 @@ private struct PlaylistsOverviewView: View {
                     .padding(.top, 6)
                 Text("Organize your local music into collections.")
                     .font(.system(size: 12))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .padding(.top, 6)
 
                 Button {
@@ -887,7 +895,7 @@ private struct PlaylistsOverviewView: View {
                         .font(.system(size: 12, weight: .bold))
                         .padding(.horizontal, 18)
                         .frame(height: 40)
-                        .background(Color.appAccent)
+                        .background(palette.accent)
                         .clipShape(Capsule())
                 }
                 .buttonStyle(PressableScaleStyle())
@@ -910,18 +918,18 @@ private struct PlaylistsOverviewView: View {
                                         .lineLimit(1)
                                     Text("\(trackCount) \(trackCount == 1 ? "track" : "tracks")")
                                         .font(.system(size: 10))
-                                        .foregroundStyle(Color.appMuted)
+                                        .foregroundStyle(palette.muted)
                                 }
                                 Spacer()
                                 Image(systemName: "chevron.right")
                                     .font(.system(size: 10, weight: .bold))
-                                    .foregroundStyle(Color.appMuted)
+                                    .foregroundStyle(palette.muted)
                             }
                             .padding(12)
                             .frame(maxWidth: .infinity)
                             .background(Color.white.opacity(0.045))
                             .overlay {
-                                RoundedRectangle(cornerRadius: 12).stroke(Color.appLine)
+                                RoundedRectangle(cornerRadius: 12).stroke(palette.divider)
                             }
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
@@ -934,7 +942,7 @@ private struct PlaylistsOverviewView: View {
         }
         .background {
             RadialGradient(
-                colors: [Color.appViolet.opacity(0.20), .clear],
+                colors: [palette.secondary.opacity(0.20), .clear],
                 center: UnitPoint(x: 0.72, y: 0.08),
                 startRadius: 10,
                 endRadius: 420
@@ -944,6 +952,7 @@ private struct PlaylistsOverviewView: View {
 }
 
 private struct TopBarView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     @Binding var serverSearchText: String
     @Binding var serverScope: MacServerScope
@@ -988,10 +997,10 @@ private struct TopBarView: View {
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(WindowDragArea())
-        .background(Color(hex: 0x050609).opacity(0.94))
+        .background(palette.panel.opacity(0.94))
         .background(.ultraThinMaterial.opacity(0.10))
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.appLine).frame(height: 1)
+            Rectangle().fill(palette.divider).frame(height: 1)
         }
         .onReceive(NotificationCenter.default.publisher(for: .focusMusicSearch)) { _ in
             searchIsFocused = true
@@ -1083,6 +1092,7 @@ private struct TopBarView: View {
 }
 
 private struct MacProfileMenu: View {
+    @Environment(\.resonancePalette) private var palette
     private enum PresentedSheet: String, Identifiable {
         case listeningHistory
         case clipEditor
@@ -1147,7 +1157,7 @@ private struct MacProfileMenu: View {
                         } label: {
                             Text(profileName)
                                 .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(Color.appInk)
+                                .foregroundStyle(palette.ink)
                                 .lineLimit(1)
                         }
                         .buttonStyle(.plain)
@@ -1159,14 +1169,14 @@ private struct MacProfileMenu: View {
                             } label: {
                                 Text(ResonanceEmailPrivacy.displayedAddress(email, isRevealed: isEmailRevealed))
                                     .font(.system(size: 11))
-                                    .foregroundStyle(Color.appMuted)
+                                    .foregroundStyle(palette.muted)
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(isEmailRevealed ? "Hide email address" : "Reveal email address")
                         } else {
                             Text("Clerk account")
                                 .font(.system(size: 11))
-                                .foregroundStyle(Color.appMuted)
+                                .foregroundStyle(palette.muted)
                         }
                     }
 
@@ -1178,7 +1188,7 @@ private struct MacProfileMenu: View {
                     } label: {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color.appMuted)
+                            .foregroundStyle(palette.muted)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Manage \(profileName) account")
@@ -1194,7 +1204,7 @@ private struct MacProfileMenu: View {
                 .onHover { isProfileHeaderHovering = $0 }
 
                 Rectangle()
-                    .fill(Color.appLine)
+                    .fill(palette.divider)
                     .frame(height: 1)
                     .padding(.horizontal, 16)
 
@@ -1226,8 +1236,8 @@ private struct MacProfileMenu: View {
                 .padding(8)
             }
             .frame(width: 274)
-            .background(Color.appSurfaceRaised)
-            .presentationBackground(Color.appSurfaceRaised)
+            .background(palette.raisedSurface)
+            .presentationBackground(palette.raisedSurface)
         }
         .sheet(item: $presentedSheet) { sheet in
             switch sheet {
@@ -1249,6 +1259,7 @@ private struct MacProfileMenu: View {
 }
 
 private struct ProfileAvatar: View {
+    @Environment(\.resonancePalette) private var palette
     let initial: String
     let size: CGFloat
     let fontSize: CGFloat
@@ -1258,7 +1269,7 @@ private struct ProfileAvatar: View {
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [Color(hex: 0x9A68FF), Color.appViolet],
+                colors: [palette.tertiary, palette.secondary],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -1288,12 +1299,13 @@ private struct ProfileAvatar: View {
             .overlay {
                 Circle().stroke(Color.white.opacity(0.20), lineWidth: 1)
             }
-            .shadow(color: Color.appViolet.opacity(0.26), radius: 9, y: 4)
+            .shadow(color: palette.secondary.opacity(0.26), radius: 9, y: 4)
             .contentShape(Circle())
     }
 }
 
 private struct ProfilePopoverRow: View {
+    @Environment(\.resonancePalette) private var palette
     let symbol: String
     let title: String
     @State private var isHovering = false
@@ -1302,12 +1314,12 @@ private struct ProfilePopoverRow: View {
         HStack(spacing: 13) {
             Image(systemName: symbol)
                 .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(Color.appInk)
+                .foregroundStyle(palette.ink)
                 .frame(width: 24)
 
             Text(title)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color.appInk)
+                .foregroundStyle(palette.ink)
 
             Spacer(minLength: 0)
         }
@@ -1324,6 +1336,7 @@ private struct ProfilePopoverRow: View {
 }
 
 private struct MacListeningHistorySheet: View {
+    @Environment(\.resonancePalette) private var palette
     private enum Mode: String, CaseIterable, Identifiable {
         case overall
         case stats
@@ -1468,7 +1481,7 @@ private struct MacListeningHistorySheet: View {
                 .stroke(Color.white.opacity(0.17), lineWidth: 1)
         }
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .foregroundStyle(Color.appInk)
+        .foregroundStyle(palette.ink)
         .preferredColorScheme(.dark)
         .presentationBackground(Color.clear)
         .onChange(of: range) {
@@ -1489,7 +1502,7 @@ private struct MacListeningHistorySheet: View {
         HStack(spacing: 14) {
             Image(systemName: "clock")
                 .font(.system(size: 21, weight: .medium))
-                .foregroundStyle(Color(hex: 0x9B62FF))
+                .foregroundStyle(palette.tertiary)
                 .frame(width: 28, height: 28)
 
             Text("Listening History")
@@ -1528,19 +1541,19 @@ private struct MacListeningHistorySheet: View {
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(
                             mode == option
-                                ? Color(hex: 0xDAC8FF)
-                                : Color.appMuted
+                                ? palette.foregroundAccent
+                                : palette.muted
                         )
                         .padding(.horizontal, 11)
                         .frame(height: 32)
                         .background {
                             if mode == option {
                                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(Color(hex: 0x302051))
+                                    .fill(palette.secondary.opacity(0.25))
                                     .overlay {
                                         RoundedRectangle(cornerRadius: 7, style: .continuous)
                                             .stroke(
-                                                Color(hex: 0x9B62FF).opacity(0.52),
+                                                palette.tertiary.opacity(0.52),
                                                 lineWidth: 1
                                             )
                                     }
@@ -1551,7 +1564,7 @@ private struct MacListeningHistorySheet: View {
             }
         }
         .padding(3)
-        .background(Color(hex: 0x0F1118))
+        .background(palette.surface)
         .overlay {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(Color.white.opacity(0.071), lineWidth: 1)
@@ -1621,12 +1634,12 @@ private struct MacListeningHistorySheet: View {
                     .font(.system(size: 11, weight: .medium))
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
             }
             .foregroundStyle(Color(hex: 0xCBC8D3))
             .padding(.horizontal, 12)
             .frame(height: 32)
-            .background(Color(hex: 0x11131B), in: Capsule())
+            .background(palette.raisedSurface, in: Capsule())
             .overlay {
                 Capsule()
                     .stroke(Color.white.opacity(0.09), lineWidth: 1)
@@ -1651,7 +1664,7 @@ private struct MacListeningHistorySheet: View {
                         : Color(hex: 0xCBC8D3)
                 )
                 .frame(width: 32, height: 32)
-                .background(Color(hex: 0x11131B), in: Circle())
+                .background(palette.raisedSurface, in: Circle())
                 .overlay {
                     Circle()
                         .stroke(Color.white.opacity(0.09), lineWidth: 1)
@@ -1675,7 +1688,7 @@ private struct MacListeningHistorySheet: View {
         HStack(spacing: 0) {
             ListeningHistoryMetric(
                 symbol: "clock",
-                accent: Color(hex: 0x9B62FF),
+                accent: palette.tertiary,
                 value: historyListenedTime(allTimeStats.totalSeconds),
                 label: "Total Time Listened"
             )
@@ -1693,7 +1706,7 @@ private struct MacListeningHistorySheet: View {
 
             ListeningHistoryMetric(
                 symbol: "music.note",
-                accent: Color(hex: 0xAD70FF),
+                accent: palette.tertiary,
                 value: allTimeStats.songs.formatted(),
                 label: "Total Songs Heard"
             )
@@ -1702,7 +1715,7 @@ private struct MacListeningHistorySheet: View {
 
             ListeningHistoryMetric(
                 symbol: "music.note",
-                accent: Color(hex: 0xAD70FF),
+                accent: palette.tertiary,
                 value: allTimeStats.topArtist,
                 label: "Most Popular Artist"
             )
@@ -1817,7 +1830,7 @@ private struct MacListeningHistorySheet: View {
                         summary.mostActiveDay?.seconds ?? 0
                     ),
                     label: "Listening time",
-                    accent: Color(hex: 0xA66CFF)
+                    accent: palette.tertiary
                 )
 
                 metricDivider
@@ -1839,7 +1852,7 @@ private struct MacListeningHistorySheet: View {
                 ListeningHistoryFooterItem(
                     value: summary.songSeries.first?.track.title ?? "No song yet",
                     label: "Most listened",
-                    accent: Color(hex: 0xA66CFF)
+                    accent: palette.tertiary
                 )
 
                 metricDivider
@@ -1875,7 +1888,7 @@ private struct MacListeningHistorySheet: View {
                                 style: .continuous
                             )
                             .stroke(
-                                Color(hex: 0xB699FF).opacity(0.31),
+                                palette.tertiary.opacity(0.31),
                                 lineWidth: 1
                             )
                         }
@@ -1884,7 +1897,7 @@ private struct MacListeningHistorySheet: View {
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(Color(hex: 0xF4EFFF))
                             .frame(width: 22, height: 22)
-                            .background(Color(hex: 0x090A11).opacity(0.85), in: Circle())
+                            .background(palette.surface.opacity(0.85), in: Circle())
                             .overlay {
                                 Circle()
                                     .stroke(
@@ -2071,7 +2084,7 @@ private struct MacListeningHistorySheet: View {
                         HStack(spacing: 10) {
                             Text((index + 1).formatted())
                                 .font(.system(size: 9))
-                                .foregroundStyle(Color.appMuted)
+                                .foregroundStyle(palette.muted)
                                 .frame(width: 28)
 
                             historyArtwork(
@@ -2088,26 +2101,26 @@ private struct MacListeningHistorySheet: View {
                                     .lineLimit(2)
                                 Text("\(song.track.artist) / Audio")
                                     .font(.system(size: 9))
-                                    .foregroundStyle(Color.appMuted)
+                                    .foregroundStyle(palette.muted)
                                     .lineLimit(1)
                             }
                             .frame(width: 420, alignment: .leading)
 
                             Text(song.track.album)
                                 .font(.system(size: 9))
-                                .foregroundStyle(Color.appMuted)
+                                .foregroundStyle(palette.muted)
                                 .lineLimit(2)
                                 .frame(width: 220, alignment: .leading)
 
                             Text(historyListenedTime(song.seconds))
                                 .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(Color(hex: 0xBBA7FF))
+                                .foregroundStyle(palette.tertiary)
                                 .monospacedDigit()
                                 .frame(width: 96, alignment: .leading)
 
                             Text(song.plays.formatted())
                                 .font(.system(size: 9))
-                                .foregroundStyle(Color.appMuted)
+                                .foregroundStyle(palette.muted)
                                 .monospacedDigit()
                                 .frame(width: 52, alignment: .leading)
                         }
@@ -2128,7 +2141,7 @@ private struct MacListeningHistorySheet: View {
     ) -> some View {
         Text(title.uppercased())
             .font(.system(size: 9, weight: .medium))
-            .foregroundStyle(Color.appMuted)
+            .foregroundStyle(palette.muted)
             .frame(width: width, alignment: alignment)
     }
 
@@ -2180,11 +2193,11 @@ private struct MacListeningHistorySheet: View {
             .frame(width: size, height: size)
         } else {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(Color(hex: 0x151722))
+                .fill(palette.raisedSurface)
                 .overlay {
                     Image(systemName: "music.note")
                         .font(.system(size: size * 0.30, weight: .medium))
-                        .foregroundStyle(Color(hex: 0x8F6BEB))
+                        .foregroundStyle(palette.foregroundAccent)
                 }
                 .frame(width: size, height: size)
         }
@@ -2318,18 +2331,18 @@ private struct MacListeningHistorySheet: View {
     private var historyBackground: some View {
         ZStack {
             LinearGradient(
-                colors: [Color(hex: 0x090B13), Color(hex: 0x070910)],
+                colors: [palette.surface, palette.panel],
                 startPoint: .top,
                 endPoint: .bottom
             )
             RadialGradient(
-                colors: [Color(hex: 0x536BFF).opacity(0.14), .clear],
+                colors: [palette.accent.opacity(0.14), .clear],
                 center: UnitPoint(x: 0.16, y: 0.12),
                 startRadius: 0,
                 endRadius: 330
             )
             RadialGradient(
-                colors: [Color(hex: 0x7547FF).opacity(0.12), .clear],
+                colors: [palette.accent.opacity(0.12), .clear],
                 center: UnitPoint(x: 0.76, y: 0.20),
                 startRadius: 0,
                 endRadius: 380
@@ -2372,6 +2385,7 @@ enum ListeningHistoryChartHitTesting {
 }
 
 private struct ListeningHistoryBarChart: View {
+    @Environment(\.resonancePalette) private var palette
     let summary: ListeningHistoryCalendarSummary
     let chartMaximum: Double
     let chartTicks: [Double]
@@ -2431,7 +2445,7 @@ private struct ListeningHistoryBarChart: View {
                     )
                 )
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 4]))
-                .foregroundStyle(Color(hex: 0xD2C3FF))
+                .foregroundStyle(palette.tertiary)
             }
         }
         .chartYScale(domain: 0...chartMaximum)
@@ -2561,8 +2575,8 @@ private struct ListeningHistoryBarChart: View {
 
     private func barStyle(for day: ListeningHistoryDay) -> AnyShapeStyle {
         let colors = day.id == peakDayID
-            ? [Color(hex: 0xFF806C), Color(hex: 0x8A42EB)]
-            : [Color(hex: 0x9B7AFF), Color(hex: 0x5D35D8)]
+            ? [Color(hex: 0xFF806C), palette.secondary]
+            : [palette.tertiary, palette.secondary]
         return AnyShapeStyle(
             LinearGradient(
                 colors: colors,
@@ -2680,6 +2694,7 @@ private struct ListeningHistoryMetric: View {
 }
 
 private struct ListeningHistorySongRow: View {
+    @Environment(\.resonancePalette) private var palette
     let position: Int
     let song: ListeningHistorySongSeries
     let maximumSeconds: TimeInterval
@@ -2725,8 +2740,8 @@ private struct ListeningHistorySongRow: View {
                         .fill(
                             LinearGradient(
                                 colors: [
-                                    Color(hex: 0xA36CFF),
-                                    Color(hex: 0x7545ED)
+                                    palette.tertiary,
+                                    palette.secondary
                                 ],
                                 startPoint: .leading,
                                 endPoint: .trailing
@@ -2739,7 +2754,7 @@ private struct ListeningHistorySongRow: View {
 
             Text(listeningTime)
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(Color(hex: 0xBEA8FF))
+                .foregroundStyle(palette.tertiary)
                 .monospacedDigit()
                 .frame(width: 64, alignment: .trailing)
 
@@ -2777,6 +2792,7 @@ private struct ListeningHistoryFooterItem: View {
 }
 
 private struct ListeningHistoryChartTooltip: View {
+    @Environment(\.resonancePalette) private var palette
     let date: String
     let listeningTime: String
     let plays: Int
@@ -2804,10 +2820,10 @@ private struct ListeningHistoryChartTooltip: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 11)
         .frame(minWidth: 156, maxWidth: 230, alignment: .leading)
-        .background(Color(hex: 0x11131D).opacity(0.93))
+        .background(palette.raisedSurface.opacity(0.93))
         .overlay {
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .stroke(Color(hex: 0xB99CFF).opacity(0.25), lineWidth: 1)
+                .stroke(palette.tertiary.opacity(0.25), lineWidth: 1)
         }
         .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         .shadow(color: Color.black.opacity(0.75), radius: 19, y: 7)
@@ -2815,6 +2831,7 @@ private struct ListeningHistoryChartTooltip: View {
 }
 
 private struct ListeningHistoryRankedSongCard: View {
+    @Environment(\.resonancePalette) private var palette
     let position: Int
     let song: ListeningHistoryRankedSong
     let listeningTime: String
@@ -2834,7 +2851,7 @@ private struct ListeningHistoryRankedSongCard: View {
                     .foregroundStyle(Color.white)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
-                    .background(Color(hex: 0x080910).opacity(0.85), in: Capsule())
+                    .background(palette.surface.opacity(0.85), in: Capsule())
                     .overlay {
                         Capsule()
                             .stroke(Color.white.opacity(0.14), lineWidth: 1)
@@ -2859,7 +2876,7 @@ private struct ListeningHistoryRankedSongCard: View {
                     + (song.plays == 1 ? "play" : "plays")
             )
             .font(.system(size: 9))
-            .foregroundStyle(Color(hex: 0xBBA7FF))
+                .foregroundStyle(palette.tertiary)
             .lineLimit(1)
             .padding(.top, 5)
         }
@@ -2945,6 +2962,7 @@ enum LibraryCollectionLayoutPolicy {
 }
 
 private struct LibraryFilterPills: View {
+    @Environment(\.resonancePalette) private var palette
     enum Style {
         case compactTop
         case standard
@@ -2963,13 +2981,13 @@ private struct LibraryFilterPills: View {
                 } label: {
                     Text(filter.rawValue)
                         .font(.system(size: isCompact ? 10 : 11, weight: .medium))
-                        .foregroundStyle(model.filter == filter ? Color.white : Color(hex: 0xAEB3C1))
+                        .foregroundStyle(model.filter == filter ? Color.white : palette.muted)
                         .padding(.horizontal, isCompact ? 12 : 15)
                         .frame(height: isCompact ? 26 : 34)
                         .background {
                             if model.filter == filter {
                                 LinearGradient(
-                                    colors: [Color(hex: 0x4D67FF), Color(hex: 0x8A42EB)],
+                    colors: [palette.accent, palette.secondary],
                                     startPoint: .topLeading,
                                     endPoint: .bottomTrailing
                                 )
@@ -2979,7 +2997,7 @@ private struct LibraryFilterPills: View {
                         }
                         .clipShape(Capsule())
                         .shadow(
-                            color: model.filter == filter ? Color(hex: 0x5B4AFF).opacity(0.30) : .clear,
+                            color: model.filter == filter ? palette.accent.opacity(0.30) : .clear,
                             radius: isCompact ? 8 : 12,
                             y: isCompact ? 4 : 6
                         )
@@ -2996,6 +3014,7 @@ private struct LibraryFilterPills: View {
 }
 
 private struct RecentlyAddedSection: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     let availableWidth: CGFloat
 
@@ -3014,19 +3033,19 @@ private struct RecentlyAddedSection: View {
                     Text("FRESH TO YOUR LIBRARY")
                         .font(.system(size: 8, weight: .bold))
                         .tracking(1.3)
-                        .foregroundStyle(Color(hex: 0x8F8A9D))
+                        .foregroundStyle(palette.muted)
 
                     Text("Recently Added")
                         .font(.system(size: 20, weight: .bold))
                         .tracking(-0.3)
-                        .foregroundStyle(Color.appInk)
+                        .foregroundStyle(palette.ink)
                 }
 
                 Spacer(minLength: 0)
 
                 Text("\(tracks.count) newest")
                     .font(.system(size: 10))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
             }
 
             ScrollView(.horizontal) {
@@ -3063,6 +3082,7 @@ enum RecentlyAddedArtworkActionPolicy {
 }
 
 private struct RecentlyAddedArtworkCard: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     let track: Track
     let cardWidth: CGFloat
@@ -3106,8 +3126,8 @@ private struct RecentlyAddedArtworkCard: View {
                                 .font(.system(size: 18, weight: .bold))
                                 .foregroundStyle(Color.white)
                                 .frame(width: 54, height: 54)
-                                .background(Color.appAccent, in: Circle())
-                                .shadow(color: Color(hex: 0x321690).opacity(0.50), radius: 14, y: 6)
+                                .background(palette.accent, in: Circle())
+                                .shadow(color: palette.accent.opacity(0.50), radius: 14, y: 6)
                         }
                         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                         .transition(.opacity)
@@ -3117,13 +3137,13 @@ private struct RecentlyAddedArtworkCard: View {
 
                 Text(track.title)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isCurrent ? Color.appAccent : Color.appInk)
+                    .foregroundStyle(isCurrent ? palette.foregroundAccent : palette.ink)
                     .lineLimit(1)
                     .padding(.top, 10)
 
                 Text(track.artist)
                     .font(.system(size: 9))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .lineLimit(1)
                     .padding(.top, 4)
             }
@@ -3139,6 +3159,7 @@ private struct RecentlyAddedArtworkCard: View {
 }
 
 private struct CollectionHeroView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     let onAddSongs: () -> Void
 
@@ -3173,20 +3194,20 @@ private struct CollectionHeroView: View {
         GeometryReader { proxy in
             ZStack {
                 LinearGradient(
-                    colors: [Color(hex: 0x08090E), Color(hex: 0x09080F), Color(hex: 0x07070B)],
+                    colors: [palette.panel, palette.background, palette.surface],
                     startPoint: .leading,
                     endPoint: .trailing
                 )
 
                 RadialGradient(
-                    colors: [Color.appViolet.opacity(0.20), .clear],
+                    colors: [palette.secondary.opacity(0.20), .clear],
                     center: UnitPoint(x: 0.12, y: 0.20),
                     startRadius: 10,
                     endRadius: 270
                 )
 
                 RadialGradient(
-                    colors: [Color.appAccent.opacity(0.10), .clear],
+                    colors: [palette.accent.opacity(0.10), .clear],
                     center: UnitPoint(x: 0.72, y: 0.70),
                     startRadius: 8,
                     endRadius: 260
@@ -3213,13 +3234,13 @@ private struct CollectionHeroView: View {
                             .frame(width: proxy.size.width < 550 ? 202 : 232)
                         }
                     }
-                    .shadow(color: Color(hex: 0x1F1B6F).opacity(0.42), radius: 28, y: 18)
+                    .shadow(color: palette.secondary.opacity(0.42), radius: 28, y: 18)
 
                     VStack(alignment: .leading, spacing: 0) {
                         Text(collectionKindLabel)
                             .font(.system(size: 10, weight: .medium))
                             .tracking(1.7)
-                            .foregroundStyle(Color(hex: 0xB7BBCC))
+                            .foregroundStyle(palette.ink.opacity(0.76))
                             .padding(.bottom, 10)
 
                         Text(model.collectionTitle)
@@ -3232,7 +3253,7 @@ private struct CollectionHeroView: View {
 
                         Text("\(model.collectionTrackCount) \(model.collectionTrackCount == 1 ? "track" : "tracks") / \(model.collectionDownloadedTrackCount) stored locally")
                             .font(.system(size: 13))
-                            .foregroundStyle(Color(hex: 0xADB2C1))
+                            .foregroundStyle(palette.muted)
 
                         HStack(spacing: 16) {
                             Button(action: model.toggleCollectionPlayback) {
@@ -3243,9 +3264,9 @@ private struct CollectionHeroView: View {
                                         .font(.system(size: 15, weight: .bold))
                                 }
                                 .frame(width: 128, height: 48)
-                                .background(Color.appAccent)
+                                .background(palette.accent)
                                 .clipShape(Capsule())
-                                .shadow(color: Color.appAccent.opacity(0.18), radius: 18, y: 9)
+                                .shadow(color: palette.accent.opacity(0.18), radius: 18, y: 9)
                             }
                             .buttonStyle(PressableScaleStyle())
                             .disabled(model.collectionDownloadedTrackCount == 0)
@@ -3286,7 +3307,7 @@ private struct CollectionHeroView: View {
                             }
                             .padding(.horizontal, 9)
                             .padding(.vertical, 7)
-                            .background(Color(hex: 0x1D1D29).opacity(0.98), in: Capsule())
+                            .background(palette.raisedSurface.opacity(0.98), in: Capsule())
                             .overlay {
                                 Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1)
                             }
@@ -3300,7 +3321,7 @@ private struct CollectionHeroView: View {
             }
         }
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.appLine).frame(height: 1)
+            Rectangle().fill(palette.divider).frame(height: 1)
         }
     }
 
@@ -3330,6 +3351,7 @@ private final class ClosureMenuItem: NSMenuItem {
 }
 
 private struct TrackAreaView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     let showAlbum: Bool
     let onAddSongs: () -> Void
@@ -3359,7 +3381,7 @@ private struct TrackAreaView: View {
                     VStack(spacing: 14) {
                         Image(systemName: model.selectedPlaylist?.isSystem == false ? "music.note.list" : (model.section == .playlists ? "heart" : "music.note.house"))
                             .font(.system(size: 34, weight: .light))
-                            .foregroundStyle(Color.appViolet)
+                            .foregroundStyle(palette.foregroundAccent)
                         Text(model.section == .playlists ? "This playlist is empty" : "Build your music library")
                             .font(.system(size: 17, weight: .semibold))
                         Text(model.selectedPlaylist?.isSystem == true
@@ -3368,14 +3390,14 @@ private struct TrackAreaView: View {
                                 ? "Add songs from your library to this playlist."
                                 : "Add audio files or an entire folder. Music stays on this Mac."))
                             .font(.system(size: 11))
-                            .foregroundStyle(Color.appMuted)
+                            .foregroundStyle(palette.muted)
                         if model.selectedPlaylist?.isSystem == false {
                             Button(action: onAddSongs) {
                                 Label("Add Songs", systemImage: "plus")
                                     .font(.system(size: 12, weight: .bold))
                                     .padding(.horizontal, 18)
                                     .frame(height: 38)
-                                    .background(Color.appAccent)
+                                    .background(palette.accent)
                                     .clipShape(Capsule())
                             }
                             .buttonStyle(PressableScaleStyle())
@@ -3387,7 +3409,7 @@ private struct TrackAreaView: View {
                                     .font(.system(size: 12, weight: .bold))
                                     .padding(.horizontal, 18)
                                     .frame(height: 38)
-                                    .background(Color.appAccent)
+                                    .background(palette.accent)
                                     .clipShape(Capsule())
                             }
                             .buttonStyle(PressableScaleStyle())
@@ -3417,7 +3439,7 @@ private struct TrackAreaView: View {
                         Text(model.hasActiveLibraryFilter ? "No songs match the current search or filter." : "No songs to show.")
                             .font(.system(size: 13))
                     }
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     LazyVStack(spacing: 0) {
@@ -3579,6 +3601,7 @@ private enum PlaylistTrackDropEdge: Equatable {
 }
 
 private struct MacPlaylistSongPicker: View {
+    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var model: PlayerModel
     let playlistID: UUID
@@ -3606,14 +3629,14 @@ private struct MacPlaylistSongPicker: View {
                         .font(.system(size: 22, weight: .bold))
                     Text(playlist?.name ?? "Playlist")
                         .font(.system(size: 11))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                 }
 
                 Spacer()
 
                 Button("Done") { dismiss() }
                     .buttonStyle(.borderedProminent)
-                    .tint(Color.appAccent)
+                    .tint(palette.accent)
                     .keyboardShortcut(.defaultAction)
             }
             .padding(.horizontal, 22)
@@ -3622,14 +3645,14 @@ private struct MacPlaylistSongPicker: View {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 12))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                 TextField("Search songs, artists, or albums…", text: $searchText)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
                 if !searchText.isEmpty {
                     Button { searchText = "" } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(Color.appMuted)
+                            .foregroundStyle(palette.muted)
                     }
                     .buttonStyle(.plain)
                     .help("Clear Search")
@@ -3640,12 +3663,12 @@ private struct MacPlaylistSongPicker: View {
             .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.appLine)
+                    .stroke(palette.divider)
             }
             .padding(.horizontal, 22)
             .padding(.bottom, 16)
 
-            Rectangle().fill(Color.appLine).frame(height: 1)
+            Rectangle().fill(palette.divider).frame(height: 1)
 
             if model.tracks.isEmpty {
                 ContentUnavailableView(
@@ -3683,11 +3706,11 @@ private struct MacPlaylistSongPicker: View {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(track.title)
                                             .font(.system(size: 13, weight: .semibold))
-                                            .foregroundStyle(Color.appInk)
+                                            .foregroundStyle(palette.ink)
                                             .lineLimit(1)
                                         Text(track.artist)
                                             .font(.system(size: 10))
-                                            .foregroundStyle(Color.appMuted)
+                                            .foregroundStyle(palette.muted)
                                             .lineLimit(1)
                                     }
 
@@ -3695,13 +3718,13 @@ private struct MacPlaylistSongPicker: View {
 
                                     Image(systemName: isAdded ? "checkmark.circle.fill" : "plus.circle")
                                         .font(.system(size: 17, weight: .medium))
-                                        .foregroundStyle(isAdded ? Color.appAccent : Color.appMuted)
+                                        .foregroundStyle(isAdded ? palette.foregroundAccent : palette.muted)
                                 }
                                 .padding(.horizontal, 14)
                                 .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
                                 .contentShape(Rectangle())
                                 .overlay(alignment: .bottom) {
-                                    Rectangle().fill(Color.appLine).frame(height: 1)
+                                    Rectangle().fill(palette.divider).frame(height: 1)
                                 }
                             }
                             .buttonStyle(.plain)
@@ -3712,11 +3735,12 @@ private struct MacPlaylistSongPicker: View {
             }
         }
         .frame(width: 600, height: 600)
-        .background(Color.appBackground)
+        .background(palette.background)
     }
 }
 
 private struct TrackHeaderRow: View {
+    @Environment(\.resonancePalette) private var palette
     let showAlbum: Bool
 
     var body: some View {
@@ -3733,12 +3757,13 @@ private struct TrackHeaderRow: View {
         .padding(.horizontal, 10)
         .frame(height: 38)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.appLine).frame(height: 1)
+            Rectangle().fill(palette.divider).frame(height: 1)
         }
     }
 }
 
 private struct UnavailablePlaylistTrackRow: View {
+    @Environment(\.resonancePalette) private var palette
     let entry: PlaylistPresentationEntry
     let number: Int
     let showAlbum: Bool
@@ -3801,7 +3826,7 @@ private struct UnavailablePlaylistTrackRow: View {
         .frame(height: 61)
         .opacity(0.58)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.appLine).frame(height: 1)
+            Rectangle().fill(palette.divider).frame(height: 1)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(entry.title) by \(entry.artist), not downloaded on this Mac")
@@ -3810,6 +3835,7 @@ private struct UnavailablePlaylistTrackRow: View {
 }
 
 private struct TrackRowView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     let track: Track
     let number: Int
@@ -3854,7 +3880,7 @@ private struct TrackRowView: View {
                                 if isFavorite {
                                     Image(systemName: "heart.fill")
                                         .font(.system(size: 7))
-                                        .foregroundStyle(Color.appAccent)
+                                        .foregroundStyle(palette.foregroundAccent)
                                 }
                             }
 
@@ -3896,7 +3922,7 @@ private struct TrackRowView: View {
             } label: {
                 Image(systemName: isFavorite ? "heart.fill" : "heart")
                     .font(.system(size: 10))
-                    .foregroundStyle(isFavorite ? Color.appAccent : Color(hex: 0xAEB4C2))
+                    .foregroundStyle(isFavorite ? palette.foregroundAccent : Color(hex: 0xAEB4C2))
             }
             .buttonStyle(.plain)
             .frame(width: 44, alignment: .trailing)
@@ -3909,7 +3935,7 @@ private struct TrackRowView: View {
         .background((hovering || isCurrent) ? Color.white.opacity(0.055) : .clear)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.appLine).frame(height: 1)
+            Rectangle().fill(palette.divider).frame(height: 1)
         }
         .onHover { hovering = $0 }
         .contextMenu {
@@ -3964,6 +3990,7 @@ private struct StorageInspectionResult: Sendable {
 }
 
 private struct StorageView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     let onImportLink: () -> Void
     @State private var searchText = ""
@@ -4053,7 +4080,7 @@ private struct StorageView: View {
                         .foregroundStyle(Color.white)
                         .padding(.horizontal, 17)
                         .frame(height: 36)
-                        .background(Color.appAccent, in: Capsule())
+                        .background(palette.accent, in: Capsule())
                     }
                     .buttonStyle(.plain)
                     .help("Choose how to import music")
@@ -4083,14 +4110,14 @@ private struct StorageView: View {
 
                 HStack(spacing: 10) {
                     HStack(spacing: 9) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(Color.appMuted)
+                        Image(systemName: "magnifyingglass").foregroundStyle(palette.muted)
                         TextField("Search songs, artists, albums, files…", text: $searchText)
                             .textFieldStyle(.plain)
                     }
                     .padding(.horizontal, 13)
                     .frame(height: 40)
                     .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
-                    .overlay { RoundedRectangle(cornerRadius: 10).stroke(Color.appLine) }
+                    .overlay { RoundedRectangle(cornerRadius: 10).stroke(palette.divider) }
 
                     Menu {
                         Section("Sort By") {
@@ -4164,7 +4191,7 @@ private struct StorageView: View {
             }
             .background {
                 RadialGradient(
-                    colors: [Color.appViolet.opacity(0.18), .clear],
+                    colors: [palette.secondary.opacity(0.18), .clear],
                     center: UnitPoint(x: 0.72, y: 0.06),
                     startRadius: 10,
                     endRadius: 360
@@ -4255,6 +4282,7 @@ private struct StorageView: View {
 }
 
 private struct MacImportChooser: View {
+    @Environment(\.resonancePalette) private var palette
     let linkImportEnabled: Bool
     let onImportLink: () -> Void
     let onImportFiles: () -> Void
@@ -4264,17 +4292,17 @@ private struct MacImportChooser: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Import Music")
                     .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(Color.appInk)
+                    .foregroundStyle(palette.ink)
                 Text("Choose where your music is coming from.")
                     .font(.system(size: 10))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
             }
             .padding(.horizontal, 17)
             .padding(.top, 16)
             .padding(.bottom, 13)
 
             Rectangle()
-                .fill(Color.appLine)
+                .fill(palette.divider)
                 .frame(height: 1)
                 .padding(.horizontal, 16)
 
@@ -4302,12 +4330,13 @@ private struct MacImportChooser: View {
             .padding(8)
         }
         .frame(width: 310)
-        .background(Color.appSurfaceRaised)
-        .presentationBackground(Color.appSurfaceRaised)
+        .background(palette.raisedSurface)
+        .presentationBackground(palette.raisedSurface)
     }
 }
 
 private struct MacImportChoiceRow: View {
+    @Environment(\.resonancePalette) private var palette
     let symbol: String
     let title: String
     let detail: String
@@ -4317,17 +4346,17 @@ private struct MacImportChoiceRow: View {
         HStack(spacing: 12) {
             Image(systemName: symbol)
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Color.appViolet)
+                .foregroundStyle(palette.foregroundAccent)
                 .frame(width: 34, height: 34)
-                .background(Color.appViolet.opacity(0.13), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .background(palette.secondary.opacity(0.13), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.appInk)
+                    .foregroundStyle(palette.ink)
                 Text(detail)
                     .font(.system(size: 9))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .lineLimit(1)
             }
 
@@ -4335,7 +4364,7 @@ private struct MacImportChoiceRow: View {
 
             Image(systemName: "chevron.right")
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(Color.appMuted.opacity(0.75))
+                .foregroundStyle(palette.muted.opacity(0.75))
         }
         .padding(.horizontal, 10)
         .frame(height: 56)
@@ -4398,6 +4427,7 @@ private enum MacStorageSort: String, CaseIterable, Identifiable {
 }
 
 private struct MacStorageScopePicker: View {
+    @Environment(\.resonancePalette) private var palette
     @Binding var scope: MacStorageScope
 
     var body: some View {
@@ -4411,8 +4441,8 @@ private struct MacStorageScopePicker: View {
                         .frame(maxWidth: .infinity)
                         .frame(height: 32)
                         .contentShape(Rectangle())
-                        .foregroundStyle(scope == option ? Color.white : Color.appMuted)
-                        .background(scope == option ? Color.appAccent : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                        .foregroundStyle(scope == option ? Color.white : palette.muted)
+                        .background(scope == option ? palette.accent : Color.clear, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
                 .frame(maxWidth: .infinity)
@@ -4420,11 +4450,12 @@ private struct MacStorageScopePicker: View {
         }
         .padding(4)
         .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
-        .overlay { RoundedRectangle(cornerRadius: 10).stroke(Color.appLine) }
+        .overlay { RoundedRectangle(cornerRadius: 10).stroke(palette.divider) }
     }
 }
 
 private struct MacStorageSummaryCard: View {
+    @Environment(\.resonancePalette) private var palette
     let importedBytes: Int64
     let importedCount: Int
     let downloadedBytes: Int64
@@ -4442,22 +4473,22 @@ private struct MacStorageSummaryCard: View {
                 if importedBytes > 0 {
                     Circle()
                         .trim(from: 0, to: importedEnd)
-                        .stroke(Color.appViolet, style: StrokeStyle(lineWidth: 14, lineCap: .butt))
+                        .stroke(palette.secondary, style: StrokeStyle(lineWidth: 14, lineCap: .butt))
                         .rotationEffect(.degrees(-90))
                 }
                 if downloadedBytes > 0 {
                     Circle()
                         .trim(from: importedEnd, to: 1)
-                        .stroke(Color.appAccent, style: StrokeStyle(lineWidth: 14, lineCap: .butt))
+                        .stroke(palette.accent, style: StrokeStyle(lineWidth: 14, lineCap: .butt))
                         .rotationEffect(.degrees(-90))
                 }
-                Image(systemName: "internaldrive").foregroundStyle(Color.appMuted)
+                Image(systemName: "internaldrive").foregroundStyle(palette.muted)
             }
             .frame(width: 96, height: 96)
 
-            MacStorageMetric(color: Color.appViolet, title: "Local audio", bytes: importedBytes, detail: "\(importedCount) files")
+            MacStorageMetric(color: palette.secondary, title: "Local audio", bytes: importedBytes, detail: "\(importedCount) files")
             Divider().frame(height: 70)
-            MacStorageMetric(color: Color.appAccent, title: "Server downloads", bytes: downloadedBytes, detail: "\(downloadedCount) files")
+            MacStorageMetric(color: palette.accent, title: "Server downloads", bytes: downloadedBytes, detail: "\(downloadedCount) files")
             Divider().frame(height: 70)
             MacStorageMetric(color: Color(hex: 0x7BA7E8), title: "Available", bytes: availableBytes, detail: "on this Mac")
             Spacer()
@@ -4466,12 +4497,13 @@ private struct MacStorageSummaryCard: View {
         .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 16))
         .overlay {
             RoundedRectangle(cornerRadius: 16)
-                .stroke(LinearGradient(colors: [Color.appViolet.opacity(0.8), Color(hex: 0x6C9CD8).opacity(0.55)], startPoint: .leading, endPoint: .trailing))
+                .stroke(LinearGradient(colors: [palette.secondary.opacity(0.8), Color(hex: 0x6C9CD8).opacity(0.55)], startPoint: .leading, endPoint: .trailing))
         }
     }
 }
 
 private struct MacStorageMetric: View {
+    @Environment(\.resonancePalette) private var palette
     let color: Color
     let title: String
     let bytes: Int64
@@ -4484,13 +4516,14 @@ private struct MacStorageMetric: View {
                 Text(title).font(.system(size: 10, weight: .medium))
             }
             Text(storageByteText(bytes)).font(.system(size: 16, weight: .semibold))
-            Text(detail).font(.system(size: 9)).foregroundStyle(Color.appMuted)
+            Text(detail).font(.system(size: 9)).foregroundStyle(palette.muted)
         }
         .frame(minWidth: 120, alignment: .leading)
     }
 }
 
 private struct MacStorageSection: View {
+    @Environment(\.resonancePalette) private var palette
     let title: String
     let symbol: String
     let tracks: [Track]
@@ -4505,7 +4538,7 @@ private struct MacStorageSection: View {
             HStack(spacing: 8) {
                 Image(systemName: symbol)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.appViolet)
+                    .foregroundStyle(palette.foregroundAccent)
                 Text(title)
                     .font(.system(size: 12, weight: .semibold))
                     .tracking(1.1)
@@ -4513,7 +4546,7 @@ private struct MacStorageSection: View {
                 Spacer()
                 Text("\(tracks.count) \(tracks.count == 1 ? "song" : "songs")")
                     .font(.system(size: 11))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
             }
             .padding(.horizontal, 10)
             .frame(height: 42)
@@ -4542,6 +4575,7 @@ private struct MacStorageSection: View {
 }
 
 private struct MacStorageCatalogHeader: View {
+    @Environment(\.resonancePalette) private var palette
     let showAlbum: Bool
 
     var body: some View {
@@ -4563,12 +4597,13 @@ private struct MacStorageCatalogHeader: View {
         .padding(.horizontal, 10)
         .frame(height: 38)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.appLine).frame(height: 1)
+            Rectangle().fill(palette.divider).frame(height: 1)
         }
     }
 }
 
 private struct MacStorageTrackRow: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     let track: Track
     let number: Int
@@ -4589,7 +4624,7 @@ private struct MacStorageTrackRow: View {
                     Group {
                         if isEditing {
                             Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(isSelected ? Color.appAccent : Color.appMuted)
+                                .foregroundStyle(isSelected ? palette.foregroundAccent : palette.muted)
                         } else if isCurrent && model.isPlaying {
                             EqualizerGlyph(isAnimating: true)
                         } else {
@@ -4654,7 +4689,7 @@ private struct MacStorageTrackRow: View {
         .background((isHovering || isCurrent || isSelected) ? Color.white.opacity(0.055) : .clear)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.appLine).frame(height: 1)
+            Rectangle().fill(palette.divider).frame(height: 1)
         }
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }

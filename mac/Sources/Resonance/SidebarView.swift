@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct SidebarView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     @State private var showingNewPlaylist = false
     @State private var newPlaylistName = ""
@@ -34,11 +35,11 @@ struct SidebarView: View {
             HStack {
                 Text("Your playlists")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color(hex: 0xB9BECB))
+                    .foregroundStyle(palette.ink.opacity(0.76))
                 Spacer()
                 Text("\(model.playlists.count)")
                     .font(.system(size: 11))
-                    .foregroundStyle(Color(hex: 0x7F8796))
+                    .foregroundStyle(palette.muted)
                 Button {
                     newPlaylistName = ""
                     showingNewPlaylist = true
@@ -79,7 +80,7 @@ struct SidebarView: View {
         .padding(.horizontal, 12)
         .background {
             LinearGradient(
-                colors: [Color(hex: 0x08090E).opacity(0.99), Color.appBackground],
+                colors: [palette.panel.opacity(0.99), palette.background],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -102,6 +103,7 @@ struct SidebarView: View {
 struct MacSettingsSheet: View {
     private enum Panel: String, CaseIterable, Identifiable {
         case general = "General"
+        case appearance = "Appearance"
         case server = "Server"
         case keybinds = "Keybinds"
 
@@ -109,6 +111,7 @@ struct MacSettingsSheet: View {
         var symbol: String {
             switch self {
             case .general: "gearshape"
+            case .appearance: "paintpalette"
             case .server: "network"
             case .keybinds: "keyboard"
             }
@@ -117,6 +120,8 @@ struct MacSettingsSheet: View {
 
     @EnvironmentObject private var model: PlayerModel
     @EnvironmentObject private var preferences: MacDesktopPreferences
+    @EnvironmentObject private var themeStore: ResonanceThemeStore
+    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @StateObject private var recorder = MacShortcutRecorder()
     @State private var panel: Panel
@@ -137,16 +142,16 @@ struct MacSettingsSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Settings")
                         .font(.system(size: 26, weight: .bold, design: .rounded))
-                        .foregroundStyle(Color.appInk)
+                        .foregroundStyle(palette.ink)
                     Text("Manage how Resonance behaves on this Mac.")
                         .font(.system(size: 10))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                 }
                 Spacer()
                 Button(action: { dismiss() }) {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                         .frame(width: 32, height: 32)
                         .background(Color.white.opacity(0.06), in: Circle())
                 }
@@ -156,7 +161,7 @@ struct MacSettingsSheet: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 18)
 
-            Rectangle().fill(Color.appLine).frame(height: 1)
+            Rectangle().fill(palette.divider).frame(height: 1)
 
             HStack(spacing: 0) {
                 VStack(spacing: 7) {
@@ -173,16 +178,17 @@ struct MacSettingsSheet: View {
                                     .font(.system(size: 12, weight: .semibold))
                                 Spacer()
                             }
-                            .foregroundStyle(panel == candidate ? Color.white : Color.appMuted)
+                            .foregroundStyle(panel == candidate ? Color.white : palette.muted)
                             .padding(.horizontal, 13)
                             .frame(height: 44)
-                            .background(panel == candidate ? Color.appViolet.opacity(0.22) : Color.clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                            .background(panel == candidate ? palette.secondary.opacity(0.22) : Color.clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                             .overlay {
                                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                    .stroke(panel == candidate ? Color.appViolet.opacity(0.8) : Color.clear)
+                                    .stroke(panel == candidate ? palette.secondary.opacity(0.8) : Color.clear)
                             }
                         }
                         .buttonStyle(.plain)
+                        .accessibilityAddTraits(panel == candidate ? [.isSelected] : [])
                     }
                     Spacer()
                 }
@@ -190,11 +196,12 @@ struct MacSettingsSheet: View {
                 .frame(width: 176)
                 .background(Color.black.opacity(0.13))
 
-                Rectangle().fill(Color.appLine).frame(width: 1)
+                Rectangle().fill(palette.divider).frame(width: 1)
 
                 Group {
                     switch panel {
                     case .general: generalPanel
+                    case .appearance: appearancePanel
                     case .server: serverPanel
                     case .keybinds: keybindPanel
                     }
@@ -202,23 +209,23 @@ struct MacSettingsSheet: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
 
-            Rectangle().fill(Color.appLine).frame(height: 1)
+            Rectangle().fill(palette.divider).frame(height: 1)
 
             HStack {
                 Spacer()
                 Button("Done") { dismiss() }
                     .buttonStyle(.borderedProminent)
-                    .tint(Color.appViolet)
+                    .tint(palette.accent)
                     .keyboardShortcut(.defaultAction)
             }
             .padding(.horizontal, 22)
             .frame(height: 62)
-            .background(Color.appSurfaceRaised.opacity(0.55))
+            .background(palette.raisedSurface.opacity(0.55))
         }
         .frame(width: 760, height: 520)
         .background(
             RadialGradient(
-                colors: [Color.appViolet.opacity(0.14), Color.appPanel],
+                colors: [palette.secondary.opacity(0.14), palette.panel],
                 center: .topTrailing,
                 startRadius: 0,
                 endRadius: 460
@@ -249,7 +256,7 @@ struct MacSettingsSheet: View {
                         detail: "Keep playback active after the last Resonance window closes.",
                         isOn: $preferences.runInBackground
                     )
-                    Rectangle().fill(Color.appLine).frame(height: 1)
+                    Rectangle().fill(palette.divider).frame(height: 1)
                     settingsToggleRow(
                         symbol: "bubble.left.and.bubble.right",
                         title: "Discord Rich Presence",
@@ -262,7 +269,7 @@ struct MacSettingsSheet: View {
                     )
                 }
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
+                .overlay { RoundedRectangle(cornerRadius: 15).stroke(palette.divider) }
 
                 settingsHeading("PLAYBACK", detail: "Blend one song smoothly into the next.")
                     .padding(.top, 10)
@@ -283,11 +290,84 @@ struct MacSettingsSheet: View {
                     }
                 }
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
+                .overlay { RoundedRectangle(cornerRadius: 15).stroke(palette.divider) }
             }
             .padding(22)
         }
         .scrollIndicators(.hidden)
+    }
+
+    private var appearancePanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                settingsHeading("THEME", detail: "Choose a dark palette for this Mac. Changes apply immediately.")
+
+                LazyVGrid(
+                    columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                    spacing: 12
+                ) {
+                    ForEach(ResonanceTheme.allCases) { theme in
+                        themeCard(theme)
+                    }
+                }
+
+                Text("Your selection is stored only on this device.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(palette.muted)
+            }
+            .padding(22)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private func themeCard(_ theme: ResonanceTheme) -> some View {
+        let candidate = theme.palette
+        let isSelected = themeStore.selectedTheme == theme
+
+        return Button {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                themeStore.selectedTheme = theme
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 12) {
+                ZStack(alignment: .bottomLeading) {
+                    LinearGradient(
+                        colors: candidate.gradientStops,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    HStack(spacing: 6) {
+                        Circle().fill(candidate.accent).frame(width: 18, height: 18)
+                        Circle().fill(candidate.secondary).frame(width: 18, height: 18)
+                        Circle().fill(candidate.tertiary).frame(width: 18, height: 18)
+                    }
+                    .padding(10)
+                }
+                .frame(height: 92)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                HStack(spacing: 8) {
+                    Text(theme.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(candidate.ink)
+                    Spacer()
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(candidate.tertiary)
+                    }
+                }
+            }
+            .padding(12)
+            .background(candidate.surface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(isSelected ? candidate.tertiary : candidate.divider, lineWidth: isSelected ? 2 : 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(theme.title) theme")
+        .accessibilityValue(isSelected ? "Selected" : "Not selected")
+        .accessibilityHint("Applies the \(theme.title) palette")
     }
 
     private var serverPanel: some View {
@@ -297,13 +377,13 @@ struct MacSettingsSheet: View {
                     Text("ACCOUNT")
                         .font(.system(size: 9, weight: .bold))
                         .tracking(1.7)
-                        .foregroundStyle(Color.appViolet)
+                        .foregroundStyle(palette.foregroundAccent)
                     Text("Music Server")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
-                        .foregroundStyle(Color.appInk)
+                        .foregroundStyle(palette.ink)
                     Text("Your Resonance account session is kept in private app storage on this Mac.")
                         .font(.system(size: 10))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -325,7 +405,7 @@ struct MacSettingsSheet: View {
                                 .accessibilityLabel(isEmailRevealed ? "Hide email address" : "Reveal email address")
                                 Text(model.accountRole == "admin" ? "Administrator" : "Member")
                                     .font(.system(size: 9))
-                                    .foregroundStyle(Color.appMuted)
+                                    .foregroundStyle(palette.muted)
                             }
                             Spacer()
                             Button("Sign out", role: .destructive) { confirmingCredentialRemoval = true }
@@ -335,7 +415,7 @@ struct MacSettingsSheet: View {
                         if !model.serverToken.isEmpty {
                             Label("Legacy connection • sign in to finish upgrading", systemImage: "exclamationmark.triangle")
                                 .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(Color.appMuted)
+                                .foregroundStyle(palette.muted)
                         }
                         Button("Sign in or create account") {
                             Task {
@@ -343,22 +423,22 @@ struct MacSettingsSheet: View {
                             }
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(Color.appViolet)
+                        .tint(palette.accent)
                         .frame(maxWidth: .infinity)
                         .disabled(model.isAuthenticatingAccount)
                         Text("Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/ in the secure system browser.")
                             .font(.system(size: 9))
-                            .foregroundStyle(Color.appMuted)
+                            .foregroundStyle(palette.muted)
                     }
                 }
                 .padding(15)
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
+                .overlay { RoundedRectangle(cornerRadius: 15).stroke(palette.divider) }
 
                 HStack(spacing: 12) {
                     Text(model.serverMessage)
                         .font(.system(size: 10))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                         .lineLimit(2)
 
                     Spacer()
@@ -372,13 +452,13 @@ struct MacSettingsSheet: View {
 
                     Button(action: saveServerSettings) {
                         if model.isSyncingServer {
-                            ProgressView().controlSize(.small)
+                            ProgressView().controlSize(.small).tint(.white)
                         } else {
                             Text("Save & Connect")
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(Color.appViolet)
+                    .tint(palette.accent)
                     .disabled(model.serverUploadActionsDisabled || !ServerConnectionPolicy.canSave(
                         serverURL: accountServerURL,
                         accessToken: model.serverToken,
@@ -410,12 +490,12 @@ struct MacSettingsSheet: View {
                         HStack(spacing: 13) {
                             Image(systemName: action == .togglePlayback ? "playpause" : action == .previousTrack ? "backward.end" : action == .nextTrack ? "forward.end" : action == .volumeDown ? "speaker.minus" : "speaker.plus")
                                 .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(Color.appViolet)
+                                .foregroundStyle(palette.foregroundAccent)
                                 .frame(width: 34, height: 34)
-                                .background(Color.appViolet.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+                                .background(palette.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(action.title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.appInk)
-                                Text(action.detail).font(.system(size: 9)).foregroundStyle(Color.appMuted)
+                                Text(action.title).font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.ink)
+                                Text(action.detail).font(.system(size: 9)).foregroundStyle(palette.muted)
                             }
                             Spacer()
                             Button {
@@ -427,17 +507,17 @@ struct MacSettingsSheet: View {
                                     .frame(height: 31)
                             }
                             .buttonStyle(.bordered)
-                            .tint(recorder.recordingAction == action ? Color.appViolet : Color.appMuted)
+                            .tint(recorder.recordingAction == action ? palette.foregroundAccent : palette.muted)
                         }
                         .padding(.horizontal, 14)
                         .frame(height: 63)
                         if index < MacShortcutAction.allCases.count - 1 {
-                            Rectangle().fill(Color.appLine).frame(height: 1)
+                            Rectangle().fill(palette.divider).frame(height: 1)
                         }
                     }
                 }
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
+                .overlay { RoundedRectangle(cornerRadius: 15).stroke(palette.divider) }
             }
             .padding(22)
         }
@@ -449,10 +529,10 @@ struct MacSettingsSheet: View {
             Text(eyebrow)
                 .font(.system(size: 9, weight: .bold))
                 .tracking(1.7)
-                .foregroundStyle(Color.appViolet)
+                .foregroundStyle(palette.foregroundAccent)
             Text(detail)
                 .font(.system(size: 10))
-                .foregroundStyle(Color.appMuted)
+                .foregroundStyle(palette.muted)
         }
     }
 
@@ -466,18 +546,18 @@ struct MacSettingsSheet: View {
         HStack(spacing: 13) {
             Image(systemName: symbol)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color.appViolet)
+                .foregroundStyle(palette.foregroundAccent)
                 .frame(width: 36, height: 36)
-                .background(Color.appViolet.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+                .background(palette.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.appInk)
-                Text(detail).font(.system(size: 9)).foregroundStyle(Color.appMuted).lineLimit(2)
+                Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.ink)
+                Text(detail).font(.system(size: 9)).foregroundStyle(palette.muted).lineLimit(2)
             }
             Spacer()
             Toggle("", isOn: isOn)
                 .labelsHidden()
                 .toggleStyle(.switch)
-                .tint(Color.appViolet)
+                .tint(palette.accent)
                 .disabled(!isEnabled)
         }
         .padding(.horizontal, 14)
@@ -489,23 +569,23 @@ struct MacSettingsSheet: View {
             HStack(spacing: 13) {
                 Image(systemName: "waveform.path")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Color.appViolet)
+                    .foregroundStyle(palette.foregroundAccent)
                     .frame(width: 36, height: 36)
-                    .background(Color.appViolet.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+                    .background(palette.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Crossfade").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.appInk)
+                    Text("Crossfade").font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.ink)
                     Text(model.crossfadeEnabled ? "Overlap songs by \(Int(model.crossfadeSeconds.rounded())) seconds." : "Start the next song early while fading between both.")
                         .font(.system(size: 9))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                 }
                 Spacer()
                 Toggle("", isOn: $model.crossfadeEnabled)
                     .labelsHidden()
                     .toggleStyle(.switch)
-                    .tint(Color.appViolet)
+                    .tint(palette.accent)
             }
             Slider(value: $model.crossfadeSeconds, in: 1...12, step: 1)
-                .tint(Color.appViolet)
+                .tint(palette.foregroundAccent)
                 .disabled(!model.crossfadeEnabled)
                 .accessibilityLabel("Crossfade duration")
                 .accessibilityValue("\(Int(model.crossfadeSeconds.rounded())) seconds")
@@ -513,7 +593,7 @@ struct MacSettingsSheet: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
+        .overlay { RoundedRectangle(cornerRadius: 15).stroke(palette.divider) }
     }
 
     private func settingsActionRow(
@@ -526,12 +606,12 @@ struct MacSettingsSheet: View {
         HStack(spacing: 13) {
             Image(systemName: symbol)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color.appViolet)
+                .foregroundStyle(palette.foregroundAccent)
                 .frame(width: 36, height: 36)
-                .background(Color.appViolet.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+                .background(palette.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.appInk)
-                Text(detail).font(.system(size: 9)).foregroundStyle(Color.appMuted).lineLimit(2)
+                Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.ink)
+                Text(detail).font(.system(size: 9)).foregroundStyle(palette.muted).lineLimit(2)
             }
             Spacer()
             Button(actionTitle, action: action)
@@ -545,7 +625,7 @@ struct MacSettingsSheet: View {
     private func serverFieldLabel(_ title: String, symbol: String) -> some View {
         Label(title, systemImage: symbol)
             .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(Color.appInk)
+            .foregroundStyle(palette.ink)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -569,6 +649,7 @@ struct MacSettingsSheet: View {
 }
 
 private struct SidebarNavigationRow: View {
+    @Environment(\.resonancePalette) private var palette
     let section: AppSection
     let isSelected: Bool
     let action: () -> Void
@@ -584,13 +665,13 @@ private struct SidebarNavigationRow: View {
                     .font(.system(size: 16, weight: .semibold))
                 Spacer()
             }
-            .foregroundStyle(isSelected ? Color.white : Color(hex: 0xAEB4C3))
+            .foregroundStyle(isSelected ? Color.white : palette.muted)
             .padding(.horizontal, 16)
             .frame(height: 48)
             .background {
                 if isSelected {
                     LinearGradient(
-                        colors: [Color.appViolet.opacity(0.26), Color.appViolet.opacity(0.10)],
+                        colors: [palette.secondary.opacity(0.26), palette.secondary.opacity(0.10)],
                         startPoint: .leading,
                         endPoint: .trailing
                     )
@@ -602,7 +683,7 @@ private struct SidebarNavigationRow: View {
             .overlay(alignment: .leading) {
                 if isSelected {
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.appAccent)
+                        .fill(palette.accent)
                         .frame(width: 3, height: 28)
                         .offset(x: -12)
                 }
@@ -615,6 +696,7 @@ private struct SidebarNavigationRow: View {
 }
 
 private struct PlaylistSidebarRow: View {
+    @Environment(\.resonancePalette) private var palette
     let playlist: Playlist
     let tracks: [Track]
     let trackCount: Int
@@ -637,11 +719,11 @@ private struct PlaylistSidebarRow: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(playlist.name)
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Color.appInk)
+                        .foregroundStyle(palette.ink)
                         .lineLimit(1)
                     Text("Playlist / \(trackCount) \(trackCount == 1 ? "track" : "tracks")")
                         .font(.system(size: 11))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                         .lineLimit(1)
                 }
 
@@ -651,7 +733,7 @@ private struct PlaylistSidebarRow: View {
             .frame(height: 55)
             .background {
                 if isSelected {
-                    Color.appViolet.opacity(0.11)
+                    palette.secondary.opacity(0.11)
                 } else if isHovering {
                     Color.white.opacity(0.045)
                 }

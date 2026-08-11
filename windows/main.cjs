@@ -153,7 +153,9 @@ if (!Number.isSafeInteger(WINDOWS_APP_BUILD) || WINDOWS_APP_BUILD < 1) {
 let mainWindow;
 let applicationQuitRequested = false;
 let backgroundTray = null;
-let runtimeAppPreferences = { runInBackground: false, discordRichPresence: false };
+const DEFAULT_APP_THEME = "midnight";
+const APP_THEME_IDS = new Set([DEFAULT_APP_THEME, "ocean", "forest", "sunset"]);
+let runtimeAppPreferences = { theme: DEFAULT_APP_THEME, runInBackground: false, discordRichPresence: false };
 let currentDiscordPresenceStatus = { state: "disabled", message: "Rich Presence is off.", applicationConfigured: false };
 const activeServerTransfers = new Map();
 const activeLocalImports = new Map();
@@ -1203,7 +1205,7 @@ function createWindow() {
     height: 850,
     minWidth: 980,
     minHeight: 650,
-    backgroundColor: "#07101c",
+    backgroundColor: "#05060a",
     title: resonanceApplicationName,
     icon: path.join(__dirname, "resonance.ico"),
     autoHideMenuBar: true,
@@ -1282,6 +1284,9 @@ function safeAppPreferences(value) {
   };
   const requestedCrossfadeSeconds = Number(preferences.crossfadeSeconds);
   return {
+    theme: typeof preferences.theme === "string" && APP_THEME_IDS.has(preferences.theme)
+      ? preferences.theme
+      : DEFAULT_APP_THEME,
     runInBackground: Boolean(preferences.runInBackground),
     discordRichPresence: Boolean(preferences.discordRichPresence),
     crossfadeEnabled: Boolean(preferences.crossfadeEnabled),

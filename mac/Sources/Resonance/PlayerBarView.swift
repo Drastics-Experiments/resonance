@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct PlayerBarView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     @State private var isSpeedPickerPresented = false
     let compact: Bool
@@ -33,15 +34,15 @@ struct PlayerBarView: View {
                     Button(action: model.togglePlay) {
                         Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(Color.appInk)
+                            .foregroundStyle(palette.ink)
                             .offset(x: model.isPlaying ? 0 : 1)
                             .frame(width: 38, height: 38)
-                            .background(Color.appSurfaceRaised)
+                            .background(palette.raisedSurface)
                             .overlay {
-                                Circle().stroke(Color.appAccent.opacity(0.72), lineWidth: 1.5)
+                                Circle().stroke(palette.accent.opacity(0.72), lineWidth: 1.5)
                             }
                             .clipShape(Circle())
-                            .shadow(color: Color.appAccent.opacity(0.25), radius: 10)
+                            .shadow(color: palette.accent.opacity(0.25), radius: 10)
                     }
                     .buttonStyle(PressableScaleStyle())
                     CircleIconButton(
@@ -80,12 +81,12 @@ struct PlayerBarView: View {
                     StableVolumeSlider(value: $model.volume)
                         .frame(width: 104)
                 }
-                .foregroundStyle(Color(hex: 0xA1A8B7))
+                .foregroundStyle(palette.muted)
                 .frame(width: 208, alignment: .trailing)
             }
         }
         .padding(.horizontal, 18)
-        .background(Color(hex: 0x050609).opacity(0.99))
+        .background(palette.panel.opacity(0.99))
         .background(.ultraThinMaterial.opacity(0.08))
     }
 
@@ -116,7 +117,7 @@ struct PlayerBarView: View {
                             Spacer(minLength: 18)
                             if abs(Double(model.playbackRate) - rate) < 0.001 {
                                 Image(systemName: "checkmark")
-                                    .foregroundStyle(Color.appAccent)
+                                    .foregroundStyle(palette.foregroundAccent)
                             }
                         }
                         .frame(width: 92)
@@ -128,8 +129,8 @@ struct PlayerBarView: View {
                 }
             }
             .padding(6)
-            .foregroundStyle(Color.appInk)
-            .background(Color.appSurfaceRaised)
+            .foregroundStyle(palette.ink)
+            .background(palette.raisedSurface)
         }
     }
 
@@ -149,7 +150,7 @@ struct PlayerBarView: View {
                                 .truncationMode(.tail)
                             Text("\(track.artist) / \(model.isPlaying ? "Now playing" : "Paused")")
                                 .font(.system(size: 10))
-                                .foregroundStyle(Color(hex: 0x969DAC))
+                                .foregroundStyle(palette.muted)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
                         }
@@ -167,7 +168,7 @@ struct PlayerBarView: View {
                     } label: {
                         Image(systemName: model.favorites.contains(track.id) ? "heart.fill" : "heart")
                             .font(.system(size: 15))
-                            .foregroundStyle(Color.appAccent)
+                            .foregroundStyle(palette.foregroundAccent)
                     }
                     .buttonStyle(.plain)
                 }
@@ -181,7 +182,7 @@ struct PlayerBarView: View {
                         .font(.system(size: 12, weight: .semibold))
                     Text("Add music to your library")
                         .font(.system(size: 10))
-                        .foregroundStyle(Color(hex: 0x969DAC))
+                        .foregroundStyle(palette.muted)
                 }
             }
         }
@@ -189,6 +190,7 @@ struct PlayerBarView: View {
 }
 
 private struct PlayerBarProgressView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var playbackPosition: PlaybackPositionState
     let duration: TimeInterval
     let onSeek: (Double) -> Void
@@ -208,7 +210,7 @@ private struct PlayerBarProgressView: View {
                 .frame(width: 28, alignment: .leading)
         }
         .font(.system(size: 9))
-        .foregroundStyle(Color(hex: 0x969DAC))
+        .foregroundStyle(palette.muted)
     }
 }
 
@@ -216,6 +218,7 @@ private struct PlayerBarProgressView: View {
 /// releases. The system slider changed its tint and thumb treatment in macOS
 /// 26, which made this control look disabled even though it was interactive.
 private struct StableVolumeSlider: View {
+    @Environment(\.resonancePalette) private var palette
     @Binding var value: Double
     @State private var isDragging = false
 
@@ -236,7 +239,7 @@ private struct StableVolumeSlider: View {
                     .frame(height: trackHeight)
 
                 Capsule()
-                    .fill(Color.appAccent)
+                    .fill(palette.accent)
                     .frame(width: max(thumbCenter, trackHeight), height: trackHeight)
 
                 volumeThumb
@@ -273,7 +276,7 @@ private struct StableVolumeSlider: View {
 #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             Capsule()
-                .fill(isDragging ? Color.clear : Color(hex: 0xD8D0FF))
+                .fill(isDragging ? Color.clear : palette.tertiary)
                 .frame(width: thumbWidth, height: thumbHeight)
                 .glassEffect(
                     isDragging ? Glass.clear.interactive() : .identity,
@@ -290,7 +293,7 @@ private struct StableVolumeSlider: View {
     private var fallbackVolumeThumb: some View {
         ZStack {
             Capsule()
-                .fill(Color(hex: 0xD8D0FF).opacity(isDragging ? 0 : 1))
+                .fill(palette.tertiary.opacity(isDragging ? 0 : 1))
 
             if isDragging {
                 Capsule().fill(.ultraThinMaterial).opacity(0.55)

@@ -33,7 +33,7 @@
 .update-panel {
   margin-top: auto;
   padding-top: 12px;
-  border-top: 1px solid #ffffff13;
+  border-top: 1px solid var(--line);
 }
 
 .update-panel > button:first-child {
@@ -48,7 +48,7 @@
 }
 
 .update-panel > button:first-child:hover {
-  background: #ffffff0a;
+  background: var(--menu-hover);
 }
 
 .update-panel strong,
@@ -62,7 +62,7 @@
 
 .update-panel small {
   margin-top: 3px;
-  color: #9fa5b6;
+  color: var(--muted);
   font-size: 9px;
 }
 
@@ -71,7 +71,7 @@
   margin-top: 7px;
   padding: 9px;
   border-radius: 9px;
-  background: #6558ff;
+  background: var(--action-background);
   font-size: 10px;
   font-weight: 700;
 }
@@ -79,11 +79,11 @@
 .playlist-dialog {
   width: min(420px, calc(100vw - 40px));
   padding: 0;
-  border: 1px solid #ffffff20;
+  border: 1px solid var(--accent-border);
   border-radius: 16px;
-  background: #0c1322;
-  color: #f7f7fb;
-  box-shadow: 0 28px 90px #000b;
+  background: var(--dialog-background);
+  color: var(--text);
+  box-shadow: var(--menu-shadow);
 }
 
 .playlist-dialog::backdrop {
@@ -103,22 +103,22 @@
 }
 
 .playlist-dialog label {
-  color: #9fa5b6;
+  color: var(--muted);
   font-size: 11px;
 }
 
 .playlist-dialog input {
   width: 100%;
   padding: 12px 14px;
-  border: 1px solid #ffffff20;
+  border: 1px solid var(--line);
   border-radius: 10px;
   outline: none;
-  background: #ffffff0b;
+  background: color-mix(in srgb, var(--surface-raised) 84%, transparent);
 }
 
 .playlist-dialog input:focus {
-  border-color: #6558ff;
-  box-shadow: 0 0 0 3px #6558ff30;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .dialog-actions {
@@ -146,12 +146,12 @@
   height: 25px;
   padding: 0;
   border-radius: 7px;
-  background: #ffffff0b;
+  background: var(--control-surface);
   color: #c7cbd6;
 }
 
 .playlist-track-actions button:hover {
-  background: #ffffff17;
+  background: var(--control-hover);
   color: #fff;
 }
 
@@ -164,6 +164,6 @@
 
 .playlist-page-actions small,
 [data-playlist-sync-status] {
-  color: #9fa5b6;
+  color: var(--muted);
   font-size: 10px;
 }

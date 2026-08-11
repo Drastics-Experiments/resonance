@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   applyRemotePlaylistDocument,
+  APP_THEMES,
   buildLocalImportSourceIdentity,
   catalogRequestCanApply,
   createEmptyState,
@@ -29,6 +30,7 @@ import {
   nextIndex,
   niceChartMaximum,
   normalizedAppPreferences,
+  normalizedAppTheme,
   normalizedCrossfadeSeconds,
   crossfadeProgress,
   normalizedRemoteSongMetadataCache,
@@ -725,6 +727,154 @@ test("binds the active library to the signed-in Clerk account", () => {
   assert.match(appSource, /function openServerSettings\(\) \{\s+openSettings\("server"\)/);
   assert.match(appSource, /#settingsServer"\)\.onclick = openServerSettings/);
   assert.match(styleSource, /\.settings-grid\s*\{/);
+});
+
+test("normalizes and persists the four device-local Windows themes", () => {
+  assert.deepEqual(APP_THEMES.map(({ id, label }) => ({ id, label })), [
+    { id: "midnight", label: "Midnight" },
+    { id: "ocean", label: "Ocean" },
+    { id: "forest", label: "Forest" },
+    { id: "sunset", label: "Sunset" },
+  ]);
+  for (const { id } of APP_THEMES) assert.equal(normalizedAppTheme(id), id);
+  for (const invalid of [null, "", "violet", "MIDNIGHT", {}, 1]) {
+    assert.equal(normalizedAppTheme(invalid), "midnight");
+  }
+  assert.equal(normalizedAppPreferences({}).theme, "midnight");
+  assert.equal(normalizedAppPreferences({ theme: "forest" }).theme, "forest");
+  assert.equal(normalizedAppPreferences({ theme: "unknown" }).theme, "midnight");
+
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  assert.match(mainSource, /const DEFAULT_APP_THEME = "midnight"/);
+  assert.match(mainSource, /APP_THEME_IDS = new Set\(\[DEFAULT_APP_THEME, "ocean", "forest", "sunset"\]\)/);
+  assert.match(mainSource, /theme: typeof preferences\.theme === "string" && APP_THEME_IDS\.has\(preferences\.theme\)[\s\S]+DEFAULT_APP_THEME/);
+  assert.match(mainSource, /appPreferences: safeAppPreferences\(state\.appPreferences\)/);
+  assert.match(mainSource, /backgroundColor: "#05060a"/);
+  assert.match(appSource, /function applyAppTheme\(value\)[\s\S]+document\.documentElement\.dataset\.theme = theme[\s\S]+cacheAppTheme\(theme\)/);
+  assert.match(appSource, /state = normalizeState\(loadedState\);\s*state\.appPreferences\.theme = applyAppTheme\(state\.appPreferences\.theme\)/);
+  assert.match(appSource, /data-settings-panel="general"[\s\S]+data-settings-panel="appearance"[\s\S]+data-settings-panel="server"/);
+  assert.match(appSource, /data-settings-content="appearance"[^>]*>[\s\S]+<h2>Appearance<\/h2>[\s\S]+name="settingsTheme"[\s\S]+stored only on this device/);
+  const generalPanel = appSource.slice(
+    appSource.indexOf('data-settings-content="general"'),
+    appSource.indexOf('data-settings-content="appearance"'),
+  );
+  assert.doesNotMatch(generalPanel, /settingsTheme|settings-theme-card/);
+  assert.match(appSource, /APP_THEMES\.map\(\(theme\) => `<label class="settings-theme-card"[\s\S]+type="radio" name="settingsTheme"/);
+  assert.match(appSource, /updateAppPreference\("theme", input\.value\)/);
+  const themeHandlerStart = appSource.indexOf(`document.querySelectorAll('input[name="settingsTheme"]')`);
+  const themeHandlerEnd = appSource.indexOf("const runInBackground", themeHandlerStart);
+  assert.ok(themeHandlerStart >= 0 && themeHandlerEnd > themeHandlerStart);
+  assert.doesNotMatch(appSource.slice(themeHandlerStart, themeHandlerEnd), /renderSettings\(\)/);
+});
+
+test("bootstraps the cached Windows theme before CSS without trusting arbitrary values", () => {
+  const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  const bootstrapSource = readFileSync(new URL("../ui/theme-bootstrap.js", import.meta.url), "utf8");
+  const bootstrapIndex = htmlSource.indexOf('<script src="theme-bootstrap.js"></script>');
+  const stylesheetIndex = htmlSource.indexOf('<link rel="stylesheet" href="styles.css">');
+  assert.ok(bootstrapIndex >= 0 && bootstrapIndex < stylesheetIndex);
+  assert.match(bootstrapSource, /const fallback = "midnight"/);
+  assert.match(bootstrapSource, /new Set\(\[fallback, "ocean", "forest", "sunset"\]\)/);
+  assert.match(bootstrapSource, /localStorage\.getItem\("resonance\.theme"\)/);
+  assert.match(bootstrapSource, /if \(themes\.has\(cached\)\) theme = cached/);
+  assert.match(bootstrapSource, /document\.documentElement\.dataset\.theme = theme/);
+});
+
+test("defines complete Windows palettes and routes major chrome through theme tokens", () => {
+  const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
+  const shuffleSource = readFileSync(new URL("../ui/shuffle-icon.css", import.meta.url), "utf8");
+  const palettes = {
+    midnight: [
+      ["background", "#020305"], ["base", "#05060a"], ["panel", "#0c0d13"],
+      ["surface", "#0b0c12"], ["surface-raised", "#11131c"], ["accent", "#7547ff"],
+      ["accent-secondary", "#6540f5"], ["accent-tertiary", "#9b82ff"],
+      ["gradient-accent", "linear-gradient(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%)"],
+      ["action-background", "linear-gradient(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%)"],
+      ["gradient-artwork", "linear-gradient(145deg, #3349c9 0%, #6857ff 52%, #f18cb2 100%)"],
+    ],
+    ocean: [
+      ["background", "#02070d"], ["panel", "#050d14"], ["surface", "#07121b"],
+      ["surface-raised", "#0d1d2a"], ["accent", "#1769c2"], ["accent-secondary", "#0f5caa"],
+      ["accent-tertiary", "#55b8ff"],
+      ["action-background", "var(--accent-secondary)"],
+      ["gradient-accent", "linear-gradient(135deg, #0f5caa 0%, #218bd6 50%, #62c3ff 100%)"],
+    ],
+    forest: [
+      ["background", "#020805"], ["panel", "#050d09"], ["surface", "#07120c"],
+      ["surface-raised", "#0d1d14"], ["accent", "#198754"], ["accent-secondary", "#126b43"],
+      ["accent-tertiary", "#5fd49a"],
+      ["action-background", "var(--accent-secondary)"],
+      ["gradient-accent", "linear-gradient(135deg, #126b43 0%, #219c64 50%, #69d89e 100%)"],
+    ],
+    sunset: [
+      ["background", "#0a0403"], ["panel", "#100706"], ["surface", "#150a07"],
+      ["surface-raised", "#21120e"], ["accent", "#c45132"], ["accent-secondary", "#a33a53"],
+      ["accent-tertiary", "#ff9a62"],
+      ["action-background", "var(--accent-secondary)"],
+      ["gradient-accent", "linear-gradient(135deg, #a33a53 0%, #d25b3f 50%, #ff9a62 100%)"],
+    ],
+  };
+  for (const [theme, expected] of Object.entries(palettes)) {
+    const block = styleSource.match(new RegExp(`:root\\[data-theme="${theme}"\\]\\s*\\{([\\s\\S]*?)\\n\\}`))?.[1] || "";
+    assert.ok(block, `${theme} theme selector is missing`);
+    for (const [token, value] of expected) {
+      assert.ok(block.includes(`--${token}: ${value};`), `${theme} is missing --${token}`);
+    }
+  }
+  const whiteContrast = (hex) => {
+    const channels = hex.match(/[0-9a-f]{2}/gi).map((value) => Number.parseInt(value, 16) / 255);
+    const linear = channels.map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+    const luminance = (0.2126 * linear[0]) + (0.7152 * linear[1]) + (0.0722 * linear[2]);
+    return 1.05 / (luminance + 0.05);
+  };
+  for (const [theme, actionColor] of Object.entries({ ocean: "#0f5caa", forest: "#126b43", sunset: "#a33a53" })) {
+    assert.ok(whiteContrast(actionColor) >= 4.5, `${theme} action background must retain 4.5:1 white-text contrast`);
+  }
+  assert.match(styleSource, /@scope \(:root\[data-theme="ocean"\],[\s\S]+:root\[data-theme="sunset"\]\) \{/);
+  assert.match(styleSource, /scrollbar-color: #7c57df #11131b/);
+  assert.match(styleSource, /@scope[\s\S]+scrollbar-color: var\(--accent\) var\(--surface-raised\)/);
+  assert.match(styleSource, /outline: 2px solid var\(--accent-tertiary\)/);
+  assert.doesNotMatch(styleSource, /outline: 2px solid #b69cff/i);
+  assert.match(styleSource, /\.sidebar\s*\{[\s\S]*?background: var\(--sidebar-background\)/);
+  assert.match(styleSource, /\.settings-dialog,[\s\S]+background: var\(--dialog-background\)/);
+  assert.match(shuffleSource, /\.playlist-dialog\s*\{[\s\S]+background: var\(--dialog-background\)/);
+  assert.match(shuffleSource, /#installUpdate\s*\{[\s\S]+background: var\(--action-background\)/);
+  assert.match(styleSource, /\.add-song-row > button\.added\s*\{[^}]*background: var\(--accent-soft\)/);
+  assert.match(styleSource, /\.local-import-provider-pill button\[aria-pressed="true"\]\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-glow\)/);
+  assert.match(styleSource, /\.local-import-media-kind input:checked \+ span\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent/);
+  assert.match(styleSource, /\.local-import-candidate:has\(input:checked\)\s*\{[^}]*var\(--accent\)/);
+  assert.match(styleSource, /\.local-import-sync input:checked \+ \.local-import-sync-toggle\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent\)/);
+  assert.match(styleSource, /#confirmLocalImport\s*\{[^}]*background: var\(--action-background\)/);
+  const chromeOverrides = styleSource.slice(styleSource.indexOf("/* Keep every non-content accent surface on the active app theme. */"));
+  assert.match(chromeOverrides, /\.profile-menu-badge\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
+  assert.match(chromeOverrides, /\.player-track:focus-visible\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-soft\)/);
+  assert.match(chromeOverrides, /\.history-mode button\.active\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
+  assert.match(chromeOverrides, /\.history-top-song-cover\[aria-expanded="true"\]\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-soft\)/);
+  assert.match(chromeOverrides, /\.local-import-preview-button\.playing\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--action-background\)[^}]*var\(--accent-glow\)/);
+  assert.match(chromeOverrides, /\.local-import-spark\s*\{[^}]*var\(--accent-soft\)[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-glow\)/);
+  assert.match(chromeOverrides, /\.clip-editor-save\s*\{[^}]*var\(--accent-border\)/);
+  assert.match(styleSource, /\.clip-editor-handle span\s*\{[^}]*background: var\(--accent-secondary\)[^}]*var\(--accent-glow\)/);
+  assert.match(styleSource, /\.clip-editor-handle\.dragging span\s*\{[^}]*background: var\(--accent\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-glow\)/);
+  assert.match(styleSource, /\.clip-editor-selection-summary input:focus\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-soft\)/);
+  assert.doesNotMatch(styleSource, /#(?:6841f1|7751ff|7654ff2e|8f72ff55|8f72ff|7654ff24|b49eff)/i);
+  assert.match(styleSource, /\.profile-button\s*\{[^}]*border: 1px solid #a58cff52[^}]*linear-gradient\(145deg, #6f3cff, #3a207d\)/);
+  assert.match(styleSource, /\.filters button\.active\s*\{[^}]*background: var\(--gradient-accent\)[^}]*#ad96ff4d/);
+  assert.match(styleSource, /\.settings-nav button\.active svg\s*\{[^}]*#9f82ff[^}]*#805aff/);
+  assert.match(styleSource, /\.storage-import-option-icon\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
+  assert.match(styleSource, /\.segmented button\.active\s*\{[^}]*#845bff[^}]*#5c2ee8[^}]*color: #fff/);
+  assert.match(styleSource, /\.history-bar\.peak\s*\{[^}]*filter: drop-shadow\([^)]*var\(--history-peak-shadow\)/);
+  assert.match(styleSource, /\.local-import-provider-pill\s*\{[^}]*border: 1px solid var\(--accent-border\)/);
+  assert.match(styleSource, /\.clip-editor-selection\s*\{[^}]*background: var\(--clip-selection-background\)/);
+  assert.match(styleSource, /--history-bar-start: #9b7aff;[\s\S]+--history-peak-start: #ff806c;[\s\S]+--clip-visualizer-low: #4e1a95/);
+  assert.match(styleSource, /\.settings-theme-grid\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(styleSource, /\.settings-theme-card\s*\{[^}]*grid-template-rows: 92px auto/);
+  const alternateChrome = styleSource.slice(styleSource.indexOf("@scope (:root[data-theme=\"ocean\"]"));
+  assert.match(alternateChrome, /\.profile-button,[\s\S]+background: var\(--control-surface\)/);
+  assert.match(alternateChrome, /\.filters button\.active,[\s\S]+background: var\(--accent-soft\)/);
+  assert.match(alternateChrome, /\.settings-nav button\.active\s*\{[^}]*var\(--accent\)[^}]*var\(--accent-glow\)/);
+  assert.match(alternateChrome, /\.segmented button\.active[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
+  assert.doesNotMatch(styleSource, /#(?:8f72ec40|7651dc35|b79cff|8175ae80|7d47dd|a75bf5|55319d|8c46e845)/i);
 });
 
 test("adds focused keybinds, Discord presence, close-to-tray settings, custom scrollbars, and no volume percentage", () => {
@@ -1476,7 +1626,7 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(styleSource, /\.listening-history-stats\[hidden\],[\s\S]+\.listening-history-chart\[hidden\][\s\S]+display: none/);
   assert.match(styleSource, /\.history-bar\s*\{[\s\S]*?fill: url\("#historyBarGradient"\)/);
   assert.match(styleSource, /\.history-bar\.peak\s*\{[\s\S]*?fill: url\("#historyPeakBarGradient"\)/);
-  assert.match(styleSource, /\.history-bar\.selected[\s\S]*?stroke: #e1d8ff/);
+  assert.match(styleSource, /\.history-bar\.selected[\s\S]*?stroke: var\(--accent-tertiary\)/);
   assert.doesNotMatch(styleSource, /\.history-song-line|\.history-song-legend|\.history-highlight-label|\.song-mode/);
   assert.match(styleSource, /\.history-chart-viewport\s*\{[\s\S]*?overflow: hidden/);
   assert.match(styleSource, /\.history-chart-svg\s*\{[\s\S]*?width: 100%[\s\S]*?min-width: 0/);

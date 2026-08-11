@@ -175,6 +175,7 @@ enum InstalledVideoRenderingPolicy {
 }
 
 struct NowPlayingView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let onDismiss: () -> Void
@@ -213,7 +214,7 @@ struct NowPlayingView: View {
                 ) {
                     nowPlayingBackground
                 } else {
-                    Color(hex: 0x010207).ignoresSafeArea()
+                    palette.background.ignoresSafeArea()
                 }
 
                 VStack(spacing: 0) {
@@ -264,7 +265,7 @@ struct NowPlayingView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .foregroundStyle(Color.appInk)
+        .foregroundStyle(palette.ink)
         .preferredColorScheme(.dark)
         .onExitCommand {
             if let installedVideoSession {
@@ -469,9 +470,9 @@ struct NowPlayingView: View {
                         .frame(width: compact ? 82 : 104, height: compact ? 82 : 104)
                         .background {
                             ZStack {
-                                Circle().fill(Color(hex: 0x291B44).opacity(0.92))
+                                Circle().fill(palette.raisedSurface.opacity(0.92))
                                 RadialGradient(
-                                    colors: [Color(hex: 0x9A5CFF).opacity(0.42), .clear],
+                                    colors: [palette.tertiary.opacity(0.42), .clear],
                                     center: .center,
                                     startRadius: 0,
                                     endRadius: compact ? 42 : 54
@@ -479,9 +480,9 @@ struct NowPlayingView: View {
                             }
                         }
                         .overlay {
-                            Circle().stroke(Color(hex: 0xAC69FF), lineWidth: 2)
+                            Circle().stroke(palette.tertiary, lineWidth: 2)
                         }
-                        .shadow(color: Color(hex: 0x8D4EFF).opacity(0.36), radius: 22)
+                        .shadow(color: palette.secondary.opacity(0.36), radius: 22)
                 }
                 .buttonStyle(PressableScaleStyle())
                 .help(model.isPlaying ? "Pause" : "Play")
@@ -568,7 +569,7 @@ struct NowPlayingView: View {
                             Spacer(minLength: 18)
                             if abs(Double(model.playbackRate) - rate) < 0.001 {
                                 Image(systemName: "checkmark")
-                                    .foregroundStyle(Color.appAccent)
+                                    .foregroundStyle(palette.foregroundAccent)
                             }
                         }
                         .frame(width: 96)
@@ -580,8 +581,8 @@ struct NowPlayingView: View {
                 }
             }
             .padding(6)
-            .foregroundStyle(Color.appInk)
-            .background(Color.appSurfaceRaised)
+            .foregroundStyle(palette.ink)
+            .background(palette.raisedSurface)
         }
     }
 
@@ -613,12 +614,12 @@ struct NowPlayingView: View {
                 .foregroundStyle(Color.white.opacity(0.92))
                 .frame(maxWidth: .infinity)
                 .frame(height: 54)
-                .background(isQueuePresented ? Color.appAccent.opacity(0.28) : Color.black.opacity(0.24))
+                .background(isQueuePresented ? palette.accent.opacity(0.28) : Color.black.opacity(0.24))
                 .overlay {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(
                             isQueuePresented
-                                ? Color.appAccent.opacity(0.72)
+                                ? palette.accent.opacity(0.72)
                                 : Color.white.opacity(0.18),
                             lineWidth: 1
                         )
@@ -646,11 +647,11 @@ struct NowPlayingView: View {
                 .font(.system(size: 34, weight: .semibold))
             Text("Choose a song from your library to begin.")
                 .font(.system(size: 15))
-                .foregroundStyle(Color.appMuted)
+                .foregroundStyle(palette.muted)
 
             Button("Add Music", action: model.importLocalFiles)
                 .buttonStyle(.borderedProminent)
-                .tint(Color.appAccent)
+                .tint(palette.accent)
                 .controlSize(.large)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -660,7 +661,7 @@ struct NowPlayingView: View {
     @ViewBuilder
     private var nowPlayingBackground: some View {
         ZStack {
-            Color(hex: 0x010207)
+            palette.background
 
             if let track = model.currentTrack,
                let artworkData = track.artworkData,
@@ -687,7 +688,7 @@ struct NowPlayingView: View {
             LinearGradient(
                 colors: [
                     Color.black.opacity(0.46),
-                    Color(hex: 0x070711).opacity(0.58),
+                    palette.panel.opacity(0.58),
                     Color.black.opacity(0.76),
                 ],
                 startPoint: .top,
@@ -695,7 +696,7 @@ struct NowPlayingView: View {
             )
 
             RadialGradient(
-                colors: [Color.appAccent.opacity(0.12), .clear],
+                colors: [palette.accent.opacity(0.12), .clear],
                 center: UnitPoint(x: 0.56, y: 0.48),
                 startRadius: 20,
                 endRadius: 560
@@ -878,6 +879,7 @@ private struct InstalledVideoTransitionArtwork: View {
 }
 
 private struct InstalledVideoLaunchArtwork: View {
+    @Environment(\.resonancePalette) private var palette
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let track: Track
     let artworkSize: CGFloat
@@ -909,9 +911,9 @@ private struct InstalledVideoLaunchArtwork: View {
                     cornerRadius: InstalledVideoLayoutPolicy.artworkCornerRadius,
                     style: .continuous
                 )
-                .stroke(Color.appAccent.opacity(0.42), lineWidth: 1)
+                .stroke(palette.accent.opacity(0.42), lineWidth: 1)
             }
-            .shadow(color: Color.appAccent.opacity(0.24), radius: 34, y: 15)
+            .shadow(color: palette.accent.opacity(0.24), radius: 34, y: 15)
 
             if hasVideo {
                 let badgeSize = InstalledVideoLaunchBadgePolicy.size(for: artworkSize)
@@ -947,6 +949,7 @@ private struct InstalledVideoLaunchArtwork: View {
 }
 
 private struct InstalledVideoPlayerView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let session: InstalledVideoSession
@@ -973,11 +976,11 @@ private struct InstalledVideoPlayerView: View {
     }
 
     private var surfaceBorderColor: Color {
-        isExpanded ? Color.white.opacity(0.18) : Color.appAccent.opacity(0.42)
+        isExpanded ? Color.white.opacity(0.18) : palette.accent.opacity(0.42)
     }
 
     private var surfaceShadowColor: Color {
-        isExpanded ? Color.black.opacity(0.72) : Color.appAccent.opacity(0.24)
+        isExpanded ? Color.black.opacity(0.72) : palette.accent.opacity(0.24)
     }
 
     private var playbackDuration: TimeInterval {
@@ -995,11 +998,11 @@ private struct InstalledVideoPlayerView: View {
         let surfaceFrame = surfaceFrame(in: viewportSize)
 
         ZStack {
-            Color(hex: 0x010207).ignoresSafeArea()
+            palette.background.ignoresSafeArea()
                 .opacity(isExpanded ? 1 : 0)
 
             RadialGradient(
-                colors: [Color.appAccent.opacity(0.16), .clear],
+                colors: [palette.accent.opacity(0.16), .clear],
                 center: .center,
                 startRadius: 40,
                 endRadius: 720
@@ -1130,7 +1133,7 @@ private struct InstalledVideoPlayerView: View {
         }
         .frame(width: viewportSize.width, height: viewportSize.height, alignment: .topLeading)
         .clipped()
-        .foregroundStyle(Color.appInk)
+        .foregroundStyle(palette.ink)
         .contentShape(Rectangle())
         .onContinuousHover { phase in
             switch phase {
@@ -1418,6 +1421,7 @@ struct InstalledVideoMiniPlayer: View {
 }
 
 private struct InstalledVideoControlsOverlay: View {
+    @Environment(\.resonancePalette) private var palette
     let track: Track
     let duration: TimeInterval
     let isPlaying: Bool
@@ -1435,8 +1439,8 @@ private struct InstalledVideoControlsOverlay: View {
             LinearGradient(
                 stops: [
                     .init(color: .clear, location: 0),
-                    .init(color: Color(hex: 0x02030A).opacity(0.60), location: 0.30),
-                    .init(color: Color(hex: 0x02030A).opacity(0.95), location: 1),
+                    .init(color: palette.background.opacity(0.60), location: 0.30),
+                    .init(color: palette.background.opacity(0.95), location: 1),
                 ],
                 startPoint: .top,
                 endPoint: .bottom
@@ -1450,7 +1454,7 @@ private struct InstalledVideoControlsOverlay: View {
                             .foregroundStyle(Color.white)
                         Text(track.artist)
                             .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(Color(hex: 0xD4CEDF))
+                            .foregroundStyle(palette.ink.opacity(0.82))
                     }
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -1527,7 +1531,7 @@ private struct InstalledVideoControlsOverlay: View {
             .frame(height: 46)
             .background {
                 Capsule()
-                    .fill(Color(hex: 0x11121B).opacity(0.72))
+                    .fill(palette.raisedSurface.opacity(0.72))
                     .background(.ultraThinMaterial, in: Capsule())
             }
             .overlay {
@@ -1539,6 +1543,7 @@ private struct InstalledVideoControlsOverlay: View {
 }
 
 private struct InstalledVideoTimeline: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var playbackPosition: PlaybackPositionState
     let duration: TimeInterval
     let onSeek: (Double) -> Void
@@ -1556,7 +1561,7 @@ private struct InstalledVideoTimeline: View {
                 .frame(width: 48, alignment: .leading)
             ClickableProgress(
                 progress: progress,
-                activeColor: Color(hex: 0x9A5CFF),
+                activeColor: palette.tertiary,
                 height: 4,
                 onSeek: onSeek
             )
@@ -1565,11 +1570,12 @@ private struct InstalledVideoTimeline: View {
         }
         .font(.system(size: 12, weight: .medium))
         .monospacedDigit()
-        .foregroundStyle(Color(hex: 0xE8E2F2))
+        .foregroundStyle(palette.ink.opacity(0.9))
     }
 }
 
 private struct InstalledVideoTransportButton: View {
+    @Environment(\.resonancePalette) private var palette
     let systemImage: String
     let label: String
     var size: CGFloat = 46
@@ -1605,17 +1611,17 @@ private struct InstalledVideoTransportButton: View {
 
     private var backgroundColor: Color {
         if isPrimary {
-            return Color(hex: 0x6E39C5).opacity(isHovering ? 0.94 : 0.78)
+            return palette.secondary.opacity(isHovering ? 0.94 : 0.78)
         }
         if isActive || isHovering {
-            return Color(hex: 0x7043C7).opacity(0.34)
+            return palette.secondary.opacity(0.34)
         }
-        return Color(hex: 0x11121B).opacity(0.76)
+        return palette.raisedSurface.opacity(0.76)
     }
 
     private var borderColor: Color {
-        if isPrimary { return Color(hex: 0xB08BFF).opacity(0.72) }
-        if isActive || isHovering { return Color(hex: 0xA98AFF).opacity(0.60) }
+        if isPrimary { return palette.tertiary.opacity(0.72) }
+        if isActive || isHovering { return palette.tertiary.opacity(0.60) }
         return Color.white.opacity(0.17)
     }
 }
@@ -1680,6 +1686,7 @@ final class AspectFitPlayerContainerView: NSView {
 }
 
 private struct NowPlayingProgressView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var playbackPosition: PlaybackPositionState
     let duration: TimeInterval
     let onSeek: (Double) -> Void
@@ -1695,7 +1702,7 @@ private struct NowPlayingProgressView: View {
                 .frame(width: 44, alignment: .trailing)
             ClickableProgress(
                 progress: progress,
-                activeColor: Color(hex: 0x965EFF),
+                activeColor: palette.tertiary,
                 height: 4,
                 onSeek: onSeek
             )
@@ -1708,6 +1715,7 @@ private struct NowPlayingProgressView: View {
 }
 
 private struct NowPlayingTransportButton: View {
+    @Environment(\.resonancePalette) private var palette
     let systemImage: String
     let label: String
     let size: CGFloat
@@ -1722,7 +1730,7 @@ private struct NowPlayingTransportButton: View {
                 .font(.system(size: symbolSize, weight: .medium))
                 .foregroundStyle(
                     isActive
-                        ? Color(hex: 0xA76BFF)
+                        ? palette.tertiary
                         : Color.white.opacity(isHovering ? 1 : 0.82)
                 )
                 .frame(width: size, height: size)
@@ -1738,6 +1746,7 @@ private struct NowPlayingTransportButton: View {
 }
 
 private struct NowPlayingVolumeSlider: View {
+    @Environment(\.resonancePalette) private var palette
     @Binding var value: Double
 
     var body: some View {
@@ -1751,12 +1760,12 @@ private struct NowPlayingVolumeSlider: View {
                     .fill(Color.white.opacity(0.20))
                     .frame(height: 4)
                 Capsule()
-                    .fill(Color(hex: 0x9A5CFF))
+                    .fill(palette.tertiary)
                     .frame(width: thumbSize / 2 + travel * clampedValue, height: 4)
                 Circle()
-                    .fill(Color(hex: 0xA969FF))
+                    .fill(palette.tertiary)
                     .frame(width: thumbSize, height: thumbSize)
-                    .shadow(color: Color.appAccent.opacity(0.4), radius: 4)
+                    .shadow(color: palette.accent.opacity(0.4), radius: 4)
                     .offset(x: travel * clampedValue)
             }
             .frame(maxHeight: .infinity)
@@ -1921,6 +1930,7 @@ private struct NowPlayingMarqueeTextWidthKey: PreferenceKey {
 }
 
 private struct NowPlayingQueueDrawer: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     let onDismiss: () -> Void
 
@@ -1932,7 +1942,7 @@ private struct NowPlayingQueueDrawer: View {
                         .font(.system(size: 22, weight: .semibold))
                     Text("\(model.queueTracks.count) \(model.queueTracks.count == 1 ? "song" : "songs")")
                         .font(.system(size: 11))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                 }
 
                 Spacer()
@@ -1956,13 +1966,13 @@ private struct NowPlayingQueueDrawer: View {
                     } label: {
                         Text(tab.rawValue)
                             .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(model.queueTab == tab ? Color.white : Color.appMuted)
+                            .foregroundStyle(model.queueTab == tab ? Color.white : palette.muted)
                             .frame(maxWidth: .infinity)
                             .frame(height: 42)
                             .overlay(alignment: .bottom) {
                                 if model.queueTab == tab {
                                     Rectangle()
-                                        .fill(Color.appAccent)
+                                        .fill(palette.accent)
                                         .frame(height: 2)
                                 }
                             }
@@ -1972,7 +1982,7 @@ private struct NowPlayingQueueDrawer: View {
             }
             .overlay(alignment: .bottom) {
                 Rectangle()
-                    .fill(Color.appLine)
+                    .fill(palette.divider)
                     .frame(height: 1)
             }
 
@@ -1980,7 +1990,7 @@ private struct NowPlayingQueueDrawer: View {
                 if model.queueTracks.isEmpty {
                     Text(model.queueTab == .history ? "Nothing played yet" : "Queue is empty")
                         .font(.system(size: 12))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                         .frame(maxWidth: .infinity)
                         .padding(.top, 42)
                 } else {
@@ -1996,17 +2006,18 @@ private struct NowPlayingQueueDrawer: View {
             .scrollIndicators(.hidden)
         }
         .background(.ultraThinMaterial)
-        .background(Color(hex: 0x090A11).opacity(0.91))
+        .background(palette.surface.opacity(0.91))
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(Color(hex: 0x9B7AFF).opacity(0.26), lineWidth: 1)
+                .stroke(palette.tertiary.opacity(0.26), lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.82), radius: 50, x: -8, y: 20)
     }
 }
 
 private struct NowPlayingQueueRow: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     let track: Track
     @State private var isHovering = false
@@ -2030,7 +2041,7 @@ private struct NowPlayingQueueRow: View {
                         .lineLimit(1)
                     Text(track.artist)
                         .font(.system(size: 10))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                         .lineLimit(1)
                 }
 
@@ -2042,11 +2053,11 @@ private struct NowPlayingQueueRow: View {
                 } else if !isAvailableOnDevice {
                     Text("Not downloaded")
                         .font(.system(size: 10))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                 } else {
                     Text(track.durationText)
                         .font(.system(size: 10))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                 }
             }
             .padding(9)
