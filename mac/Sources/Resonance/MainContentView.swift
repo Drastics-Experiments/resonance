@@ -9,6 +9,7 @@ struct MainContentView: View {
     @State private var serverSearchText = ""
     @State private var serverScope: MacServerScope = .all
     @State private var serverSort: MacServerSort = .title
+    @State private var clipEditorSelection: MacClipEditorSelection?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,7 +44,21 @@ struct MainContentView: View {
             )
         }
         .clipped()
+        .sheet(item: $clipEditorSelection) { selection in
+            MacClipEditorSheet(initialTrackID: selection.trackID)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openClipEditor)) { notification in
+            guard let trackID = notification.object as? UUID,
+                  let track = model.tracks.first(where: { $0.id == trackID }),
+                  ClipEditorTrackPolicy.isEditable(track) else { return }
+            clipEditorSelection = MacClipEditorSelection(trackID: trackID)
+        }
     }
+}
+
+struct MacClipEditorSelection: Identifiable, Equatable {
+    let trackID: UUID
+    var id: UUID { trackID }
 }
 
 private struct ServerLibraryView: View {
@@ -683,6 +698,7 @@ private struct MacServerSongRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .clipEditorAccessibilityAction(for: localTrack)
 
             HStack(spacing: 11) {
                 if let localTrack {
@@ -731,6 +747,9 @@ private struct MacServerSongRow: View {
         .contextMenu {
             if let localTrack {
                 Button("Play", action: { model.selectAndPlay(localTrack) })
+                if ClipEditorTrackPolicy.isEditable(localTrack) {
+                    Button("Open in Clip Editor") { openClipEditor(localTrack) }
+                }
                 Button("Show in Finder", action: { model.revealInFinder(localTrack) })
             } else {
                 if model.clientConfiguration.allowsStreamOnlyPlayback {
@@ -3155,6 +3174,12 @@ private struct RecentlyAddedArtworkCard: View {
         .animation(.easeOut(duration: 0.14), value: isHovering)
         .help("\(playbackActionTitle) \(track.title)")
         .accessibilityLabel("\(playbackActionTitle) \(track.title) by \(track.artist)")
+        .clipEditorAccessibilityAction(for: track)
+        .contextMenu {
+            if ClipEditorTrackPolicy.isEditable(track) {
+                Button("Open in Clip Editor") { openClipEditor(track) }
+            }
+        }
     }
 }
 
@@ -3907,6 +3932,7 @@ private struct TrackRowView: View {
             .accessibilityAction(named: isFavorite ? "Remove from Liked Songs" : "Add to Liked Songs") {
                 model.toggleFavorite(track)
             }
+            .clipEditorAccessibilityAction(for: track)
             .help("Play \(track.title)")
 
             Button {
@@ -3944,6 +3970,9 @@ private struct TrackRowView: View {
             }
 
             Button("Show in Finder") { model.revealInFinder(track) }
+            if ClipEditorTrackPolicy.isEditable(track) {
+                Button("Open in Clip Editor") { openClipEditor(track) }
+            }
             Divider()
 
             if let selected = model.selectedPlaylist, model.section == .playlists {
@@ -4674,6 +4703,7 @@ private struct MacStorageTrackRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .clipEditorAccessibilityAction(for: track)
 
         }
         .padding(.horizontal, 10)
@@ -4688,6 +4718,9 @@ private struct MacStorageTrackRow: View {
         .contextMenu {
             Button("Play", action: { model.selectAndPlay(track) })
             Button("Show in Finder", action: { model.revealInFinder(track) })
+            if ClipEditorTrackPolicy.isEditable(track) {
+                Button("Open in Clip Editor") { openClipEditor(track) }
+            }
             Divider()
             Button(track.remoteID == nil ? "Delete Original File" : "Delete Downloaded Copy", role: .destructive, action: onDelete)
         }
@@ -4698,9 +4731,36 @@ private func storageByteText(_ bytes: Int64) -> String {
     ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
 }
 
+private func openClipEditor(_ track: Track) {
+    guard ClipEditorTrackPolicy.isEditable(track) else { return }
+    NotificationCenter.default.post(name: .openClipEditor, object: track.id)
+}
+
+private struct ClipEditorAccessibilityAction: ViewModifier {
+    let track: Track?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let track, ClipEditorTrackPolicy.isEditable(track) {
+            content.accessibilityAction(named: "Open in Clip Editor") {
+                openClipEditor(track)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+private extension View {
+    func clipEditorAccessibilityAction(for track: Track?) -> some View {
+        modifier(ClipEditorAccessibilityAction(track: track))
+    }
+}
+
 extension Notification.Name {
     static let focusMusicSearch = Notification.Name("focusMusicSearch")
     static let newMusicPlaylist = Notification.Name("newMusicPlaylist")
     static let importMusicFromLink = Notification.Name("importMusicFromLink")
     static let openResonanceSettings = Notification.Name("openResonanceSettings")
+    static let openClipEditor = Notification.Name("openClipEditor")
 }

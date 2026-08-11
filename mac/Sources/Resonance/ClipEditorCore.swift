@@ -34,6 +34,32 @@ struct ClipRangePolicy {
     }
 }
 
+enum ClipEditorTrackPolicy {
+    static func isEditable(
+        _ track: Track,
+        fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:)
+    ) -> Bool {
+        guard let fileURL = track.fileURL else { return false }
+        return fileExists(fileURL.path)
+    }
+
+    static func initialTrack(
+        from editableTracks: [Track],
+        requestedTrackID: UUID?,
+        currentTrackID: UUID?
+    ) -> Track? {
+        if let requestedTrackID,
+           let requestedTrack = editableTracks.first(where: { $0.id == requestedTrackID }) {
+            return requestedTrack
+        }
+        if let currentTrackID,
+           let currentTrack = editableTracks.first(where: { $0.id == currentTrackID }) {
+            return currentTrack
+        }
+        return editableTracks.first
+    }
+}
+
 final class ClipLiveSpectrumAnalyzer: @unchecked Sendable {
     static let barCount = 112
     private static let sampleCount = 512

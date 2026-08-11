@@ -154,19 +154,6 @@ private struct LibraryView: View {
                         .textFieldStyle(.plain)
                         .padding(13)
                         .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
-                    HStack(spacing: 10) {
-                        Button { library.togglePlay() } label: {
-                            Label(library.isPlaying ? "Pause" : "Play", systemImage: library.isPlaying ? "pause.fill" : "play.fill")
-                                .pill(color: palette.accent)
-                        }
-                        .disabled(library.tracksForActiveProfile.isEmpty)
-                        Button { library.shuffleEnabled.toggle() } label: {
-                            Image(systemName: "shuffle")
-                                .roundButton(active: library.shuffleEnabled, activeColor: palette.secondary)
-                        }
-                        .disabled(library.tracksForActiveProfile.isEmpty)
-                        Spacer()
-                    }
                     if library.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                        !recentlyAddedTracks.isEmpty {
                         RecentlyAddedSection(tracks: recentlyAddedTracks)
@@ -942,6 +929,7 @@ private struct NativeStorageView: View {
     @State private var deletionCandidate: MobileTrack?
     @State private var showsBatchDeleteConfirmation = false
     @State private var presentedSheet: StorageSheet?
+    @State private var startsFileImportAfterSheet = false
 
     private var visibleTracks: [MobileTrack] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -978,6 +966,10 @@ private struct NativeStorageView: View {
 
     private var importedTracks: [MobileTrack] {
         visibleTracks.filter { $0.sourceServer == nil && $0.remoteID == nil }
+    }
+
+    private var presentedTracks: [MobileTrack] {
+        downloadedTracks + importedTracks
     }
 
     private var downloadedBytes: Int64 {
@@ -1033,10 +1025,14 @@ private struct NativeStorageView: View {
                         ForEach(downloadedTracks) { track in
                             NativeStorageTrackRow(
                                 track: track,
+                                number: storageIndex(for: track),
                                 fileSize: fileSizes[track.id, default: 0],
                                 onDelete: { deletionCandidate = track }
                             )
                             .tag(track.id)
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
                         }
                     } header: {
                         Label("Downloaded from Server", systemImage: "icloud.and.arrow.down")
@@ -1048,10 +1044,14 @@ private struct NativeStorageView: View {
                         ForEach(importedTracks) { track in
                             NativeStorageTrackRow(
                                 track: track,
+                                number: storageIndex(for: track),
                                 fileSize: fileSizes[track.id, default: 0],
                                 onDelete: { deletionCandidate = track }
                             )
                             .tag(track.id)
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
                         }
                     } header: {
                         Label("Imported on Device", systemImage: "internaldrive")
@@ -1059,9 +1059,11 @@ private struct NativeStorageView: View {
                 }
             }
         }
-        .listStyle(.insetGrouped)
+        .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(palette.background)
+        .contentMargins(.horizontal, 20, for: .scrollContent)
+        .environment(\.defaultMinListRowHeight, 1)
         .searchable(
             text: $searchText,
             placement: .navigationBarDrawer(displayMode: .always),
@@ -1071,9 +1073,18 @@ private struct NativeStorageView: View {
         .navigationBarTitleDisplayMode(.large)
         .toolbar(.hidden, for: .tabBar)
         .environment(\.editMode, $editMode)
-        .sheet(item: $presentedSheet) { sheet in
+        .sheet(item: $presentedSheet, onDismiss: {
+            guard startsFileImportAfterSheet else { return }
+            startsFileImportAfterSheet = false
+            importing = true
+        }) { sheet in
             switch sheet {
-            case .linkImport:
+            case .importChooser:
+                StorageImportChooser(
+                    presentedSheet: $presentedSheet,
+                    startsFileImportAfterSheet: $startsFileImportAfterSheet
+                )
+            case .webImport:
                 MobileLocalImportSheet()
             }
         }
@@ -1084,21 +1095,20 @@ private struct NativeStorageView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button("Import from Web", systemImage: "link.badge.plus") {
-                        presentedSheet = .linkImport
-                    }
-                    Button("Import Files", systemImage: "doc.badge.plus") {
-                        importing = true
-                    }
-                    Divider()
                     Picker("Sort by", selection: $sort) {
                         ForEach(StorageSort.allCases) { option in
                             Label(option.title, systemImage: option.symbol).tag(option)
                         }
                     }
                 } label: {
-                    Label("Import and sort", systemImage: "ellipsis.circle")
+                    Label("Sort", systemImage: "arrow.up.arrow.down")
                 }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { presentedSheet = .importChooser } label: {
+                    Label("Import", systemImage: "plus")
+                }
+                .accessibilityHint("Choose whether to import from the web or Files")
             }
             if editMode.isEditing {
                 ToolbarItem(placement: .bottomBar) {
@@ -1161,42 +1171,30 @@ private struct NativeStorageView: View {
         let values = try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         availableBytes = max(values?.volumeAvailableCapacityForImportantUsage ?? 0, 0)
     }
+
+    private func storageIndex(for track: MobileTrack) -> Int {
+        (presentedTracks.firstIndex(where: { $0.id == track.id }) ?? 0) + 1
+    }
 }
 
 private struct NativeStorageTrackRow: View {
     @Environment(\.editMode) private var editMode
     @EnvironmentObject private var library: MusicLibrary
     let track: MobileTrack
+    let number: Int
     let fileSize: Int64
     let onDelete: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            TrackArtwork(track: track)
-                .frame(width: 46, height: 46)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(track.title)
-                    .font(.body.weight(.semibold))
-                    .lineLimit(1)
-                Text(track.artist)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Text(track.album.isEmpty ? "Unknown Album" : track.album)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+        Group {
+            if editMode?.wrappedValue.isEditing == true {
+                rowContent
+            } else {
+                Button { library.play(track) } label: { rowContent }
+                    .buttonStyle(.plain)
             }
-            Spacer(minLength: 8)
-            Text(formatBytes(fileSize))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
         }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            guard editMode?.wrappedValue.isEditing != true else { return }
-            library.play(track)
-        }
+        .mobileCatalogRow()
         .contextMenu {
             Button { library.play(track) } label: {
                 Label("Play", systemImage: "play.fill")
@@ -1209,11 +1207,56 @@ private struct NativeStorageTrackRow: View {
         .accessibilityLabel("\(track.title) by \(track.artist), \(formatBytes(fileSize))")
         .accessibilityAction(named: "Play") { library.play(track) }
     }
+
+    private var rowContent: some View {
+        LocalSongRowContent(
+            track: track,
+            number: number,
+            trailingDetail: formatBytes(fileSize),
+            isPlaying: library.currentTrackID == track.id && library.isPlaying
+        )
+    }
+}
+
+private struct StorageImportChooser: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var presentedSheet: StorageSheet?
+    @Binding var startsFileImportAfterSheet: Bool
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button {
+                        presentedSheet = .webImport
+                    } label: {
+                        Label("Import from Web", systemImage: "link.badge.plus")
+                    }
+                    Button {
+                        startsFileImportAfterSheet = true
+                        dismiss()
+                    } label: {
+                        Label("Import Files", systemImage: "doc.badge.plus")
+                    }
+                } footer: {
+                    Text("Import from a supported web link, or choose audio and video files already available to this device.")
+                }
+            }
+            .navigationTitle("Import Songs")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
 }
 
 
 private enum StorageSheet: String, Identifiable {
-    case linkImport
+    case importChooser, webImport
     var id: String { rawValue }
 }
 
@@ -2385,6 +2428,7 @@ private struct ServerConnectionSheet: View {
                                     Text("Secure Resonance account access")
                                         .font(.caption)
                                         .foregroundStyle(.white.opacity(0.78))
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
                                 Spacer(minLength: 8)
                                 if library.isAuthenticatingAccount {
@@ -2397,7 +2441,8 @@ private struct ServerConnectionSheet: View {
                             }
                             .foregroundStyle(.white)
                             .padding(.horizontal, 14)
-                            .frame(maxWidth: .infinity, minHeight: 58)
+                            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+                            .contentShape(Rectangle())
                             .background(
                                 LinearGradient(
                                     colors: [palette.secondary, palette.accent],
@@ -2409,6 +2454,8 @@ private struct ServerConnectionSheet: View {
                             .shadow(color: palette.accent.opacity(0.24), radius: 10, y: 5)
                         }
                         .buttonStyle(.plain)
+                        .controlSize(.large)
+                        .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
                         .disabled(library.isAuthenticatingAccount)
                         Text("Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/ in the secure system browser.")
                             .font(.caption)

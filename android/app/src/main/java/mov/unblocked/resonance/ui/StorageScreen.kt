@@ -3,7 +3,6 @@ package mov.unblocked.resonance.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -69,6 +68,7 @@ fun StorageScreen(
     var sort by remember { mutableStateOf(StorageSort.Title) }
     var filterMenu by remember { mutableStateOf(false) }
     var importMenu by remember { mutableStateOf(false) }
+    var actionsMenu by remember { mutableStateOf(false) }
     var linkImportOpen by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(setOf<String>()) }
@@ -123,7 +123,7 @@ fun StorageScreen(
                     IconButton(
                         onClick = { importMenu = true },
                         modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
-                    ) { Icon(Icons.Default.MoreVert, "Storage actions") }
+                    ) { Icon(Icons.Default.Add, "Import songs") }
                     DropdownMenu(expanded = importMenu, onDismissRequest = { importMenu = false }) {
                         DropdownMenuItem(
                             text = { Text("Import from Web") },
@@ -141,12 +141,20 @@ fun StorageScreen(
                                 actions.importAudio()
                             },
                         )
+                    }
+                }
+                Box {
+                    IconButton(
+                        onClick = { actionsMenu = true },
+                        modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
+                    ) { Icon(Icons.Default.MoreVert, "Song storage actions") }
+                    DropdownMenu(expanded = actionsMenu, onDismissRequest = { actionsMenu = false }) {
                         DropdownMenuItem(
                             text = { Text(if (editing) "Done Editing" else "Select Songs") },
                             leadingIcon = { Icon(if (editing) Icons.Default.Check else Icons.Default.Checklist, null) },
                             enabled = state.tracks.isNotEmpty(),
                             onClick = {
-                                importMenu = false
+                                actionsMenu = false
                                 editing = !editing
                                 if (!editing) selected = emptySet()
                             },
@@ -349,7 +357,6 @@ private fun StorageSection(
                     onSelect = { onToggle(track.id) },
                     allowDeleteFromDevice = true,
                     onDeleteFromDevice = { onDelete(track) },
-                    showFavorite = false,
                     showMenu = !editing,
                 )
             }

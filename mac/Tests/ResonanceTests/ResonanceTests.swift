@@ -1099,6 +1099,31 @@ struct ResonanceTests {
     }
 
     @Test
+    func clipEditorPrefersTheExplicitContextMenuSong() throws {
+        let current = Track(
+            title: "Current", artist: "Artist", album: "Album", duration: 30,
+            artwork: .midnight, fileURL: URL(fileURLWithPath: "/tmp/current.mp3")
+        )
+        let requested = Track(
+            title: "Requested", artist: "Artist", album: "Album", duration: 30,
+            artwork: .midnight, fileURL: URL(fileURLWithPath: "/tmp/requested.mp3")
+        )
+
+        #expect(ClipEditorTrackPolicy.initialTrack(
+            from: [current, requested],
+            requestedTrackID: requested.id,
+            currentTrackID: current.id
+        )?.id == requested.id)
+        #expect(ClipEditorTrackPolicy.isEditable(requested) { $0 == "/tmp/requested.mp3" })
+
+        let unavailable = Track(
+            title: "Unavailable", artist: "Artist", album: "Album", duration: 30,
+            artwork: .midnight
+        )
+        #expect(!ClipEditorTrackPolicy.isEditable(unavailable) { _ in true })
+    }
+
+    @Test
     func mixedPlaylistReordersUndownloadedSongsAndPersistsCombinedOrder() throws {
         let (defaults, suite) = try defaults()
         defer { defaults.removePersistentDomain(forName: suite) }

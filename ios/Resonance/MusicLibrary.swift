@@ -550,6 +550,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 streamingPlayer?.rate = playbackRate
             }
             UserDefaults.standard.set(Double(playbackRate), forKey: "Resonance.rate")
+            updateNowPlaying()
         }
     }
     @Published var shuffleEnabled = false { didSet { UserDefaults.standard.set(shuffleEnabled, forKey: "Resonance.shuffle") } }
@@ -687,6 +688,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var artworkCache: [String: UIImage] = [:]
     private var nowPlayingArtworkCacheKey: String?
     private var nowPlayingArtworkCache: MPMediaItemArtwork?
+    private var remoteNowPlayingArtworkCache: [String: UIImage] = [:]
+    private var nowPlayingArtworkLoadTask: Task<Void, Never>?
+    private var nowPlayingArtworkLoadRemoteID: String?
+    private var remoteCommandTargets: [(command: MPRemoteCommand, target: Any)] = []
     private var audioSessionObservers: [NSObjectProtocol] = []
     private var wasPlayingBeforeInterruption = false
     private var playlistRevision = 0
@@ -782,6 +787,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         configureAudioSession()
         observeAudioSession()
         configureRemoteCommands()
+        updateNowPlaying()
         Task { [weak self] in
             await self?.refreshEmbeddedMetadata()
             await self?.refreshAccountSessionIfNeeded()
@@ -794,6 +800,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         playlistSyncTask?.cancel()
         clientConfigRefreshTask?.cancel()
         accountRefreshTask?.cancel()
+        nowPlayingArtworkLoadTask?.cancel()
         activeDownloadAuthorizations.values.forEach { $0.revoke() }
         if let streamingEndObserver { NotificationCenter.default.removeObserver(streamingEndObserver) }
         if let streamingFailureObserver { NotificationCenter.default.removeObserver(streamingFailureObserver) }
@@ -804,6 +811,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         streamingAuthorizationLease?.invalidate()
         for observer in audioSessionObservers {
             NotificationCenter.default.removeObserver(observer)
+        }
+        for registration in remoteCommandTargets {
+            registration.command.removeTarget(registration.target)
         }
     }
 
@@ -2070,6 +2080,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         } catch {
             stopTimer()
             isPlaying = false
+            updateNowPlaying()
         }
     }
 
@@ -2170,6 +2181,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         position = player.currentTime
         UserDefaults.standard.set(position, forKey: "Resonance.position")
         updateNowPlaying()
+    }
+
+    private func seek(toElapsedTime elapsedTime: TimeInterval) {
+        guard let track = currentTrack else { return }
+        let duration = isTransientStreamActive ? nil : player?.duration
+        let bounds = playbackBounds(for: track, duration: duration)
+        seek(to: MobileNowPlayingPolicy.seekFraction(
+            elapsedTime: elapsedTime,
+            bounds: .init(start: bounds.start, end: bounds.end)
+        ))
     }
 
     func next() {
@@ -3181,6 +3202,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             serverMessage = "Sign in to your Resonance account."
             return
         }
+        let wasServerConnected = isServerConnected
+        let catalogBeforeRefresh = remoteSongs
+        let serverMessageBeforeRefresh = serverMessage
         let requestsDownloads = songIDs.map { !$0.isEmpty } ?? true
         let downloadPolicyLease: MobileTransferPolicyLease?
         if requestsDownloads {
@@ -3219,7 +3243,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             catalogRequest.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
             setProfileHeader(on: &catalogRequest)
             let (catalogData, response) = try await URLSession.shared.data(for: catalogRequest)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+            guard let catalogStatus = (response as? HTTPURLResponse)?.statusCode else {
+                throw URLError(.badServerResponse)
+            }
+            guard catalogStatus == 200 else {
+                throw playlistServerError(status: catalogStatus, data: catalogData)
+            }
             let catalog = try JSONDecoder().decode(MobileRemoteCatalog.self, from: catalogData)
             let catalogSongs = applyingKnownRemoteSongMetadata(
                 to: MobileCollectionNormalization.uniqueRemoteSongs(catalog.songs)
@@ -3341,16 +3370,49 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 isError: true
             )
         } catch {
-            if !reachedCatalog {
+            let wasCancelled = Task.isCancelled
+                || (error as? URLError)?.code == .cancelled
+                || error is CancellationError
+            let isAuthenticationFailure = (error as? PlaylistServerError).map {
+                $0.status == 401 || $0.status == 403
+            } ?? false
+            let preservesCatalog = MobileCatalogRefreshFailurePolicy.preservesLastKnownCatalog(
+                wasConnected: wasServerConnected,
+                hadCatalog: !catalogBeforeRefresh.isEmpty,
+                wasCancelled: wasCancelled,
+                isAuthenticationFailure: isAuthenticationFailure
+            )
+            if isAuthenticationFailure {
+                cancelRemoteSongMetadataHydration()
                 isServerConnected = false
                 remoteSongs = MobileCatalogRefreshMergePolicy.merge(
                     catalog: [],
                     uploadedSongsAwaitingCatalog: uploadedSongsAwaitingCatalog
                 )
                 selectedRemoteSongIDs.removeAll()
+            } else if !reachedCatalog, !preservesCatalog {
+                isServerConnected = false
+                remoteSongs = MobileCatalogRefreshMergePolicy.merge(
+                    catalog: [],
+                    uploadedSongsAwaitingCatalog: uploadedSongsAwaitingCatalog
+                )
+                selectedRemoteSongIDs.removeAll()
+            } else if !reachedCatalog {
+                isServerConnected = wasServerConnected
+                remoteSongs = catalogBeforeRefresh
+                selectedRemoteSongIDs.formIntersection(Set(remoteSongs.map(\.id)))
+                beginRemoteSongMetadataHydration(baseURL: baseURL, profileID: requestProfileID)
             }
             if submittedUploadMutationGeneration == uploadCatalogMutationGeneration {
-                serverMessage = "Connection failed: \(error.localizedDescription)"
+                if isAuthenticationFailure {
+                    serverMessage = "Authentication failed. Sign in again."
+                } else if wasCancelled {
+                    serverMessage = serverMessageBeforeRefresh
+                } else {
+                    serverMessage = preservesCatalog
+                        ? "Refresh failed: \(error.localizedDescription)"
+                        : "Connection failed: \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -5797,10 +5859,66 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private func configureRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
-        center.playCommand.addTarget { [weak self] _ in Task { @MainActor in self?.resumePlayback() }; return .success }
-        center.pauseCommand.addTarget { [weak self] _ in Task { @MainActor in self?.pausePlayback() }; return .success }
-        center.nextTrackCommand.addTarget { [weak self] _ in Task { @MainActor in self?.next() }; return .success }
-        center.previousTrackCommand.addTarget { [weak self] _ in Task { @MainActor in self?.previous() }; return .success }
+        let playTarget = center.playCommand.addTarget { [weak self] _ in
+            guard self != nil else { return .commandFailed }
+            Task { @MainActor [weak self] in self?.resumePlayback() }
+            return .success
+        }
+        remoteCommandTargets.append((center.playCommand, playTarget))
+
+        let pauseTarget = center.pauseCommand.addTarget { [weak self] _ in
+            guard self != nil else { return .commandFailed }
+            Task { @MainActor [weak self] in self?.pausePlayback() }
+            return .success
+        }
+        remoteCommandTargets.append((center.pauseCommand, pauseTarget))
+
+        let toggleTarget = center.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard self != nil else { return .commandFailed }
+            Task { @MainActor [weak self] in self?.togglePlay() }
+            return .success
+        }
+        remoteCommandTargets.append((center.togglePlayPauseCommand, toggleTarget))
+
+        let nextTarget = center.nextTrackCommand.addTarget { [weak self] _ in
+            guard self != nil else { return .commandFailed }
+            Task { @MainActor [weak self] in self?.next() }
+            return .success
+        }
+        remoteCommandTargets.append((center.nextTrackCommand, nextTarget))
+
+        let previousTarget = center.previousTrackCommand.addTarget { [weak self] _ in
+            guard self != nil else { return .commandFailed }
+            Task { @MainActor [weak self] in self?.previous() }
+            return .success
+        }
+        remoteCommandTargets.append((center.previousTrackCommand, previousTarget))
+
+        let positionTarget = center.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard self != nil,
+                  let positionEvent = event as? MPChangePlaybackPositionCommandEvent else {
+                return .commandFailed
+            }
+            let elapsedTime = positionEvent.positionTime
+            Task { @MainActor [weak self] in self?.seek(toElapsedTime: elapsedTime) }
+            return .success
+        }
+        remoteCommandTargets.append((center.changePlaybackPositionCommand, positionTarget))
+
+        let hasCurrentTrack = currentTrack != nil
+        let allowsTrackNavigation = hasCurrentTrack && !isTransientStreamActive && activeQueue.count > 1
+        center.playCommand.isEnabled = hasCurrentTrack && !isPlaying
+        center.pauseCommand.isEnabled = hasCurrentTrack && isPlaying
+        center.togglePlayPauseCommand.isEnabled = hasCurrentTrack
+        center.nextTrackCommand.isEnabled = allowsTrackNavigation
+        center.previousTrackCommand.isEnabled = allowsTrackNavigation
+        center.changePlaybackPositionCommand.isEnabled = hasCurrentTrack
+        center.changePlaybackRateCommand.isEnabled = false
+        center.seekForwardCommand.isEnabled = false
+        center.seekBackwardCommand.isEnabled = false
+        center.skipForwardCommand.isEnabled = false
+        center.skipBackwardCommand.isEnabled = false
+        center.stopCommand.isEnabled = false
     }
 
     private func startTimer() {
@@ -5810,6 +5928,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             Task { @MainActor in
                 guard let self else { return }
                 if self.isTransientStreamActive, let streamingPlayer = self.streamingPlayer {
+                    let wasPlaying = self.isPlaying
                     let currentTime = streamingPlayer.currentTime().seconds
                     if currentTime.isFinite, let track = self.streamingTrack {
                         let bounds = self.playbackBounds(for: track)
@@ -5833,7 +5952,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                         }
                     }
                     self.isPlaying = streamingPlayer.timeControlStatus != .paused
-                    self.updateNowPlaying()
+                    if self.isPlaying != wasPlaying {
+                        self.updateNowPlaying()
+                    }
                     return
                 }
                 guard let player = self.player else { return }
@@ -5856,7 +5977,6 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 self.position = player.currentTime
                 UserDefaults.standard.set(self.position, forKey: "Resonance.position")
                 self.isPlaying = true
-                self.updateNowPlaying()
             }
         }
         timer = playbackTimer
@@ -5986,27 +6106,60 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private func updateNowPlaying() {
         let remoteCommands = MPRemoteCommandCenter.shared()
-        remoteCommands.nextTrackCommand.isEnabled = !isTransientStreamActive
-        remoteCommands.previousTrackCommand.isEnabled = !isTransientStreamActive
         guard let track = currentTrack else {
+            remoteCommands.playCommand.isEnabled = false
+            remoteCommands.pauseCommand.isEnabled = false
+            remoteCommands.togglePlayPauseCommand.isEnabled = false
+            remoteCommands.nextTrackCommand.isEnabled = false
+            remoteCommands.previousTrackCommand.isEnabled = false
+            remoteCommands.changePlaybackPositionCommand.isEnabled = false
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            nowPlayingArtworkLoadTask?.cancel()
+            nowPlayingArtworkLoadTask = nil
+            nowPlayingArtworkLoadRemoteID = nil
             return
         }
-        let bounds = playbackBounds(for: track, duration: player?.duration)
+
+        let allowsTrackNavigation = !isTransientStreamActive && activeQueue.count > 1
+        remoteCommands.playCommand.isEnabled = !isPlaying
+        remoteCommands.pauseCommand.isEnabled = isPlaying
+        remoteCommands.togglePlayPauseCommand.isEnabled = true
+        remoteCommands.nextTrackCommand.isEnabled = allowsTrackNavigation
+        remoteCommands.previousTrackCommand.isEnabled = allowsTrackNavigation
+        remoteCommands.changePlaybackPositionCommand.isEnabled = true
+
+        let playerDuration = isTransientStreamActive ? nil : player?.duration
+        let bounds = playbackBounds(for: track, duration: playerDuration)
+        let snapshot = MobileNowPlayingPolicy.snapshot(
+            for: track,
+            position: position,
+            bounds: .init(start: bounds.start, end: bounds.end),
+            playbackRate: playbackRate,
+            isPlaying: isPlaying,
+            allowsTrackNavigation: allowsTrackNavigation
+        )
         var info: [String: Any] = [
-            MPMediaItemPropertyTitle: track.title,
-            MPMediaItemPropertyArtist: track.artist,
-            MPMediaItemPropertyAlbumTitle: track.album,
-            MPMediaItemPropertyPlaybackDuration: max(bounds.end - bounds.start, 0.01),
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: min(max(position - bounds.start, 0), bounds.end - bounds.start),
-            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? playbackRate : 0,
+            MPMediaItemPropertyTitle: snapshot.title,
+            MPMediaItemPropertyArtist: snapshot.artist,
+            MPMediaItemPropertyAlbumTitle: snapshot.album,
+            MPMediaItemPropertyPlaybackDuration: snapshot.duration,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: snapshot.elapsed,
+            MPNowPlayingInfoPropertyPlaybackRate: snapshot.playbackRate,
+            MPNowPlayingInfoPropertyDefaultPlaybackRate: snapshot.defaultPlaybackRate,
+            MPNowPlayingInfoPropertyExternalContentIdentifier: snapshot.identifier,
+            MPNowPlayingInfoPropertyIsLiveStream: false,
         ]
         info[MPMediaItemPropertyArtwork] = nowPlayingArtwork(for: track)
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        scheduleNowPlayingArtworkLoad(for: track)
     }
 
     private func nowPlayingArtwork(for track: MobileTrack) -> MPMediaItemArtwork {
-        let cacheKey = "\(track.id.uuidString)|\(track.artworkFilename ?? "fallback")"
+        let remoteArtwork = track.remoteID.flatMap { remoteNowPlayingArtworkCache[$0] }
+        let sourceArtwork = artwork(for: track) ?? remoteArtwork
+        let sourceKey = track.artworkFilename
+            ?? (remoteArtwork == nil ? "fallback" : "remote:\(track.remoteID ?? "")")
+        let cacheKey = "\(track.id.uuidString)|\(sourceKey)"
         if cacheKey == nowPlayingArtworkCacheKey, let nowPlayingArtworkCache {
             return nowPlayingArtworkCache
         }
@@ -6014,11 +6167,54 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         // MPMediaItemArtwork is rendered outside the app process. Redrawing the
         // source into an opaque sRGB bitmap avoids CI-backed or oriented images
         // becoming a black tile on the Lock Screen and Dynamic Island.
-        let image = renderedNowPlayingArtwork(from: artwork(for: track))
+        let image = renderedNowPlayingArtwork(from: sourceArtwork)
         let mediaArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
         nowPlayingArtworkCacheKey = cacheKey
         nowPlayingArtworkCache = mediaArtwork
         return mediaArtwork
+    }
+
+    private func scheduleNowPlayingArtworkLoad(for track: MobileTrack) {
+        guard artwork(for: track) == nil,
+              let remoteID = track.remoteID,
+              remoteNowPlayingArtworkCache[remoteID] == nil,
+              let song = remoteSongs.first(where: { $0.id == remoteID }),
+              song.artworkURL != nil,
+              let baseURL = normalizedServer() else {
+            if nowPlayingArtworkLoadRemoteID != track.remoteID {
+                nowPlayingArtworkLoadTask?.cancel()
+                nowPlayingArtworkLoadTask = nil
+                nowPlayingArtworkLoadRemoteID = nil
+            }
+            return
+        }
+        guard nowPlayingArtworkLoadRemoteID != remoteID else { return }
+
+        nowPlayingArtworkLoadTask?.cancel()
+        nowPlayingArtworkLoadRemoteID = remoteID
+        nowPlayingArtworkLoadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.nowPlayingArtworkLoadRemoteID == remoteID {
+                    self.nowPlayingArtworkLoadRemoteID = nil
+                    self.nowPlayingArtworkLoadTask = nil
+                }
+            }
+            do {
+                guard let data = await self.remoteArtworkData(for: song, baseURL: baseURL) else {
+                    return
+                }
+                try Task.checkCancellation()
+                guard let image = UIImage(data: data),
+                      self.currentTrack?.remoteID == remoteID else { return }
+                self.remoteNowPlayingArtworkCache = [remoteID: image]
+                self.nowPlayingArtworkCacheKey = nil
+                self.nowPlayingArtworkCache = nil
+                self.updateNowPlaying()
+            } catch {
+                return
+            }
+        }
     }
 
     private func renderedNowPlayingArtwork(from source: UIImage?) -> UIImage {

@@ -438,6 +438,7 @@ const contextPlaylistIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d
 const contextRemoveIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>`;
 const contextTrashIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 3h6l1 4M7 7l1 14h8l1-14M10 11v6M14 11v6"/></svg>`;
 const contextDownloadIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14"/></svg>`;
+const contextClipEditorIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="7" r="3"/><circle cx="6" cy="17" r="3"/><path d="m8.5 8.5 11 7.5M8.5 15.5 19.5 8"/></svg>`;
 const contextOpenIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>`;
 const contextBackIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m5-5-5 5 5 5"/></svg>`;
 const escapeHTML = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
@@ -1008,8 +1009,23 @@ function toggleProfileMenu() {
   $("#profileControl")?.classList.add("open");
 }
 
+function clipEditorTrackIsEditable(track) {
+  return Boolean(
+    track
+    && !track.transientStream
+    && track.available !== false
+    && !track.missing
+    && typeof track.fileUrl === "string"
+    && track.fileUrl,
+  );
+}
+
+function clipEditorTracks() {
+  return tracksForActiveProfile(state).filter(clipEditorTrackIsEditable);
+}
+
 function clipEditorTrack() {
-  return tracksForActiveProfile(state).find((track) => track.id === $("#clipEditorTrack").value) || null;
+  return clipEditorTracks().find((track) => track.id === $("#clipEditorTrack").value) || null;
 }
 
 function clipEditorDuration(track = clipEditorTrack()) {
@@ -1655,7 +1671,7 @@ async function toggleClipRangePreview() {
 }
 
 async function stepClipEditorTrack(direction) {
-  const tracks = tracksForActiveProfile(state);
+  const tracks = clipEditorTracks();
   if (!tracks.length) return;
   const currentIndex = Math.max(0, tracks.findIndex((track) => track.id === clipEditorTrack()?.id));
   const nextIndex = (currentIndex + direction + tracks.length) % tracks.length;
@@ -1679,11 +1695,14 @@ function handleClipEditorKeybind(action) {
   return true;
 }
 
-function openClipEditor() {
+function openClipEditor(trackID = null) {
   closeProfileMenu();
   const select = $("#clipEditorTrack");
-  const visibleTracks = tracksForActiveProfile(state);
-  const preferredTrack = visibleTracks.find((track) => track.id === currentID) || visibleTracks[0];
+  const visibleTracks = clipEditorTracks();
+  const requestedTrackID = typeof trackID === "string" ? trackID : null;
+  const preferredTrack = visibleTracks.find((track) => track.id === requestedTrackID)
+    || visibleTracks.find((track) => track.id === currentID)
+    || visibleTracks[0];
   setCustomSelectOptions(select, visibleTracks.map((track) => ({
     value: track.id,
     label: `${track.title} — ${track.artist || "Unknown Artist"}`,
@@ -4640,6 +4659,13 @@ function renderTrackContextMenu(track, options = {}) {
     },
     { label: liked ? "Remove from Liked Songs" : "Add to Liked Songs", icon: contextHeartIcon, onSelect: () => toggleFavorite(track.id) },
   ];
+  if (clipEditorTrackIsEditable(track)) {
+    actions.push({
+      label: "Open in Clip Editor",
+      icon: contextClipEditorIcon,
+      onSelect: () => openClipEditor(track.id),
+    });
+  }
   if (options.source === "full-player" && isInstalledVideoTrack(track)) {
     actions.unshift(
       {
@@ -4747,6 +4773,11 @@ function openServerTrackContextMenu(event, songID) {
           }
         },
       },
+    ...(localTrack ? [{
+      label: "Open in Clip Editor",
+      icon: contextClipEditorIcon,
+      onSelect: () => openClipEditor(localTrack.id),
+    }] : []),
     { divider: true },
     {
       label: "Delete from server",

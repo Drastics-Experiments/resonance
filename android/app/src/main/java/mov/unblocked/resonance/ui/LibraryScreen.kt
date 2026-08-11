@@ -30,12 +30,7 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Shuffle
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -131,32 +126,6 @@ fun LibraryScreen(
                     unfocusedBorderColor = Color.White.copy(alpha = .08f),
                 ),
             )
-        }
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    enabled = state.tracks.isNotEmpty(),
-                    onClick = actions::togglePlayPause,
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                    contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
-                ) {
-                    Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null)
-                    Spacer(Modifier.size(7.dp))
-                    Text(if (state.isPlaying) "Pause" else "Play", fontWeight = FontWeight.Bold)
-                }
-                IconButton(
-                    enabled = state.tracks.isNotEmpty() && !state.isTransientPlayback,
-                    onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) },
-                    modifier = Modifier
-                        .size(46.dp)
-                        .background(
-                            if (state.shuffleEnabled && !state.isTransientPlayback) MaterialTheme.colorScheme.secondary
-                            else Color.White.copy(alpha = .08f),
-                            CircleShape,
-                        ),
-                ) { Icon(Icons.Default.Shuffle, "Shuffle") }
-                Spacer(Modifier.weight(1f))
-            }
         }
         val recentlyAdded = recentlyAddedTracks(state.tracks)
         if (query.isEmpty() && recentlyAdded.isNotEmpty()) {

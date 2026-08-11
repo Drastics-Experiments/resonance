@@ -189,6 +189,14 @@ test("renders the Clerk account name and picture without local profile controls"
   assert.doesNotMatch(appSource, /api\.chooseProfilePicture|api\.removeProfilePicture/);
   assert.match(appSource, /class="clerk-sign-in-button"[\s\S]+Sign in with Clerk/);
   assert.match(styleSource, /\.clerk-sign-in-button\s*\{[\s\S]+var\(--action-background\)/);
+  const accountCardStyles = styleSource.slice(
+    styleSource.indexOf(".settings-account-card {"),
+    styleSource.indexOf("/* Cinematic cross-platform clip editor."),
+  );
+  assert.match(accountCardStyles, /\.settings-account-card\s*\{[\s\S]*?width: 100%;[\s\S]*?min-width: 0;/);
+  assert.match(accountCardStyles, /> div:first-child[^}]+flex: 1 1 0;[^}]+min-width: 0;/);
+  assert.match(accountCardStyles, /\.settings-auth-grid\s*\{[\s\S]*?flex: 0 1 220px;[\s\S]*?width: min\(220px, 100%\);[\s\S]*?min-width: 0;[\s\S]*?max-width: 220px;/);
+  assert.match(accountCardStyles, /\.clerk-sign-in-button\s*\{[\s\S]*?width: 100%;[\s\S]*?min-width: 0;[\s\S]*?max-width: 100%;/);
 });
 
 test("classifies remote video as download-required without confusing audio MP4", () => {
@@ -990,7 +998,10 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   assert.match(htmlSource, /id="clipEditorPreviewCurrent"[\s\S]+id="clipEditorPreviewSeek"[^>]+type="range"[\s\S]+id="clipEditorPreviewEnd"/);
   assert.match(htmlSource, /id="clearClipRange"[^>]*>Use full song/);
   assert.match(htmlSource, /id="clipEditorStatus"[^>]+role="status"/);
-  assert.match(appSource, /function openClipEditor\(\)[\s\S]+clipEditorDialog[\s\S]+showModal\(\)/);
+  assert.match(appSource, /function clipEditorTrackIsEditable\(track\)[\s\S]+track\.available !== false[\s\S]+track\.fileUrl/);
+  assert.match(appSource, /function openClipEditor\(trackID = null\)[\s\S]+requestedTrackID[\s\S]+track\.id === requestedTrackID[\s\S]+clipEditorDialog[\s\S]+showModal\(\)/);
+  assert.match(appSource, /label: "Open in Clip Editor",[\s\S]{0,180}openClipEditor\(track\.id\)/);
+  assert.match(appSource, /openServerTrackContextMenu[\s\S]+\.\.\.\(localTrack \? \[\{[\s\S]+label: "Open in Clip Editor"[\s\S]+openClipEditor\(localTrack\.id\)/);
   assert.match(appSource, /async function saveClipRange\(\)[\s\S]+setClipRangeForTrack\(state, track/);
   assert.match(appSource, /#saveClipRange"\)\.onclick = saveClipRange/);
   const saveFunctionSource = appSource.slice(appSource.indexOf("async function saveClipRange()"), appSource.indexOf("function clearClipRange()"));

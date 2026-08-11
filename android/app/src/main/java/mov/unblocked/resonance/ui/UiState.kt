@@ -121,6 +121,7 @@ data class ResonanceUiState(
     val isSigningIn: Boolean = false,
     val isNativeAccountSignInOpen: Boolean = false,
     val serverMessage: String = "Not connected",
+    val hasConnectedServerSession: Boolean = false,
     val clientConfig: EffectiveClientConfig = EffectiveClientConfig.safeDefaults(),
     val clientConfigStatus: String = "Safe defaults",
     val serverUploadMode: ServerUploadMode? = ServerUploadMode.LocalFile,
@@ -154,7 +155,8 @@ data class ResonanceUiState(
         get() = currentTrackId != null && transientCurrentTrack?.id == currentTrackId
 
     val isConnected: Boolean
-        get() = remoteSongs.isNotEmpty() || serverMessage.startsWith("Connected", ignoreCase = true)
+        get() = hasConnectedServerSession || remoteSongs.isNotEmpty() ||
+            serverMessage.startsWith("Connected", ignoreCase = true)
 
     val hasServerUploadCredentials: Boolean
         get() = serverUrl.isNotBlank() && serverAdminKey.isNotBlank()

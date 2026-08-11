@@ -238,12 +238,14 @@ struct MacClipEditorSheet: View {
     @State private var showsSettings = false
     @State private var showsHelp = false
     @State private var previewExpanded = false
+    let initialTrackID: UUID?
+
+    init(initialTrackID: UUID? = nil) {
+        self.initialTrackID = initialTrackID
+    }
 
     private var editableTracks: [Track] {
-        model.tracks.filter { track in
-            guard let fileURL = track.fileURL else { return false }
-            return FileManager.default.fileExists(atPath: fileURL.path)
-        }
+        model.tracks.filter { ClipEditorTrackPolicy.isEditable($0) }
     }
 
     private var selectedTrack: Track? {
@@ -282,9 +284,11 @@ struct MacClipEditorSheet: View {
         }
         .task {
             guard selectedTrackID == nil else { return }
-            chooseTrack(model.currentTrack.flatMap { current in
-                editableTracks.first(where: { $0.id == current.id })
-            } ?? editableTracks.first)
+            chooseTrack(ClipEditorTrackPolicy.initialTrack(
+                from: editableTracks,
+                requestedTrackID: initialTrackID,
+                currentTrackID: model.currentTrackID
+            ))
         }
         .task(id: selectedTrackID) { await loadWaveform() }
         .onChange(of: startTime) { _, _ in

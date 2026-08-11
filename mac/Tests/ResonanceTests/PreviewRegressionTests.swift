@@ -32,6 +32,7 @@ struct PreviewRegressionTests {
         #expect(Notification.Name.newMusicPlaylist.rawValue == "newMusicPlaylist")
         #expect(Notification.Name.focusMusicSearch != .newMusicPlaylist)
         #expect(Notification.Name.openResonanceSettings.rawValue == "openResonanceSettings")
+        #expect(Notification.Name.openClipEditor.rawValue == "openClipEditor")
     }
 
     @Test

@@ -2,6 +2,7 @@ package mov.unblocked.resonance
 
 import android.app.Application
 import android.content.ComponentName
+import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
@@ -20,6 +21,7 @@ import com.clerk.api.Clerk
 import com.clerk.api.ClerkConfigurationOptions
 import com.clerk.api.network.serialization.ClerkResult
 import com.clerk.api.session.GetTokenOptions
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.time.Instant
 import java.util.UUID
@@ -85,6 +87,7 @@ import mov.unblocked.resonance.data.RemoteSongMetadataRetryPolicy
 import mov.unblocked.resonance.data.ResonanceAccountSignInServerURL
 import mov.unblocked.resonance.data.ServerClient
 import mov.unblocked.resonance.data.ServerProfileContext
+import mov.unblocked.resonance.data.ServerRefreshPresentationPolicy
 import mov.unblocked.resonance.data.RemoteTrackIdentityPolicy
 import mov.unblocked.resonance.data.ServerSongIdentityPolicy
 import mov.unblocked.resonance.data.ServerDownloadMode
@@ -101,6 +104,7 @@ import mov.unblocked.resonance.data.associatedWithLocalSource
 import mov.unblocked.resonance.playback.PlaybackService
 import mov.unblocked.resonance.playback.DownloadPolicy
 import mov.unblocked.resonance.playback.PlaybackFailurePolicy
+import mov.unblocked.resonance.playback.PlaybackMetadataPolicy
 import mov.unblocked.resonance.playback.PlaybackVolumePolicy
 import mov.unblocked.resonance.playback.CrossfadePolicy
 import mov.unblocked.resonance.playback.QueuePolicy
@@ -146,6 +150,8 @@ private data class RemoteSongMetadataResult(
 )
 
 private const val STREAM_ARTWORK_URL_EXTRA = "resonance.stream.artwork_url"
+private const val MAX_PUBLISHED_ARTWORK_EDGE = 512
+private const val MAX_PUBLISHED_ARTWORK_BYTES = 256 * 1_024
 
 class ResonanceViewModel(application: Application) : AndroidViewModel(application), ResonanceActions {
     private val context = application.applicationContext
@@ -216,6 +222,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private var activeStreamHandle: AuthenticatedStreamHandle? = null
     private var activeStreamPresentation: Track? = null
     private var activeStreamPolicyContext: ServerProfileContext? = null
+    private var streamArtworkJob: Job? = null
     private var streamConfigRenewalJob: Job? = null
     private var streamLeaseExpiryJob: Job? = null
     private var pendingStreamRenewalMinimumExpiry: Instant? = null
@@ -364,6 +371,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             isNativeAccountSignInOpen = false,
             remoteSongs = emptyList(),
             selectedRemoteSongIds = emptySet(),
+            hasConnectedServerSession = false,
             serverMessage = "Signed out",
         )
         if (current != null) viewModelScope.launch {
@@ -2384,7 +2392,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     private suspend fun refreshServerNow() {
         val (catalogSnapshot, client) = beginCatalogRequest() ?: return
-        mutableState.value = mutableState.value.copy(isRefreshingServer = true, serverMessage = "Connecting…")
+        val refreshPresentation = mutableState.value.let { state ->
+            ServerRefreshPresentationPolicy.snapshot(state.serverMessage, state.isConnected)
+        }
+        mutableState.value = mutableState.value.copy(
+            isRefreshingServer = true,
+            serverMessage = ServerRefreshPresentationPolicy.messageWhileRefreshing(refreshPresentation),
+        )
         runCatching {
             coroutineScope {
                 val profiles = async { client.fetchProfiles() }
@@ -2405,6 +2419,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 mutableState.value = mutableState.value.copy(
                     remoteSongs = if (applyCatalog) catalogSongs else mutableState.value.remoteSongs,
                     syncProfiles = profiles.profiles,
+                    hasConnectedServerSession = true,
                     serverMessage = if (applyCatalog) {
                         "Connected • ${catalog.count} song${if (catalog.count == 1) "" else "s"}"
                     } else {
@@ -2423,8 +2438,28 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             }
             .onFailure { error ->
                 if (currentServerProfileContext() != catalogSnapshot.context) return@onFailure
+                val authenticationFailure = ServerRefreshPresentationPolicy.isAuthenticationFailure(error)
+                val preservesSession = ServerRefreshPresentationPolicy.preservesConnectedSession(
+                    refreshPresentation,
+                    error,
+                )
+                if (authenticationFailure) cancelRemoteSongMetadataHydration()
                 mutableState.value = mutableState.value.copy(
-                    serverMessage = error.message ?: "Connection failed",
+                    // A refresh is best-effort. Keep the last proven catalog/session and its
+                    // connected presentation for transient failures. Authentication failures
+                    // require a real reconnect and must not leave stale catalog state connected.
+                    remoteSongs = if (authenticationFailure) emptyList() else mutableState.value.remoteSongs,
+                    selectedRemoteSongIds = if (authenticationFailure) emptySet() else mutableState.value.selectedRemoteSongIds,
+                    hasConnectedServerSession = if (preservesSession) {
+                        mutableState.value.hasConnectedServerSession
+                    } else {
+                        false
+                    },
+                    serverMessage = ServerRefreshPresentationPolicy.messageAfterFailure(
+                        refreshPresentation,
+                        error.message,
+                        authenticationFailure,
+                    ),
                     errorMessage = error.message.takeUnless { mutableState.value.isApplyingServerConnection },
                 )
             }
@@ -2656,6 +2691,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val previousAdminKey = accountSession?.accessToken ?: credentials.adminToken
         val previousRemoteSongs = state.remoteSongs
         val previousSelection = state.selectedRemoteSongIds
+        val previousConnectedSession = state.hasConnectedServerSession
         connectionGeneration += 1
         resetClientConfigForCurrentContext("Safe defaults • connection changed")
         library = ProfileLibraryStatePolicy.captureActive(library)
@@ -2677,6 +2713,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 serverAdminKey = adminKey,
                 remoteSongs = if (serverChanged) emptyList() else mutableState.value.remoteSongs,
                 selectedRemoteSongIds = emptySet(),
+                hasConnectedServerSession = false,
                 isApplyingServerConnection = false,
                 serverMessage = "Server saved • sign in to connect",
                 errorMessage = null,
@@ -2692,6 +2729,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             serverAdminKey = adminKey,
             remoteSongs = emptyList(),
             selectedRemoteSongIds = emptySet(),
+            hasConnectedServerSession = false,
             isApplyingServerConnection = true,
             serverMessage = "Connecting…",
             errorMessage = null,
@@ -2756,6 +2794,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         serverAdminKey = previousAdminKey,
                         remoteSongs = previousRemoteSongs,
                         selectedRemoteSongIds = previousSelection,
+                        hasConnectedServerSession = previousConnectedSession,
                         serverMessage = "Could not activate profile: ${error.message ?: "Unknown error"}",
                     )
                     resetClientConfigForCurrentContext()
@@ -2786,6 +2825,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             syncProfileId = profileId,
             remoteSongs = emptyList(),
             selectedRemoteSongIds = emptySet(),
+            hasConnectedServerSession = false,
         )
         resetClientConfigForCurrentContext("Safe defaults • profile changed")
     }
@@ -3120,12 +3160,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 putString(STREAM_ARTWORK_URL_EXTRA, it)
             }
         }
-        val metadata = MediaMetadata.Builder()
-            .setTitle(song.title)
-            .setArtist(song.artist)
-            .setAlbumTitle(song.album)
-            .setExtras(metadataExtras)
-            .build()
+        val metadata = publishedMediaMetadata(
+            title = song.title,
+            artist = song.artist,
+            album = song.album,
+            durationMs = presentation.durationMs,
+            extras = metadataExtras,
+        )
         val item = MediaItem.Builder()
             .setMediaId(presentation.id)
             .setUri(handle.playbackURI)
@@ -3147,8 +3188,99 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         player.shuffleModeEnabled = false
         player.prepare()
         player.play()
+        publishStreamArtwork(song, presentation, handle, client)
         scheduleActiveStreamRenewal(authorizationExpiresAt)
         refreshPlaybackState()
+    }
+
+    private fun publishStreamArtwork(
+        song: RemoteSong,
+        presentation: Track,
+        handle: AuthenticatedStreamHandle,
+        client: ServerClient,
+    ) {
+        if (song.artworkURL.isNullOrBlank()) return
+        streamArtworkJob?.cancel()
+        streamArtworkJob = viewModelScope.launch {
+            val artwork = client.fetchArtwork(song) ?: return@launch
+            val publishable = withContext(Dispatchers.Default) {
+                prepareArtworkForSystemPublication(artwork)
+            } ?: return@launch
+            if (
+                activeStreamHandle?.id != handle.id ||
+                activeStreamPresentation?.id != presentation.id
+            ) return@launch
+            val player = controller ?: return@launch
+            val currentIndex = player.currentMediaItemIndex
+            if (
+                currentIndex == C.INDEX_UNSET ||
+                player.currentMediaItem?.mediaId != presentation.id
+            ) return@launch
+            val extras = Bundle().apply {
+                song.artworkURL?.takeIf(String::isNotBlank)?.let {
+                    putString(STREAM_ARTWORK_URL_EXTRA, it)
+                }
+            }
+            val updated = MediaItem.Builder()
+                .setMediaId(presentation.id)
+                .setUri(handle.playbackURI)
+                .setMediaMetadata(
+                    publishedMediaMetadata(
+                        title = presentation.title,
+                        artist = presentation.artist,
+                        album = presentation.album,
+                        durationMs = presentation.durationMs,
+                        extras = extras,
+                        artworkData = publishable,
+                    ),
+                )
+                .build()
+            // Media3 preserves playback when the URI is unchanged and only metadata is enriched.
+            player.replaceMediaItem(currentIndex, updated)
+        }
+    }
+
+    private fun prepareArtworkForSystemPublication(source: ByteArray): ByteArray? {
+        if (source.isEmpty()) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(source, 0, source.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sampleSize = 1
+        while (
+            bounds.outWidth / sampleSize > MAX_PUBLISHED_ARTWORK_EDGE * 2 ||
+            bounds.outHeight / sampleSize > MAX_PUBLISHED_ARTWORK_EDGE * 2
+        ) {
+            sampleSize *= 2
+        }
+        val decoded = BitmapFactory.decodeByteArray(
+            source,
+            0,
+            source.size,
+            BitmapFactory.Options().apply { inSampleSize = sampleSize },
+        ) ?: return null
+        val largestEdge = maxOf(decoded.width, decoded.height)
+        val scaled = if (largestEdge > MAX_PUBLISHED_ARTWORK_EDGE) {
+            val ratio = MAX_PUBLISHED_ARTWORK_EDGE.toFloat() / largestEdge.toFloat()
+            android.graphics.Bitmap.createScaledBitmap(
+                decoded,
+                (decoded.width * ratio).toInt().coerceAtLeast(1),
+                (decoded.height * ratio).toInt().coerceAtLeast(1),
+                true,
+            )
+        } else {
+            decoded
+        }
+        val output = ByteArrayOutputStream()
+        scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 82, output)
+        if (output.size() > MAX_PUBLISHED_ARTWORK_BYTES) {
+            output.reset()
+            scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 62, output)
+        }
+        if (scaled !== decoded) scaled.recycle()
+        decoded.recycle()
+        return output.toByteArray().takeIf {
+            it.isNotEmpty() && it.size <= MAX_PUBLISHED_ARTWORK_BYTES
+        }
     }
 
     private fun clearActiveStreamPresentation() {
@@ -3157,6 +3289,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         streamLeaseExpiryJob?.cancel()
         streamLeaseExpiryJob = null
         pendingStreamRenewalMinimumExpiry = null
+        streamArtworkJob?.cancel()
+        streamArtworkJob = null
         AuthenticatedStreamRegistry.remove(activeStreamHandle?.id)
         activeStreamHandle = null
         activeStreamPresentation = null
@@ -3229,7 +3363,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             title = metadata.title?.toString().orEmpty().ifBlank { "Server stream" },
             artist = metadata.artist?.toString().orEmpty().ifBlank { "Server" },
             album = metadata.albumTitle?.toString().orEmpty(),
-            durationMs = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L,
+            durationMs = metadata.durationMs
+                ?: player.duration.takeIf { it != C.TIME_UNSET && it > 0L }
+                ?: 0L,
             relativePath = "",
         )
         mutableState.value = mutableState.value.copy(
@@ -3729,17 +3865,45 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             putLong(PlaybackService.CLIP_START_MS, clip?.startMs ?: 0L)
             clip?.let { putLong(PlaybackService.CLIP_END_MS, it.endMs) }
         }
-        val metadata = MediaMetadata.Builder()
-            .setTitle(track.title)
-            .setArtist(track.artist)
-            .setAlbumTitle(track.album)
-            .setArtworkUri(artworkUri)
-            .setExtras(extras)
-            .build()
+        val metadata = publishedMediaMetadata(
+            title = track.title,
+            artist = track.artist,
+            album = track.album,
+            durationMs = track.durationMs,
+            extras = extras,
+            artworkUri = artworkUri,
+        )
         return MediaItem.Builder()
             .setMediaId(track.id)
             .setUri(Uri.fromFile(audioFile))
             .setMediaMetadata(metadata)
+            .build()
+    }
+
+    private fun publishedMediaMetadata(
+        title: String,
+        artist: String,
+        album: String,
+        durationMs: Long,
+        extras: Bundle,
+        artworkUri: Uri? = null,
+        artworkData: ByteArray? = null,
+    ): MediaMetadata {
+        val published = PlaybackMetadataPolicy.published(title, artist, album, durationMs)
+        return MediaMetadata.Builder()
+            .setTitle(published.title)
+            .setArtist(published.artist)
+            .setAlbumTitle(published.album)
+            .setDurationMs(published.durationMs)
+            .setIsPlayable(true)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+            .setArtworkUri(artworkUri)
+            .apply {
+                artworkData?.let {
+                    setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                }
+            }
+            .setExtras(extras)
             .build()
     }
 

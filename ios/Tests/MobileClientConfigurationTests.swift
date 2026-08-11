@@ -26,6 +26,103 @@ final class MobileCrossfadePolicyTests: XCTestCase {
     }
 }
 
+final class MobileNowPlayingPolicyTests: XCTestCase {
+    private let track = MobileTrack(
+        id: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA")!,
+        title: "Control Center Song",
+        artist: "Resonance",
+        album: "Now Playing",
+        duration: 200,
+        relativePath: "control-center.m4a"
+    )
+
+    func testSnapshotPublishesClipRelativeElapsedDurationAndRate() {
+        let snapshot = MobileNowPlayingPolicy.snapshot(
+            for: track,
+            position: 25,
+            bounds: .init(start: 10, end: 70),
+            playbackRate: 1.25,
+            isPlaying: true,
+            allowsTrackNavigation: true
+        )
+
+        XCTAssertEqual(snapshot.identifier, track.id.uuidString)
+        XCTAssertEqual(snapshot.title, track.title)
+        XCTAssertEqual(snapshot.artist, track.artist)
+        XCTAssertEqual(snapshot.album, track.album)
+        XCTAssertEqual(snapshot.duration, 60)
+        XCTAssertEqual(snapshot.elapsed, 15)
+        XCTAssertEqual(snapshot.playbackRate, 1.25)
+        XCTAssertEqual(snapshot.defaultPlaybackRate, 1.25)
+        XCTAssertTrue(snapshot.allowsTrackNavigation)
+    }
+
+    func testSnapshotClampsElapsedAndPublishesZeroRateWhenPaused() {
+        let snapshot = MobileNowPlayingPolicy.snapshot(
+            for: track,
+            position: 500,
+            bounds: .init(start: 10, end: 70),
+            playbackRate: .nan,
+            isPlaying: false,
+            allowsTrackNavigation: false
+        )
+
+        XCTAssertEqual(snapshot.elapsed, 60)
+        XCTAssertEqual(snapshot.playbackRate, 0)
+        XCTAssertEqual(snapshot.defaultPlaybackRate, 1)
+        XCTAssertFalse(snapshot.allowsTrackNavigation)
+    }
+
+    func testControlCenterPositionMapsToClipRelativeSeekFraction() {
+        let bounds = MobileClipPlaybackPolicy.Bounds(start: 10, end: 70)
+        XCTAssertEqual(MobileNowPlayingPolicy.seekFraction(elapsedTime: -10, bounds: bounds), 0)
+        XCTAssertEqual(MobileNowPlayingPolicy.seekFraction(elapsedTime: 30, bounds: bounds), 0.5)
+        XCTAssertEqual(MobileNowPlayingPolicy.seekFraction(elapsedTime: 90, bounds: bounds), 1)
+        XCTAssertEqual(MobileNowPlayingPolicy.seekFraction(elapsedTime: .nan, bounds: bounds), 0)
+    }
+}
+
+final class MobileCatalogRefreshFailurePolicyTests: XCTestCase {
+    func testRefreshFailurePreservesAnExistingConnectionOrCatalog() {
+        XCTAssertTrue(MobileCatalogRefreshFailurePolicy.preservesLastKnownCatalog(
+            wasConnected: true,
+            hadCatalog: false,
+            wasCancelled: false,
+            isAuthenticationFailure: false
+        ))
+        XCTAssertTrue(MobileCatalogRefreshFailurePolicy.preservesLastKnownCatalog(
+            wasConnected: false,
+            hadCatalog: true,
+            wasCancelled: false,
+            isAuthenticationFailure: false
+        ))
+    }
+
+    func testCancelledNativeRefreshNeverTearsDownConnectionState() {
+        XCTAssertTrue(MobileCatalogRefreshFailurePolicy.preservesLastKnownCatalog(
+            wasConnected: false,
+            hadCatalog: false,
+            wasCancelled: true,
+            isAuthenticationFailure: false
+        ))
+        XCTAssertFalse(MobileCatalogRefreshFailurePolicy.preservesLastKnownCatalog(
+            wasConnected: false,
+            hadCatalog: false,
+            wasCancelled: false,
+            isAuthenticationFailure: false
+        ))
+    }
+
+    func testAuthenticationFailureAlwaysRequiresARealReconnect() {
+        XCTAssertFalse(MobileCatalogRefreshFailurePolicy.preservesLastKnownCatalog(
+            wasConnected: true,
+            hadCatalog: true,
+            wasCancelled: false,
+            isAuthenticationFailure: true
+        ))
+    }
+}
+
 final class MobilePlaylistPresentationMovePolicyTests: XCTestCase {
     func testUnavailableRemoteEntryMovesWithoutCorruptingPersistedOrders() {
         let localTrack = MobileTrack(

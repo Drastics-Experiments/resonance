@@ -139,10 +139,23 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
     val syncedCount = state.remoteSongs.count { it.id in state.downloadedRemoteSongIds }
     val host = remember(state.serverUrl) { runCatching { URI(state.serverUrl).host }.getOrNull() ?: state.serverUrl }
     val focusManager = LocalFocusManager.current
+    val refreshEnabled = state.serverToken.isNotBlank() &&
+        !state.isRefreshingServer &&
+        !state.isApplyingServerConnection &&
+        !state.isDownloading &&
+        !state.isUploading &&
+        !state.isSyncingPlaylists
 
     PullToRefreshBox(
         isRefreshing = state.isRefreshingServer,
-        onRefresh = actions::refreshServer,
+        onRefresh = {
+            // Material's pull refresh participates in the LazyColumn nested-scroll chain, so it
+            // does not compete with Android's horizontal back gesture. Clearing focus first also
+            // prevents an active search field/IME from consuming the initial drag.
+            focusManager.clearFocus(force = true)
+            actions.refreshServer()
+        },
+        enabled = refreshEnabled,
         modifier = modifier.fillMaxSize(),
     ) {
         LazyColumn(
@@ -162,8 +175,11 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                         )
                     } else {
                         IconButton(
-                            enabled = !state.isDownloading && !state.isUploading && !state.isSyncingPlaylists,
-                            onClick = actions::refreshServer,
+                            enabled = refreshEnabled,
+                            onClick = {
+                                focusManager.clearFocus(force = true)
+                                actions.refreshServer()
+                            },
                             modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
                         ) { Icon(Icons.Default.Refresh, "Refresh server") }
                     }
@@ -828,7 +844,7 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                         fontWeight = FontWeight.SemiBold,
                     )
                     Button(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                         enabled = !connecting,
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(
@@ -851,7 +867,12 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                             Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
                         }
                         Spacer(Modifier.size(8.dp))
-                        Text("Sign in with Clerk", fontWeight = FontWeight.Bold)
+                        Text(
+                            "Sign in with Clerk",
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                            maxLines = 2,
+                        )
                     }
                     Text(
                         "Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/.",

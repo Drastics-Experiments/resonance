@@ -5908,13 +5908,16 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   align-items: center;
   justify-content: space-between;
   gap: 14px;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
   padding: 14px;
   border: 1px solid rgba(255,255,255,.11);
   border-radius: 12px;
   background: rgba(255,255,255,.035);
 }
-.settings-account-card > div:first-child { display: grid; gap: 4px; }
-.settings-account-card small { color: var(--muted); }
+.settings-account-card > div:first-child { display: grid; flex: 1 1 0; gap: 4px; min-width: 0; }
+.settings-account-card small { display: block; overflow-wrap: anywhere; color: var(--muted); line-height: 1.4; }
 .email-disclosure {
   padding: 0;
   border: 0;
@@ -5925,13 +5928,24 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 }
 .email-disclosure:hover,
 .email-disclosure:focus-visible { color: var(--ink); text-decoration: underline; outline: none; }
-.settings-auth-grid { display: grid; grid-template-columns: minmax(180px, 1fr); gap: 8px; }
+.settings-auth-grid {
+  display: grid;
+  flex: 0 1 220px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  width: min(220px, 100%);
+  min-width: 0;
+  max-width: 220px;
+}
 .clerk-sign-in-button {
   display: grid;
   grid-template-columns: 30px minmax(0, 1fr) 18px;
   align-items: center;
   gap: 10px;
-  min-width: 220px;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 46px;
   padding: 7px 13px 7px 8px;
   border: 1px solid var(--accent-border);
@@ -5965,7 +5979,10 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .clerk-sign-in-arrow { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 .clerk-sign-in-mark svg { width: 18px; height: 18px; }
 .clerk-sign-in-arrow { justify-self: end; opacity: .72; }
-@media (max-width: 760px) { .settings-account-card { align-items: stretch; flex-direction: column; } .settings-auth-grid { grid-template-columns: 1fr; } }
+@media (max-width: 760px) {
+  .settings-account-card { align-items: stretch; flex-direction: column; }
+  .settings-auth-grid { flex-basis: auto; grid-template-columns: minmax(0, 1fr); width: 100%; max-width: none; }
+}
 
 /* Cinematic cross-platform clip editor. */
 .clip-editor-dialog {

@@ -22,6 +22,12 @@ class ResonanceUiStateTest {
         assertTrue(ResonanceUiState(serverMessage = "Connected • 0 songs").isConnected)
         assertTrue(
             ResonanceUiState(
+                serverMessage = "Refresh timed out",
+                hasConnectedServerSession = true,
+            ).isConnected,
+        )
+        assertTrue(
+            ResonanceUiState(
                 remoteSongs = listOf(
                     RemoteSong(
                         id = "song-1",

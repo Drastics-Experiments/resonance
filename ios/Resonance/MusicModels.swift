@@ -260,6 +260,68 @@ struct MobileTrack: Identifiable, Codable, Hashable {
     }
 }
 
+struct MobileNowPlayingSnapshot: Equatable {
+    let identifier: String
+    let title: String
+    let artist: String
+    let album: String
+    let duration: TimeInterval
+    let elapsed: TimeInterval
+    let playbackRate: Double
+    let defaultPlaybackRate: Double
+    let allowsTrackNavigation: Bool
+}
+
+enum MobileNowPlayingPolicy {
+    static func seekFraction(
+        elapsedTime: TimeInterval,
+        bounds: MobileClipPlaybackPolicy.Bounds
+    ) -> Double {
+        let duration = max(bounds.end - bounds.start, 0.01)
+        guard elapsedTime.isFinite else { return 0 }
+        return min(max(elapsedTime / duration, 0), 1)
+    }
+
+    static func snapshot(
+        for track: MobileTrack,
+        position: TimeInterval,
+        bounds: MobileClipPlaybackPolicy.Bounds,
+        playbackRate: Float,
+        isPlaying: Bool,
+        allowsTrackNavigation: Bool
+    ) -> MobileNowPlayingSnapshot {
+        let duration = max(bounds.end - bounds.start, 0.01)
+        let safePosition = position.isFinite ? position : bounds.start
+        let elapsed = min(max(safePosition - bounds.start, 0), duration)
+        let normalizedRate = playbackRate.isFinite && playbackRate > 0
+            ? Double(playbackRate)
+            : 1
+        return MobileNowPlayingSnapshot(
+            identifier: track.id.uuidString,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            duration: duration,
+            elapsed: elapsed,
+            playbackRate: isPlaying ? normalizedRate : 0,
+            defaultPlaybackRate: normalizedRate,
+            allowsTrackNavigation: allowsTrackNavigation
+        )
+    }
+}
+
+enum MobileCatalogRefreshFailurePolicy {
+    static func preservesLastKnownCatalog(
+        wasConnected: Bool,
+        hadCatalog: Bool,
+        wasCancelled: Bool,
+        isAuthenticationFailure: Bool
+    ) -> Bool {
+        guard !isAuthenticationFailure else { return false }
+        return wasConnected || hadCatalog || wasCancelled
+    }
+}
+
 enum MobileUnlinkedDownloadMigrationPolicy {
     static let identifier = "delete-unlinked-downloads-v1"
 
