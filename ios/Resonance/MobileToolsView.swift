@@ -278,43 +278,76 @@ struct MobileClipEditorSheet: View {
     }
 
     private var topBar: some View {
-        ZStack {
-            Text("My Clip").font(.headline.weight(.semibold)).foregroundStyle(.white)
-            HStack {
-                Button("Done", action: dismissWithoutSaving)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                Spacer()
-                HStack(spacing: 12) {
-                    Button("Save", action: saveRange)
-                        .font(.subheadline.weight(.bold))
-                        .padding(.horizontal, 13)
-                        .frame(height: 32)
-                        .background(hasUnsavedChanges ? Color(hex: 0x7942DF) : Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
-                        .foregroundStyle(hasUnsavedChanges ? Color.white : Color.white.opacity(0.35))
-                        .disabled(!hasUnsavedChanges || selectedTrack == nil || (selectedTrack?.duration ?? 0) < 0.25)
-                    Button {
-                        showsHelp.toggle()
-                        showsSettings = false
-                    } label: {
-                        Image(systemName: "questionmark")
-                            .font(.callout.bold())
-                            .frame(width: 28, height: 28)
-                            .overlay(Circle().stroke(.white.opacity(0.9), lineWidth: 1.4))
-                    }
-                    Button {
-                        showsSettings.toggle()
-                        showsHelp = false
-                    } label: {
-                        Image(systemName: "gearshape").font(.title3)
+        HStack(spacing: 8) {
+            Button("Done", action: dismissWithoutSaving)
+                .fontWeight(.semibold)
+                .foregroundStyle(.white)
+
+            trackSelectionMenu
+                .frame(maxWidth: .infinity)
+
+            Button("Save", action: saveRange)
+                .font(.subheadline.weight(.bold))
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .background(hasUnsavedChanges ? Color(hex: 0x7942DF) : Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
+                .foregroundStyle(hasUnsavedChanges ? Color.white : Color.white.opacity(0.35))
+                .disabled(!hasUnsavedChanges || selectedTrack == nil || (selectedTrack?.duration ?? 0) < 0.25)
+
+            Button {
+                showsHelp.toggle()
+                showsSettings = false
+            } label: {
+                Image(systemName: "questionmark")
+                    .font(.caption.bold())
+                    .frame(width: 28, height: 28)
+                    .overlay(Circle().stroke(.white.opacity(0.9), lineWidth: 1.4))
+            }
+
+            Button {
+                showsSettings.toggle()
+                showsHelp = false
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.title3)
+                    .frame(width: 28, height: 28)
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .frame(height: 42)
+        .padding(.horizontal, 12)
+    }
+
+    private var trackSelectionMenu: some View {
+        Menu {
+            ForEach(tracks) { track in
+                Button {
+                    selectedTrackID = track.id
+                } label: {
+                    if track.id == selectedTrackID {
+                        Label("\(track.title) — \(track.artist)", systemImage: "checkmark")
+                    } else {
+                        Text("\(track.title) — \(track.artist)")
                     }
                 }
-                .foregroundStyle(.white)
             }
-            .buttonStyle(.plain)
+        } label: {
+            HStack(spacing: 5) {
+                Text(selectedTrack?.title ?? "Choose a song")
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                Image(systemName: "chevron.down")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.secondary)
+            }
+            .font(.subheadline.weight(.semibold))
+            .frame(maxWidth: .infinity)
+            .frame(height: 34)
+            .contentShape(Rectangle())
         }
-        .frame(height: 42)
-        .padding(.horizontal, 16)
+        .disabled(tracks.isEmpty)
+        .accessibilityLabel("Select a song to clip")
     }
 
     private func previewStage(_ track: MobileTrack) -> some View {
@@ -352,15 +385,12 @@ struct MobileClipEditorSheet: View {
                                     .font(previewExpanded ? .headline : .subheadline)
                                     .foregroundStyle(.white.opacity(0.86))
                                     .lineLimit(1)
-                                Text("[Visualizer]")
-                                    .font(.subheadline)
-                                    .foregroundStyle(Color(hex: 0xB56AFF))
                             }
                             .padding(14)
                         }
                 }
             }
-            .frame(minHeight: previewExpanded ? 500 : 232)
+            .frame(minHeight: previewExpanded ? 500 : 286)
             .contentShape(Rectangle())
             .onTapGesture { togglePreview() }
 
@@ -406,7 +436,7 @@ struct MobileClipEditorSheet: View {
 
     private func timeline(_ track: MobileTrack) -> some View {
         VStack(spacing: 0) {
-            MobileClipRuler(duration: track.duration).frame(height: 34)
+            MobileClipRuler(duration: track.duration).frame(height: 40)
             MobileCinematicWaveform(
                 track: track,
                 samples: waveformSamples,
@@ -422,7 +452,7 @@ struct MobileClipEditorSheet: View {
                 },
                 onSeek: { preview.seek(to: $0) }
             )
-            .frame(height: 92)
+            .frame(height: 108)
         }
         .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -433,16 +463,9 @@ struct MobileClipEditorSheet: View {
         overlayScrim {
             VStack(alignment: .leading, spacing: 14) {
                 overlayHeader("CLIP SETTINGS", "Fine tune your clip") { showsSettings = false }
-                Text("SONG").eyebrow()
-                Picker("Song", selection: $selectedTrackID) {
-                    ForEach(tracks) { track in
-                        Text("\(track.title) — \(track.artist)").tag(Optional(track.id))
-                    }
+                if let track = selectedTrack {
+                    settingsTrackSummary(track)
                 }
-                .pickerStyle(.menu)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(11)
-                .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
 
                 HStack(spacing: 10) {
                     exactTimeField("START", text: $startText, boundary: .start)
@@ -476,7 +499,7 @@ struct MobileClipEditorSheet: View {
     private var helpOverlay: some View {
         overlayScrim {
             VStack(alignment: .leading, spacing: 13) {
-                overlayHeader("HOW IT WORKS", "Create your perfect playback range") { showsHelp = false }
+                overlayHeader("HOW IT WORKS", "Create your perfect clip") { showsHelp = false }
                 Text("Drag the yellow handles to choose a range. Tap the waveform to scrub, then use the center controls to preview exactly what will play.")
                 Text("**Save** updates playback for the active profile without changing the media file. **Done** closes the editor and discards anything not saved.")
             }
@@ -493,7 +516,37 @@ struct MobileClipEditorSheet: View {
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .background(Color(hex: 0x11121B).opacity(0.94), in: RoundedRectangle(cornerRadius: 20))
                 .overlay { RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.12), lineWidth: 1) }
-                .padding(20)
+                .frame(maxWidth: 430)
+                .padding(.horizontal, 20)
+                .padding(.top, 56)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        }
+    }
+
+    private func settingsTrackSummary(_ track: MobileTrack) -> some View {
+        HStack(spacing: 10) {
+            TrackArtwork(track: track, fallbackSymbol: "music.note")
+                .frame(width: 50, height: 50)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(track.title)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Text(track.artist)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Text(formatTime(track.duration))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(.white.opacity(0.08), lineWidth: 1)
         }
     }
 

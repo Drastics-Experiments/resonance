@@ -51,11 +51,13 @@ fun ResonanceApp(
         var openPlaylistId by rememberSaveable { mutableStateOf<String?>(null) }
         var showStorage by rememberSaveable { mutableStateOf(false) }
         var showNowPlaying by rememberSaveable { mutableStateOf(false) }
+        var showSettings by rememberSaveable { mutableStateOf(false) }
         val focusManager = LocalFocusManager.current
 
-        BackHandler(enabled = showNowPlaying) { showNowPlaying = false }
-        BackHandler(enabled = !showNowPlaying && showStorage) { showStorage = false }
-        BackHandler(enabled = !showNowPlaying && openPlaylistId != null) { openPlaylistId = null }
+        BackHandler(enabled = showSettings) { showSettings = false }
+        BackHandler(enabled = !showSettings && showNowPlaying) { showNowPlaying = false }
+        BackHandler(enabled = !showSettings && !showNowPlaying && showStorage) { showStorage = false }
+        BackHandler(enabled = !showSettings && !showNowPlaying && openPlaylistId != null) { openPlaylistId = null }
 
         Box(Modifier.fillMaxSize()) {
             ResonanceBackground {
@@ -63,28 +65,30 @@ fun ResonanceApp(
                     containerColor = Color.Transparent,
                     contentColor = MaterialTheme.colorScheme.onBackground,
                     bottomBar = {
-                        Column {
-                            if (state.currentTrack != null) {
-                                MiniPlayer(state, actions, onOpen = { showNowPlaying = true })
-                            }
-                            if (!showStorage) {
-                                NavigationBar(containerColor = Color(0xF5050609)) {
-                                    ResonanceTab.entries.forEach { tab ->
-                                        val icon = when (tab) {
-                                            ResonanceTab.Library -> Icons.Default.LibraryMusic
-                                            ResonanceTab.Playlists -> Icons.Default.PlaylistPlay
-                                            ResonanceTab.Server -> Icons.Default.Cloud
+                        if (!showSettings) {
+                            Column {
+                                if (state.currentTrack != null) {
+                                    MiniPlayer(state, actions, onOpen = { showNowPlaying = true })
+                                }
+                                if (!showStorage) {
+                                    NavigationBar(containerColor = Color(0xF5050609)) {
+                                        ResonanceTab.entries.forEach { tab ->
+                                            val icon = when (tab) {
+                                                ResonanceTab.Library -> Icons.Default.LibraryMusic
+                                                ResonanceTab.Playlists -> Icons.Default.PlaylistPlay
+                                                ResonanceTab.Server -> Icons.Default.Cloud
+                                            }
+                                            NavigationBarItem(
+                                                selected = selectedTab == tab,
+                                                onClick = {
+                                                    focusManager.clearFocus()
+                                                    selectedTab = tab
+                                                    if (tab != ResonanceTab.Playlists) openPlaylistId = null
+                                                },
+                                                icon = { Icon(icon, tab.label) },
+                                                label = { Text(tab.label) },
+                                            )
                                         }
-                                        NavigationBarItem(
-                                            selected = selectedTab == tab,
-                                            onClick = {
-                                                focusManager.clearFocus()
-                                                selectedTab = tab
-                                                if (tab != ResonanceTab.Playlists) openPlaylistId = null
-                                            },
-                                            icon = { Icon(icon, tab.label) },
-                                            label = { Text(tab.label) },
-                                        )
                                     }
                                 }
                             }
@@ -104,6 +108,12 @@ fun ResonanceApp(
                             actions = actions,
                             modifier = Modifier.padding(insets),
                             onOpenStorage = { showStorage = true },
+                            onOpenSettings = {
+                                focusManager.clearFocus()
+                                showNowPlaying = false
+                                showStorage = false
+                                showSettings = true
+                            },
                         )
                         ResonanceTab.Playlists -> PlaylistsScreen(
                             state = state,
@@ -130,6 +140,9 @@ fun ResonanceApp(
             }
             if (showNowPlaying && state.currentTrack != null) {
                 NowPlayingScreen(state, actions, onDismiss = { showNowPlaying = false })
+            }
+            if (showSettings) {
+                SettingsScreen(state, actions, onDismiss = { showSettings = false })
             }
             val errorMessage = state.errorMessage
             if (errorMessage != null) {

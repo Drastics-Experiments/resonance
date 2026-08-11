@@ -142,7 +142,7 @@ private struct LibraryView: View {
                             email: library.accountEmail,
                             imageURL: library.accountImageURL,
                             onClipEditor: { presentedSheet = .clipEditor },
-                            onConnection: { presentedSheet = .profile }
+                            onSettings: { presentedSheet = .settings }
                         )
                     }
                     TextField("Search your music", text: $library.searchText)
@@ -202,10 +202,10 @@ private struct LibraryView: View {
         .navigationBarHidden(true)
         .sheet(item: $presentedSheet) { sheet in
             switch sheet {
-            case .profile:
-                ServerConnectionSheet()
             case .clipEditor:
                 MobileClipEditorSheet()
+            case .settings:
+                MobileSettingsSheet()
             }
         }
         .toolbar {
@@ -218,8 +218,164 @@ private struct LibraryView: View {
 }
 
 private enum LibrarySheet: String, Identifiable {
-    case profile, clipEditor
+    case clipEditor, settings
     var id: String { rawValue }
+}
+
+private struct MobileSettingsSheet: View {
+    private enum PresentedSheet: String, Identifiable {
+        case connection
+        var id: String { rawValue }
+    }
+
+    @EnvironmentObject private var library: MusicLibrary
+    @Environment(\.dismiss) private var dismiss
+    @State private var presentedSheet: PresentedSheet?
+
+    private var displayName: String {
+        ResonanceEmailPrivacy.safeDisplayName(
+            library.accountDisplayName ?? library.syncProfileName,
+            email: library.accountEmail
+        )
+    }
+
+    private var accountStatus: String {
+        if let role = library.accountRole {
+            return role == "admin" ? "Administrator" : "Member"
+        }
+        return library.serverToken.isEmpty ? "Not signed in" : "Legacy connection"
+    }
+
+    private var versionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        return "\(version) (\(build))"
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    accountSummary
+                }
+
+                Section("Playback") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label("Volume", systemImage: "speaker.wave.2")
+                            Spacer()
+                            Text("\(Int((library.volume * 100).rounded()))%")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(value: $library.volume, in: 0...1)
+                            .tint(.accent)
+                            .accessibilityLabel("Playback volume")
+                    }
+                    .padding(.vertical, 4)
+
+                    Picker("Playback Speed", selection: $library.playbackRate) {
+                        ForEach([Float(0.75), 1, 1.25, 1.5, 2], id: \.self) { rate in
+                            Text("\(Double(rate), specifier: "%g")×").tag(rate)
+                        }
+                    }
+                }
+
+                Section("App") {
+                    Button {
+                        presentedSheet = .connection
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "network")
+                                .foregroundStyle(Color.accent)
+                                .frame(width: 24)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Music Server")
+                                    .foregroundStyle(.primary)
+                                Text(library.isServerConnected ? "Connected as \(displayName)" : library.serverMessage)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Text("Configure")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color.accent)
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    LabeledContent {
+                        Text("Enabled").foregroundStyle(.secondary)
+                    } label: {
+                        Label("Background Audio", systemImage: "waveform")
+                    }
+                }
+
+                Section("About") {
+                    LabeledContent("Version", value: versionText)
+                    LabeledContent("Platform", value: UIDevice.current.userInterfaceIdiom == .pad ? "iPadOS" : "iOS")
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(Color.appBackground)
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .sheet(item: $presentedSheet) { sheet in
+            switch sheet {
+            case .connection:
+                ServerConnectionSheet()
+            }
+        }
+    }
+
+    private var accountSummary: some View {
+        HStack(spacing: 13) {
+            ZStack {
+                Circle().fill(Color.violet)
+                if let imageURL = library.accountImageURL {
+                    AsyncImage(url: imageURL) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFill()
+                        } else {
+                            Text(String(displayName.prefix(1)).uppercased())
+                                .font(.headline.weight(.bold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                } else {
+                    Text(String(displayName.prefix(1)).uppercased())
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(width: 48, height: 48)
+            .clipShape(Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(displayName)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text(accountStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
 }
 
 private struct ProfileButton: View {
@@ -227,7 +383,7 @@ private struct ProfileButton: View {
     let email: String?
     let imageURL: URL?
     let onClipEditor: () -> Void
-    let onConnection: () -> Void
+    let onSettings: () -> Void
     @State private var isEmailRevealed = false
 
     private var resolvedDisplayName: String {
@@ -254,7 +410,7 @@ private struct ProfileButton: View {
                 }
                 Button("Clip Editor", systemImage: "waveform.path.ecg", action: onClipEditor)
             }
-            Button("Account & Connection", systemImage: "person.crop.circle", action: onConnection)
+            Button("Settings", systemImage: "gearshape", action: onSettings)
         } label: {
             ZStack {
                 Circle().fill(Color.violet)

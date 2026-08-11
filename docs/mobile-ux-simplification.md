@@ -44,6 +44,23 @@ This pass makes the iOS and Android apps feel like the same product while keepin
 - Replaced the ring chart and three narrow columns with a compact usage bar, used/available values, and local/downloaded counts.
 - Kept search, sorting, scopes, batch selection, import, and deletion behavior unchanged.
 
+### Clip editor
+
+- Matched the desktop editor bar: Done, the active-song picker, Save, help, and settings now share one persistent row.
+- Enlarged the preview stage and timeline so artwork, video, waveforms, range handles, and the playhead carry the same visual priority as on macOS and Windows.
+- Removed the fixed “My Clip” and “[Visualizer]” labels; the selected song now provides the editor context.
+- Reduced settings to a compact track summary, exact start and end values, clip length, and Use Full Song.
+- Positioned help and settings as top-right inspector cards while keeping their touch targets and outside-tap dismissal mobile-friendly.
+- Preserved preview playback, exact range editing, profile-scoped saving, video frames, waveform extraction, and non-destructive media behavior.
+
+### Settings
+
+- Added Settings to the profile menu, matching the desktop entry point without adding a fourth bottom-navigation destination.
+- Added a real full-height Settings experience on both platforms with account identity, persisted volume and playback-speed controls, Music Server configuration, background-audio status, and installed version/build information.
+- Reused the existing secure account and server connection flow; the new screens never read, copy, or persist credentials themselves.
+- Kept desktop-only window-background behavior, Discord Rich Presence, and keyboard shortcuts off mobile instead of presenting controls that the mobile runtimes do not implement.
+- Android Settings temporarily owns the full surface and Back action, hiding tab and mini-player chrome until dismissed; iOS uses a native grouped Form and enum-driven sheets.
+
 ## Visual reference
 
 The implementation direction was generated with the built-in ImageGen workflow and saved as [mobile-ux-simplification-concept.png](design/mobile-ux-simplification-concept.png).

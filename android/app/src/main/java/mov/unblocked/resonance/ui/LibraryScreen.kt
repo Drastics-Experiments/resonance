@@ -75,8 +75,8 @@ fun LibraryScreen(
     actions: ResonanceActions,
     modifier: Modifier = Modifier,
     onOpenStorage: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
-    var connectionOpen by remember { mutableStateOf(false) }
     var clipEditorOpen by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val query = state.librarySearch.trim()
@@ -109,8 +109,7 @@ fun LibraryScreen(
                 ) { Icon(Icons.Default.Storage, "Storage") }
                 ProfileButton(
                     state = state,
-                    actions = actions,
-                    onConnection = { connectionOpen = true },
+                    onSettings = onOpenSettings,
                     onClipEditor = { clipEditorOpen = true },
                 )
             }
@@ -207,9 +206,6 @@ fun LibraryScreen(
         item { Spacer(Modifier.height(8.dp)) }
     }
 
-    if (connectionOpen) {
-        ConnectionDialog(state, actions) { connectionOpen = false }
-    }
     if (clipEditorOpen) {
         ClipEditorDialog(state, actions) { clipEditorOpen = false }
     }
@@ -218,8 +214,7 @@ fun LibraryScreen(
 @Composable
 private fun ProfileButton(
     state: ResonanceUiState,
-    actions: ResonanceActions,
-    onConnection: () -> Unit,
+    onSettings: () -> Unit,
     onClipEditor: () -> Unit,
 ) {
     val profileName = AccountEmailPrivacy.safeDisplayName(
@@ -274,11 +269,11 @@ private fun ProfileButton(
                 },
             )
             DropdownMenuItem(
-                text = { Text("Account & Connection") },
+                text = { Text("Settings") },
                 leadingIcon = { Icon(Icons.Default.Settings, null) },
                 onClick = {
                     expanded = false
-                    onConnection()
+                    onSettings()
                 },
             )
         }

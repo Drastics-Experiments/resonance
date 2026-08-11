@@ -33,6 +33,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MusicNote
@@ -95,6 +96,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
@@ -138,7 +140,6 @@ fun ClipEditorDialog(
     var endMs by remember { mutableLongStateOf(selectedTrack?.durationMs?.takeIf { it > 0L } ?: 0L) }
     var startText by remember { mutableStateOf("0:00") }
     var endText by remember { mutableStateOf(selectedTrack?.durationMs?.let(::clipTime) ?: "0:00") }
-    var trackMenu by remember { mutableStateOf(false) }
     var previewing by remember { mutableStateOf(false) }
     var previewPositionMs by remember { mutableLongStateOf(0L) }
     var resumeMainAfterPreview by remember { mutableStateOf(false) }
@@ -250,8 +251,11 @@ fun ClipEditorDialog(
             ) {
                 Column(Modifier.fillMaxSize()) {
                     CinematicClipHeader(
+                        selectedTrack = selectedTrack,
+                        tracks = state.tracks,
                         saveEnabled = selectedTrack?.durationMs?.let { it >= 250 } == true
                             && (startMs != savedStartMs || endMs != savedEndMs),
+                        onTrackSelected = { selectedTrackId = it },
                         onDone = {
                             focus.clearFocus()
                             stopPreview()
@@ -372,20 +376,10 @@ fun ClipEditorDialog(
                 CinematicClipOverlay(onOutsideClick = { settingsOpen = false }) {
                     Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
                         CinematicOverlayHeader("CLIP SETTINGS", "Fine tune your clip") { settingsOpen = false }
-                        Eyebrow("Song")
-                        Box {
-                            OutlinedButton(onClick = { trackMenu = true }, modifier = Modifier.fillMaxWidth()) {
-                                Text(selectedTrack.title + " — " + selectedTrack.artist, maxLines = 1)
-                            }
-                            DropdownMenu(expanded = trackMenu, onDismissRequest = { trackMenu = false }) {
-                                state.tracks.forEach { track ->
-                                    DropdownMenuItem(
-                                        text = { Text(track.title + " — " + track.artist) },
-                                        onClick = { selectedTrackId = track.id; trackMenu = false },
-                                    )
-                                }
-                            }
-                        }
+                        CinematicSettingsTrackSummary(
+                            track = selectedTrack,
+                            artworkPath = state.artworkPathsByTrackId[selectedTrack.id],
+                        )
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             ClipTimeField(
                                 "START",
@@ -443,7 +437,7 @@ fun ClipEditorDialog(
             if (helpOpen) {
                 CinematicClipOverlay(onOutsideClick = { helpOpen = false }) {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        CinematicOverlayHeader("HOW IT WORKS", "Create your perfect playback range") { helpOpen = false }
+                        CinematicOverlayHeader("HOW IT WORKS", "Create your perfect clip") { helpOpen = false }
                         Text(
                             "Drag the yellow handles to choose a range. Tap the waveform to scrub, then use the center controls to preview exactly what will play.",
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
@@ -463,18 +457,66 @@ fun ClipEditorDialog(
 
 @Composable
 private fun CinematicClipHeader(
+    selectedTrack: Track?,
+    tracks: List<Track>,
     saveEnabled: Boolean,
+    onTrackSelected: (String) -> Unit,
     onDone: () -> Unit,
     onSave: () -> Unit,
     onHelp: () -> Unit,
     onSettings: () -> Unit,
 ) {
-    Box(Modifier.fillMaxWidth().height(50.dp).padding(horizontal = 8.dp)) {
-        TextButton(onClick = onDone, modifier = Modifier.align(Alignment.CenterStart)) {
+    var trackMenu by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier.fillMaxWidth().height(50.dp).padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(onClick = onDone) {
             Text("Done", color = Color.White, fontWeight = FontWeight.Bold)
         }
-        Text("My Clip", modifier = Modifier.align(Alignment.Center), color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
-        Row(modifier = Modifier.align(Alignment.CenterEnd), verticalAlignment = Alignment.CenterVertically) {
+        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            TextButton(
+                onClick = { trackMenu = true },
+                enabled = tracks.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    selectedTrack?.title ?: "Choose a song",
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 16.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Icon(
+                    Icons.Default.ArrowDropDown,
+                    contentDescription = "Select a song to clip",
+                    tint = Color.White.copy(alpha = .7f),
+                )
+            }
+            DropdownMenu(expanded = trackMenu, onDismissRequest = { trackMenu = false }) {
+                tracks.forEach { track ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                track.title + " — " + track.artist,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                        leadingIcon = if (track.id == selectedTrack?.id) {
+                            { Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFFB56AFF)) }
+                        } else null,
+                        onClick = {
+                            onTrackSelected(track.id)
+                            trackMenu = false
+                        },
+                    )
+                }
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Button(
                 onClick = onSave,
                 enabled = saveEnabled,
@@ -488,6 +530,49 @@ private fun CinematicClipHeader(
                 }
             }
             IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, contentDescription = "Clip settings", tint = Color.White) }
+        }
+    }
+}
+
+@Composable
+private fun CinematicSettingsTrackSummary(track: Track, artworkPath: String?) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color.White.copy(alpha = .055f),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = .08f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Artwork(
+                path = artworkPath,
+                modifier = Modifier.size(50.dp).clip(RoundedCornerShape(10.dp)),
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    track.title,
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    track.artist,
+                    color = Color.White.copy(alpha = .62f),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Text(
+                clipTime(track.durationMs),
+                color = Color.White.copy(alpha = .55f),
+                fontSize = 12.sp,
+            )
         }
     }
 }
@@ -515,12 +600,12 @@ private fun CinematicClipStage(
     ) {
         Column {
             if (isVideoClipTrack(track)) {
-                Box(Modifier.fillMaxWidth().height(if (expanded) 500.dp else 230.dp)) {
+                Box(Modifier.fillMaxWidth().height(if (expanded) 500.dp else 286.dp)) {
                     ClipVideoPreview(player, isPlaying, track.title)
                 }
             } else {
                 Box(
-                    modifier = Modifier.fillMaxWidth().height(if (expanded) 500.dp else 230.dp),
+                    modifier = Modifier.fillMaxWidth().height(if (expanded) 500.dp else 286.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     CinematicAndroidVisualizer(
@@ -537,7 +622,6 @@ private fun CinematicClipStage(
                         )
                         Text(track.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = if (expanded) 23.sp else 18.sp, maxLines = 1)
                         Text(track.artist, color = Color.White.copy(alpha = .86f), fontSize = if (expanded) 17.sp else 14.sp, maxLines = 1)
-                        Text("[Visualizer]", color = Color(0xFFB56AFF), fontSize = 14.sp)
                     }
                 }
             }
@@ -639,13 +723,13 @@ private fun CinematicClipTimeline(
         border = BorderStroke(1.dp, Color.White.copy(alpha = .09f)),
     ) {
         Column {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 5.dp)) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 7.dp)) {
                 repeat(6) { index ->
                     Text(clipTime(track.durationMs * index / 5), color = Color.White.copy(alpha = .58f), fontSize = 9.sp)
                     if (index < 5) Spacer(Modifier.weight(1f))
                 }
             }
-            Canvas(Modifier.fillMaxWidth().height(12.dp).padding(horizontal = 8.dp)) {
+            Canvas(Modifier.fillMaxWidth().height(14.dp).padding(horizontal = 8.dp)) {
                 repeat(31) { index ->
                     val x = size.width * index / 30
                     drawRect(Color.White.copy(alpha = if (index % 6 == 0) .4f else .2f), topLeft = Offset(x, 0f), size = androidx.compose.ui.geometry.Size(1.dp.toPx(), if (index % 6 == 0) size.height else size.height * .58f))
@@ -680,7 +764,7 @@ private fun CinematicAndroidWaveform(
     Canvas(
         modifier = Modifier
             .fillMaxWidth()
-            .height(88.dp)
+            .height(108.dp)
             .semantics { contentDescription = "Clip waveform with yellow draggable handles" }
             .pointerInput(track.id, duration) {
                 detectTapGestures { offset ->
@@ -801,10 +885,15 @@ private fun CinematicClipOverlay(
 ) {
     Box(
         modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = .52f)).clickable(onClick = onOutsideClick),
-        contentAlignment = Alignment.Center,
+        contentAlignment = Alignment.TopEnd,
     ) {
         Surface(
-            modifier = Modifier.fillMaxWidth().padding(18.dp).clickable {},
+            modifier = Modifier
+                .padding(horizontal = 18.dp)
+                .padding(top = 58.dp, bottom = 18.dp)
+                .widthIn(max = 430.dp)
+                .fillMaxWidth()
+                .clickable {},
             color = Color(0xF511121B),
             shape = RoundedCornerShape(20.dp),
             border = BorderStroke(1.dp, Color.White.copy(alpha = .12f)),
