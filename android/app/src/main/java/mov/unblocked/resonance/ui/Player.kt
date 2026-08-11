@@ -79,7 +79,6 @@ fun MiniPlayer(
     modifier: Modifier = Modifier,
 ) {
     val track = state.currentTrack ?: return
-    val palette = LocalResonancePalette.current
     val singletonStream = state.isTransientPlayback
     val fraction = state.playbackProgressFraction
     val seekInput = if (state.canSeekPlayback) {
@@ -97,11 +96,7 @@ fun MiniPlayer(
         Modifier
     }
     Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(palette.panel.copy(alpha = .98f))
-            .clickable(onClick = onOpen)
-            .padding(top = 8.dp),
+        modifier = modifier.fillMaxWidth().background(Color(0xFA050609)).clickable(onClick = onOpen).padding(top = 8.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         Row(
@@ -126,15 +121,15 @@ fun MiniPlayer(
                 Icon(
                     Icons.Default.SkipPrevious,
                     "Previous",
-                    tint = if (singletonStream) Color.White.copy(alpha = .24f) else MaterialTheme.colorScheme.tertiary,
+                    tint = if (singletonStream) Color.White.copy(alpha = .24f) else Accent,
                 )
             }
             IconButton(
                 onClick = { actions.togglePlayPause() },
                 modifier = Modifier
                     .size(44.dp)
-                    .background(palette.raised, CircleShape)
-                    .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .72f), CircleShape),
+                    .background(RaisedSurface, CircleShape)
+                    .border(1.dp, Accent.copy(alpha = .72f), CircleShape),
             ) {
                 if (state.playbackStatus == PlaybackUiStatus.Buffering) {
                     CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
@@ -149,7 +144,7 @@ fun MiniPlayer(
                 Icon(
                     Icons.Default.SkipNext,
                     "Next",
-                    tint = if (singletonStream) Color.White.copy(alpha = .24f) else MaterialTheme.colorScheme.tertiary,
+                    tint = if (singletonStream) Color.White.copy(alpha = .24f) else Accent,
                 )
             }
         }
@@ -161,9 +156,7 @@ fun MiniPlayer(
                 .background(Color.White.copy(alpha = .13f)),
             contentAlignment = Alignment.CenterStart,
         ) {
-            fraction?.let {
-                Box(Modifier.fillMaxWidth(it).height(3.dp).background(MaterialTheme.colorScheme.primary))
-            }
+            fraction?.let { Box(Modifier.fillMaxWidth(it).height(3.dp).background(Accent)) }
         }
     }
 }
@@ -176,7 +169,6 @@ fun NowPlayingScreen(
     modifier: Modifier = Modifier,
 ) {
     val track = state.currentTrack ?: return
-    val palette = LocalResonancePalette.current
     val isServerStream = state.transientCurrentTrack?.id == track.id
     var dragOffset by remember { mutableFloatStateOf(0f) }
     var speedMenu by remember { mutableStateOf(false) }
@@ -262,7 +254,7 @@ fun NowPlayingScreen(
                             Icon(
                                 if (track.id in state.favoriteTrackIds) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                                 "Favorite",
-                                tint = if (track.id in state.favoriteTrackIds) MaterialTheme.colorScheme.tertiary else Color.White,
+                                tint = if (track.id in state.favoriteTrackIds) Accent else Color.White,
                                 modifier = Modifier.size(28.dp),
                             )
                         }
@@ -310,8 +302,8 @@ fun NowPlayingScreen(
                         onClick = actions::togglePlayPause,
                         modifier = Modifier
                             .size(76.dp)
-                            .background(palette.raised, CircleShape)
-                            .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = .72f), CircleShape),
+                            .background(RaisedSurface, CircleShape)
+                            .border(2.dp, Accent.copy(alpha = .72f), CircleShape),
                     ) {
                         if (state.playbackStatus == PlaybackUiStatus.Buffering) {
                             CircularProgressIndicator(Modifier.size(30.dp), color = Color.White, strokeWidth = 3.dp)
@@ -366,22 +358,14 @@ fun NowPlayingScreen(
                             "Shuffle",
                             tint = when {
                                 isServerStream -> MaterialTheme.colorScheme.onSurface.copy(alpha = .24f)
-                                state.shuffleEnabled -> MaterialTheme.colorScheme.tertiary
+                                state.shuffleEnabled -> Accent
                                 else -> MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
                             },
                         )
                     }
                     Box {
                         IconButton(onClick = { speedMenu = true }) {
-                            Icon(
-                                Icons.Default.Speed,
-                                "Playback speed",
-                                tint = if (state.playbackSpeed != 1f) {
-                                    MaterialTheme.colorScheme.tertiary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
-                                },
-                            )
+                            Icon(Icons.Default.Speed, "Playback speed", tint = if (state.playbackSpeed != 1f) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                         }
                         DropdownMenu(expanded = speedMenu, onDismissRequest = { speedMenu = false }) {
                             listOf(.75f, 1f, 1.25f, 1.5f, 2f).forEach { speed ->
@@ -393,21 +377,13 @@ fun NowPlayingScreen(
                         }
                     }
                     IconButton(onClick = { actions.setRepeatEnabled(!state.repeatEnabled) }) {
-                        Icon(
-                            Icons.Default.Repeat,
-                            "Repeat",
-                            tint = if (state.repeatEnabled) {
-                                MaterialTheme.colorScheme.tertiary
-                            } else {
-                                MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
-                            },
-                        )
+                        Icon(Icons.Default.Repeat, "Repeat", tint = if (state.repeatEnabled) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                     }
                 }
             }
             item {
                 Column(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(palette.raised).padding(18.dp),
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Color.White.copy(alpha = .06f)).padding(18.dp),
                     verticalArrangement = Arrangement.spacedBy(11.dp),
                 ) {
                     Eyebrow("Song Details")
@@ -437,7 +413,6 @@ private fun PlayerSeekBar(
     enabled: Boolean,
     onSeek: (Float) -> Unit,
 ) {
-    val palette = LocalResonancePalette.current
     val clampedFraction = fraction?.coerceIn(0f, 1f) ?: 0f
     val thumbDiameterPx = with(LocalDensity.current) { 20.dp.toPx() }
     val seekInput = if (enabled) {
@@ -473,7 +448,7 @@ private fun PlayerSeekBar(
                 .fillMaxWidth(clampedFraction)
                 .height(4.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary),
+                .background(Accent),
         )
         if (enabled) {
             Box(
@@ -485,7 +460,7 @@ private fun PlayerSeekBar(
                         )
                     }
                     .size(20.dp)
-                    .background(palette.tertiary, CircleShape),
+                    .background(Color(0xFFD8D0FF), CircleShape),
             )
         }
     }
@@ -497,13 +472,13 @@ private fun CompactPlaybackStatus(status: PlaybackUiStatus) {
         PlaybackUiStatus.Buffering -> Text(
             "Buffering…",
             fontSize = 10.sp,
-            color = MaterialTheme.colorScheme.tertiary,
+            color = Accent,
             maxLines = 1,
         )
         is PlaybackUiStatus.Failed -> Text(
             status.message,
             fontSize = 10.sp,
-            color = MaterialTheme.colorScheme.error,
+            color = Color(0xFFFF8A80),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -516,29 +491,23 @@ private fun PlaybackStatusNotice(
     status: PlaybackUiStatus,
     onRetry: () -> Unit,
 ) {
-    val palette = LocalResonancePalette.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .background(palette.raised)
+            .background(Color.White.copy(alpha = .06f))
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         when (status) {
             PlaybackUiStatus.Buffering -> {
-                CircularProgressIndicator(Modifier.size(20.dp), color = MaterialTheme.colorScheme.primary, strokeWidth = 2.dp)
+                CircularProgressIndicator(Modifier.size(20.dp), color = Accent, strokeWidth = 2.dp)
                 Text("Buffering audio…", modifier = Modifier.weight(1f), fontSize = 13.sp)
             }
             is PlaybackUiStatus.Failed -> {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text(
-                        "Playback failed",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.error,
-                    )
+                    Text("Playback failed", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFFFF8A80))
                     Text(
                         status.message,
                         fontSize = 12.sp,

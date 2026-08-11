@@ -7,7 +7,6 @@ private enum MobileSection: Hashable {
 }
 
 struct RootView: View {
-    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @State private var selection: MobileSection = .library
     @State private var importing = false
@@ -37,7 +36,7 @@ struct RootView: View {
                     .tabItem { Label("Server", systemImage: "network") }
                     .tag(MobileSection.server)
             }
-            .toolbarBackground(palette.background.opacity(0.96), for: .tabBar)
+            .toolbarBackground(Color.appBackground.opacity(0.96), for: .tabBar)
             .toolbarBackground(.visible, for: .tabBar)
             .toolbarColorScheme(.dark, for: .tabBar)
 
@@ -47,7 +46,7 @@ struct RootView: View {
                     .transition(.move(edge: .bottom))
             }
         }
-        .tint(palette.foregroundAccent)
+        .tint(.accent)
         .preferredColorScheme(.dark)
         .fileImporter(
             isPresented: $importing,
@@ -107,7 +106,6 @@ private struct PlayerAwareTab<Content: View>: View {
 }
 
 private struct LibraryView: View {
-    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @State private var presentedSheet: LibrarySheet?
     @FocusState private var searchIsFocused: Bool
@@ -139,21 +137,17 @@ private struct LibraryView: View {
                             email: library.accountEmail,
                             imageURL: library.accountImageURL,
                             onClipEditor: { presentedSheet = .clipEditor },
-                            onAppearance: { presentedSheet = .appearance },
                             onConnection: { presentedSheet = .profile }
                         )
                     }
                     HStack {
                         Button { library.togglePlay() } label: {
                             Label(library.isPlaying ? "Pause" : "Play", systemImage: library.isPlaying ? "pause.fill" : "play.fill")
-                                .pill(color: palette.accent)
+                                .pill(color: .accent)
                         }
                         .disabled(library.tracksForActiveProfile.isEmpty)
                         Button { library.shuffleEnabled.toggle() } label: {
-                            Image(systemName: "shuffle").roundButton(
-                                active: library.shuffleEnabled,
-                                activeColor: palette.secondary
-                            )
+                            Image(systemName: "shuffle").roundButton(active: library.shuffleEnabled)
                         }
                         .disabled(library.tracksForActiveProfile.isEmpty)
                         Spacer()
@@ -198,8 +192,6 @@ private struct LibraryView: View {
                 ServerConnectionSheet()
             case .clipEditor:
                 MobileClipEditorSheet()
-            case .appearance:
-                ThemeSettingsSheet()
             }
         }
         .toolbar {
@@ -212,17 +204,15 @@ private struct LibraryView: View {
 }
 
 private enum LibrarySheet: String, Identifiable {
-    case profile, clipEditor, appearance
+    case profile, clipEditor
     var id: String { rawValue }
 }
 
 private struct ProfileButton: View {
-    @Environment(\.resonancePalette) private var palette
     let displayName: String
     let email: String?
     let imageURL: URL?
     let onClipEditor: () -> Void
-    let onAppearance: () -> Void
     let onConnection: () -> Void
     @State private var isEmailRevealed = false
 
@@ -250,11 +240,10 @@ private struct ProfileButton: View {
                 }
                 Button("Clip Editor", systemImage: "waveform.path.ecg", action: onClipEditor)
             }
-            Button("Appearance", systemImage: "paintpalette", action: onAppearance)
             Button("Account & Connection", systemImage: "person.crop.circle", action: onConnection)
         } label: {
             ZStack {
-                Circle().fill(palette.secondary)
+                Circle().fill(Color.violet)
                 if let imageURL {
                     AsyncImage(url: imageURL) { phase in
                         if let image = phase.image {
@@ -277,101 +266,12 @@ private struct ProfileButton: View {
                 Circle()
                     .stroke(.white.opacity(0.18), lineWidth: 1)
             }
-            .shadow(color: palette.secondary.opacity(0.28), radius: 12, y: 5)
+            .shadow(color: Color.violet.opacity(0.28), radius: 12, y: 5)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(resolvedDisplayName) account")
-        .accessibilityHint("Opens profile and settings tools")
+        .accessibilityHint("Opens account tools")
         .onChange(of: email) { _, _ in isEmailRevealed = false }
-    }
-}
-
-private struct ThemeSettingsSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.resonancePalette) private var palette
-    @EnvironmentObject private var themeStore: ResonanceThemeStore
-
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                AppBackground()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("Choose a dark palette. Changes apply immediately and stay only on this device.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-
-                        LazyVGrid(
-                            columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
-                            spacing: 12
-                        ) {
-                            ForEach(ResonanceTheme.allCases) { theme in
-                                themeCard(theme)
-                            }
-                        }
-                    }
-                    .padding(20)
-                }
-            }
-            .navigationTitle("Appearance")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-        .preferredColorScheme(.dark)
-    }
-
-    private func themeCard(_ theme: ResonanceTheme) -> some View {
-        let candidate = theme.palette
-        let isSelected = themeStore.selectedTheme == theme
-
-        return Button {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                themeStore.selectedTheme = theme
-            }
-        } label: {
-            VStack(alignment: .leading, spacing: 10) {
-                ZStack(alignment: .bottomLeading) {
-                    LinearGradient(
-                        colors: candidate.gradientStops,
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    HStack(spacing: 5) {
-                        Circle().fill(candidate.accent).frame(width: 16, height: 16)
-                        Circle().fill(candidate.secondary).frame(width: 16, height: 16)
-                        Circle().fill(candidate.tertiary).frame(width: 16, height: 16)
-                    }
-                    .padding(9)
-                }
-                .frame(height: 94)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                HStack(spacing: 6) {
-                    Text(theme.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(candidate.ink)
-                    Spacer(minLength: 4)
-                    if isSelected {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(candidate.tertiary)
-                    }
-                }
-            }
-            .padding(10)
-            .background(candidate.surface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 15, style: .continuous)
-                    .stroke(isSelected ? candidate.tertiary : candidate.divider, lineWidth: isSelected ? 2 : 1)
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(theme.title) theme")
-        .accessibilityValue(isSelected ? "Selected" : "Not selected")
-        .accessibilityHint("Applies the \(theme.title) palette")
     }
 }
 
@@ -587,7 +487,6 @@ private struct PlaylistsView: View {
 }
 
 private struct PlaylistDetailView: View {
-    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @State private var addingToPlaylist: MobilePlaylist?
@@ -614,7 +513,6 @@ private struct PlaylistDetailView: View {
                     if !playlist.isSystem {
                         Button("Add Songs") { addingToPlaylist = playlist }
                             .buttonStyle(.borderedProminent)
-                            .tint(palette.accent)
                     }
                 }
             } else {
@@ -632,7 +530,7 @@ private struct PlaylistDetailView: View {
                                     isPlaying ? "Pause" : (library.shuffleEnabled && !isActive ? "Shuffle Play" : "Play"),
                                     systemImage: isPlaying ? "pause.fill" : (library.shuffleEnabled && !isActive ? "shuffle" : "play.fill")
                                 )
-                                .pill(color: palette.accent)
+                                .pill(color: .accent)
                             }
                         }
                         .buttonStyle(.plain)
@@ -642,10 +540,7 @@ private struct PlaylistDetailView: View {
                         Button {
                             library.shuffleEnabled.toggle()
                         } label: {
-                            Image(systemName: "shuffle").roundButton(
-                                active: library.shuffleEnabled,
-                                activeColor: palette.secondary
-                            )
+                            Image(systemName: "shuffle").roundButton(active: library.shuffleEnabled)
                         }
                         .buttonStyle(.plain)
                         .contentShape(Circle())
@@ -731,7 +626,6 @@ private struct PlaylistDetailView: View {
 }
 
 private struct PlaylistSongPicker: View {
-    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     let playlistID: UUID
@@ -766,7 +660,7 @@ private struct PlaylistSongPicker: View {
                                     trailingDetail: track.durationText
                                 )
                                 Image(systemName: playlist?.trackIDs.contains(track.id) == true ? "checkmark.circle.fill" : "plus.circle")
-                                    .foregroundStyle(playlist?.trackIDs.contains(track.id) == true ? palette.accent : .secondary)
+                                    .foregroundStyle(playlist?.trackIDs.contains(track.id) == true ? Color.accent : .secondary)
                                     .frame(width: 28, height: 44)
                             }
                             .mobileCatalogRow(isSelected: playlist?.trackIDs.contains(track.id) == true)
@@ -794,7 +688,6 @@ private struct PlaylistSongPicker: View {
 }
 
 private struct StorageView: View {
-    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @Binding var importing: Bool
     @State private var searchText = ""
@@ -877,7 +770,7 @@ private struct StorageView: View {
                         } label: {
                             Text("Import")
                                 .font(.headline)
-                                .foregroundStyle(palette.foregroundAccent)
+                                .foregroundStyle(Color.violet)
                         }
                         .accessibilityHint("Choose a link or files to import")
                         Button(isEditing ? "Done" : "Edit") {
@@ -887,7 +780,7 @@ private struct StorageView: View {
                             }
                         }
                         .font(.headline)
-                        .foregroundStyle(palette.foregroundAccent)
+                        .foregroundStyle(Color.accent)
                         .disabled(library.tracks.isEmpty)
                     }
 
@@ -1111,7 +1004,6 @@ private enum StorageSort: String, CaseIterable, Identifiable {
 }
 
 private struct StorageScopePicker: View {
-    @Environment(\.resonancePalette) private var palette
     @Binding var scope: StorageScope
 
     var body: some View {
@@ -1124,7 +1016,7 @@ private struct StorageScopePicker: View {
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
                         .frame(height: 42)
-                        .background(scope == option ? palette.accent : .clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .background(scope == option ? Color.accent : .clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                         .foregroundStyle(scope == option ? .white : .secondary)
                 }
                 .buttonStyle(.plain)
@@ -1140,7 +1032,6 @@ private struct StorageScopePicker: View {
 }
 
 private struct StorageSummaryCard: View {
-    @Environment(\.resonancePalette) private var palette
     let importedBytes: Int64
     let importedCount: Int
     let downloadedBytes: Int64
@@ -1160,11 +1051,11 @@ private struct StorageSummaryCard: View {
                 Circle().stroke(.white.opacity(0.08), lineWidth: 15)
                 Circle()
                     .trim(from: 0, to: max(importedEnd, 0.015))
-                    .stroke(palette.secondary, style: StrokeStyle(lineWidth: 15, lineCap: .butt))
+                    .stroke(Color.violet, style: StrokeStyle(lineWidth: 15, lineCap: .butt))
                     .rotationEffect(.degrees(-90))
                 Circle()
                     .trim(from: importedEnd, to: max(downloadedEnd, importedEnd + 0.015))
-                    .stroke(palette.accent, style: StrokeStyle(lineWidth: 15, lineCap: .butt))
+                    .stroke(Color.accent, style: StrokeStyle(lineWidth: 15, lineCap: .butt))
                     .rotationEffect(.degrees(-90))
                 Image(systemName: "internaldrive")
                     .font(.title3)
@@ -1178,9 +1069,9 @@ private struct StorageSummaryCard: View {
             VStack(alignment: .leading, spacing: 11) {
                 Text("Local audio").font(.subheadline).foregroundStyle(.secondary)
                 HStack(spacing: 0) {
-                    StorageMetric(color: palette.secondary, title: "Local audio", bytes: importedBytes, detail: "\(importedCount) files")
+                    StorageMetric(color: .violet, title: "Local audio", bytes: importedBytes, detail: "\(importedCount) files")
                     Divider().padding(.horizontal, 10)
-                    StorageMetric(color: palette.accent, title: "Server downloads", bytes: downloadedBytes, detail: "\(downloadedCount) files")
+                    StorageMetric(color: .accent, title: "Server downloads", bytes: downloadedBytes, detail: "\(downloadedCount) files")
                     Divider().padding(.horizontal, 10)
                     StorageMetric(color: Color(hex: 0x7BA7E8), title: "Available", bytes: availableBytes, detail: "on device")
                 }
@@ -1192,7 +1083,7 @@ private struct StorageSummaryCard: View {
         .overlay {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .stroke(
-                    LinearGradient(colors: [palette.secondary.opacity(0.85), palette.tertiary.opacity(0.65)], startPoint: .topLeading, endPoint: .bottomTrailing),
+                    LinearGradient(colors: [.violet.opacity(0.85), Color(hex: 0x6C9CD8).opacity(0.65)], startPoint: .topLeading, endPoint: .bottomTrailing),
                     lineWidth: 1
                 )
         }
@@ -1219,7 +1110,6 @@ private struct StorageMetric: View {
 }
 
 private struct StorageSection: View {
-    @Environment(\.resonancePalette) private var palette
     let title: String
     let symbol: String
     let tracks: [MobileTrack]
@@ -1231,7 +1121,7 @@ private struct StorageSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 7) {
-                Image(systemName: symbol).foregroundStyle(palette.foregroundAccent)
+                Image(systemName: symbol).foregroundStyle(Color.violet)
                 Text(title).eyebrow()
                 Spacer()
                 Text("\(tracks.count) \(tracks.count == 1 ? "SONG" : "SONGS")")
@@ -1314,7 +1204,6 @@ private func formatBytes(_ bytes: Int64) -> String {
 }
 
 private struct ServerView: View {
-    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @State private var deletionCandidate: MobileRemoteSong?
     @State private var presentedSheet: ServerSheet?
@@ -1455,7 +1344,7 @@ private struct ServerView: View {
                         HStack(spacing: 7) {
                             ProgressView()
                                 .controlSize(.mini)
-                                .tint(palette.foregroundAccent)
+                                .tint(Color.violet)
                             Text(
                                 "Loading metadata for \(library.pendingRemoteSongMetadataCount) "
                                     + (library.pendingRemoteSongMetadataCount == 1 ? "song" : "songs")
@@ -1582,18 +1471,18 @@ private struct ServerView: View {
             }
 
             HStack(spacing: 8) {
-                ServerMetric(symbol: "music.note", color: palette.secondary, value: "\(library.remoteSongs.count)", label: "songs")
+                ServerMetric(symbol: "music.note", color: .violet, value: "\(library.remoteSongs.count)", label: "songs")
                 Text("•").foregroundStyle(.tertiary)
                 ServerMetric(
                     symbol: "list.bullet",
-                    color: palette.secondary,
+                    color: .violet,
                     value: "\(library.playlists.filter { !$0.isSystem }.count)",
                     label: "playlists"
                 )
                 Text("•").foregroundStyle(.tertiary)
                 ServerMetric(
                     symbol: allSynced ? "checkmark" : "icloud.and.arrow.down",
-                    color: allSynced ? .green : palette.accent,
+                    color: allSynced ? .green : .accent,
                     value: "\(syncedCount)",
                     label: "on device"
                 )
@@ -1825,7 +1714,6 @@ private struct ServerMetric: View {
 }
 
 private struct ServerTextActionButton: View {
-    @Environment(\.resonancePalette) private var palette
     let symbol: String
     let label: String
     var isDisabled = false
@@ -1838,7 +1726,7 @@ private struct ServerTextActionButton: View {
         } label: {
             Label(label, systemImage: symbol)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(palette.serverActionForeground)
+                .foregroundStyle(Color.serverActionForeground)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity)
@@ -1853,7 +1741,6 @@ private struct ServerTextActionButton: View {
 }
 
 private struct ServerIconActionButton: View {
-    @Environment(\.resonancePalette) private var palette
     let symbol: String
     let label: String
     var isDisabled = false
@@ -1877,7 +1764,7 @@ private struct ServerIconActionButton: View {
                 }
             }
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(palette.serverActionForeground)
+                .foregroundStyle(Color.serverActionForeground)
                 .rotationEffect(.degrees(spinRotation))
                 .frame(width: 54, height: 58)
                 .contentShape(Rectangle())
@@ -1918,7 +1805,6 @@ private struct ServerActionButtonStyle: ButtonStyle {
 }
 
 private struct ServerTransferPopup: View {
-    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
 
     private var progress: Double {
@@ -1930,9 +1816,9 @@ private struct ServerTransferPopup: View {
         HStack(spacing: 12) {
             Image(systemName: library.isUploading ? "arrow.up" : "arrow.down")
                 .font(.subheadline.weight(.bold))
-                .foregroundStyle(palette.foregroundAccent)
+                .foregroundStyle(Color.violet)
                 .frame(width: 36, height: 36)
-                .background(palette.secondary.opacity(0.13), in: Circle())
+                .background(Color.violet.opacity(0.13), in: Circle())
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(library.isUploading ? "Uploading" : "Downloading")
@@ -1941,7 +1827,7 @@ private struct ServerTransferPopup: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                ProgressView(value: progress).tint(palette.foregroundAccent)
+                ProgressView(value: progress).tint(.violet)
             }
 
             Spacer(minLength: 4)
@@ -2044,7 +1930,6 @@ private struct MobileSongListHeader: View {
 }
 
 private struct LocalSongRowContent: View {
-    @Environment(\.resonancePalette) private var palette
     let track: MobileTrack
     let number: Int
     let trailingDetail: String
@@ -2056,7 +1941,7 @@ private struct LocalSongRowContent: View {
             Group {
                 if let selectionState {
                     Image(systemName: selectionState ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(selectionState ? palette.accent : .secondary)
+                        .foregroundStyle(selectionState ? Color.accent : .secondary)
                 } else {
                     Text("\(number)")
                         .foregroundStyle(.secondary)
@@ -2184,7 +2069,6 @@ private extension View {
 }
 
 private struct ServerSongRow: View {
-    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     let song: MobileRemoteSong
     let number: Int
@@ -2232,7 +2116,7 @@ private struct ServerSongRow: View {
                     Group {
                         if isSelecting {
                             Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(isSelected ? palette.accent : .secondary)
+                                .foregroundStyle(isSelected ? Color.accent : .secondary)
                         } else {
                             Text("\(number)")
                                 .foregroundStyle(.secondary)
@@ -2606,7 +2490,6 @@ private struct ServerSourceImportSheet: View {
 }
 
 private struct MobilePlayerBar: View {
-    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @Binding var showsNowPlaying: Bool
 
@@ -2637,10 +2520,10 @@ private struct MobilePlayerBar: View {
                         Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
                             .font(.title3)
                             .frame(width: 38, height: 38)
-                            .background(palette.raisedSurface, in: Circle())
-                            .overlay { Circle().stroke(palette.accent.opacity(0.72), lineWidth: 1.5) }
+                            .background(Color.appSurfaceRaised, in: Circle())
+                            .overlay { Circle().stroke(Color.accent.opacity(0.72), lineWidth: 1.5) }
                             .foregroundStyle(.white)
-                            .shadow(color: palette.accent.opacity(0.22), radius: 8)
+                            .shadow(color: Color.accent.opacity(0.22), radius: 8)
                     }
                     Button { library.next() } label: { Image(systemName: "forward.end.fill") }
                         .disabled(library.isTransientStreamActive)
@@ -2648,7 +2531,7 @@ private struct MobilePlayerBar: View {
                 GeometryReader { geometry in
                     ZStack(alignment: .leading) {
                         Capsule().fill(.white.opacity(0.13)).frame(height: 3)
-                        Capsule().fill(palette.foregroundAccent).frame(width: geometry.size.width * library.playbackProgress(for: track), height: 3)
+                        Capsule().fill(Color.accent).frame(width: geometry.size.width * library.playbackProgress(for: track), height: 3)
                     }
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0).onChanged { library.seek(to: $0.location.x / max(geometry.size.width, 1)) })
@@ -2656,14 +2539,13 @@ private struct MobilePlayerBar: View {
             }
         }
         .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 6)
-        .background(palette.surface.opacity(0.98))
+        .background(Color.appSurface.opacity(0.98))
         .background(.ultraThinMaterial.opacity(0.08))
         .overlay(alignment: .top) { Divider() }
     }
 }
 
 private struct NowPlayingView: View {
-    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @Binding var isPresented: Bool
     @State private var dismissalOffset: CGFloat = 0
@@ -2697,7 +2579,7 @@ private struct NowPlayingView: View {
                                 Button { library.toggleFavorite(track) } label: {
                                     Image(systemName: library.favorites.contains(track.id) ? "heart.fill" : "heart")
                                         .font(.title2)
-                                        .foregroundStyle(library.favorites.contains(track.id) ? palette.accent : .primary)
+                                        .foregroundStyle(library.favorites.contains(track.id) ? Color.accent : .primary)
                                         .frame(width: 44, height: 44)
                                 }
                                 .accessibilityLabel(library.favorites.contains(track.id) ? "Remove from Liked Songs" : "Add to Liked Songs")
@@ -2789,7 +2671,7 @@ private struct NowPlayingView: View {
                 ),
                 in: 0...1
             )
-            .tint(palette.foregroundAccent)
+            .tint(.accent)
             HStack {
                 Text(timeText(library.playbackElapsed(for: track)))
                 Spacer()
@@ -2810,10 +2692,10 @@ private struct NowPlayingView: View {
                 Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 30, weight: .bold))
                     .frame(width: 72, height: 72)
-                    .background(palette.raisedSurface, in: Circle())
-                    .overlay { Circle().stroke(palette.accent.opacity(0.72), lineWidth: 2) }
+                    .background(Color.appSurfaceRaised, in: Circle())
+                    .overlay { Circle().stroke(Color.accent.opacity(0.72), lineWidth: 2) }
                     .foregroundStyle(.white)
-                    .shadow(color: palette.accent.opacity(0.24), radius: 14)
+                    .shadow(color: Color.accent.opacity(0.24), radius: 14)
             }
             Button { library.next() } label: {
                 Image(systemName: "forward.end.fill").font(.title)
@@ -2834,7 +2716,7 @@ private struct NowPlayingView: View {
                     .foregroundStyle(.secondary)
             }
             Slider(value: $library.volume, in: 0...1)
-                .tint(palette.foregroundAccent)
+                .tint(.accent)
                 .accessibilityLabel("Volume")
                 .accessibilityValue("\(Int((library.volume * 100).rounded())) percent")
         }
@@ -2848,7 +2730,7 @@ private struct NowPlayingView: View {
                     .foregroundStyle(
                         library.isTransientStreamActive
                             ? AnyShapeStyle(.tertiary)
-                            : AnyShapeStyle(library.shuffleEnabled ? palette.accent : .secondary)
+                            : AnyShapeStyle(library.shuffleEnabled ? Color.accent : .secondary)
                     )
             }
             .disabled(library.isTransientStreamActive)
@@ -2863,7 +2745,7 @@ private struct NowPlayingView: View {
             Spacer()
             Button { library.repeatEnabled.toggle() } label: {
                 Label("Repeat", systemImage: "repeat")
-                    .foregroundStyle(library.repeatEnabled ? palette.accent : .secondary)
+                    .foregroundStyle(library.repeatEnabled ? Color.accent : .secondary)
             }
         }
         .font(.subheadline.weight(.semibold))
@@ -2903,12 +2785,11 @@ private struct NowPlayingView: View {
 }
 
 private struct AppBackground: View {
-    @Environment(\.resonancePalette) private var palette
     var body: some View {
         ZStack {
-            palette.background
+            Color.appBackground
             RadialGradient(
-                colors: [palette.secondary.opacity(0.16), .clear],
+                colors: [Color.violet.opacity(0.16), .clear],
                 center: UnitPoint(x: 0.76, y: 0.04),
                 startRadius: 10,
                 endRadius: 520
@@ -2946,14 +2827,13 @@ private struct ArtworkTile: View {
 }
 
 private struct ArtworkPlaceholder: View {
-    @Environment(\.resonancePalette) private var palette
     let symbol: String
     var compact = false
 
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: palette.gradientStops,
+                colors: [.violet, Color(hex: 0x874BFF), Color(hex: 0xB079FF)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -3077,17 +2957,25 @@ private struct ServerArtwork: View {
     }
 }
 
+extension Color {
+    static let appBackground = Color(hex: 0x020305)
+    static let appSurface = Color(hex: 0x0B0C11)
+    static let appSurfaceRaised = Color(hex: 0x12131A)
+    static let accent = Color(hex: 0x7547FF)
+    static let violet = Color(hex: 0x6540F5)
+    static let serverActionForeground = Color(hex: 0xB0ADBF)
+    init(hex: UInt32) {
+        self.init(.sRGB, red: Double((hex >> 16) & 255) / 255, green: Double((hex >> 8) & 255) / 255, blue: Double(hex & 255) / 255)
+    }
+}
+
 extension Text {
     func eyebrow() -> some View { font(.caption2.weight(.semibold)).tracking(1.6).foregroundStyle(.secondary) }
 }
 
 extension View {
     func pill(color: Color) -> some View { font(.subheadline.weight(.bold)).padding(.horizontal, 17).frame(height: 42).background(color, in: Capsule()).foregroundStyle(.white) }
-    func roundButton(active: Bool, activeColor: Color) -> some View {
-        frame(width: 42, height: 42)
-            .background(active ? activeColor : .white.opacity(0.08), in: Circle())
-            .foregroundStyle(.white)
-    }
+    func roundButton(active: Bool) -> some View { frame(width: 42, height: 42).background(active ? Color.violet : .white.opacity(0.08), in: Circle()).foregroundStyle(.white) }
     func serverActionButton() -> some View {
         font(.subheadline.weight(.semibold))
             .lineLimit(1)

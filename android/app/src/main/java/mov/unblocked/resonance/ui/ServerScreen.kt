@@ -162,11 +162,11 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                 ) {
                     Text(
                         if (state.isConnected) "● Connected" else "● Offline",
-                        color = if (state.isConnected) LocalResonancePalette.current.success else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                        color = if (state.isConnected) SuccessGreen else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 12.sp,
                         modifier = Modifier.background(
-                            (if (state.isConnected) LocalResonancePalette.current.success else Color.White).copy(alpha = .11f),
+                            (if (state.isConnected) SuccessGreen else Color.White).copy(alpha = .11f),
                             CircleShape,
                         ).padding(horizontal = 10.dp, vertical = 6.dp),
                     )
@@ -246,7 +246,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                     CircularProgressIndicator(
                         modifier = Modifier.size(12.dp),
                         strokeWidth = 1.5.dp,
-                        color = MaterialTheme.colorScheme.tertiary,
+                        color = Violet,
                     )
                     Text(
                         "Loading metadata for $pendingMetadataCount ${if (pendingMetadataCount == 1) "song" else "songs"}",
@@ -315,7 +315,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(Icons.Default.CloudDownload, null, Modifier.size(44.dp), tint = MaterialTheme.colorScheme.tertiary)
+                    Icon(Icons.Default.CloudDownload, null, Modifier.size(44.dp), tint = Violet)
                     Text(if (state.remoteSongs.isEmpty()) "No Server Songs" else "No Results", style = MaterialTheme.typography.titleMedium)
                     Text("Connect and sync to load the server library.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                 }
@@ -373,8 +373,8 @@ private fun CompactMetric(icon: androidx.compose.ui.graphics.vector.ImageVector,
         Icon(
             icon,
             null,
-            Modifier.size(30.dp).background(MaterialTheme.colorScheme.secondary.copy(alpha = .13f), CircleShape).padding(7.dp),
-            tint = MaterialTheme.colorScheme.tertiary,
+            Modifier.size(30.dp).background(Violet.copy(alpha = .13f), CircleShape).padding(7.dp),
+            tint = Violet,
         )
         Text(value, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), maxLines = 1)
@@ -417,7 +417,7 @@ private fun ServerActionBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(LocalResonancePalette.current.raised, RoundedCornerShape(18.dp))
+            .background(Color(0xFF11111A), RoundedCornerShape(18.dp))
             .border(1.dp, Color.White.copy(alpha = .085f), RoundedCornerShape(18.dp))
             .padding(horizontal = 4.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -553,7 +553,7 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
         modifier = modifier
             .fillMaxWidth()
             .shadow(18.dp, RoundedCornerShape(20.dp))
-            .background(LocalResonancePalette.current.panel.copy(alpha = .92f), RoundedCornerShape(20.dp))
+            .background(Color(0xEB34343B), RoundedCornerShape(20.dp))
             .border(1.dp, Color.White.copy(alpha = .15f), RoundedCornerShape(20.dp))
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(9.dp),
@@ -562,8 +562,8 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
             Icon(
                 if (isUploading) Icons.Default.CloudUpload else Icons.Default.CloudDownload,
                 null,
-                Modifier.size(40.dp).background(MaterialTheme.colorScheme.secondary.copy(alpha = .17f), CircleShape).padding(9.dp),
-                tint = MaterialTheme.colorScheme.tertiary,
+                Modifier.size(40.dp).background(Violet.copy(alpha = .17f), CircleShape).padding(9.dp),
+                tint = Violet,
             )
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
@@ -577,11 +577,7 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
             }
             Text("${(progress * 100).toInt()}%", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f))
         }
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier.fillMaxWidth(),
-            color = MaterialTheme.colorScheme.secondary,
-        )
+        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(), color = Violet)
     }
 }
 
@@ -631,7 +627,7 @@ private fun ServerSongRow(
                         if (selected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
                         contentDescription = if (selected) "Selected" else "Not selected",
                         modifier = Modifier.size(18.dp),
-                        tint = if (selected) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurface.copy(alpha = .42f),
+                        tint = if (selected) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .42f),
                     )
                 } else {
                     Text(number.toString(), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f))
@@ -678,7 +674,7 @@ private fun ServerSongRow(
                                 Icons.Default.CheckCircle,
                                 contentDescription = "Downloaded",
                                 modifier = Modifier.size(9.dp),
-                                tint = LocalResonancePalette.current.success,
+                                tint = SuccessGreen,
                             )
                         }
                     }

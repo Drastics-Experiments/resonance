@@ -204,7 +204,7 @@ fun StorageScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = MaterialTheme.colorScheme.tertiary)
+                    Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = Violet)
                     Text(if (query.isNotEmpty()) "No Results" else "No Stored Songs", style = MaterialTheme.typography.titleMedium)
                     Text("Import audio or video, or download songs from your music server.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
                 }
@@ -271,29 +271,28 @@ private fun StorageSummary(
     downloadedCount: Int,
     availableBytes: Long,
 ) {
-    val palette = LocalResonancePalette.current
     val total = (importedBytes + downloadedBytes + availableBytes).coerceAtLeast(1).toFloat()
     val importedSweep = importedBytes / total * 360f
     val downloadedSweep = downloadedBytes / total * 360f
     Row(
-        modifier = Modifier.fillMaxWidth().background(palette.raised, RoundedCornerShape(20.dp)).padding(16.dp),
+        modifier = Modifier.fillMaxWidth().background(Color.White.copy(alpha = .045f), RoundedCornerShape(20.dp)).padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Box(Modifier.size(96.dp), contentAlignment = Alignment.Center) {
             Canvas(Modifier.fillMaxSize()) {
                 drawArc(Color.White.copy(alpha = .08f), -90f, 360f, false, style = Stroke(14.dp.toPx()))
-                if (importedSweep > 0) drawArc(palette.secondary, -90f, importedSweep, false, style = Stroke(14.dp.toPx(), cap = StrokeCap.Butt))
-                if (downloadedSweep > 0) drawArc(palette.accent, -90f + importedSweep, downloadedSweep, false, style = Stroke(14.dp.toPx(), cap = StrokeCap.Butt))
+                if (importedSweep > 0) drawArc(Violet, -90f, importedSweep, false, style = Stroke(14.dp.toPx(), cap = StrokeCap.Butt))
+                if (downloadedSweep > 0) drawArc(Accent, -90f + importedSweep, downloadedSweep, false, style = Stroke(14.dp.toPx(), cap = StrokeCap.Butt))
             }
             Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Text("Local audio", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StorageMetric(palette.secondary, "Local", importedBytes, "$importedCount files", Modifier.weight(1f))
-                StorageMetric(palette.accent, "Server", downloadedBytes, "$downloadedCount files", Modifier.weight(1f))
-                StorageMetric(palette.tertiary, "Available", availableBytes, "on device", Modifier.weight(1f))
+                StorageMetric(Violet, "Local", importedBytes, "$importedCount files", Modifier.weight(1f))
+                StorageMetric(Accent, "Server", downloadedBytes, "$downloadedCount files", Modifier.weight(1f))
+                StorageMetric(ElectricBlue, "Available", availableBytes, "on device", Modifier.weight(1f))
             }
         }
     }

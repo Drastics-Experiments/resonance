@@ -5,16 +5,16 @@
   color: var(--text);
   --background: #020305;
   --base: #05060a;
-  --panel: #07080c;
-  --surface: #0b0c11;
-  --surface-raised: #12131a;
+  --panel: #0c0d13;
+  --surface: #0b0c12;
+  --surface-raised: #11131c;
   --accent: #7547ff;
   --accent-secondary: #6540f5;
   --accent-tertiary: #9b82ff;
   --text: #f5f4f7;
   --ink: #f5f4f7;
-  --coral: var(--accent);
-  --violet: var(--accent-secondary);
+  --coral: #7c4dff;
+  --violet: #6f3cff;
   --muted: #9b99a5;
   --line: #ffffff12;
   --accent-soft: #6f3cff26;
@@ -36,6 +36,19 @@
   --gradient-accent: linear-gradient(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%);
   --action-background: linear-gradient(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%);
   --gradient-artwork: linear-gradient(145deg, #3349c9 0%, #6857ff 52%, #f18cb2 100%);
+  --history-bar-start: #9b7aff;
+  --history-bar-end: #5d35d8;
+  --history-peak-start: #ff806c;
+  --history-peak-end: #8a42eb;
+  --history-scrollbar-thumb: #7650d8;
+  --history-scrollbar-track: #171923;
+  --history-bar-shadow: #5730bd4d;
+  --history-peak-shadow: #b54d9b59;
+  --history-selected-stroke: #e1d8ff;
+  --clip-selection-background: linear-gradient(180deg, #5e2ba328, #6c36ac18);
+  --clip-visualizer-low: #4e1a95;
+  --clip-visualizer-mid: #bc5df8;
+  --clip-visualizer-high: #7140d4;
   --gradient-ambient:
     radial-gradient(circle at 74% 4%, #6540f524 0, transparent 38rem),
     radial-gradient(circle at 18% 86%, #7547ff12 0, transparent 34rem),
@@ -47,15 +60,28 @@
 :root[data-theme="midnight"] {
   --background: #020305;
   --base: #05060a;
-  --panel: #07080c;
-  --surface: #0b0c11;
-  --surface-raised: #12131a;
+  --panel: #0c0d13;
+  --surface: #0b0c12;
+  --surface-raised: #11131c;
   --accent: #7547ff;
   --accent-secondary: #6540f5;
   --accent-tertiary: #9b82ff;
   --gradient-accent: linear-gradient(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%);
   --action-background: linear-gradient(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%);
   --gradient-artwork: linear-gradient(145deg, #3349c9 0%, #6857ff 52%, #f18cb2 100%);
+  --history-bar-start: #9b7aff;
+  --history-bar-end: #5d35d8;
+  --history-peak-start: #ff806c;
+  --history-peak-end: #8a42eb;
+  --history-scrollbar-thumb: #7650d8;
+  --history-scrollbar-track: #171923;
+  --history-bar-shadow: #5730bd4d;
+  --history-peak-shadow: #b54d9b59;
+  --history-selected-stroke: #e1d8ff;
+  --clip-selection-background: linear-gradient(180deg, #5e2ba328, #6c36ac18);
+  --clip-visualizer-low: #4e1a95;
+  --clip-visualizer-mid: #bc5df8;
+  --clip-visualizer-high: #7140d4;
 }
 
 :root[data-theme="ocean"] {
@@ -103,6 +129,8 @@
 :root[data-theme="ocean"],
 :root[data-theme="forest"],
 :root[data-theme="sunset"] {
+  --coral: var(--accent);
+  --violet: var(--accent-secondary);
   --accent-soft: color-mix(in srgb, var(--accent) 15%, transparent);
   --accent-border: color-mix(in srgb, var(--accent-tertiary) 42%, transparent);
   --accent-glow: color-mix(in srgb, var(--accent) 28%, transparent);
@@ -111,6 +139,19 @@
   --control-hover: color-mix(in srgb, var(--surface-raised) 76%, var(--accent) 24%);
   --menu-surface: color-mix(in srgb, var(--surface-raised) 86%, var(--accent) 14%);
   --menu-border: color-mix(in srgb, #5f5c69 70%, var(--accent-tertiary) 30%);
+  --history-bar-start: var(--accent-tertiary);
+  --history-bar-end: var(--accent-secondary);
+  --history-peak-start: var(--accent-tertiary);
+  --history-peak-end: var(--accent);
+  --history-scrollbar-thumb: var(--accent);
+  --history-scrollbar-track: var(--surface-raised);
+  --history-bar-shadow: var(--accent-glow);
+  --history-peak-shadow: var(--accent-glow);
+  --history-selected-stroke: var(--accent-tertiary);
+  --clip-selection-background: linear-gradient(180deg, var(--accent-soft), color-mix(in srgb, var(--accent-secondary) 9%, transparent));
+  --clip-visualizer-low: var(--accent-secondary);
+  --clip-visualizer-mid: var(--accent-tertiary);
+  --clip-visualizer-high: var(--accent);
   --sidebar-background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 92%, var(--accent-secondary) 8%), var(--background));
   --topbar-background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 91%, transparent), color-mix(in srgb, var(--panel) 88%, transparent));
   --player-background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 94%, transparent), color-mix(in srgb, var(--background) 98%, transparent));
@@ -124,24 +165,24 @@
 }
 * {
   box-sizing: border-box;
-  scrollbar-color: var(--accent) var(--surface-raised);
+  scrollbar-color: #7c57df #11131b;
   scrollbar-width: thin;
 }
 *::-webkit-scrollbar { width: 10px; height: 10px; }
 *::-webkit-scrollbar-track {
-  border: 1px solid color-mix(in srgb, var(--accent-tertiary) 8%, transparent);
+  border: 1px solid #ffffff08;
   border-radius: 999px;
-  background: var(--panel);
+  background: #0c0e15;
 }
 *::-webkit-scrollbar-thumb {
   min-height: 34px;
-  border: 2px solid var(--panel);
+  border: 2px solid #0c0e15;
   border-radius: 999px;
-  background: linear-gradient(180deg, var(--accent-tertiary), var(--accent-secondary));
+  background: linear-gradient(180deg, #8b6aee, #5f3ebc);
   box-shadow: inset 0 1px #ffffff2b;
 }
-*::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg, var(--accent-tertiary), var(--accent)); }
-*::-webkit-scrollbar-corner { background: var(--panel); }
+*::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg, #a084ff, #714bd7); }
+*::-webkit-scrollbar-corner { background: #0c0e15; }
 html {
   width: 100%;
   height: 100%;
@@ -472,13 +513,9 @@ main {
   flex: 0 0 40px;
   width: 40px;
   height: 40px;
-  border: 1px solid var(--accent-border);
+  border: 1px solid #a58cff52;
   border-radius: 50%;
-  background: var(--action-background);
-  color: #fff;
-  font-size: 14px;
-  font-weight: 800;
-  box-shadow: 0 8px 24px #0007, inset 0 0 0 1px #ffffff18;
+  background: linear-gradient(145deg, #6f3cff, #3a207d);
   transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
   background-position: center;
   background-size: cover;
@@ -486,7 +523,7 @@ main {
 .profile-button:hover,
 .profile-button:focus-visible,
 .profile-control.open .profile-button {
-  border-color: var(--accent-tertiary);
+  border-color: #c3b3ff;
   box-shadow: 0 0 0 3px var(--accent-soft), 0 8px 24px #0007;
   outline: none;
   transform: translateY(-1px);
@@ -1292,8 +1329,8 @@ main {
   background: #ffffff0a;
 }
 .filters button.active {
-  background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1px var(--accent-border);
+  background: var(--gradient-accent);
+  box-shadow: inset 0 0 0 1px #ad96ff4d;
 }
 .track-table {
   position: relative;
@@ -1518,12 +1555,12 @@ main {
 }
 .settings-nav button:hover { background: #ffffff08; color: #e5e1eb; }
 .settings-nav button.active {
-  border-color: var(--accent);
-  background: linear-gradient(100deg, var(--accent-glow), var(--accent-soft));
+  border-color: #8e64ff;
+  background: linear-gradient(100deg, #6840e34c, #8b62ff20);
   color: #fff;
-  box-shadow: inset 0 0 20px var(--accent-soft), 0 0 16px var(--accent-glow);
+  box-shadow: inset 0 0 20px #7a4cff22, 0 0 16px #6a3fff2b;
 }
-.settings-nav button.active svg { color: var(--accent-tertiary); filter: drop-shadow(0 0 5px var(--accent-glow)); }
+.settings-nav button.active svg { color: #9f82ff; filter: drop-shadow(0 0 5px #805aff); }
 .settings-content { min-width: 0; min-height: 0; overflow: hidden; }
 .settings-panel { height: 100%; min-height: 0; padding: 21px 24px 28px; overflow-y: auto; }
 .settings-panel[hidden] { display: none; }
@@ -1537,32 +1574,33 @@ main {
 }
 .settings-theme-fieldset {
   min-width: 0;
+  max-width: 760px;
   margin: 0;
   padding: 0;
   border: 0;
 }
 .settings-theme-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
 .settings-theme-card {
   --theme-preview-background: #020305;
-  --theme-preview-panel: #07080c;
-  --theme-preview-surface: #0b0c11;
+  --theme-preview-panel: #0c0d13;
+  --theme-preview-surface: #0b0c12;
   --theme-preview-accent: #7547ff;
   --theme-preview-secondary: #6540f5;
   --theme-preview-tertiary: #9b82ff;
   position: relative;
   display: grid;
-  grid-template-rows: 56px auto;
-  gap: 10px;
+  grid-template-rows: 92px auto;
+  gap: 12px;
   min-width: 0;
-  min-height: 126px;
-  padding: 10px;
+  min-height: 166px;
+  padding: 12px;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 15px;
+  border-radius: 16px;
   background: color-mix(in srgb, var(--surface) 90%, transparent);
   cursor: pointer;
   transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease, transform 150ms ease;
@@ -1614,11 +1652,11 @@ main {
 .settings-theme-preview {
   position: relative;
   display: grid;
-  grid-template-columns: 18px 1fr;
-  grid-template-rows: 14px 1fr;
+  grid-template-columns: 30px 1fr;
+  grid-template-rows: 22px 1fr;
   overflow: hidden;
   border: 1px solid #ffffff16;
-  border-radius: 9px;
+  border-radius: 12px;
   background: var(--theme-preview-background);
   box-shadow: inset 0 1px #ffffff0d;
 }
@@ -1633,7 +1671,7 @@ main {
   align-self: center;
   justify-self: center;
   width: 64%;
-  height: 9px;
+  height: 13px;
   border-radius: 999px;
   background: linear-gradient(90deg, var(--theme-preview-secondary), var(--theme-preview-accent), var(--theme-preview-tertiary));
   box-shadow: 0 0 12px color-mix(in srgb, var(--theme-preview-accent) 58%, transparent);
@@ -1644,26 +1682,32 @@ main {
 }
 .settings-theme-copy strong,
 .settings-theme-copy small { display: block; }
-.settings-theme-copy strong { color: var(--text); font-size: 12px; }
-.settings-theme-copy small { margin-top: 4px; color: var(--muted); font-size: 9px; line-height: 1.3; }
+.settings-theme-copy strong { color: var(--text); font-size: 13px; }
+.settings-theme-copy small { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.35; }
 .settings-theme-check {
   position: absolute;
-  top: 7px;
-  right: 7px;
+  top: 10px;
+  right: 10px;
   display: grid;
   place-items: center;
-  width: 18px;
-  height: 18px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
   background: var(--accent);
   color: #fff;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 800;
   opacity: 0;
   transform: scale(.7);
   transition: opacity 140ms ease, transform 140ms ease;
 }
 .settings-theme-card:has(input:checked) .settings-theme-check { opacity: 1; transform: scale(1); }
+.settings-theme-note {
+  max-width: 760px;
+  margin: 14px 2px 0;
+  color: var(--muted);
+  font-size: 10px;
+}
 .settings-group {
   overflow: hidden;
   border: 1px solid #ffffff14;
@@ -2191,6 +2235,9 @@ input[type="range"]::-webkit-slider-thumb {
 }
 input[type="range"]:focus-visible::-webkit-slider-thumb {
   box-shadow: 0 0 0 4px var(--base), 0 0 0 6px var(--accent-tertiary);
+}
+@media (max-width: 680px) {
+  .settings-theme-grid { grid-template-columns: 1fr; }
 }
 .volume {
   display: flex;
@@ -3399,7 +3446,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .storage-import-option small { margin-top: 4px; color: var(--muted); font-size: 9px; font-weight: 500; }
 .segmented { display: flex; padding: 4px; margin-top: 14px; border: 1px solid var(--line); border-radius: 12px; background: #ffffff08; }
 .segmented button { flex: 1; padding: 9px; background: transparent; border-radius: 9px; color: #c8cbd5; }
-.segmented button.active { background: var(--accent-soft); color: var(--accent-text); box-shadow: inset 0 0 0 1px var(--accent-border); }
+.segmented button.active { background: linear-gradient(180deg, #845bff, #5c2ee8); color: #fff; box-shadow: inset 0 0 0 1px #ad96ff4d; }
 .selection-bar { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; padding: 10px 14px; border-radius: 10px; background: #ffffff08; }
 .selection-bar .danger:disabled,
 .server-actions button:disabled { opacity: .4; cursor: default; }
@@ -3654,17 +3701,17 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-color: var(--accent) var(--surface-raised);
+  scrollbar-color: var(--history-scrollbar-thumb) var(--history-scrollbar-track);
   scrollbar-width: thin;
 }
 .listening-history-dialog.day-expanded::-webkit-scrollbar { width: 7px; }
 .listening-history-dialog.day-expanded::-webkit-scrollbar-track {
   border-radius: 6px;
-  background: var(--surface-raised);
+  background: var(--history-scrollbar-track);
 }
 .listening-history-dialog.day-expanded::-webkit-scrollbar-thumb {
   border-radius: 6px;
-  background: var(--accent);
+  background: var(--history-scrollbar-thumb);
 }
 .listening-history-dialog.day-expanded .listening-history-panel {
   max-height: none;
@@ -4025,7 +4072,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   overflow-x: auto;
   overscroll-behavior-inline: contain;
   scroll-snap-type: x proximity;
-  scrollbar-color: var(--accent) var(--surface-raised);
+  scrollbar-color: var(--history-scrollbar-thumb) var(--history-scrollbar-track);
   scrollbar-width: thin;
   animation: history-ranking-in 180ms cubic-bezier(.2, .8, .2, 1);
 }
@@ -4033,11 +4080,11 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .history-song-ranking::-webkit-scrollbar { height: 7px; }
 .history-song-ranking::-webkit-scrollbar-track {
   border-radius: 6px;
-  background: var(--surface-raised);
+  background: var(--history-scrollbar-track);
 }
 .history-song-ranking::-webkit-scrollbar-thumb {
   border-radius: 6px;
-  background: var(--accent);
+  background: var(--history-scrollbar-thumb);
 }
 .history-ranked-song {
   position: relative;
@@ -4225,7 +4272,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .history-bar {
   fill: url("#historyBarGradient");
   opacity: .8;
-  filter: drop-shadow(0 3px 7px var(--accent-glow));
+  filter: drop-shadow(0 3px 7px var(--history-bar-shadow));
   cursor: pointer;
   transition: opacity 120ms ease, stroke 120ms ease, stroke-width 120ms ease;
 }
@@ -4237,11 +4284,11 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .history-bar.peak {
   fill: url("#historyPeakBarGradient");
   opacity: 1;
-  filter: drop-shadow(0 4px 9px var(--accent-glow));
+  filter: drop-shadow(0 4px 9px var(--history-peak-shadow));
 }
 .history-bar.selected,
 .history-bar:focus-visible {
-  stroke: var(--accent-tertiary);
+  stroke: var(--history-selected-stroke);
   stroke-width: 2;
   opacity: 1;
 }
@@ -4318,7 +4365,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   overflow-y: auto;
   overscroll-behavior: contain;
   background: transparent;
-  scrollbar-color: var(--accent) var(--surface-raised);
+  scrollbar-color: var(--history-scrollbar-thumb) var(--history-scrollbar-track);
   scrollbar-width: thin;
 }
 .history-day-song-list:focus-visible {
@@ -4328,11 +4375,11 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .history-day-song-list::-webkit-scrollbar { width: 7px; }
 .history-day-song-list::-webkit-scrollbar-track {
   border-radius: 6px;
-  background: var(--surface-raised);
+  background: var(--history-scrollbar-track);
 }
 .history-day-song-list::-webkit-scrollbar-thumb {
   border-radius: 6px;
-  background: var(--accent);
+  background: var(--history-scrollbar-thumb);
 }
 .listening-history-dialog.day-expanded .history-day-song-list {
   max-height: none;
@@ -6162,7 +6209,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   display: block;
   width: var(--clip-selection-width);
   border-block: 2px solid #ffd225;
-  background: linear-gradient(180deg, var(--accent-soft), color-mix(in srgb, var(--accent-secondary) 9%, transparent));
+  background: var(--clip-selection-background);
   pointer-events: none;
 }
 .clip-editor-handle { z-index: 5; width: 36px; height: 100%; }
@@ -6248,7 +6295,8 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   .clip-editor-popover { top: 48px; right: 8px; }
 }
 
-/* Theme-aware application chrome. Album-art-driven Full Player colors stay cinematic. */
+/* Alternate palettes recolor application chrome. Midnight intentionally keeps the original Windows skin. */
+@scope (:root[data-theme="ocean"], :root[data-theme="forest"], :root[data-theme="sunset"]) {
 * { scrollbar-color: var(--accent) var(--surface-raised); }
 *::-webkit-scrollbar-track {
   border-color: color-mix(in srgb, var(--accent-tertiary) 8%, transparent);
@@ -6637,3 +6685,4 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .clip-editor-selection-summary input:focus { box-shadow: 0 0 0 3px var(--accent-soft); }
 .clip-editor-preview,
 .clip-editor-save { border-color: var(--accent-border); }
+}

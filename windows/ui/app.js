@@ -279,6 +279,7 @@ function settingsIcon(pathMarkup) {
 
 const settingsIcons = Object.freeze({
   general: settingsIcon('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.07.07-2.76 2.76-.07-.07a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.1 1.65V21h-3.8v-.1A1.8 1.8 0 0 0 9 19.25a1.8 1.8 0 0 0-2 .36l-.07.07-2.76-2.76.07-.07a1.8 1.8 0 0 0 .36-2A1.8 1.8 0 0 0 2.95 13H3v-3.8h-.05A1.8 1.8 0 0 0 4.6 8a1.8 1.8 0 0 0-.36-2l-.07-.07 2.76-2.76.07.07a1.8 1.8 0 0 0 2 .36A1.8 1.8 0 0 0 10.1 2H14v.05A1.8 1.8 0 0 0 15 3.7a1.8 1.8 0 0 0 2-.36l.07-.07 2.76 2.76-.07.07a1.8 1.8 0 0 0-.36 2A1.8 1.8 0 0 0 21.05 9H21v4h.05A1.8 1.8 0 0 0 19.4 15Z"/>'),
+  appearance: settingsIcon('<path d="M12 3a9 9 0 1 0 0 18h1.1a1.8 1.8 0 0 0 0-3.6h-.55a1.35 1.35 0 0 1 0-2.7H15a6 6 0 0 0 0-12Z"/><circle cx="7.4" cy="10" r=".8"/><circle cx="9.3" cy="6.8" r=".8"/><circle cx="13.3" cy="6.2" r=".8"/><circle cx="16.5" cy="8.5" r=".8"/>'),
   server: settingsIcon('<circle cx="12" cy="12" r="8"/><path d="M4.5 9h15M4.5 15h15M12 4c2 2.2 3 4.9 3 8s-1 5.8-3 8c-2-2.2-3-4.9-3-8s1-5.8 3-8Z"/>'),
   keybinds: settingsIcon('<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h.01M11 14h6M18 10h.01"/>'),
   background: settingsIcon('<path d="M4 7h16v11H4z"/><path d="M8 7V4h8v3M8 21h8"/>'),
@@ -1055,9 +1056,9 @@ function drawClipEditorStageVisualizer(levels, { live = false } = {}) {
   const gradientSize = `${pixelWidth}x${pixelHeight}`;
   if (!clipEditorVisualizerGradient || clipEditorVisualizerGradientSize !== gradientSize) {
     clipEditorVisualizerGradient = context.createLinearGradient(0, height, 0, 0);
-    clipEditorVisualizerGradient.addColorStop(0, themeCSSColor("--accent-secondary", "#6540f5"));
-    clipEditorVisualizerGradient.addColorStop(.72, themeCSSColor("--accent-tertiary", "#9b82ff"));
-    clipEditorVisualizerGradient.addColorStop(1, themeCSSColor("--accent", "#7547ff"));
+    clipEditorVisualizerGradient.addColorStop(0, themeCSSColor("--clip-visualizer-low", "#4e1a95"));
+    clipEditorVisualizerGradient.addColorStop(.72, themeCSSColor("--clip-visualizer-mid", "#bc5df8"));
+    clipEditorVisualizerGradient.addColorStop(1, themeCSSColor("--clip-visualizer-high", "#7140d4"));
     clipEditorVisualizerGradientSize = gradientSize;
   }
 
@@ -1902,8 +1903,8 @@ function historyChartMarkup(summary) {
     : `${summary.days.length} days of daily`;
   return `<div class="history-chart-frame"><div class="history-chart-viewport" data-day-count="${summary.days.length}"><svg class="history-chart-svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" data-plot-left="${left}" data-plot-right="${right}" data-plot-top="${top}" data-plot-bottom="${bottom}" data-axis-maximum="${axisMaximum}" role="img" aria-label="${periodDescription} listening minutes">
     <defs>
-      <linearGradient id="historyBarGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--accent-tertiary)"/><stop offset="1" style="stop-color:var(--accent-secondary)"/></linearGradient>
-      <linearGradient id="historyPeakBarGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--accent-tertiary)"/><stop offset="1" style="stop-color:var(--accent)"/></linearGradient>
+      <linearGradient id="historyBarGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--history-bar-start)"/><stop offset="1" style="stop-color:var(--history-bar-end)"/></linearGradient>
+      <linearGradient id="historyPeakBarGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--history-peak-start)"/><stop offset="1" style="stop-color:var(--history-peak-end)"/></linearGradient>
     </defs>
     <g class="history-grid">${grid}</g>
     ${bars}
@@ -4100,24 +4101,13 @@ function renderSettings() {
     <div class="settings-shell">
       <nav class="settings-nav" aria-label="Settings sections">
         <button class="${settingsPanel === "general" ? "active" : ""}" type="button" data-settings-panel="general" aria-current="${settingsPanel === "general" ? "page" : "false"}">${settingsIcons.general}<span>General</span></button>
+        <button class="${settingsPanel === "appearance" ? "active" : ""}" type="button" data-settings-panel="appearance" aria-current="${settingsPanel === "appearance" ? "page" : "false"}">${settingsIcons.appearance}<span>Appearance</span></button>
         <button class="${settingsPanel === "server" ? "active" : ""}" type="button" data-settings-panel="server" aria-current="${settingsPanel === "server" ? "page" : "false"}">${settingsIcons.server}<span>Server</span></button>
         <button class="${settingsPanel === "keybinds" ? "active" : ""}" type="button" data-settings-panel="keybinds" aria-current="${settingsPanel === "keybinds" ? "page" : "false"}">${settingsIcons.keybinds}<span>Keybinds</span></button>
       </nav>
       <div class="settings-content">
         <section class="settings-panel" data-settings-content="general" ${settingsPanel === "general" ? "" : "hidden"}>
-          <div class="settings-section-heading"><span>APPEARANCE</span><p>Choose a color theme for this Windows device.</p></div>
-          <fieldset class="settings-theme-fieldset">
-            <legend class="sr-only">Resonance theme</legend>
-            <div class="settings-theme-grid">
-              ${APP_THEMES.map((theme) => `<label class="settings-theme-card" data-theme-option="${theme.id}">
-                <input type="radio" name="settingsTheme" value="${theme.id}" ${preferences.theme === theme.id ? "checked" : ""}>
-                <span class="settings-theme-preview" aria-hidden="true"><span></span><span></span><span></span></span>
-                <span class="settings-theme-copy"><strong>${theme.label}</strong><small>${theme.description}</small></span>
-                <span class="settings-theme-check" aria-hidden="true">&#10003;</span>
-              </label>`).join("")}
-            </div>
-          </fieldset>
-          <div class="settings-section-heading compact"><span>WINDOWS</span><p>Control desktop behavior and connected services.</p></div>
+          <div class="settings-section-heading"><span>WINDOWS</span><p>Control desktop behavior and connected services.</p></div>
           <div class="settings-grid">
             <div class="settings-group">
               <label class="settings-row" for="settingsRunInBackground">
@@ -4145,6 +4135,21 @@ function renderSettings() {
               </div>
             </div>
           </div>
+        </section>
+        <section class="settings-panel settings-appearance-panel" data-settings-content="appearance" ${settingsPanel === "appearance" ? "" : "hidden"}>
+          <div class="settings-panel-title"><div><span class="eyebrow">THEME</span><h2>Appearance</h2><p>Choose a dark palette for this Windows device. Changes apply immediately.</p></div></div>
+          <fieldset class="settings-theme-fieldset">
+            <legend class="sr-only">Resonance theme</legend>
+            <div class="settings-theme-grid">
+              ${APP_THEMES.map((theme) => `<label class="settings-theme-card" data-theme-option="${theme.id}">
+                <input type="radio" name="settingsTheme" value="${theme.id}" ${preferences.theme === theme.id ? "checked" : ""}>
+                <span class="settings-theme-preview" aria-hidden="true"><span></span><span></span><span></span></span>
+                <span class="settings-theme-copy"><strong>${theme.label}</strong><small>${theme.description}</small></span>
+                <span class="settings-theme-check" aria-hidden="true">&#10003;</span>
+              </label>`).join("")}
+            </div>
+          </fieldset>
+          <p class="settings-theme-note">Your selection is stored only on this device.</p>
         </section>
         <section class="settings-panel" data-settings-content="server" ${settingsPanel === "server" ? "" : "hidden"}>
           <form id="serverSettingsForm" class="settings-server-form">

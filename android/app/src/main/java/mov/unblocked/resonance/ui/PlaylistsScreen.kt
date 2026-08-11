@@ -104,7 +104,7 @@ private fun PlaylistCollectionScreen(
                 }
                 IconButton(
                     onClick = { creating = true },
-                    modifier = Modifier.size(46.dp).background(MaterialTheme.colorScheme.primary, CircleShape),
+                    modifier = Modifier.size(46.dp).background(Accent, CircleShape),
                 ) { Icon(Icons.Default.Add, "New playlist") }
             }
         }
@@ -222,7 +222,7 @@ private fun PlaylistDetailScreen(
                 Button(
                     enabled = tracks.isNotEmpty(),
                     onClick = { if (isActivePlaylist) actions.togglePlayPause() else actions.playPlaylist(playlist.id) },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent),
                 ) {
                     Icon(
                         if (state.isPlaying && isActivePlaylist) Icons.Default.Pause
@@ -242,7 +242,7 @@ private fun PlaylistDetailScreen(
                     enabled = tracks.isNotEmpty() && !state.isTransientPlayback,
                     onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) },
                     modifier = Modifier.size(46.dp).background(
-                        if (state.shuffleEnabled && !state.isTransientPlayback) MaterialTheme.colorScheme.secondary
+                        if (state.shuffleEnabled && !state.isTransientPlayback) Violet
                         else Color.White.copy(alpha = .08f),
                         CircleShape,
                     ),
@@ -331,11 +331,7 @@ private fun PlaylistDetailScreen(
                                 )
                             }
                             Text(track.durationText, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
-                            Icon(
-                                if (added) Icons.Default.Check else Icons.Default.Add,
-                                null,
-                                tint = if (added) MaterialTheme.colorScheme.tertiary else Color.White,
-                            )
+                            Icon(if (added) Icons.Default.Check else Icons.Default.Add, null, tint = if (added) Accent else Color.White)
                         }
                     }
                 }
@@ -427,7 +423,7 @@ private fun EmptyPlaylistMessage(title: String, detail: String) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = MaterialTheme.colorScheme.tertiary)
+        Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = Violet)
         Text(title, style = MaterialTheme.typography.titleMedium)
         Text(detail, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
     }

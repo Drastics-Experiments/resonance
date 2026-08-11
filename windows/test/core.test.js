@@ -751,6 +751,13 @@ test("normalizes and persists the four device-local Windows themes", () => {
   assert.match(mainSource, /backgroundColor: "#05060a"/);
   assert.match(appSource, /function applyAppTheme\(value\)[\s\S]+document\.documentElement\.dataset\.theme = theme[\s\S]+cacheAppTheme\(theme\)/);
   assert.match(appSource, /state = normalizeState\(loadedState\);\s*state\.appPreferences\.theme = applyAppTheme\(state\.appPreferences\.theme\)/);
+  assert.match(appSource, /data-settings-panel="general"[\s\S]+data-settings-panel="appearance"[\s\S]+data-settings-panel="server"/);
+  assert.match(appSource, /data-settings-content="appearance"[^>]*>[\s\S]+<h2>Appearance<\/h2>[\s\S]+name="settingsTheme"[\s\S]+stored only on this device/);
+  const generalPanel = appSource.slice(
+    appSource.indexOf('data-settings-content="general"'),
+    appSource.indexOf('data-settings-content="appearance"'),
+  );
+  assert.doesNotMatch(generalPanel, /settingsTheme|settings-theme-card/);
   assert.match(appSource, /APP_THEMES\.map\(\(theme\) => `<label class="settings-theme-card"[\s\S]+type="radio" name="settingsTheme"/);
   assert.match(appSource, /updateAppPreference\("theme", input\.value\)/);
   const themeHandlerStart = appSource.indexOf(`document.querySelectorAll('input[name="settingsTheme"]')`);
@@ -777,8 +784,8 @@ test("defines complete Windows palettes and routes major chrome through theme to
   const shuffleSource = readFileSync(new URL("../ui/shuffle-icon.css", import.meta.url), "utf8");
   const palettes = {
     midnight: [
-      ["background", "#020305"], ["base", "#05060a"], ["panel", "#07080c"],
-      ["surface", "#0b0c11"], ["surface-raised", "#12131a"], ["accent", "#7547ff"],
+      ["background", "#020305"], ["base", "#05060a"], ["panel", "#0c0d13"],
+      ["surface", "#0b0c12"], ["surface-raised", "#11131c"], ["accent", "#7547ff"],
       ["accent-secondary", "#6540f5"], ["accent-tertiary", "#9b82ff"],
       ["gradient-accent", "linear-gradient(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%)"],
       ["action-background", "linear-gradient(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%)"],
@@ -822,8 +829,9 @@ test("defines complete Windows palettes and routes major chrome through theme to
   for (const [theme, actionColor] of Object.entries({ ocean: "#0f5caa", forest: "#126b43", sunset: "#a33a53" })) {
     assert.ok(whiteContrast(actionColor) >= 4.5, `${theme} action background must retain 4.5:1 white-text contrast`);
   }
-  assert.match(styleSource, /scrollbar-color: var\(--accent\) var\(--surface-raised\)/);
-  assert.doesNotMatch(styleSource, /scrollbar-color:\s*#[0-9a-f]/i);
+  assert.match(styleSource, /@scope \(:root\[data-theme="ocean"\],[\s\S]+:root\[data-theme="sunset"\]\) \{/);
+  assert.match(styleSource, /scrollbar-color: #7c57df #11131b/);
+  assert.match(styleSource, /@scope[\s\S]+scrollbar-color: var\(--accent\) var\(--surface-raised\)/);
   assert.match(styleSource, /outline: 2px solid var\(--accent-tertiary\)/);
   assert.doesNotMatch(styleSource, /outline: 2px solid #b69cff/i);
   assert.match(styleSource, /\.sidebar\s*\{[\s\S]*?background: var\(--sidebar-background\)/);
@@ -848,15 +856,23 @@ test("defines complete Windows palettes and routes major chrome through theme to
   assert.match(styleSource, /\.clip-editor-handle\.dragging span\s*\{[^}]*background: var\(--accent\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-glow\)/);
   assert.match(styleSource, /\.clip-editor-selection-summary input:focus\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-soft\)/);
   assert.doesNotMatch(styleSource, /#(?:6841f1|7751ff|7654ff2e|8f72ff55|8f72ff|7654ff24|b49eff)/i);
-  assert.match(styleSource, /\.profile-button\s*\{[^}]*border: 1px solid var\(--accent-border\)[^}]*background: var\(--action-background\)/);
-  assert.match(styleSource, /\.filters button\.active\s*\{[^}]*background: var\(--accent-soft\)[^}]*var\(--accent-border\)/);
-  assert.match(styleSource, /\.settings-nav button\.active svg\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-glow\)/);
+  assert.match(styleSource, /\.profile-button\s*\{[^}]*border: 1px solid #a58cff52[^}]*linear-gradient\(145deg, #6f3cff, #3a207d\)/);
+  assert.match(styleSource, /\.filters button\.active\s*\{[^}]*background: var\(--gradient-accent\)[^}]*#ad96ff4d/);
+  assert.match(styleSource, /\.settings-nav button\.active svg\s*\{[^}]*#9f82ff[^}]*#805aff/);
   assert.match(styleSource, /\.storage-import-option-icon\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
-  assert.match(styleSource, /\.segmented button\.active\s*\{[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)[^}]*var\(--accent-border\)/);
-  assert.match(styleSource, /\.history-bar\.peak\s*\{[^}]*filter: drop-shadow\([^)]*var\(--accent-glow\)/);
+  assert.match(styleSource, /\.segmented button\.active\s*\{[^}]*#845bff[^}]*#5c2ee8[^}]*color: #fff/);
+  assert.match(styleSource, /\.history-bar\.peak\s*\{[^}]*filter: drop-shadow\([^)]*var\(--history-peak-shadow\)/);
   assert.match(styleSource, /\.local-import-provider-pill\s*\{[^}]*border: 1px solid var\(--accent-border\)/);
-  assert.match(styleSource, /\.clip-editor-selection\s*\{[^}]*background: linear-gradient\([^}]*var\(--accent-soft\)[^}]*var\(--accent-secondary\)/);
-  assert.doesNotMatch(styleSource, /#(?:a58cff52|3a207d|c3b3ff|ad96ff4d|8e64ff|6840e34c|8b62ff20|7a4cff22|6a3fff2b|9f82ff|805aff|8f72ec40|7651dc35|b79cff|845bff|5c2ee8|5730bd4d|b54d9b59|e1d8ff|8175ae80|7d47dd|a75bf5|55319d|8c46e845|5e2ba328|6c36ac18)/i);
+  assert.match(styleSource, /\.clip-editor-selection\s*\{[^}]*background: var\(--clip-selection-background\)/);
+  assert.match(styleSource, /--history-bar-start: #9b7aff;[\s\S]+--history-peak-start: #ff806c;[\s\S]+--clip-visualizer-low: #4e1a95/);
+  assert.match(styleSource, /\.settings-theme-grid\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(styleSource, /\.settings-theme-card\s*\{[^}]*grid-template-rows: 92px auto/);
+  const alternateChrome = styleSource.slice(styleSource.indexOf("@scope (:root[data-theme=\"ocean\"]"));
+  assert.match(alternateChrome, /\.profile-button,[\s\S]+background: var\(--control-surface\)/);
+  assert.match(alternateChrome, /\.filters button\.active,[\s\S]+background: var\(--accent-soft\)/);
+  assert.match(alternateChrome, /\.settings-nav button\.active\s*\{[^}]*var\(--accent\)[^}]*var\(--accent-glow\)/);
+  assert.match(alternateChrome, /\.segmented button\.active[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
+  assert.doesNotMatch(styleSource, /#(?:8f72ec40|7651dc35|b79cff|8175ae80|7d47dd|a75bf5|55319d|8c46e845)/i);
 });
 
 test("adds focused keybinds, Discord presence, close-to-tray settings, custom scrollbars, and no volume percentage", () => {

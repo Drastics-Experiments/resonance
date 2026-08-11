@@ -17,7 +17,6 @@ interface ResonanceActions {
     fun setRepeatEnabled(enabled: Boolean)
     fun setPlaybackSpeed(speed: Float)
     fun setVolume(volume: Float)
-    fun setThemeChoice(choice: ResonanceThemeChoice)
     fun toggleFavorite(trackId: String)
     fun deleteTracksFromDevice(trackIds: Set<String>)
     fun saveClipRange(trackId: String, startMs: Long, endMs: Long)
