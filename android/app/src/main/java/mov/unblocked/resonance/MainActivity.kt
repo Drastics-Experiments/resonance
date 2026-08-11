@@ -20,7 +20,6 @@ import androidx.lifecycle.lifecycleScope
 import com.clerk.api.Clerk
 import kotlinx.coroutines.launch
 import mov.unblocked.resonance.ui.ResonanceApp
-import mov.unblocked.resonance.ui.ResonanceTheme
 import mov.unblocked.resonance.update.AndroidInstallRequest
 import mov.unblocked.resonance.update.AndroidUpdateInfo
 import mov.unblocked.resonance.update.AndroidUpdateManager
@@ -86,16 +85,14 @@ class MainActivity : ComponentActivity() {
                     startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(destination)))
                 }
             }
-            ResonanceTheme {
-                ResonanceApp(
-                    state = state,
-                    actions = viewModel,
-                    updateState = updateState,
-                    onDownloadUpdate = ::downloadUpdate,
-                    onInstallUpdate = ::installDownloadedUpdate,
-                    onDismissUpdate = updateManager::dismiss,
-                )
-            }
+            ResonanceApp(
+                state = state,
+                actions = viewModel,
+                updateState = updateState,
+                onDownloadUpdate = ::downloadUpdate,
+                onInstallUpdate = ::installDownloadedUpdate,
+                onDismissUpdate = updateManager::dismiss,
+            )
         }
     }
 

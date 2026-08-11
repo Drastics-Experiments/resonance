@@ -132,6 +132,7 @@ fun ClipEditorDialog(
 ) {
     val context = LocalContext.current
     val focus = LocalFocusManager.current
+    val palette = LocalResonancePalette.current
     var selectedTrackId by remember { mutableStateOf(state.currentTrackId ?: state.tracks.firstOrNull()?.id) }
     val selectedTrack = state.tracks.firstOrNull { it.id == selectedTrackId }
     var startMs by remember { mutableLongStateOf(0L) }
@@ -238,12 +239,12 @@ fun ClipEditorDialog(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF03040A).copy(alpha = .92f))
+                .background(palette.background.copy(alpha = .92f))
                 .padding(horizontal = 8.dp, vertical = 10.dp),
         ) {
             Surface(
                 modifier = Modifier.fillMaxSize(),
-                color = Color(0xFF080910),
+                color = palette.surface,
                 shape = RoundedCornerShape(18.dp),
                 border = BorderStroke(1.dp, Color.White.copy(alpha = .08f)),
                 tonalElevation = 8.dp,
@@ -423,7 +424,11 @@ fun ClipEditorDialog(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column {
                                 Eyebrow("Clip Length")
-                                Text(clipTime(endMs - startMs), color = Color(0xFFB56AFF), fontWeight = FontWeight.Bold)
+                                Text(
+                                    clipTime(endMs - startMs),
+                                    color = palette.tertiary,
+                                    fontWeight = FontWeight.Bold,
+                                )
                             }
                             Spacer(Modifier.weight(1f))
                             OutlinedButton(onClick = {
@@ -478,7 +483,7 @@ private fun CinematicClipHeader(
             Button(
                 onClick = onSave,
                 enabled = saveEnabled,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7942DF)),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 13.dp, vertical = 0.dp),
                 modifier = Modifier.height(34.dp),
             ) { Text("Save", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
@@ -508,8 +513,9 @@ private fun CinematicClipStage(
     onSkipEnd: () -> Unit,
     onExpand: () -> Unit,
 ) {
+    val palette = LocalResonancePalette.current
     Surface(
-        color = Color(0xFF090A10),
+        color = palette.surface,
         shape = RoundedCornerShape(16.dp),
         border = BorderStroke(1.dp, Color.White.copy(alpha = .09f)),
     ) {
@@ -537,15 +543,15 @@ private fun CinematicClipStage(
                         )
                         Text(track.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = if (expanded) 23.sp else 18.sp, maxLines = 1)
                         Text(track.artist, color = Color.White.copy(alpha = .86f), fontSize = if (expanded) 17.sp else 14.sp, maxLines = 1)
-                        Text("[Visualizer]", color = Color(0xFFB56AFF), fontSize = 14.sp)
+                        Text("[Visualizer]", color = palette.tertiary, fontSize = 14.sp)
                     }
                 }
             }
             Box(
-                modifier = Modifier.fillMaxWidth().height(54.dp).background(Color(0xFF0D0E15)).padding(horizontal = 14.dp),
+                modifier = Modifier.fillMaxWidth().height(54.dp).background(palette.raised).padding(horizontal = 14.dp),
             ) {
                 Row(modifier = Modifier.align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
-                    Text(clipTime(positionMs), color = Color(0xFFAC75FF), fontSize = 11.sp)
+                    Text(clipTime(positionMs), color = palette.tertiary, fontSize = 11.sp)
                     Text("  /  ", color = Color.White.copy(alpha = .35f), fontSize = 11.sp)
                     Text(clipTime(endMs), color = Color.White, fontSize = 11.sp)
                 }
@@ -570,6 +576,7 @@ private fun CinematicAndroidVisualizer(
     durationMs: Long,
     player: ExoPlayer,
 ) {
+    val palette = LocalResonancePalette.current
     var livePositionMs by remember(player) { mutableLongStateOf(positionMs) }
 
     LaunchedEffect(isPlaying, player, durationMs) {
@@ -596,7 +603,7 @@ private fun CinematicAndroidVisualizer(
         modifier = Modifier
             .fillMaxSize()
             .preferredFrameRate(60f)
-            .background(Brush.radialGradient(listOf(Color(0xFF2C1647), Color.Black))),
+            .background(Brush.radialGradient(listOf(palette.secondary.copy(alpha = .62f), palette.background))),
     ) {
         val barCount = 96
         val gap = 1.5.dp.toPx()
@@ -613,7 +620,7 @@ private fun CinematicAndroidVisualizer(
             val level = sampledAndroidClipLevel(samples, samplePosition)
             val height = (size.height * .72f * level).coerceAtLeast(5f)
             drawRoundRect(
-                color = Color(0xFF8D43D8).copy(alpha = .76f),
+                color = palette.accent.copy(alpha = .76f),
                 topLeft = Offset(index * (width + gap), size.height - height),
                 size = androidx.compose.ui.geometry.Size(width.coerceAtLeast(1f), height),
                 cornerRadius = androidx.compose.ui.geometry.CornerRadius(width / 2),
@@ -667,6 +674,7 @@ private fun CinematicAndroidWaveform(
     onRangeChange: (Long, Long) -> Unit,
     onSeek: (Long) -> Unit,
 ) {
+    val palette = LocalResonancePalette.current
     var draggingStart by remember { mutableStateOf(true) }
     val duration = track.durationMs.coerceAtLeast(250)
     val levels = remember(waveformSamples) {
@@ -681,7 +689,7 @@ private fun CinematicAndroidWaveform(
         modifier = Modifier
             .fillMaxWidth()
             .height(88.dp)
-            .semantics { contentDescription = "Clip waveform with yellow draggable handles" }
+            .semantics { contentDescription = "Clip waveform with draggable handles" }
             .pointerInput(track.id, duration) {
                 detectTapGestures { offset ->
                     val value = (offset.x / size.width.coerceAtLeast(1) * duration).toLong().coerceIn(currentStart, currentEnd)
@@ -721,7 +729,7 @@ private fun CinematicAndroidWaveform(
                 size = androidx.compose.ui.geometry.Size((size.width - endX).coerceAtLeast(0f), size.height),
             )
         }
-        drawRect(Color(0xFF7130AF).copy(alpha = .14f), topLeft = Offset(startX, 0f), size = androidx.compose.ui.geometry.Size((endX - startX).coerceAtLeast(0f), size.height))
+        drawRect(palette.secondary.copy(alpha = .14f), topLeft = Offset(startX, 0f), size = androidx.compose.ui.geometry.Size((endX - startX).coerceAtLeast(0f), size.height))
         if (frameImages.isEmpty()) {
             val gap = 1.dp.toPx()
             val barWidth = (size.width - gap * (levels.size - 1)) / levels.size
@@ -730,16 +738,16 @@ private fun CinematicAndroidWaveform(
                 val selected = ratio >= startMs.toFloat() / duration && ratio <= endMs.toFloat() / duration
                 val height = size.height * (.16f + .56f * level)
                 drawRect(
-                    color = if (selected) Color(0xFF934ADD) else Color.White.copy(alpha = .25f),
+                    color = if (selected) palette.tertiary else Color.White.copy(alpha = .25f),
                     topLeft = Offset(index * (barWidth + gap), (size.height - height) / 2),
                     size = androidx.compose.ui.geometry.Size(barWidth.coerceAtLeast(1f), height),
                 )
             }
         }
-        drawRect(Color(0xFFFFD329), topLeft = Offset(startX, 0f), size = androidx.compose.ui.geometry.Size((endX - startX).coerceAtLeast(0f), 2.dp.toPx()))
-        drawRect(Color(0xFFFFD329), topLeft = Offset(startX, size.height - 2.dp.toPx()), size = androidx.compose.ui.geometry.Size((endX - startX).coerceAtLeast(0f), 2.dp.toPx()))
-        drawCinematicHandle(startX, true)
-        drawCinematicHandle(endX, false)
+        drawRect(palette.tertiary, topLeft = Offset(startX, 0f), size = androidx.compose.ui.geometry.Size((endX - startX).coerceAtLeast(0f), 2.dp.toPx()))
+        drawRect(palette.tertiary, topLeft = Offset(startX, size.height - 2.dp.toPx()), size = androidx.compose.ui.geometry.Size((endX - startX).coerceAtLeast(0f), 2.dp.toPx()))
+        drawCinematicHandle(startX, true, palette.tertiary)
+        drawCinematicHandle(endX, false, palette.tertiary)
         val playheadX = size.width * playheadMs.coerceIn(0, duration) / duration.toFloat()
         drawRect(Color.White, topLeft = Offset(playheadX, 0f), size = androidx.compose.ui.geometry.Size(1.5.dp.toPx(), size.height))
     }
@@ -769,11 +777,15 @@ private suspend fun extractAndroidClipVideoFrames(
     }
 }
 
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCinematicHandle(x: Float, pointsRight: Boolean) {
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCinematicHandle(
+    x: Float,
+    pointsRight: Boolean,
+    color: Color,
+) {
     val handleWidth = 26.dp.toPx()
     val left = (x - handleWidth / 2).coerceIn(0f, size.width - handleWidth)
     drawRoundRect(
-        color = Color(0xFFFFD329),
+        color = color,
         topLeft = Offset(left, 0f),
         size = androidx.compose.ui.geometry.Size(handleWidth, size.height),
         cornerRadius = androidx.compose.ui.geometry.CornerRadius(10.dp.toPx()),
@@ -805,7 +817,7 @@ private fun CinematicClipOverlay(
     ) {
         Surface(
             modifier = Modifier.fillMaxWidth().padding(18.dp).clickable {},
-            color = Color(0xF511121B),
+            color = LocalResonancePalette.current.raised.copy(alpha = .96f),
             shape = RoundedCornerShape(20.dp),
             border = BorderStroke(1.dp, Color.White.copy(alpha = .12f)),
             tonalElevation = 12.dp,
@@ -1043,7 +1055,7 @@ private fun LegacyClipEditorDialog(
     ) {
         Surface(
             modifier = Modifier.fillMaxWidth().fillMaxHeight(.92f).padding(horizontal = 14.dp),
-            color = Color(0xFF08090E),
+            color = LocalResonancePalette.current.surface,
             shape = RoundedCornerShape(22.dp),
             tonalElevation = 8.dp,
         ) {
@@ -1139,7 +1151,11 @@ private fun LegacyClipEditorDialog(
                                 horizontalAlignment = Alignment.CenterHorizontally,
                             ) {
                                 Eyebrow("Clip Length")
-                                Text(clipTime(endMs - startMs), color = Violet, fontWeight = FontWeight.Bold)
+                                Text(
+                                    clipTime(endMs - startMs),
+                                    color = MaterialTheme.colorScheme.tertiary,
+                                    fontWeight = FontWeight.Bold,
+                                )
                             }
                             ClipTimeField(
                                 "END",
@@ -1213,7 +1229,7 @@ private fun LegacyClipEditorDialog(
                                     stopPreview()
                                     actions.saveClipRange(selectedTrack.id, startMs, endMs)
                                 },
-                                colors = ButtonDefaults.buttonColors(containerColor = Violet),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
                                 modifier = Modifier.weight(1f),
                             ) { Text("Save Range") }
                         }
@@ -1304,7 +1320,7 @@ private fun ClipPreviewTransport(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             IconButton(onClick = onToggle, enabled = enabled) {
-                Surface(color = Violet, shape = RoundedCornerShape(999.dp)) {
+                Surface(color = MaterialTheme.colorScheme.secondary, shape = RoundedCornerShape(999.dp)) {
                     Icon(
                         if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = if (isPlaying) "Pause preview" else "Play preview",
@@ -1346,6 +1362,7 @@ private fun ClipWaveform(
     endMs: Long,
     onRangeChange: (Long, Long) -> Unit,
 ) {
+    val palette = LocalResonancePalette.current
     var draggingStart by remember { mutableStateOf(true) }
     val duration = track.durationMs.coerceAtLeast(250)
     val levels = remember(track.id) { waveformLevels(track.id) }
@@ -1385,7 +1402,7 @@ private fun ClipWaveform(
             val selected = center >= startMs.toFloat() / duration && center <= endMs.toFloat() / duration
             val height = size.height * (.2f + .65f * level)
             drawRoundRect(
-                color = if (selected) Violet else Color.White.copy(alpha = .16f),
+                color = if (selected) palette.tertiary else Color.White.copy(alpha = .16f),
                 topLeft = Offset(x, (size.height - height) / 2),
                 size = androidx.compose.ui.geometry.Size(barWidth.coerceAtLeast(1f), height),
                 cornerRadius = androidx.compose.ui.geometry.CornerRadius(barWidth / 2),
@@ -1393,8 +1410,8 @@ private fun ClipWaveform(
         }
         val startX = size.width * startMs / duration.toFloat()
         val endX = size.width * endMs / duration.toFloat()
-        drawHandle(startX, pointsRight = true)
-        drawHandle(endX, pointsRight = false)
+        drawHandle(startX, pointsRight = true, color = palette.tertiary)
+        drawHandle(endX, pointsRight = false, color = palette.tertiary)
         drawRoundRect(
             color = Color.White.copy(alpha = .08f),
             style = Stroke(1.dp.toPx()),
@@ -1403,11 +1420,15 @@ private fun ClipWaveform(
     }
 }
 
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawHandle(x: Float, pointsRight: Boolean) {
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawHandle(
+    x: Float,
+    pointsRight: Boolean,
+    color: Color,
+) {
     val halfWidth = 11.dp.toPx()
     val halfHeight = 20.dp.toPx()
     drawRoundRect(
-        color = Violet,
+        color = color,
         topLeft = Offset((x - halfWidth).coerceIn(0f, size.width - halfWidth * 2), size.height / 2 - halfHeight),
         size = androidx.compose.ui.geometry.Size(halfWidth * 2, halfHeight * 2),
         cornerRadius = androidx.compose.ui.geometry.CornerRadius(halfWidth),
@@ -1506,7 +1527,7 @@ fun LinkImportDialog(
     ) {
         Surface(
             modifier = Modifier.fillMaxWidth().fillMaxHeight(.92f).padding(horizontal = 14.dp),
-            color = Color(0xFF08090E),
+            color = LocalResonancePalette.current.surface,
             shape = RoundedCornerShape(22.dp),
         ) {
             Column(Modifier.fillMaxSize()) {
@@ -1631,7 +1652,7 @@ fun LinkImportDialog(
                                     Text(
                                         linkExistingStatus(existing.isOnDevice, existing.isOnServer),
                                         fontSize = 12.sp,
-                                        color = SuccessGreen,
+                                        color = LocalResonancePalette.current.success,
                                     )
                                 }
                             }
@@ -1711,7 +1732,7 @@ fun LinkImportDialog(
                                                 Text(
                                                     linkExistingStatus(existing.isOnDevice, existing.isOnServer),
                                                     fontSize = 11.sp,
-                                                    color = SuccessGreen,
+                                                    color = LocalResonancePalette.current.success,
                                                 )
                                             }
                                         }
@@ -1755,7 +1776,7 @@ fun LinkImportDialog(
                                 actions.resolveLinkImport(source)
                             },
                             enabled = !importState.isRunning,
-                            colors = ButtonDefaults.buttonColors(containerColor = Violet),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
                         ) {
                             Icon(Icons.Default.Search, null)
                             Spacer(Modifier.size(6.dp))
@@ -1773,7 +1794,7 @@ fun LinkImportDialog(
                             } else {
                                 importState.selectedVideoId != null
                             },
-                            colors = ButtonDefaults.buttonColors(containerColor = Violet),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
                         ) { Text("Import") }
                     }
                 }
@@ -1796,7 +1817,7 @@ private fun LinkSearchResults(
                 "${response.results.size} ${if (state.linkImport.mediaMode == LinkImportMediaMode.Video) "downloadable" else "previewable"}",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = Violet,
+                color = MaterialTheme.colorScheme.tertiary,
             )
         }
         LinkImportSearchProvider.entries.forEach { provider ->
@@ -1881,7 +1902,7 @@ private fun LinkSearchResultRow(
                     Text(
                         linkExistingStatus(existing.isOnDevice, existing.isOnServer),
                         fontSize = 11.sp,
-                        color = SuccessGreen,
+                        color = LocalResonancePalette.current.success,
                     )
                 }
             }
@@ -1916,7 +1937,11 @@ private fun LinkStageCard(state: LinkImportUiState) {
                         else -> Icons.Default.MusicNote
                     },
                     null,
-                    tint = if (state.stage == LinkImportStage.Complete) SuccessGreen else Violet,
+                    tint = if (state.stage == LinkImportStage.Complete) {
+                        LocalResonancePalette.current.success
+                    } else {
+                        MaterialTheme.colorScheme.tertiary
+                    },
                 )
                 Spacer(Modifier.size(8.dp))
                 Text(linkStageTitle(state.stage, state.mediaMode), fontWeight = FontWeight.Bold)
@@ -1928,7 +1953,7 @@ private fun LinkStageCard(state: LinkImportUiState) {
                 LinearProgressIndicator(
                     progress = { state.completedBytes.toFloat() / state.totalBytes.coerceAtLeast(1) },
                     modifier = Modifier.fillMaxWidth(),
-                    color = Violet,
+                    color = MaterialTheme.colorScheme.secondary,
                 )
                 Text(
                     android.text.format.Formatter.formatFileSize(LocalContext.current, state.completedBytes) + " of " +
@@ -1937,10 +1962,16 @@ private fun LinkStageCard(state: LinkImportUiState) {
                 )
             }
             state.completedTrackTitle?.let {
-                Text("Added “" + it + "” to this device.", color = SuccessGreen, fontSize = 13.sp)
+                Text(
+                    "Added “" + it + "” to this device.",
+                    color = LocalResonancePalette.current.success,
+                    fontSize = 13.sp,
+                )
             }
             state.batchCurrentTitle?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .7f)) }
-            state.completedSummary?.let { Text(it, color = SuccessGreen, fontSize = 13.sp) }
+            state.completedSummary?.let {
+                Text(it, color = LocalResonancePalette.current.success, fontSize = 13.sp)
+            }
         }
     }
 }
@@ -1966,7 +1997,7 @@ private fun ToolEmpty(title: String, detail: String) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = Violet)
+        Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = MaterialTheme.colorScheme.tertiary)
         Text(title, fontWeight = FontWeight.Bold)
         Text(
             detail,

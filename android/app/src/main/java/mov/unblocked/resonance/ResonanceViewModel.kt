@@ -107,6 +107,7 @@ import mov.unblocked.resonance.playback.AuthenticatedStreamRegistry
 import mov.unblocked.resonance.playback.StreamLeaseUpdatePolicy
 import mov.unblocked.resonance.ui.ResonanceActions
 import mov.unblocked.resonance.ui.ResonanceUiState
+import mov.unblocked.resonance.ui.ResonanceThemeChoice
 import mov.unblocked.resonance.ui.LinkImportUiState
 import mov.unblocked.resonance.ui.PlaybackUiStatus
 import mov.unblocked.resonance.ui.invalidatedForSourceEdit
@@ -153,6 +154,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private val clientConfigStore = ClientConfigStore(context)
     private val profilePictureStore = ProfilePictureStore(context)
     private val preferences = context.getSharedPreferences("resonance.playback", 0)
+    private val appearancePreferences = context.getSharedPreferences("resonance.appearance", 0)
     private val mutableState = MutableStateFlow(
         ResonanceUiState(
             serverUrl = accountSession?.baseURL ?: credentials.serverURL,
@@ -166,6 +168,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             repeatEnabled = preferences.getBoolean("repeat", false),
             playbackSpeed = preferences.getFloat("speed", 1f),
             volume = preferences.getFloat("volume", .8f).coerceIn(0f, 1f),
+            themeChoice = ResonanceThemeChoice.fromStorageID(
+                appearancePreferences.getString("theme", null),
+            ),
         ),
     )
     val uiState = mutableState.asStateFlow()
@@ -1915,6 +1920,12 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         controller?.volume = PlaybackVolumePolicy.gainForSlider(clamped)
         mutableState.value = mutableState.value.copy(volume = clamped)
         preferences.edit().putFloat("volume", clamped).apply()
+    }
+
+    override fun setThemeChoice(choice: ResonanceThemeChoice) {
+        if (mutableState.value.themeChoice == choice) return
+        mutableState.value = mutableState.value.copy(themeChoice = choice)
+        appearancePreferences.edit().putString("theme", choice.storageID).apply()
     }
 
     override fun toggleFavorite(trackId: String) {

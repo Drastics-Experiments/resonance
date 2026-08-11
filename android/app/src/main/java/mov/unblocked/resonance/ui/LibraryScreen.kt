@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shuffle
@@ -72,6 +73,7 @@ import kotlinx.coroutines.withContext
 fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: Modifier = Modifier) {
     var connectionOpen by remember { mutableStateOf(false) }
     var clipEditorOpen by remember { mutableStateOf(false) }
+    var appearanceOpen by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val query = state.librarySearch.trim()
     val tracks = if (query.isEmpty()) state.tracks else state.tracks.filter {
@@ -103,6 +105,7 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                     actions = actions,
                     onConnection = { connectionOpen = true },
                     onClipEditor = { clipEditorOpen = true },
+                    onAppearance = { appearanceOpen = true },
                 )
             }
         }
@@ -111,7 +114,7 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                 Button(
                     enabled = state.tracks.isNotEmpty(),
                     onClick = actions::togglePlayPause,
-                    colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
                 ) {
                     Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null)
@@ -124,7 +127,7 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                     modifier = Modifier
                         .size(46.dp)
                         .background(
-                            if (state.shuffleEnabled && !state.isTransientPlayback) Violet
+                            if (state.shuffleEnabled && !state.isTransientPlayback) MaterialTheme.colorScheme.secondary
                             else Color.White.copy(alpha = .08f),
                             CircleShape,
                         ),
@@ -167,7 +170,7 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = Violet)
+                    Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = MaterialTheme.colorScheme.tertiary)
                     Text(if (state.tracks.isEmpty()) "No songs yet" else "No results", style = MaterialTheme.typography.titleMedium)
                     Text(
                         if (state.tracks.isEmpty()) "Import audio or video, or sync your music server." else "Try another search term.",
@@ -194,6 +197,13 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
     if (clipEditorOpen) {
         ClipEditorDialog(state, actions) { clipEditorOpen = false }
     }
+    if (appearanceOpen) {
+        AppearanceDialog(
+            selected = state.themeChoice,
+            onSelected = actions::setThemeChoice,
+            onDismiss = { appearanceOpen = false },
+        )
+    }
 }
 
 @Composable
@@ -202,6 +212,7 @@ private fun ProfileButton(
     actions: ResonanceActions,
     onConnection: () -> Unit,
     onClipEditor: () -> Unit,
+    onAppearance: () -> Unit,
 ) {
     val profileName = AccountEmailPrivacy.safeDisplayName(
         state.accountDisplayName ?: activeSyncProfileName(state),
@@ -215,7 +226,7 @@ private fun ProfileButton(
             onClick = { expanded = true },
             modifier = Modifier
                 .size(44.dp)
-                .background(Violet, CircleShape)
+                .background(MaterialTheme.colorScheme.secondary, CircleShape)
                 .semantics {
                     contentDescription = "Profile: $profileName. Open profile tools"
                 },
@@ -252,6 +263,14 @@ private fun ProfileButton(
                 onClick = {
                     expanded = false
                     onClipEditor()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Appearance") },
+                leadingIcon = { Icon(Icons.Default.Palette, null) },
+                onClick = {
+                    expanded = false
+                    onAppearance()
                 },
             )
             DropdownMenuItem(

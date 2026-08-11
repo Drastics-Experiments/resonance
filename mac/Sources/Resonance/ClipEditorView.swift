@@ -219,6 +219,7 @@ final class ClipPreviewController: ObservableObject {
 }
 
 struct MacClipEditorSheet: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     @EnvironmentObject private var preferences: MacDesktopPreferences
     @Environment(\.dismiss) private var dismiss
@@ -262,7 +263,7 @@ struct MacClipEditorSheet: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            Color(hex: 0x080910)
+            palette.background
 
             VStack(spacing: 10) {
                 topBar
@@ -306,14 +307,14 @@ struct MacClipEditorSheet: View {
                     Text("Done").font(.system(size: 15, weight: .semibold))
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Color.appInk)
+                .foregroundStyle(palette.ink)
 
                 Spacer()
 
                 HStack(spacing: 14) {
                     Button(action: saveRange) {
                         if isSaving {
-                            ProgressView().controlSize(.small).frame(width: 48)
+                            ProgressView().controlSize(.small).tint(.white).frame(width: 48)
                         } else {
                             Text("Save")
                                 .font(.system(size: 13, weight: .bold))
@@ -323,8 +324,8 @@ struct MacClipEditorSheet: View {
                     .buttonStyle(.plain)
                     .padding(.horizontal, 9)
                     .frame(height: 32)
-                    .foregroundStyle(canSave ? Color.white : Color.appMuted.opacity(0.55))
-                    .background(canSave ? Color(hex: 0x7942DF) : Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
+                    .foregroundStyle(canSave ? Color.white : palette.muted.opacity(0.55))
+                    .background(canSave ? palette.accent : Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
                     .disabled(!canSave)
                     .keyboardShortcut("s", modifiers: [.command])
 
@@ -335,7 +336,7 @@ struct MacClipEditorSheet: View {
                         Image(systemName: "questionmark")
                             .font(.system(size: 14, weight: .semibold))
                             .frame(width: 28, height: 28)
-                            .overlay(Circle().stroke(Color.appInk.opacity(0.9), lineWidth: 1.4))
+                            .overlay(Circle().stroke(palette.ink.opacity(0.9), lineWidth: 1.4))
                     }
                     .help("Clip editor help")
 
@@ -350,7 +351,7 @@ struct MacClipEditorSheet: View {
                     .help("Clip settings")
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Color.appInk)
+                .foregroundStyle(palette.ink)
             }
         }
         .frame(height: 44)
@@ -375,10 +376,10 @@ struct MacClipEditorSheet: View {
                     .truncationMode(.tail)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
             }
             .font(.system(size: 18, weight: .semibold))
-            .foregroundStyle(Color.appInk)
+            .foregroundStyle(palette.ink)
             .padding(.horizontal, 10)
             .frame(height: 34)
             .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -396,17 +397,17 @@ struct MacClipEditorSheet: View {
             Spacer()
             Image(systemName: "waveform.slash")
                 .font(.system(size: 36, weight: .medium))
-                .foregroundStyle(Color.appViolet)
-            Text("No editable songs").font(.system(size: 20, weight: .bold)).foregroundStyle(Color.appInk)
+                .foregroundStyle(palette.foregroundAccent)
+            Text("No editable songs").font(.system(size: 20, weight: .bold)).foregroundStyle(palette.ink)
             Text("Add a local file or download a server song before creating a clip.")
-                .font(.system(size: 12)).foregroundStyle(Color.appMuted)
+                .font(.system(size: 12)).foregroundStyle(palette.muted)
             Button("Add Music…") { model.importLocalFiles() }
-                .buttonStyle(.borderedProminent).tint(Color.appViolet)
+                .buttonStyle(.borderedProminent).tint(palette.secondary)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine, lineWidth: 1) }
+        .overlay { RoundedRectangle(cornerRadius: 15).stroke(palette.divider, lineWidth: 1) }
         .padding([.horizontal, .bottom], 14)
     }
 
@@ -449,7 +450,7 @@ struct MacClipEditorSheet: View {
         }
         .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine, lineWidth: 1) }
+        .overlay { RoundedRectangle(cornerRadius: 15).stroke(palette.divider, lineWidth: 1) }
     }
 
     private var audioPreview: some View {
@@ -457,7 +458,8 @@ struct MacClipEditorSheet: View {
             CinematicClipVisualizer(
                 samples: waveformSamples,
                 spectrumAnalyzer: preview.spectrumAnalyzer,
-                isPlaying: preview.isPlaying
+                isPlaying: preview.isPlaying,
+                gradientColors: palette.gradientStops
             )
             if let selectedTrack {
                 VStack(spacing: 9) {
@@ -466,25 +468,25 @@ struct MacClipEditorSheet: View {
                         .shadow(color: .black.opacity(0.62), radius: 24, y: 16)
                     Text(selectedTrack.title)
                         .font(.system(size: 28, weight: .bold))
-                        .foregroundStyle(Color.appInk)
+                        .foregroundStyle(palette.ink)
                         .lineLimit(1)
                     Text(selectedTrack.artist)
                         .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(Color.appInk.opacity(0.88))
+                        .foregroundStyle(palette.ink.opacity(0.88))
                         .lineLimit(1)
                 }
                 .padding(.top, 8)
             }
         }
-        .background(Color(hex: 0x05060B))
+        .background(palette.background)
     }
 
     private var previewTransport: some View {
         ZStack {
             HStack(spacing: 8) {
-                Text(clipTimeText(preview.position)).foregroundStyle(Color(hex: 0xAC75FF))
-                Text("/").foregroundStyle(Color.appMuted.opacity(0.65))
-                Text(clipTimeText(endTime)).foregroundStyle(Color.appInk)
+                Text(clipTimeText(preview.position)).foregroundStyle(palette.tertiary)
+                Text("/").foregroundStyle(palette.muted.opacity(0.65))
+                Text(clipTimeText(endTime)).foregroundStyle(palette.ink)
                 Spacer()
                 Button { previewExpanded.toggle() } label: {
                     Image(systemName: previewExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
@@ -511,11 +513,11 @@ struct MacClipEditorSheet: View {
             .font(.system(size: 17, weight: .semibold))
         }
         .buttonStyle(.plain)
-        .foregroundStyle(Color.appInk)
+        .foregroundStyle(palette.ink)
         .padding(.horizontal, 24)
         .frame(height: 60)
-        .background(Color(hex: 0x0D0E15).opacity(0.96))
-        .overlay(alignment: .top) { Rectangle().fill(Color.appLine).frame(height: 1) }
+        .background(palette.panel.opacity(0.96))
+        .overlay(alignment: .top) { Rectangle().fill(palette.divider).frame(height: 1) }
     }
 
     private var timeline: some View {
@@ -531,12 +533,12 @@ struct MacClipEditorSheet: View {
                     previewPosition: selectedTrack == nil ? nil : preview.position,
                     onSeek: { preview.seek(to: $0) }
                 )
-                if isLoadingWaveform { ProgressView().controlSize(.small) }
+                if isLoadingWaveform { ProgressView().controlSize(.small).tint(palette.foregroundAccent) }
             }
         }
-        .background(Color(hex: 0x101119), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .background(palette.raisedSurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine, lineWidth: 1) }
+        .overlay { RoundedRectangle(cornerRadius: 15).stroke(palette.divider, lineWidth: 1) }
     }
 
     private var statusLine: some View {
@@ -553,7 +555,7 @@ struct MacClipEditorSheet: View {
             Spacer()
         }
         .font(.system(size: 10, weight: .medium))
-        .foregroundStyle(errorMessage == nil ? Color.appMuted : Color(hex: 0xFF7568))
+        .foregroundStyle(errorMessage == nil ? palette.muted : Color(hex: 0xFF7568))
         .lineLimit(1)
         .padding(.horizontal, 4)
         .frame(height: 14)
@@ -569,8 +571,8 @@ struct MacClipEditorSheet: View {
 
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("CLIP LENGTH").font(.system(size: 9, weight: .bold)).tracking(1).foregroundStyle(Color.appMuted)
-                    Text(clipTimeText(clipLength)).font(.system(size: 15, weight: .bold, design: .monospaced)).foregroundStyle(Color(hex: 0xB56AFF))
+                    Text("CLIP LENGTH").font(.system(size: 9, weight: .bold)).tracking(1).foregroundStyle(palette.muted)
+                    Text(clipTimeText(clipLength)).font(.system(size: 15, weight: .bold, design: .monospaced)).foregroundStyle(palette.tertiary)
                 }
                 Spacer()
                 Button("Use Full Song") {
@@ -584,8 +586,8 @@ struct MacClipEditorSheet: View {
         .padding(18)
         .frame(width: 390)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .background(Color(hex: 0x11121B).opacity(0.94), in: RoundedRectangle(cornerRadius: 16))
-        .overlay { RoundedRectangle(cornerRadius: 16).stroke(Color.appLine, lineWidth: 1) }
+        .background(palette.raisedSurface.opacity(0.94), in: RoundedRectangle(cornerRadius: 16))
+        .overlay { RoundedRectangle(cornerRadius: 16).stroke(palette.divider, lineWidth: 1) }
         .shadow(color: .black.opacity(0.65), radius: 30, y: 14)
         .padding(.top, 58)
         .padding(.trailing, 20)
@@ -598,13 +600,13 @@ struct MacClipEditorSheet: View {
             Text("**Save** updates playback for this profile without changing the media file. **Done** closes the editor and discards anything not saved.")
         }
         .font(.system(size: 12))
-        .foregroundStyle(Color.appMuted)
+        .foregroundStyle(palette.muted)
         .lineSpacing(3)
         .padding(18)
         .frame(width: 360)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .background(Color(hex: 0x11121B).opacity(0.94), in: RoundedRectangle(cornerRadius: 16))
-        .overlay { RoundedRectangle(cornerRadius: 16).stroke(Color.appLine, lineWidth: 1) }
+        .background(palette.raisedSurface.opacity(0.94), in: RoundedRectangle(cornerRadius: 16))
+        .overlay { RoundedRectangle(cornerRadius: 16).stroke(palette.divider, lineWidth: 1) }
         .shadow(color: .black.opacity(0.65), radius: 30, y: 14)
         .padding(.top, 58)
         .padding(.trailing, 20)
@@ -613,8 +615,8 @@ struct MacClipEditorSheet: View {
     private func popoverHeader(eyebrow: String, title: String, close: @escaping () -> Void) -> some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(eyebrow).font(.system(size: 9, weight: .bold)).tracking(1.1).foregroundStyle(Color.appMuted)
-                Text(title).font(.system(size: 15, weight: .bold)).foregroundStyle(Color.appInk)
+                Text(eyebrow).font(.system(size: 9, weight: .bold)).tracking(1.1).foregroundStyle(palette.muted)
+                Text(title).font(.system(size: 15, weight: .bold)).foregroundStyle(palette.ink)
             }
             Spacer()
             Button(action: close) {
@@ -749,15 +751,26 @@ private struct CinematicClipVisualizer: NSViewRepresentable {
     let samples: [Double]
     let spectrumAnalyzer: ClipLiveSpectrumAnalyzer
     let isPlaying: Bool
+    let gradientColors: [Color]
 
     func makeNSView(context: Context) -> ClipSpectrumVisualizerView {
         let view = ClipSpectrumVisualizerView()
-        view.update(samples: samples, spectrumAnalyzer: spectrumAnalyzer, isPlaying: isPlaying)
+        view.update(
+            samples: samples,
+            spectrumAnalyzer: spectrumAnalyzer,
+            isPlaying: isPlaying,
+            gradientColors: gradientColors
+        )
         return view
     }
 
     func updateNSView(_ nsView: ClipSpectrumVisualizerView, context: Context) {
-        nsView.update(samples: samples, spectrumAnalyzer: spectrumAnalyzer, isPlaying: isPlaying)
+        nsView.update(
+            samples: samples,
+            spectrumAnalyzer: spectrumAnalyzer,
+            isPlaying: isPlaying,
+            gradientColors: gradientColors
+        )
     }
 
     static func dismantleNSView(_ nsView: ClipSpectrumVisualizerView, coordinator: ()) {
@@ -786,11 +799,7 @@ private final class ClipSpectrumVisualizerView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer = gradientLayer
-        gradientLayer.colors = [
-            NSColor(red: 0.31, green: 0.10, blue: 0.58, alpha: 1).cgColor,
-            NSColor(red: 0.74, green: 0.36, blue: 0.97, alpha: 1).cgColor,
-            NSColor(red: 0.44, green: 0.25, blue: 0.83, alpha: 1).cgColor,
-        ]
+        gradientLayer.colors = []
         gradientLayer.locations = [0, 0.72, 1]
         gradientLayer.startPoint = CGPoint(x: 0.5, y: 1)
         gradientLayer.endPoint = CGPoint(x: 0.5, y: 0)
@@ -819,8 +828,10 @@ private final class ClipSpectrumVisualizerView: NSView {
     func update(
         samples: [Double],
         spectrumAnalyzer: ClipLiveSpectrumAnalyzer,
-        isPlaying: Bool
+        isPlaying: Bool,
+        gradientColors: [Color]
     ) {
+        gradientLayer.colors = gradientColors.map { NSColor($0).cgColor }
         self.spectrumAnalyzer = spectrumAnalyzer
         if sourceSamples != samples {
             sourceSamples = samples
@@ -955,6 +966,7 @@ private final class ClipSpectrumVisualizerView: NSView {
 }
 
 private struct CinematicClipRuler: View {
+    @Environment(\.resonancePalette) private var palette
     let duration: TimeInterval
     private let divisions = 6
 
@@ -974,7 +986,7 @@ private struct CinematicClipRuler: View {
                     let x = proxy.size.width * CGFloat(index) / CGFloat(divisions)
                     Text(clipTimeText(max(duration, 0) * Double(index) / Double(divisions)))
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                         .position(
                             x: index == 0 ? 28 : (index == divisions ? proxy.size.width - 28 : x),
                             y: 12
@@ -982,11 +994,12 @@ private struct CinematicClipRuler: View {
                 }
             }
         }
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.appLine.opacity(0.65)).frame(height: 1) }
+        .overlay(alignment: .bottom) { Rectangle().fill(palette.divider.opacity(0.65)).frame(height: 1) }
     }
 }
 
 private struct CinematicClipWaveformSelector: View {
+    @Environment(\.resonancePalette) private var palette
     let samples: [Double]
     let videoFrames: [NSImage]
     let duration: TimeInterval
@@ -1039,7 +1052,7 @@ private struct CinematicClipWaveformSelector: View {
                 }
 
                 Rectangle()
-                    .fill(Color(hex: 0x7130AF).opacity(0.14))
+                    .fill(palette.secondary.opacity(0.14))
                     .frame(width: max(endX - startX, 0))
                     .position(x: startX + max(endX - startX, 0) / 2, y: height / 2)
 
@@ -1056,7 +1069,7 @@ private struct CinematicClipWaveformSelector: View {
                             let rect = CGRect(x: x, y: (size.height - barHeight) / 2, width: barWidth, height: barHeight)
                             context.fill(
                                 Path(roundedRect: rect, cornerRadius: barWidth / 2),
-                                with: .color(selected ? Color(hex: 0x8E4ADB) : Color.white.opacity(0.26))
+                                with: .color(selected ? palette.tertiary : Color.white.opacity(0.26))
                             )
                         }
                     }
@@ -1223,6 +1236,7 @@ private struct ClipVideoPlayer: NSViewRepresentable {
 }
 
 private struct ClipWaveformRangeSelector: View {
+    @Environment(\.resonancePalette) private var palette
     let samples: [Double]
     let duration: TimeInterval
     @Binding var startTime: TimeInterval
@@ -1251,7 +1265,7 @@ private struct ClipWaveformRangeSelector: View {
                         let rect = CGRect(x: x, y: (size.height - barHeight) / 2, width: barWidth, height: barHeight)
                         context.fill(
                             Path(roundedRect: rect, cornerRadius: barWidth / 2),
-                            with: .color(selected ? Color.appViolet : Color.white.opacity(0.18))
+                            with: .color(selected ? palette.secondary : Color.white.opacity(0.18))
                         )
                     }
                 }
@@ -1274,7 +1288,7 @@ private struct ClipWaveformRangeSelector: View {
                         .position(x: width * min(max(previewPosition / duration, 0), 1), y: height / 2)
                 }
 
-                rangeHandle(symbol: "chevron.right", color: Color.appViolet)
+                rangeHandle(symbol: "chevron.right", color: palette.secondary)
                     .position(x: min(max(startX, 8), width - 8), y: height / 2)
                     .gesture(
                         DragGesture(minimumDistance: 0, coordinateSpace: .named("clipWaveform"))
@@ -1285,7 +1299,7 @@ private struct ClipWaveformRangeSelector: View {
                             }
                     )
 
-                rangeHandle(symbol: "chevron.left", color: Color.appViolet)
+                rangeHandle(symbol: "chevron.left", color: palette.secondary)
                     .position(x: min(max(endX, 8), width - 8), y: height / 2)
                     .gesture(
                         DragGesture(minimumDistance: 0, coordinateSpace: .named("clipWaveform"))
@@ -1321,6 +1335,7 @@ private struct ClipWaveformRangeSelector: View {
 }
 
 private struct ClipTimeControl: View {
+    @Environment(\.resonancePalette) private var palette
     let label: String
     @Binding var value: TimeInterval
     let range: ClosedRange<TimeInterval>
@@ -1331,18 +1346,18 @@ private struct ClipTimeControl: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(Color.appMuted)
+                .foregroundStyle(palette.muted)
 
             TextField("0:00.0", text: $draft)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                .foregroundStyle(Color.appInk)
+                .foregroundStyle(palette.ink)
                 .padding(.horizontal, 8)
                 .frame(height: 27)
                 .background(Color.black.opacity(0.24), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(isFocused ? Color.appViolet.opacity(0.75) : Color.appLine, lineWidth: 1)
+                        .stroke(isFocused ? palette.secondary.opacity(0.75) : palette.divider, lineWidth: 1)
                 }
                 .focused($isFocused)
                 .onSubmit {

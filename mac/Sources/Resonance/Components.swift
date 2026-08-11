@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct TransferProgressOverlay: View {
+    @Environment(\.resonancePalette) private var palette
     let title: String
     let detail: String
     let status: String
@@ -18,7 +19,7 @@ struct TransferProgressOverlay: View {
         HStack(spacing: 14) {
             Image(systemName: symbol)
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(color)
+                .foregroundStyle(palette.foregroundAccent)
                 .frame(width: 42, height: 42)
                 .background(color.opacity(0.14), in: Circle())
                 .symbolEffect(.pulse)
@@ -31,31 +32,31 @@ struct TransferProgressOverlay: View {
                     if let clampedProgress {
                         Text("\(Int(clampedProgress * 100))%")
                             .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(Color.appMuted)
+                            .foregroundStyle(palette.muted)
                             .monospacedDigit()
                     }
                 }
 
                 Text(detail.isEmpty ? status : detail)
                     .font(.system(size: 10))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .lineLimit(1)
 
                 if let clampedProgress {
                     ProgressView(value: clampedProgress)
                         .progressViewStyle(.linear)
-                        .tint(color)
+                        .tint(palette.foregroundAccent)
                 } else {
                     ProgressView()
                         .progressViewStyle(.linear)
-                        .tint(color)
+                        .tint(palette.foregroundAccent)
                 }
             }
 
             Button(action: cancel) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .frame(width: 28, height: 28)
                     .background(Color.white.opacity(0.045), in: Circle())
             }
@@ -65,7 +66,7 @@ struct TransferProgressOverlay: View {
         }
         .padding(15)
         .frame(width: 390)
-        .background(Color.appSurfaceRaised.opacity(0.98), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .background(palette.raisedSurface.opacity(0.98), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .stroke(Color.white.opacity(0.055))
@@ -76,6 +77,7 @@ struct TransferProgressOverlay: View {
 }
 
 struct TransferResultOverlay: View {
+    @Environment(\.resonancePalette) private var palette
     let title: String
     let detail: String
     let symbol: String
@@ -86,7 +88,7 @@ struct TransferResultOverlay: View {
         HStack(spacing: 14) {
             Image(systemName: symbol)
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(color)
+                .foregroundStyle(palette.foregroundAccent)
                 .frame(width: 42, height: 42)
                 .background(color.opacity(0.14), in: Circle())
 
@@ -95,7 +97,7 @@ struct TransferResultOverlay: View {
                     .font(.system(size: 13, weight: .semibold))
                 Text(detail)
                     .font(.system(size: 10))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .lineLimit(2)
             }
 
@@ -104,7 +106,7 @@ struct TransferResultOverlay: View {
             Button(action: dismiss) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .frame(width: 28, height: 28)
                     .background(Color.white.opacity(0.045), in: Circle())
             }
@@ -114,7 +116,7 @@ struct TransferResultOverlay: View {
         }
         .padding(15)
         .frame(width: 390)
-        .background(Color.appSurfaceRaised.opacity(0.98), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .background(palette.raisedSurface.opacity(0.98), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .stroke(color.opacity(0.24))
@@ -398,8 +400,9 @@ struct TrackArtworkView: View {
 }
 
 struct ClickableProgress: View {
+    @Environment(\.resonancePalette) private var palette
     let progress: Double
-    var activeColor: Color = .appAccent
+    var activeColor: Color? = nil
     var height: CGFloat = 3
     var onSeek: (Double) -> Void
     @State private var isHovering = false
@@ -407,6 +410,7 @@ struct ClickableProgress: View {
     private let hitSlop: CGFloat = 7
     private let hoverThumbSize: CGFloat = 8
     private var clampedProgress: Double { min(max(progress, 0), 1) }
+    private var resolvedActiveColor: Color { activeColor ?? palette.accent }
 
     var body: some View {
         GeometryReader { proxy in
@@ -421,16 +425,16 @@ struct ClickableProgress: View {
                     .frame(height: height)
 
                 Capsule()
-                    .fill(activeColor)
+                    .fill(resolvedActiveColor)
                     .frame(width: proxy.size.width * clampedProgress, height: height)
             }
             .frame(height: height)
             .overlay(alignment: .leading) {
                 if isHovering {
                     Circle()
-                        .fill(activeColor)
+                        .fill(resolvedActiveColor)
                         .frame(width: hoverThumbSize, height: hoverThumbSize)
-                        .shadow(color: activeColor.opacity(0.35), radius: 3)
+                        .shadow(color: resolvedActiveColor.opacity(0.35), radius: 3)
                         .offset(x: thumbOffset)
                         .transition(.scale(scale: 0.65).combined(with: .opacity))
                 }
@@ -468,6 +472,7 @@ struct ClickableProgress: View {
 }
 
 struct EqualizerGlyph: View {
+    @Environment(\.resonancePalette) private var palette
     var isAnimating: Bool
 
     var body: some View {
@@ -476,7 +481,7 @@ struct EqualizerGlyph: View {
             RoundedRectangle(cornerRadius: 1).frame(width: 2, height: isAnimating ? 5 : 4)
             RoundedRectangle(cornerRadius: 1).frame(width: 2, height: isAnimating ? 10 : 4)
         }
-        .foregroundStyle(Color.appAccent)
+        .foregroundStyle(palette.foregroundAccent)
         .frame(width: 14, height: 12)
         .animation(.easeInOut(duration: 0.45).repeatForever(autoreverses: true), value: isAnimating)
     }
@@ -497,9 +502,11 @@ struct HoverSurface<Content: View>: View {
 }
 
 struct SoftDivider: View {
+    @Environment(\.resonancePalette) private var palette
+
     var body: some View {
         Rectangle()
-            .fill(Color.appLine)
+            .fill(palette.divider)
             .frame(height: 1)
     }
 }

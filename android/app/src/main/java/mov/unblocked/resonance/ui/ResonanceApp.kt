@@ -21,6 +21,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -47,11 +48,21 @@ fun ResonanceApp(
     onInstallUpdate: (AndroidUpdateInfo) -> Unit = {},
     onDismissUpdate: () -> Unit = {},
 ) {
-    ResonanceTheme {
+    ResonanceTheme(state.themeChoice) {
         var selectedTab by rememberSaveable { mutableStateOf(ResonanceTab.Library) }
         var openPlaylistId by rememberSaveable { mutableStateOf<String?>(null) }
         var showNowPlaying by rememberSaveable { mutableStateOf(false) }
         val focusManager = LocalFocusManager.current
+        val palette = LocalResonancePalette.current
+        val navigationItemColors = NavigationBarItemDefaults.colors(
+            selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            selectedTextColor = MaterialTheme.colorScheme.onSurface,
+            indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
+            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            disabledIconColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .38f),
+            disabledTextColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .38f),
+        )
 
         BackHandler(enabled = showNowPlaying) { showNowPlaying = false }
         BackHandler(enabled = !showNowPlaying && openPlaylistId != null) { openPlaylistId = null }
@@ -66,7 +77,7 @@ fun ResonanceApp(
                             if (state.currentTrack != null) {
                                 MiniPlayer(state, actions, onOpen = { showNowPlaying = true })
                             }
-                            NavigationBar(containerColor = Color(0xF5050609)) {
+                            NavigationBar(containerColor = palette.panel.copy(alpha = .96f)) {
                                 ResonanceTab.entries.forEach { tab ->
                                     val icon = when (tab) {
                                         ResonanceTab.Library -> Icons.Default.LibraryMusic
@@ -83,6 +94,7 @@ fun ResonanceApp(
                                         },
                                         icon = { Icon(icon, tab.label) },
                                         label = { Text(tab.label) },
+                                        colors = navigationItemColors,
                                     )
                                 }
                             }

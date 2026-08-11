@@ -1072,6 +1072,7 @@ enum LocalImportPresentationPolicy {
 }
 
 struct MacLocalImportSheet: View {
+    @Environment(\.resonancePalette) private var palette
     @ObservedObject private var viewModel: MacLocalImportViewModel
     private let onDismiss: () -> Void
     @FocusState private var sourceFocused: Bool
@@ -1129,7 +1130,7 @@ struct MacLocalImportSheet: View {
         VStack(spacing: 0) {
             header
 
-            Divider().overlay(Color.appLine)
+            Divider().overlay(palette.divider)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
@@ -1163,13 +1164,13 @@ struct MacLocalImportSheet: View {
             }
             .scrollIndicators(.hidden)
 
-            Divider().overlay(Color.appLine)
+            Divider().overlay(palette.divider)
             footer
         }
         .frame(width: 620, height: sheetHeight)
         .background(
             RadialGradient(
-                colors: [Color.appViolet.opacity(0.12), Color.appBackground],
+                colors: [palette.secondary.opacity(0.12), palette.background],
                 center: .topTrailing,
                 startRadius: 0,
                 endRadius: 430
@@ -1192,14 +1193,14 @@ struct MacLocalImportSheet: View {
                     providerMark(provider)
                         .frame(width: 40, height: 44)
                         .background(
-                            selectedProvider == provider ? Color.appViolet.opacity(0.18) : Color.clear,
+                            selectedProvider == provider ? palette.secondary.opacity(0.18) : Color.clear,
                             in: RoundedRectangle(cornerRadius: 14, style: .continuous)
                         )
                         .overlay {
                             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(selectedProvider == provider ? Color.appViolet.opacity(0.72) : Color.clear)
+                                .stroke(selectedProvider == provider ? palette.secondary.opacity(0.72) : Color.clear)
                         }
-                        .shadow(color: selectedProvider == provider ? Color.appViolet.opacity(0.30) : Color.clear, radius: 10)
+                        .shadow(color: selectedProvider == provider ? palette.secondary.opacity(0.30) : Color.clear, radius: 10)
                 }
                 .buttonStyle(.plain)
                 .help(provider.displayName)
@@ -1209,10 +1210,10 @@ struct MacLocalImportSheet: View {
         }
         .padding(7)
         .frame(width: 54)
-        .background(Color.appSurfaceRaised.opacity(0.96), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background(palette.raisedSurface.opacity(0.96), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(Color.appViolet.opacity(0.38))
+                .stroke(palette.secondary.opacity(0.38))
         }
         .shadow(color: .black.opacity(0.55), radius: 26, y: 14)
     }
@@ -1259,16 +1260,16 @@ struct MacLocalImportSheet: View {
         HStack(spacing: 14) {
             Image(systemName: "sparkles")
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(Color.appViolet)
+                .foregroundStyle(palette.foregroundAccent)
                 .frame(width: 36, height: 36)
-                .background(Color.appViolet.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(palette.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Import from Link")
                     .font(.system(size: 21, weight: .bold, design: .rounded))
                 Text("Search for a track or paste a link to get started.")
                     .font(.system(size: 10))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
             }
 
             Spacer()
@@ -1306,7 +1307,7 @@ struct MacLocalImportSheet: View {
         }
         .padding(.horizontal, 20)
         .frame(height: 76)
-        .background(Color.appSurfaceRaised.opacity(0.82))
+        .background(palette.raisedSurface.opacity(0.82))
     }
 
     private var sourceField: some View {
@@ -1314,11 +1315,11 @@ struct MacLocalImportSheet: View {
             Text("LINK OR MUSIC SEARCH")
                 .font(.system(size: 10, weight: .bold))
                 .tracking(1.0)
-                .foregroundStyle(Color.appMuted)
+                .foregroundStyle(palette.muted)
 
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                 TextField("Link or music search", text: $viewModel.source)
                     .textFieldStyle(.plain)
                     .focused($sourceFocused)
@@ -1341,7 +1342,7 @@ struct MacLocalImportSheet: View {
                 }
                     .buttonStyle(.borderedProminent)
                     .buttonBorderShape(.roundedRectangle(radius: 10))
-                    .tint(Color.appViolet)
+                    .tint(palette.secondary)
                     .controlSize(.regular)
                     .disabled(viewModel.isRunning || viewModel.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .help(viewModel.resolveButtonTitle)
@@ -1350,8 +1351,8 @@ struct MacLocalImportSheet: View {
             .padding(.horizontal, 14)
             .frame(height: 50)
             .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(Color.appViolet.opacity(0.52)) }
-            .shadow(color: Color.appViolet.opacity(0.12), radius: 12)
+            .overlay { RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(palette.secondary.opacity(0.52)) }
+            .shadow(color: palette.secondary.opacity(0.12), radius: 12)
 
         }
     }
@@ -1362,11 +1363,11 @@ struct MacLocalImportSheet: View {
                 Text("SEARCH RESULTS")
                     .font(.system(size: 10, weight: .bold))
                     .tracking(1.0)
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                 Spacer()
                 Text("\(response.results.count) \(viewModel.mediaMode == .video ? "downloadable" : "previewable")")
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Color.appViolet)
+                    .foregroundStyle(palette.foregroundAccent)
             }
 
             ForEach(MacLocalImportChrome.providerOrder) { provider in
@@ -1376,24 +1377,24 @@ struct MacLocalImportSheet: View {
                         Text(provider.displayName.uppercased())
                             .font(.system(size: 9, weight: .bold))
                             .tracking(0.8)
-                            .foregroundStyle(Color.appInk)
+                            .foregroundStyle(palette.ink)
                         Spacer()
                         Text("\(results.count) result\(results.count == 1 ? "" : "s")")
                             .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(Color.appMuted)
+                            .foregroundStyle(palette.muted)
                     }
                     .padding(.horizontal, 3)
 
                     if results.isEmpty {
                         Text(viewModel.mediaMode == .video ? "No downloadable videos." : "No previewable results.")
                             .font(.system(size: 9))
-                            .foregroundStyle(Color.appMuted)
+                            .foregroundStyle(palette.muted)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(11)
                             .background(Color.white.opacity(0.02), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             .overlay {
                                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .stroke(Color.appLine, style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                                    .stroke(palette.divider, style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
                             }
                     } else {
                         ForEach(results) { result in
@@ -1426,7 +1427,7 @@ struct MacLocalImportSheet: View {
                 HStack(spacing: 11) {
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                         .font(.system(size: 16))
-                        .foregroundStyle(selected ? Color.appViolet : Color.appMuted)
+                        .foregroundStyle(selected ? palette.foregroundAccent : palette.muted)
                     importArtwork(
                         urlValue: result.track.artworkURL ?? candidate?.thumbnailURL,
                         title: result.track.title,
@@ -1435,20 +1436,20 @@ struct MacLocalImportSheet: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(result.track.title)
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Color.appInk)
+                            .foregroundStyle(palette.ink)
                             .lineLimit(1)
                         Text(searchResultDetails(result))
                             .font(.system(size: 9))
-                            .foregroundStyle(Color.appMuted)
+                            .foregroundStyle(palette.muted)
                             .lineLimit(1)
                     }
                     Spacer(minLength: 8)
                     Text(result.provider.displayName.uppercased())
                         .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(Color.appViolet)
+                        .foregroundStyle(palette.foregroundAccent)
                         .padding(.horizontal, 8)
                         .frame(height: 22)
-                        .background(Color.appViolet.opacity(0.12), in: Capsule())
+                        .background(palette.secondary.opacity(0.12), in: Capsule())
                 }
                 .contentShape(Rectangle())
             }
@@ -1461,11 +1462,11 @@ struct MacLocalImportSheet: View {
                     ZStack {
                         Circle().fill(Color.white.opacity(0.055))
                         if viewModel.loadingPreviewVideoID == candidate.videoID {
-                            ProgressView().controlSize(.mini).tint(Color.appViolet)
+                            ProgressView().controlSize(.mini).tint(palette.foregroundAccent)
                         } else {
                             Image(systemName: viewModel.previewingVideoID == candidate.videoID ? "pause.fill" : "play.fill")
                                 .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(viewModel.previewingVideoID == candidate.videoID ? Color.white : Color.appViolet)
+                                .foregroundStyle(viewModel.previewingVideoID == candidate.videoID ? Color.white : palette.foregroundAccent)
                                 .offset(x: viewModel.previewingVideoID == candidate.videoID ? 0 : 1)
                         }
                     }
@@ -1477,10 +1478,10 @@ struct MacLocalImportSheet: View {
             }
         }
         .padding(11)
-        .background(selected ? Color.appViolet.opacity(0.08) : Color.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .background(selected ? palette.secondary.opacity(0.08) : Color.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .stroke(selected ? Color.appViolet.opacity(0.45) : Color.appLine)
+                .stroke(selected ? palette.secondary.opacity(0.45) : palette.divider)
         }
         .disabled(viewModel.isRunning)
     }
@@ -1520,15 +1521,15 @@ struct MacLocalImportSheet: View {
                     .font(.system(size: 13, weight: .semibold))
                 Text(copy.detail)
                     .font(.system(size: 10))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .lineLimit(2)
 
             }
             Spacer(minLength: 0)
         }
         .padding(14)
-        .background(Color.appSurfaceRaised, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(Color.appLine) }
+        .background(palette.raisedSurface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(palette.divider) }
     }
 
     private func resolvedTrack(_ track: LocalImportSpotifyTrack) -> some View {
@@ -1541,12 +1542,12 @@ struct MacLocalImportSheet: View {
                     .lineLimit(1)
                 Text([track.artist, track.album].compactMap { $0 }.joined(separator: " • "))
                     .font(.system(size: 11))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .lineLimit(1)
                 if let duration = track.durationSeconds {
                     Text(Track.timeText(TimeInterval(duration)))
                         .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                 }
                 if let status = viewModel.existingStatus(for: track) {
                     Text(status)
@@ -1567,16 +1568,16 @@ struct MacLocalImportSheet: View {
                 Text("TRACKS TO IMPORT")
                     .font(.system(size: 10, weight: .bold))
                     .tracking(1.0)
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                 Spacer()
                 Text("\(viewModel.selectedPlaylistItems.count) of \(playlist.items.count) selected")
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Color.appViolet)
+                    .foregroundStyle(palette.foregroundAccent)
             }
             if playlist.unavailableCount > 0 {
                 Text("\(playlist.unavailableCount) \(viewModel.playlistProviderName) track\(playlist.unavailableCount == 1 ? "" : "s") will be skipped. Each reason is listed below.")
                     .font(.system(size: 9))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
             }
             if let summary = viewModel.existingSummary(for: playlist) {
                 Text(summary)
@@ -1590,20 +1591,20 @@ struct MacLocalImportSheet: View {
                         HStack(spacing: 12) {
                             Image(systemName: selected ? "checkmark.square.fill" : "square")
                                 .font(.system(size: 16))
-                                .foregroundStyle(selected ? Color.appViolet : Color.appMuted)
+                                .foregroundStyle(selected ? palette.foregroundAccent : palette.muted)
                             Text("\(item.position)")
                                 .font(.system(size: 9, design: .monospaced))
-                                .foregroundStyle(Color.appMuted)
+                                .foregroundStyle(palette.muted)
                                 .frame(width: 24, alignment: .trailing)
                             playlistItemArtwork(item)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(item.track.title)
                                     .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(Color.appInk)
+                                    .foregroundStyle(palette.ink)
                                     .lineLimit(1)
                                 Text([item.track.artist, item.track.durationSeconds.map { Track.timeText(TimeInterval($0)) }].compactMap { $0 }.joined(separator: " • "))
                                     .font(.system(size: 9))
-                                    .foregroundStyle(Color.appMuted)
+                                    .foregroundStyle(palette.muted)
                                     .lineLimit(1)
                                 if let status = viewModel.existingStatus(for: item.track) {
                                     Text(status)
@@ -1626,10 +1627,10 @@ struct MacLocalImportSheet: View {
                     }
                 }
                 .padding(12)
-                .background(selected ? Color.appViolet.opacity(0.08) : Color.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .background(selected ? palette.secondary.opacity(0.08) : Color.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .stroke(selected ? Color.appViolet.opacity(0.45) : Color.appLine)
+                        .stroke(selected ? palette.secondary.opacity(0.45) : palette.divider)
                 }
                 .disabled(viewModel.isRunning)
             }
@@ -1638,35 +1639,35 @@ struct MacLocalImportSheet: View {
                 Text("SKIPPED")
                     .font(.system(size: 10, weight: .bold))
                     .tracking(1.0)
-                    .foregroundStyle(Color.appAccent)
+                    .foregroundStyle(palette.foregroundAccent)
                     .padding(.top, 5)
 
                 ForEach(playlist.skippedItems) { item in
                     HStack(spacing: 12) {
                         Image(systemName: "forward.end.fill")
                             .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(Color.appAccent)
+                            .foregroundStyle(palette.foregroundAccent)
                         Text("\(item.position)")
                             .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(Color.appMuted)
+                            .foregroundStyle(palette.muted)
                             .frame(width: 24, alignment: .trailing)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.title)
                                 .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(Color.appInk)
+                                .foregroundStyle(palette.ink)
                                 .lineLimit(1)
                             Text([item.artist, item.reason].compactMap { $0 }.joined(separator: " • "))
                                 .font(.system(size: 9))
-                                .foregroundStyle(Color.appMuted)
+                                .foregroundStyle(palette.muted)
                                 .lineLimit(2)
                         }
                         Spacer()
                     }
                     .padding(12)
-                    .background(Color.appAccent.opacity(0.055), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .background(palette.accent.opacity(0.055), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                     .overlay {
                         RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .stroke(Color.appAccent.opacity(0.22))
+                            .stroke(palette.accent.opacity(0.22))
                     }
                     .accessibilityElement(children: .combine)
                 }
@@ -1720,13 +1721,13 @@ struct MacLocalImportSheet: View {
     private var resolvedArtworkFallback: some View {
         ZStack {
             LinearGradient(
-                colors: [Color.appViolet.opacity(0.28), Color.appAccent.opacity(0.16)],
+                colors: [palette.secondary.opacity(0.28), palette.accent.opacity(0.16)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
             Image(systemName: viewModel.mediaMode == .video ? "film" : "music.note")
                 .font(.system(size: 22, weight: .medium))
-                .foregroundStyle(Color.appViolet)
+                .foregroundStyle(palette.foregroundAccent)
         }
     }
 
@@ -1739,12 +1740,12 @@ struct MacLocalImportSheet: View {
                     : "DIRECT AUDIO MATCHES")
                 .font(.system(size: 10, weight: .bold))
                 .tracking(1.0)
-                .foregroundStyle(Color.appMuted)
+                .foregroundStyle(palette.muted)
 
             if candidates.contains(where: viewModel.isServerReviewCandidate) {
                 Text("Server matches are metadata-only suggestions. Preview and explicitly select the exact recording before importing or uploading it.")
                     .font(.system(size: 9))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -1756,16 +1757,16 @@ struct MacLocalImportSheet: View {
                         HStack(spacing: 12) {
                             Image(systemName: viewModel.selectedCandidate?.videoID == candidate.videoID ? "checkmark.circle.fill" : "circle")
                                 .font(.system(size: 16))
-                                .foregroundStyle(viewModel.selectedCandidate?.videoID == candidate.videoID ? Color.appViolet : Color.appMuted)
+                                .foregroundStyle(viewModel.selectedCandidate?.videoID == candidate.videoID ? palette.foregroundAccent : palette.muted)
 
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(candidate.title)
                                     .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(Color.appInk)
+                                    .foregroundStyle(palette.ink)
                                     .lineLimit(1)
                                 Text([candidate.artist ?? "Unknown uploader", candidate.durationSeconds.map { Track.timeText(TimeInterval($0)) }, candidateProviderName(candidate)].compactMap { $0 }.joined(separator: " • "))
                                     .font(.system(size: 9))
-                                    .foregroundStyle(Color.appMuted)
+                                    .foregroundStyle(palette.muted)
                                     .lineLimit(1)
                             }
 
@@ -1775,10 +1776,10 @@ struct MacLocalImportSheet: View {
                                 ? "SERVER REVIEW"
                                 : candidate.confidence.uppercased())
                                 .font(.system(size: 8, weight: .bold))
-                                .foregroundStyle(Color.appViolet)
+                                .foregroundStyle(palette.foregroundAccent)
                                 .padding(.horizontal, 8)
                                 .frame(height: 22)
-                                .background(Color.appViolet.opacity(0.12), in: Capsule())
+                                .background(palette.secondary.opacity(0.12), in: Capsule())
                         }
                         .contentShape(Rectangle())
                     }
@@ -1793,12 +1794,12 @@ struct MacLocalImportSheet: View {
                 }
                 .padding(12)
                 .background(
-                    viewModel.selectedCandidate?.videoID == candidate.videoID ? Color.appViolet.opacity(0.08) : Color.white.opacity(0.025),
+                    viewModel.selectedCandidate?.videoID == candidate.videoID ? palette.secondary.opacity(0.08) : Color.white.opacity(0.025),
                     in: RoundedRectangle(cornerRadius: 11, style: .continuous)
                 )
                 .overlay {
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .stroke(viewModel.selectedCandidate?.videoID == candidate.videoID ? Color.appViolet.opacity(0.45) : Color.appLine)
+                        .stroke(viewModel.selectedCandidate?.videoID == candidate.videoID ? palette.secondary.opacity(0.45) : palette.divider)
                 }
                 .disabled(viewModel.isRunning)
             }
@@ -1812,10 +1813,10 @@ struct MacLocalImportSheet: View {
         if let previewErrorMessage = viewModel.previewErrorMessage {
             HStack(alignment: .top, spacing: 7) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(Color.appAccent)
+                    .foregroundStyle(palette.foregroundAccent)
                 Text(previewErrorMessage)
                     .font(.system(size: 9))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 4)
@@ -1831,11 +1832,11 @@ struct MacLocalImportSheet: View {
                 if viewModel.loadingPreviewVideoID == candidate.videoID {
                     ProgressView()
                         .controlSize(.mini)
-                        .tint(Color.appViolet)
+                        .tint(palette.foregroundAccent)
                 } else {
                     Image(systemName: viewModel.previewingVideoID == candidate.videoID ? "pause.fill" : "play.fill")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(viewModel.previewingVideoID == candidate.videoID ? Color.white : Color.appViolet)
+                        .foregroundStyle(viewModel.previewingVideoID == candidate.videoID ? Color.white : palette.foregroundAccent)
                         .offset(x: viewModel.previewingVideoID == candidate.videoID ? 0 : 1)
                 }
             }
@@ -1852,16 +1853,16 @@ struct MacLocalImportSheet: View {
                 Text("OTHER RELEASE SOURCES")
                     .font(.system(size: 10, weight: .bold))
                     .tracking(1.0)
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                 Spacer()
                 Text("Debrid Vault")
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Color.appViolet)
+                    .foregroundStyle(palette.foregroundAccent)
             }
 
             Text("These are release torrents, not verified single-track files. Open one externally, choose the exact audio file, then use Import Files.")
                 .font(.system(size: 9))
-                .foregroundStyle(Color.appMuted)
+                .foregroundStyle(palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
 
             ForEach(Array(releases.prefix(8))) { release in
@@ -1871,16 +1872,16 @@ struct MacLocalImportSheet: View {
                     HStack(spacing: 12) {
                         Image(systemName: viewModel.selectedRelease?.infoHash == release.infoHash ? "checkmark.circle.fill" : "circle")
                             .font(.system(size: 16))
-                            .foregroundStyle(viewModel.selectedRelease?.infoHash == release.infoHash ? Color.appViolet : Color.appMuted)
+                            .foregroundStyle(viewModel.selectedRelease?.infoHash == release.infoHash ? palette.foregroundAccent : palette.muted)
 
                         VStack(alignment: .leading, spacing: 4) {
                             Text(release.title)
                                 .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(Color.appInk)
+                                .foregroundStyle(palette.ink)
                                 .lineLimit(1)
                             Text(releaseDetails(release))
                                 .font(.system(size: 9))
-                                .foregroundStyle(Color.appMuted)
+                                .foregroundStyle(palette.muted)
                                 .lineLimit(1)
                         }
 
@@ -1888,16 +1889,16 @@ struct MacLocalImportSheet: View {
 
                         Image(systemName: "arrow.up.right.square")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color.appMuted)
+                            .foregroundStyle(palette.muted)
                     }
                     .padding(12)
                     .background(
-                        viewModel.selectedRelease?.infoHash == release.infoHash ? Color.appViolet.opacity(0.08) : Color.white.opacity(0.025),
+                        viewModel.selectedRelease?.infoHash == release.infoHash ? palette.secondary.opacity(0.08) : Color.white.opacity(0.025),
                         in: RoundedRectangle(cornerRadius: 11, style: .continuous)
                     )
                     .overlay {
                         RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .stroke(viewModel.selectedRelease?.infoHash == release.infoHash ? Color.appViolet.opacity(0.45) : Color.appLine)
+                            .stroke(viewModel.selectedRelease?.infoHash == release.infoHash ? palette.secondary.opacity(0.45) : palette.divider)
                     }
                 }
                 .buttonStyle(.plain)
@@ -1919,16 +1920,16 @@ struct MacLocalImportSheet: View {
     private func releaseActionStatus(_ message: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "info.circle.fill")
-                .foregroundStyle(Color.appViolet)
+                .foregroundStyle(palette.foregroundAccent)
             Text(message)
                 .font(.system(size: 10))
-                .foregroundStyle(Color.appMuted)
+                .foregroundStyle(palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
         .padding(12)
-        .background(Color.appViolet.opacity(0.07), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(Color.appViolet.opacity(0.2)) }
+        .background(palette.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(palette.secondary.opacity(0.2)) }
     }
 
     private var syncOption: some View {
@@ -1936,7 +1937,7 @@ struct MacLocalImportSheet: View {
             Toggle("Upload to server", isOn: $viewModel.syncAfterImport)
                 .font(.system(size: 12, weight: .semibold))
                 .toggleStyle(.switch)
-                .tint(Color.appViolet)
+                .tint(palette.secondary)
                 .disabled(!viewModel.canSync || viewModel.isRunning)
                 .fixedSize()
                 .help(viewModel.syncAvailabilityMessage)
@@ -1944,7 +1945,7 @@ struct MacLocalImportSheet: View {
             if !viewModel.canSync {
                 Text(viewModel.syncAvailabilityMessage)
                     .font(.system(size: 8))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .lineLimit(2)
                     .frame(maxWidth: 300, alignment: .leading)
             }
@@ -1954,23 +1955,23 @@ struct MacLocalImportSheet: View {
     private func errorCard(_ error: LocalImportError) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(Color.appAccent)
+                .foregroundStyle(palette.foregroundAccent)
             VStack(alignment: .leading, spacing: 4) {
                 Text(error.stage == .syncing && viewModel.completedTrack != nil ? "Saved locally; upload failed" : "Import stopped at \(stageLabel(error.stage))")
                     .font(.system(size: 12, weight: .semibold))
                 Text(error.message)
                     .font(.system(size: 10))
-                    .foregroundStyle(Color.appMuted)
+                    .foregroundStyle(palette.muted)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(error.code)
                     .font(.system(size: 8, design: .monospaced))
-                    .foregroundStyle(Color.appMuted.opacity(0.8))
+                    .foregroundStyle(palette.muted.opacity(0.8))
             }
             Spacer()
         }
         .padding(13)
-        .background(Color.appAccent.opacity(0.08), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(Color.appAccent.opacity(0.24)) }
+        .background(palette.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(palette.accent.opacity(0.24)) }
     }
 
     private var footer: some View {
@@ -1995,7 +1996,7 @@ struct MacLocalImportSheet: View {
                         .buttonStyle(.bordered)
                     Button("Open in Torrent App", action: viewModel.openSelectedRelease)
                         .buttonStyle(.borderedProminent)
-                        .tint(Color.appViolet)
+                        .tint(palette.secondary)
                 } else {
                     Button {
                         if viewModel.importSelected() {
@@ -2007,7 +2008,7 @@ struct MacLocalImportSheet: View {
                             .frame(width: 24, height: 18)
                     }
                         .buttonStyle(.borderedProminent)
-                        .tint(Color.appViolet)
+                        .tint(palette.secondary)
                         .disabled(viewModel.isPlaylist ? viewModel.selectedPlaylistItems.isEmpty : viewModel.selectedCandidate == nil)
                         .help(viewModel.isPlaylist ? "Import Selected Playlist Songs" : viewModel.mediaMode == .video ? "Download Video" : "Save Audio on This Mac")
                         .accessibilityLabel(viewModel.isPlaylist ? "Import Selected Playlist Songs" : viewModel.mediaMode == .video ? "Download Video" : "Save Audio on This Mac")
@@ -2015,19 +2016,19 @@ struct MacLocalImportSheet: View {
             } else if viewModel.stage == .complete || viewModel.completedTrack != nil {
                 Button("Done") { onDismiss() }
                     .buttonStyle(.borderedProminent)
-                    .tint(Color.appViolet)
+                    .tint(palette.secondary)
             }
         }
         .padding(.horizontal, 20)
         .frame(height: 64)
-        .background(Color.appSurfaceRaised.opacity(0.82))
+        .background(palette.raisedSurface.opacity(0.82))
     }
 
     private func stageCopy(_ stage: LocalImportStage) -> (title: String, detail: String, symbol: String, color: Color) {
         let mediaName = viewModel.mediaMode == .video ? "video" : "audio"
         return switch stage {
-        case .idle: ("Ready", "Paste a supported link, or enter a song, artist, or album to search.", "link", Color.appViolet)
-        case .resolvingMetadata: ("Resolving metadata", "This link lookup runs directly from your Mac.", "magnifyingglass", Color.appViolet)
+        case .idle: ("Ready", "Paste a supported link, or enter a song, artist, or album to search.", "link", palette.foregroundAccent)
+        case .resolvingMetadata: ("Resolving metadata", "This link lookup runs directly from your Mac.", "magnifyingglass", palette.foregroundAccent)
         case .searchingCandidates: (
             !LocalImportInput.looksLikeLink(viewModel.source)
                 ? (viewModel.mediaMode == .video ? "Searching videos" : "Searching music platforms")
@@ -2036,7 +2037,7 @@ struct MacLocalImportSheet: View {
                 ? "Querying Spotify, SoundCloud, and YouTube for \(viewModel.mediaMode == .video ? "downloadable videos" : "previewable results")."
                 : viewModel.isPlaylist ? "Matching each public playlist track to a direct or alternate audio source." : "Finding direct and alternate audio sources.",
             "waveform.badge.magnifyingglass",
-            Color.appViolet
+            palette.foregroundAccent
         )
         case .awaitingSelection: (
             viewModel.selectedRelease != nil ? "Choose a release file" : "Ready to download",
@@ -2044,7 +2045,7 @@ struct MacLocalImportSheet: View {
                 ? "Open the external release, choose its exact audio file, then use Import Files."
                 : viewModel.isPlaylist ? "Choose the playlist songs to save in order." : "Save the selected source as \(mediaName).",
             "checkmark.circle",
-            Color.appViolet
+            palette.foregroundAccent
         )
         case .inspectingSource: (
             "Inspecting \(mediaName)",
@@ -2052,16 +2053,16 @@ struct MacLocalImportSheet: View {
                 ? "Checking for a direct, verifiable MP4 stream with video and audio."
                 : "Checking for a direct, verifiable audio stream.",
             "doc.text.magnifyingglass",
-            Color.appViolet
+            palette.foregroundAccent
         )
-        case .downloading: ("Downloading to this Mac", "Every expected byte range is verified while it is written.", "arrow.down.circle", Color.appViolet)
-        case .processing: ("Preparing \(mediaName)", "Converting when needed and attaching available metadata.", "slider.horizontal.3", Color.appViolet)
-        case .savingLocal: ("Saving locally", "Adding the completed file to this Mac's Resonance library.", "internaldrive", Color.appViolet)
+        case .downloading: ("Downloading to this Mac", "Every expected byte range is verified while it is written.", "arrow.down.circle", palette.foregroundAccent)
+        case .processing: ("Preparing \(mediaName)", "Converting when needed and attaching available metadata.", "slider.horizontal.3", palette.foregroundAccent)
+        case .savingLocal: ("Saving locally", "Adding the completed file to this Mac's Resonance library.", "internaldrive", palette.foregroundAccent)
         case .localComplete: ("Saved on this Mac", "This \(mediaName) remains visible when server profiles change.", "checkmark.circle.fill", Color.green)
-        case .syncing: ("Uploading optional copy", "Sending the local file only to the currently active profile.", "arrow.up.circle", Color.appViolet)
+        case .syncing: ("Uploading optional copy", "Sending the local file only to the currently active profile.", "arrow.up.circle", palette.foregroundAccent)
         case .complete: ("Import complete", viewModel.completedSummary ?? "The \(mediaName) is ready in your local Resonance library.", "checkmark.circle.fill", Color.green)
-        case .failed: ("Import stopped", "Review the stage-specific error below.", "exclamationmark.triangle", Color.appAccent)
-        case .cancelled: ("Import cancelled", "No partial song was added to the library.", "xmark.circle", Color.appMuted)
+        case .failed: ("Import stopped", "Review the stage-specific error below.", "exclamationmark.triangle", palette.foregroundAccent)
+        case .cancelled: ("Import cancelled", "No partial song was added to the library.", "xmark.circle", palette.muted)
         }
     }
 

@@ -196,6 +196,7 @@ private enum MobileClipVideoFrameSampler {
 }
 
 struct MobileClipEditorSheet: View {
+    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @StateObject private var preview = MobileClipPreviewPlayer()
@@ -225,7 +226,7 @@ struct MobileClipEditorSheet: View {
 
     var body: some View {
         ZStack {
-            Color(hex: 0x080910).ignoresSafeArea()
+            palette.background.ignoresSafeArea()
 
             VStack(spacing: 10) {
                 topBar
@@ -290,7 +291,7 @@ struct MobileClipEditorSheet: View {
                         .font(.subheadline.weight(.bold))
                         .padding(.horizontal, 13)
                         .frame(height: 32)
-                        .background(hasUnsavedChanges ? Color(hex: 0x7942DF) : Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
+                        .background(hasUnsavedChanges ? palette.accent : Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
                         .foregroundStyle(hasUnsavedChanges ? Color.white : Color.white.opacity(0.35))
                         .disabled(!hasUnsavedChanges || selectedTrack == nil || (selectedTrack?.duration ?? 0) < 0.25)
                     Button {
@@ -354,7 +355,7 @@ struct MobileClipEditorSheet: View {
                                     .lineLimit(1)
                                 Text("[Visualizer]")
                                     .font(.subheadline)
-                                    .foregroundStyle(Color(hex: 0xB56AFF))
+                                    .foregroundStyle(palette.tertiary)
                             }
                             .padding(14)
                         }
@@ -374,7 +375,7 @@ struct MobileClipEditorSheet: View {
     private func previewTransport(_ track: MobileTrack) -> some View {
         ZStack {
             HStack(spacing: 6) {
-                Text(formatTime(preview.position)).foregroundStyle(Color(hex: 0xAC75FF))
+                Text(formatTime(preview.position)).foregroundStyle(palette.tertiary)
                 Text("/").foregroundStyle(.secondary)
                 Text(formatTime(endSeconds)).foregroundStyle(.white)
                 Spacer()
@@ -400,7 +401,7 @@ struct MobileClipEditorSheet: View {
         .foregroundStyle(.white)
         .padding(.horizontal, 14)
         .frame(height: 58)
-        .background(Color(hex: 0x0D0E15).opacity(0.97))
+        .background(palette.surface.opacity(0.97))
         .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.08)).frame(height: 1) }
     }
 
@@ -454,7 +455,7 @@ struct MobileClipEditorSheet: View {
                         Text("CLIP LENGTH").eyebrow()
                         Text(formatTime(max(endSeconds - startSeconds, 0)))
                             .font(.headline.monospacedDigit())
-                            .foregroundStyle(Color(hex: 0xB56AFF))
+                            .foregroundStyle(palette.tertiary)
                     }
                     Spacer()
                     if let track = selectedTrack {
@@ -491,7 +492,7 @@ struct MobileClipEditorSheet: View {
             content()
                 .padding(18)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .background(Color(hex: 0x11121B).opacity(0.94), in: RoundedRectangle(cornerRadius: 20))
+                .background(palette.raisedSurface.opacity(0.94), in: RoundedRectangle(cornerRadius: 20))
                 .overlay { RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.12), lineWidth: 1) }
                 .padding(20)
         }
@@ -629,6 +630,7 @@ struct MobileClipEditorSheet: View {
 }
 
 private struct MobileCinematicVisualizer: View {
+    @Environment(\.resonancePalette) private var palette
     let samples: [Double]
     let isPlaying: Bool
     let position: TimeInterval
@@ -663,7 +665,7 @@ private struct MobileCinematicVisualizer: View {
                 context.fill(
                     bars,
                     with: .linearGradient(
-                        Gradient(colors: [Color(hex: 0x4D1B91), Color(hex: 0xB456EF)]),
+                        Gradient(colors: [palette.secondary, palette.tertiary]),
                         startPoint: CGPoint(x: 0, y: size.height),
                         endPoint: .zero
                     )
@@ -679,7 +681,7 @@ private struct MobileCinematicVisualizer: View {
                 }
             }
         }
-        .background(RadialGradient(colors: [Color(hex: 0x2C1647), .black], center: .center, startRadius: 8, endRadius: 380))
+        .background(RadialGradient(colors: [palette.secondary.opacity(0.5), palette.background], center: .center, startRadius: 8, endRadius: 380))
         .onChange(of: isPlaying) { _, playing in
             if !playing { livePosition = nil }
         }
@@ -775,6 +777,7 @@ private struct MobileClipRuler: View {
 }
 
 private struct MobileCinematicWaveform: View {
+    @Environment(\.resonancePalette) private var palette
     let track: MobileTrack
     let samples: [Double]
     let videoFrames: [UIImage]
@@ -816,7 +819,7 @@ private struct MobileCinematicWaveform: View {
                         .position(x: endX + max(width - endX, 0) / 2, y: geometry.size.height / 2)
                 }
 
-                Rectangle().fill(Color(hex: 0x7130AF).opacity(0.14))
+                Rectangle().fill(palette.secondary.opacity(0.14))
                     .frame(width: max(width * (endRatio - startRatio), 0))
                     .position(x: width * (startRatio + endRatio) / 2, y: geometry.size.height / 2)
 
@@ -825,7 +828,7 @@ private struct MobileCinematicWaveform: View {
                         ForEach(Array(levels.enumerated()), id: \.offset) { index, level in
                             let ratio = (Double(index) + 0.5) / Double(levels.count)
                             Rectangle()
-                                .fill(ratio >= startRatio && ratio <= endRatio ? Color(hex: 0x934ADD) : .white.opacity(0.25))
+                                .fill(ratio >= startRatio && ratio <= endRatio ? palette.tertiary : .white.opacity(0.25))
                                 .frame(maxWidth: .infinity)
                                 .frame(height: max(9, geometry.size.height * (0.16 + 0.72 * level)))
                         }
@@ -891,6 +894,7 @@ private func mobileClipLevels(seed: String, count: Int) -> [Double] {
 }
 
 private struct LegacyMobileClipEditorSheet: View {
+    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @StateObject private var preview = MobileClipPreviewPlayer()
@@ -913,7 +917,7 @@ private struct LegacyMobileClipEditorSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Color.appBackground.ignoresSafeArea()
+                palette.background.ignoresSafeArea()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
                         if library.tracksForActiveProfile.isEmpty {
@@ -1054,7 +1058,7 @@ private struct LegacyMobileClipEditorSheet: View {
                     ForEach(Array(waveformLevels(for: track).enumerated()), id: \.offset) { index, level in
                         let ratio = (Double(index) + 0.5) / 72
                         Capsule()
-                            .fill(ratio >= startRatio && ratio <= endRatio ? Color.violet : .white.opacity(0.16))
+                            .fill(ratio >= startRatio && ratio <= endRatio ? palette.secondary : .white.opacity(0.16))
                             .frame(maxWidth: .infinity)
                             .frame(height: 18 + 54 * level)
                     }
@@ -1097,8 +1101,8 @@ private struct LegacyMobileClipEditorSheet: View {
             .font(.caption.bold())
             .foregroundStyle(.white)
             .frame(width: 26, height: 38)
-            .background(Color.violet, in: Capsule())
-            .shadow(color: Color.violet.opacity(0.35), radius: 8)
+            .background(palette.secondary, in: Capsule())
+            .shadow(color: palette.secondary.opacity(0.35), radius: 8)
             .position(x: x, y: 52)
             .accessibilityLabel(accessibilityName)
     }
@@ -1110,7 +1114,7 @@ private struct LegacyMobileClipEditorSheet: View {
                 Text("CLIP LENGTH").eyebrow()
                 Text(formatTime(max(endSeconds - startSeconds, 0)))
                     .font(.headline.monospacedDigit())
-                    .foregroundStyle(Color.violet)
+                    .foregroundStyle(palette.foregroundAccent)
             }
             .frame(maxWidth: .infinity)
             timeField("END", text: $endText, boundary: .end)
@@ -1150,7 +1154,7 @@ private struct LegacyMobileClipEditorSheet: View {
                 library.saveClipRange(for: track, start: startSeconds, end: endSeconds)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.violet)
+            .tint(palette.secondary)
         }
     }
 
@@ -1177,7 +1181,7 @@ private struct LegacyMobileClipEditorSheet: View {
                 Image(systemName: preview.isPlaying ? "pause.fill" : "play.fill")
                     .font(.callout.bold())
                     .frame(width: 38, height: 38)
-                    .background(Color.violet, in: Circle())
+                    .background(palette.secondary, in: Circle())
                     .foregroundStyle(.white)
             }
             .buttonStyle(.plain)
@@ -1195,7 +1199,7 @@ private struct LegacyMobileClipEditorSheet: View {
                 ),
                 in: sliderRange
             )
-            .tint(.violet)
+            .tint(palette.foregroundAccent)
             .accessibilityLabel("Preview position")
 
             Text(formatTime(endSeconds))
@@ -2185,6 +2189,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
 }
 
 struct MobileLocalImportSheet: View {
+    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @StateObject private var viewModel = MobileLocalImportViewModel()
@@ -2194,7 +2199,7 @@ struct MobileLocalImportSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Color.appBackground.ignoresSafeArea()
+                palette.background.ignoresSafeArea()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         VStack(alignment: .leading, spacing: 8) {
@@ -2272,7 +2277,7 @@ struct MobileLocalImportSheet: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                            .tint(.violet)
+                            .tint(palette.secondary)
                         }
 
                         stageCard
@@ -2356,7 +2361,7 @@ struct MobileLocalImportSheet: View {
     private var stageCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Image(systemName: stageSymbol(viewModel.stage)).foregroundStyle(Color.violet)
+                Image(systemName: stageSymbol(viewModel.stage)).foregroundStyle(palette.foregroundAccent)
                 Text(stageTitle(viewModel.stage, mediaMode: viewModel.mediaMode)).font(.headline)
                 Spacer()
                 if viewModel.isRunning { ProgressView() }
@@ -2366,7 +2371,7 @@ struct MobileLocalImportSheet: View {
                 .foregroundStyle(.secondary)
             if viewModel.totalBytes > 0 {
                 ProgressView(value: Double(viewModel.completedBytes), total: Double(viewModel.totalBytes))
-                    .tint(.violet)
+                    .tint(palette.foregroundAccent)
                 Text("\(ByteCountFormatter.string(fromByteCount: viewModel.completedBytes, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: viewModel.totalBytes, countStyle: .file))")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -2391,7 +2396,7 @@ struct MobileLocalImportSheet: View {
                 Spacer()
                 Text("\(response.results.count) \(viewModel.mediaMode == .video ? "downloadable" : "previewable")")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.violet)
+                    .foregroundStyle(palette.foregroundAccent)
             }
 
             ForEach(LocalImportSearchProvider.allCases) { provider in
@@ -2430,7 +2435,7 @@ struct MobileLocalImportSheet: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(Color.violet)
+                        .foregroundStyle(palette.foregroundAccent)
                     searchResultArtwork(result)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(result.track.title)
@@ -2459,7 +2464,7 @@ struct MobileLocalImportSheet: View {
                     } else {
                         Image(systemName: viewModel.previewingVideoID == candidate.videoID ? "stop.fill" : "play.fill")
                             .frame(width: 34, height: 34)
-                            .background(Color.violet.opacity(0.18), in: Circle())
+                            .background(palette.secondary.opacity(0.18), in: Circle())
                     }
                 }
                 .buttonStyle(.plain)
@@ -2470,7 +2475,7 @@ struct MobileLocalImportSheet: View {
         .background(.white.opacity(selected ? 0.08 : 0.035), in: RoundedRectangle(cornerRadius: 12))
         .overlay {
             RoundedRectangle(cornerRadius: 12)
-                .stroke(selected ? Color.violet.opacity(0.45) : Color.white.opacity(0.05))
+                .stroke(selected ? palette.secondary.opacity(0.45) : Color.white.opacity(0.05))
         }
         .disabled(viewModel.isRunning)
     }
@@ -2479,7 +2484,7 @@ struct MobileLocalImportSheet: View {
         let artworkURL = (result.track.artworkURL ?? result.candidates.first?.thumbnailURL).flatMap(URL.init(string:))
         return ZStack {
             LinearGradient(
-                colors: [Color.violet.opacity(0.42), Color.purple.opacity(0.22)],
+                colors: [palette.secondary.opacity(0.42), palette.tertiary.opacity(0.22)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -2544,7 +2549,7 @@ struct MobileLocalImportSheet: View {
                     } label: {
                         HStack(spacing: 11) {
                             Image(systemName: viewModel.selectedVideoID == candidate.videoID ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(Color.violet)
+                                .foregroundStyle(palette.foregroundAccent)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(candidate.title).font(.subheadline.weight(.semibold)).lineLimit(2)
                                 Text([
@@ -2567,7 +2572,7 @@ struct MobileLocalImportSheet: View {
                         } else {
                             Image(systemName: viewModel.previewingVideoID == candidate.videoID ? "stop.fill" : "play.fill")
                                 .frame(width: 32, height: 32)
-                                .background(Color.violet.opacity(0.18), in: Circle())
+                                .background(palette.secondary.opacity(0.18), in: Circle())
                         }
                     }
                     .buttonStyle(.plain)
@@ -2586,7 +2591,7 @@ struct MobileLocalImportSheet: View {
                 Spacer()
                 Text("\(viewModel.selectedPlaylistItems.count) of \(playlist.items.count)")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.violet)
+                    .foregroundStyle(palette.foregroundAccent)
             }
             if playlist.unavailableCount > 0 {
                 VStack(alignment: .leading, spacing: 5) {
@@ -2609,7 +2614,7 @@ struct MobileLocalImportSheet: View {
                 HStack(spacing: 8) {
                     Button { viewModel.togglePlaylistItem(item) } label: {
                         HStack(spacing: 11) {
-                            Image(systemName: selected ? "checkmark.square.fill" : "square").foregroundStyle(Color.violet)
+                            Image(systemName: selected ? "checkmark.square.fill" : "square").foregroundStyle(palette.foregroundAccent)
                             Text("\(item.position)").font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 24)
                             playlistItemArtwork(item)
                             VStack(alignment: .leading, spacing: 3) {
@@ -2635,7 +2640,7 @@ struct MobileLocalImportSheet: View {
                         } else {
                             Image(systemName: viewModel.previewingVideoID == item.candidate.videoID ? "stop.fill" : "play.fill")
                                 .frame(width: 32, height: 32)
-                                .background(Color.violet.opacity(0.18), in: Circle())
+                                .background(palette.secondary.opacity(0.18), in: Circle())
                         }
                     }
                     .buttonStyle(.plain)
@@ -2652,7 +2657,7 @@ struct MobileLocalImportSheet: View {
         let artworkURL = (item.track.artworkURL ?? item.candidate.thumbnailURL).flatMap(URL.init(string:))
         return ZStack {
             LinearGradient(
-                colors: [Color.violet.opacity(0.42), Color.purple.opacity(0.22)],
+                colors: [palette.secondary.opacity(0.42), palette.tertiary.opacity(0.22)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )

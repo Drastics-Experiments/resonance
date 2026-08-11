@@ -2,6 +2,19 @@ const LEGACY_PRODUCTION_ORIGIN = "https://music.unblocked.mov";
 const PRODUCTION_ORIGIN = "https://resonance-core.blithe-haven-9710.chatgpt.site";
 export const RESONANCE_ACCOUNT_SERVER_URL = `${PRODUCTION_ORIGIN}/`;
 
+export const APP_THEMES = Object.freeze([
+  Object.freeze({ id: "midnight", label: "Midnight", description: "Near-black with vivid violet." }),
+  Object.freeze({ id: "ocean", label: "Ocean", description: "Deep blue with a bright cyan tide." }),
+  Object.freeze({ id: "forest", label: "Forest", description: "Evergreen with a fresh mint glow." }),
+  Object.freeze({ id: "sunset", label: "Sunset", description: "Warm ember with coral highlights." }),
+]);
+export const DEFAULT_APP_THEME = "midnight";
+const APP_THEME_IDS = new Set(APP_THEMES.map(({ id }) => id));
+
+export function normalizedAppTheme(value) {
+  return typeof value === "string" && APP_THEME_IDS.has(value) ? value : DEFAULT_APP_THEME;
+}
+
 export function createEmptyState() {
   return {
     tracks: [],
@@ -37,6 +50,7 @@ export function createEmptyState() {
     serverTransferPreferences: {},
     remoteSongMetadataCache: {},
     appPreferences: {
+      theme: DEFAULT_APP_THEME,
       runInBackground: false,
       discordRichPresence: false,
       keybinds: {
@@ -149,6 +163,7 @@ export function normalizedAppPreferences(value) {
     ? preferences.keybinds
     : {};
   return {
+    theme: normalizedAppTheme(preferences.theme),
     runInBackground: Boolean(preferences.runInBackground),
     discordRichPresence: Boolean(preferences.discordRichPresence),
     keybinds: Object.fromEntries(Object.entries(DEFAULT_KEYBINDS).map(([action, fallback]) => [

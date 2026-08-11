@@ -1,5 +1,6 @@
 import {
   activeServerClientConfig,
+  APP_THEMES,
   applyRemotePlaylistDocument,
   buildLocalImportSourceIdentity,
   canonicalYouTubeSourcePageURL,
@@ -28,6 +29,7 @@ import {
   niceChartMaximum,
   normalizeServerUploadManifest,
   normalizedAppPreferences,
+  normalizedAppTheme,
   normalizedRemoteSongMetadataCache,
   normalizedVolume,
   playbackGainForVolume,
@@ -80,6 +82,7 @@ const clipEditorVisualizerContext = clipEditorVisualizerCanvas.getContext("2d", 
 const installedVideoPlayer = document.querySelector("#installedVideoPlayer");
 const localImportPreviewAudio = document.querySelector("#localImportPreview");
 const content = document.querySelector("#content");
+const THEME_STORAGE_KEY = "resonance.theme";
 let state = createEmptyState();
 let currentID = null;
 let section = "library";
@@ -240,6 +243,27 @@ let settingsRecordingAction = null;
 let discordPresenceStatus = { state: "disabled", message: "Rich Presence is off.", applicationConfigured: false };
 let discordPresenceSyncTimer = null;
 const activeProfileID = () => state.syncProfileID || "default";
+
+function cacheAppTheme(theme) {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    // Theme caching is only a first-paint optimization. library.json remains authoritative.
+  }
+}
+
+function themeCSSColor(name, fallback) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
+function applyAppTheme(value) {
+  const theme = normalizedAppTheme(value);
+  document.documentElement.dataset.theme = theme;
+  cacheAppTheme(theme);
+  clipEditorVisualizerGradient = null;
+  clipEditorVisualizerGradientSize = "";
+  return theme;
+}
 
 const settingsKeybindActions = Object.freeze({
   togglePlayback: { label: "Play / pause", description: "Toggle playback from anywhere in Resonance." },
@@ -1031,9 +1055,9 @@ function drawClipEditorStageVisualizer(levels, { live = false } = {}) {
   const gradientSize = `${pixelWidth}x${pixelHeight}`;
   if (!clipEditorVisualizerGradient || clipEditorVisualizerGradientSize !== gradientSize) {
     clipEditorVisualizerGradient = context.createLinearGradient(0, height, 0, 0);
-    clipEditorVisualizerGradient.addColorStop(0, "#4e1a95");
-    clipEditorVisualizerGradient.addColorStop(.72, "#bc5df8");
-    clipEditorVisualizerGradient.addColorStop(1, "#7140d4");
+    clipEditorVisualizerGradient.addColorStop(0, themeCSSColor("--accent-secondary", "#6540f5"));
+    clipEditorVisualizerGradient.addColorStop(.72, themeCSSColor("--accent-tertiary", "#9b82ff"));
+    clipEditorVisualizerGradient.addColorStop(1, themeCSSColor("--accent", "#7547ff"));
     clipEditorVisualizerGradientSize = gradientSize;
   }
 
@@ -1878,8 +1902,8 @@ function historyChartMarkup(summary) {
     : `${summary.days.length} days of daily`;
   return `<div class="history-chart-frame"><div class="history-chart-viewport" data-day-count="${summary.days.length}"><svg class="history-chart-svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" data-plot-left="${left}" data-plot-right="${right}" data-plot-top="${top}" data-plot-bottom="${bottom}" data-axis-maximum="${axisMaximum}" role="img" aria-label="${periodDescription} listening minutes">
     <defs>
-      <linearGradient id="historyBarGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9b7aff"/><stop offset="1" stop-color="#5d35d8"/></linearGradient>
-      <linearGradient id="historyPeakBarGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff806c"/><stop offset="1" stop-color="#8a42eb"/></linearGradient>
+      <linearGradient id="historyBarGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--accent-tertiary)"/><stop offset="1" style="stop-color:var(--accent-secondary)"/></linearGradient>
+      <linearGradient id="historyPeakBarGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--accent-tertiary)"/><stop offset="1" style="stop-color:var(--accent)"/></linearGradient>
     </defs>
     <g class="history-grid">${grid}</g>
     ${bars}
@@ -4081,7 +4105,19 @@ function renderSettings() {
       </nav>
       <div class="settings-content">
         <section class="settings-panel" data-settings-content="general" ${settingsPanel === "general" ? "" : "hidden"}>
-          <div class="settings-section-heading"><span>WINDOWS</span><p>Control desktop behavior and connected services.</p></div>
+          <div class="settings-section-heading"><span>APPEARANCE</span><p>Choose a color theme for this Windows device.</p></div>
+          <fieldset class="settings-theme-fieldset">
+            <legend class="sr-only">Resonance theme</legend>
+            <div class="settings-theme-grid">
+              ${APP_THEMES.map((theme) => `<label class="settings-theme-card" data-theme-option="${theme.id}">
+                <input type="radio" name="settingsTheme" value="${theme.id}" ${preferences.theme === theme.id ? "checked" : ""}>
+                <span class="settings-theme-preview" aria-hidden="true"><span></span><span></span><span></span></span>
+                <span class="settings-theme-copy"><strong>${theme.label}</strong><small>${theme.description}</small></span>
+                <span class="settings-theme-check" aria-hidden="true">&#10003;</span>
+              </label>`).join("")}
+            </div>
+          </fieldset>
+          <div class="settings-section-heading compact"><span>WINDOWS</span><p>Control desktop behavior and connected services.</p></div>
           <div class="settings-grid">
             <div class="settings-group">
               <label class="settings-row" for="settingsRunInBackground">
@@ -4143,6 +4179,12 @@ function renderSettings() {
       settingsRecordingAction = null;
       renderSettings();
       if (settingsPanel === "server") void refreshServerSettingsControls();
+    };
+  });
+  document.querySelectorAll('input[name="settingsTheme"]').forEach((input) => {
+    input.onchange = () => {
+      if (!input.checked) return;
+      void updateAppPreference("theme", input.value);
     };
   });
   const runInBackground = $("#settingsRunInBackground");
@@ -4242,6 +4284,7 @@ async function updateAppPreference(key, value) {
     ...state.appPreferences,
     [key]: value,
   });
+  if (key === "theme") state.appPreferences.theme = applyAppTheme(state.appPreferences.theme);
   persistInBackground({ refreshSidebar: false });
   await api.updateAppPreferences(state.appPreferences).catch(() => undefined);
 }
@@ -6760,7 +6803,7 @@ function setInstalledVideoSourceGeometry(sourceRect, targetRect) {
   stage.style.setProperty("--video-source-radius-x", `${sourceRadius / sourceScaleX}px`);
   stage.style.setProperty("--video-source-radius-y", `${sourceRadius / sourceScaleY}px`);
   stage.style.setProperty("--video-source-radius", sourceStyle.borderRadius || "22px");
-  stage.style.setProperty("--video-source-border-color", sourceStyle.borderColor || "#a678ff80");
+  stage.style.setProperty("--video-source-border-color", sourceStyle.borderColor || themeCSSColor("--accent-border", "#a678ff80"));
   stage.style.setProperty("--video-source-shadow", sourceStyle.boxShadow || "none");
 
   const transitionArtwork = $("#installedVideoArtwork");
@@ -8149,6 +8192,7 @@ discordPresenceStatus = await api.getDiscordPresenceStatus().catch(() => discord
 const libraryLoad = await api.loadLibrary();
 const loadedState = libraryLoad && Object.hasOwn(libraryLoad, "state") ? libraryLoad.state : libraryLoad;
 state = normalizeState(loadedState);
+state.appPreferences.theme = applyAppTheme(state.appPreferences.theme);
 await api.updateAppPreferences(state.appPreferences).catch(() => undefined);
 scheduleDiscordPresenceUpdate();
 let closeFlushStarted = false;

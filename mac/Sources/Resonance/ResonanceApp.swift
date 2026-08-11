@@ -8,6 +8,7 @@ struct ResonanceApp: App {
     @StateObject private var localImportModel: MacLocalImportViewModel
     @StateObject private var updateManager: UpdateManager
     @StateObject private var desktopPreferences: MacDesktopPreferences
+    @StateObject private var themeStore: ResonanceThemeStore
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -22,6 +23,7 @@ struct ResonanceApp: App {
         )
         _updateManager = StateObject(wrappedValue: UpdateManager())
         _desktopPreferences = StateObject(wrappedValue: MacDesktopPreferences())
+        _themeStore = StateObject(wrappedValue: ResonanceThemeStore())
     }
 
     var body: some Scene {
@@ -31,7 +33,10 @@ struct ResonanceApp: App {
                 .environmentObject(localImportModel)
                 .environmentObject(updateManager)
                 .environmentObject(desktopPreferences)
-                .background(WindowConfigurator())
+                .environmentObject(themeStore)
+                .environment(\.resonancePalette, themeStore.palette)
+                .tint(themeStore.palette.accent)
+                .background(WindowConfigurator(backgroundColor: themeStore.palette.background))
                 .task {
                     desktopPreferences.bind(to: model)
                     await model.refreshAccountSessionIfNeeded()
@@ -98,6 +103,8 @@ final class ResonanceAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 private struct WindowConfigurator: NSViewRepresentable {
+    let backgroundColor: Color
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         DispatchQueue.main.async { configure(view.window) }
@@ -113,7 +120,7 @@ private struct WindowConfigurator: NSViewRepresentable {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = false
-        window.backgroundColor = NSColor(red: 0.027, green: 0.063, blue: 0.110, alpha: 1)
+        window.backgroundColor = NSColor(backgroundColor)
         window.minSize = NSSize(width: 860, height: 620)
         window.standardWindowButton(.closeButton)?.isHidden = false
         window.standardWindowButton(.miniaturizeButton)?.isHidden = false
