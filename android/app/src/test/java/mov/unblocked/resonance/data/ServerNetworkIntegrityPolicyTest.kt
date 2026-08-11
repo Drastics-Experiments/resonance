@@ -267,6 +267,20 @@ class ServerNetworkIntegrityPolicyTest {
         }
     }
 
+    @Test
+    fun downloadProgressIsThrottledByBytesAndTimeButAlwaysEmitsCompletion() {
+        val throttle = TransferProgressThrottle(
+            minimumByteDelta = 512L * 1_024,
+            minimumIntervalNanos = 100L,
+        )
+
+        assertTrue(throttle.shouldEmit(64L * 1_024, 2L * 1_024 * 1_024, nowNanos = 1L))
+        assertFalse(throttle.shouldEmit(128L * 1_024, 2L * 1_024 * 1_024, nowNanos = 50L))
+        assertTrue(throttle.shouldEmit(640L * 1_024, 2L * 1_024 * 1_024, nowNanos = 60L))
+        assertTrue(throttle.shouldEmit(704L * 1_024, 2L * 1_024 * 1_024, nowNanos = 200L))
+        assertTrue(throttle.shouldEmit(2L * 1_024 * 1_024, 2L * 1_024 * 1_024, nowNanos = 201L))
+    }
+
     private inline fun <reified T : Throwable> expectFailure(
         messageFragment: String,
         block: () -> Unit,

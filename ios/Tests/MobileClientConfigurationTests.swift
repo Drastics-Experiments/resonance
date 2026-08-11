@@ -800,6 +800,44 @@ final class MobileClientConfigurationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: operation.temporaryURL.path))
     }
 
+    func testLocalImportRangeDownloadAggregatesURLSessionChunks() async throws {
+        MobileChunkedDownloadProtocol.state.configure(onFirstChunk: {}, onStop: {})
+        let session = URLSession(configuration: chunkedSessionConfiguration())
+        defer { session.invalidateAndCancel() }
+        let operation = LocalImportBoundedDataOperation(
+            session: session,
+            maximumSize: 8,
+            redirectValidator: { _ in true }
+        )
+
+        let (data, response) = try await operation.run(
+            request: URLRequest(url: URL(string: "https://music.example/audio")!)
+        )
+
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(data, Data("aaaabbbb".utf8))
+    }
+
+    func testLocalImportRangeDownloadRejectsDeclaredOverflow() async throws {
+        MobileChunkedDownloadProtocol.state.configure(onFirstChunk: {}, onStop: {})
+        let session = URLSession(configuration: chunkedSessionConfiguration())
+        defer { session.invalidateAndCancel() }
+        let operation = LocalImportBoundedDataOperation(
+            session: session,
+            maximumSize: 4,
+            redirectValidator: { _ in true }
+        )
+
+        do {
+            _ = try await operation.run(
+                request: URLRequest(url: URL(string: "https://music.example/audio")!)
+            )
+            XCTFail("A declared range larger than the operation bound must fail")
+        } catch {
+            XCTAssertTrue(error is LocalImportBoundedDataError)
+        }
+    }
+
     func testCommittedReviewedUploadReconcilesAfterLeaseExpiryOnlyInSameContext() {
         XCTAssertTrue(MobileReviewedUploadCompletionPolicy.shouldReconcileCommittedResponse(
             requestContextCurrent: true,

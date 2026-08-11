@@ -504,6 +504,7 @@ class LinkImportService(context: Context) {
         candidate: LinkImportCandidate,
         metadata: LinkImportTrack,
         mediaMode: LinkImportMediaMode = LinkImportMediaMode.Audio,
+        includeArtwork: Boolean = true,
         progress: (LinkImportProgress) -> Unit,
     ): LinkImportDownload = withContext(Dispatchers.IO) {
         if (candidate.sourceProvider == LinkImportSourceProvider.SoundCloud) {
@@ -517,7 +518,9 @@ class LinkImportService(context: Context) {
             val output = File(directory, "source.mp3")
             try {
                 val hash = SoundCloudImport.download(resolved, output, progress)
-                val artwork = fetchArtwork(metadata.artworkURL ?: resolved.track.artworkURL)
+                val artwork = if (includeArtwork) {
+                    fetchArtwork(metadata.artworkURL ?: resolved.track.artworkURL)
+                } else null
                 return@withContext LinkImportDownload(
                     output,
                     metadata.copy(
@@ -545,22 +548,33 @@ class LinkImportService(context: Context) {
         val output = File(directory, "source.${mediaMode.fileExtension}")
         try {
             val totalBytes = resolved.primary.contentLength + (resolved.companionAudio?.contentLength ?: 0L)
-            val primaryHash = downloadRanges(
-                stream = resolved.primary,
-                destination = primaryFile,
-                progressOffset = 0L,
-                progressTotal = totalBytes,
-                progress = progress,
-            )
-            val companionHash = if (resolved.companionAudio != null && companionFile != null) {
-                downloadRanges(
-                    stream = resolved.companionAudio,
-                    destination = companionFile,
-                    progressOffset = resolved.primary.contentLength,
-                    progressTotal = totalBytes,
-                    progress = progress,
-                )
-            } else null
+            val progressByStream = LongArray(2)
+            val progressLock = Any()
+            val progressThrottle = TransferProgressThrottle()
+            fun reportProgress(streamIndex: Int, completedBytes: Long) {
+                val aggregate = synchronized(progressLock) {
+                    progressByStream[streamIndex] = completedBytes
+                    progressByStream.sum().takeIf {
+                        progressThrottle.shouldEmit(it, totalBytes, System.nanoTime())
+                    }
+                }
+                if (aggregate != null) {
+                    progress(LinkImportProgress(LinkImportStage.Downloading, aggregate, totalBytes))
+                }
+            }
+            val (primaryHash, companionHash) = if (resolved.companionAudio != null && companionFile != null) {
+                coroutineScope {
+                    val primary = async {
+                        downloadRanges(resolved.primary, primaryFile) { reportProgress(0, it) }
+                    }
+                    val companion = async {
+                        downloadRanges(resolved.companionAudio, companionFile) { reportProgress(1, it) }
+                    }
+                    primary.await() to companion.await()
+                }
+            } else {
+                downloadRanges(resolved.primary, primaryFile) { reportProgress(0, it) } to null
+            }
             if (companionFile != null) {
                 muxVideoAndAudio(primaryFile, companionFile, output)
             } else if (!primaryFile.renameTo(output)) {
@@ -570,7 +584,9 @@ class LinkImportService(context: Context) {
             validateDownloadedMedia(output, mediaMode)
             val sourceHash = if (companionHash == null) primaryHash else combinedHash(primaryHash, companionHash)
             val contentHash = if (companionHash == null) sourceHash else sha256(output)
-            val artwork = fetchArtwork(metadata.artworkURL ?: resolved.candidate.thumbnailURL)
+            val artwork = if (includeArtwork) {
+                fetchArtwork(metadata.artworkURL ?: resolved.candidate.thumbnailURL)
+            } else null
             LinkImportDownload(
                 output,
                 metadata.copy(
@@ -1110,9 +1126,7 @@ class LinkImportService(context: Context) {
     private suspend fun downloadRanges(
         stream: ResolvedStream,
         destination: File,
-        progressOffset: Long,
-        progressTotal: Long,
-        progress: (LinkImportProgress) -> Unit,
+        progress: (Long) -> Unit,
     ): String {
         val digest = MessageDigest.getInstance("SHA-256")
         var completed = 0L
@@ -1171,7 +1185,7 @@ class LinkImportService(context: Context) {
                             output.write(buffer, 0, count)
                             digest.update(buffer, 0, count)
                             received += count
-                            progress(LinkImportProgress(LinkImportStage.Downloading, progressOffset + completed + received, progressTotal))
+                            progress(completed + received)
                         }
                         if (received != expectedBytes || completed + received > stream.contentLength) throw LinkImportException(
                             LinkImportStage.Downloading,

@@ -5,6 +5,28 @@ import Foundation
 
 typealias LocalImportProgressHandler = @MainActor @Sendable (LocalImportProgress) -> Void
 
+@MainActor
+private final class LocalImportCombinedProgress {
+    private var completedByStream: [Int64]
+    private let total: Int64
+    private let progress: LocalImportProgressHandler
+
+    init(streamCount: Int, total: Int64, progress: @escaping LocalImportProgressHandler) {
+        completedByStream = Array(repeating: 0, count: streamCount)
+        self.total = total
+        self.progress = progress
+    }
+
+    func update(streamIndex: Int, completed: Int64) {
+        completedByStream[streamIndex] = completed
+        progress(.init(
+            stage: .downloading,
+            completed: completedByStream.reduce(0, +),
+            total: total
+        ))
+    }
+}
+
 enum LocalImportFeature {
     static var isEnabled: Bool {
         ProcessInfo.processInfo.environment["RESONANCE_LOCAL_DEVICE_IMPORT"] != "0"
@@ -26,6 +48,173 @@ private final class LocalImportRedirectDelegate: NSObject, URLSessionTaskDelegat
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
         completionHandler(request.url.map(validator) == true ? request : nil)
+    }
+}
+
+enum LocalImportBoundedDataError: Error {
+    case tooLarge
+}
+
+/// Receives URLSession body chunks directly instead of iterating AsyncBytes one
+/// byte at a time. Each operation is still strictly bounded before data is
+/// accumulated, and it inherits the caller's ephemeral/test configuration.
+final class LocalImportBoundedDataOperation: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let configuration: URLSessionConfiguration
+    private let maximumSize: Int
+    private let redirectValidator: @Sendable (URL) -> Bool
+    private let lock = NSLock()
+    private var data = Data()
+    private var response: HTTPURLResponse?
+    private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var isFinished = false
+
+    init(
+        session: URLSession,
+        maximumSize: Int,
+        redirectValidator: @escaping @Sendable (URL) -> Bool
+    ) {
+        configuration = session.configuration
+        self.maximumSize = maximumSize
+        self.redirectValidator = redirectValidator
+        super.init()
+    }
+
+    func run(request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let queue = OperationQueue()
+                queue.maxConcurrentOperationCount = 1
+                queue.qualityOfService = .utility
+                let session = URLSession(
+                    configuration: configuration,
+                    delegate: self,
+                    delegateQueue: queue
+                )
+                let task = session.dataTask(with: request)
+
+                lock.lock()
+                let alreadyFinished = isFinished
+                if !alreadyFinished {
+                    self.continuation = continuation
+                    self.session = session
+                    self.task = task
+                    data.reserveCapacity(min(maximumSize, 1 * 1_024 * 1_024))
+                }
+                lock.unlock()
+
+                if alreadyFinished {
+                    session.invalidateAndCancel()
+                    continuation.resume(throwing: CancellationError())
+                } else if Task.isCancelled {
+                    cancel()
+                } else {
+                    task.resume()
+                }
+            }
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(request.url.map(redirectValidator) == true ? request : nil)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let response = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            complete(with: .failure(URLError(.badServerResponse)))
+            return
+        }
+        if response.expectedContentLength > Int64(maximumSize) {
+            completionHandler(.cancel)
+            complete(with: .failure(LocalImportBoundedDataError.tooLarge))
+            return
+        }
+        lock.lock()
+        if !isFinished { self.response = response }
+        lock.unlock()
+        completionHandler(.allow)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive incoming: Data
+    ) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        let remaining = maximumSize - data.count
+        guard incoming.count <= remaining else {
+            lock.unlock()
+            dataTask.cancel()
+            complete(with: .failure(LocalImportBoundedDataError.tooLarge))
+            return
+        }
+        data.append(incoming)
+        lock.unlock()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        if let error {
+            complete(with: .failure(error))
+            return
+        }
+        lock.lock()
+        let result = response.map { (data, $0) }
+        lock.unlock()
+        guard let result else {
+            complete(with: .failure(URLError(.badServerResponse)))
+            return
+        }
+        complete(with: .success(result))
+    }
+
+    private func cancel() {
+        complete(with: .failure(CancellationError()))
+    }
+
+    private func complete(with result: Result<(Data, HTTPURLResponse), Error>) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        let continuation = self.continuation
+        self.continuation = nil
+        let session = self.session
+        self.session = nil
+        self.task = nil
+        lock.unlock()
+
+        switch result {
+        case .success:
+            session?.finishTasksAndInvalidate()
+        case .failure:
+            session?.invalidateAndCancel()
+        }
+        continuation?.resume(with: result)
     }
 }
 
@@ -460,7 +649,8 @@ actor LocalDeviceImportService {
         metadata inputMetadata: LocalImportMetadata,
         existingTracks: [MobileTrack],
         mediaMode: LocalImportMediaMode = .audio,
-        progress: LocalImportProgressHandler
+        includeArtwork: Bool = true,
+        progress: @escaping LocalImportProgressHandler
     ) async throws -> LocalImportOutcome {
         try Task.checkCancellation()
         try await prepareDirectories()
@@ -476,6 +666,7 @@ actor LocalDeviceImportService {
                 candidate,
                 metadata: inputMetadata,
                 existingTracks: existingTracks,
+                includeArtwork: includeArtwork,
                 progress: progress
             )
         }
@@ -499,25 +690,46 @@ actor LocalDeviceImportService {
                 : nil
         )
         let totalDownloadBytes = resolved.preview.contentLength
-        let primaryHash = try await download(
-            resolved.primaryStream,
-            to: source,
-            completedOffset: 0,
-            total: totalDownloadBytes,
-            progress: progress
-        )
-        var sourceHashes = [primaryHash]
-        var companionAudioInput: URL?
-        if let audioStream = resolved.companionAudioStream {
-            let audioHash = try await download(
-                audioStream,
-                to: companionAudio,
-                completedOffset: resolved.primaryStream.contentLength,
+        let progressTracker = await MainActor.run {
+            LocalImportCombinedProgress(
+                streamCount: resolved.companionAudioStream == nil ? 1 : 2,
                 total: totalDownloadBytes,
                 progress: progress
             )
-            sourceHashes.append(audioHash)
+        }
+        let primaryProgress: LocalImportProgressHandler = { update in
+            progressTracker.update(streamIndex: 0, completed: update.completed)
+        }
+        var sourceHashes: [String]
+        var companionAudioInput: URL?
+        if let audioStream = resolved.companionAudioStream {
+            let audioProgress: LocalImportProgressHandler = { update in
+                progressTracker.update(streamIndex: 1, completed: update.completed)
+            }
+            async let primaryHash = download(
+                resolved.primaryStream,
+                to: source,
+                completedOffset: 0,
+                total: resolved.primaryStream.contentLength,
+                progress: primaryProgress
+            )
+            async let audioHash = download(
+                audioStream,
+                to: companionAudio,
+                completedOffset: 0,
+                total: audioStream.contentLength,
+                progress: audioProgress
+            )
+            sourceHashes = try await [primaryHash, audioHash]
             companionAudioInput = companionAudio
+        } else {
+            sourceHashes = [try await download(
+                resolved.primaryStream,
+                to: source,
+                completedOffset: 0,
+                total: totalDownloadBytes,
+                progress: primaryProgress
+            )]
         }
         let sourceHash = Self.combinedSourceHash(sourceHashes)
         if let duplicate = existingTracks.first(where: {
@@ -535,7 +747,7 @@ actor LocalDeviceImportService {
             artworkURL: inputMetadata.artworkURL ?? resolved.preview.thumbnailURL,
             sourceURL: inputMetadata.sourceURL
         )
-        let artwork = await fetchArtwork(metadata.artworkURL)
+        let artwork = includeArtwork ? await fetchArtwork(metadata.artworkURL) : nil
         try Task.checkCancellation()
         do {
             try await LocalImportMediaProcessor.remux(
@@ -615,6 +827,7 @@ actor LocalDeviceImportService {
         _ candidate: LocalImportAudioSourceMatch,
         metadata inputMetadata: LocalImportMetadata,
         existingTracks: [MobileTrack],
+        includeArtwork: Bool,
         progress: LocalImportProgressHandler
     ) async throws -> LocalImportOutcome {
         let temporary = temporaryRoot.appendingPathComponent("resonance-import-\(UUID().uuidString)", isDirectory: true)
@@ -654,7 +867,7 @@ actor LocalDeviceImportService {
             artworkURL: inputMetadata.artworkURL ?? stream.track.artworkURL,
             sourceURL: inputMetadata.sourceURL
         )
-        let artwork = await fetchArtwork(metadata.artworkURL)
+        let artwork = includeArtwork ? await fetchArtwork(metadata.artworkURL) : nil
         try Task.checkCancellation()
         do {
             try await LocalImportMediaProcessor.remuxM4A(input: source, output: processed, metadata: metadata, artwork: artwork)
@@ -1449,9 +1662,23 @@ actor LocalDeviceImportService {
                 stream.streamingHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
                 request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
                 request.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
-                let (bytes, rawResponse) = try await sessions.googleVideo.bytes(for: request)
-                guard let response = rawResponse as? HTTPURLResponse,
-                      response.url.map(LocalImportURL.isGoogleVideo) == true else {
+                let operation = LocalImportBoundedDataOperation(
+                    session: sessions.googleVideo,
+                    maximumSize: Int(end - start + 1),
+                    redirectValidator: { url in LocalImportURL.isGoogleVideo(url) }
+                )
+                let body: Data
+                let response: HTTPURLResponse
+                do {
+                    (body, response) = try await operation.run(request: request)
+                } catch LocalImportBoundedDataError.tooLarge {
+                    throw LocalImportError(
+                        stage: .downloading,
+                        code: "YOUTUBE_RANGE_OVERFLOW",
+                        message: "YouTube returned more \(mediaLabel) data than requested."
+                    )
+                }
+                guard response.url.map(LocalImportURL.isGoogleVideo) == true else {
                     throw LocalImportError(stage: .downloading, code: "YOUTUBE_UNSAFE_REDIRECT", message: "YouTube returned an unsafe \(mediaLabel) redirect.")
                 }
                 if response.statusCode == 429 {
@@ -1478,32 +1705,13 @@ actor LocalDeviceImportService {
                 if let length = response.value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init), length != expected {
                     throw LocalImportError(stage: .downloading, code: "YOUTUBE_SIZE_MISMATCH", message: "YouTube returned an unverifiable \(mediaLabel) size.")
                 }
-                var received: Int64 = 0
-                var buffer = Data()
-                buffer.reserveCapacity(64 * 1_024)
-                for try await byte in bytes {
-                    try Task.checkCancellation()
-                    buffer.append(byte)
-                    received += 1
-                    if received > expected {
-                        throw LocalImportError(stage: .downloading, code: "YOUTUBE_RANGE_OVERFLOW", message: "YouTube returned more \(mediaLabel) data than requested.")
-                    }
-                    if buffer.count >= 64 * 1_024 {
-                        try file.write(contentsOf: buffer)
-                        hasher.update(data: buffer)
-                        buffer.removeAll(keepingCapacity: true)
-                    }
-                    if received % (256 * 1_024) == 0 {
-                        await progress(.init(stage: .downloading, completed: completedOffset + completed + received, total: total))
-                    }
-                }
-                if !buffer.isEmpty {
-                    try file.write(contentsOf: buffer)
-                    hasher.update(data: buffer)
-                }
+                try Task.checkCancellation()
+                let received = Int64(body.count)
                 guard received == expected else {
                     throw LocalImportError(stage: .downloading, code: "YOUTUBE_RANGE_TRUNCATED", message: "YouTube ended a \(mediaLabel) range before it was complete.")
                 }
+                try file.write(contentsOf: body)
+                hasher.update(data: body)
                 completed += received
                 await progress(.init(stage: .downloading, completed: completedOffset + completed, total: total))
                 start = end + 1

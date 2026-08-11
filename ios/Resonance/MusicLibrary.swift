@@ -481,6 +481,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         let request: RemoteSongMetadataRequest
         let metadata: LocalImportSpotifyTrack?
     }
+    private enum RemoteDownloadItemResult: Sendable {
+        case downloaded(songID: String)
+        case failed(songID: String, title: String, reason: String)
+        case policyChanged
+        case cancelled
+    }
     @Published var tracks: [MobileTrack] = []
     @Published var playlists: [MobilePlaylist] = [MobilePlaylist(name: "Liked Songs", isSystem: true)]
     @Published var favorites: Set<UUID> = []
@@ -1786,7 +1792,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @discardableResult
     func associateLocalImportSource(
         trackID: UUID,
-        source: LocalImportSourceAssociation
+        source: LocalImportSourceAssociation,
+        persistImmediately: Bool = true
     ) -> MobileTrack? {
         guard let index = tracks.firstIndex(where: { $0.id == trackID }),
               !tracks[index].relativePath.isEmpty else { return nil }
@@ -1801,12 +1808,15 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             tracks[index].downloadSourceURL = downloadSourceURL
             changed = true
         }
-        if changed { save() }
+        if changed && persistImmediately { save() }
         return tracks[index]
     }
 
     @discardableResult
-    func insertLocalImportedAudio(_ imported: LocalImportedAudio) throws -> MobileTrack {
+    func insertLocalImportedAudio(
+        _ imported: LocalImportedAudio,
+        persistImmediately: Bool = true
+    ) throws -> MobileTrack {
         if let duplicate = tracks.first(where: {
             $0.sourceSHA256 == imported.sourceSHA256
                 || $0.contentSHA256 == imported.sourceSHA256
@@ -1818,7 +1828,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 source: LocalImportSourceAssociation(
                     sourceURL: imported.metadata.sourceURL,
                     downloadSourceURL: imported.downloadSourceURL
-                )
+                ),
+                persistImmediately: persistImmediately
             ) ?? duplicate
         }
 
@@ -1846,7 +1857,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             tracks.append(track)
             normalizeSystemPlaylist()
             if currentTrackID == nil { currentTrackID = track.id }
-            save()
+            if persistImmediately { save() }
             return track
         } catch {
             try? fileManager.removeItem(at: destination)
@@ -2508,7 +2519,6 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         cancelRemoteSongMetadataHydration()
         let requests = remoteSongMetadataRequests(for: remoteSongs)
         pendingRemoteSongMetadataCount = requests.reduce(0) { $0 + $1.songIDs.count }
-        guard !requests.isEmpty else { return }
 
         remoteSongMetadataHydrationGeneration &+= 1
         let generation = remoteSongMetadataHydrationGeneration
@@ -2721,7 +2731,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @discardableResult
     private func importSavedRemoteSource(
         _ song: MobileRemoteSong,
-        baseURL: URL
+        baseURL: URL,
+        downloadPolicyLease: MobileTransferPolicyLease
     ) async throws -> MobileTrack {
         let resolution = try await remoteSourceResolution(for: song)
         guard let candidate = resolution.candidates.first,
@@ -2737,7 +2748,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             candidate,
             metadata: metadata,
             existingTracks: tracks,
-            mediaMode: LocalImportMediaMode(rawValue: song.mediaKind) ?? .audio
+            mediaMode: LocalImportMediaMode(rawValue: song.mediaKind) ?? .audio,
+            includeArtwork: false
         ) { [weak self] progress in
             self?.downloadDetail = progress.stage == .downloading
                 ? "Downloading \(song.title)"
@@ -2746,23 +2758,274 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         let track: MobileTrack
         switch outcome {
         case .created(let imported):
-            track = try insertLocalImportedAudio(imported)
+            track = try insertLocalImportedAudio(imported, persistImmediately: false)
         case .duplicate(let id, let sourceAssociation):
             guard let duplicate = tracks.first(where: { $0.id == id }) else {
                 throw URLError(.fileDoesNotExist)
             }
-            track = associateLocalImportSource(trackID: id, source: sourceAssociation) ?? duplicate
+            track = associateLocalImportSource(
+                trackID: id,
+                source: sourceAssociation,
+                persistImmediately: false
+            ) ?? duplicate
         }
         guard isCurrentServerContext(baseURL: baseURL, profileID: syncProfileID) else {
+            // Preserve the completed local import even if the server/profile
+            // changed before its remote association could be committed.
+            save()
             throw CancellationError()
+        }
+        guard isDownloadPolicyLeaseCurrent(downloadPolicyLease) else {
+            // The verified bytes remain a valid local import, but an expired
+            // lease must not attach them to the server identity.
+            save()
+            throw MobileTransferPolicyChangedError.changed
         }
         try adoptUploadedDownload(
             trackID: track.id,
             remoteID: song.id,
             sourceServer: baseURL.absoluteString,
-            profileID: syncProfileID
+            profileID: syncProfileID,
+            persistImmediately: false
         )
+        // Import, provenance, and remote identity are committed together so a
+        // source-link song rewrites the library only once.
+        save()
         return tracks.first(where: { $0.id == track.id }) ?? track
+    }
+
+    private func downloadRemoteSong(
+        _ song: MobileRemoteSong,
+        baseURL: URL,
+        profileID: String,
+        downloadPolicyLease: MobileTransferPolicyLease
+    ) async -> RemoteDownloadItemResult {
+        guard isCurrentServerContext(baseURL: baseURL, profileID: profileID) else {
+            return .cancelled
+        }
+        guard isDownloadPolicyLeaseCurrent(downloadPolicyLease) else {
+            return .policyChanged
+        }
+        downloadDetail = "Downloading \(song.title)"
+
+        if song.isSourceLinkRecord {
+            do {
+                _ = try await importSavedRemoteSource(
+                    song,
+                    baseURL: baseURL,
+                    downloadPolicyLease: downloadPolicyLease
+                )
+                return .downloaded(songID: song.id)
+            } catch is MobileTransferPolicyChangedError {
+                return .policyChanged
+            } catch is CancellationError {
+                return .cancelled
+            } catch let error as URLError where error.code == .cancelled {
+                return .cancelled
+            } catch {
+                return .failed(
+                    songID: song.id,
+                    title: song.title,
+                    reason: error.localizedDescription
+                )
+            }
+        }
+
+        guard song.size <= MobileDownloadIntegrityPolicy.maximumFileSize else {
+            let error = MobileDownloadIntegrityError.tooLarge(
+                actual: song.size,
+                limit: MobileDownloadIntegrityPolicy.maximumFileSize
+            )
+            return .failed(
+                songID: song.id,
+                title: song.title,
+                reason: error.localizedDescription
+            )
+        }
+        guard let remoteURL = URL(string: song.downloadURL, relativeTo: baseURL)?.absoluteURL else {
+            return .failed(
+                songID: song.id,
+                title: song.title,
+                reason: "The server returned an invalid download URL."
+            )
+        }
+        guard sameOrigin(remoteURL, baseURL) else {
+            return .failed(
+                songID: song.id,
+                title: song.title,
+                reason: "The server returned a cross-origin file URL. Resonance only accepts the same-origin resolver."
+            )
+        }
+
+        var request = URLRequest(url: remoteURL)
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
+        setClientConfigContextHeaders(on: &request, profileID: profileID)
+        do {
+            guard let authorization = registerDownloadAuthorization(
+                for: downloadPolicyLease
+            ) else {
+                throw MobileTransferPolicyChangedError.changed
+            }
+            defer { releaseDownloadAuthorization(authorization.id) }
+            let boundedDownload = try MobileBoundedDownloadOperation(
+                maximumSize: MobileDownloadIntegrityPolicy.maximumFileSize,
+                authorization: authorization.authorization
+            )
+            let downloaded = try await boundedDownload.run(request: request)
+            let temporaryURL = downloaded.temporaryURL
+            defer { try? fileManager.removeItem(at: temporaryURL) }
+            try Task.checkCancellation()
+            guard isCurrentServerContext(baseURL: baseURL, profileID: profileID) else {
+                throw CancellationError()
+            }
+            guard isDownloadPolicyLeaseCurrent(downloadPolicyLease) else {
+                throw MobileTransferPolicyChangedError.changed
+            }
+            try MobileDownloadIntegrityPolicy.validate(
+                expectedSize: song.size,
+                expectedSHA256: song.contentSHA256,
+                actualSize: downloaded.byteCount,
+                actualSHA256: downloaded.sha256
+            )
+
+            let mediaDuration: TimeInterval
+            if song.mediaKind == "video" || song.contentType.lowercased().hasPrefix("video/") {
+                let asset = AVURLAsset(url: temporaryURL)
+                guard try await !asset.loadTracks(withMediaType: .video).isEmpty else {
+                    throw CocoaError(.fileReadCorruptFile, userInfo: [
+                        NSLocalizedDescriptionKey: "The downloaded video does not contain a playable video track."
+                    ])
+                }
+                let duration = try await asset.load(.duration).seconds
+                guard duration.isFinite, duration > 0 else {
+                    throw CocoaError(.fileReadCorruptFile, userInfo: [
+                        NSLocalizedDescriptionKey: "The downloaded video has an invalid duration."
+                    ])
+                }
+                mediaDuration = duration
+            } else {
+                mediaDuration = try AVAudioPlayer(contentsOf: temporaryURL).duration
+            }
+            let metadata = await embeddedMetadata(at: temporaryURL)
+            let artworkData = metadata.artworkData
+            try Task.checkCancellation()
+            guard isCurrentServerContext(baseURL: baseURL, profileID: profileID) else {
+                throw CancellationError()
+            }
+            guard isDownloadPolicyLeaseCurrent(downloadPolicyLease) else {
+                throw MobileTransferPolicyChangedError.changed
+            }
+            let filename = uniqueFilename(song.filename)
+            let destination = musicDirectory.appendingPathComponent(filename)
+            try fileManager.moveItem(at: temporaryURL, to: destination)
+            do {
+                try markServerDownloadExcludedFromBackup(at: destination)
+            } catch {
+                try? fileManager.removeItem(at: destination)
+                throw error
+            }
+            let trackID = UUID()
+            tracks.append(MobileTrack(
+                id: trackID,
+                title: metadata.title ?? song.title,
+                artist: metadata.artist ?? usefulFallback(song.artist, default: "Unknown Artist"),
+                album: metadata.album ?? usefulFallback(song.album, default: "Server Library"),
+                duration: metadata.duration ?? mediaDuration,
+                relativePath: filename,
+                remoteID: song.id,
+                sourceServer: baseURL.absoluteString,
+                syncProfileID: profileID,
+                sourceURL: song.sourceURL,
+                downloadSourceURL: song.sourceURL,
+                artworkFilename: saveArtwork(artworkData, for: trackID),
+                artworkScanComplete: artworkData != nil,
+                contentSHA256: downloaded.sha256,
+                preservesUnlinkedImport: false
+            ))
+            save()
+            return .downloaded(songID: song.id)
+        } catch is MobileTransferPolicyChangedError {
+            return .policyChanged
+        } catch is CancellationError {
+            return .cancelled
+        } catch let error as URLError where error.code == .cancelled {
+            return .cancelled
+        } catch {
+            return .failed(
+                songID: song.id,
+                title: song.title,
+                reason: error.localizedDescription
+            )
+        }
+    }
+
+    private func downloadRemoteSongs(
+        _ songs: [MobileRemoteSong],
+        baseURL: URL,
+        profileID: String,
+        downloadPolicyLease: MobileTransferPolicyLease
+    ) async -> [RemoteDownloadItemResult] {
+        let audioSongs = songs.filter { $0.mediaKind != "video" }
+        let videoSongs = songs.filter { $0.mediaKind == "video" }
+        var results: [RemoteDownloadItemResult] = []
+        var processed = 0
+
+        func isInterrupted(_ result: RemoteDownloadItemResult) -> Bool {
+            switch result {
+            case .policyChanged, .cancelled: true
+            case .downloaded, .failed: false
+            }
+        }
+
+        var audioIndex = 0
+        while audioIndex < audioSongs.count {
+            let batch: [RemoteDownloadItemResult]
+            if audioIndex + 1 < audioSongs.count {
+                let firstSong = audioSongs[audioIndex]
+                let secondSong = audioSongs[audioIndex + 1]
+                async let first = downloadRemoteSong(
+                    firstSong,
+                    baseURL: baseURL,
+                    profileID: profileID,
+                    downloadPolicyLease: downloadPolicyLease
+                )
+                async let second = downloadRemoteSong(
+                    secondSong,
+                    baseURL: baseURL,
+                    profileID: profileID,
+                    downloadPolicyLease: downloadPolicyLease
+                )
+                let pair = await (first, second)
+                batch = [pair.0, pair.1]
+            } else {
+                batch = [await downloadRemoteSong(
+                    audioSongs[audioIndex],
+                    baseURL: baseURL,
+                    profileID: profileID,
+                    downloadPolicyLease: downloadPolicyLease
+                )]
+            }
+            results.append(contentsOf: batch)
+            processed += batch.count
+            downloadProgress = Double(processed) / Double(max(songs.count, 1))
+            if batch.contains(where: isInterrupted) { return results }
+            audioIndex += batch.count
+        }
+
+        for song in videoSongs {
+            let result = await downloadRemoteSong(
+                song,
+                baseURL: baseURL,
+                profileID: profileID,
+                downloadPolicyLease: downloadPolicyLease
+            )
+            results.append(result)
+            processed += 1
+            downloadProgress = Double(processed) / Double(max(songs.count, 1))
+            if isInterrupted(result) { break }
+        }
+        return results
     }
 
     private func performSync(songIDs: Set<String>?) async {
@@ -2807,6 +3070,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         let requestProfileID = syncProfileID
         isSyncing = true
         defer { isSyncing = false }
+        var metadataHydrationContext: (baseURL: URL, profileID: String)?
+        defer {
+            if let context = metadataHydrationContext,
+               isCurrentServerContext(baseURL: context.baseURL, profileID: context.profileID) {
+                beginRemoteSongMetadataHydration(
+                    baseURL: context.baseURL,
+                    profileID: context.profileID
+                )
+            }
+        }
         var reachedCatalog = false
         do {
             var catalogRequest = URLRequest(url: baseURL.appendingPathComponent("api/v1/songs"))
@@ -2834,8 +3107,13 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 uploadedSongsAwaitingCatalog.removeValue(forKey: song.id)
             }
             selectedRemoteSongIDs.formIntersection(Set(remoteSongs.map(\.id)))
-            beginRemoteSongMetadataHydration(baseURL: baseURL, profileID: requestProfileID)
-            await backfillDownloadedArtwork(from: catalogSongs, baseURL: baseURL)
+            if requestsDownloads {
+                // Metadata and artwork hydration resume after the media batch so
+                // provider/image requests do not compete with the selected files.
+                metadataHydrationContext = (baseURL, requestProfileID)
+            } else {
+                beginRemoteSongMetadataHydration(baseURL: baseURL, profileID: requestProfileID)
+            }
             if let downloadPolicyLease,
                !isDownloadPolicyLeaseCurrent(downloadPolicyLease) {
                 throw MobileTransferPolicyChangedError.changed
@@ -2855,168 +3133,40 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 defer { isDownloading = false }
                 var completed = 0
                 var failed = 0
-                var processed = 0
                 var downloadedSongIDs = Set<String>()
-                for song in songs {
-                    guard let downloadPolicyLease,
-                          isDownloadPolicyLeaseCurrent(downloadPolicyLease) else {
-                        commitDownloadCheckpoint(downloadedSongIDs)
-                        throw MobileTransferPolicyChangedError.changed
-                    }
-                    defer {
-                        processed += 1
-                        downloadProgress = Double(processed) / Double(max(songs.count, 1))
-                    }
-                    downloadDetail = "Downloading \(completed + 1) of \(songs.count) • \(song.filename)"
-                    if song.isSourceLinkRecord {
-                        do {
-                            _ = try await importSavedRemoteSource(song, baseURL: baseURL)
-                            downloadedSongIDs.insert(song.id)
-                            completed += 1
-                            save()
-                        } catch {
-                            failed += 1
-                            recordTransferFailure(
-                                .download,
-                                item: song.title,
-                                reason: error.localizedDescription,
-                                retryTarget: .download(remoteSongID: song.id)
-                            )
-                        }
-                        continue
-                    }
-                    guard song.size <= MobileDownloadIntegrityPolicy.maximumFileSize else {
-                        failed += 1
-                        let error = MobileDownloadIntegrityError.tooLarge(
-                            actual: song.size,
-                            limit: MobileDownloadIntegrityPolicy.maximumFileSize
-                        )
-                        recordTransferFailure(
-                            .download,
-                            item: song.title,
-                            reason: error.localizedDescription,
-                            retryTarget: .download(remoteSongID: song.id)
-                        )
-                        continue
-                    }
-                    guard let remoteURL = URL(string: song.downloadURL, relativeTo: baseURL)?.absoluteURL else {
-                        failed += 1
-                        recordTransferFailure(
-                            .download,
-                            item: song.title,
-                            reason: "The server returned an invalid download URL.",
-                            retryTarget: .download(remoteSongID: song.id)
-                        )
-                        continue
-                    }
-                    guard sameOrigin(remoteURL, baseURL) else {
-                        failed += 1
-                        recordTransferFailure(
-                            .download,
-                            item: song.title,
-                            reason: "The server returned a cross-origin file URL. Resonance only accepts the same-origin resolver.",
-                            retryTarget: .download(remoteSongID: song.id)
-                        )
-                        continue
-                    }
-                    var request = URLRequest(url: remoteURL)
-                    request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-                    request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
-                    setClientConfigContextHeaders(on: &request, profileID: requestProfileID)
-                    do {
-                        guard let authorization = registerDownloadAuthorization(
-                            for: downloadPolicyLease
-                        ) else {
-                            throw MobileTransferPolicyChangedError.changed
-                        }
-                        defer { releaseDownloadAuthorization(authorization.id) }
-                        let boundedDownload = try MobileBoundedDownloadOperation(
-                            maximumSize: MobileDownloadIntegrityPolicy.maximumFileSize,
-                            authorization: authorization.authorization
-                        )
-                        let downloaded = try await boundedDownload.run(request: request)
-                        let temporaryURL = downloaded.temporaryURL
-                        defer { try? fileManager.removeItem(at: temporaryURL) }
-                        try Task.checkCancellation()
-                        guard isCurrentServerContext(baseURL: baseURL, profileID: requestProfileID),
-                              isDownloadPolicyLeaseCurrent(downloadPolicyLease) else {
-                            if !isDownloadPolicyLeaseCurrent(downloadPolicyLease) {
-                                throw MobileTransferPolicyChangedError.changed
-                            }
-                            throw CancellationError()
-                        }
-                        try MobileDownloadIntegrityPolicy.validate(
-                            expectedSize: song.size,
-                            expectedSHA256: song.contentSHA256,
-                            actualSize: downloaded.byteCount,
-                            actualSHA256: downloaded.sha256
-                        )
-
-                        let mediaDuration: TimeInterval
-                        if song.mediaKind == "video" || song.contentType.lowercased().hasPrefix("video/") {
-                            let asset = AVURLAsset(url: temporaryURL)
-                            guard try await !asset.loadTracks(withMediaType: .video).isEmpty else {
-                                throw CocoaError(.fileReadCorruptFile, userInfo: [
-                                    NSLocalizedDescriptionKey: "The downloaded video does not contain a playable video track."
-                                ])
-                            }
-                            let duration = try await asset.load(.duration).seconds
-                            guard duration.isFinite, duration > 0 else {
-                                throw CocoaError(.fileReadCorruptFile, userInfo: [
-                                    NSLocalizedDescriptionKey: "The downloaded video has an invalid duration."
-                                ])
-                            }
-                            mediaDuration = duration
-                        } else {
-                            mediaDuration = try AVAudioPlayer(contentsOf: temporaryURL).duration
-                        }
-                        let metadata = await embeddedMetadata(at: temporaryURL)
-                        let artworkData: Data?
-                        if let embeddedArtwork = metadata.artworkData {
-                            artworkData = embeddedArtwork
-                        } else {
-                            artworkData = await remoteArtworkData(for: song, baseURL: baseURL)
-                        }
-                        try Task.checkCancellation()
-                        guard isCurrentServerContext(baseURL: baseURL, profileID: requestProfileID),
-                              isDownloadPolicyLeaseCurrent(downloadPolicyLease) else {
-                            if !isDownloadPolicyLeaseCurrent(downloadPolicyLease) {
-                                throw MobileTransferPolicyChangedError.changed
-                            }
-                            throw CancellationError()
-                        }
-                        let filename = uniqueFilename(song.filename)
-                        let destination = musicDirectory.appendingPathComponent(filename)
-                        try fileManager.moveItem(at: temporaryURL, to: destination)
-                        do {
-                            try markServerDownloadExcludedFromBackup(at: destination)
-                        } catch {
-                            try? fileManager.removeItem(at: destination)
-                            throw error
-                        }
-                        let trackID = UUID()
-                        tracks.append(MobileTrack(
-                            id: trackID,
-                            title: metadata.title ?? song.title,
-                            artist: metadata.artist ?? usefulFallback(song.artist, default: "Unknown Artist"),
-                            album: metadata.album ?? usefulFallback(song.album, default: "Server Library"),
-                            duration: metadata.duration ?? mediaDuration,
-                            relativePath: filename,
-                            remoteID: song.id,
-                            sourceServer: baseURL.absoluteString,
-                            syncProfileID: syncProfileID,
-                            sourceURL: song.sourceURL,
-                            downloadSourceURL: song.sourceURL,
-                            artworkFilename: saveArtwork(artworkData, for: trackID),
-                            artworkScanComplete: true,
-                            contentSHA256: downloaded.sha256,
-                            preservesUnlinkedImport: false
-                        ))
-                        downloadedSongIDs.insert(song.id)
+                guard let downloadPolicyLease else {
+                    throw MobileTransferPolicyChangedError.changed
+                }
+                let results = await downloadRemoteSongs(
+                    songs,
+                    baseURL: baseURL,
+                    profileID: requestProfileID,
+                    downloadPolicyLease: downloadPolicyLease
+                )
+                var policyChanged = false
+                var cancelled = false
+                for result in results {
+                    switch result {
+                    case .downloaded(let songID):
+                        downloadedSongIDs.insert(songID)
                         completed += 1
-                        save()
-                    } catch is MobileTransferPolicyChangedError {
-                        commitDownloadCheckpoint(downloadedSongIDs)
+                    case .failed(let songID, let title, let reason):
+                        failed += 1
+                        recordTransferFailure(
+                            .download,
+                            item: title,
+                            reason: reason,
+                            retryTarget: .download(remoteSongID: songID)
+                        )
+                    case .policyChanged:
+                        policyChanged = true
+                    case .cancelled:
+                        cancelled = true
+                    }
+                }
+                if policyChanged || cancelled {
+                    commitDownloadCheckpoint(downloadedSongIDs)
+                    if policyChanged {
                         downloadDetail = "Download stopped because the signed policy changed after \(completed) completed"
                         serverMessage = downloadDetail
                         showTransferNotice(
@@ -3024,26 +3174,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                             detail: downloadDetail,
                             isError: true
                         )
-                        return
-                    } catch is CancellationError {
-                        commitDownloadCheckpoint(downloadedSongIDs)
+                    } else {
                         downloadDetail = "Download cancelled after \(completed) completed"
                         serverMessage = downloadDetail
-                        return
-                    } catch let error as URLError where error.code == .cancelled {
-                        commitDownloadCheckpoint(downloadedSongIDs)
-                        downloadDetail = "Download cancelled after \(completed) completed"
-                        serverMessage = downloadDetail
-                        return
-                    } catch {
-                        failed += 1
-                        recordTransferFailure(
-                            .download,
-                            item: song.title,
-                            reason: error.localizedDescription,
-                            retryTarget: .download(remoteSongID: song.id)
-                        )
                     }
+                    return
                 }
                 normalizeSystemPlaylist()
                 hydrateRemotePlaylistTracks()
@@ -4323,7 +4458,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         trackID: UUID,
         remoteID: String,
         sourceServer: String,
-        profileID: String
+        profileID: String,
+        persistImmediately: Bool = true
     ) throws {
         guard let targetIndex = tracks.firstIndex(where: { $0.id == trackID }) else {
             throw URLError(.fileDoesNotExist)
@@ -4405,7 +4541,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             likesDirty = true
         }
         normalizeSystemPlaylist()
-        save()
+        if persistImmediately { save() }
         schedulePlaylistSync()
     }
 
