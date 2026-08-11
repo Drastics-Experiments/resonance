@@ -3,7 +3,14 @@ package mov.unblocked.resonance.data
 import mov.unblocked.resonance.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerialName
@@ -51,6 +58,41 @@ internal object SourceLinkSchemaCompatibility {
         status == HttpURLConnection.HTTP_BAD_REQUEST &&
             error == UnsupportedSchema &&
             mediaKind == "audio"
+}
+
+data class ServerDownloadFailure(
+    val songID: String,
+    val filename: String,
+    val message: String,
+)
+
+data class ServerDownloadBatchResult(
+    val tracks: List<Track>,
+    val failures: List<ServerDownloadFailure>,
+)
+
+private data class ServerDownloadItemResult(
+    val index: Int,
+    val track: Track? = null,
+    val failure: ServerDownloadFailure? = null,
+)
+
+internal class TransferProgressThrottle(
+    private val minimumByteDelta: Long = 512L * 1_024,
+    private val minimumIntervalNanos: Long = 100L * 1_000_000,
+) {
+    private var lastBytes = 0L
+    private var lastEmissionNanos = 0L
+
+    fun shouldEmit(transferred: Long, totalBytes: Long?, nowNanos: Long): Boolean {
+        val isComplete = totalBytes != null && transferred >= totalBytes
+        val byteDeltaReached = transferred - lastBytes >= minimumByteDelta
+        val intervalReached = lastEmissionNanos == 0L || nowNanos - lastEmissionNanos >= minimumIntervalNanos
+        if (!isComplete && !byteDeltaReached && !intervalReached) return false
+        lastBytes = transferred
+        lastEmissionNanos = nowNanos
+        return true
+    }
 }
 
 class ServerClient(
@@ -191,7 +233,7 @@ class ServerClient(
         existingRemoteIDs: Set<String> = emptySet(),
         onProgress: (TransferProgress) -> Unit = {},
         beforeEach: () -> Unit,
-    ): List<Track> = downloadSongs(
+    ): ServerDownloadBatchResult = downloadSongs(
         songs = catalog.songs.filter { it.id in selectedIDs },
         repository = repository,
         existingRemoteIDs = existingRemoteIDs,
@@ -205,7 +247,7 @@ class ServerClient(
         existingRemoteIDs: Set<String> = emptySet(),
         onProgress: (TransferProgress) -> Unit = {},
         beforeEach: () -> Unit,
-    ): List<Track> = downloadSongs(
+    ): ServerDownloadBatchResult = downloadSongs(
         songs = catalog.songs,
         repository = repository,
         existingRemoteIDs = existingRemoteIDs,
@@ -409,63 +451,118 @@ class ServerClient(
         existingRemoteIDs: Set<String>,
         onProgress: (TransferProgress) -> Unit,
         beforeEach: () -> Unit,
-    ): List<Track> {
+    ): ServerDownloadBatchResult {
         val allocatedDownloads = mutableListOf<File>()
-        val completedDownloads = mutableListOf<Track>()
         return try {
             withContext(Dispatchers.IO) {
-                songs.forEachIndexed { index, song ->
+                val pending = songs.withIndex().filter { it.value.id !in existingRemoteIDs }
+                val progressLock = Any()
+                var processed = songs.size - pending.size
+                val transferGate = Semaphore(permits = 2)
+                val videoGate = Mutex()
+
+                suspend fun downloadItem(index: Int, song: RemoteSong): ServerDownloadItemResult {
                     coroutineContext.ensureActive()
-                    if (song.id in existingRemoteIDs) {
-                        onProgress(TransferProgress(index + 1, songs.size, song.filename))
-                        return@forEachIndexed
-                    }
                     // Re-evaluate the exact snapshotted client policy immediately
                     // before each file allocation and authenticated media request.
                     beforeEach()
                     val destination = repository.newDownloadFile(song.filename)
-                    allocatedDownloads.add(destination)
-                    val verifiedContentSHA256 = downloadToFile(
-                        song,
-                        destination,
-                        repository,
-                        beforeRead = beforeEach,
-                    ) { transferred, totalBytes ->
-                        onProgress(
-                            TransferProgress(
-                                completed = index,
-                                total = songs.size,
-                                currentFilename = song.filename,
-                                bytesTransferred = transferred,
-                                totalBytes = totalBytes,
+                    synchronized(allocatedDownloads) { allocatedDownloads += destination }
+                    val result = try {
+                        val verifiedContentSHA256 = downloadToFile(
+                            song,
+                            destination,
+                            repository,
+                            beforeRead = beforeEach,
+                        ) { transferred, totalBytes ->
+                            synchronized(progressLock) {
+                                onProgress(
+                                    TransferProgress(
+                                        completed = processed,
+                                        total = songs.size,
+                                        currentFilename = song.filename,
+                                        bytesTransferred = transferred,
+                                        totalBytes = totalBytes,
+                                    ),
+                                )
+                            }
+                        }
+                        ServerDownloadItemResult(
+                            index = index,
+                            track = repository.registerDownloadedFile(
+                                destination,
+                                song,
+                                baseURL,
+                                profileID,
+                                // Artwork is intentionally backfilled after the media batch so
+                                // a slow image host cannot block the next song download.
+                                fallbackArtwork = null,
+                                verifiedContentSHA256 = verifiedContentSHA256,
+                            ),
+                        )
+                    } catch (error: CancellationException) {
+                        repository.discardUncommittedDownload(destination)
+                        throw error
+                    } catch (error: Throwable) {
+                        repository.discardUncommittedDownload(destination)
+                        // A transient item failure should not discard completed
+                        // downloads, but a policy/profile change must stop the
+                        // batch immediately instead of becoming an item error.
+                        beforeEach()
+                        ServerDownloadItemResult(
+                            index = index,
+                            failure = ServerDownloadFailure(
+                                songID = song.id,
+                                filename = song.filename,
+                                message = error.message ?: "Download failed",
                             ),
                         )
                     }
-                    val track = repository.registerDownloadedFile(
-                        destination,
-                        song,
-                        baseURL,
-                        profileID,
-                        fallbackArtwork = fetchArtwork(song),
-                        verifiedContentSHA256 = verifiedContentSHA256,
-                    )
-                    completedDownloads.add(track)
-                    onProgress(
-                        TransferProgress(
-                            completed = index + 1,
-                            total = songs.size,
-                            currentFilename = song.filename,
-                            bytesTransferred = destination.length(),
-                            totalBytes = song.size.takeIf { it > 0L },
-                        ),
-                    )
+                    synchronized(progressLock) {
+                        processed += 1
+                        onProgress(
+                            TransferProgress(
+                                completed = processed,
+                                total = songs.size,
+                                currentFilename = song.filename,
+                                bytesTransferred = destination.length(),
+                                totalBytes = song.size.takeIf { it > 0L },
+                            ),
+                        )
+                    }
+                    return result
                 }
-                completedDownloads.toList()
+
+                val results = coroutineScope {
+                    pending.map { indexedSong ->
+                        async {
+                            val work: suspend () -> ServerDownloadItemResult = {
+                                transferGate.withPermit {
+                                    downloadItem(indexedSong.index, indexedSong.value)
+                                }
+                            }
+                            if (indexedSong.value.isVideoMedia) {
+                                // Videos stay one-at-a-time while audio can use both
+                                // bounded transfer slots.
+                                videoGate.withLock { work() }
+                            } else {
+                                work()
+                            }
+                        }
+                    }.awaitAll()
+                }.sortedBy(ServerDownloadItemResult::index)
+
+                ServerDownloadBatchResult(
+                    tracks = results.mapNotNull(ServerDownloadItemResult::track),
+                    failures = results.mapNotNull(ServerDownloadItemResult::failure),
+                )
             }
         } catch (error: Throwable) {
-            // The caller only adds tracks to its visible library after the whole batch returns.
-            // This outer catch also covers prompt cancellation while withContext returns.
-            allocatedDownloads.forEach(repository::discardUncommittedDownload)
+            // A cancellation or policy/profile interruption means the caller
+            // cannot commit this result, so remove every uncommitted allocation.
+            synchronized(allocatedDownloads) {
+                allocatedDownloads.forEach(repository::discardUncommittedDownload)
+            }
             throw error
         }
     }
@@ -498,13 +595,13 @@ class ServerClient(
             val temporary = repository.newDownloadStagingFile()
             try {
                 val digest = MessageDigest.getInstance("SHA-256")
+                val progressThrottle = TransferProgressThrottle()
                 var transferred = 0L
                 connection.inputStream.use { input ->
                     temporary.outputStream().use { output ->
                         val buffer = ByteArray(BUFFER_SIZE)
                         while (true) {
                             coroutineContext.ensureActive()
-                            beforeRead()
                             val read = input.read(buffer)
                             beforeRead()
                             if (read < 0) break
@@ -518,10 +615,18 @@ class ServerClient(
                             output.write(buffer, 0, read)
                             digest.update(buffer, 0, read)
                             transferred = updatedTransferred
-                            onBytes(transferred, expectations.expectedBytes)
+                            if (progressThrottle.shouldEmit(
+                                    transferred = transferred,
+                                    totalBytes = expectations.expectedBytes,
+                                    nowNanos = System.nanoTime(),
+                                )
+                            ) {
+                                onBytes(transferred, expectations.expectedBytes)
+                            }
                         }
                     }
                 }
+                onBytes(transferred, expectations.expectedBytes)
                 val verifiedContentSHA256 = DownloadIntegrityPolicy.verify(
                     expectations = expectations,
                     actualBytes = transferred,
