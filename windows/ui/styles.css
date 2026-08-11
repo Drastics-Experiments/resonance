@@ -1784,6 +1784,11 @@ label.settings-row { cursor: pointer; }
 .settings-toggle input:checked + span { border-color: #a184ff; background: linear-gradient(135deg, #5e34e8, #7c52ff); box-shadow: 0 0 14px #7047ff3a; }
 .settings-toggle input:checked + span::before { background: #fff; transform: translateX(20px); }
 .settings-toggle input:focus-visible + span { outline: 2px solid var(--accent-tertiary); outline-offset: 3px; }
+.settings-crossfade-row { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; min-height: 92px; }
+.settings-crossfade-controls { display: flex; align-items: center; gap: 11px; }
+.settings-crossfade-controls > span { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.settings-crossfade-slider { grid-column: 2 / -1; width: 100%; margin: 2px 0 5px; }
+.settings-crossfade-slider:disabled { opacity: .38; }
 .settings-panel-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin: 0 5px 18px; }
 .settings-panel-title h2 { margin: 5px 0 6px; font-size: 26px; letter-spacing: -.6px; }
 .settings-panel-title p { max-width: 560px; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }

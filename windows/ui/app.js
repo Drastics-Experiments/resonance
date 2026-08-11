@@ -30,6 +30,8 @@ import {
   normalizeServerUploadManifest,
   normalizedAppPreferences,
   normalizedAppTheme,
+  normalizedCrossfadeSeconds,
+  crossfadeProgress,
   normalizedRemoteSongMetadataCache,
   normalizedVolume,
   playbackGainForVolume,
@@ -75,7 +77,8 @@ import {
 } from "./core.js";
 
 const api = window.resonance;
-const audio = document.querySelector("#audio");
+let audio = document.querySelector("#audio");
+let crossfadeAudio = document.querySelector("#crossfadeAudio");
 const clipEditorPreviewAudio = document.querySelector("#clipEditorPreview");
 const clipEditorVisualizerCanvas = document.querySelector("#clipEditorStageVisualizerCanvas");
 const clipEditorVisualizerContext = clipEditorVisualizerCanvas.getContext("2d", { alpha: true, desynchronized: true });
@@ -129,6 +132,11 @@ let nowPlayingCloseTimer = null;
 let fullPlayerTitleMarqueeFrame = null;
 let audioSourceTrackID = null;
 let audioMetadataTrackID = null;
+let crossfadeTrackID = null;
+let crossfadeDurationSeconds = 0;
+let crossfadeAnimationFrame = null;
+let crossfadeStarted = false;
+let crossfadeStarting = false;
 let installedVideoSession = null;
 let installedVideoTransitionTimer = null;
 let installedVideoGeometryAnimation = null;
@@ -285,6 +293,7 @@ const settingsIcons = Object.freeze({
   background: settingsIcon('<path d="M4 7h16v11H4z"/><path d="M8 7V4h8v3M8 21h8"/>'),
   discord: settingsIcon('<path d="M7.5 7.4A11 11 0 0 1 12 6.5a11 11 0 0 1 4.5.9c1.1 1.5 2 4.4 2 6.4-1.3 1.6-2.6 2.2-4 2.6l-1-1.3M16.5 7.4l.9-1.7M7.5 7.4l-.9-1.7M10 13h.01M14 13h.01M9.5 15.1c1.7.7 3.3.7 5 0"/>'),
   update: settingsIcon('<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/>'),
+  playback: settingsIcon('<path d="M4 12h2m2-5v10m3-13v16m3-11v6m3-9v12m3-7v2"/>'),
 });
 
 const serverUploadModeOptions = Object.freeze({
@@ -758,6 +767,7 @@ function applyShuffleToPlaybackContext(anchorTrackID = currentID) {
 
 function setShuffleEnabled(value) {
   if (currentTrack()?.transientStream) return false;
+  cancelCrossfade();
   shuffle = Boolean(value);
   state.shuffle = shuffle;
   applyShuffleToPlaybackContext();
@@ -4120,6 +4130,15 @@ function renderSettings() {
                 <span class="settings-row-copy"><strong>Discord Rich Presence</strong><small id="settingsDiscordStatus">${escapeHTML(discordPresenceStatus.message || "Show Resonance playback on your signed-in Discord profile.")}</small></span>
                 <span class="settings-toggle"><input id="settingsDiscordPresence" type="checkbox" ${preferences.discordRichPresence && discordPresenceStatus.applicationConfigured ? "checked" : ""} ${discordPresenceStatus.applicationConfigured ? "" : "disabled"}><span aria-hidden="true"></span></span>
               </label>
+              <div class="settings-row settings-crossfade-row">
+                <span class="settings-row-icon" aria-hidden="true">${settingsIcons.playback}</span>
+                <span class="settings-row-copy"><strong>Crossfade</strong><small id="settingsCrossfadeDescription">${preferences.crossfadeEnabled ? `Overlap songs by ${preferences.crossfadeSeconds} seconds.` : "Start the next song early while fading between both."}</small></span>
+                <span class="settings-crossfade-controls">
+                  <span id="settingsCrossfadeValue">${preferences.crossfadeSeconds} sec</span>
+                  <label class="settings-toggle"><input id="settingsCrossfadeEnabled" type="checkbox" aria-label="Enable crossfade" ${preferences.crossfadeEnabled ? "checked" : ""}><span aria-hidden="true"></span></label>
+                </span>
+                <input id="settingsCrossfadeSeconds" class="settings-crossfade-slider" type="range" min="1" max="12" step="1" value="${preferences.crossfadeSeconds}" aria-label="Crossfade duration" aria-valuetext="${preferences.crossfadeSeconds} seconds" ${preferences.crossfadeEnabled ? "" : "disabled"}>
+              </div>
             </div>
             <div class="settings-section-heading compact"><span>APP</span><p>Existing Resonance connection and update tools.</p></div>
             <div class="settings-group">
@@ -4199,6 +4218,25 @@ function renderSettings() {
     await updateAppPreference("discordRichPresence", discordPresence.checked);
     scheduleDiscordPresenceUpdate();
   };
+  const crossfadeEnabled = $("#settingsCrossfadeEnabled");
+  const crossfadeSeconds = $("#settingsCrossfadeSeconds");
+  if (crossfadeEnabled) crossfadeEnabled.onchange = async () => {
+    await updateAppPreference("crossfadeEnabled", crossfadeEnabled.checked);
+    cancelCrossfade();
+    renderSettings();
+  };
+  if (crossfadeSeconds) crossfadeSeconds.oninput = () => {
+    const seconds = normalizedCrossfadeSeconds(crossfadeSeconds.value);
+    crossfadeSeconds.value = String(seconds);
+    crossfadeSeconds.setAttribute("aria-valuetext", `${seconds} seconds`);
+    $("#settingsCrossfadeValue").textContent = `${seconds} sec`;
+    $("#settingsCrossfadeDescription").textContent = `Overlap songs by ${seconds} seconds.`;
+    paintRange(crossfadeSeconds);
+  };
+  if (crossfadeSeconds) crossfadeSeconds.onchange = async () => {
+    await updateAppPreference("crossfadeSeconds", normalizedCrossfadeSeconds(crossfadeSeconds.value));
+  };
+  if (crossfadeSeconds) paintRange(crossfadeSeconds);
   document.querySelectorAll("[data-keybind-action]").forEach((button) => {
     button.onclick = () => {
       settingsRecordingAction = button.dataset.keybindAction;
@@ -6506,6 +6544,7 @@ function finishClipPlaybackIfNeeded() {
 
 function play(track, queue = null, options = {}) {
   if (!track) return;
+  cancelCrossfade();
   if (track.available === false || track.missing) {
     showNotice(`${track.title || "This song"} is still in your library, but its file is unavailable on this device.`);
     return;
@@ -6559,7 +6598,10 @@ function toggle() {
       state.position = range.startSeconds;
     }
     void requestPlayback();
-  } else audio.pause();
+  } else {
+    cancelCrossfade();
+    audio.pause();
+  }
   updateChrome();
 }
 
@@ -6569,6 +6611,159 @@ function move(direction, recordHistory = direction > 0) {
   const index = nextIndex(tracks, currentID, direction);
   if (index < 0) return false;
   play(tracks[index], null, { recordHistory });
+  return true;
+}
+
+function crossfadePlaybackBounds(track, media = null) {
+  const range = playbackRangeForTrack(state, track);
+  const measuredDuration = Number(media?.duration);
+  const storedDuration = Number(track?.duration) || 0;
+  const duration = Number.isFinite(measuredDuration) && measuredDuration > 0 ? measuredDuration : storedDuration;
+  const start = range?.startSeconds ?? 0;
+  const end = range?.endSeconds ?? duration;
+  return { start, end, duration: Math.max(0, end - start) };
+}
+
+function nextCrossfadeTrack() {
+  const preferences = normalizedAppPreferences(state.appPreferences);
+  const current = currentTrack();
+  if (!preferences.crossfadeEnabled || repeat || !current || current.transientStream || isInstalledVideoTrack(current)) return null;
+  const tracks = activePlaybackTracks();
+  if (tracks.length < 2) return null;
+  const index = nextIndex(tracks, currentID, 1);
+  const nextTrack = index >= 0 ? tracks[index] : null;
+  if (!nextTrack || nextTrack.id === currentID || nextTrack.transientStream || isInstalledVideoTrack(nextTrack) || !nextTrack.fileUrl) return null;
+  return nextTrack;
+}
+
+function resetCrossfadeState() {
+  if (crossfadeAnimationFrame) cancelAnimationFrame(crossfadeAnimationFrame);
+  crossfadeAnimationFrame = null;
+  crossfadeTrackID = null;
+  crossfadeDurationSeconds = 0;
+  crossfadeStarted = false;
+  crossfadeStarting = false;
+}
+
+function cancelCrossfade() {
+  const gain = playbackGainForVolume(state.volume);
+  audio.volume = gain;
+  if (crossfadeAnimationFrame) cancelAnimationFrame(crossfadeAnimationFrame);
+  crossfadeAudio.oncanplay = null;
+  crossfadeAudio.onerror = null;
+  crossfadeAudio.pause();
+  crossfadeAudio.removeAttribute("src");
+  crossfadeAudio.load();
+  crossfadeAudio.volume = 0;
+  resetCrossfadeState();
+}
+
+function prepareCrossfade(track) {
+  crossfadeTrackID = track.id;
+  crossfadeAudio.src = track.fileUrl;
+  crossfadeAudio.preload = "auto";
+  crossfadeAudio.playbackRate = Number(state.playbackRate) || 1;
+  crossfadeAudio.volume = 0;
+  crossfadeAudio.load();
+  crossfadeAudio.onerror = () => cancelCrossfade();
+}
+
+function maybeStartCrossfade() {
+  const nextTrack = nextCrossfadeTrack();
+  if (!nextTrack) {
+    if (crossfadeTrackID) cancelCrossfade();
+    return;
+  }
+  const preferences = normalizedAppPreferences(state.appPreferences);
+  const currentBounds = crossfadePlaybackBounds(currentTrack(), audio);
+  const remaining = currentBounds.end - audio.currentTime;
+  if (!Number.isFinite(remaining) || remaining <= 0) return;
+  if (crossfadeTrackID && crossfadeTrackID !== nextTrack.id) cancelCrossfade();
+  if (!crossfadeTrackID && remaining <= preferences.crossfadeSeconds + 2) prepareCrossfade(nextTrack);
+  if (crossfadeTrackID !== nextTrack.id || crossfadeStarted || crossfadeStarting || crossfadeAudio.readyState < HTMLMediaElement.HAVE_METADATA) return;
+
+  const nextBounds = crossfadePlaybackBounds(nextTrack, crossfadeAudio);
+  crossfadeDurationSeconds = Math.min(
+    preferences.crossfadeSeconds,
+    currentBounds.duration / 2,
+    nextBounds.duration / 2,
+  );
+  if (!Number.isFinite(crossfadeDurationSeconds) || crossfadeDurationSeconds < .25 || remaining > crossfadeDurationSeconds) return;
+  crossfadeStarting = true;
+  crossfadeAudio.currentTime = nextBounds.start;
+  void crossfadeAudio.play().then(() => {
+    if (crossfadeTrackID !== nextTrack.id) return;
+    crossfadeStarting = false;
+    crossfadeStarted = true;
+    runCrossfadeFrame();
+  }).catch(() => cancelCrossfade());
+}
+
+function applyCrossfadeVolumes() {
+  const gain = playbackGainForVolume(state.volume);
+  if (!crossfadeStarted) {
+    audio.volume = gain;
+    crossfadeAudio.volume = 0;
+    return;
+  }
+  const bounds = crossfadePlaybackBounds(currentTrack(), audio);
+  const progress = crossfadeProgress(bounds.end - audio.currentTime, crossfadeDurationSeconds);
+  audio.volume = gain * (1 - progress);
+  crossfadeAudio.volume = gain * progress;
+}
+
+function runCrossfadeFrame() {
+  crossfadeAnimationFrame = null;
+  if (!crossfadeStarted || !nextCrossfadeTrack() || nextCrossfadeTrack()?.id !== crossfadeTrackID) {
+    cancelCrossfade();
+    return;
+  }
+  applyCrossfadeVolumes();
+  const bounds = crossfadePlaybackBounds(currentTrack(), audio);
+  if (bounds.end - audio.currentTime <= .03 || audio.ended) {
+    promoteCrossfade();
+    return;
+  }
+  crossfadeAnimationFrame = requestAnimationFrame(runCrossfadeFrame);
+}
+
+function promoteCrossfade() {
+  const nextTrack = playbackTrackByID(crossfadeTrackID);
+  if (!crossfadeStarted || !nextTrack) {
+    cancelCrossfade();
+    return false;
+  }
+  updateListeningSession();
+  scheduleListeningHistorySync();
+  if (currentID && currentID !== nextTrack.id) history.push(currentID);
+  activeListeningEntryID = null;
+  lastListeningPosition = 0;
+  lastPersistedListeningSeconds = 0;
+
+  const outgoing = audio;
+  const incoming = crossfadeAudio;
+  outgoing.pause();
+  audio = incoming;
+  crossfadeAudio = outgoing;
+  currentID = nextTrack.id;
+  state.currentTrackID = nextTrack.id;
+  state.position = audio.currentTime;
+  pendingRestorePosition = null;
+  audioSourceTrackID = nextTrack.id;
+  audioMetadataTrackID = nextTrack.id;
+  resetCrossfadeState();
+  bindPrimaryAudioEvents(audio);
+  audio.volume = playbackGainForVolume(state.volume);
+  crossfadeAudio.oncanplay = null;
+  crossfadeAudio.onerror = null;
+  crossfadeAudio.removeAttribute("src");
+  crossfadeAudio.load();
+  crossfadeAudio.volume = 0;
+  beginListeningSession();
+  startPlaybackProgressAnimation();
+  persistInBackground();
+  updateChrome();
+  render();
   return true;
 }
 
@@ -7468,6 +7663,7 @@ function syncRepeatControls() {
 }
 
 function setRepeatEnabled(value) {
+  cancelCrossfade();
   repeat = Boolean(value);
   state.repeat = repeat;
   persistInBackground({ refreshSidebar: false });
@@ -8061,6 +8257,7 @@ function setPlaybackVolume(value, { shouldPersist = true } = {}) {
   state.volume = normalizedVolume(value);
   const gain = playbackGainForVolume(state.volume);
   audio.volume = gain;
+  applyCrossfadeVolumes();
   installedVideoPlayer.muted = true;
   installedVideoPlayer.volume = 0;
   const percent = Math.round(state.volume * 100);
@@ -8080,6 +8277,7 @@ $("#installedVideoVolume").oninput = (event) => {
 };
 $("#speed").onchange = (event) => {
   audio.playbackRate = Number(event.target.value);
+  crossfadeAudio.playbackRate = audio.playbackRate;
   installedVideoPlayer.playbackRate = audio.playbackRate;
   state.playbackRate = audio.playbackRate;
   setCustomSelectValue($("#fullPlayerSpeed"), audio.playbackRate);
@@ -8087,12 +8285,14 @@ $("#speed").onchange = (event) => {
 };
 $("#fullPlayerSpeed").onchange = (event) => {
   audio.playbackRate = Number(event.target.value);
+  crossfadeAudio.playbackRate = audio.playbackRate;
   installedVideoPlayer.playbackRate = audio.playbackRate;
   state.playbackRate = audio.playbackRate;
   setCustomSelectValue($("#speed"), audio.playbackRate);
   persistInBackground();
 };
 $("#seek").oninput = (event) => {
+  cancelCrossfade();
   const duration = currentPlaybackDuration();
   if (duration) audio.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
   event.target.value = duration ? String(Math.round(audio.currentTime / duration * 1000)) : "0";
@@ -8100,6 +8300,7 @@ $("#seek").oninput = (event) => {
   paintRange(event.target);
 };
 $("#fullPlayerSeek").oninput = (event) => {
+  cancelCrossfade();
   const duration = currentPlaybackDuration();
   if (duration) audio.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
   event.target.value = duration ? String(Math.round(audio.currentTime / duration * 1000)) : "0";
@@ -8108,85 +8309,101 @@ $("#fullPlayerSeek").oninput = (event) => {
   $("#seek").setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(duration)}`);
   paintRange($("#seek"));
 };
-audio.ontimeupdate = () => {
-  if (pendingRestorePosition !== null) return;
-  if (finishClipPlaybackIfNeeded()) return;
-  updatePlaybackProgressUI();
-  state.position = audio.currentTime;
-  updateListeningSession();
-  schedulePlaybackProgressSave();
-  synchronizeInstalledVideoWithAudio();
-};
-audio.onplay = () => {
-  beginListeningSession();
-  startPlaybackProgressAnimation();
-  synchronizeInstalledVideoWithAudio({ forceSeek: true });
-  updateChrome();
-  renderQueue();
-};
-audio.onpause = () => {
-  stopPlaybackProgressAnimation();
-  updatePlaybackProgressUI();
-  updateListeningSession();
-  scheduleListeningHistorySync();
-  synchronizeInstalledVideoWithAudio({ forceSeek: true });
-  updateChrome();
-  if (playbackProgressTimer) {
-    clearTimeout(playbackProgressTimer);
-    playbackProgressTimer = null;
-  }
-  persistInBackground({ refreshSidebar: false });
-};
-audio.onended = () => {
-  stopPlaybackProgressAnimation();
-  updatePlaybackProgressUI();
-  updateListeningSession();
-  scheduleListeningHistorySync();
-  const range = activeClipRange();
-  if (repeat) {
-    finishListeningSessionForReplay();
-    const start = range?.startSeconds ?? 0;
-    audio.currentTime = start;
-    state.position = start;
-    if (installedVideoSession?.metadataReady) installedVideoPlayer.currentTime = start;
-    void requestPlayback();
-  } else if ($("#installedVideoDialog").open && installedVideoSession) {
-    advanceInstalledVideo(1);
-  } else if (!move(1) && currentTrack()?.transientStream) {
-    releaseActiveServerStream({ stopPlayback: true });
-  }
-};
-audio.onerror = () => {
-  stopPlaybackProgressAnimation();
-  const streamFailed = Boolean(currentTrack()?.transientStream);
-  if (streamFailed) releaseActiveServerStream({ stopPlayback: true });
-  updateChrome();
-  showNotice(streamFailed
-    ? "This song could not be streamed. Check the connection and signed server policy, then try again."
-    : "This song could not be played. The file may be missing, inaccessible, or unsupported.");
-};
-audio.onloadedmetadata = async () => {
-  const track = playbackTrackByID(audioSourceTrackID);
-  if (!track) return;
-  audioMetadataTrackID = track.id;
-  if (track.id === currentID && pendingRestorePosition !== null) {
-    if (Number.isFinite(audio.duration) && audio.duration > 0) {
-      const duration = currentPlaybackDuration(track);
-      audio.currentTime = clippedPlaybackPosition(Math.min(pendingRestorePosition, Math.max(0, duration - 0.25)));
-      state.position = audio.currentTime;
+function bindPrimaryAudioEvents(media) {
+  media.ontimeupdate = () => {
+    if (media !== audio || pendingRestorePosition !== null) return;
+    maybeStartCrossfade();
+    if (crossfadeStarted) {
+      const bounds = crossfadePlaybackBounds(currentTrack(), audio);
+      if (bounds.end - audio.currentTime <= .03 && promoteCrossfade()) return;
     }
-    pendingRestorePosition = null;
-  }
-  if (!track.transientStream && !isInstalledVideoTrack(track) && audio.duration && track.duration !== audio.duration) {
-    track.duration = audio.duration;
-    await persist();
+    if (finishClipPlaybackIfNeeded()) return;
+    updatePlaybackProgressUI();
+    state.position = audio.currentTime;
+    updateListeningSession();
+    schedulePlaybackProgressSave();
+    synchronizeInstalledVideoWithAudio();
+  };
+  media.onplay = () => {
+    if (media !== audio) return;
+    beginListeningSession();
+    startPlaybackProgressAnimation();
+    synchronizeInstalledVideoWithAudio({ forceSeek: true });
+    updateChrome();
     renderQueue();
-  } else if (track.transientStream && audio.duration && track.duration !== audio.duration) {
-    activeServerStream.track = Object.freeze({ ...track, duration: audio.duration });
-    renderQueue();
-  }
-  if (track.id === currentID) updateFullPlayerProgress();
-};
+  };
+  media.onpause = () => {
+    if (media !== audio) return;
+    if (crossfadeTrackID) cancelCrossfade();
+    stopPlaybackProgressAnimation();
+    updatePlaybackProgressUI();
+    updateListeningSession();
+    scheduleListeningHistorySync();
+    synchronizeInstalledVideoWithAudio({ forceSeek: true });
+    updateChrome();
+    if (playbackProgressTimer) {
+      clearTimeout(playbackProgressTimer);
+      playbackProgressTimer = null;
+    }
+    persistInBackground({ refreshSidebar: false });
+  };
+  media.onended = () => {
+    if (media !== audio) return;
+    if (crossfadeStarted && promoteCrossfade()) return;
+    stopPlaybackProgressAnimation();
+    updatePlaybackProgressUI();
+    updateListeningSession();
+    scheduleListeningHistorySync();
+    const range = activeClipRange();
+    if (repeat) {
+      finishListeningSessionForReplay();
+      const start = range?.startSeconds ?? 0;
+      audio.currentTime = start;
+      state.position = start;
+      if (installedVideoSession?.metadataReady) installedVideoPlayer.currentTime = start;
+      void requestPlayback();
+    } else if ($("#installedVideoDialog").open && installedVideoSession) {
+      advanceInstalledVideo(1);
+    } else if (!move(1) && currentTrack()?.transientStream) {
+      releaseActiveServerStream({ stopPlayback: true });
+    }
+  };
+  media.onerror = () => {
+    if (media !== audio) return;
+    stopPlaybackProgressAnimation();
+    const streamFailed = Boolean(currentTrack()?.transientStream);
+    if (streamFailed) releaseActiveServerStream({ stopPlayback: true });
+    updateChrome();
+    showNotice(streamFailed
+      ? "This song could not be streamed. Check the connection and signed server policy, then try again."
+      : "This song could not be played. The file may be missing, inaccessible, or unsupported.");
+  };
+  media.onloadedmetadata = async () => {
+    if (media !== audio) return;
+    const track = playbackTrackByID(audioSourceTrackID);
+    if (!track) return;
+    audioMetadataTrackID = track.id;
+    if (track.id === currentID && pendingRestorePosition !== null) {
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        const duration = currentPlaybackDuration(track);
+        audio.currentTime = clippedPlaybackPosition(Math.min(pendingRestorePosition, Math.max(0, duration - 0.25)));
+        state.position = audio.currentTime;
+      }
+      pendingRestorePosition = null;
+    }
+    if (!track.transientStream && !isInstalledVideoTrack(track) && audio.duration && track.duration !== audio.duration) {
+      track.duration = audio.duration;
+      await persist();
+      renderQueue();
+    } else if (track.transientStream && audio.duration && track.duration !== audio.duration) {
+      activeServerStream.track = Object.freeze({ ...track, duration: audio.duration });
+      renderQueue();
+    }
+    if (track.id === currentID) updateFullPlayerProgress();
+  };
+}
+
+bindPrimaryAudioEvents(audio);
 
 api.onDiscordPresenceStatus((status) => {
   discordPresenceStatus = status || discordPresenceStatus;

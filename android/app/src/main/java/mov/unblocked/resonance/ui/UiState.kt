@@ -47,7 +47,6 @@ data class LinkImportUiState(
 enum class ResonanceTab(val label: String) {
     Library("Library"),
     Playlists("Playlists"),
-    Storage("Storage"),
     Server("Server"),
 }
 

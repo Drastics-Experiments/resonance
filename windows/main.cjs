@@ -1282,12 +1282,17 @@ function safeAppPreferences(value) {
     volumeDown: "Ctrl+ArrowDown",
     volumeUp: "Ctrl+ArrowUp",
   };
+  const requestedCrossfadeSeconds = Number(preferences.crossfadeSeconds);
   return {
     theme: typeof preferences.theme === "string" && APP_THEME_IDS.has(preferences.theme)
       ? preferences.theme
       : DEFAULT_APP_THEME,
     runInBackground: Boolean(preferences.runInBackground),
     discordRichPresence: Boolean(preferences.discordRichPresence),
+    crossfadeEnabled: Boolean(preferences.crossfadeEnabled),
+    crossfadeSeconds: Number.isFinite(requestedCrossfadeSeconds)
+      ? Math.max(1, Math.min(12, Math.round(requestedCrossfadeSeconds)))
+      : 5,
     keybinds: Object.fromEntries(Object.entries(defaults).map(([action, fallback]) => {
       const candidate = typeof keybinds[action] === "string" ? keybinds[action].trim().slice(0, 80) : "";
       return [action, candidate || fallback];

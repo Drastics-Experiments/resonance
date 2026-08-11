@@ -99,8 +99,12 @@ private fun PlaylistCollectionScreen(
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Eyebrow("Your collections")
                     Text("Playlists", fontSize = 36.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "${state.playlists.size} ${if (state.playlists.size == 1) "collection" else "collections"}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                    )
                 }
                 IconButton(
                     onClick = { creating = true },
@@ -252,7 +256,6 @@ private fun PlaylistDetailScreen(
         if (entries.isEmpty()) {
             item { EmptyPlaylistMessage("No Songs", if (playlist.isSystem) "Like songs to add them here." else "Add songs from your library.") }
         } else {
-            item { SongListHeader() }
             itemsIndexed(entries, key = { _, entry -> entry.stableID }) { index, entry ->
                 when (entry) {
                     is PlaylistPresentationEntry.Downloaded -> {
@@ -297,7 +300,6 @@ private fun PlaylistDetailScreen(
             title = { Text("Add Songs") },
             text = {
                 LazyColumn(Modifier.heightIn(max = 440.dp)) {
-                    item { SongListHeader() }
                     itemsIndexed(state.tracks, key = { _, track -> track.id }) { index, track ->
                         val added = track.id in playlist.trackIDs
                         Row(
