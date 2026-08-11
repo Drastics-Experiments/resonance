@@ -1,6 +1,5 @@
 package mov.unblocked.resonance.ui
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -21,10 +20,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
@@ -32,6 +34,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -46,8 +49,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -56,7 +57,12 @@ import androidx.compose.ui.unit.sp
 import mov.unblocked.resonance.data.Track
 
 @Composable
-fun StorageScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: Modifier = Modifier) {
+fun StorageScreen(
+    state: ResonanceUiState,
+    actions: ResonanceActions,
+    modifier: Modifier = Modifier,
+    onBack: () -> Unit,
+) {
     val focusManager = LocalFocusManager.current
     var search by remember { mutableStateOf("") }
     var scope by remember { mutableStateOf(StorageScope.Songs) }
@@ -104,12 +110,20 @@ fun StorageScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Song Storage", fontSize = 36.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
+                ) { Icon(Icons.Default.ArrowBack, "Back to Library") }
+                Text("Storage", fontSize = 34.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Box {
-                    TextButton(onClick = { importMenu = true }) {
-                        Text("Import", fontWeight = FontWeight.SemiBold)
-                    }
+                    IconButton(
+                        onClick = { importMenu = true },
+                        modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
+                    ) { Icon(Icons.Default.MoreVert, "Storage actions") }
                     DropdownMenu(expanded = importMenu, onDismissRequest = { importMenu = false }) {
                         DropdownMenuItem(
                             text = { Text("Import from Link") },
@@ -127,15 +141,18 @@ fun StorageScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                                 actions.importAudio()
                             },
                         )
+                        DropdownMenuItem(
+                            text = { Text(if (editing) "Done Editing" else "Select Songs") },
+                            leadingIcon = { Icon(if (editing) Icons.Default.Check else Icons.Default.Checklist, null) },
+                            enabled = state.tracks.isNotEmpty(),
+                            onClick = {
+                                importMenu = false
+                                editing = !editing
+                                if (!editing) selected = emptySet()
+                            },
+                        )
                     }
                 }
-                TextButton(
-                    enabled = state.tracks.isNotEmpty(),
-                    onClick = {
-                        editing = !editing
-                        if (!editing) selected = emptySet()
-                    },
-                ) { Text(if (editing) "Done" else "Edit", fontWeight = FontWeight.SemiBold) }
             }
         }
         item {
@@ -271,42 +288,28 @@ private fun StorageSummary(
     downloadedCount: Int,
     availableBytes: Long,
 ) {
-    val total = (importedBytes + downloadedBytes + availableBytes).coerceAtLeast(1).toFloat()
-    val importedSweep = importedBytes / total * 360f
-    val downloadedSweep = downloadedBytes / total * 360f
-    Row(
-        modifier = Modifier.fillMaxWidth().background(Color.White.copy(alpha = .045f), RoundedCornerShape(20.dp)).padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    val usedBytes = importedBytes + downloadedBytes
+    val totalBytes = (usedBytes + availableBytes).coerceAtLeast(1L)
+    Column(
+        modifier = Modifier.fillMaxWidth().background(Color.White.copy(alpha = .045f), RoundedCornerShape(18.dp)).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Box(Modifier.size(96.dp), contentAlignment = Alignment.Center) {
-            Canvas(Modifier.fillMaxSize()) {
-                drawArc(Color.White.copy(alpha = .08f), -90f, 360f, false, style = Stroke(14.dp.toPx()))
-                if (importedSweep > 0) drawArc(Violet, -90f, importedSweep, false, style = Stroke(14.dp.toPx(), cap = StrokeCap.Butt))
-                if (downloadedSweep > 0) drawArc(Accent, -90f + importedSweep, downloadedSweep, false, style = Stroke(14.dp.toPx(), cap = StrokeCap.Butt))
+        Row(verticalAlignment = Alignment.Bottom) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("${importedCount + downloadedCount} songs on device", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text("${formatBytes(usedBytes)} used", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
             }
-            Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
+            Text("${formatBytes(availableBytes)} available", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
         }
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-            Text("Local audio", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StorageMetric(Violet, "Local", importedBytes, "$importedCount files", Modifier.weight(1f))
-                StorageMetric(Accent, "Server", downloadedBytes, "$downloadedCount files", Modifier.weight(1f))
-                StorageMetric(ElectricBlue, "Available", availableBytes, "on device", Modifier.weight(1f))
-            }
+        LinearProgressIndicator(
+            progress = { usedBytes.toFloat() / totalBytes.toFloat() },
+            modifier = Modifier.fillMaxWidth(),
+            color = Violet,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("$importedCount local", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+            Text("$downloadedCount downloaded", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
         }
-    }
-}
-
-@Composable
-private fun StorageMetric(color: Color, label: String, bytes: Long, detail: String, modifier: Modifier = Modifier) {
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Box(Modifier.size(7.dp).background(color, CircleShape))
-            Text(label, fontSize = 10.sp, maxLines = 1)
-        }
-        Text(formatBytes(bytes), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-        Text(detail, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), maxLines = 1)
     }
 }
 

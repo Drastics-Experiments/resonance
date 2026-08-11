@@ -3,7 +3,7 @@ import UIKit
 import UniformTypeIdentifiers
 
 private enum MobileSection: Hashable {
-    case library, playlists, storage, server
+    case library, playlists, server
 }
 
 struct RootView: View {
@@ -16,7 +16,7 @@ struct RootView: View {
         ZStack {
             TabView(selection: $selection) {
                 PlayerAwareTab(showsNowPlaying: $showsNowPlaying) {
-                    NavigationStack { LibraryView() }
+                    NavigationStack { LibraryView(importing: $importing) }
                 }
                     .tabItem { Label("Library", systemImage: "waveform") }
                     .tag(MobileSection.library)
@@ -25,11 +25,6 @@ struct RootView: View {
                 }
                     .tabItem { Label("Playlists", systemImage: "square.stack") }
                     .tag(MobileSection.playlists)
-                PlayerAwareTab(showsNowPlaying: $showsNowPlaying) {
-                    NavigationStack { StorageView(importing: $importing) }
-                }
-                    .tabItem { Label("Storage", systemImage: "externaldrive") }
-                    .tag(MobileSection.storage)
                 PlayerAwareTab(showsNowPlaying: $showsNowPlaying) {
                     NavigationStack { ServerView() }
                 }
@@ -107,6 +102,7 @@ private struct PlayerAwareTab<Content: View>: View {
 
 private struct LibraryView: View {
     @EnvironmentObject private var library: MusicLibrary
+    @Binding var importing: Bool
     @State private var presentedSheet: LibrarySheet?
     @FocusState private var searchIsFocused: Bool
 
@@ -124,23 +120,39 @@ private struct LibraryView: View {
             AppBackground()
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    HStack(alignment: .top) {
+                    HStack(alignment: .center, spacing: 10) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("MUSIC LIBRARY").eyebrow()
-                            Text("Resonance").font(.system(size: 38, weight: .regular, design: .rounded))
-                            Text("\(library.tracksForActiveProfile.count) tracks • Stored locally")
+                            Text("Library")
+                                .font(.system(size: 36, weight: .bold, design: .rounded))
+                            Text("\(library.tracksForActiveProfile.count) songs on this device")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
+                        NavigationLink {
+                            StorageView(importing: $importing)
+                        } label: {
+                            Image(systemName: "internaldrive")
+                                .roundButton(active: false)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Storage")
+                        .accessibilityHint("Manage imports, downloads, and device storage")
                         ProfileButton(
                             displayName: library.accountDisplayName ?? library.syncProfileName,
                             email: library.accountEmail,
                             imageURL: library.accountImageURL,
                             onClipEditor: { presentedSheet = .clipEditor },
-                            onConnection: { presentedSheet = .profile }
+                            onSettings: { presentedSheet = .settings }
                         )
                     }
-                    HStack {
+                    TextField("Search your music", text: $library.searchText)
+                        .focused($searchIsFocused)
+                        .submitLabel(.done)
+                        .onSubmit { searchIsFocused = false }
+                        .textFieldStyle(.plain)
+                        .padding(13)
+                        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+                    HStack(spacing: 10) {
                         Button { library.togglePlay() } label: {
                             Label(library.isPlaying ? "Pause" : "Play", systemImage: library.isPlaying ? "pause.fill" : "play.fill")
                                 .pill(color: .accent)
@@ -156,19 +168,21 @@ private struct LibraryView: View {
                        !recentlyAddedTracks.isEmpty {
                         RecentlyAddedSection(tracks: recentlyAddedTracks)
                     }
-                    TextField("Search your music", text: $library.searchText)
-                        .focused($searchIsFocused)
-                        .submitLabel(.done)
-                        .onSubmit { searchIsFocused = false }
-                        .textFieldStyle(.plain)
-                        .padding(13)
-                        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
                     if library.filteredTracks.isEmpty {
                         ContentUnavailableView("No songs yet", systemImage: "music.note", description: Text("Import audio or video, or sync your music server."))
                             .frame(maxWidth: .infinity).padding(.top, 40)
                     } else {
                         VStack(spacing: 0) {
-                            MobileSongListHeader()
+                            HStack {
+                                Text("All Songs")
+                                    .font(.headline)
+                                Spacer()
+                                Text("\(library.filteredTracks.count)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.bottom, 6)
                             LazyVStack(spacing: 0) {
                                 ForEach(Array(library.filteredTracks.enumerated()), id: \.element.id) { index, track in
                                     TrackRow(
@@ -188,10 +202,10 @@ private struct LibraryView: View {
         .navigationBarHidden(true)
         .sheet(item: $presentedSheet) { sheet in
             switch sheet {
-            case .profile:
-                ServerConnectionSheet()
             case .clipEditor:
                 MobileClipEditorSheet()
+            case .settings:
+                MobileSettingsSheet()
             }
         }
         .toolbar {
@@ -204,8 +218,164 @@ private struct LibraryView: View {
 }
 
 private enum LibrarySheet: String, Identifiable {
-    case profile, clipEditor
+    case clipEditor, settings
     var id: String { rawValue }
+}
+
+private struct MobileSettingsSheet: View {
+    private enum PresentedSheet: String, Identifiable {
+        case connection
+        var id: String { rawValue }
+    }
+
+    @EnvironmentObject private var library: MusicLibrary
+    @Environment(\.dismiss) private var dismiss
+    @State private var presentedSheet: PresentedSheet?
+
+    private var displayName: String {
+        ResonanceEmailPrivacy.safeDisplayName(
+            library.accountDisplayName ?? library.syncProfileName,
+            email: library.accountEmail
+        )
+    }
+
+    private var accountStatus: String {
+        if let role = library.accountRole {
+            return role == "admin" ? "Administrator" : "Member"
+        }
+        return library.serverToken.isEmpty ? "Not signed in" : "Legacy connection"
+    }
+
+    private var versionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        return "\(version) (\(build))"
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    accountSummary
+                }
+
+                Section("Playback") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label("Volume", systemImage: "speaker.wave.2")
+                            Spacer()
+                            Text("\(Int((library.volume * 100).rounded()))%")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(value: $library.volume, in: 0...1)
+                            .tint(.accent)
+                            .accessibilityLabel("Playback volume")
+                    }
+                    .padding(.vertical, 4)
+
+                    Picker("Playback Speed", selection: $library.playbackRate) {
+                        ForEach([Float(0.75), 1, 1.25, 1.5, 2], id: \.self) { rate in
+                            Text("\(Double(rate), specifier: "%g")×").tag(rate)
+                        }
+                    }
+                }
+
+                Section("App") {
+                    Button {
+                        presentedSheet = .connection
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "network")
+                                .foregroundStyle(Color.accent)
+                                .frame(width: 24)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Music Server")
+                                    .foregroundStyle(.primary)
+                                Text(library.isServerConnected ? "Connected as \(displayName)" : library.serverMessage)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Text("Configure")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color.accent)
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    LabeledContent {
+                        Text("Enabled").foregroundStyle(.secondary)
+                    } label: {
+                        Label("Background Audio", systemImage: "waveform")
+                    }
+                }
+
+                Section("About") {
+                    LabeledContent("Version", value: versionText)
+                    LabeledContent("Platform", value: UIDevice.current.userInterfaceIdiom == .pad ? "iPadOS" : "iOS")
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(Color.appBackground)
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .sheet(item: $presentedSheet) { sheet in
+            switch sheet {
+            case .connection:
+                ServerConnectionSheet()
+            }
+        }
+    }
+
+    private var accountSummary: some View {
+        HStack(spacing: 13) {
+            ZStack {
+                Circle().fill(Color.violet)
+                if let imageURL = library.accountImageURL {
+                    AsyncImage(url: imageURL) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFill()
+                        } else {
+                            Text(String(displayName.prefix(1)).uppercased())
+                                .font(.headline.weight(.bold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                } else {
+                    Text(String(displayName.prefix(1)).uppercased())
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(width: 48, height: 48)
+            .clipShape(Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(displayName)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text(accountStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
 }
 
 private struct ProfileButton: View {
@@ -213,7 +383,7 @@ private struct ProfileButton: View {
     let email: String?
     let imageURL: URL?
     let onClipEditor: () -> Void
-    let onConnection: () -> Void
+    let onSettings: () -> Void
     @State private var isEmailRevealed = false
 
     private var resolvedDisplayName: String {
@@ -240,7 +410,7 @@ private struct ProfileButton: View {
                 }
                 Button("Clip Editor", systemImage: "waveform.path.ecg", action: onClipEditor)
             }
-            Button("Account & Connection", systemImage: "person.crop.circle", action: onConnection)
+            Button("Settings", systemImage: "gearshape", action: onSettings)
         } label: {
             ZStack {
                 Circle().fill(Color.violet)
@@ -445,7 +615,9 @@ private struct PlaylistsView: View {
                             }
                         }
                     }
-                } header: { Text("YOUR COLLECTIONS") }
+                } header: {
+                    Text("\(library.playlists.count) \(library.playlists.count == 1 ? "collection" : "collections")")
+                }
             }
             .scrollContentBackground(.hidden)
         }
@@ -553,11 +725,6 @@ private struct PlaylistDetailView: View {
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
 
-                    MobileSongListHeader()
-                        .listRowInsets(EdgeInsets())
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-
                     ForEach(Array(playlistEntries.enumerated()), id: \.element.id) { index, entry in
                         Group {
                             if let track = entry.track {
@@ -639,11 +806,6 @@ private struct PlaylistSongPicker: View {
             ZStack {
                 AppBackground()
                 List {
-                    MobileSongListHeader()
-                        .listRowInsets(EdgeInsets())
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-
                     ForEach(Array(library.tracksForActiveProfile.enumerated()), id: \.element.id) { index, track in
                         Button {
                             guard let playlist else { return }
@@ -688,6 +850,7 @@ private struct PlaylistSongPicker: View {
 }
 
 private struct StorageView: View {
+    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @Binding var importing: Bool
     @State private var searchText = ""
@@ -756,9 +919,15 @@ private struct StorageView: View {
             AppBackground()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text("Song Storage")
-                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                    HStack(spacing: 10) {
+                        Button { dismiss() } label: {
+                            Image(systemName: "chevron.left")
+                                .roundButton(active: false)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Back to Library")
+                        Text("Storage")
+                            .font(.system(size: 34, weight: .bold, design: .rounded))
                         Spacer()
                         Menu {
                             Button("Import from Link", systemImage: "link.badge.plus") {
@@ -767,21 +936,20 @@ private struct StorageView: View {
                             Button("Import Files", systemImage: "doc.badge.plus") {
                                 importing = true
                             }
-                        } label: {
-                            Text("Import")
-                                .font(.headline)
-                                .foregroundStyle(Color.violet)
-                        }
-                        .accessibilityHint("Choose a link or files to import")
-                        Button(isEditing ? "Done" : "Edit") {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                isEditing.toggle()
-                                if !isEditing { selectedTrackIDs.removeAll() }
+                            Divider()
+                            Button(isEditing ? "Done Editing" : "Select Songs", systemImage: isEditing ? "checkmark" : "checklist") {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isEditing.toggle()
+                                    if !isEditing { selectedTrackIDs.removeAll() }
+                                }
                             }
+                            .disabled(library.tracks.isEmpty)
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .roundButton(active: false)
                         }
-                        .font(.headline)
-                        .foregroundStyle(Color.accent)
-                        .disabled(library.tracks.isEmpty)
+                        .accessibilityLabel("Storage actions")
+                        .accessibilityHint("Import files or select songs")
                     }
 
                     StorageSummaryCard(
@@ -889,6 +1057,7 @@ private struct StorageView: View {
             .scrollDismissesKeyboard(.interactively)
         }
         .navigationBarHidden(true)
+        .toolbar(.hidden, for: .tabBar)
         .sheet(item: $presentedSheet) { sheet in
             switch sheet {
             case .linkImport:
@@ -1038,74 +1207,43 @@ private struct StorageSummaryCard: View {
     let downloadedCount: Int
     let availableBytes: Int64
 
-    private var totalBytes: Double {
-        max(Double(importedBytes + downloadedBytes + availableBytes), 1)
-    }
-
-    private var importedEnd: Double { Double(importedBytes) / totalBytes }
-    private var downloadedEnd: Double { importedEnd + Double(downloadedBytes) / totalBytes }
+    private var usedBytes: Int64 { importedBytes + downloadedBytes }
+    private var totalBytes: Int64 { max(usedBytes + availableBytes, 1) }
 
     var body: some View {
-        HStack(spacing: 18) {
-            ZStack {
-                Circle().stroke(.white.opacity(0.08), lineWidth: 15)
-                Circle()
-                    .trim(from: 0, to: max(importedEnd, 0.015))
-                    .stroke(Color.violet, style: StrokeStyle(lineWidth: 15, lineCap: .butt))
-                    .rotationEffect(.degrees(-90))
-                Circle()
-                    .trim(from: importedEnd, to: max(downloadedEnd, importedEnd + 0.015))
-                    .stroke(Color.accent, style: StrokeStyle(lineWidth: 15, lineCap: .butt))
-                    .rotationEffect(.degrees(-90))
-                Image(systemName: "internaldrive")
-                    .font(.title3)
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(importedCount + downloadedCount) songs on device")
+                        .font(.subheadline.weight(.semibold))
+                    Text("\(formatBytes(usedBytes)) used")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(formatBytes(availableBytes)) available")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .frame(width: 104, height: 104)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Storage usage")
-            .accessibilityValue("\(formatBytes(importedBytes + downloadedBytes)) used, \(formatBytes(availableBytes)) available")
-
-            VStack(alignment: .leading, spacing: 11) {
-                Text("Local audio").font(.subheadline).foregroundStyle(.secondary)
-                HStack(spacing: 0) {
-                    StorageMetric(color: .violet, title: "Local audio", bytes: importedBytes, detail: "\(importedCount) files")
-                    Divider().padding(.horizontal, 10)
-                    StorageMetric(color: .accent, title: "Server downloads", bytes: downloadedBytes, detail: "\(downloadedCount) files")
-                    Divider().padding(.horizontal, 10)
-                    StorageMetric(color: Color(hex: 0x7BA7E8), title: "Available", bytes: availableBytes, detail: "on device")
-                }
+            ProgressView(value: Double(usedBytes), total: Double(totalBytes))
+                .tint(Color.violet)
+            HStack(spacing: 14) {
+                Label("\(importedCount) local", systemImage: "internaldrive")
+                Label("\(downloadedCount) downloaded", systemImage: "icloud.and.arrow.down")
+                Spacer()
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Storage usage")
+        .accessibilityValue("\(formatBytes(usedBytes)) used, \(formatBytes(availableBytes)) available")
         .padding(16)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(
-                    LinearGradient(colors: [.violet.opacity(0.85), Color(hex: 0x6C9CD8).opacity(0.65)], startPoint: .topLeading, endPoint: .bottomTrailing),
-                    lineWidth: 1
-                )
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(0.08), lineWidth: 1)
         }
-    }
-}
-
-private struct StorageMetric: View {
-    let color: Color
-    let title: String
-    let bytes: Int64
-    let detail: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 5) {
-                Circle().fill(color).frame(width: 7, height: 7)
-                Text(title).font(.caption2).lineLimit(1).minimumScaleFactor(0.75)
-            }
-            Text(formatBytes(bytes)).font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.72)
-            Text(detail).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1219,10 +1357,6 @@ private struct ServerView: View {
         library.remoteSongs.reduce(0) { $0 + (library.isSynced($1) ? 1 : 0) }
     }
 
-    private var allSynced: Bool {
-        !library.remoteSongs.isEmpty && syncedCount == library.remoteSongs.count
-    }
-
     private var serverHost: String {
         URL(string: library.serverURL)?.host ?? library.serverURL
     }
@@ -1276,10 +1410,26 @@ private struct ServerView: View {
             AppBackground()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    Text("Music Server")
-                        .font(.system(size: 38, weight: .bold, design: .rounded))
-                        .tracking(-1.2)
-                        .padding(.bottom, 10)
+                    HStack {
+                        Text("Server")
+                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                        Spacer()
+                        Button {
+                            Task { await library.refreshCatalog() }
+                        } label: {
+                            if library.isRefreshingCatalog {
+                                ProgressView()
+                                    .frame(width: 44, height: 44)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                                    .roundButton(active: false)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(library.isSyncing || library.isUploading || library.isSyncingPlaylists)
+                        .accessibilityLabel("Refresh server")
+                    }
+                    .padding(.bottom, 8)
 
                     serverStatusLine
                         .padding(.bottom, 24)
@@ -1355,8 +1505,6 @@ private struct ServerView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.bottom, 6)
                     }
-
-                    MobileSongListHeader()
 
                     if visibleSongs.isEmpty,
                        library.remoteSongs.isEmpty,
@@ -1447,7 +1595,7 @@ private struct ServerView: View {
     }
 
     private var serverStatusLine: some View {
-        VStack(alignment: .leading, spacing: 13) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Label(isConnected ? "Connected" : "Offline", systemImage: "circle.fill")
                     .font(.caption2.weight(.semibold))
@@ -1460,7 +1608,7 @@ private struct ServerView: View {
                     HStack(spacing: 7) {
                         Text(serverHost.isEmpty ? "Add a server connection" : serverHost)
                             .lineLimit(1)
-                        Image(systemName: "pencil")
+                        Image(systemName: "gearshape")
                             .font(.caption2.weight(.semibold))
                     }
                     .font(.caption)
@@ -1470,23 +1618,13 @@ private struct ServerView: View {
                 .accessibilityLabel("Manage server connection")
             }
 
-            HStack(spacing: 8) {
-                ServerMetric(symbol: "music.note", color: .violet, value: "\(library.remoteSongs.count)", label: "songs")
-                Text("•").foregroundStyle(.tertiary)
-                ServerMetric(
-                    symbol: "list.bullet",
-                    color: .violet,
-                    value: "\(library.playlists.filter { !$0.isSystem }.count)",
-                    label: "playlists"
-                )
-                Text("•").foregroundStyle(.tertiary)
-                ServerMetric(
-                    symbol: allSynced ? "checkmark" : "icloud.and.arrow.down",
-                    color: allSynced ? .green : .accent,
-                    value: "\(syncedCount)",
-                    label: "on device"
-                )
-            }
+            Text(
+                "\(library.remoteSongs.count) songs · "
+                    + "\(library.playlists.filter { !$0.isSystem }.count) playlists · "
+                    + "\(syncedCount) on device"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
     }
 
@@ -1513,41 +1651,13 @@ private struct ServerView: View {
 
             ServerActionDivider()
 
-            ServerIconActionButton(
-                symbol: "icloud.and.arrow.up",
-                label: "Upload downloaded songs missing from the server",
-                isDisabled: library.isUploadTransferBusy || library.activeUploadMode != .localFile
-            ) {
-                Task { await library.uploadDownloadedSongsMissingFromServer() }
-            }
-
-            ServerActionDivider()
-
             ServerTextActionButton(
-                symbol: uploadModeSymbol,
-                label: uploadModeLabel,
-                isDisabled: library.isUploadTransferBusy || library.activeUploadMode == nil
-            ) {
-                switch library.activeUploadMode {
-                case .localFile, .serverSourceLink:
-                    presentedSheet = .linkImport
-                case .reviewedMatch:
-                    presentedSheet = .reviewedImport
-                case nil:
-                    break
-                }
-            }
-
-            ServerActionDivider()
-
-            ServerIconActionButton(
                 symbol: "checklist",
-                label: isSelecting ? "Cancel song selection" : "Select songs",
+                label: isSelecting ? "\(library.selectedRemoteSongIDs.count) Selected" : "Select",
                 isDisabled: library.isSyncing
                     || library.isUploading
                     || library.activeDownloadMode == .streamOnly
-                    || library.activeDownloadMode == nil,
-                count: isSelecting ? library.selectedRemoteSongIDs.count : nil
+                    || library.activeDownloadMode == nil
             ) {
                 withAnimation(.easeInOut(duration: 0.18)) {
                     if isSelecting {
@@ -1562,16 +1672,36 @@ private struct ServerView: View {
 
             ServerActionDivider()
 
-            ServerIconActionButton(
-                symbol: "arrow.clockwise",
-                label: "Refresh catalog and sync playlists",
-                isDisabled: library.isSyncing || library.isUploading || library.isSyncingPlaylists,
-                isSpinning: library.isRefreshingCatalog
-            ) {
-                Task {
-                    await library.refreshCatalog()
+            Menu {
+                Button("Upload Missing Downloads", systemImage: "icloud.and.arrow.up") {
+                    Task { await library.uploadDownloadedSongsMissingFromServer() }
                 }
+                .disabled(library.isUploadTransferBusy || library.activeUploadMode != .localFile)
+
+                Button(uploadModeLabel, systemImage: uploadModeSymbol) {
+                    switch library.activeUploadMode {
+                    case .localFile, .serverSourceLink:
+                        presentedSheet = .linkImport
+                    case .reviewedMatch:
+                        presentedSheet = .reviewedImport
+                    case nil:
+                        break
+                    }
+                }
+                .disabled(library.isUploadTransferBusy || library.activeUploadMode == nil)
+
+                Divider()
+                Button("Account & Connection", systemImage: "gearshape") {
+                    presentedSheet = .connection
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.serverActionForeground)
+                    .frame(width: 54, height: 58)
+                    .contentShape(Rectangle())
             }
+            .accessibilityLabel("More server actions")
         }
         .padding(.horizontal, 4)
         .frame(height: 58)
@@ -1689,30 +1819,6 @@ private enum ServerLibrarySort: String, CaseIterable, Identifiable {
     }
 }
 
-private struct ServerMetric: View {
-    let symbol: String
-    let color: Color
-    let value: String
-    let label: String
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: symbol)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(color)
-                .frame(width: 27, height: 27)
-                .background(color.opacity(0.12), in: Circle())
-            Text(value)
-                .font(.caption.weight(.semibold))
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .lineLimit(1)
-        .minimumScaleFactor(0.78)
-    }
-}
-
 private struct ServerTextActionButton: View {
     let symbol: String
     let label: String
@@ -1737,54 +1843,6 @@ private struct ServerTextActionButton: View {
         .frame(maxWidth: .infinity)
         .accessibilityLabel(label)
         .accessibilityValue(isDisabled ? "Unavailable while another transfer is active" : "")
-    }
-}
-
-private struct ServerIconActionButton: View {
-    let symbol: String
-    let label: String
-    var isDisabled = false
-    var isSpinning = false
-    var count: Int? = nil
-    let action: () -> Void
-    @State private var spinRotation = 0.0
-
-    var body: some View {
-        Button {
-            guard !isDisabled else { return }
-            action()
-        } label: {
-            Group {
-                if let count {
-                    Text("\(count)")
-                        .fontWeight(.bold)
-                        .monospacedDigit()
-                } else {
-                    Image(systemName: symbol)
-                }
-            }
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.serverActionForeground)
-                .rotationEffect(.degrees(spinRotation))
-                .frame(width: 54, height: 58)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(ServerActionButtonStyle())
-        .fixedSize()
-        .accessibilityLabel(label)
-        .accessibilityValue(isDisabled ? "Unavailable while another transfer is active" : "")
-        .onAppear {
-            if isSpinning { performFullSpin() }
-        }
-        .onChange(of: isSpinning) { _, active in
-            if active { performFullSpin() }
-        }
-    }
-
-    private func performFullSpin() {
-        withAnimation(.timingCurve(0.55, 0, 0.1, 1, duration: 0.82)) {
-            spinRotation += 360
-        }
     }
 }
 
