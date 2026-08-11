@@ -960,6 +960,7 @@ struct Playlist: Identifiable, Hashable, Codable {
     var trackIDs: [UUID]
     var isSystem: Bool
     var remoteSongIDs: [String]?
+    var entryOrder: [String]?
 
     init(
         id: UUID = UUID(),
@@ -967,7 +968,8 @@ struct Playlist: Identifiable, Hashable, Codable {
         artwork: ArtworkStyle,
         trackIDs: [UUID],
         isSystem: Bool = false,
-        remoteSongIDs: [String]? = nil
+        remoteSongIDs: [String]? = nil,
+        entryOrder: [String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -975,6 +977,7 @@ struct Playlist: Identifiable, Hashable, Codable {
         self.trackIDs = trackIDs
         self.isSystem = isSystem
         self.remoteSongIDs = remoteSongIDs
+        self.entryOrder = entryOrder
     }
 
     var count: Int { trackIDs.count }
@@ -1167,7 +1170,7 @@ struct RemoteSong: Identifiable, Hashable, Decodable, Sendable {
                 ? "Resolving metadata…"
                 : URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent)
         artist = decodedArtist
-            ?? (isSourceLinkRecord ? "On-device lookup" : "Unknown Artist")
+            ?? (isSourceLinkRecord ? "Automatic lookup" : "Unknown Artist")
         album = try values.decodeIfPresent(String.self, forKey: .album).flatMap { value in
             value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
         }

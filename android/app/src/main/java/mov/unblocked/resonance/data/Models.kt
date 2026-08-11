@@ -81,6 +81,8 @@ data class Playlist(
     val trackIDs: List<String> = emptyList(),
     val isSystem: Boolean = false,
     val remoteSongIDs: List<String>? = null,
+    /** Device-local merged ordering for local and server-only entries. */
+    val entryOrder: List<String>? = null,
 ) {
     val automaticArtworkTrackIDs: List<String>
         get() = if (isSystem) emptyList() else trackIDs.take(4)

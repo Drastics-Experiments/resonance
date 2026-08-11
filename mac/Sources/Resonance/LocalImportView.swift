@@ -337,7 +337,7 @@ final class MacLocalImportViewModel: ObservableObject {
             ?? completedTrack?.title
             ?? resolution?.track.title
             ?? selectedCandidate?.title
-            ?? "Import from Link"
+            ?? "Import from Web"
         guard stage == .downloading, totalBytes > 0 else { return trackTitle }
         let completed = ByteCountFormatter.string(fromByteCount: completedBytes, countStyle: .file)
         let total = ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
@@ -1265,7 +1265,7 @@ struct MacLocalImportSheet: View {
                 .background(palette.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
             VStack(alignment: .leading, spacing: 3) {
-                Text("Import from Link")
+                Text("Import from Web")
                     .font(.system(size: 21, weight: .bold, design: .rounded))
                 Text("Search for a track or paste a link to get started.")
                     .font(.system(size: 10))

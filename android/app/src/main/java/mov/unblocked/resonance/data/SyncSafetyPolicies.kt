@@ -116,7 +116,13 @@ object PlaylistPresentationPolicy {
         val preservedKeys = previousKeys.filterIsInstance<EntryKey.Local>()
         val remoteSongsByID = remoteSongs.associateBy(RemoteSong::id)
 
-        return PlaylistOrderPolicy.merge(previousKeys, orderedKeys, preservedKeys).mapNotNull { key ->
+        val legacyKeys = PlaylistOrderPolicy.merge(previousKeys, orderedKeys, preservedKeys)
+        val keysByStableID = legacyKeys.associateBy(::stableID)
+        val storedOrder = playlist.entryOrder.orEmpty().distinct().mapNotNull(keysByStableID::get)
+        val storedIDs = storedOrder.mapTo(mutableSetOf(), ::stableID)
+        val presentedKeys = storedOrder + legacyKeys.filter { stableID(it) !in storedIDs }
+
+        return presentedKeys.mapNotNull { key ->
             when (key) {
                 is EntryKey.Local -> tracksByID[key.trackID]?.let { track ->
                     PlaylistPresentationEntry.Downloaded(track, "local:${track.id}")
@@ -129,6 +135,71 @@ object PlaylistPresentationPolicy {
                 )
             }
         }
+    }
+
+    private fun stableID(key: EntryKey): String = when (key) {
+        is EntryKey.Local -> "local:${key.trackID}"
+        is EntryKey.Remote -> "remote:${key.remoteSongID}"
+    }
+}
+
+object PlaylistEntryOrderPolicy {
+    fun move(
+        playlist: Playlist,
+        tracks: List<Track>,
+        remoteSongs: List<RemoteSong>,
+        fromIndex: Int,
+        toIndex: Int,
+    ): Playlist {
+        val entries = PlaylistPresentationPolicy.entries(playlist, tracks, remoteSongs)
+        if (fromIndex !in entries.indices || toIndex !in entries.indices || fromIndex == toIndex) {
+            return playlist
+        }
+        val moved = entries.toMutableList().apply { add(toIndex, removeAt(fromIndex)) }
+        val movedTrackIDs = moved.mapNotNull { entry ->
+            (entry as? PlaylistPresentationEntry.Downloaded)?.track?.id
+        }
+        val remoteSongIDs = playlist.remoteSongIDs ?: return playlist.copy(trackIDs = movedTrackIDs)
+        val remoteIDSet = remoteSongIDs.toSet()
+        val movedRemoteIDs = moved.mapNotNull { entry ->
+            when (entry) {
+                is PlaylistPresentationEntry.Unavailable -> entry.remoteSongID
+                is PlaylistPresentationEntry.Downloaded -> entry.track.remoteID?.takeIf(remoteIDSet::contains)
+            }
+        }.distinct()
+        return playlist.copy(
+            trackIDs = movedTrackIDs,
+            remoteSongIDs = movedRemoteIDs,
+            entryOrder = moved.map(PlaylistPresentationEntry::stableID),
+        )
+    }
+
+    fun normalizedOrder(
+        playlist: Playlist,
+        tracks: List<Track>,
+    ): List<String> = PlaylistPresentationPolicy.entries(playlist, tracks, emptyList())
+        .map(PlaylistPresentationEntry::stableID)
+
+    fun mergingRemoteOrder(
+        previous: Playlist?,
+        remoteSongIDs: List<String>,
+        tracks: List<Track>,
+    ): List<String> {
+        val remoteTokens = remoteSongIDs.distinct().map { "remote:$it" }
+        val remoteIDSet = remoteSongIDs.toSet()
+        val tracksByID = tracks.associateBy(Track::id)
+        val fallbackTokens = previous?.trackIDs.orEmpty().mapNotNull { trackID ->
+            tracksByID[trackID]?.let { track ->
+                track.remoteID?.takeIf(remoteIDSet::contains)?.let { "remote:$it" }
+                    ?: "local:${track.id}"
+            }
+        }
+        val previousTokens = previous?.entryOrder.orEmpty().ifEmpty { fallbackTokens }
+        val localTokens = (previousTokens + fallbackTokens).distinct().filter { token ->
+            token.startsWith("local:") && token.removePrefix("local:") in tracksByID
+        }
+        val merged = PlaylistOrderPolicy.merge(previousTokens, remoteTokens, localTokens)
+        return merged + localTokens.filterNot(merged::contains)
     }
 }
 

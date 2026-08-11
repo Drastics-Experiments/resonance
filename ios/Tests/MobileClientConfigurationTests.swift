@@ -3,6 +3,117 @@ import Foundation
 import XCTest
 @testable import Resonance
 
+final class MobileCrossfadePolicyTests: XCTestCase {
+    func testCrossfadeRangeAndShortTrackLimit() {
+        XCTAssertEqual(MobileCrossfadePolicy.normalizedSeconds(-2), 1)
+        XCTAssertEqual(MobileCrossfadePolicy.normalizedSeconds(30), 12)
+        XCTAssertEqual(
+            MobileCrossfadePolicy.effectiveDuration(
+                requestedSeconds: 12,
+                currentDuration: 4,
+                nextDuration: 20
+            ),
+            2
+        )
+        XCTAssertEqual(MobileCrossfadePolicy.progress(remaining: 2.5, duration: 5), 0.5)
+    }
+
+    func testMetadataRetryWindowUsesBoundedBackoff() {
+        XCTAssertEqual(MobileRemoteMetadataRetryPolicy.maximumImmediateAttempts, 4)
+        XCTAssertEqual(MobileRemoteMetadataRetryPolicy.delaySeconds(afterFailureCount: 1), 1)
+        XCTAssertEqual(MobileRemoteMetadataRetryPolicy.delaySeconds(afterFailureCount: 2), 3)
+        XCTAssertEqual(MobileRemoteMetadataRetryPolicy.delaySeconds(afterFailureCount: 99), 10)
+    }
+}
+
+final class MobilePlaylistPresentationMovePolicyTests: XCTestCase {
+    func testUnavailableRemoteEntryMovesWithoutCorruptingPersistedOrders() {
+        let localTrack = MobileTrack(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            title: "Local",
+            duration: 120,
+            relativePath: "Local.m4a"
+        )
+        let downloadedTrack = MobileTrack(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            title: "Downloaded",
+            duration: 180,
+            relativePath: "Downloaded.m4a",
+            remoteID: "remote-downloaded"
+        )
+        let entries = [
+            MobilePlaylistPresentationEntry(
+                id: .local(localTrack.id),
+                track: localTrack,
+                remoteSongID: nil,
+                remoteSong: nil
+            ),
+            MobilePlaylistPresentationEntry(
+                id: .remote("remote-downloaded"),
+                track: downloadedTrack,
+                remoteSongID: "remote-downloaded",
+                remoteSong: nil
+            ),
+            MobilePlaylistPresentationEntry(
+                id: .remote("remote-unavailable"),
+                track: nil,
+                remoteSongID: "remote-unavailable",
+                remoteSong: nil
+            ),
+        ]
+
+        let reordered = MobilePlaylistPresentationMovePolicy.move(
+            entries,
+            fromOffsets: IndexSet(integer: 2),
+            toOffset: 0
+        )
+        XCTAssertEqual(
+            reordered.map(\.id),
+            [.remote("remote-unavailable"), .local(localTrack.id), .remote("remote-downloaded")]
+        )
+
+        let persisted = MobilePlaylistPresentationMovePolicy.persistedOrder(for: reordered)
+        XCTAssertEqual(persisted.trackIDs, [localTrack.id, downloadedTrack.id])
+        XCTAssertEqual(persisted.remoteSongIDs, ["remote-unavailable", "remote-downloaded"])
+        XCTAssertEqual(
+            persisted.entryOrder,
+            [
+                "remote:remote-unavailable",
+                "local:\(localTrack.id.uuidString.lowercased())",
+                "remote:remote-downloaded",
+            ]
+        )
+
+        let roundTrippedPlaylist = MobilePlaylist(
+            name: "Mixed",
+            trackIDs: persisted.trackIDs,
+            remoteSongIDs: persisted.remoteSongIDs,
+            entryOrder: ["remote:stale"] + persisted.entryOrder
+        )
+        XCTAssertEqual(
+            MobilePlaylistPresentationPolicy.entries(
+                in: roundTrippedPlaylist,
+                tracks: [localTrack, downloadedTrack],
+                remoteSongs: []
+            ).map(\.id),
+            reordered.map(\.id)
+        )
+    }
+
+    func testPlaylistEntryOrderCodableRemainsBackwardCompatible() throws {
+        let playlist = MobilePlaylist(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!,
+            name: "Ordered",
+            entryOrder: ["remote:a", "local:00000000-0000-0000-0000-000000000001"]
+        )
+        let encoded = try JSONEncoder().encode(playlist)
+        XCTAssertEqual(try JSONDecoder().decode(MobilePlaylist.self, from: encoded).entryOrder, playlist.entryOrder)
+
+        let legacy = Data(#"{"id":"00000000-0000-0000-0000-000000000003","name":"Legacy","trackIDs":[],"isSystem":false}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(MobilePlaylist.self, from: legacy).entryOrder)
+    }
+}
+
 final class MobileClientConfigurationTests: XCTestCase {
     private let token = "test-access-token"
     private let cohortKey = "AAECAwQFBgcICQoLDA0ODw"

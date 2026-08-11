@@ -71,6 +71,26 @@ enum PlaylistOrderPolicy {
 enum PlaylistPresentationEntryID: Hashable {
     case local(UUID)
     case remote(String)
+
+    var storageKey: String {
+        switch self {
+        case .local(let id): "local:\(id.uuidString.lowercased())"
+        case .remote(let id): "remote:\(id)"
+        }
+    }
+
+    init?(storageKey: String) {
+        if storageKey.hasPrefix("local:"),
+           let id = UUID(uuidString: String(storageKey.dropFirst("local:".count))) {
+            self = .local(id)
+        } else if storageKey.hasPrefix("remote:") {
+            let id = String(storageKey.dropFirst("remote:".count))
+            guard !id.isEmpty else { return nil }
+            self = .remote(id)
+        } else {
+            return nil
+        }
+    }
 }
 
 struct PlaylistPresentationEntry: Identifiable, Hashable {
@@ -106,7 +126,7 @@ enum PlaylistPresentationPolicy {
         let orderedRemoteIDs = unique(remoteSongIDs)
         let remoteIDSet = Set(orderedRemoteIDs)
         var downloadedByRemoteID: [String: Track] = [:]
-        let previousKeys: [PlaylistPresentationEntryID] = playlistTracks.map { track in
+        let fallbackPreviousKeys: [PlaylistPresentationEntryID] = playlistTracks.map { track in
             guard let remoteID = track.remoteID, remoteIDSet.contains(remoteID) else {
                 return .local(track.id)
             }
@@ -114,6 +134,19 @@ enum PlaylistPresentationPolicy {
             return .remote(remoteID)
         }
         let orderedKeys = orderedRemoteIDs.map(PlaylistPresentationEntryID.remote)
+        let validLocalKeys = Set(fallbackPreviousKeys.filter {
+            if case .local = $0 { return true }
+            return false
+        })
+        let validRemoteKeys = Set(orderedKeys)
+        let storedPreviousKeys = unique((playlist.entryOrder ?? []).compactMap(PlaylistPresentationEntryID.init(storageKey:)))
+            .filter { key in
+                switch key {
+                case .local: validLocalKeys.contains(key)
+                case .remote: validRemoteKeys.contains(key)
+                }
+            }
+        let previousKeys = unique(storedPreviousKeys + fallbackPreviousKeys)
         let preservedKeys = previousKeys.filter {
             if case .local = $0 { return true }
             return false
@@ -710,6 +743,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private let networkSession: URLSession
     private let serverLinkImportService: LocalDeviceImportService
     private let remoteSongMetadataResolver: RemoteSongMetadataResolver
+    private let remoteSongMetadataRetryDelays: [Duration]
     private var remoteSourceResolutions: [String: LocalImportResolution] = [:]
     private var remoteSongMetadataCache: [String: CachedRemoteSongMetadata]
     private let serverCacheRoot: URL?
@@ -791,7 +825,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         persistServerCredentials: Bool = true,
         systemPlaybackController: (any MacSystemPlaybackControlling)? = nil,
         legacyApplicationSupportMigration: LegacyApplicationSupportMigration? = nil,
-        remoteSongMetadataResolver: RemoteSongMetadataResolver? = nil
+        remoteSongMetadataResolver: RemoteSongMetadataResolver? = nil,
+        remoteSongMetadataRetryDelays: [Duration] = [.milliseconds(400), .milliseconds(1_600)]
     ) {
         Self.persistenceCoordinator.flush()
         let serverLinkImportService = LocalDeviceImportService()
@@ -804,6 +839,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 mediaMode: mediaMode
             )
         }
+        self.remoteSongMetadataRetryDelays = remoteSongMetadataRetryDelays
         self.remoteSongMetadataCache = Self.loadRemoteSongMetadataCache(from: defaults)
         self.serverCacheRoot = serverCacheRoot
         self.shouldPersistServerCredentials = persistServerCredentials
@@ -1185,11 +1221,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         playlistEntries(in: playlist).count
     }
 
-    var selectedPlaylistHasUnavailableEntries: Bool {
-        guard section == .playlists, selectedPlaylist != nil else { return false }
-        return unfilteredCollectionEntries.contains { !$0.isDownloaded }
-    }
-
     var unfilteredCollectionTracks: [Track] {
         if section == .playlists, let playlist = selectedPlaylist {
             let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
@@ -1504,6 +1535,32 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         playlists[playlistIndex].trackIDs.insert(movedTrackID, at: clampedDestination)
         if !playlists[playlistIndex].isSystem {
             updateRemoteSongIDs(forPlaylistAt: playlistIndex)
+            markPlaylistDirty(playlistID)
+        }
+        persistLibrary()
+        if !playlists[playlistIndex].isSystem {
+            schedulePlaylistSync()
+        }
+    }
+
+    func movePlaylistEntry(
+        _ entryID: PlaylistPresentationEntryID,
+        to destinationIndex: Int,
+        in playlistID: UUID
+    ) {
+        guard let playlistIndex = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+        var entries = playlistEntries(in: playlists[playlistIndex])
+        guard let sourceIndex = entries.firstIndex(where: { $0.id == entryID }) else { return }
+
+        let movedEntry = entries.remove(at: sourceIndex)
+        let clampedDestination = min(max(destinationIndex, 0), entries.endIndex)
+        entries.insert(movedEntry, at: clampedDestination)
+        if !playlists[playlistIndex].isSystem {
+            playlists[playlistIndex].entryOrder = entries.map { $0.id.storageKey }
+        }
+        playlists[playlistIndex].trackIDs = entries.compactMap(\.track?.id)
+        if !playlists[playlistIndex].isSystem {
+            playlists[playlistIndex].remoteSongIDs = entries.compactMap(\.remoteSongID)
             markPlaylistDirty(playlistID)
         }
         persistLibrary()
@@ -2333,8 +2390,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 return
             }
             serverMessage = uploadMode == .reviewedMatch
-                ? "Choose and review a match in Import from Link"
-                : "Download a song in Import from Link to register its preserved direct source"
+                ? "Choose and review a match in Import from Web"
+                : "Download a song in Import from Web to register its preserved direct source"
             NotificationCenter.default.post(name: .importMusicFromLink, object: nil)
         }
     }
@@ -4951,6 +5008,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         await reconcileCachedUploadedLocalTracks()
         await syncPlaylistsAutomatically()
         await syncListeningHistoryAutomatically()
+        retryPendingRemoteSongMetadata()
         while !Task.isCancelled {
             do {
                 try await Task.sleep(for: .seconds(60))
@@ -4961,6 +5019,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             await reconcileCachedUploadedLocalTracks()
             await syncPlaylistsAutomatically()
             await syncListeningHistoryAutomatically()
+            retryPendingRemoteSongMetadata()
         }
     }
 
@@ -5242,7 +5301,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     ordered: downloadedTrackIDs,
                     preserving: localOnlyTrackIDs
                 ),
-                remoteSongIDs: remote.songIDs
+                remoteSongIDs: remote.songIDs,
+                entryOrder: existing[remote.id]?.entryOrder
             )
         }
         let remoteIDs = Set(document.playlists.map(\.id))
@@ -5444,13 +5504,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         guard !requests.isEmpty else { return resolvedSongs }
 
         let resolver = remoteSongMetadataResolver
+        let retryDelays = remoteSongMetadataRetryDelays
         var didUpdateMetadataCache = false
         await withTaskGroup(of: RemoteSongMetadataResult.self) { group in
             var iterator = requests.makeIterator()
             for _ in 0..<min(4, requests.count) {
                 guard let request = iterator.next() else { break }
                 group.addTask {
-                    await Self.resolveRemoteSongMetadata(request, using: resolver)
+                    await Self.resolveRemoteSongMetadata(request, using: resolver, retryDelays: retryDelays)
                 }
             }
 
@@ -5459,7 +5520,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     || didUpdateMetadataCache
                 if let request = iterator.next() {
                     group.addTask {
-                        await Self.resolveRemoteSongMetadata(request, using: resolver)
+                        await Self.resolveRemoteSongMetadata(request, using: resolver, retryDelays: retryDelays)
                     }
                 }
             }
@@ -5479,20 +5540,32 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         serverMetadataHydrationGeneration &+= 1
         let generation = serverMetadataHydrationGeneration
         let resolver = remoteSongMetadataResolver
+        let retryDelays = remoteSongMetadataRetryDelays
         serverMetadataHydrationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             await hydrateRemoteSongMetadata(
                 requests,
                 using: resolver,
+                retryDelays: retryDelays,
                 generation: generation,
                 contextKey: contextKey
             )
         }
     }
 
+    func retryPendingRemoteSongMetadata() {
+        guard serverMetadataHydrationTask == nil,
+              remoteSongs.contains(where: \.isMetadataLoading),
+              let base = try? normalizedServerURL() else { return }
+        beginRemoteSongMetadataHydration(
+            contextKey: Self.serverContextKey(base: base, profileID: syncProfileID)
+        )
+    }
+
     private func hydrateRemoteSongMetadata(
         _ requests: [RemoteSongMetadataRequest],
         using resolver: @escaping RemoteSongMetadataResolver,
+        retryDelays: [Duration],
         generation: UInt64,
         contextKey: String
     ) async {
@@ -5514,7 +5587,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             for _ in 0..<min(4, requests.count) {
                 guard let request = iterator.next() else { break }
                 group.addTask {
-                    await Self.resolveRemoteSongMetadata(request, using: resolver)
+                    await Self.resolveRemoteSongMetadata(request, using: resolver, retryDelays: retryDelays)
                 }
             }
 
@@ -5540,7 +5613,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
                 if let request = iterator.next() {
                     group.addTask {
-                        await Self.resolveRemoteSongMetadata(request, using: resolver)
+                        await Self.resolveRemoteSongMetadata(request, using: resolver, retryDelays: retryDelays)
                     }
                 }
             }
@@ -5557,6 +5630,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
         return songs.map { song in
             guard song.isMetadataLoading else { return song }
+            if song.requiresOriginalSourcePage {
+                return Self.applyingLegacyRemoteMetadataFailure(to: song)
+            }
             if let localTrack = localTracksByRemoteID[song.id] {
                 var updated = song
                 updated.title = localTrack.title
@@ -5619,8 +5695,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         for index in songs.indices where songIDs.contains(songs[index].id) && songs[index].isMetadataLoading {
             if let metadata = result.metadata {
                 songs[index] = Self.applying(metadata, to: songs[index])
-            } else {
-                songs[index] = Self.applyingRemoteMetadataFailure(to: songs[index])
+            } else if songs[index].requiresOriginalSourcePage {
+                songs[index] = Self.applyingLegacyRemoteMetadataFailure(to: songs[index])
             }
         }
         return result.metadata != nil
@@ -5648,19 +5724,30 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     nonisolated private static func resolveRemoteSongMetadata(
         _ request: RemoteSongMetadataRequest,
-        using resolver: @escaping RemoteSongMetadataResolver
+        using resolver: @escaping RemoteSongMetadataResolver,
+        retryDelays: [Duration]
     ) async -> RemoteSongMetadataResult {
-        do {
-            try Task.checkCancellation()
-            let metadata = try await resolver(request.source, request.mediaMode)
-            try Task.checkCancellation()
-            return RemoteSongMetadataResult(
-                request: request,
-                metadata: metadata
-            )
-        } catch {
-            return RemoteSongMetadataResult(request: request, metadata: nil)
+        for attempt in 0...retryDelays.count {
+            do {
+                try Task.checkCancellation()
+                let metadata = try await resolver(request.source, request.mediaMode)
+                try Task.checkCancellation()
+                return RemoteSongMetadataResult(
+                    request: request,
+                    metadata: metadata
+                )
+            } catch {
+                guard !Task.isCancelled, attempt < retryDelays.count else {
+                    return RemoteSongMetadataResult(request: request, metadata: nil)
+                }
+                do {
+                    try await Task.sleep(for: retryDelays[attempt])
+                } catch {
+                    return RemoteSongMetadataResult(request: request, metadata: nil)
+                }
+            }
         }
+        return RemoteSongMetadataResult(request: request, metadata: nil)
     }
 
     nonisolated private static func applying(
@@ -5677,17 +5764,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         return updated
     }
 
-    nonisolated private static func applyingRemoteMetadataFailure(to song: RemoteSong) -> RemoteSong {
+    nonisolated private static func applyingLegacyRemoteMetadataFailure(to song: RemoteSong) -> RemoteSong {
         var updated = song
-        if updated.requiresOriginalSourcePage {
-            updated.title = "Original source link needed"
-            updated.artist = "Re-import on the original device"
-            updated.album = "Legacy expired link"
-        } else {
-            updated.title = "Metadata unavailable"
-            updated.artist = "Refresh to retry"
-            updated.album = "Link only"
-        }
+        updated.title = "Original source link needed"
+        updated.artist = "Re-import on the original device"
+        updated.album = "Legacy expired link"
         updated.isMetadataLoading = false
         return updated
     }

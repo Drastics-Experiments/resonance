@@ -41,13 +41,14 @@ import {
   physicalStorageClassForTrack,
   planMissingDownloadedUploads,
   playlistArtworkTrackIDs,
+  playlistEntryKey,
   playlistInsertionIndex,
   preservedUploadSourceURL,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
   remoteSongMetadataCacheKey,
   reconcileUploadedTrack,
-  reorderPlaylistTrackIDs,
+  reorderPlaylistEntries,
   resolveServerTransferModes,
   removeClipRangeForTrack,
   RESONANCE_ACCOUNT_SERVER_URL,
@@ -97,6 +98,9 @@ let accountSession = null;
 let isAccountEmailRevealed = false;
 let serverCatalog = [];
 let serverCatalogGeneration = 0;
+let serverMetadataHydrationGeneration = 0;
+let serverMetadataHydrationActive = false;
+const SERVER_METADATA_RETRY_DELAYS_MS = [400, 1600];
 const serverArtworkCache = new Map();
 const serverArtworkPending = new Map();
 const squareArtworkCache = new Map();
@@ -834,7 +838,7 @@ function clearPlaylistDragFloatingRow() {
 }
 
 function startPlaylistDragPreview(row, trackTable) {
-  draggingPlaylistTrackID = row.dataset.track;
+  draggingPlaylistTrackID = row.dataset.playlistEntry;
   draggingPlaylistTargetID = null;
   draggingPlaylistInsertAfter = false;
   clearPlaylistDragPreview();
@@ -844,6 +848,7 @@ function startPlaylistDragPreview(row, trackTable) {
   floatingRow.classList.remove("playlist-draggable", "dragging", "drag-preview-up", "drag-preview-down");
   floatingRow.classList.add("playlist-drag-floating");
   floatingRow.removeAttribute("data-track");
+  floatingRow.removeAttribute("data-playlist-entry");
   floatingRow.removeAttribute("data-playlist-draggable");
   floatingRow.removeAttribute("aria-label");
   floatingRow.removeAttribute("aria-keyshortcuts");
@@ -873,21 +878,21 @@ function playlistDragDestination(trackTable, clientY) {
 
 function updatePlaylistDragPreview(targetRow, insertAfter = false) {
   if (!draggingPlaylistTrackID) return;
-  if (!targetRow || draggingPlaylistTrackID === targetRow.dataset.track) {
+  if (!targetRow || draggingPlaylistTrackID === targetRow.dataset.playlistEntry) {
     draggingPlaylistTargetID = null;
     draggingPlaylistInsertAfter = false;
     clearPlaylistDragPreview();
     playlistDragFloatingRow?.style.setProperty("--playlist-drag-source-offset", "0px");
     return;
   }
-  const previewKey = `${targetRow.dataset.track}:${insertAfter ? "after" : "before"}`;
-  draggingPlaylistTargetID = targetRow.dataset.track;
+  const previewKey = `${targetRow.dataset.playlistEntry}:${insertAfter ? "after" : "before"}`;
+  draggingPlaylistTargetID = targetRow.dataset.playlistEntry;
   draggingPlaylistInsertAfter = insertAfter;
   if (previewKey === playlistDragPreviewKey) return;
   clearPlaylistDragPreview();
   playlistDragPreviewKey = previewKey;
   const rows = [...document.querySelectorAll("[data-playlist-draggable]")];
-  const sourceIndex = rows.findIndex((item) => item.dataset.track === draggingPlaylistTrackID);
+  const sourceIndex = rows.findIndex((item) => item.dataset.playlistEntry === draggingPlaylistTrackID);
   const targetIndex = rows.indexOf(targetRow);
   if (sourceIndex < 0 || targetIndex < 0) return;
   const destinationIndex = targetIndex + (draggingPlaylistInsertAfter ? 1 : 0) - (sourceIndex < targetIndex ? 1 : 0);
@@ -909,7 +914,7 @@ function clearPlaylistPointerDrag() {
   const drag = playlistPointerDrag;
   playlistPointerDrag = null;
   if (drag?.pointerID != null) {
-    const sourceRow = document.querySelector(`[data-track="${CSS.escape(drag.sourceID)}"]`);
+    const sourceRow = document.querySelector(`[data-playlist-entry="${CSS.escape(drag.sourceID)}"]`);
     if (sourceRow?.hasPointerCapture(drag.pointerID)) sourceRow.releasePointerCapture(drag.pointerID);
   }
   draggingPlaylistTrackID = null;
@@ -922,10 +927,7 @@ function clearPlaylistPointerDrag() {
 async function commitPlaylistTrackReorder(sourceID, targetID, insertAfter) {
   const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
   if (!playlist) return false;
-  const reordered = reorderPlaylistTrackIDs(playlist.trackIDs, sourceID, targetID, insertAfter);
-  if (reordered.every((trackID, index) => trackID === playlist.trackIDs[index])) return false;
-  playlist.trackIDs = reordered;
-  updatePlaylistRemoteSongIDs(state, playlist);
+  if (!reorderPlaylistEntries(state, playlist, sourceID, targetID, insertAfter)) return false;
   markPlaylistDirty(playlist);
   if (activePlaybackPlaylistID === playlist.id) setPlaybackContext(tracksForPlaylist(state, playlist.id), playlist.id);
   renderLibrary();
@@ -2889,9 +2891,34 @@ function hydrateServerCatalogMetadataArtwork(songs, context, generation) {
   void Promise.allSettled(workers);
 }
 
+function waitForServerMetadataRetry(delay) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, delay)));
+}
+
+async function resolveServerMetadataWithRetry(request, context, catalogGeneration, hydrationGeneration) {
+  for (let attempt = 0; attempt <= SERVER_METADATA_RETRY_DELAYS_MS.length; attempt += 1) {
+    if (catalogGeneration !== serverCatalogGeneration
+        || hydrationGeneration !== serverMetadataHydrationGeneration
+        || !profileContextIsCurrent(context)) return null;
+    try {
+      return await api.resolveServerSourceMetadata({
+        sourceURL: request.sourceURL,
+        mediaKind: request.mediaKind,
+      });
+    } catch {
+      const delay = SERVER_METADATA_RETRY_DELAYS_MS[attempt];
+      if (delay == null) return null;
+      await waitForServerMetadataRetry(delay);
+    }
+  }
+  return null;
+}
+
 function hydrateServerCatalogMetadata(songs) {
   const context = currentProfileContext();
   const generation = serverCatalogGeneration;
+  serverMetadataHydrationGeneration += 1;
+  const hydrationGeneration = serverMetadataHydrationGeneration;
   const requests = new Map();
   for (const song of songs.filter((item) => item.metadataLoading)) {
     const key = remoteSongMetadataCacheKey(song.source_url, song.media_kind);
@@ -2906,11 +2933,15 @@ function hydrateServerCatalogMetadata(songs) {
     });
   }
   const queue = [...requests.values()];
+  serverMetadataHydrationActive = queue.length > 0;
+  if (!queue.length) return;
   const bufferedResults = [];
   let completedRequests = 0;
   let cacheChanged = false;
   const flush = () => {
-    if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) {
+    if (generation !== serverCatalogGeneration
+        || hydrationGeneration !== serverMetadataHydrationGeneration
+        || !profileContextIsCurrent(context)) {
       bufferedResults.length = 0;
       return false;
     }
@@ -2923,13 +2954,6 @@ function hydrateServerCatalogMetadata(songs) {
           applyServerSongMetadata(current, result.metadata);
           cacheChanged = rememberServerSongMetadata(current, result.metadata) || cacheChanged;
           if (current.metadataArtworkLoading) artworkSongs.push(current);
-        } else {
-          const fallback = serverSourceDisplayFallback(current.source_url, { failed: true });
-          Object.assign(current, fallback, {
-            name: fallback.title,
-            metadataLoading: false,
-            metadataArtworkLoading: false,
-          });
         }
       }
     }
@@ -2940,27 +2964,35 @@ function hydrateServerCatalogMetadata(songs) {
   const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
     while (queue.length) {
       const request = queue.shift();
-      let metadata = null;
-      try {
-        metadata = await api.resolveServerSourceMetadata({
-          sourceURL: request.sourceURL,
-          mediaKind: request.mediaKind,
-        });
-      } catch {
-        metadata = null;
-      }
-      if (generation !== serverCatalogGeneration || !profileContextIsCurrent(context)) return;
+      const metadata = await resolveServerMetadataWithRetry(
+        request,
+        context,
+        generation,
+        hydrationGeneration,
+      );
+      if (generation !== serverCatalogGeneration
+          || hydrationGeneration !== serverMetadataHydrationGeneration
+          || !profileContextIsCurrent(context)) return;
       bufferedResults.push({ request, metadata });
       completedRequests += 1;
       if (bufferedResults.length >= 4 || completedRequests === requests.size) flush();
     }
   });
   void Promise.allSettled(workers).then(() => {
+    if (hydrationGeneration === serverMetadataHydrationGeneration) {
+      serverMetadataHydrationActive = false;
+    }
     flush();
     if (!cacheChanged) return;
     state.remoteSongMetadataCache = normalizedRemoteSongMetadataCache(state.remoteSongMetadataCache);
     persistInBackground({ refreshSidebar: false });
   });
+}
+
+function retryPendingServerCatalogMetadata() {
+  if (serverMetadataHydrationActive || !serverCatalog.some((song) => song.metadataLoading)) return;
+  hydrateServerCatalogMetadata(serverCatalog);
+  if (section === "server") renderServer();
 }
 
 function replaceServerCatalog(songs) {
@@ -3226,10 +3258,12 @@ function trackRow(track, index) {
   const actionLabel = unavailable
     ? `${track.title || "Untitled"} by ${track.artist || "Unknown artist"}. ${notDownloaded ? "Not downloaded on this device" : "File unavailable on this device"}`
     : `Play ${track.title || "Untitled"} by ${track.artist || "Unknown artist"}`;
-  const canReorder = Boolean(editablePlaylist && !unavailable && editablePlaylist.trackIDs.includes(track.id));
+  const entryKey = editablePlaylist ? playlistEntryKey(editablePlaylist, track) : "";
+  const canReorder = Boolean(editablePlaylist && entryKey
+    && (notDownloaded || editablePlaylist.trackIDs.includes(track.id)));
   const reorderLabel = canReorder ? ". Press Alt+Up or Alt+Down to reorder" : "";
   const draggableAttributes = canReorder
-    ? ` data-playlist-draggable="true" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Shift+F10"`
+    ? ` data-playlist-draggable="true" data-playlist-entry="${escapeHTML(entryKey)}" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Shift+F10"`
     : ` aria-keyshortcuts="Enter Space Shift+F10"`;
   return `<div class="track-row ${track.id === currentID ? "playing" : ""}${canReorder ? " playlist-draggable" : ""}${unavailable ? " unavailable" : ""}${notDownloaded ? " playlist-unavailable" : ""}" data-track="${escapeHTML(track.id)}" tabindex="0" aria-label="${escapeHTML(actionLabel + reorderLabel)}" aria-disabled="${unavailable}"${draggableAttributes}>
     <span class="track-number" title="${track.id === currentID && !audio.paused ? "Now playing" : `Track ${index + 1}`}">${track.id === currentID && !audio.paused ? nowPlayingIcon : index + 1}</span>${artwork(track)}
@@ -3479,7 +3513,7 @@ function renderStorage() {
   const storageHasQuery = Boolean(storageQuery.trim());
   const storageEmptyTitle = storageHasQuery ? "No matching songs" : storageScope === "downloads" ? "No server downloads yet" : storageScope === "files" ? "No imported files yet" : "No songs stored yet";
   const storageEmptyHelp = storageHasQuery ? "Try another search." : storageScope === "downloads" ? "Download songs from Music Server to keep them on this device." : "Import audio files to add them to this device.";
-  content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><div><span class="eyebrow">ON THIS DEVICE</span><h1>Song Storage</h1></div><div class="page-title-actions"><div class="storage-import-control" id="storageImportControl"><button class="primary storage-import-trigger" id="storageImportMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="storageImportMenu"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg></span><span>Import</span><svg class="storage-import-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="storage-import-menu" id="storageImportMenu" role="menu" aria-label="Choose an import type" hidden>${localImportAvailable ? '<button class="storage-import-option" type="button" role="menuitem" data-storage-import="link"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span><span><strong>Import from link</strong><small>Paste a link or search music</small></span></button>' : ""}<button class="storage-import-option" type="button" role="menuitem" data-storage-import="files"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4zM12 10v6m-3-3h6"/></svg></span><span><strong>Import files</strong><small>Choose audio from this device</small></span></button></div></div><button class="secondary" id="storageEdit" ${!storageEditing && !tracks.length ? "disabled" : ""}>${storageEditing ? "Done" : "Edit"}</button></div></div>
+  content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><div><span class="eyebrow">ON THIS DEVICE</span><h1>Song Storage</h1></div><div class="page-title-actions"><div class="storage-import-control" id="storageImportControl"><button class="primary storage-import-trigger" id="storageImportMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="storageImportMenu"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg></span><span>Import</span><svg class="storage-import-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="storage-import-menu" id="storageImportMenu" role="menu" aria-label="Choose an import type" hidden>${localImportAvailable ? '<button class="storage-import-option" type="button" role="menuitem" data-storage-import="link"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span><span><strong>Import from Web</strong><small>Paste a link or search music</small></span></button>' : ""}<button class="storage-import-option" type="button" role="menuitem" data-storage-import="files"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4zM12 10v6m-3-3h6"/></svg></span><span><strong>Import files</strong><small>Choose audio from this device</small></span></button></div></div><button class="secondary" id="storageEdit" ${!storageEditing && !tracks.length ? "disabled" : ""}>${storageEditing ? "Done" : "Edit"}</button></div></div>
     <div class="storage-summary" id="storageSummary"><div class="storage-ring" id="storageRing" style="--local:${localDegrees}deg"><span>♪</span></div><div class="storage-stat"><small>Local audio</small><strong id="storageLocalBytes">${formatBytes(localBytes)}</strong><span>${localTracks.length} available library ${localTracks.length === 1 ? "file" : "files"}</span></div><div class="storage-stat"><small>Server downloads</small><strong id="storageRemoteBytes">${formatBytes(remoteBytes)}</strong><span>${remoteTracks.length} available library ${remoteTracks.length === 1 ? "file" : "files"}</span></div><div class="storage-stat"><small>Available</small><strong id="storageAvailable">Calculating…</strong><span id="storageFreePercent">Disk space</span></div></div>
     <div class="segmented storage-tabs" role="group" aria-label="Storage scope"><button class="${storageScope === "songs" ? "active" : ""}" data-storage-scope="songs" aria-pressed="${storageScope === "songs"}">Songs</button><button class="${storageScope === "downloads" ? "active" : ""}" data-storage-scope="downloads" aria-pressed="${storageScope === "downloads"}">Downloads</button><button class="${storageScope === "files" ? "active" : ""}" data-storage-scope="files" aria-pressed="${storageScope === "files"}">Files</button></div>
     ${storageEditing ? `<div class="selection-bar"><span>${selectedStorageIDs.size} selected</span><button class="danger" id="deleteSelectedStorage" ${selectedStorageIDs.size ? "" : "disabled"}>Delete selected</button></div>` : ""}
@@ -3844,7 +3878,7 @@ function renderServer() {
       <span class="server-dot">•</span><span class="server-inline-metric green">${serverDeviceIcon}<strong>${downloaded}</strong><span>on device</span></span>
     </div></div>
     ${serverUploadManifestMarkup()}
-    <div class="server-library-bar"><div><strong>${resultSummary}</strong>${pendingMetadata ? `<small class="server-metadata-status"><span aria-hidden="true"></span>Loading metadata for ${pendingMetadata} ${pendingMetadata === 1 ? "song" : "songs"}</small>` : ""}<small class="server-transfer-mode-summary">${escapeHTML(`${serverUploadModeOptions[transferModes.uploadMode] || "Uploads disabled"} · ${serverDownloadModeOptions[transferModes.downloadMode] || "Downloads disabled"}`)}</small></div><div class="server-actions">
+    <div class="server-library-bar"><div><strong>${resultSummary}</strong>${pendingMetadata ? `<small class="server-metadata-status"><span aria-hidden="true"></span>${serverMetadataHydrationActive ? "Resolving" : "Automatically retrying"} metadata for ${pendingMetadata} ${pendingMetadata === 1 ? "song" : "songs"}</small>` : ""}<small class="server-transfer-mode-summary">${escapeHTML(`${serverUploadModeOptions[transferModes.uploadMode] || "Uploads disabled"} · ${serverDownloadModeOptions[transferModes.downloadMode] || "Downloads disabled"}`)}</small></div><div class="server-actions">
       <button id="uploadMissingDownloads" title="${fileUploadSelected ? "Upload downloaded songs missing from the server" : "Available only in Local files upload mode"}" aria-label="Upload downloaded songs missing from the server" ${fileUploadSelected ? "" : "disabled"}>${serverUploadMissingIcon}</button>
       <button id="uploadServer" title="${escapeHTML(uploadAvailable ? serverUploadModeOptions[transferModes.uploadMode] : "Uploads are disabled")}" aria-label="${escapeHTML(uploadAvailable ? serverUploadModeOptions[transferModes.uploadMode] : "Uploads are disabled")}" ${uploadAvailable ? "" : "disabled"}>${serverUploadIcon}</button>
       <button id="syncAll" title="${downloadLabel}" aria-label="${downloadLabel}" ${!offlineDownloadAvailable || (serverSelecting && !selectedRemoteIDs.size) ? "disabled" : ""}>${serverDownloadIcon}</button>
@@ -4178,7 +4212,7 @@ function renderSettings() {
               <div class="settings-account-card settings-server-field-wide">
                 ${accountSession
                   ? `<div><strong>${escapeHTML(safeAccountDisplayName(accountSession))}</strong><small><button id="settingsAccountEmail" class="email-disclosure" type="button" aria-label="${isAccountEmailRevealed ? "Hide" : "Reveal"} email address">${escapeHTML(displayedAccountEmail())}</button> · ${accountSession.role === "admin" ? "Administrator" : "Member"}</small></div><button id="signOutAccount" class="secondary" type="button">Sign out</button>`
-                  : `<div><strong>${serverToken ? "Legacy connection" : "Sign in to Resonance"}</strong><small>${serverToken ? "Sign in to finish upgrading this device." : "Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/."}</small></div><div class="settings-auth-grid"><button class="secondary" type="button" data-auth-provider="clerk">Sign in or create account</button></div>`}
+                  : `<div><strong>${serverToken ? "Legacy connection" : "Sign in to Resonance"}</strong><small>${serverToken ? "Sign in to finish upgrading this device." : "Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/."}</small></div><div class="settings-auth-grid"><button class="clerk-sign-in-button" type="button" data-auth-provider="clerk"><span class="clerk-sign-in-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Z"/><path d="m16.4 14.6 3.1 3.1M17.2 5.4l1.1-1.1M6.8 18.6l-1.1 1.1"/></svg></span><span>Sign in with Clerk</span><svg class="clerk-sign-in-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button></div>`}
               </div>
             </div>
             <div class="settings-server-actions">
@@ -4419,13 +4453,14 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       const playlist = state.playlists.find((item) => item.id === selectedPlaylistID && !item.isSystem);
       if (!playlist) return;
       event.preventDefault();
-      const from = playlist.trackIDs.indexOf(row.dataset.track);
+      const reorderRows = [...(trackTable?.querySelectorAll("[data-playlist-draggable]") || [])];
+      const from = reorderRows.indexOf(row);
       const to = from + (event.key === "ArrowUp" ? -1 : 1);
-      if (from < 0 || to < 0 || to >= playlist.trackIDs.length) return;
-      const trackID = row.dataset.track;
-      const targetID = playlist.trackIDs[to];
-      await commitPlaylistTrackReorder(trackID, targetID, event.key === "ArrowDown");
-      document.querySelector(`[data-track="${CSS.escape(trackID)}"]`)?.focus();
+      if (from < 0 || to < 0 || to >= reorderRows.length) return;
+      const entryKey = row.dataset.playlistEntry;
+      const targetKey = reorderRows[to].dataset.playlistEntry;
+      await commitPlaylistTrackReorder(entryKey, targetKey, event.key === "ArrowDown");
+      document.querySelector(`[data-playlist-entry="${CSS.escape(entryKey)}"]`)?.focus();
     };
     if (row.dataset.playlistDraggable === "true") {
       // Capture mouse pointers too so crossing header controls cannot strand a drag.
@@ -4434,7 +4469,7 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
         clearPlaylistPointerDrag();
         playlistPointerDrag = {
           pointerID: event.pointerId,
-          sourceID: row.dataset.track,
+          sourceID: row.dataset.playlistEntry,
           startX: event.clientX,
           startY: event.clientY,
           active: false,
@@ -4443,7 +4478,7 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       };
       row.onpointermove = (event) => {
         const drag = playlistPointerDrag;
-        if (!drag || drag.pointerID !== event.pointerId || drag.sourceID !== row.dataset.track) return;
+        if (!drag || drag.pointerID !== event.pointerId || drag.sourceID !== row.dataset.playlistEntry) return;
         if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
         if (!drag.active) {
           drag.active = true;
@@ -4455,7 +4490,7 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       };
       row.onpointerup = (event) => {
         const drag = playlistPointerDrag;
-        if (!drag || drag.pointerID !== event.pointerId || drag.sourceID !== row.dataset.track) return;
+        if (!drag || drag.pointerID !== event.pointerId || drag.sourceID !== row.dataset.playlistEntry) return;
         if (drag.active) {
           const destination = playlistDragDestination(trackTable, event.clientY);
           updatePlaylistDragPreview(destination?.targetRow, destination?.insertAfter);
@@ -4470,7 +4505,7 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       };
       row.onpointercancel = clearPlaylistPointerDrag;
       row.onlostpointercapture = () => {
-        if (playlistPointerDrag?.sourceID === row.dataset.track) clearPlaylistPointerDrag();
+        if (playlistPointerDrag?.sourceID === row.dataset.playlistEntry) clearPlaylistPointerDrag();
       };
     }
   });
@@ -4992,7 +5027,7 @@ function resetLocalImport() {
   $("#localImportProviderPill").hidden = false;
   setLocalImportProviderFocus("youtube");
   $("#chooseLocalFiles").hidden = false;
-  $("#localImportTitle").textContent = "Import from Link";
+  $("#localImportTitle").textContent = "Import from Web";
   $("#localImportSource").placeholder = "Link or music search";
 }
 
@@ -8175,9 +8210,15 @@ document.addEventListener("keydown", (event) => {
   }
 });
 window.addEventListener("blur", closeTrackContextMenu);
-window.addEventListener("focus", () => syncPlaylistsNow({ automatic: true }));
+window.addEventListener("focus", () => {
+  syncPlaylistsNow({ automatic: true });
+  retryPendingServerCatalogMetadata();
+});
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") syncPlaylistsNow({ automatic: true });
+  if (document.visibilityState === "visible") {
+    syncPlaylistsNow({ automatic: true });
+    retryPendingServerCatalogMetadata();
+  }
 });
 $("#search").oninput = () => {
   const query = $("#search").value;
@@ -8640,3 +8681,4 @@ syncPlaylistsNow({ automatic: true });
 syncListeningHistoryNow();
 setInterval(() => syncPlaylistsNow({ automatic: true }), 60000);
 setInterval(() => syncListeningHistoryNow(), 60000);
+setInterval(retryPendingServerCatalogMetadata, 60000);

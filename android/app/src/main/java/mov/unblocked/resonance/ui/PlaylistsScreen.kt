@@ -108,7 +108,7 @@ private fun PlaylistCollectionScreen(
                 }
                 IconButton(
                     onClick = { creating = true },
-                    modifier = Modifier.size(46.dp).background(Accent, CircleShape),
+                    modifier = Modifier.size(46.dp).background(MaterialTheme.colorScheme.primary, CircleShape),
                 ) { Icon(Icons.Default.Add, "New playlist") }
             }
         }
@@ -199,7 +199,6 @@ private fun PlaylistDetailScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     val entries = PlaylistPresentationPolicy.entries(playlist, state.tracks, state.remoteSongs)
     val tracks = entries.mapNotNull { (it as? PlaylistPresentationEntry.Downloaded)?.track }
-    val hasUnavailableEntries = entries.any { it is PlaylistPresentationEntry.Unavailable }
     val isActivePlaylist = state.activePlaylistId == playlist.id && state.currentTrackId != null
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -212,7 +211,7 @@ private fun PlaylistDetailScreen(
                 Text(playlist.name, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
                 if (!playlist.isSystem) {
                     IconButton(onClick = { addSongs = true }) { Icon(Icons.Default.Add, "Add songs") }
-                    if (tracks.size > 1 && !hasUnavailableEntries) {
+                    if (entries.size > 1) {
                         TextButton(onClick = { reorder = !reorder }) { Text(if (reorder) "Done" else "Reorder") }
                     }
                     IconButton(onClick = { confirmDelete = true }) {
@@ -226,7 +225,7 @@ private fun PlaylistDetailScreen(
                 Button(
                     enabled = tracks.isNotEmpty(),
                     onClick = { if (isActivePlaylist) actions.togglePlayPause() else actions.playPlaylist(playlist.id) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                 ) {
                     Icon(
                         if (state.isPlaying && isActivePlaylist) Icons.Default.Pause
@@ -246,7 +245,7 @@ private fun PlaylistDetailScreen(
                     enabled = tracks.isNotEmpty() && !state.isTransientPlayback,
                     onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) },
                     modifier = Modifier.size(46.dp).background(
-                        if (state.shuffleEnabled && !state.isTransientPlayback) Violet
+                        if (state.shuffleEnabled && !state.isTransientPlayback) MaterialTheme.colorScheme.secondary
                         else Color.White.copy(alpha = .08f),
                         CircleShape,
                     ),
@@ -272,24 +271,28 @@ private fun PlaylistDetailScreen(
                                 )
                             }
                             if (reorder) {
-                                Column {
-                                    IconButton(
-                                        enabled = index > 0,
-                                        onClick = { actions.movePlaylistTrack(playlist.id, index, index - 1) },
-                                    ) { Icon(Icons.Default.KeyboardArrowUp, "Move up") }
-                                    IconButton(
-                                        enabled = index < tracks.lastIndex,
-                                        onClick = { actions.movePlaylistTrack(playlist.id, index, index + 1) },
-                                    ) { Icon(Icons.Default.KeyboardArrowDown, "Move down") }
+                                PlaylistReorderButtons(index, entries.lastIndex) { toIndex ->
+                                    actions.movePlaylistTrack(playlist.id, index, toIndex)
                                 }
                             }
                         }
                     }
-                    is PlaylistPresentationEntry.Unavailable -> UnavailablePlaylistSongRow(
-                        entry = entry,
-                        number = index + 1,
-                        serverURL = state.serverUrl,
-                    )
+                    is PlaylistPresentationEntry.Unavailable -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.weight(1f)) {
+                                UnavailablePlaylistSongRow(
+                                    entry = entry,
+                                    number = index + 1,
+                                    serverURL = state.serverUrl,
+                                )
+                            }
+                            if (reorder) {
+                                PlaylistReorderButtons(index, entries.lastIndex) { toIndex ->
+                                    actions.movePlaylistTrack(playlist.id, index, toIndex)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -333,7 +336,11 @@ private fun PlaylistDetailScreen(
                                 )
                             }
                             Text(track.durationText, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
-                            Icon(if (added) Icons.Default.Check else Icons.Default.Add, null, tint = if (added) Accent else Color.White)
+                            Icon(
+                                if (added) Icons.Default.Check else Icons.Default.Add,
+                                null,
+                                tint = if (added) MaterialTheme.colorScheme.tertiary else Color.White,
+                            )
                         }
                     }
                 }
@@ -353,6 +360,24 @@ private fun PlaylistDetailScreen(
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
         )
+    }
+}
+
+@Composable
+private fun PlaylistReorderButtons(
+    index: Int,
+    lastIndex: Int,
+    onMove: (Int) -> Unit,
+) {
+    Column {
+        IconButton(
+            enabled = index > 0,
+            onClick = { onMove(index - 1) },
+        ) { Icon(Icons.Default.KeyboardArrowUp, "Move up") }
+        IconButton(
+            enabled = index < lastIndex,
+            onClick = { onMove(index + 1) },
+        ) { Icon(Icons.Default.KeyboardArrowDown, "Move down") }
     }
 }
 
@@ -425,7 +450,12 @@ private fun EmptyPlaylistMessage(title: String, detail: String) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = Violet)
+        Icon(
+            Icons.Default.MusicNote,
+            null,
+            Modifier.size(44.dp),
+            tint = MaterialTheme.colorScheme.tertiary,
+        )
         Text(title, style = MaterialTheme.typography.titleMedium)
         Text(detail, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
     }

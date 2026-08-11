@@ -137,7 +137,7 @@ fun LibraryScreen(
                 Button(
                     enabled = state.tracks.isNotEmpty(),
                     onClick = actions::togglePlayPause,
-                    colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
                 ) {
                     Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null)
@@ -150,7 +150,7 @@ fun LibraryScreen(
                     modifier = Modifier
                         .size(46.dp)
                         .background(
-                            if (state.shuffleEnabled && !state.isTransientPlayback) Violet
+                            if (state.shuffleEnabled && !state.isTransientPlayback) MaterialTheme.colorScheme.secondary
                             else Color.White.copy(alpha = .08f),
                             CircleShape,
                         ),
@@ -175,7 +175,12 @@ fun LibraryScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = Violet)
+                    Icon(
+                        Icons.Default.MusicNote,
+                        null,
+                        Modifier.size(44.dp),
+                        tint = MaterialTheme.colorScheme.tertiary,
+                    )
                     Text(if (state.tracks.isEmpty()) "No songs yet" else "No results", style = MaterialTheme.typography.titleMedium)
                     Text(
                         if (state.tracks.isEmpty()) "Import audio or video, or sync your music server." else "Try another search term.",
@@ -229,7 +234,7 @@ private fun ProfileButton(
             onClick = { expanded = true },
             modifier = Modifier
                 .size(44.dp)
-                .background(Violet, CircleShape)
+                .background(MaterialTheme.colorScheme.secondary, CircleShape)
                 .semantics {
                     contentDescription = "Profile: $profileName. Open profile tools"
                 },

@@ -417,15 +417,54 @@ struct MacSettingsSheet: View {
                                 .font(.system(size: 9, weight: .semibold))
                                 .foregroundStyle(palette.muted)
                         }
-                        Button("Sign in or create account") {
+                        Button {
                             Task {
                                 await model.signIn(with: .clerk)
                             }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "person.badge.key.fill")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .frame(width: 30, height: 30)
+                                    .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                            .stroke(Color.white.opacity(0.18))
+                                    }
+                                Text("Sign in with Clerk")
+                                    .font(.system(size: 12, weight: .bold))
+                                Spacer(minLength: 8)
+                                if model.isAuthenticatingAccount {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .tint(.white)
+                                } else {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .opacity(0.75)
+                                }
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .frame(maxWidth: .infinity, minHeight: 46)
+                            .background(
+                                LinearGradient(
+                                    colors: [palette.accent, palette.secondary],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                ),
+                                in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                    .stroke(Color.white.opacity(0.2))
+                            }
+                            .shadow(color: palette.accent.opacity(0.28), radius: 14, y: 7)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(palette.accent)
+                        .buttonStyle(PressableScaleStyle())
                         .frame(maxWidth: .infinity)
                         .disabled(model.isAuthenticatingAccount)
+                        .accessibilityLabel("Sign in with Clerk")
                         Text("Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/ in the secure system browser.")
                             .font(.system(size: 9))
                             .foregroundStyle(palette.muted)

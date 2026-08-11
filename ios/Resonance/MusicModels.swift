@@ -626,19 +626,22 @@ struct MobilePlaylist: Identifiable, Codable, Hashable {
     var trackIDs: [UUID]
     var isSystem: Bool
     var remoteSongIDs: [String]?
+    var entryOrder: [String]?
 
     init(
         id: UUID = UUID(),
         name: String,
         trackIDs: [UUID] = [],
         isSystem: Bool = false,
-        remoteSongIDs: [String]? = nil
+        remoteSongIDs: [String]? = nil,
+        entryOrder: [String]? = nil
     ) {
         self.id = id
         self.name = name
         self.trackIDs = trackIDs
         self.isSystem = isSystem
         self.remoteSongIDs = remoteSongIDs
+        self.entryOrder = entryOrder
     }
 
     var automaticArtworkTrackIDs: [UUID] {
@@ -1085,6 +1088,27 @@ enum MobilePlaylistOrderPolicy {
 enum MobilePlaylistPresentationEntryID: Hashable {
     case local(UUID)
     case remote(String)
+
+    var storageKey: String {
+        switch self {
+        case .local(let id):
+            "local:\(id.uuidString.lowercased())"
+        case .remote(let songID):
+            "remote:\(songID)"
+        }
+    }
+
+    init?(storageKey: String) {
+        if storageKey.hasPrefix("local:"),
+           let id = UUID(uuidString: String(storageKey.dropFirst("local:".count))) {
+            self = .local(id)
+        } else if storageKey.hasPrefix("remote:"),
+                  !storageKey.dropFirst("remote:".count).isEmpty {
+            self = .remote(String(storageKey.dropFirst("remote:".count)))
+        } else {
+            return nil
+        }
+    }
 }
 
 struct MobilePlaylistPresentationEntry: Identifiable, Hashable {
@@ -1100,6 +1124,43 @@ struct MobilePlaylistPresentationEntry: Identifiable, Hashable {
     var durationText: String { track?.durationText ?? remoteSong?.durationText ?? "—" }
 }
 
+struct MobilePlaylistPersistedOrder: Equatable {
+    let trackIDs: [UUID]
+    let remoteSongIDs: [String]
+    let entryOrder: [String]
+}
+
+enum MobilePlaylistPresentationMovePolicy {
+    static func move(
+        _ entries: [MobilePlaylistPresentationEntry],
+        fromOffsets source: IndexSet,
+        toOffset destination: Int
+    ) -> [MobilePlaylistPresentationEntry] {
+        var reordered = entries
+        let validOffsets = source.filter { reordered.indices.contains($0) }.sorted()
+        guard !validOffsets.isEmpty else { return entries }
+
+        let movingEntries = validOffsets.map { reordered[$0] }
+        for offset in validOffsets.reversed() {
+            reordered.remove(at: offset)
+        }
+        let removedBeforeDestination = validOffsets.count { $0 < destination }
+        let insertionIndex = min(max(destination - removedBeforeDestination, 0), reordered.count)
+        reordered.insert(contentsOf: movingEntries, at: insertionIndex)
+        return reordered
+    }
+
+    static func persistedOrder(
+        for entries: [MobilePlaylistPresentationEntry]
+    ) -> MobilePlaylistPersistedOrder {
+        MobilePlaylistPersistedOrder(
+            trackIDs: entries.compactMap { $0.track?.id },
+            remoteSongIDs: entries.compactMap(\.remoteSongID),
+            entryOrder: entries.map { $0.id.storageKey }
+        )
+    }
+}
+
 enum MobilePlaylistPresentationPolicy {
     static func entries(
         in playlist: MobilePlaylist,
@@ -1111,7 +1172,7 @@ enum MobilePlaylistPresentationPolicy {
         }
         let playlistTracks = playlist.trackIDs.compactMap { tracksByID[$0] }
         guard !playlist.isSystem, let remoteSongIDs = playlist.remoteSongIDs else {
-            return playlistTracks.map {
+            let entries = playlistTracks.map {
                 MobilePlaylistPresentationEntry(
                     id: .local($0.id),
                     track: $0,
@@ -1119,6 +1180,7 @@ enum MobilePlaylistPresentationPolicy {
                     remoteSong: nil
                 )
             }
+            return applyingStoredOrder(playlist.entryOrder, to: entries)
         }
 
         let orderedRemoteIDs = unique(remoteSongIDs)
@@ -1140,7 +1202,7 @@ enum MobilePlaylistPresentationPolicy {
             if result[song.id] == nil { result[song.id] = song }
         }
 
-        return MobilePlaylistOrderPolicy.merge(
+        let entries = MobilePlaylistOrderPolicy.merge(
             previous: previousKeys,
             ordered: orderedKeys,
             preserving: preservedKeys
@@ -1163,6 +1225,25 @@ enum MobilePlaylistPresentationPolicy {
                 )
             }
         }
+        return applyingStoredOrder(playlist.entryOrder, to: entries)
+    }
+
+    private static func applyingStoredOrder(
+        _ storedOrder: [String]?,
+        to entries: [MobilePlaylistPresentationEntry]
+    ) -> [MobilePlaylistPresentationEntry] {
+        guard let storedOrder, !storedOrder.isEmpty else { return entries }
+        let entriesByID = entries.reduce(into: [MobilePlaylistPresentationEntryID: MobilePlaylistPresentationEntry]()) {
+            if $0[$1.id] == nil { $0[$1.id] = $1 }
+        }
+        var seen = Set<MobilePlaylistPresentationEntryID>()
+        var reconciled = storedOrder.compactMap { key -> MobilePlaylistPresentationEntry? in
+            guard let id = MobilePlaylistPresentationEntryID(storageKey: key),
+                  seen.insert(id).inserted else { return nil }
+            return entriesByID[id]
+        }
+        reconciled.append(contentsOf: entries.filter { seen.insert($0.id).inserted })
+        return reconciled
     }
 
     private static func unique<Element: Hashable>(_ values: [Element]) -> [Element] {

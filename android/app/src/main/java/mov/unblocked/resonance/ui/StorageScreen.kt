@@ -126,7 +126,7 @@ fun StorageScreen(
                     ) { Icon(Icons.Default.MoreVert, "Storage actions") }
                     DropdownMenu(expanded = importMenu, onDismissRequest = { importMenu = false }) {
                         DropdownMenuItem(
-                            text = { Text("Import from Link") },
+                            text = { Text("Import from Web") },
                             leadingIcon = { Icon(Icons.Default.Link, null) },
                             onClick = {
                                 importMenu = false
@@ -221,7 +221,12 @@ fun StorageScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = Violet)
+                    Icon(
+                        Icons.Default.MusicNote,
+                        null,
+                        Modifier.size(44.dp),
+                        tint = MaterialTheme.colorScheme.tertiary,
+                    )
                     Text(if (query.isNotEmpty()) "No Results" else "No Stored Songs", style = MaterialTheme.typography.titleMedium)
                     Text("Import audio or video, or download songs from your music server.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
                 }
@@ -304,7 +309,7 @@ private fun StorageSummary(
         LinearProgressIndicator(
             progress = { usedBytes.toFloat() / totalBytes.toFloat() },
             modifier = Modifier.fillMaxWidth(),
-            color = Violet,
+            color = MaterialTheme.colorScheme.secondary,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("$importedCount local", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))

@@ -1099,6 +1099,61 @@ struct ResonanceTests {
     }
 
     @Test
+    func mixedPlaylistReordersUndownloadedSongsAndPersistsCombinedOrder() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        let local = Track(title: "Local", artist: "Artist", album: "Album", duration: 120, artwork: .liked)
+        let remoteA = Track(
+            title: "Downloaded A",
+            artist: "Artist",
+            album: "Album",
+            duration: 120,
+            artwork: .liked,
+            remoteID: "remote-a"
+        )
+        let remoteB = Track(
+            title: "Downloaded B",
+            artist: "Artist",
+            album: "Album",
+            duration: 120,
+            artwork: .liked,
+            remoteID: "remote-b"
+        )
+        let playlist = Playlist(
+            name: "Shared",
+            artwork: .liked,
+            trackIDs: [remoteA.id, local.id, remoteB.id],
+            remoteSongIDs: ["remote-b", "remote-missing", "remote-a"]
+        )
+        model.tracks = [local, remoteA, remoteB]
+        model.playlists = [.library(), playlist]
+
+        model.movePlaylistEntry(.remote("remote-missing"), to: 0, in: playlist.id)
+
+        let reordered = try #require(model.playlists.first(where: { $0.id == playlist.id }))
+        #expect(reordered.trackIDs == [remoteB.id, local.id, remoteA.id])
+        #expect(reordered.remoteSongIDs == ["remote-missing", "remote-b", "remote-a"])
+        #expect(reordered.entryOrder == [
+            "remote:remote-missing",
+            "remote:remote-b",
+            "local:\(local.id.uuidString.lowercased())",
+            "remote:remote-a",
+        ])
+        #expect(model.playlistEntries(in: reordered).map(\.id) == [
+            .remote("remote-missing"),
+            .remote("remote-b"),
+            .local(local.id),
+            .remote("remote-a"),
+        ])
+
+        let reloaded = PlayerModel(loadPersistedLibrary: true, defaults: defaults, persistServerCredentials: false)
+        let persisted = try #require(reloaded.playlists.first(where: { $0.id == playlist.id }))
+        #expect(persisted.entryOrder == reordered.entryOrder)
+        #expect(reloaded.playlistEntries(in: persisted).map(\.id) == model.playlistEntries(in: reordered).map(\.id))
+    }
+
+    @Test
     func playbackControlsKeepTheirQueueAfterNavigationAndFiltering() async throws {
         let (defaults, suite) = try defaults()
         defer { defaults.removePersistentDomain(forName: suite) }

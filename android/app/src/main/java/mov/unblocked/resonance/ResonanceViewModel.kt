@@ -70,6 +70,7 @@ import mov.unblocked.resonance.data.LibraryRepository
 import mov.unblocked.resonance.data.Playlist
 import mov.unblocked.resonance.data.PlaylistPutResult
 import mov.unblocked.resonance.data.PlaylistMutationSnapshot
+import mov.unblocked.resonance.data.PlaylistEntryOrderPolicy
 import mov.unblocked.resonance.data.PlaylistOrderPolicy
 import mov.unblocked.resonance.data.PlaylistSyncMutationPolicy
 import mov.unblocked.resonance.data.ProfileLibraryStatePolicy
@@ -80,6 +81,7 @@ import mov.unblocked.resonance.data.RemotePlaylistsDocument
 import mov.unblocked.resonance.data.RemoteSong
 import mov.unblocked.resonance.data.RemoteSongMetadataCacheEntry
 import mov.unblocked.resonance.data.RemoteSongMetadataCachePolicy
+import mov.unblocked.resonance.data.RemoteSongMetadataRetryPolicy
 import mov.unblocked.resonance.data.ResonanceAccountSignInServerURL
 import mov.unblocked.resonance.data.ServerClient
 import mov.unblocked.resonance.data.ServerProfileContext
@@ -100,6 +102,7 @@ import mov.unblocked.resonance.playback.PlaybackService
 import mov.unblocked.resonance.playback.DownloadPolicy
 import mov.unblocked.resonance.playback.PlaybackFailurePolicy
 import mov.unblocked.resonance.playback.PlaybackVolumePolicy
+import mov.unblocked.resonance.playback.CrossfadePolicy
 import mov.unblocked.resonance.playback.QueuePolicy
 import mov.unblocked.resonance.playback.UploadMissingPolicy
 import mov.unblocked.resonance.playback.AuthenticatedStreamHandle
@@ -107,6 +110,7 @@ import mov.unblocked.resonance.playback.AuthenticatedStreamRegistry
 import mov.unblocked.resonance.playback.StreamLeaseUpdatePolicy
 import mov.unblocked.resonance.ui.ResonanceActions
 import mov.unblocked.resonance.ui.ResonanceUiState
+import mov.unblocked.resonance.ui.ResonanceThemeChoice
 import mov.unblocked.resonance.ui.LinkImportUiState
 import mov.unblocked.resonance.ui.PlaybackUiStatus
 import mov.unblocked.resonance.ui.invalidatedForSourceEdit
@@ -153,6 +157,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private val clientConfigStore = ClientConfigStore(context)
     private val profilePictureStore = ProfilePictureStore(context)
     private val preferences = context.getSharedPreferences("resonance.playback", 0)
+    private val appearancePreferences = context.getSharedPreferences("resonance.appearance", 0)
     private val mutableState = MutableStateFlow(
         ResonanceUiState(
             serverUrl = accountSession?.baseURL ?: credentials.serverURL,
@@ -166,6 +171,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             repeatEnabled = preferences.getBoolean("repeat", false),
             playbackSpeed = preferences.getFloat("speed", 1f),
             volume = preferences.getFloat("volume", .8f).coerceIn(0f, 1f),
+            crossfadeEnabled = preferences.getBoolean("crossfadeEnabled", false),
+            crossfadeSeconds = CrossfadePolicy.normalizedSeconds(
+                preferences.getFloat("crossfadeSeconds", CrossfadePolicy.DefaultSeconds),
+            ),
+            themeChoice = ResonanceThemeChoice.fromStorageID(
+                appearancePreferences.getString("theme", null),
+            ),
         ),
     )
     val uiState = mutableState.asStateFlow()
@@ -594,6 +606,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             while (isActive) {
                 delay(60_000)
                 expireClientConfigIfNeeded()
+                retryRemoteSongMetadataIfNeeded()
                 syncPlaylistsAutomatically()
             }
         }
@@ -1532,7 +1545,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             linkImport = mutableState.value.linkImport.copy(
                 stage = LinkImportStage.Failed,
                 errorCode = failure?.code ?: "LOCAL_IMPORT_FAILED",
-                errorMessage = error.message ?: "The link import failed.",
+                errorMessage = error.message ?: "The web import failed.",
             ),
         )
     }
@@ -1598,7 +1611,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             when (activeUploadMode()) {
                 ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink, ServerUploadMode.ReviewedMatch -> {
                     mutableState.value = mutableState.value.copy(
-                        errorMessage = "Use Import from Link so Resonance can preserve and register the direct source URL.",
+                        errorMessage = "Use Import from Web so Resonance can preserve and register the direct source URL.",
                     )
                 }
                 null -> mutableState.value = mutableState.value.copy(
@@ -1917,6 +1930,31 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         preferences.edit().putFloat("volume", clamped).apply()
     }
 
+    fun retryRemoteSongMetadataIfNeeded() {
+        if (remoteSongMetadataHydrationJob?.isActive == true) return
+        if (mutableState.value.remoteSongs.none(RemoteSong::isMetadataLoading)) return
+        val context = currentServerProfileContext() ?: return
+        if (activeAccessToken().isBlank()) return
+        beginRemoteSongMetadataHydration(context, serverClient(context))
+    }
+
+    override fun setCrossfadeEnabled(enabled: Boolean) {
+        mutableState.value = mutableState.value.copy(crossfadeEnabled = enabled)
+        preferences.edit().putBoolean("crossfadeEnabled", enabled).apply()
+    }
+
+    override fun setCrossfadeSeconds(seconds: Float) {
+        val normalized = CrossfadePolicy.normalizedSeconds(seconds)
+        mutableState.value = mutableState.value.copy(crossfadeSeconds = normalized)
+        preferences.edit().putFloat("crossfadeSeconds", normalized).apply()
+    }
+
+    override fun setThemeChoice(choice: ResonanceThemeChoice) {
+        if (mutableState.value.themeChoice == choice) return
+        mutableState.value = mutableState.value.copy(themeChoice = choice)
+        appearancePreferences.edit().putString("theme", choice.storageID).apply()
+    }
+
     override fun toggleFavorite(trackId: String) {
         if (library.tracks.none { it.id == trackId && trackBelongsToActiveContext(it) }) return
         val favorites = if (trackId in library.favorites) library.favorites - trackId else library.favorites + trackId
@@ -2044,8 +2082,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun movePlaylistTrack(playlistId: String, fromIndex: Int, toIndex: Int) {
         mutatePlaylist(playlistId) { playlist ->
-            if (fromIndex !in playlist.trackIDs.indices || toIndex !in playlist.trackIDs.indices) playlist
-            else playlist.copy(trackIDs = playlist.trackIDs.toMutableList().apply { add(toIndex, removeAt(fromIndex)) })
+            PlaylistEntryOrderPolicy.move(
+                playlist = playlist,
+                tracks = mutableState.value.tracks,
+                remoteSongs = mutableState.value.remoteSongs,
+                fromIndex = fromIndex,
+                toIndex = toIndex,
+            )
         }
     }
 
@@ -2396,6 +2439,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             .toMap()
         return songs.map { song ->
             if (!song.isMetadataLoading) return@map song
+            if (song.requiresOriginalSourcePage) {
+                return@map applyOriginalSourceMetadataFailure(song)
+            }
             localTracksByRemoteID[song.id]?.let { local ->
                 return@map song.copy(
                     title = local.title,
@@ -2406,7 +2452,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             val key = remoteSongMetadataCacheKey(song)
-                ?: return@map applyRemoteSongMetadataFailure(song)
+                ?: return@map song
             library.remoteSongMetadataCache[key]?.let { cached ->
                 return@map applyRemoteSongMetadata(song, cached)
             }
@@ -2423,34 +2469,41 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         client: ServerClient,
     ) {
         cancelRemoteSongMetadataHydration()
-        val requests = remoteSongMetadataRequests(mutableState.value.remoteSongs)
-
         remoteSongMetadataHydrationGeneration += 1
         val generation = remoteSongMetadataHydrationGeneration
         remoteSongMetadataHydrationJob = viewModelScope.launch {
             var cacheChanged = false
-            for (batch in requests.chunked(4)) {
-                val results = coroutineScope {
-                    batch.map { request ->
-                        async {
-                            val metadata = runCatching {
-                                linkImportService.resolveMetadata(request.source)
-                            }.getOrNull()
-                            RemoteSongMetadataResult(request, metadata)
-                        }
-                    }.awaitAll()
-                }
-                if (!isCurrentRemoteSongMetadataHydration(generation, context)) return@launch
+            var failedAttemptCount = 0
+            while (isActive && isCurrentRemoteSongMetadataHydration(generation, context)) {
+                val requests = remoteSongMetadataRequests(mutableState.value.remoteSongs)
+                if (requests.isEmpty()) break
+                var anyFailure = false
 
-                var songs = mutableState.value.remoteSongs
-                results.forEach { result ->
-                    val songIDs = result.request.songIDs.toSet()
-                    songs = songs.map { song ->
-                        if (song.id !in songIDs || !song.isMetadataLoading) return@map song
-                        result.metadata?.let { applyRemoteSongMetadata(song, it) }
-                            ?: applyRemoteSongMetadataFailure(song)
+                for (batch in requests.chunked(4)) {
+                    val results = coroutineScope {
+                        batch.map { request ->
+                            async {
+                                val metadata = runCatching {
+                                    linkImportService.resolveMetadata(request.source)
+                                }.getOrNull()
+                                RemoteSongMetadataResult(request, metadata)
+                            }
+                        }.awaitAll()
                     }
-                    result.metadata?.let { metadata ->
+                    if (!isCurrentRemoteSongMetadataHydration(generation, context)) return@launch
+
+                    var songs = mutableState.value.remoteSongs
+                    results.forEach { result ->
+                        val metadata = result.metadata
+                        if (metadata == null) {
+                            anyFailure = true
+                            return@forEach
+                        }
+                        val songIDs = result.request.songIDs.toSet()
+                        songs = songs.map { song ->
+                            if (song.id !in songIDs || !song.isMetadataLoading) song
+                            else applyRemoteSongMetadata(song, metadata)
+                        }
                         library = library.copy(
                             remoteSongMetadataCache = library.remoteSongMetadataCache + (
                                 result.request.cacheKey to RemoteSongMetadataCacheEntry(
@@ -2467,8 +2520,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         )
                         cacheChanged = true
                     }
+                    mutableState.value = mutableState.value.copy(remoteSongs = songs)
                 }
-                mutableState.value = mutableState.value.copy(remoteSongs = songs)
+
+                if (!anyFailure) break
+                failedAttemptCount += 1
+                if (!RemoteSongMetadataRetryPolicy.shouldRetryAfterFailure(failedAttemptCount)) break
+                delay(RemoteSongMetadataRetryPolicy.delayAfterFailureMs(failedAttemptCount))
             }
 
             if (!isCurrentRemoteSongMetadataHydration(generation, context)) return@launch
@@ -2490,7 +2548,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private fun remoteSongMetadataRequests(songs: List<RemoteSong>): List<RemoteSongMetadataRequest> {
         val requests = mutableListOf<RemoteSongMetadataRequest>()
         val requestIndexByKey = mutableMapOf<String, Int>()
-        songs.filter(RemoteSong::isMetadataLoading).forEach { song ->
+        songs.filter { it.isMetadataLoading && !it.requiresOriginalSourcePage }.forEach { song ->
             val source = song.sourceURL?.trim().orEmpty()
             val key = remoteSongMetadataCacheKey(song) ?: return@forEach
             val existingIndex = requestIndexByKey[key]
@@ -2541,10 +2599,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         isMetadataLoading = false,
     )
 
-    private fun applyRemoteSongMetadataFailure(song: RemoteSong): RemoteSong = song.copy(
-        title = if (song.requiresOriginalSourcePage) "Original source link needed" else "Metadata unavailable",
-        artist = if (song.requiresOriginalSourcePage) "Re-import on the original device" else "Refresh to retry",
-        album = if (song.requiresOriginalSourcePage) "Legacy expired link" else "Link only",
+    private fun applyOriginalSourceMetadataFailure(song: RemoteSong): RemoteSong = song.copy(
+        title = "Original source link needed",
+        artist = "Re-import on the original device",
+        album = "Legacy expired link",
         isMetadataLoading = false,
     )
 
@@ -3391,11 +3449,20 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 library.tracks.firstOrNull { trackBelongsToActiveContext(it) && it.remoteID == remoteId }?.id
             }
             Playlist(
-                remote.id,
-                remote.name,
-                PlaylistOrderPolicy.merge(existing[remote.id]?.trackIDs.orEmpty(), downloaded, localOnly),
-                false,
-                remote.songIDs,
+                id = remote.id,
+                name = remote.name,
+                trackIDs = PlaylistOrderPolicy.merge(
+                    existing[remote.id]?.trackIDs.orEmpty(),
+                    downloaded,
+                    localOnly,
+                ),
+                isSystem = false,
+                remoteSongIDs = remote.songIDs,
+                entryOrder = PlaylistEntryOrderPolicy.mergingRemoteOrder(
+                    previous = existing[remote.id],
+                    remoteSongIDs = remote.songIDs,
+                    tracks = library.tracks,
+                ),
             )
         }
         val mergedLikedSongIDs = document.likedSongIDs.toMutableSet()
@@ -3548,11 +3615,14 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val ordered = playlist.trackIDs.mapNotNull { id ->
             library.tracks.firstOrNull { it.id == id && trackBelongsToActiveContext(it) }?.remoteID
         }.distinct()
-        return playlist.copy(remoteSongIDs = PlaylistOrderPolicy.merge(
+        val updated = playlist.copy(remoteSongIDs = PlaylistOrderPolicy.merge(
             playlist.remoteSongIDs.orEmpty(),
             ordered,
             unresolved,
         ))
+        return updated.copy(
+            entryOrder = PlaylistEntryOrderPolicy.normalizedOrder(updated, library.tracks),
+        )
     }
 
     private fun normalizeLiked(value: StoredLibrary): StoredLibrary {

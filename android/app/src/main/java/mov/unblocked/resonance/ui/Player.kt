@@ -25,7 +25,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -43,7 +42,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -79,6 +77,7 @@ fun MiniPlayer(
     modifier: Modifier = Modifier,
 ) {
     val track = state.currentTrack ?: return
+    val palette = LocalResonancePalette.current
     val singletonStream = state.isTransientPlayback
     val fraction = state.playbackProgressFraction
     val seekInput = if (state.canSeekPlayback) {
@@ -96,7 +95,11 @@ fun MiniPlayer(
         Modifier
     }
     Column(
-        modifier = modifier.fillMaxWidth().background(Color(0xFA050609)).clickable(onClick = onOpen).padding(top = 8.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .background(palette.panel.copy(alpha = .98f))
+            .clickable(onClick = onOpen)
+            .padding(top = 8.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         Row(
@@ -121,15 +124,19 @@ fun MiniPlayer(
                 Icon(
                     Icons.Default.SkipPrevious,
                     "Previous",
-                    tint = if (singletonStream) Color.White.copy(alpha = .24f) else Accent,
+                    tint = if (singletonStream) {
+                        Color.White.copy(alpha = .24f)
+                    } else {
+                        MaterialTheme.colorScheme.tertiary
+                    },
                 )
             }
             IconButton(
                 onClick = { actions.togglePlayPause() },
                 modifier = Modifier
                     .size(44.dp)
-                    .background(RaisedSurface, CircleShape)
-                    .border(1.dp, Accent.copy(alpha = .72f), CircleShape),
+                    .background(palette.raised, CircleShape)
+                    .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .72f), CircleShape),
             ) {
                 if (state.playbackStatus == PlaybackUiStatus.Buffering) {
                     CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
@@ -144,7 +151,11 @@ fun MiniPlayer(
                 Icon(
                     Icons.Default.SkipNext,
                     "Next",
-                    tint = if (singletonStream) Color.White.copy(alpha = .24f) else Accent,
+                    tint = if (singletonStream) {
+                        Color.White.copy(alpha = .24f)
+                    } else {
+                        MaterialTheme.colorScheme.tertiary
+                    },
                 )
             }
         }
@@ -156,7 +167,14 @@ fun MiniPlayer(
                 .background(Color.White.copy(alpha = .13f)),
             contentAlignment = Alignment.CenterStart,
         ) {
-            fraction?.let { Box(Modifier.fillMaxWidth(it).height(3.dp).background(Accent)) }
+            fraction?.let {
+                Box(
+                    Modifier
+                        .fillMaxWidth(it)
+                        .height(3.dp)
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+            }
         }
     }
 }
@@ -169,6 +187,7 @@ fun NowPlayingScreen(
     modifier: Modifier = Modifier,
 ) {
     val track = state.currentTrack ?: return
+    val palette = LocalResonancePalette.current
     val isServerStream = state.transientCurrentTrack?.id == track.id
     var dragOffset by remember { mutableFloatStateOf(0f) }
     var speedMenu by remember { mutableStateOf(false) }
@@ -254,7 +273,11 @@ fun NowPlayingScreen(
                             Icon(
                                 if (track.id in state.favoriteTrackIds) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                                 "Favorite",
-                                tint = if (track.id in state.favoriteTrackIds) Accent else Color.White,
+                                tint = if (track.id in state.favoriteTrackIds) {
+                                    MaterialTheme.colorScheme.tertiary
+                                } else {
+                                    Color.White
+                                },
                                 modifier = Modifier.size(28.dp),
                             )
                         }
@@ -302,8 +325,8 @@ fun NowPlayingScreen(
                         onClick = actions::togglePlayPause,
                         modifier = Modifier
                             .size(76.dp)
-                            .background(RaisedSurface, CircleShape)
-                            .border(2.dp, Accent.copy(alpha = .72f), CircleShape),
+                            .background(palette.raised, CircleShape)
+                            .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = .72f), CircleShape),
                     ) {
                         if (state.playbackStatus == PlaybackUiStatus.Buffering) {
                             CircularProgressIndicator(Modifier.size(30.dp), color = Color.White, strokeWidth = 3.dp)
@@ -321,29 +344,6 @@ fun NowPlayingScreen(
                 }
             }
             item {
-                Column(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(7.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.AutoMirrored.Filled.VolumeUp, null, Modifier.size(18.dp))
-                        Spacer(Modifier.size(7.dp))
-                        Text("Volume", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.weight(1f))
-                        Text(
-                            "${(state.volume * 100).roundToInt()}%",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
-                        )
-                    }
-                    Slider(
-                        value = state.volume,
-                        onValueChange = actions::setVolume,
-                        valueRange = 0f..1f,
-                    )
-                }
-            }
-            item {
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -358,14 +358,22 @@ fun NowPlayingScreen(
                             "Shuffle",
                             tint = when {
                                 isServerStream -> MaterialTheme.colorScheme.onSurface.copy(alpha = .24f)
-                                state.shuffleEnabled -> Accent
+                                state.shuffleEnabled -> MaterialTheme.colorScheme.tertiary
                                 else -> MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
                             },
                         )
                     }
                     Box {
                         IconButton(onClick = { speedMenu = true }) {
-                            Icon(Icons.Default.Speed, "Playback speed", tint = if (state.playbackSpeed != 1f) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                            Icon(
+                                Icons.Default.Speed,
+                                "Playback speed",
+                                tint = if (state.playbackSpeed != 1f) {
+                                    MaterialTheme.colorScheme.tertiary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
+                                },
+                            )
                         }
                         DropdownMenu(expanded = speedMenu, onDismissRequest = { speedMenu = false }) {
                             listOf(.75f, 1f, 1.25f, 1.5f, 2f).forEach { speed ->
@@ -377,13 +385,25 @@ fun NowPlayingScreen(
                         }
                     }
                     IconButton(onClick = { actions.setRepeatEnabled(!state.repeatEnabled) }) {
-                        Icon(Icons.Default.Repeat, "Repeat", tint = if (state.repeatEnabled) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                        Icon(
+                            Icons.Default.Repeat,
+                            "Repeat",
+                            tint = if (state.repeatEnabled) {
+                                MaterialTheme.colorScheme.tertiary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
+                            },
+                        )
                     }
                 }
             }
             item {
                 Column(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Color.White.copy(alpha = .06f)).padding(18.dp),
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(palette.raised)
+                        .padding(18.dp),
                     verticalArrangement = Arrangement.spacedBy(11.dp),
                 ) {
                     Eyebrow("Song Details")
@@ -413,6 +433,7 @@ private fun PlayerSeekBar(
     enabled: Boolean,
     onSeek: (Float) -> Unit,
 ) {
+    val palette = LocalResonancePalette.current
     val clampedFraction = fraction?.coerceIn(0f, 1f) ?: 0f
     val thumbDiameterPx = with(LocalDensity.current) { 20.dp.toPx() }
     val seekInput = if (enabled) {
@@ -448,7 +469,7 @@ private fun PlayerSeekBar(
                 .fillMaxWidth(clampedFraction)
                 .height(4.dp)
                 .clip(CircleShape)
-                .background(Accent),
+                .background(MaterialTheme.colorScheme.primary),
         )
         if (enabled) {
             Box(
@@ -460,7 +481,7 @@ private fun PlayerSeekBar(
                         )
                     }
                     .size(20.dp)
-                    .background(Color(0xFFD8D0FF), CircleShape),
+                    .background(palette.tertiary, CircleShape),
             )
         }
     }
@@ -472,13 +493,13 @@ private fun CompactPlaybackStatus(status: PlaybackUiStatus) {
         PlaybackUiStatus.Buffering -> Text(
             "Buffering…",
             fontSize = 10.sp,
-            color = Accent,
+            color = MaterialTheme.colorScheme.tertiary,
             maxLines = 1,
         )
         is PlaybackUiStatus.Failed -> Text(
             status.message,
             fontSize = 10.sp,
-            color = Color(0xFFFF8A80),
+            color = MaterialTheme.colorScheme.error,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -491,23 +512,33 @@ private fun PlaybackStatusNotice(
     status: PlaybackUiStatus,
     onRetry: () -> Unit,
 ) {
+    val palette = LocalResonancePalette.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .background(Color.White.copy(alpha = .06f))
+            .background(palette.raised)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         when (status) {
             PlaybackUiStatus.Buffering -> {
-                CircularProgressIndicator(Modifier.size(20.dp), color = Accent, strokeWidth = 2.dp)
+                CircularProgressIndicator(
+                    Modifier.size(20.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    strokeWidth = 2.dp,
+                )
                 Text("Buffering audio…", modifier = Modifier.weight(1f), fontSize = 13.sp)
             }
             is PlaybackUiStatus.Failed -> {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("Playback failed", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFFFF8A80))
+                    Text(
+                        "Playback failed",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.error,
+                    )
                     Text(
                         status.message,
                         fontSize = 12.sp,

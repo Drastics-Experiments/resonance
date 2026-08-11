@@ -66,6 +66,131 @@ class SyncSafetyPoliciesTest {
     }
 
     @Test
+    fun unavailableRemoteSongsCanMoveAcrossLocalSongsAndRoundTripExactly() {
+        val local = Track(title = "Local", relativePath = "local.m4a")
+        val downloaded = Track(
+            title = "Downloaded B",
+            relativePath = "b.m4a",
+            remoteID = "remote-b",
+        )
+        val original = Playlist(
+            name = "Shared",
+            trackIDs = listOf(local.id, downloaded.id),
+            remoteSongIDs = listOf("remote-a", "remote-b"),
+        )
+        assertEquals(
+            listOf("local:${local.id}", "remote:remote-a", "remote:remote-b"),
+            PlaylistPresentationPolicy.entries(original, listOf(local, downloaded), emptyList())
+                .map(PlaylistPresentationEntry::stableID),
+        )
+
+        val moved = PlaylistEntryOrderPolicy.move(
+            playlist = original,
+            tracks = listOf(local, downloaded),
+            remoteSongs = emptyList(),
+            fromIndex = 1,
+            toIndex = 0,
+        )
+
+        assertEquals(listOf(local.id, downloaded.id), moved.trackIDs)
+        assertEquals(listOf("remote-a", "remote-b"), moved.remoteSongIDs)
+        assertEquals(
+            listOf("remote:remote-a", "local:${local.id}", "remote:remote-b"),
+            moved.entryOrder,
+        )
+        assertEquals(
+            moved.entryOrder,
+            PlaylistPresentationPolicy.entries(moved, listOf(local, downloaded), emptyList())
+                .map(PlaylistPresentationEntry::stableID),
+        )
+    }
+
+    @Test
+    fun serializedMixedEntryOrderRoundTripsAndSurvivesRemoteRefresh() {
+        val local = Track(title = "Local", relativePath = "local.m4a")
+        val downloaded = Track(
+            title = "Downloaded B",
+            relativePath = "b.m4a",
+            remoteID = "remote-b",
+        )
+        val playlist = Playlist(
+            name = "Shared",
+            trackIDs = listOf(local.id, downloaded.id),
+            remoteSongIDs = listOf("remote-a", "remote-b"),
+            entryOrder = listOf("remote:remote-a", "local:${local.id}", "remote:remote-b"),
+        )
+
+        assertEquals(
+            playlist.entryOrder,
+            PlaylistPresentationPolicy.entries(playlist, listOf(local, downloaded), emptyList())
+                .map(PlaylistPresentationEntry::stableID),
+        )
+        assertEquals(
+            playlist.entryOrder,
+            PlaylistEntryOrderPolicy.mergingRemoteOrder(
+                previous = playlist,
+                remoteSongIDs = listOf("remote-a", "remote-b"),
+                tracks = listOf(local, downloaded),
+            ),
+        )
+    }
+
+    @Test
+    fun remoteRefreshReconcilesStaleTokensAndRestoresMissingLocalTokens() {
+        val local = Track(title = "Local", relativePath = "local.m4a")
+        val playlist = Playlist(
+            name = "Shared",
+            trackIDs = listOf(local.id),
+            remoteSongIDs = listOf("remote-old"),
+            entryOrder = listOf("remote:remote-old", "local:stale"),
+        )
+
+        assertEquals(
+            listOf("remote:remote-new", "local:${local.id}"),
+            PlaylistEntryOrderPolicy.mergingRemoteOrder(
+                previous = playlist,
+                remoteSongIDs = listOf("remote-new"),
+                tracks = listOf(local),
+            ),
+        )
+    }
+
+    @Test
+    fun movingUnavailableSongPersistsRemoteAndDownloadedRelativeOrder() {
+        val remoteA = Track(
+            title = "Downloaded A",
+            relativePath = "a.m4a",
+            remoteID = "remote-a",
+        )
+        val remoteC = Track(
+            title = "Downloaded C",
+            relativePath = "c.m4a",
+            remoteID = "remote-c",
+        )
+        val playlist = Playlist(
+            name = "Shared",
+            trackIDs = listOf(remoteA.id, remoteC.id),
+            remoteSongIDs = listOf("remote-a", "remote-b", "remote-c"),
+        )
+
+        val moved = PlaylistEntryOrderPolicy.move(
+            playlist,
+            listOf(remoteA, remoteC),
+            emptyList(),
+            fromIndex = 1,
+            toIndex = 2,
+        )
+
+        assertEquals(listOf(remoteA.id, remoteC.id), moved.trackIDs)
+        assertEquals(listOf("remote-a", "remote-c", "remote-b"), moved.remoteSongIDs)
+        assertEquals(
+            listOf("remote:remote-a", "remote:remote-c", "remote:remote-b"),
+            PlaylistPresentationPolicy.entries(moved, listOf(remoteA, remoteC), emptyList())
+                .map(PlaylistPresentationEntry::stableID),
+        )
+    }
+
+    @Test
     fun stablePlaylistSubmissionClearsOnlyItsOwnDirtySnapshot() {
         val result = PlaylistSyncMutationPolicy.reconcile(
             submitted = PlaylistMutationSnapshot(4, setOf("submitted"), setOf("deleted")),

@@ -52,6 +52,7 @@ struct ResonanceApp: App {
                             await model.refreshAccountSessionIfNeeded()
                             await model.refreshClientConfigurationNow()
                             await model.syncPlaylistsAutomatically()
+                            model.retryPendingRemoteSongMetadata()
                         }
                     } else {
                         model.flushPersistence()
@@ -70,7 +71,7 @@ struct ResonanceApp: App {
                 Button("Add Music…") { model.importLocalFiles() }
                     .keyboardShortcut("o", modifiers: [.command])
 
-                Button("Import from Link…") {
+                Button("Import from Web…") {
                     NotificationCenter.default.post(name: .importMusicFromLink, object: nil)
                 }
                 .keyboardShortcut("l", modifiers: [.command, .shift])

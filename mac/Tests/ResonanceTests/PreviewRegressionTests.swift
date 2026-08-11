@@ -121,7 +121,7 @@ struct PreviewRegressionTests {
         #expect(song.id == "saved-song-uuid")
         #expect(song.filename == "Local Title.m4a")
         #expect(song.title == "Resolving metadata…")
-        #expect(song.artist == "On-device lookup")
+        #expect(song.artist == "Automatic lookup")
         #expect(song.album == "Link only")
         #expect(song.size == 0)
         #expect(song.sourceURL == "https://media.example/Local%20Title.m4a?token=preserved")

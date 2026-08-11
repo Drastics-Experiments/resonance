@@ -670,6 +670,104 @@ struct PlayerModelRegressionTests {
     }
 
     @Test
+    func linkOnlyCatalogMetadataRetriesTransientFailuresAutomatically() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        let resolverCalls = LockedRegressionCounter()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        RegressionURLProtocol.handler = { request in
+            let data = Data(#"{"count":1,"songs":[{"id":"retry-link","source_url":"https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8","media_kind":"audio","size":0,"modified_at":"now","content_type":"application/octet-stream","download_url":"/api/v1/songs/retry-link/file","stream_url":"/api/v1/songs/retry-link/stream"}]}"#.utf8)
+            return (try response(for: request), data)
+        }
+
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false,
+            remoteSongMetadataResolver: { source, _ in
+                guard resolverCalls.increment() >= 3 else { throw URLError(.timedOut) }
+                return LocalImportSpotifyTrack(
+                    provider: "spotify",
+                    type: "track",
+                    trackID: "4PTG3Z6ehGkBFwjybzWkR8",
+                    title: "Recovered Song",
+                    artist: "Recovered Artist",
+                    album: "Recovered Album",
+                    trackNumber: 1,
+                    durationSeconds: 180,
+                    artworkURL: nil,
+                    embedURL: nil,
+                    sourceURL: source
+                )
+            },
+            remoteSongMetadataRetryDelays: [.zero, .zero]
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+
+        await model.refreshServerCatalogNow()
+        for _ in 0..<100 where model.pendingRemoteSongMetadataCount > 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(resolverCalls.value == 3)
+        #expect(model.remoteSongs.first?.isMetadataLoading == false)
+        #expect(model.remoteSongs.first?.title == "Recovered Song")
+    }
+
+    @Test
+    func exhaustedMetadataWindowStaysNeutralAndCanRetryWithoutCatalogRefresh() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let network = session()
+        let resolverCalls = LockedRegressionCounter()
+        defer {
+            network.invalidateAndCancel()
+            RegressionURLProtocol.handler = nil
+        }
+
+        RegressionURLProtocol.handler = { request in
+            let data = Data(#"{"count":1,"songs":[{"id":"pending-link","source_url":"https://www.youtube.com/watch?v=jNQXAC9IVRw","media_kind":"audio","size":0,"modified_at":"now","content_type":"application/octet-stream","download_url":"/api/v1/songs/pending-link/file","stream_url":"/api/v1/songs/pending-link/stream"}]}"#.utf8)
+            return (try response(for: request), data)
+        }
+
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            persistServerCredentials: false,
+            remoteSongMetadataResolver: { _, _ in
+                resolverCalls.increment()
+                throw URLError(.cannotConnectToHost)
+            },
+            remoteSongMetadataRetryDelays: [.zero, .zero]
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "access-token"
+
+        await model.refreshServerCatalogNow()
+        for _ in 0..<100 where model.pendingRemoteSongMetadataCount > 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(resolverCalls.value == 3)
+        #expect(model.remoteSongs.first?.isMetadataLoading == true)
+        #expect(model.remoteSongs.first?.title == "Resolving metadata…")
+
+        model.retryPendingRemoteSongMetadata()
+        for _ in 0..<100 where model.pendingRemoteSongMetadataCount > 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(resolverCalls.value == 6)
+        #expect(model.remoteSongs.first?.title != "Metadata unavailable")
+    }
+
+    @Test
     func catalogRefreshReusesPersistedDeviceMetadataWithoutResolvingAgain() async throws {
         let (defaults, suiteName) = try isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
