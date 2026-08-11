@@ -569,23 +569,23 @@ struct MacSettingsSheet: View {
             HStack(spacing: 13) {
                 Image(systemName: "waveform.path")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Color.appViolet)
+                    .foregroundStyle(palette.foregroundAccent)
                     .frame(width: 36, height: 36)
-                    .background(Color.appViolet.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+                    .background(palette.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Crossfade").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.appInk)
+                    Text("Crossfade").font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.ink)
                     Text(model.crossfadeEnabled ? "Overlap songs by \(Int(model.crossfadeSeconds.rounded())) seconds." : "Start the next song early while fading between both.")
                         .font(.system(size: 9))
-                        .foregroundStyle(Color.appMuted)
+                        .foregroundStyle(palette.muted)
                 }
                 Spacer()
                 Toggle("", isOn: $model.crossfadeEnabled)
                     .labelsHidden()
                     .toggleStyle(.switch)
-                    .tint(Color.appViolet)
+                    .tint(palette.accent)
             }
             Slider(value: $model.crossfadeSeconds, in: 1...12, step: 1)
-                .tint(Color.appViolet)
+                .tint(palette.foregroundAccent)
                 .disabled(!model.crossfadeEnabled)
                 .accessibilityLabel("Crossfade duration")
                 .accessibilityValue("\(Int(model.crossfadeSeconds.rounded())) seconds")
@@ -593,7 +593,7 @@ struct MacSettingsSheet: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
+        .overlay { RoundedRectangle(cornerRadius: 15).stroke(palette.divider) }
     }
 
     private func settingsActionRow(

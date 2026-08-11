@@ -84,6 +84,23 @@ final class ThemeTests: XCTestCase {
         }
     }
 
+    func testSettingsUseSemanticPaletteColors() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sidebarSource = try String(
+            contentsOf: packageRoot.appendingPathComponent("Sources/Resonance/SidebarView.swift"),
+            encoding: .utf8
+        )
+
+        for retiredColor in ["Color.appViolet", "Color.appInk", "Color.appMuted", "Color.appLine"] {
+            XCTAssertFalse(sidebarSource.contains(retiredColor), "Retired color reference: \(retiredColor)")
+        }
+        XCTAssertTrue(sidebarSource.contains(".tint(palette.foregroundAccent)"))
+        XCTAssertTrue(sidebarSource.contains(".stroke(palette.divider)"))
+    }
+
     private func contrastRatio(_ first: UInt32, _ second: UInt32) -> Double {
         let brighter = max(relativeLuminance(first), relativeLuminance(second))
         let darker = min(relativeLuminance(first), relativeLuminance(second))
