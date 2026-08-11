@@ -6,6 +6,34 @@ import Darwin
 import Foundation
 import UniformTypeIdentifiers
 
+enum MacCrossfadePolicy {
+    static let defaultSeconds: TimeInterval = 5
+    static let minimumSeconds: TimeInterval = 1
+    static let maximumSeconds: TimeInterval = 12
+
+    static func normalizedSeconds(_ value: TimeInterval) -> TimeInterval {
+        guard value.isFinite else { return defaultSeconds }
+        return min(max(value, minimumSeconds), maximumSeconds)
+    }
+
+    static func effectiveDuration(
+        requestedSeconds: TimeInterval,
+        currentDuration: TimeInterval,
+        nextDuration: TimeInterval
+    ) -> TimeInterval {
+        guard currentDuration > 0, nextDuration > 0 else { return 0 }
+        return min(
+            normalizedSeconds(requestedSeconds),
+            min(currentDuration / 2, nextDuration / 2)
+        )
+    }
+
+    static func progress(remaining: TimeInterval, duration: TimeInterval) -> Double {
+        guard duration > 0 else { return 0 }
+        return min(max(1 - remaining / duration, 0), 1)
+    }
+}
+
 enum PlaylistOrderPolicy {
     static func merge<Element: Hashable>(
         previous: [Element],
@@ -407,6 +435,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private static let knownDrasticProfileID = "4f633616-9cf0-44db-8864-09358970c8f9"
     private static let volumeKey = "Resonance.volume.v1"
     private static let playbackRateKey = "Resonance.playbackRate.v1"
+    private static let crossfadeEnabledKey = "Resonance.crossfadeEnabled.v1"
+    private static let crossfadeSecondsKey = "Resonance.crossfadeSeconds.v1"
     private static let shuffleKey = "Resonance.shuffle.v1"
     private static let repeatKey = "Resonance.repeat.v1"
     private static let currentTrackKey = "Resonance.currentTrack.v1"
@@ -435,7 +465,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
     @Published var volume: Double = 0.78 {
         didSet {
-            audioPlayer?.volume = PlaybackVolumePolicy.gain(for: volume)
+            applyCrossfadeVolumes()
             remoteStreamPlayer?.volume = PlaybackVolumePolicy.gain(for: volume)
             defaults.set(volume, forKey: Self.volumeKey)
         }
@@ -443,6 +473,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published var playbackRate: Float = 1 {
         didSet {
             audioPlayer?.rate = playbackRate
+            crossfadePlayer?.rate = playbackRate
             remoteStreamPlayer?.defaultRate = playbackRate
             if remoteStreamPlayer?.timeControlStatus == .playing {
                 remoteStreamPlayer?.rate = playbackRate
@@ -454,7 +485,24 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         didSet { defaults.set(shuffleEnabled, forKey: Self.shuffleKey) }
     }
     @Published var repeatEnabled = false {
-        didSet { defaults.set(repeatEnabled, forKey: Self.repeatKey) }
+        didSet {
+            defaults.set(repeatEnabled, forKey: Self.repeatKey)
+            if repeatEnabled { cancelCrossfade() }
+        }
+    }
+    @Published var crossfadeEnabled = false {
+        didSet {
+            defaults.set(crossfadeEnabled, forKey: Self.crossfadeEnabledKey)
+            if !crossfadeEnabled { cancelCrossfade() }
+        }
+    }
+    @Published var crossfadeSeconds: Double = MacCrossfadePolicy.defaultSeconds {
+        didSet {
+            defaults.set(
+                MacCrossfadePolicy.normalizedSeconds(crossfadeSeconds),
+                forKey: Self.crossfadeSecondsKey
+            )
+        }
     }
     @Published var favorites: Set<UUID>
     @Published private(set) var listeningHistoryEntries: [ListeningHistoryEntry] = []
@@ -670,6 +718,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private let systemPlaybackController: (any MacSystemPlaybackControlling)?
     private var audioPlayer: AVAudioPlayer?
     private var loadedAudioTrackID: UUID?
+    private var crossfadePlayer: AVAudioPlayer?
+    private var crossfadeTrackID: UUID?
+    private var activeCrossfadeDuration: TimeInterval = 0
     private var remoteStreamPlayer: AVPlayer?
     private var remoteStreamTrack: Track?
     private var remoteStreamSongID: String?
@@ -938,6 +989,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
         if defaults.object(forKey: Self.volumeKey) != nil { volume = defaults.double(forKey: Self.volumeKey) }
         if defaults.object(forKey: Self.playbackRateKey) != nil { playbackRate = Float(defaults.double(forKey: Self.playbackRateKey)) }
+        crossfadeEnabled = defaults.bool(forKey: Self.crossfadeEnabledKey)
+        if defaults.object(forKey: Self.crossfadeSecondsKey) != nil {
+            crossfadeSeconds = MacCrossfadePolicy.normalizedSeconds(
+                defaults.double(forKey: Self.crossfadeSecondsKey)
+            )
+        }
         shuffleEnabled = defaults.bool(forKey: Self.shuffleKey)
         repeatEnabled = defaults.bool(forKey: Self.repeatKey)
         position = defaults.double(forKey: Self.positionKey)
@@ -995,6 +1052,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         navigationHistory = [NavigationLocation(section: .library, playlistID: nil)]
         defaults.set(volume, forKey: Self.volumeKey)
         defaults.set(Double(playbackRate), forKey: Self.playbackRateKey)
+        defaults.set(crossfadeEnabled, forKey: Self.crossfadeEnabledKey)
+        defaults.set(crossfadeSeconds, forKey: Self.crossfadeSecondsKey)
         persistPlaybackPosition()
         persistPlaybackContext()
         persistShuffleQueue()
@@ -3097,6 +3156,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         playbackRate = rate
         audioPlayer?.enableRate = true
         audioPlayer?.rate = rate
+        crossfadePlayer?.rate = rate
         remoteStreamPlayer?.defaultRate = rate
         if remoteStreamPlayer?.timeControlStatus == .playing {
             remoteStreamPlayer?.rate = rate
@@ -3114,6 +3174,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func seekToTime(_ requestedTime: TimeInterval) {
+        cancelCrossfade()
         guard let track = currentTrack else { return }
         updateListeningSession()
         let safeTime = requestedTime.isFinite ? requestedTime : 0
@@ -3392,7 +3453,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         guard player === audioPlayer else { return }
-        finishCurrentPlaybackRange()
+        if crossfadePlayer != nil {
+            completeCrossfade()
+        } else {
+            finishCurrentPlaybackRange()
+        }
     }
 
     func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
@@ -3566,6 +3631,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     private func pausePlayback() {
+        cancelCrossfade()
         updateListeningSession(flush: true)
         if remoteStreamTrack?.id == currentTrackID, let remoteStreamPlayer {
             remoteStreamPlayer.pause()
@@ -3584,6 +3650,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     private func stopCurrentPlayback(preservingRemoteNavigation: Bool = false) {
+        cancelCrossfade()
         endListeningSession()
         remoteStreamLoadGeneration &+= 1
         remoteStreamPreparationTask?.cancel()
@@ -3671,6 +3738,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     self.position = self.audioPlayer?.currentTime ?? self.position
                 }
                 if let track = self.currentTrack,
+                   self.updateCrossfadeIfNeeded(for: track) {
+                    return
+                }
+                if let track = self.currentTrack,
                    ClipPlaybackPolicy.reachedEnd(
                     position: self.position,
                     bounds: self.playbackBounds(for: track, duration: self.playbackDuration)
@@ -3689,6 +3760,125 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private func stopPlaybackTimer() {
         playbackTimer?.invalidate()
         playbackTimer = nil
+    }
+
+    private func automaticCrossfadeTrack() -> Track? {
+        let context = activePlaybackTracks
+        guard context.count > 1 else { return nil }
+        if shuffleEnabled {
+            reconcileShuffleOrderIfNeeded()
+            if shuffledTrackIDs.isEmpty { rebuildShuffleOrder() }
+            guard let nextID = shuffledTrackIDs.first else { return nil }
+            return context.first { $0.id == nextID }
+        }
+        guard let currentTrackID,
+              let currentIndex = context.firstIndex(where: { $0.id == currentTrackID }) else {
+            return context.first
+        }
+        let nextIndex = context.index(after: currentIndex)
+        return nextIndex == context.endIndex ? context.first : context[nextIndex]
+    }
+
+    private func updateCrossfadeIfNeeded(for currentTrack: Track) -> Bool {
+        guard crossfadeEnabled, !repeatEnabled, remoteStreamTrack == nil,
+              let currentPlayer = audioPlayer else {
+            cancelCrossfade()
+            return false
+        }
+        let currentBounds = playbackBounds(for: currentTrack, duration: playbackDuration)
+
+        if crossfadePlayer == nil {
+            guard let nextTrack = automaticCrossfadeTrack(),
+                  let fileURL = nextTrack.fileURL,
+                  let nextPlayer = try? AVAudioPlayer(contentsOf: fileURL) else { return false }
+            let nextBounds = playbackBounds(for: nextTrack, duration: nextPlayer.duration)
+            let duration = MacCrossfadePolicy.effectiveDuration(
+                requestedSeconds: crossfadeSeconds,
+                currentDuration: currentBounds.end - currentBounds.start,
+                nextDuration: nextBounds.end - nextBounds.start
+            )
+            let remaining = currentBounds.end - currentPlayer.currentTime
+            guard duration >= 0.25, remaining <= duration else { return false }
+            nextPlayer.delegate = self
+            nextPlayer.enableRate = true
+            nextPlayer.rate = playbackRate
+            nextPlayer.volume = 0
+            nextPlayer.currentTime = nextBounds.start
+            nextPlayer.prepareToPlay()
+            guard nextPlayer.play() else { return false }
+            crossfadePlayer = nextPlayer
+            crossfadeTrackID = nextTrack.id
+            activeCrossfadeDuration = duration
+        }
+
+        guard crossfadePlayer != nil else { return false }
+        let remaining = currentBounds.end - currentPlayer.currentTime
+        applyCrossfadeVolumes(progress: MacCrossfadePolicy.progress(
+            remaining: remaining,
+            duration: activeCrossfadeDuration
+        ))
+        if remaining <= 0.02 {
+            completeCrossfade()
+            return true
+        }
+        return false
+    }
+
+    private func applyCrossfadeVolumes(progress: Double? = nil) {
+        let gain = PlaybackVolumePolicy.gain(for: volume)
+        guard let crossfadePlayer else {
+            audioPlayer?.volume = gain
+            return
+        }
+        let resolvedProgress = progress ?? {
+            guard let audioPlayer, let currentTrack else { return 0.0 }
+            let bounds = playbackBounds(for: currentTrack, duration: playbackDuration)
+            return MacCrossfadePolicy.progress(
+                remaining: bounds.end - audioPlayer.currentTime,
+                duration: activeCrossfadeDuration
+            )
+        }()
+        audioPlayer?.volume = gain * Float(1 - resolvedProgress)
+        crossfadePlayer.volume = gain * Float(resolvedProgress)
+    }
+
+    private func cancelCrossfade() {
+        crossfadePlayer?.delegate = nil
+        crossfadePlayer?.stop()
+        crossfadePlayer = nil
+        crossfadeTrackID = nil
+        activeCrossfadeDuration = 0
+        audioPlayer?.volume = PlaybackVolumePolicy.gain(for: volume)
+    }
+
+    private func completeCrossfade() {
+        guard let nextPlayer = crossfadePlayer,
+              let nextTrackID = crossfadeTrackID,
+              let nextTrack = tracks.first(where: { $0.id == nextTrackID }) else {
+            cancelCrossfade()
+            return
+        }
+        endListeningSession()
+        recordCurrentTrackInHistory(whenSwitchingTo: nextTrackID)
+        if shuffleEnabled {
+            shuffledTrackIDs.removeAll { $0 == nextTrackID }
+            persistShuffleQueue()
+        }
+        audioPlayer?.delegate = nil
+        audioPlayer?.stop()
+        audioPlayer = nextPlayer
+        loadedAudioTrackID = nextTrackID
+        crossfadePlayer = nil
+        crossfadeTrackID = nil
+        activeCrossfadeDuration = 0
+        nextPlayer.volume = PlaybackVolumePolicy.gain(for: volume)
+        currentTrackID = nextTrackID
+        synchronizePlaybackDuration(for: nextTrack, playerDuration: nextPlayer.duration)
+        position = nextPlayer.currentTime
+        isPlaying = nextPlayer.isPlaying
+        persistPlaybackPosition()
+        if isPlaying { beginListeningSession(for: nextTrack) }
+        publishSystemPlayback()
     }
 
     private func reconcileShuffleOrderIfNeeded() {

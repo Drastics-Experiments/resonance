@@ -264,6 +264,10 @@ struct MacSettingsSheet: View {
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
 
+                settingsHeading("PLAYBACK", detail: "Blend one song smoothly into the next.")
+                    .padding(.top, 10)
+                crossfadeSettingsRow
+
                 settingsHeading("APP", detail: "Manage this Mac's server connection.")
                     .padding(.top, 10)
                 VStack(spacing: 0) {
@@ -478,6 +482,38 @@ struct MacSettingsSheet: View {
         }
         .padding(.horizontal, 14)
         .frame(minHeight: 64)
+    }
+
+    private var crossfadeSettingsRow: some View {
+        VStack(spacing: 9) {
+            HStack(spacing: 13) {
+                Image(systemName: "waveform.path")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.appViolet)
+                    .frame(width: 36, height: 36)
+                    .background(Color.appViolet.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Crossfade").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.appInk)
+                    Text(model.crossfadeEnabled ? "Overlap songs by \(Int(model.crossfadeSeconds.rounded())) seconds." : "Start the next song early while fading between both.")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Color.appMuted)
+                }
+                Spacer()
+                Toggle("", isOn: $model.crossfadeEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(Color.appViolet)
+            }
+            Slider(value: $model.crossfadeSeconds, in: 1...12, step: 1)
+                .tint(Color.appViolet)
+                .disabled(!model.crossfadeEnabled)
+                .accessibilityLabel("Crossfade duration")
+                .accessibilityValue("\(Int(model.crossfadeSeconds.rounded())) seconds")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 15).stroke(Color.appLine) }
     }
 
     private func settingsActionRow(
