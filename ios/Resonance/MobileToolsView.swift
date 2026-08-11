@@ -1708,7 +1708,19 @@ private final class MobileLocalImportViewModel: ObservableObject {
         let shouldSync = syncAfterImport
         let reviewLease = usesReviewedUpload ? reviewedMatchLease : nil
         let selectedMediaMode = mediaMode
-        reserveTransfer(library)
+        guard let transferSessionID = reserveTransfer(
+            title: resolution.track.title,
+            total: 1,
+            library: library
+        ) else {
+            error = LocalImportError(
+                stage: .inspectingSource,
+                code: "TRANSFER_BUSY",
+                message: "Wait for the current upload or download to finish before starting an import."
+            )
+            stage = .failed
+            return false
+        }
         task = Task { [self, library] in
             await runSingleImport(
                 spotifyTrack: resolution.track,
@@ -1717,6 +1729,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 mediaMode: selectedMediaMode,
                 shouldSync: shouldSync,
                 reviewedMatchLease: reviewLease,
+                transferSessionID: transferSessionID,
                 library: library
             )
             task = nil
@@ -1743,13 +1756,26 @@ private final class MobileLocalImportViewModel: ObservableObject {
         stage = .inspectingSource
         let shouldSync = syncAfterImport
         let selectedMediaMode = mediaMode
-        reserveTransfer(library)
+        guard let transferSessionID = reserveTransfer(
+            title: items.first?.track.title ?? playlist.title,
+            total: items.count,
+            library: library
+        ) else {
+            error = LocalImportError(
+                stage: .inspectingSource,
+                code: "TRANSFER_BUSY",
+                message: "Wait for the current upload or download to finish before starting an import."
+            )
+            stage = .failed
+            return
+        }
         task = Task { [self, library] in
             await runPlaylistImport(
                 items: items,
                 playlist: playlist,
                 mediaMode: selectedMediaMode,
                 shouldSync: shouldSync,
+                transferSessionID: transferSessionID,
                 library: library
             )
             task = nil
@@ -1860,8 +1886,13 @@ private final class MobileLocalImportViewModel: ObservableObject {
         mediaMode: LocalImportMediaMode,
         shouldSync: Bool,
         reviewedMatchLease: MobileReviewedMatchLease?,
+        transferSessionID: UUID,
         library: MusicLibrary
     ) async {
+        defer {
+            finishTransfers(sessionID: transferSessionID, library: library)
+            batchCurrentTitle = nil
+        }
         do {
             try Task.checkCancellation()
             let isReviewedUpload = reviewedMatchLease != nil
@@ -1887,7 +1918,13 @@ private final class MobileLocalImportViewModel: ObservableObject {
             }
             let plannedDownloads = track == nil ? 1 : 0
             if plannedDownloads > 0 {
-                beginDownloads(total: plannedDownloads, library: library)
+                beginDownloads(
+                    sessionID: transferSessionID,
+                    total: plannedDownloads,
+                    title: spotifyTrack.title,
+                    itemID: spotifyTrack.trackID,
+                    library: library
+                )
                 batchCurrentTitle = "1 of 1 • \(spotifyTrack.title)"
                 track = try await downloadTrack(
                     spotifyTrack,
@@ -1896,11 +1933,21 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     mediaMode: mediaMode,
                     completedBefore: 0,
                     total: plannedDownloads,
+                    transferSessionID: transferSessionID,
                     library: library
                 )
-                library.downloadProgress = 1
+                updateTransfer(
+                    sessionID: transferSessionID,
+                    kind: .download,
+                    itemID: spotifyTrack.trackID,
+                    title: spotifyTrack.title,
+                    detail: "Download complete",
+                    currentItem: 1,
+                    totalItems: plannedDownloads,
+                    fallbackProgress: 1,
+                    library: library
+                )
             }
-            library.isDownloading = false
             guard let track else {
                 throw LocalImportError(stage: .savingLocal, code: "LOCAL_IMPORT_MISSING", message: "The imported song could not be found on this device.")
             }
@@ -1917,8 +1964,6 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 )
             if let serverID = match.serverSongID {
                 guard library.reconcileLocalImportWithServer(trackID: track.id, remoteID: serverID) else {
-                    finishTransfers(library)
-                    batchCurrentTitle = nil
                     let detail = "\(track.title) — \(track.artist) (\(library.serverMessage))"
                     self.error = LocalImportError(
                         stage: .syncing,
@@ -1937,22 +1982,37 @@ private final class MobileLocalImportViewModel: ObservableObject {
             var uploadFailure: String?
             if shouldSync, match.serverSongID == nil {
                 stage = .syncing
-                beginUploads(total: 1, library: library)
+                beginUploads(
+                    sessionID: transferSessionID,
+                    total: 1,
+                    title: track.title,
+                    itemID: track.id.uuidString,
+                    library: library
+                )
                 do {
                     _ = try await uploadWithRetry(
                         track,
                         index: 0,
                         total: 1,
                         reviewedMatchLease: reviewedMatchLease,
+                        transferSessionID: transferSessionID,
                         library: library
                     )
-                    library.uploadProgress = 1
+                    updateTransfer(
+                        sessionID: transferSessionID,
+                        kind: .upload,
+                        itemID: track.id.uuidString,
+                        title: track.title,
+                        detail: "Upload complete",
+                        currentItem: 1,
+                        totalItems: 1,
+                        fallbackProgress: 1,
+                        library: library
+                    )
                 } catch {
                     uploadFailure = error.localizedDescription
                 }
             }
-            finishTransfers(library)
-            batchCurrentTitle = nil
             if let uploadFailure {
                 let detail = "\(track.title) — \(track.artist) (\(uploadFailure))"
                 self.error = LocalImportError(stage: .syncing, code: "SERVER_UPLOAD_FAILED", message: detail)
@@ -1966,10 +2026,8 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 library.showTransferNotice(title: "Import complete", detail: localDetail + serverDetail, isError: false)
             }
         } catch is CancellationError {
-            finishTransfers(library)
             stage = .cancelled
         } catch {
-            finishTransfers(library)
             let message = (error as? LocalImportError)?.message ?? error.localizedDescription
             self.error = LocalImportError(stage: stage, code: "LOCAL_IMPORT_FAILED", message: message)
             stage = .failed
@@ -1982,8 +2040,13 @@ private final class MobileLocalImportViewModel: ObservableObject {
         playlist: LocalImportPlaylist,
         mediaMode: LocalImportMediaMode,
         shouldSync: Bool,
+        transferSessionID: UUID,
         library: MusicLibrary
     ) async {
+        defer {
+            finishTransfers(sessionID: transferSessionID, library: library)
+            batchCurrentTitle = nil
+        }
         var importedTracks: [(item: LocalImportPlaylistItem, track: MobileTrack)] = []
         var downloadFailures: [String] = []
         var associationFailures: [String] = []
@@ -2002,7 +2065,15 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 )
             }
             let downloadItems = items.filter { initialMatches[$0.track.trackID]?.deviceTrackID == nil }
-            if !downloadItems.isEmpty { beginDownloads(total: downloadItems.count, library: library) }
+            if let firstDownload = downloadItems.first {
+                beginDownloads(
+                    sessionID: transferSessionID,
+                    total: downloadItems.count,
+                    title: firstDownload.track.title,
+                    itemID: firstDownload.track.trackID,
+                    library: library
+                )
+            }
             var completedDownloads = 0
             for item in items {
                 try Task.checkCancellation()
@@ -2034,6 +2105,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
                             mediaMode: mediaMode,
                             completedBefore: completedDownloads,
                             total: downloadItems.count,
+                            transferSessionID: transferSessionID,
                             library: library
                         )
                     } catch is CancellationError {
@@ -2042,7 +2114,17 @@ private final class MobileLocalImportViewModel: ObservableObject {
                         downloadFailures.append("\(item.track.title) — \(item.track.artist) (\(error.localizedDescription))")
                     }
                     completedDownloads += 1
-                    library.downloadProgress = Double(completedDownloads) / Double(max(downloadItems.count, 1))
+                    updateTransfer(
+                        sessionID: transferSessionID,
+                        kind: .download,
+                        itemID: item.track.trackID,
+                        title: item.track.title,
+                        detail: track == nil ? "Download failed" : "Download complete",
+                        currentItem: completedDownloads,
+                        totalItems: downloadItems.count,
+                        fallbackProgress: track == nil ? nil : 1,
+                        library: library
+                    )
                 }
                 if let track {
                     if let serverID = initialMatch?.serverSongID,
@@ -2058,7 +2140,6 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     }
                 }
             }
-            library.isDownloading = false
             library.upsertImportedPlaylist(named: playlist.title, tracks: importedTracks.map(\.track))
 
             let uploadQueue = shouldSync ? importedTracks.filter { pair in
@@ -2074,27 +2155,44 @@ private final class MobileLocalImportViewModel: ObservableObject {
             } : []
             if !uploadQueue.isEmpty {
                 stage = .syncing
-                beginUploads(total: uploadQueue.count, library: library)
+                beginUploads(
+                    sessionID: transferSessionID,
+                    total: uploadQueue.count,
+                    title: uploadQueue[0].track.title,
+                    itemID: uploadQueue[0].track.id.uuidString,
+                    library: library
+                )
                 for (index, pair) in uploadQueue.enumerated() {
                     try Task.checkCancellation()
+                    var uploadFailed = false
                     do {
                         _ = try await uploadWithRetry(
                             pair.track,
                             index: index,
                             total: uploadQueue.count,
                             reviewedMatchLease: nil,
+                            transferSessionID: transferSessionID,
                             library: library
                         )
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
+                        uploadFailed = true
                         uploadFailures.append("\(pair.track.title) — \(pair.track.artist) (\(error.localizedDescription))")
                     }
-                    library.uploadProgress = Double(index + 1) / Double(uploadQueue.count)
+                    updateTransfer(
+                        sessionID: transferSessionID,
+                        kind: .upload,
+                        itemID: pair.track.id.uuidString,
+                        title: pair.track.title,
+                        detail: uploadFailed ? "Upload failed" : "Upload complete",
+                        currentItem: index + 1,
+                        totalItems: uploadQueue.count,
+                        fallbackProgress: uploadFailed ? nil : 1,
+                        library: library
+                    )
                 }
             }
-            finishTransfers(library)
-            batchCurrentTitle = nil
             completedSummary = "Kept \(importedTracks.count) of \(items.count) selected songs in \(playlist.title)."
             if !downloadFailures.isEmpty {
                 let detail = "Kept \(importedTracks.count) song\(importedTracks.count == 1 ? "" : "s"). Downloads failed after retrying: \(downloadFailures.joined(separator: "; "))"
@@ -2122,11 +2220,9 @@ private final class MobileLocalImportViewModel: ObservableObject {
             }
         } catch is CancellationError {
             library.upsertImportedPlaylist(named: playlist.title, tracks: importedTracks.map(\.track))
-            finishTransfers(library)
             stage = .cancelled
         } catch {
             library.upsertImportedPlaylist(named: playlist.title, tracks: importedTracks.map(\.track))
-            finishTransfers(library)
             let message = error.localizedDescription
             self.error = LocalImportError(stage: stage, code: "LOCAL_IMPORT_FAILED", message: message)
             stage = .failed
@@ -2141,6 +2237,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
         mediaMode: LocalImportMediaMode,
         completedBefore: Int,
         total: Int,
+        transferSessionID: UUID,
         library: MusicLibrary
     ) async throws -> MobileTrack {
         var lastError: Error?
@@ -2155,11 +2252,19 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 ) { [weak self, weak library] progress in
                     self?.apply(progress)
                     guard let library else { return }
-                    let byteFraction = progress.total > 0
-                        ? min(max(Double(progress.completed) / Double(progress.total), 0), 1)
-                        : 0
-                    library.downloadProgress = (Double(completedBefore) + byteFraction) / Double(max(total, 1))
-                    library.downloadDetail = "Downloading \(completedBefore + 1) of \(total) • \(spotifyTrack.title)"
+                    self?.updateTransfer(
+                        sessionID: transferSessionID,
+                        kind: .download,
+                        itemID: spotifyTrack.trackID,
+                        title: spotifyTrack.title,
+                        detail: progress.stage == .downloading ? "Downloading song" : "Preparing song",
+                        currentItem: completedBefore + 1,
+                        totalItems: total,
+                        completedBytes: progress.completed,
+                        totalBytes: progress.total,
+                        fallbackProgress: progress.stage == .complete ? 1 : nil,
+                        library: library
+                    )
                 }
                 switch outcome {
                 case .created(let imported): return try library.insertLocalImportedAudio(imported)
@@ -2186,6 +2291,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
         index: Int,
         total: Int,
         reviewedMatchLease: MobileReviewedMatchLease?,
+        transferSessionID: UUID,
         library: MusicLibrary
     ) async throws -> Bool {
         var lastError: Error?
@@ -2200,10 +2306,20 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     )
                 }
                 if attempt > 1 { try await Task.sleep(for: .milliseconds(attempt == 2 ? 500 : 1_500)) }
-                library.uploadDetail = "Uploading \(index + 1) of \(total) • \(track.title)"
+                updateTransfer(
+                    sessionID: transferSessionID,
+                    kind: .upload,
+                    itemID: track.id.uuidString,
+                    title: track.title,
+                    detail: attempt == 1 ? "Uploading song" : "Retrying upload (\(attempt)/3)",
+                    currentItem: index + 1,
+                    totalItems: total,
+                    library: library
+                )
                 return try await library.uploadLocalImportToActiveProfile(
                     track,
-                    reviewedMatchLease: reviewedMatchLease
+                    reviewedMatchLease: reviewedMatchLease,
+                    transferSessionID: transferSessionID
                 )
             } catch is CancellationError {
                 throw CancellationError()
@@ -2214,30 +2330,90 @@ private final class MobileLocalImportViewModel: ObservableObject {
         throw lastError ?? URLError(.cannotConnectToHost)
     }
 
-    private func beginDownloads(total: Int, library: MusicLibrary) {
-        library.isUploading = false
-        library.isDownloading = true
-        library.downloadProgress = 0
-        library.downloadDetail = "Preparing 1 of \(total)"
+    private func beginDownloads(
+        sessionID: UUID,
+        total: Int,
+        title: String,
+        itemID: String,
+        library: MusicLibrary
+    ) {
+        updateTransfer(
+            sessionID: sessionID,
+            kind: .download,
+            itemID: itemID,
+            title: title,
+            detail: "Preparing song",
+            currentItem: 1,
+            totalItems: total,
+            library: library
+        )
     }
 
-    private func reserveTransfer(_ library: MusicLibrary) {
-        library.isUploading = false
-        library.isDownloading = true
-        library.downloadProgress = 0
-        library.downloadDetail = "Preparing import…"
+    private func reserveTransfer(
+        title: String,
+        total: Int,
+        library: MusicLibrary
+    ) -> UUID? {
+        library.beginTransferSession(with: MobileTransferDisplayState(
+            kind: .download,
+            itemID: "local-import-\(UUID().uuidString)",
+            songTitle: title,
+            detail: "Preparing import",
+            currentItem: 1,
+            totalItems: max(total, 1),
+            completedBytes: 0,
+            totalBytes: 0,
+            fallbackProgress: nil
+        ))
     }
 
-    private func beginUploads(total: Int, library: MusicLibrary) {
-        library.isDownloading = false
-        library.isUploading = true
-        library.uploadProgress = 0
-        library.uploadDetail = "Preparing 1 of \(total)"
+    private func beginUploads(
+        sessionID: UUID,
+        total: Int,
+        title: String,
+        itemID: String,
+        library: MusicLibrary
+    ) {
+        updateTransfer(
+            sessionID: sessionID,
+            kind: .upload,
+            itemID: itemID,
+            title: title,
+            detail: "Preparing upload",
+            currentItem: 1,
+            totalItems: total,
+            library: library
+        )
     }
 
-    private func finishTransfers(_ library: MusicLibrary) {
-        library.isDownloading = false
-        library.isUploading = false
+    private func updateTransfer(
+        sessionID: UUID,
+        kind: MobileTransferDisplayState.Kind,
+        itemID: String,
+        title: String,
+        detail: String,
+        currentItem: Int,
+        totalItems: Int,
+        completedBytes: Int64 = 0,
+        totalBytes: Int64 = 0,
+        fallbackProgress: Double? = nil,
+        library: MusicLibrary
+    ) {
+        library.updateTransferSession(sessionID, with: MobileTransferDisplayState(
+            kind: kind,
+            itemID: itemID,
+            songTitle: title,
+            detail: detail,
+            currentItem: currentItem,
+            totalItems: max(totalItems, 1),
+            completedBytes: completedBytes,
+            totalBytes: totalBytes,
+            fallbackProgress: fallbackProgress
+        ))
+    }
+
+    private func finishTransfers(sessionID: UUID, library: MusicLibrary) {
+        library.finishTransferSession(sessionID)
     }
 }
 

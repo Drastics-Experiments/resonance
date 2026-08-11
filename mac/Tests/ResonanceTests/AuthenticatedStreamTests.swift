@@ -348,6 +348,79 @@ struct AuthenticatedStreamTests {
         #expect(!FileManager.default.fileExists(atPath: destination.path))
     }
 
+    @Test("current-song byte progress is throttled without dropping its boundaries")
+    func downloadProgressThrottleKeepsInitialAndFinalUpdates() {
+        #expect(MacDownloadProgressPolicy.shouldPublish(
+            completedBytes: 0,
+            totalBytes: 1_000,
+            lastPublishedAt: 10,
+            now: 10
+        ))
+        #expect(!MacDownloadProgressPolicy.shouldPublish(
+            completedBytes: 100,
+            totalBytes: 1_000,
+            lastPublishedAt: 10,
+            now: 10.05
+        ))
+        #expect(MacDownloadProgressPolicy.shouldPublish(
+            completedBytes: 200,
+            totalBytes: 1_000,
+            lastPublishedAt: 10,
+            now: 10.11
+        ))
+        #expect(MacDownloadProgressPolicy.shouldPublish(
+            completedBytes: 1_000,
+            totalBytes: 1_000,
+            lastPublishedAt: 10.1,
+            now: 10.11
+        ))
+    }
+
+    @Test("only the owning server download generation may release shared UI state")
+    func serverDownloadStateReleaseIsGenerationOwned() {
+        #expect(MacServerDownloadStatePolicy.owns(generation: 4, currentGeneration: 4))
+        #expect(!MacServerDownloadStatePolicy.owns(generation: 4, currentGeneration: 5))
+    }
+
+    @Test("cancelling the parent download cancels its worker and removes staged bytes")
+    func parentDownloadCancellationReachesWorker() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SlowDownloadURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("resonance-parent-cancelled-download-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let source = try #require(URL(string: "https://music.example/api/v1/songs/song-1/file"))
+        let now = Date.now
+        let lease = try MacAuthenticatedStreamAuthorizationLease(
+            context: makeContext(),
+            expiresAt: now.addingTimeInterval(60),
+            now: now
+        )
+        let download = Task {
+            try await MacLeaseBoundDownloader.download(
+                request: URLRequest(url: source),
+                to: destination,
+                expectedContentLength: 8,
+                authorizationLease: lease,
+                session: session
+            )
+        }
+
+        try await Task.sleep(for: .milliseconds(50))
+        download.cancel()
+        var cancelled = false
+        do {
+            _ = try await download.value
+        } catch is CancellationError {
+            cancelled = true
+        }
+
+        #expect(cancelled)
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+    }
+
     @Test("same-context config refresh cannot extend a signed offline download deadline")
     func offlineAuthorizationCheckNeverRenewsCapturedExpiration() async throws {
         let now = Date.now
@@ -399,6 +472,38 @@ struct AuthenticatedStreamTests {
             }
         }
         #expect(!installCalled)
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+    }
+
+    @Test("cancellation at the finalization boundary prevents atomic download install")
+    func cancelledFinalizationCannotAdoptStagedFile() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("resonance-cancelled-finalization-\(UUID().uuidString)", isDirectory: true)
+        let destination = root.appendingPathComponent("installed.m4a")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let now = Date.now
+        let lease = try MacAuthenticatedStreamAuthorizationLease(
+            context: makeContext(),
+            expiresAt: now.addingTimeInterval(60),
+            now: now
+        )
+        let finalization = Task {
+            withUnsafeCurrentTask { task in
+                task?.cancel()
+            }
+            try MacAuthorizedDownloadFinalizer.finalize(authorizationLease: lease) {
+                try Data([0x01]).write(to: destination)
+            }
+        }
+        var cancelled = false
+        do {
+            try await finalization.value
+        } catch is CancellationError {
+            cancelled = true
+        }
+
+        #expect(cancelled)
         #expect(!FileManager.default.fileExists(atPath: destination.path))
     }
 

@@ -69,6 +69,7 @@ struct ContentView: View {
                             detail: model.downloadCurrentFile,
                             status: model.downloadStatus,
                             progress: model.downloadProgress,
+                            counter: model.downloadBatchCounter,
                             symbol: "arrow.down.to.line",
                             color: palette.secondary,
                             cancel: model.cancelServerDownload
@@ -82,6 +83,7 @@ struct ContentView: View {
                             detail: model.uploadCurrentFile,
                             status: model.uploadStatus,
                             progress: model.uploadProgress,
+                            counter: nil,
                             symbol: "arrow.up.to.line",
                             color: palette.accent,
                             cancel: model.cancelServerUpload
@@ -95,6 +97,7 @@ struct ContentView: View {
                             detail: model.uploadCurrentFile,
                             status: model.uploadStatus,
                             progress: model.uploadProgress,
+                            counter: nil,
                             symbol: "wrench.and.screwdriver",
                             color: palette.accent,
                             cancel: model.cancelServerUpload
@@ -108,6 +111,7 @@ struct ContentView: View {
                             detail: localImportModel.transferDetail,
                             status: localImportModel.transferStatus,
                             progress: localImportModel.transferProgress,
+                            counter: nil,
                             symbol: localImportModel.stage == .syncing
                                 ? "arrow.up.to.line"
                                 : "arrow.down.to.line",

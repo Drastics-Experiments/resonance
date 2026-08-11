@@ -477,13 +477,15 @@ test("upload manifests retain per-file failures and never allow cleanup before s
 });
 
 test("Windows renderer and main-process integrations retain the hardening boundaries", async () => {
-  const [mainSource, preloadSource, appSource, htmlSource, packageSource, launcherSource] = await Promise.all([
+  const [mainSource, preloadSource, appSource, htmlSource, packageSource, launcherSource, serverDownloadSource, downloadFileSource] = await Promise.all([
     readFile(new URL("../main.cjs", import.meta.url), "utf8"),
     readFile(new URL("../preload.cjs", import.meta.url), "utf8"),
     readFile(new URL("../ui/app.js", import.meta.url), "utf8"),
     readFile(new URL("../ui/index.html", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../../.launcher-terminal.zsh", import.meta.url), "utf8"),
+    readFile(new URL("../server-download.cjs", import.meta.url), "utf8"),
+    readFile(new URL("../download-file.cjs", import.meta.url), "utf8"),
   ]);
   const packageJSON = JSON.parse(packageSource);
   const retiredStorageName = ["Liked", " Songs"].join("");
@@ -551,6 +553,18 @@ test("Windows renderer and main-process integrations retain the hardening bounda
     mainSource.indexOf('ipcMain.handle("server:sync"'),
     mainSource.indexOf('ipcMain.handle("server:upload"'),
   );
+  const replaceServerCatalogBody = appSource.slice(
+    appSource.indexOf("function replaceServerCatalog(songs)"),
+    appSource.indexOf("function markPlaylistDirty"),
+  );
+  const refreshServerCatalogAfterUploadBody = appSource.slice(
+    appSource.indexOf("async function refreshServerCatalogAfterUpload(context)"),
+    appSource.indexOf("function scheduleServerCatalogRefresh"),
+  );
+  const rememberUploadedServerSongsBody = appSource.slice(
+    appSource.indexOf("function rememberUploadedServerSongs(results)"),
+    appSource.indexOf("function serverCatalogMatchForLocalImport"),
+  );
   const rawUploadHandler = mainSource.slice(
     mainSource.indexOf('ipcMain.handle("server:upload"'),
     mainSource.indexOf('ipcMain.handle("server:cancel-transfer"'),
@@ -617,8 +631,17 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(mediaRefreshHelper, /\.\.\.profileHeaders\(token, profileID\),[\s\S]+\.\.\.requestContext\.expected\.request_headers[\s\S]+redirect: "manual"/);
   const transferProgressBodies = [...mainSource.matchAll(/event\.sender\.send\("server:transfer-progress",\s*\{([\s\S]*?)\}\);/g)]
     .map((match) => match[1]);
-  assert.ok(transferProgressBodies.length >= 6);
+  const throttledItemProgressCalls = [...serverSyncHandler.matchAll(/publishProgress\(progressEvent\(/g)];
+  assert.ok(transferProgressBodies.length + throttledItemProgressCalls.length >= 6);
   for (const body of transferProgressBodies) assert.match(body, /autoHide:\s*false/);
+  assert.match(serverDownloadSource, /function serverDownloadProgressEvent[\s\S]+autoHide:\s*false/);
+  assert.match(serverDownloadSource, /function createServerDownloadProgressPublisher[\s\S]+isInitial[\s\S]+isFinal[\s\S]+minimumInterval/);
+  assert.match(mainSource, /function serverTransferIsActive\(event, controller, generation[\s\S]+active === controller[\s\S]+active\?\.resonanceGeneration === generation[\s\S]+controller\?\.signal\.aborted !== true/);
+  assert.match(serverSyncHandler, /if \(!serverTransferIsActive\(event, controller, transferGeneration\)\) return;[\s\S]+event\.sender\.send\("server:transfer-progress", progressEvent\)/);
+  assert.match(downloadFileSource, /const \{ done, value \} = await reader\.read\(\);\s+signal\?\.throwIfAborted\(\);\s+if \(done\) break;/);
+  assert.match(replaceServerCatalogBody, /resetServerCatalogAuthority\(\);[\s\S]+serverCatalogGeneration \+= 1/);
+  assert.match(refreshServerCatalogAfterUploadBody, /replaceServerCatalog\(catalog\.songs\);\s+markServerCatalogAuthoritative\(context\);/);
+  assert.doesNotMatch(rememberUploadedServerSongsBody, /markServerCatalogAuthoritative/);
   assert.match(preloadSource, /discardServerUploadRetries/);
   assert.match(preloadSource, /fetchClientConfig:[\s\S]+server:client-config/);
   assert.match(preloadSource, /importServerSource:[\s\S]+server:source-import/);

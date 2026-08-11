@@ -93,6 +93,40 @@ enum PlaylistPresentationEntryID: Hashable {
     }
 }
 
+enum MacServerDownloadProgressPolicy {
+    static func fraction(completedBytes: Int64, totalBytes: Int64) -> Double {
+        guard totalBytes > 0 else { return 0 }
+        return min(max(Double(completedBytes) / Double(totalBytes), 0), 1)
+    }
+
+    static func batchCounter(position: Int, total: Int) -> String? {
+        guard total > 0 else { return nil }
+        return "\(min(max(position, 1), total))/\(total)"
+    }
+}
+
+enum MacServerDownloadStatePolicy {
+    static func owns(generation: UInt64, currentGeneration: UInt64) -> Bool {
+        generation == currentGeneration
+    }
+}
+
+struct MacServerDownloadFileSnapshot: Equatable {
+    let size: Int64
+    let modificationDate: Date
+    let systemNumber: UInt64
+    let systemFileNumber: UInt64
+}
+
+enum MacServerDownloadValidationPolicy {
+    static func isReusable(
+        validated: MacServerDownloadFileSnapshot,
+        current: MacServerDownloadFileSnapshot?
+    ) -> Bool {
+        current == validated
+    }
+}
+
 struct PlaylistPresentationEntry: Identifiable, Hashable {
     let id: PlaylistPresentationEntryID
     let track: Track?
@@ -560,6 +594,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     serverContextChanged = false
                 }
             }
+            if serverContextChanged {
+                remoteCatalogIsAuthoritative = false
+            }
             persistServerCredentialsImmediately()
             if didFinishInitialization, serverContextChanged {
                 resetClientConfigurationForCurrentContext()
@@ -569,9 +606,15 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published var serverToken = "" {
         didSet {
             persistServerCredentialsImmediately()
-            if didFinishInitialization,
-               MacClientConfigContext.tokenFingerprint(oldValue)
-                    != MacClientConfigContext.tokenFingerprint(serverToken) {
+            let identityChanged = MacClientConfigContext.tokenFingerprint(oldValue)
+                != MacClientConfigContext.tokenFingerprint(serverToken)
+            if identityChanged {
+                cancelRemoteSongMetadataHydration()
+                serverCatalogRequestGeneration &+= 1
+                serverCatalogUploadMutations.removeAll()
+                remoteCatalogIsAuthoritative = false
+            }
+            if didFinishInitialization, identityChanged {
                 resetClientConfigurationForCurrentContext()
             }
         }
@@ -579,10 +622,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published var serverAdminToken = "" {
         didSet {
             persistServerCredentialsImmediately()
-            if didFinishInitialization,
-               serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               MacClientConfigContext.tokenFingerprint(oldValue)
-                    != MacClientConfigContext.tokenFingerprint(serverAdminToken) {
+            let identityChanged = serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && MacClientConfigContext.tokenFingerprint(oldValue)
+                    != MacClientConfigContext.tokenFingerprint(serverAdminToken)
+            if identityChanged {
+                cancelRemoteSongMetadataHydration()
+                serverCatalogRequestGeneration &+= 1
+                serverCatalogUploadMutations.removeAll()
+                remoteCatalogIsAuthoritative = false
+            }
+            if didFinishInitialization, identityChanged {
                 resetClientConfigurationForCurrentContext()
             }
         }
@@ -594,6 +643,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published private(set) var isAuthenticatingAccount = false
     @Published var serverMessage = "Not connected"
     @Published var remoteSongs: [RemoteSong] = []
+    var remoteCatalogIsAuthoritative = false
     @Published private(set) var pendingRemoteSongMetadataCount = 0
     @Published var isSyncingServer = false
     @Published var isRefreshingServerCatalog = false
@@ -601,6 +651,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published private(set) var isRepairingServerMetadata = false
     @Published private(set) var isUploadingLocalImport = false
     @Published var downloadProgress = 0.0
+    @Published private(set) var downloadBatchPosition = 0
+    @Published private(set) var downloadBatchTotal = 0
     @Published var uploadProgress = 0.0
     @Published var downloadCurrentFile = ""
     @Published var uploadCurrentFile = ""
@@ -618,6 +670,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published private(set) var downloadMode = MacDownloadMode.verifiedFileCache
 
     var allowsInsecurePreviewLoopback: Bool { Self.isPreviewBundle }
+
+    var downloadBatchCounter: String? {
+        MacServerDownloadProgressPolicy.batchCounter(
+            position: downloadBatchPosition,
+            total: downloadBatchTotal
+        )
+    }
 
     var serverUploadActionsDisabled: Bool {
         isUploadingServer
@@ -785,6 +844,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var navigationHistory: [NavigationLocation] = []
     private var navigationIndex = 0
     private var downloadTask: Task<Void, Never>?
+    private var serverDownloadStateGeneration: UInt64 = 0
     private var uploadTask: Task<Void, Never>?
     private var playlistSyncTask: Task<Void, Never>?
     private var playlistSyncDebounceTask: Task<Void, Never>?
@@ -1573,11 +1633,69 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         let removingCurrentTrack = currentTrackID == track.id
         if removingCurrentTrack { stopCurrentPlayback() }
 
+        let activeRemoteID = track.remoteID.flatMap { remoteID in
+            track.remoteIdentity == activeRemoteIdentity(songID: remoteID) ? remoteID : nil
+        }
+        let conclusivelyMissingRemoteID = activeRemoteID.flatMap { remoteID in
+            remoteCatalogIsAuthoritative && !remoteSongs.contains(where: { $0.id == remoteID })
+                ? remoteID
+                : nil
+        }
+        var changedRemotePlaylistMembership = false
+        for index in playlists.indices where playlists[index].trackIDs.contains(track.id) {
+            if playlists[index].isSystem {
+                playlists[index].trackIDs.removeAll { $0 == track.id }
+                continue
+            }
+
+            var seenRemoteSongIDs = Set<String>()
+            let oldRemoteSongIDs = (playlists[index].remoteSongIDs ?? []).filter { remoteID in
+                !remoteID.isEmpty && seenRemoteSongIDs.insert(remoteID).inserted
+            }
+            var nextRemoteSongIDs = oldRemoteSongIDs
+            var entryIDs: [PlaylistPresentationEntryID]
+            if let storedEntryOrder = playlists[index].entryOrder {
+                var seenEntryIDs = Set<PlaylistPresentationEntryID>()
+                entryIDs = storedEntryOrder.compactMap(PlaylistPresentationEntryID.init(storageKey:))
+                    .filter { seenEntryIDs.insert($0).inserted }
+            } else {
+                entryIDs = playlistEntries(in: playlists[index]).map(\.id)
+            }
+
+            let localEntryID = PlaylistPresentationEntryID.local(track.id)
+            if let remoteID = activeRemoteID {
+                let remoteEntryID = PlaylistPresentationEntryID.remote(remoteID)
+                let hasCanonicalMembership = nextRemoteSongIDs.contains(remoteID)
+                let catalogConfirmsMembership = remoteCatalogIsAuthoritative
+                    && remoteSongs.contains { $0.id == remoteID }
+                if conclusivelyMissingRemoteID == remoteID {
+                    entryIDs.removeAll { $0 == localEntryID || $0 == remoteEntryID }
+                    nextRemoteSongIDs.removeAll { $0 == remoteID }
+                } else if hasCanonicalMembership || catalogConfirmsMembership {
+                    entryIDs = entryIDs.map { $0 == localEntryID ? remoteEntryID : $0 }
+                    if !hasCanonicalMembership {
+                        nextRemoteSongIDs.append(remoteID)
+                    }
+                } else {
+                    entryIDs.removeAll { $0 == localEntryID }
+                }
+            } else {
+                entryIDs.removeAll { $0 == localEntryID }
+            }
+
+            var seenEntryIDs = Set<PlaylistPresentationEntryID>()
+            entryIDs = entryIDs.filter { seenEntryIDs.insert($0).inserted }
+            playlists[index].trackIDs.removeAll { $0 == track.id }
+            playlists[index].remoteSongIDs = nextRemoteSongIDs
+            playlists[index].entryOrder = entryIDs.map(\.storageKey)
+            if nextRemoteSongIDs != oldRemoteSongIDs {
+                markPlaylistDirty(playlists[index].id)
+                changedRemotePlaylistMembership = true
+            }
+        }
+
         tracks.removeAll { $0.id == track.id }
         favorites.remove(track.id)
-        for index in playlists.indices {
-            playlists[index].trackIDs.removeAll { $0 == track.id }
-        }
         historyTrackIDs.removeAll { $0 == track.id }
         shuffledTrackIDs.removeAll { $0 == track.id }
         playbackContextTrackIDs.removeAll { $0 == track.id }
@@ -1599,6 +1717,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         persistShuffleQueue()
         persistPlaybackPosition()
         persistLibrary()
+        if changedRemotePlaylistMembership { schedulePlaylistSync() }
     }
 
     func revealInFinder(_ track: Track) {
@@ -1726,6 +1845,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         serverToken = ""
         serverAdminToken = ""
         remoteSongs.removeAll()
+        remoteCatalogIsAuthoritative = false
         selectedRemoteSongIDs.removeAll()
         serverMessage = "Not connected"
         downloadStatus = ""
@@ -1907,6 +2027,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         where defaults.object(forKey: prefix + newTransferScope) == nil {
             defaults.set(defaults.object(forKey: prefix + oldTransferScope), forKey: prefix + newTransferScope)
         }
+        cancelRemoteSongMetadataHydration()
+        serverCatalogRequestGeneration &+= 1
+        serverCatalogUploadMutations.removeAll()
+        remoteSongs.removeAll()
+        remoteCatalogIsAuthoritative = false
+        selectedRemoteSongIDs.removeAll()
         syncProfileID = accountProfileID
         activeSyncProfileName = session.profileDisplayName
         persistListeningHistory()
@@ -2408,6 +2534,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     func refreshServerCatalogNow() async {
         guard !isSyncingServer else { return }
+        serverDownloadStateGeneration &+= 1
         isSyncingServer = true
         isRefreshingServerCatalog = true
         defer {
@@ -2418,6 +2545,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             let base = try normalizedServerURL()
             try saveServerConfiguration(base: base)
             let profileID = syncProfileID
+            let credentialFingerprint = MacClientConfigContext.tokenFingerprint(serverToken)
             let contextKey = Self.serverContextKey(base: base, profileID: profileID)
             serverCatalogRequestGeneration &+= 1
             let requestGeneration = serverCatalogRequestGeneration
@@ -2425,6 +2553,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             var catalog = try await fetchRemoteCatalog(base: base)
             guard requestGeneration == serverCatalogRequestGeneration,
                   profileID == syncProfileID,
+                  credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken),
                   let currentBase = try? normalizedServerURL(),
                   Self.serverContextKey(base: currentBase, profileID: syncProfileID) == contextKey else {
                 return
@@ -2434,6 +2563,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 catalog = [mutation.song] + catalog.filter { $0.id != mutation.song.id }
             }
             remoteSongs = applyingKnownRemoteSongMetadata(to: catalog)
+            remoteCatalogIsAuthoritative = true
             selectedRemoteSongIDs.formIntersection(Set(remoteSongs.map(\.id)))
             serverMessage = "Connected • \(remoteSongs.count) \(remoteSongs.count == 1 ? "song" : "songs") available"
 
@@ -2441,6 +2571,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 catalog = try await fetchRemoteCatalog(base: base)
                 guard requestGeneration == serverCatalogRequestGeneration,
                       profileID == syncProfileID,
+                      credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken),
                       let currentBase = try? normalizedServerURL(),
                       Self.serverContextKey(base: currentBase, profileID: syncProfileID) == contextKey else {
                     return
@@ -2450,6 +2581,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     catalog = [mutation.song] + catalog.filter { $0.id != mutation.song.id }
                 }
                 remoteSongs = applyingKnownRemoteSongMetadata(to: catalog)
+                remoteCatalogIsAuthoritative = true
                 selectedRemoteSongIDs.formIntersection(Set(remoteSongs.map(\.id)))
                 serverMessage = "Connected • \(remoteSongs.count) \(remoteSongs.count == 1 ? "song" : "songs") available"
             }
@@ -2461,34 +2593,162 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         }
     }
 
+    private func releaseServerDownloadState(
+        generation: UInt64,
+        authorizationLease: MacAuthenticatedStreamAuthorizationLease?
+    ) {
+        authorizationLease?.invalidate()
+        if let authorizationLease,
+           offlineDownloadAuthorizationLease === authorizationLease {
+            offlineDownloadAuthorizationLease = nil
+            offlineDownloadRequiresVerifiedConfiguration = false
+        }
+        guard MacServerDownloadStatePolicy.owns(
+            generation: generation,
+            currentGeneration: serverDownloadStateGeneration
+        ) else { return }
+        isSyncingServer = false
+        downloadCurrentFile = ""
+        downloadBatchPosition = 0
+        downloadBatchTotal = 0
+    }
+
+    private struct ValidatedCachedServerSong {
+        let destination: URL
+        let snapshot: MacServerDownloadFileSnapshot
+        let contentSHA256: String
+    }
+
+    private struct ServerSongDownloadPlan {
+        let requiresDownload: Bool
+        let validatedCache: ValidatedCachedServerSong?
+
+        static let download = ServerSongDownloadPlan(
+            requiresDownload: true,
+            validatedCache: nil
+        )
+    }
+
+    nonisolated private static func serverDownloadFileSnapshot(
+        at url: URL
+    ) -> MacServerDownloadFileSnapshot? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let fileType = attributes[.type] as? FileAttributeType,
+              fileType == .typeRegular,
+              let size = (attributes[.size] as? NSNumber)?.int64Value,
+              let modificationDate = attributes[.modificationDate] as? Date,
+              let systemNumber = (attributes[.systemNumber] as? NSNumber)?.uint64Value,
+              let systemFileNumber = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value else {
+            return nil
+        }
+        return MacServerDownloadFileSnapshot(
+            size: size,
+            modificationDate: modificationDate,
+            systemNumber: systemNumber,
+            systemFileNumber: systemFileNumber
+        )
+    }
+
+    private func remoteSourceLinkNeedsDownload(
+        _ remote: RemoteSong,
+        base: URL,
+        profileID: String
+    ) -> Bool {
+        guard let identity = ServerSongIdentity(
+            serverURL: base,
+            profileID: profileID,
+            songID: remote.id
+        ) else { return true }
+        return !tracks.contains { track in
+            guard track.remoteIdentity == identity,
+                  let fileURL = track.fileURL else { return false }
+            return FileManager.default.fileExists(atPath: fileURL.path)
+        }
+    }
+
+    private func serverSongDownloadPlan(
+        for remote: RemoteSong,
+        base: URL,
+        cache: URL,
+        profileID: String
+    ) async throws -> ServerSongDownloadPlan {
+        if remote.isSourceLinkRecord {
+            return ServerSongDownloadPlan(
+                requiresDownload: remoteSourceLinkNeedsDownload(
+                    remote,
+                    base: base,
+                    profileID: profileID
+                ),
+                validatedCache: nil
+            )
+        }
+
+        let maximumDownloadSize: Int64 = remote.kind == .video
+            ? 1_024 * 1_024 * 1_024
+            : 256 * 1_024 * 1_024
+        guard remote.size > 0,
+              remote.size <= maximumDownloadSize,
+              let destination = try? Self.cachedDestination(for: remote, in: cache),
+              let initialSnapshot = Self.serverDownloadFileSnapshot(at: destination),
+              initialSnapshot.size == remote.size,
+              (try? AVAudioPlayer(contentsOf: destination)) != nil else { return .download }
+        do {
+            let expectedContentSHA256 = try Self.catalogSHA256(remote.contentSHA256)
+            let localHash = try await Self.fileSHA256Detached(at: destination)
+            try Task.checkCancellation()
+            guard MacServerDownloadValidationPolicy.isReusable(
+                validated: initialSnapshot,
+                current: Self.serverDownloadFileSnapshot(at: destination)
+            ), expectedContentSHA256.map({ $0 == localHash }) ?? true else {
+                return .download
+            }
+            return ServerSongDownloadPlan(
+                requiresDownload: false,
+                validatedCache: ValidatedCachedServerSong(
+                    destination: destination,
+                    snapshot: initialSnapshot,
+                    contentSHA256: localHash
+                )
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return .download
+        }
+    }
+
     func syncServerLibrary(songIDs: Set<String>? = nil, reconcile _: Bool = false) async {
         guard !isSyncingServer else { return }
+        serverDownloadStateGeneration &+= 1
+        let stateGeneration = serverDownloadStateGeneration
+        isSyncingServer = true
+        var authorizationLease: MacAuthenticatedStreamAuthorizationLease?
+        defer {
+            releaseServerDownloadState(
+                generation: stateGeneration,
+                authorizationLease: authorizationLease
+            )
+        }
         await refreshClientConfigurationNow()
+        guard MacServerDownloadStatePolicy.owns(
+            generation: stateGeneration,
+            currentGeneration: serverDownloadStateGeneration
+        ) else { return }
         guard clientConfiguration.allowsOfflineDownload else {
             downloadStatus = offlineDownloadUnavailableMessage
             serverMessage = downloadStatus
             return
         }
-        isSyncingServer = true
         downloadStatus = "Preparing download…"
         downloadProgress = 0
-        var authorizationLease: MacAuthenticatedStreamAuthorizationLease?
-        defer {
-            if let authorizationLease,
-               offlineDownloadAuthorizationLease === authorizationLease {
-                authorizationLease.invalidate()
-                offlineDownloadAuthorizationLease = nil
-                offlineDownloadRequiresVerifiedConfiguration = false
-            }
-            isSyncingServer = false
-            downloadCurrentFile = ""
-        }
-
+        downloadBatchPosition = 0
+        downloadBatchTotal = 0
         do {
             let base = try normalizedServerURL()
             try saveServerConfiguration(base: base)
             let accessToken = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !accessToken.isEmpty else { throw ServerSyncError.missingToken }
+            let credentialFingerprint = MacClientConfigContext.tokenFingerprint(accessToken)
             let expiration = clientConfiguration.document
                 .flatMap(MacClientConfigVerifier.expirationDate)
                 ?? .distantFuture
@@ -2500,23 +2760,98 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             offlineDownloadAuthorizationLease = lease
             offlineDownloadRequiresVerifiedConfiguration = clientConfiguration.document != nil
                 && (clientConfiguration.source == .verifiedServer || clientConfiguration.source == .verifiedCache)
+            let catalogProfileID = syncProfileID
             var fetchedCatalog = try await fetchRemoteCatalog(base: base)
             if await repairLegacyRemoteSourceLinks(in: fetchedCatalog, base: base) {
                 fetchedCatalog = try await fetchRemoteCatalog(base: base)
             }
             let catalogSongs = await resolveRemoteSongMetadata(in: fetchedCatalog)
+            guard catalogProfileID == syncProfileID,
+                  credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken),
+                  let currentBase = try? normalizedServerURL(),
+                  Self.serverContextKey(base: currentBase, profileID: catalogProfileID)
+                    == Self.serverContextKey(base: base, profileID: catalogProfileID) else {
+                throw CancellationError()
+            }
             remoteSongs = catalogSongs
+            remoteCatalogIsAuthoritative = true
             reconcileDownloadedMediaKinds(with: catalogSongs)
             let songs = songIDs.map { ids in catalogSongs.filter { ids.contains($0.id) } } ?? catalogSongs
             downloadStatus = songs.isEmpty ? "Nothing to download" : "Checking \(songs.count) songs"
             let cache = try serverCacheDirectory(for: base, profileID: syncProfileID)
+            var pendingSongIDs = Set<String>()
+            var downloadPlans: [ServerSongDownloadPlan] = []
+            downloadPlans.reserveCapacity(songs.count)
+            for remote in songs {
+                try Task.checkCancellation()
+                let plan = try await serverSongDownloadPlan(
+                    for: remote,
+                    base: base,
+                    cache: cache,
+                    profileID: catalogProfileID
+                )
+                downloadPlans.append(plan)
+                if plan.requiresDownload {
+                    pendingSongIDs.insert(remote.id)
+                }
+            }
+            guard catalogProfileID == syncProfileID,
+                  credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken),
+                  let currentBase = try? normalizedServerURL(),
+                  Self.serverContextKey(base: currentBase, profileID: catalogProfileID)
+                    == Self.serverContextKey(base: base, profileID: catalogProfileID) else {
+                throw CancellationError()
+            }
+            downloadBatchTotal = pendingSongIDs.count
             var changedCount = 0
             var failedCount = 0
+            var pendingPosition = 0
 
-            for (index, remote) in songs.enumerated() {
+            for (remote, plan) in zip(songs, downloadPlans) {
                 try Task.checkCancellation()
-                downloadCurrentFile = remote.filename
-                downloadStatus = "Downloading \(index + 1) of \(songs.count)"
+                guard catalogProfileID == syncProfileID,
+                      credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken),
+                      let currentBase = try? normalizedServerURL(),
+                      Self.serverContextKey(base: currentBase, profileID: catalogProfileID)
+                        == Self.serverContextKey(base: base, profileID: catalogProfileID) else {
+                    throw CancellationError()
+                }
+                var isPendingDownload = plan.requiresDownload
+                var reusableCachedValidation: ValidatedCachedServerSong?
+                var reusableCachedPlayer: AVAudioPlayer?
+                if remote.isSourceLinkRecord {
+                    isPendingDownload = remoteSourceLinkNeedsDownload(
+                        remote,
+                        base: base,
+                        profileID: catalogProfileID
+                    )
+                } else if !isPendingDownload,
+                          let validation = plan.validatedCache,
+                          let plannedDestination = try? Self.cachedDestination(for: remote, in: cache),
+                          plannedDestination.standardizedFileURL == validation.destination.standardizedFileURL,
+                          MacServerDownloadValidationPolicy.isReusable(
+                            validated: validation.snapshot,
+                            current: Self.serverDownloadFileSnapshot(at: validation.destination)
+                          ),
+                          let player = try? AVAudioPlayer(contentsOf: validation.destination) {
+                    reusableCachedValidation = validation
+                    reusableCachedPlayer = player
+                } else if !isPendingDownload {
+                    isPendingDownload = true
+                }
+                if isPendingDownload {
+                    pendingSongIDs.insert(remote.id)
+                } else {
+                    pendingSongIDs.remove(remote.id)
+                }
+                downloadBatchTotal = pendingSongIDs.count
+                if isPendingDownload {
+                    pendingPosition += 1
+                    downloadBatchPosition = pendingPosition
+                    downloadCurrentFile = remote.title
+                    downloadStatus = "Downloading \(pendingPosition) of \(pendingSongIDs.count)"
+                    downloadProgress = 0
+                }
                 var stagingURL: URL?
                 do {
                     if remote.isSourceLinkRecord {
@@ -2528,12 +2863,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         if let existing = tracks.first(where: { $0.remoteIdentity == remoteIdentity }),
                            let fileURL = existing.fileURL,
                            FileManager.default.fileExists(atPath: fileURL.path) {
-                            downloadProgress = Double(index + 1) / Double(max(songs.count, 1))
+                            if isPendingDownload { downloadProgress = 1 }
                             continue
                         }
                         _ = try await importSavedRemoteSource(remote, base: base)
                         changedCount += 1
-                        downloadProgress = Double(index + 1) / Double(max(songs.count, 1))
+                        if isPendingDownload { downloadProgress = 1 }
                         continue
                     }
                     let maximumDownloadSize: Int64 = remote.kind == .video
@@ -2553,36 +2888,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         $0.remoteIdentity == remoteIdentity
                     }
                     let previousCachedURL = existingIndex.flatMap { tracks[$0].fileURL }
-                    var destinationExists = FileManager.default.fileExists(atPath: destination.path)
-                    var localSize = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
-                    var cachedPlayer = destinationExists ? try? AVAudioPlayer(contentsOf: destination) : nil
-                    var resolvedContentSHA256: String?
-
-                    if destinationExists, cachedPlayer == nil {
-                        // Keep the previous cache entry in place until a replacement has been
-                        // completely downloaded and validated. Mark it unusable for this pass
-                        // so it cannot make a later sync skip the redownload.
-                        destinationExists = false
-                        localSize = nil
-                    }
-
-                    if destinationExists, localSize == remote.size, cachedPlayer != nil {
-                        let localHash = try await Self.fileSHA256Detached(at: destination)
-                        if let expectedContentSHA256, localHash != expectedContentSHA256 {
-                            destinationExists = false
-                            localSize = nil
-                            cachedPlayer = nil
-                        } else {
-                            resolvedContentSHA256 = localHash
-                        }
-                    }
+                    let localSize = reusableCachedValidation?.snapshot.size
+                    let cachedPlayer = reusableCachedPlayer
+                    var resolvedContentSHA256 = reusableCachedValidation?.contentSHA256
 
                     if let existingIndex,
                        localSize == remote.size,
                        cachedPlayer != nil,
                        tracks[existingIndex].fileURL?.standardizedFileURL == destination.standardizedFileURL {
                         tracks[existingIndex].contentSHA256 = resolvedContentSHA256
-                        downloadProgress = Double(index + 1) / Double(max(songs.count, 1))
+                        if isPendingDownload { downloadProgress = 1 }
                         continue
                     }
 
@@ -2604,17 +2919,27 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                             to: staging,
                             expectedContentLength: remote.size,
                             authorizationLease: lease,
-                            session: networkSession
+                            session: networkSession,
+                            progress: { [weak self] completedBytes, totalBytes in
+                                self?.downloadProgress = MacServerDownloadProgressPolicy.fraction(
+                                    completedBytes: completedBytes,
+                                    totalBytes: totalBytes
+                                )
+                            }
                         )
+                        try Task.checkCancellation()
                         let stagedSize = (try? staging.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
                         guard stagedSize == remote.size else { throw ServerSyncError.unexpectedDownloadSize }
+                        try Task.checkCancellation()
                         let stagedHash = try await Self.fileSHA256Detached(at: staging)
+                        try Task.checkCancellation()
                         guard expectedContentSHA256 == nil || stagedHash == expectedContentSHA256 else {
                             throw ServerSyncError.downloadHashMismatch
                         }
                         guard let stagedPlayer = try? AVAudioPlayer(contentsOf: staging) else {
                             throw ServerSyncError.invalidMedia
                         }
+                        try Task.checkCancellation()
                         try MacAuthorizedDownloadFinalizer.finalize(authorizationLease: lease) {
                             try Self.installValidatedDownload(from: staging, at: destination)
                         }
@@ -2624,6 +2949,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     }
 
                     let metadata = await Self.metadata(for: destination)
+                    if let validation = reusableCachedValidation,
+                       !MacServerDownloadValidationPolicy.isReusable(
+                        validated: validation.snapshot,
+                        current: Self.serverDownloadFileSnapshot(at: validation.destination)
+                       ) {
+                        throw ServerSyncError.invalidMedia
+                    }
                     let fallbackStem = destination.deletingPathExtension().lastPathComponent
                     let track = Track(
                         id: existingIndex.map { tracks[$0].id } ?? UUID(),
@@ -2656,6 +2988,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         tracks.append(track)
                     }
                     changedCount += 1
+                    if isPendingDownload { downloadProgress = 1 }
                 } catch is CancellationError {
                     if let stagingURL { try? FileManager.default.removeItem(at: stagingURL) }
                     throw CancellationError()
@@ -2663,7 +2996,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     if let stagingURL { try? FileManager.default.removeItem(at: stagingURL) }
                     failedCount += 1
                 }
-                downloadProgress = Double(index + 1) / Double(max(songs.count, 1))
             }
 
             await reconcileCachedUploadedLocalTracks()
@@ -2681,8 +3013,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 ? "Downloaded \(changedCount); \(failedCount) failed"
                 : (changedCount == 0 ? "Up to date" : "Downloaded \(changedCount) songs")
             selectedRemoteSongIDs.subtract(Set(songs.map(\.id)))
-            isSyncingServer = false
-            downloadCurrentFile = ""
+            releaseServerDownloadState(
+                generation: stateGeneration,
+                authorizationLease: authorizationLease
+            )
             await syncPlaylistsNow()
         } catch is CancellationError {
             serverMessage = "Download cancelled"
@@ -4252,6 +4586,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         serverCatalogRequestGeneration &+= 1
         serverCatalogUploadMutations.removeAll()
         remoteSongs.removeAll()
+        remoteCatalogIsAuthoritative = false
         selectedRemoteSongIDs.removeAll()
         resetClientConfigurationForCurrentContext()
 
@@ -5795,6 +6130,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             self?.downloadStatus = progress.stage == .downloading
                 ? "Downloading \(remote.title)"
                 : "Resolving \(remote.title)"
+            if progress.stage == .downloading {
+                self?.downloadProgress = MacServerDownloadProgressPolicy.fraction(
+                    completedBytes: progress.completed,
+                    totalBytes: progress.total
+                )
+            }
         }
         let track: Track
         switch outcome {
@@ -6126,8 +6467,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private func reconcileDownloadedMediaKindsAutomatically() async {
         guard !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let base = try? normalizedServerURL() else { return }
+        let profileID = syncProfileID
+        let credentialFingerprint = MacClientConfigContext.tokenFingerprint(serverToken)
         guard let catalog = try? await fetchRemoteCatalog(base: base) else { return }
+        guard profileID == syncProfileID,
+              credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken),
+              let currentBase = try? normalizedServerURL(),
+              Self.serverContextKey(base: currentBase, profileID: profileID)
+                == Self.serverContextKey(base: base, profileID: profileID) else { return }
         remoteSongs = catalog
+        remoteCatalogIsAuthoritative = true
         reconcileDownloadedMediaKinds(with: catalog)
     }
 

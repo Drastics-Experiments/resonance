@@ -34,7 +34,13 @@ const {
 const { readAudioMetadata } = require("./metadata.cjs");
 const { normalizeSourceIdentities, normalizeSourceIdentity } = require("./provenance.cjs");
 const { createRenewablePolicyLease } = require("./policy-lease.cjs");
-const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload, serverDownloadDisplayName } = require("./server-download.cjs");
+const {
+  SERVER_DOWNLOAD_ATTEMPTS,
+  createServerDownloadProgressPublisher,
+  retryServerDownload,
+  serverDownloadDisplayName,
+  serverDownloadProgressEvent,
+} = require("./server-download.cjs");
 const {
   SERVER_STREAM_SCHEME,
   ServerStreamValidationError,
@@ -158,6 +164,7 @@ const APP_THEME_IDS = new Set([DEFAULT_APP_THEME, "ocean", "forest", "sunset"]);
 let runtimeAppPreferences = { theme: DEFAULT_APP_THEME, runInBackground: false, discordRichPresence: false };
 let currentDiscordPresenceStatus = { state: "disabled", message: "Rich Presence is off.", applicationConfigured: false };
 const activeServerTransfers = new Map();
+let serverTransferGeneration = 0;
 const activeLocalImports = new Map();
 const activeLocalImportPreviews = new Map();
 const cachedLocalImportPreviews = new Map();
@@ -587,8 +594,19 @@ function beginServerTransfer(event) {
   const senderID = event.sender.id;
   activeServerTransfers.get(senderID)?.abort();
   const controller = new AbortController();
+  Object.defineProperty(controller, "resonanceGeneration", {
+    value: ++serverTransferGeneration,
+    enumerable: false,
+  });
   activeServerTransfers.set(senderID, controller);
   return controller;
+}
+
+function serverTransferIsActive(event, controller, generation = controller?.resonanceGeneration) {
+  const active = activeServerTransfers.get(event.sender.id);
+  return active === controller
+    && active?.resonanceGeneration === generation
+    && controller?.signal.aborted !== true;
 }
 
 function finishServerTransfer(event, controller) {
@@ -3221,7 +3239,14 @@ async function downloadSavedSourceSong(song, options) {
   });
 }
 
-ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existing = [], songIDs = null }) => {
+ipcMain.handle("server:sync", async (event, {
+  baseURL,
+  token,
+  profileID,
+  existing = [],
+  songIDs = null,
+  songTitles = {},
+}) => {
   token = canonicalCredentialToken(token);
   if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
@@ -3232,6 +3257,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
     ...requestContext.expected.request_headers,
   };
   const controller = beginServerTransfer(event);
+  const transferGeneration = controller.resonanceGeneration;
   const { signal } = controller;
   let catalog = null;
   const downloaded = [];
@@ -3262,12 +3288,19 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
   }
   const paths = await ensureDirectories();
   const requested = Array.isArray(songIDs) ? new Set(songIDs) : null;
+  const preferredTitles = new Map(Object.entries(
+    songTitles && typeof songTitles === "object" && !Array.isArray(songTitles) ? songTitles : {},
+  ).slice(0, 2_000).flatMap(([id, title]) => {
+    const songID = String(id || "").trim();
+    const displayTitle = typeof title === "string" ? title.trim().slice(0, 500) : "";
+    return songID && songID.length <= 256 && displayTitle ? [[songID, displayTitle]] : [];
+  }));
   const songs = (catalog.songs || []).filter((song) => !requested || requested.has(song.id));
-  let completed = 0;
+  const pendingDownloads = [];
   for (const song of songs) {
     signal.throwIfAborted();
     const remoteName = song.filename || song.name || `Track-${song.id}.mp3`;
-    const displayName = serverDownloadDisplayName(song, remoteName);
+    const displayName = serverDownloadDisplayName(song, remoteName, preferredTitles.get(String(song.id)));
     const remoteModified = song.modified_at || song.modified_utc || null;
     const expectedSize = Number(song.size);
     const expectedSHA256 = catalogSHA256(song);
@@ -3298,13 +3331,54 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
         alreadyDownloaded = false;
       }
     }
-    if (alreadyDownloaded) {
-      completed += 1;
-      event.sender.send("server:transfer-progress", { direction: "download", currentFile: displayName, completed, total: songs.length, autoHide: false });
-      // Skip only this song. The rest of a Download All batch must still run.
-      continue;
-    }
-    event.sender.send("server:transfer-progress", { direction: "download", currentFile: displayName, completed, total: songs.length, autoHide: false });
+    if (alreadyDownloaded) continue;
+    pendingDownloads.push({
+      song,
+      remoteName,
+      displayName,
+      remoteModified,
+      expectedSize,
+      expectedSHA256,
+      savedSourceURL,
+      mediaLocation,
+      matching,
+    });
+  }
+
+  let completed = 0;
+  for (const [pendingIndex, pending] of pendingDownloads.entries()) {
+    signal.throwIfAborted();
+    const {
+      song,
+      remoteName,
+      displayName,
+      remoteModified,
+      expectedSize,
+      expectedSHA256,
+      savedSourceURL,
+      mediaLocation,
+      matching,
+    } = pending;
+    const itemIndex = pendingIndex + 1;
+    const itemCount = pendingDownloads.length;
+    let itemCompletedBytes = 0;
+    let itemTotalBytes = Number.isSafeInteger(expectedSize) && expectedSize > 0 ? expectedSize : 0;
+    const publishProgress = createServerDownloadProgressPublisher((progressEvent) => {
+      if (!serverTransferIsActive(event, controller, transferGeneration)) return;
+      event.sender.send("server:transfer-progress", progressEvent);
+    });
+    const progressEvent = (overrides = {}) => serverDownloadProgressEvent({
+      song,
+      preferredTitle: displayName,
+      itemIndex,
+      itemCount,
+      completedBytes: itemCompletedBytes,
+      totalBytes: itemTotalBytes,
+      completedItems: completed,
+      ...overrides,
+    });
+    publishProgress(progressEvent(), { force: true });
+    let itemSucceeded = false;
     try {
       if (savedSourceURL) {
         const downloadedTrack = await downloadSavedSourceSong(song, {
@@ -3313,20 +3387,25 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
           destinationDirectory: paths.remote,
           serverOrigin: base.origin,
           profileID: profileID || "default",
-          onProgress: (progress) => event.sender.send("server:transfer-progress", {
-            direction: "download",
-            currentFile: displayName,
-            completed,
-            total: songs.length,
-            autoHide: false,
-          }),
+          onProgress: (progress) => {
+            if (progress?.stage === "downloading") {
+              itemCompletedBytes = Math.max(0, Number(progress.completed) || 0);
+              itemTotalBytes = Math.max(0, Number(progress.total) || 0);
+            }
+            publishProgress(progressEvent());
+          },
         });
         if (matching?.id || existing.some((item) => item.id === downloadedTrack.id)) {
           replacedTrackIDs.push(matching?.id || downloadedTrack.id);
         }
         downloaded.push(downloadedTrack);
+        itemSucceeded = true;
         completed += 1;
-        event.sender.send("server:transfer-progress", { direction: "download", currentFile: displayName, completed, total: songs.length, autoHide: false });
+        publishProgress(progressEvent({
+          completedBytes: itemTotalBytes || 1,
+          totalBytes: itemTotalBytes || 1,
+          completedItems: completed,
+        }), { force: true });
         continue;
       }
       let fileURL = sameOriginServerMediaURL(mediaLocation?.download_url || song.download_url, base, "download");
@@ -3368,6 +3447,11 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
               expectedSize,
               expectedSHA256,
               maximumBytes: MAX_SERVER_MEDIA_BYTES,
+              onProgress: (progress) => {
+                itemCompletedBytes = Math.max(0, Number(progress.completed) || 0);
+                itemTotalBytes = Math.max(0, Number(progress.total) || 0);
+                publishProgress(progressEvent());
+              },
             });
             downloadedSize = downloadedFile.size;
             downloadedSHA256 = downloadedFile.sha256;
@@ -3402,13 +3486,15 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
         }
       }, {
         signal,
-        onRetry: ({ nextAttempt }) => event.sender.send("server:transfer-progress", {
-          direction: "download",
-          currentFile: `Retrying ${displayName} (${nextAttempt}/${SERVER_DOWNLOAD_ATTEMPTS})`,
-          completed,
-          total: songs.length,
-          autoHide: false,
-        }),
+        onRetry: ({ nextAttempt }) => {
+          itemCompletedBytes = 0;
+          publishProgress(progressEvent({
+            completedBytes: 0,
+            totalBytes: itemTotalBytes,
+            completedItems: completed,
+            title: `Retrying download (${nextAttempt}/${SERVER_DOWNLOAD_ATTEMPTS})`,
+          }), { force: true });
+        },
       });
       if (matching?.id) replacedTrackIDs.push(matching.id);
       downloaded.push(await enrichedTrack(destination, {
@@ -3430,6 +3516,7 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
           ? matching.preservesUnlinkedImport
           : false,
       }));
+      itemSucceeded = true;
     } catch (error) {
       if (error?.name === "AbortError") throw error;
       if (error instanceof OfflineDownloadPolicyError) throw error;
@@ -3443,7 +3530,11 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
       });
     }
     completed += 1;
-    event.sender.send("server:transfer-progress", { direction: "download", currentFile: displayName, completed, total: songs.length, autoHide: false });
+    publishProgress(progressEvent({
+      completedBytes: itemSucceeded ? (itemTotalBytes || 1) : itemCompletedBytes,
+      totalBytes: itemTotalBytes || (itemSucceeded ? 1 : 0),
+      completedItems: completed,
+    }), { force: true });
   }
   return { catalog, downloaded, replacedTrackIDs, failed };
   } catch (error) {

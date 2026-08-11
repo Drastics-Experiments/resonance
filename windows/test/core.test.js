@@ -46,11 +46,14 @@ import {
   remoteAssociationConflictMessage,
   remoteSongMetadataCacheKey,
   serverSongMetadataMatches,
+  serverCatalogAuthorityIsCurrent,
+  serverCatalogAuthoritySnapshot,
   reconcileServerBackedTrackDuplicates,
   reconcileUploadedTrack,
   reorderPlaylistEntries,
   reorderPlaylistTrackIDs,
   removeClipRangeForTrack,
+  removeLibraryTracksFromPlaylists,
   restoreProfileState,
   resolveSyncProfile,
   serverUploadBlockedByActivity,
@@ -59,6 +62,7 @@ import {
   serverSongRequiresDownload,
   serverSourceDisplayFallback,
   serverSourceNeedsOriginalPage,
+  serverTransferProgressPresentation,
   shuffledTrackIDs,
   storeActiveProfileState,
   setClipRangeForTrack,
@@ -78,7 +82,13 @@ import discordRPC from "../discord-rpc.cjs";
 
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = updaterFeed;
 const { isManagedLibraryFile } = libraryPaths;
-const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload, serverDownloadDisplayName } = serverDownload;
+const {
+  SERVER_DOWNLOAD_ATTEMPTS,
+  createServerDownloadProgressPublisher,
+  retryServerDownload,
+  serverDownloadDisplayName,
+  serverDownloadProgressEvent,
+} = serverDownload;
 const { discordArtworkURL, sanitizeDiscordActivity } = discordRPC;
 
 test("playlist artwork uses only the first four custom-playlist songs", () => {
@@ -559,6 +569,23 @@ test("rejects stale same-context catalog responses after an upload mutates the c
     currentGeneration: 4,
     contextCurrent: false,
   }), false);
+});
+
+test("catalog authority is scoped to the exact catalog generation, server, profile, and token", () => {
+  const context = {
+    generation: 7,
+    profileID: "profile-a",
+    serverKey: "https://music.example/",
+    token: "token-a",
+  };
+  const authority = serverCatalogAuthoritySnapshot(context, 11);
+  assert.equal(serverCatalogAuthorityIsCurrent(authority, context, 11), true);
+  assert.equal(serverCatalogAuthorityIsCurrent(authority, { ...context, generation: 8 }, 11), false);
+  assert.equal(serverCatalogAuthorityIsCurrent(authority, { ...context, profileID: "profile-b" }, 11), false);
+  assert.equal(serverCatalogAuthorityIsCurrent(authority, { ...context, serverKey: "https://other.example/" }, 11), false);
+  assert.equal(serverCatalogAuthorityIsCurrent(authority, { ...context, token: "token-b" }, 11), false);
+  assert.equal(serverCatalogAuthorityIsCurrent(authority, context, 12), false);
+  assert.equal(serverCatalogAuthorityIsCurrent(null, context, 11), false);
 });
 
 test("moves fullscreen titles only by their rendered overflow", () => {
@@ -2189,9 +2216,8 @@ test("guards profile transitions, authenticated downloads, persistence, and tran
   assert.match(syncSource, /sameOriginServerMediaURL\(mediaLocation\?\.download_url \|\| song\.download_url/);
   assert.match(syncSource, /redirect: "manual"/);
   assert.match(syncSource, /syncProfileID \|\| "default"\) === \(profileID \|\| "default"\)/);
-  const alreadyDownloadedBranch = syncSource.match(/if \(alreadyDownloaded\) \{([\s\S]*?)\n    \}/)?.[1] || "";
-  assert.match(alreadyDownloadedBranch, /continue;/);
-  assert.doesNotMatch(alreadyDownloadedBranch, /return/);
+  assert.match(syncSource, /if \(alreadyDownloaded\) continue;/);
+  assert.doesNotMatch(syncSource, /if \(alreadyDownloaded\) return/);
   assert.match(syncSource, /writeResponseToFile\(response, temporary/);
   assert.doesNotMatch(syncSource, /response\.arrayBuffer\(\)/);
   assert.doesNotMatch(uploadSource, /createReadStream\(filePath\)|duplex: "half"/);
@@ -2259,6 +2285,7 @@ test("retries individual server downloads and reports every song that still fail
   const packageJSON = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const syncSource = mainSource.slice(mainSource.indexOf('ipcMain.handle("server:sync"'), mainSource.indexOf('ipcMain.handle("server:upload"'));
   assert.match(syncSource, /retryServerDownload/);
+  assert.match(syncSource, /const pendingDownloads = \[\][\s\S]+if \(alreadyDownloaded\) continue;[\s\S]+itemCount = pendingDownloads\.length/);
   assert.match(syncSource, /failed\.push\(\{/);
   assert.match(syncSource, /return \{ catalog, downloaded, replacedTrackIDs, failed \}/);
   assert.match(appSource, /showNotice\(formatServerDownloadFailureNotice\(failedDownloads\)\)/);
@@ -2275,7 +2302,67 @@ test("shows catalog song titles instead of internal server download filenames", 
     "Actual Song Name",
   );
   assert.equal(serverDownloadDisplayName({ title: "  Trimmed Name  " }, "Track-id.mp3"), "Trimmed Name");
-  assert.equal(serverDownloadDisplayName({ name: "Legacy Song" }, "Track-id.mp3"), "Legacy Song");
+  assert.equal(serverDownloadDisplayName({ name: "Track-id.mp3" }, "Track-id.mp3", "Resolved Legacy Song"), "Resolved Legacy Song");
+  assert.equal(serverDownloadDisplayName({ name: "Track-id.mp3" }), "Untitled song");
+
+  assert.deepEqual(serverDownloadProgressEvent({
+    song: { id: "song-a", filename: "5wxQw7ll2TSFbwjaQcoJVB.m4a" },
+    preferredTitle: "Nevada",
+    itemIndex: 3,
+    itemCount: 10,
+    completedBytes: 42,
+    totalBytes: 100,
+    completedItems: 2,
+  }), {
+    direction: "download",
+    currentFile: "Nevada",
+    completed: 2,
+    total: 10,
+    itemCompleted: 42,
+    itemTotal: 100,
+    itemIndex: 3,
+    itemCount: 10,
+    title: undefined,
+    autoHide: false,
+  });
+  assert.deepEqual(
+    serverTransferProgressPresentation({
+      completed: 7,
+      total: 10,
+      itemCompleted: 42,
+      itemTotal: 100,
+      itemIndex: 3,
+      itemCount: 10,
+    }),
+    { ratio: 0.42, counter: "3/10", label: "42% · 3/10" },
+  );
+  assert.equal(serverTransferProgressPresentation({
+    completed: 7,
+    total: 10,
+    itemCompleted: 0,
+    itemTotal: 100,
+    itemIndex: 4,
+    itemCount: 10,
+  }).ratio, 0);
+});
+
+test("throttles current-song progress while always publishing its initial and final values", () => {
+  let timestamp = 0;
+  const published = [];
+  const publish = createServerDownloadProgressPublisher((event) => published.push(event.itemCompleted), {
+    now: () => timestamp,
+    minimumInterval: 100,
+  });
+  const event = (itemCompleted) => ({ itemCompleted, itemTotal: 1_000 });
+
+  assert.equal(publish(event(0)), true);
+  timestamp = 10;
+  assert.equal(publish(event(100)), false);
+  timestamp = 100;
+  assert.equal(publish(event(200)), true);
+  timestamp = 101;
+  assert.equal(publish(event(1_000)), true);
+  assert.deepEqual(published, [0, 200, 1_000]);
 });
 
 test("replaces stale synced tracks instead of discarding the fresh download", () => {
@@ -2672,6 +2759,152 @@ test("playlist presentation includes undownloaded server songs in order", () => 
   assert.equal(entries[2].title, "Server-only song");
   assert.equal(entries[2].available, false);
   assert.equal(entries[2].playlistUnavailable, true);
+});
+
+test("removing a download keeps its server playlist slot until the server song is gone", () => {
+  const state = createEmptyState();
+  const kept = {
+    id: "downloaded-a",
+    title: "Downloaded A",
+    remoteID: "remote-a",
+    sourceServer: state.serverURL,
+    syncProfileID: "default",
+  };
+  const local = { id: "local", title: "Local" };
+  state.tracks = [kept, local];
+  const playlist = {
+    id: "shared",
+    name: "Shared",
+    trackIDs: [local.id, kept.id],
+    remoteSongIDs: [kept.remoteID],
+    entryOrder: ["local:local", "remote:remote-a"],
+    isSystem: false,
+  };
+  state.playlists.push(playlist);
+
+  const preserved = removeLibraryTracksFromPlaylists(state, new Set([kept.id]), [{
+    id: kept.remoteID,
+    title: "Downloaded A",
+  }], { catalogIsAuthoritative: true });
+  assert.deepEqual(playlist.trackIDs, [local.id]);
+  assert.deepEqual(playlist.remoteSongIDs, [kept.remoteID]);
+  assert.deepEqual(playlist.entryOrder, ["local:local", "remote:remote-a"]);
+  assert.deepEqual(preserved.remoteMembershipChangedPlaylistIDs, []);
+  state.tracks = [local];
+  assert.deepEqual(tracksForPlaylist(state, playlist.id, [{ id: kept.remoteID, title: "Downloaded A" }])
+    .map((track) => track.id), [local.id, `playlist-remote:${kept.remoteID}`]);
+
+  const missing = {
+    id: "downloaded-b",
+    title: "Downloaded B",
+    remoteID: "remote-b",
+    sourceServer: state.serverURL,
+    syncProfileID: "default",
+  };
+  state.tracks.push(missing);
+  playlist.trackIDs.push(missing.id);
+  playlist.remoteSongIDs.push(missing.remoteID);
+  playlist.entryOrder.push("remote:remote-b");
+  const unavailableCatalog = removeLibraryTracksFromPlaylists(state, [missing.id], []);
+  assert.deepEqual(playlist.remoteSongIDs, [kept.remoteID, missing.remoteID]);
+  assert.deepEqual(playlist.entryOrder, ["local:local", "remote:remote-a", "remote:remote-b"]);
+  assert.deepEqual(unavailableCatalog.remoteMembershipChangedPlaylistIDs, []);
+
+  playlist.trackIDs.push(missing.id);
+  const removed = removeLibraryTracksFromPlaylists(
+    state,
+    [missing.id],
+    [{ id: kept.remoteID }],
+    { catalogIsAuthoritative: true },
+  );
+  assert.deepEqual(playlist.remoteSongIDs, [kept.remoteID]);
+  assert.deepEqual(playlist.entryOrder, ["local:local", "remote:remote-a"]);
+  assert.deepEqual(removed.remoteMembershipChangedPlaylistIDs, [playlist.id]);
+});
+
+test("library removal mutates only the deleted raw entry-order token", () => {
+  const state = createEmptyState();
+  const removed = { id: "X", title: "Local X" };
+  state.tracks = [removed];
+  const playlist = {
+    id: "raw-order",
+    name: "Raw order",
+    trackIDs: [removed.id],
+    remoteSongIDs: ["A", "B"],
+    entryOrder: ["remote:B", "local:X", "remote:A"],
+    isSystem: false,
+  };
+  state.playlists.push(playlist);
+
+  const result = removeLibraryTracksFromPlaylists(
+    state,
+    [removed.id],
+    [{ id: "A" }, { id: "B" }],
+    { catalogIsAuthoritative: true },
+  );
+
+  assert.deepEqual(playlist.remoteSongIDs, ["A", "B"]);
+  assert.deepEqual(playlist.entryOrder, ["remote:B", "remote:A"]);
+  assert.deepEqual(result.remoteMembershipChangedPlaylistIDs, []);
+});
+
+test("library removal appends a newly converted remote membership without reordering existing IDs", () => {
+  const state = createEmptyState();
+  const downloaded = {
+    id: "downloaded-c",
+    title: "Downloaded C",
+    remoteID: "C",
+    sourceServer: state.serverURL,
+    syncProfileID: "default",
+  };
+  state.tracks = [downloaded];
+  const playlist = {
+    id: "converted-order",
+    name: "Converted order",
+    trackIDs: [downloaded.id],
+    remoteSongIDs: ["A", "B"],
+    entryOrder: ["remote:B", "local:downloaded-c", "remote:A"],
+    isSystem: false,
+  };
+  state.playlists.push(playlist);
+
+  const result = removeLibraryTracksFromPlaylists(
+    state,
+    [downloaded.id],
+    [{ id: "A" }, { id: "B" }, { id: "C" }],
+    { catalogIsAuthoritative: true },
+  );
+
+  assert.deepEqual(playlist.remoteSongIDs, ["A", "B", "C"]);
+  assert.deepEqual(playlist.entryOrder, ["remote:B", "remote:C", "remote:A"]);
+  assert.deepEqual(result.remoteMembershipChangedPlaylistIDs, [playlist.id]);
+});
+
+test("library removal does not synthesize legacy remote membership from an unproven catalog", () => {
+  const state = createEmptyState();
+  const downloaded = {
+    id: "downloaded-c",
+    title: "Downloaded C",
+    remoteID: "C",
+    sourceServer: state.serverURL,
+    syncProfileID: "default",
+  };
+  state.tracks = [downloaded];
+  const playlist = {
+    id: "unproven-conversion",
+    name: "Unproven conversion",
+    trackIDs: [downloaded.id],
+    remoteSongIDs: ["A", "B"],
+    entryOrder: ["remote:B", "local:downloaded-c", "remote:A"],
+    isSystem: false,
+  };
+  state.playlists.push(playlist);
+
+  const result = removeLibraryTracksFromPlaylists(state, [downloaded.id], []);
+
+  assert.deepEqual(playlist.remoteSongIDs, ["A", "B"]);
+  assert.deepEqual(playlist.entryOrder, ["remote:B", "remote:A"]);
+  assert.deepEqual(result.remoteMembershipChangedPlaylistIDs, []);
 });
 
 test("mixed playlist reorders and persists undownloaded server entries", () => {

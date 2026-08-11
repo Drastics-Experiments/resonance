@@ -81,8 +81,8 @@ private struct PlayerAwareTab<Content: View>: View {
                 }
             }
 
-            if library.isDownloading || library.isUploading {
-                ServerTransferPopup()
+            if let transfer = library.transferDisplay {
+                ServerTransferPopup(transfer: transfer)
                     .padding(.horizontal, 20)
                     .padding(.bottom, library.currentTrack == nil ? 12 : 82)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -96,7 +96,7 @@ private struct PlayerAwareTab<Content: View>: View {
             }
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
-        .animation(.easeInOut(duration: 0.22), value: library.isDownloading || library.isUploading)
+        .animation(.easeInOut(duration: 0.22), value: library.transferDisplay)
         .animation(.easeInOut(duration: 0.22), value: library.transferNotice)
     }
 }
@@ -1451,7 +1451,7 @@ private struct ServerView: View {
                             }
                         }
                         .buttonStyle(.plain)
-                        .disabled(library.isSyncing || library.isUploading || library.isSyncingPlaylists)
+                        .disabled(library.isSyncing || library.isTransferBusy || library.isSyncingPlaylists)
                         .accessibilityLabel("Refresh server")
                     }
                     .padding(.bottom, 8)
@@ -1570,7 +1570,7 @@ private struct ServerView: View {
                 .padding(.bottom, 24)
             }
             .refreshable {
-                guard !library.isSyncing, !library.isUploading else { return }
+                guard !library.isSyncing, !library.isTransferBusy else { return }
                 await library.refreshCatalog()
             }
             .scrollDismissesKeyboard(.interactively)
@@ -1589,7 +1589,7 @@ private struct ServerView: View {
             guard hasServer,
                   hasAccessToken || hasAdminToken,
                   !library.isSyncing,
-                  !library.isUploading,
+                  !library.isTransferBusy,
                   !library.isSyncingPlaylists else { return }
             if hasAccessToken {
                 await library.refreshCatalog()
@@ -1659,7 +1659,7 @@ private struct ServerView: View {
                 symbol: "tray.and.arrow.down",
                 label: library.activeDownloadMode == .streamOnly ? "Tap a Song" : "Download",
                 isDisabled: library.isSyncing
-                    || library.isUploading
+                    || library.isTransferBusy
                     || library.activeDownloadMode == nil
                     || library.activeDownloadMode == .streamOnly
                     || (isSelecting && library.selectedRemoteSongIDs.isEmpty)
@@ -1680,7 +1680,7 @@ private struct ServerView: View {
                 symbol: "checklist",
                 label: isSelecting ? "\(library.selectedRemoteSongIDs.count) Selected" : "Select",
                 isDisabled: library.isSyncing
-                    || library.isUploading
+                    || library.isTransferBusy
                     || library.activeDownloadMode == .streamOnly
                     || library.activeDownloadMode == nil
             ) {
@@ -1890,36 +1890,42 @@ private struct ServerActionButtonStyle: ButtonStyle {
 
 private struct ServerTransferPopup: View {
     @Environment(\.resonancePalette) private var palette
-    @EnvironmentObject private var library: MusicLibrary
-
-    private var progress: Double {
-        if library.isUploading { return library.uploadProgress }
-        return library.downloadProgress
-    }
+    let transfer: MobileTransferDisplayState
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: library.isUploading ? "arrow.up" : "arrow.down")
+            Image(systemName: transfer.kind.symbol)
                 .font(.subheadline.weight(.bold))
                 .foregroundStyle(palette.foregroundAccent)
                 .frame(width: 36, height: 36)
                 .background(palette.secondary.opacity(0.13), in: Circle())
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(library.isUploading ? "Uploading" : "Downloading")
-                    .font(.caption.weight(.semibold))
-                Text(activeDetail)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Text(transfer.kind.title)
+                        .font(.caption.weight(.semibold))
+                    Spacer(minLength: 4)
+                    Text(transfer.batchPosition)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Text(transfer.songTitle)
+                    .font(.caption.weight(.medium))
                     .lineLimit(1)
-                ProgressView(value: progress).tint(palette.foregroundAccent)
+                if let progress = transfer.progress {
+                    ProgressView(value: progress)
+                        .tint(palette.foregroundAccent)
+                } else {
+                    ProgressView()
+                        .tint(palette.foregroundAccent)
+                }
             }
 
-            Spacer(minLength: 4)
-
-            Text("\(Int(progress * 100))%")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+            if let progress = transfer.progress {
+                Text("\(Int(progress * 100))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(13)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -1939,11 +1945,9 @@ private struct ServerTransferPopup: View {
             .allowsHitTesting(false)
         }
         .shadow(color: .black.opacity(0.28), radius: 18, y: 8)
-    }
-
-    private var activeDetail: String {
-        if library.isUploading { return library.uploadDetail }
-        return library.downloadDetail
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(transfer.kind.title) \(transfer.songTitle), \(transfer.batchPosition)")
+        .accessibilityValue(transfer.detail)
     }
 }
 
@@ -2266,6 +2270,7 @@ private struct ServerSongRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .disabled(primaryActionIsDisabled)
             .accessibilityLabel(
                 showsMetadataPlaceholder
                     ? "Loading server song metadata"
@@ -2285,8 +2290,10 @@ private struct ServerSongRow: View {
                             remoteActionTitle,
                             systemImage: remoteActionSymbol
                         ) { Task { await library.download(song) } }
+                            .disabled(remoteTransferIsDisabled)
                     }
                     Button("Delete from Server", systemImage: "trash", role: .destructive, action: onDelete)
+                        .disabled(library.isTransferBusy)
                 }
             }
         }
@@ -2297,8 +2304,20 @@ private struct ServerSongRow: View {
         if let localTrack {
             library.play(localTrack)
         } else {
+            guard !library.isTransferBusy else { return }
             Task { await library.download(song) }
         }
+    }
+
+    private var primaryActionIsDisabled: Bool {
+        guard !isSelecting, localTrack == nil else { return false }
+        return remoteTransferIsDisabled
+    }
+
+    private var remoteTransferIsDisabled: Bool {
+        if library.isTransferBusy || library.activeDownloadMode == nil { return true }
+        return library.activeDownloadMode == .streamOnly
+            && MobileAuthenticatedStreamPolicy.normalizedAudioMIMEType(song.contentType) == nil
     }
 
     private var remoteActionTitle: String {

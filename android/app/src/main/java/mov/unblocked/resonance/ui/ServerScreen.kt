@@ -513,8 +513,17 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
     val isUploading = state.isUploading
     val progress = (if (isUploading) state.uploadProgress else state.downloadProgress)
         .coerceIn(0f, 1f)
-    val title = if (isUploading) "Uploading" else "Downloading"
-    val detail = if (isUploading) state.uploadDetail else state.downloadDetail
+    val counter = if (
+        !isUploading && state.downloadCurrentItem > 0 && state.downloadTotalItems > 0
+    ) {
+        "${state.downloadCurrentItem}/${state.downloadTotalItems}"
+    } else null
+    val title = if (isUploading) "Uploading" else listOfNotNull("Downloading", counter).joinToString(" • ")
+    val detail = if (isUploading) {
+        state.uploadDetail
+    } else {
+        state.downloadCurrentTitle ?: state.downloadDetail
+    }
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -551,6 +560,18 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
             modifier = Modifier.fillMaxWidth(),
             color = MaterialTheme.colorScheme.secondary,
         )
+        if (!isUploading) {
+            val totalBytes = state.downloadTotalBytes?.takeIf { it > 0L }
+            Text(
+                if (totalBytes != null) {
+                    "${formatBytes(state.downloadBytesTransferred)} / ${formatBytes(totalBytes)}"
+                } else {
+                    "${formatBytes(state.downloadBytesTransferred)} downloaded"
+                },
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f),
+            )
+        }
     }
 }
 

@@ -322,6 +322,46 @@ enum MobileCatalogRefreshFailurePolicy {
     }
 }
 
+struct MobileFullCatalogAuthoritySnapshot: Equatable, Sendable {
+    let context: MobileServerContext
+    let requestGeneration: UInt64
+    let songIDs: Set<String>
+}
+
+enum MobileFullCatalogAuthorityPolicy {
+    static func completedFetch(
+        context: MobileServerContext?,
+        requestGeneration: UInt64,
+        currentRequestGeneration: UInt64,
+        credentialIsCurrent: Bool,
+        catalogMutationGenerationUnchanged: Bool,
+        hasPendingCatalogMerges: Bool,
+        songIDs: Set<String>
+    ) -> MobileFullCatalogAuthoritySnapshot? {
+        guard let context,
+              requestGeneration == currentRequestGeneration,
+              credentialIsCurrent,
+              catalogMutationGenerationUnchanged,
+              !hasPendingCatalogMerges else { return nil }
+        return MobileFullCatalogAuthoritySnapshot(
+            context: context,
+            requestGeneration: requestGeneration,
+            songIDs: songIDs
+        )
+    }
+
+    static func songIDsIfCurrent(
+        _ snapshot: MobileFullCatalogAuthoritySnapshot?,
+        context: MobileServerContext?,
+        requestGeneration: UInt64
+    ) -> Set<String>? {
+        guard let snapshot,
+              snapshot.context == context,
+              snapshot.requestGeneration == requestGeneration else { return nil }
+        return snapshot.songIDs
+    }
+}
+
 enum MobileUnlinkedDownloadMigrationPolicy {
     static let identifier = "delete-unlinked-downloads-v1"
 
@@ -1173,6 +1213,90 @@ enum MobilePlaylistPresentationEntryID: Hashable {
     }
 }
 
+struct MobileTransferDisplayState: Equatable, Sendable {
+    enum Kind: String, Equatable, Sendable {
+        case download
+        case upload
+
+        var title: String {
+            switch self {
+            case .download: "Downloading"
+            case .upload: "Uploading"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .download: "arrow.down"
+            case .upload: "arrow.up"
+            }
+        }
+    }
+
+    let kind: Kind
+    let itemID: String
+    let songTitle: String
+    let detail: String
+    let currentItem: Int
+    let totalItems: Int
+    let completedBytes: Int64
+    let totalBytes: Int64
+    let fallbackProgress: Double?
+
+    var progress: Double? {
+        MobileTransferDisplayPolicy.progress(
+            completedBytes: completedBytes,
+            totalBytes: totalBytes,
+            fallbackProgress: fallbackProgress
+        )
+    }
+
+    var batchPosition: String {
+        guard totalItems > 0 else { return "0/0" }
+        return "\(min(max(currentItem, 1), totalItems))/\(totalItems)"
+    }
+}
+
+enum MobileTransferDisplayPolicy {
+    static func progress(
+        completedBytes: Int64,
+        totalBytes: Int64,
+        fallbackProgress: Double?
+    ) -> Double? {
+        if totalBytes > 0 {
+            return min(max(Double(max(completedBytes, 0)) / Double(totalBytes), 0), 1)
+        }
+        guard let fallbackProgress, fallbackProgress.isFinite else { return nil }
+        return min(max(fallbackProgress, 0), 1)
+    }
+}
+
+enum MobileTransferSessionPolicy {
+    static func canBegin(activeSessionID: UUID?) -> Bool {
+        activeSessionID == nil
+    }
+
+    static func accepts(_ sessionID: UUID, activeSessionID: UUID?) -> Bool {
+        sessionID == activeSessionID
+    }
+
+    static func acceptsOperation(
+        sessionID: UUID,
+        operationID: UUID,
+        activeSessionID: UUID?,
+        activeOperationID: UUID?
+    ) -> Bool {
+        accepts(sessionID, activeSessionID: activeSessionID)
+            && operationID == activeOperationID
+    }
+}
+
+enum MobileBoundedDownloadCallbackPolicy {
+    static func acceptsResponse(isFinished: Bool) -> Bool {
+        !isFinished
+    }
+}
+
 struct MobilePlaylistPresentationEntry: Identifiable, Hashable {
     let id: MobilePlaylistPresentationEntryID
     let track: MobileTrack?
@@ -1220,6 +1344,207 @@ enum MobilePlaylistPresentationMovePolicy {
             remoteSongIDs: entries.compactMap(\.remoteSongID),
             entryOrder: entries.map { $0.id.storageKey }
         )
+    }
+}
+
+struct MobileLocalTrackRemovalPlaylistResult: Equatable {
+    let playlist: MobilePlaylist
+    let remoteMembershipChanged: Bool
+}
+
+enum MobileLocalTrackRemoteBackingAuthority: Equatable {
+    case unproven
+    case confirmedPresent
+    case confirmedAbsent
+}
+
+struct MobileLocalTrackRemovalRemoteBacking: Equatable {
+    let remoteSongID: String?
+    let authority: MobileLocalTrackRemoteBackingAuthority
+}
+
+enum MobileLocalTrackRemovalAuthorityPolicy {
+    static func resolve(
+        track: MobileTrack,
+        activeContext: MobileServerContext?,
+        catalogIsAuthoritative: Bool,
+        catalogRemoteSongIDs: Set<String>
+    ) -> MobileLocalTrackRemovalRemoteBacking {
+        guard let remoteSongID = track.remoteID,
+              let activeContext,
+              track.remoteIdentity() == MobileRemoteIdentity(
+                  context: activeContext,
+                  remoteID: remoteSongID
+              ) else {
+            return MobileLocalTrackRemovalRemoteBacking(
+                remoteSongID: nil,
+                authority: .unproven
+            )
+        }
+        guard catalogIsAuthoritative else {
+            return MobileLocalTrackRemovalRemoteBacking(
+                remoteSongID: remoteSongID,
+                authority: .unproven
+            )
+        }
+        return MobileLocalTrackRemovalRemoteBacking(
+            remoteSongID: remoteSongID,
+            authority: catalogRemoteSongIDs.contains(remoteSongID)
+                ? .confirmedPresent
+                : .confirmedAbsent
+        )
+    }
+}
+
+enum MobileLocalTrackRemovalPlaylistPolicy {
+    static func removing(
+        trackID: UUID,
+        remoteSongID: String?,
+        remoteBackingAuthority: MobileLocalTrackRemoteBackingAuthority,
+        from playlist: MobilePlaylist,
+        presentationOrder: [MobilePlaylistPresentationEntryID]
+    ) -> MobileLocalTrackRemovalPlaylistResult {
+        guard playlist.trackIDs.contains(trackID) else {
+            return MobileLocalTrackRemovalPlaylistResult(
+                playlist: playlist,
+                remoteMembershipChanged: false
+            )
+        }
+
+        var updated = playlist
+        updated.trackIDs.removeAll { $0 == trackID }
+        guard !playlist.isSystem else {
+            return MobileLocalTrackRemovalPlaylistResult(
+                playlist: updated,
+                remoteMembershipChanged: false
+            )
+        }
+
+        let previousRemoteIDs = playlist.remoteSongIDs
+        let localEntry = MobilePlaylistPresentationEntryID.local(trackID)
+        let storedOrder = playlist.entryOrder ?? presentationOrder.map(\.storageKey)
+        guard let remoteSongID else {
+            updated.entryOrder = removing(localEntry, from: storedOrder)
+            return MobileLocalTrackRemovalPlaylistResult(
+                playlist: updated,
+                remoteMembershipChanged: false
+            )
+        }
+
+        let remoteEntry = MobilePlaylistPresentationEntryID.remote(remoteSongID)
+        switch remoteBackingAuthority {
+        case .confirmedPresent:
+            let promotedOrder = promoting(
+                localEntry: localEntry,
+                to: remoteEntry,
+                in: storedOrder,
+                appendIfMissing: true
+            )
+            updated.entryOrder = promotedOrder
+            var remoteIDs = playlist.remoteSongIDs ?? []
+            if !remoteIDs.contains(remoteSongID) {
+                insert(
+                    remoteSongID,
+                    into: &remoteIDs,
+                    followingOrder: promotedOrder
+                )
+            }
+            updated.remoteSongIDs = remoteIDs
+        case .unproven:
+            // Without an authoritative catalog, deleting a local-only track
+            // must neither create nor relocate server playlist membership.
+            // Preserve any existing canonical remote token exactly as stored.
+            updated.entryOrder = removing(localEntry, from: storedOrder)
+        case .confirmedAbsent:
+            if playlist.remoteSongIDs != nil {
+                updated.remoteSongIDs?.removeAll { $0 == remoteSongID }
+            }
+            updated.entryOrder = removing(
+                [localEntry, remoteEntry],
+                from: storedOrder
+            )
+        }
+
+        return MobileLocalTrackRemovalPlaylistResult(
+            playlist: updated,
+            remoteMembershipChanged: previousRemoteIDs != updated.remoteSongIDs
+        )
+    }
+
+    private static func promoting(
+        localEntry: MobilePlaylistPresentationEntryID,
+        to remoteEntry: MobilePlaylistPresentationEntryID,
+        in storedOrder: [String],
+        appendIfMissing: Bool
+    ) -> [String] {
+        let hasLocalSlot = storedOrder.contains { entryID(for: $0) == localEntry }
+        guard hasLocalSlot else {
+            guard appendIfMissing,
+                  !storedOrder.contains(where: { entryID(for: $0) == remoteEntry }) else {
+                return storedOrder
+            }
+            return storedOrder + [remoteEntry.storageKey]
+        }
+
+        var insertedReplacement = false
+        return storedOrder.compactMap { key in
+            let id = entryID(for: key)
+            if id == localEntry {
+                guard !insertedReplacement else { return nil }
+                insertedReplacement = true
+                return remoteEntry.storageKey
+            }
+            if id == remoteEntry {
+                // Prefer the exact legacy local slot over a reconciled remote
+                // token elsewhere in the raw order.
+                return nil
+            }
+            return key
+        }
+    }
+
+    private static func insert(
+        _ remoteSongID: String,
+        into remoteIDs: inout [String],
+        followingOrder storedOrder: [String]
+    ) {
+        let displayedRemoteIDs = unique(storedOrder.compactMap { key -> String? in
+            guard let entry = entryID(for: key),
+                  case .remote(let id) = entry else { return nil }
+            return id
+        })
+        let displayedIndex = displayedRemoteIDs.firstIndex(of: remoteSongID) ?? displayedRemoteIDs.endIndex
+        let precedingRemoteIDs = displayedRemoteIDs[..<displayedIndex]
+        let insertionIndex = precedingRemoteIDs.reduce(into: 0) { count, id in
+            if remoteIDs.contains(id) { count += 1 }
+        }
+        remoteIDs.insert(remoteSongID, at: min(insertionIndex, remoteIDs.count))
+    }
+
+    private static func removing(
+        _ entry: MobilePlaylistPresentationEntryID,
+        from storedOrder: [String]
+    ) -> [String] {
+        removing([entry], from: storedOrder)
+    }
+
+    private static func removing(
+        _ entries: Set<MobilePlaylistPresentationEntryID>,
+        from storedOrder: [String]
+    ) -> [String] {
+        storedOrder.filter { key in
+            guard let id = entryID(for: key) else { return true }
+            return !entries.contains(id)
+        }
+    }
+
+    private static func entryID(for storageKey: String) -> MobilePlaylistPresentationEntryID? {
+        MobilePlaylistPresentationEntryID(storageKey: storageKey)
+    }
+
+    private static func unique<Element: Hashable>(_ values: [Element]) -> [Element] {
+        var seen = Set<Element>()
+        return values.filter { seen.insert($0).inserted }
     }
 }
 

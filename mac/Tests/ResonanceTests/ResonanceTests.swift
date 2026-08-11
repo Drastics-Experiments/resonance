@@ -1099,6 +1099,307 @@ struct ResonanceTests {
     }
 
     @Test
+    func serverDownloadProgressUsesCurrentSongBytesAndSeparateBatchPosition() {
+        #expect(MacServerDownloadProgressPolicy.fraction(completedBytes: 42, totalBytes: 100) == 0.42)
+        #expect(MacServerDownloadProgressPolicy.fraction(completedBytes: 0, totalBytes: 100) == 0)
+        #expect(MacServerDownloadProgressPolicy.fraction(completedBytes: 120, totalBytes: 100) == 1)
+        #expect(MacServerDownloadProgressPolicy.batchCounter(position: 3, total: 10) == "3/10")
+        #expect(MacServerDownloadProgressPolicy.batchCounter(position: 0, total: 0) == nil)
+    }
+
+    @Test
+    func cachedServerDownloadValidationIsReusableOnlyForTheExactFileSnapshot() {
+        let snapshot = MacServerDownloadFileSnapshot(
+            size: 4_096,
+            modificationDate: Date(timeIntervalSince1970: 100),
+            systemNumber: 7,
+            systemFileNumber: 11
+        )
+        #expect(MacServerDownloadValidationPolicy.isReusable(
+            validated: snapshot,
+            current: snapshot
+        ))
+        #expect(!MacServerDownloadValidationPolicy.isReusable(
+            validated: snapshot,
+            current: MacServerDownloadFileSnapshot(
+                size: 4_097,
+                modificationDate: snapshot.modificationDate,
+                systemNumber: snapshot.systemNumber,
+                systemFileNumber: snapshot.systemFileNumber
+            )
+        ))
+        #expect(!MacServerDownloadValidationPolicy.isReusable(
+            validated: snapshot,
+            current: MacServerDownloadFileSnapshot(
+                size: snapshot.size,
+                modificationDate: snapshot.modificationDate.addingTimeInterval(1),
+                systemNumber: snapshot.systemNumber,
+                systemFileNumber: snapshot.systemFileNumber
+            )
+        ))
+        #expect(!MacServerDownloadValidationPolicy.isReusable(
+            validated: snapshot,
+            current: MacServerDownloadFileSnapshot(
+                size: snapshot.size,
+                modificationDate: snapshot.modificationDate,
+                systemNumber: snapshot.systemNumber,
+                systemFileNumber: 12
+            )
+        ))
+        #expect(!MacServerDownloadValidationPolicy.isReusable(
+            validated: snapshot,
+            current: nil
+        ))
+    }
+
+    @Test
+    func removingDownloadPreservesPlaylistSlotOnlyWhileSongRemainsOnServer() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        model.serverURLString = "https://music.test"
+        let keptRemoteID = "0123456789abcdef01234567"
+        let removedRemoteID = "89abcdef0123456701234567"
+        let kept = Track(
+            title: "Kept server song",
+            artist: "Artist",
+            album: "Album",
+            duration: 120,
+            artwork: .liked,
+            remoteID: keptRemoteID,
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
+        )
+        let missing = Track(
+            title: "Gone server song",
+            artist: "Artist",
+            album: "Album",
+            duration: 120,
+            artwork: .liked,
+            remoteID: removedRemoteID,
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
+        )
+        let local = Track(title: "Local", artist: "Artist", album: "Album", duration: 120, artwork: .liked)
+        let playlist = Playlist(
+            name: "Shared",
+            artwork: .liked,
+            trackIDs: [local.id, kept.id, missing.id],
+            remoteSongIDs: [keptRemoteID, removedRemoteID],
+            entryOrder: [
+                "local:\(local.id.uuidString.lowercased())",
+                "remote:\(keptRemoteID)",
+                "remote:\(removedRemoteID)",
+            ]
+        )
+        model.tracks = [local, kept, missing]
+        model.playlists = [.library(), playlist]
+        model.remoteSongs = [try JSONDecoder().decode(RemoteSong.self, from: Data(
+            """
+            {
+              "id": "\(keptRemoteID)",
+              "title": "Kept server song",
+              "artist": "Artist",
+              "download_url": "/api/v1/songs/\(keptRemoteID)/file",
+              "stream_url": "/api/v1/songs/\(keptRemoteID)/stream"
+            }
+            """.utf8
+        ))]
+        model.remoteCatalogIsAuthoritative = true
+
+        model.removeTrackFromLibrary(kept)
+        var updated = try #require(model.playlists.first { $0.id == playlist.id })
+        #expect(updated.trackIDs == [local.id, missing.id])
+        #expect(updated.remoteSongIDs == [keptRemoteID, removedRemoteID])
+        #expect(updated.entryOrder == playlist.entryOrder)
+        #expect(model.playlistEntries(in: updated).map(\.id) == [
+            .local(local.id),
+            .remote(keptRemoteID),
+            .remote(removedRemoteID),
+        ])
+
+        model.removeTrackFromLibrary(missing)
+        updated = try #require(model.playlists.first { $0.id == playlist.id })
+        #expect(updated.trackIDs == [local.id])
+        #expect(updated.remoteSongIDs == [keptRemoteID])
+        #expect(updated.entryOrder == [
+            "local:\(local.id.uuidString.lowercased())",
+            "remote:\(keptRemoteID)",
+        ])
+    }
+
+    @Test
+    func unavailableCatalogDoesNotRemoveRemotePlaylistMembership() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        model.serverURLString = "https://music.test"
+        let remoteID = "0123456789abcdef01234567"
+        let track = Track(
+            title: "Downloaded",
+            artist: "Artist",
+            album: "Album",
+            duration: 120,
+            artwork: .liked,
+            remoteID: remoteID,
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
+        )
+        let playlist = Playlist(
+            name: "Shared",
+            artwork: .liked,
+            trackIDs: [track.id],
+            remoteSongIDs: [remoteID],
+            entryOrder: ["remote:\(remoteID)"]
+        )
+        model.tracks = [track]
+        model.playlists = [.library(), playlist]
+        model.remoteSongs = []
+        model.remoteCatalogIsAuthoritative = false
+
+        model.removeTrackFromLibrary(track)
+
+        let updated = try #require(model.playlists.first { $0.id == playlist.id })
+        #expect(updated.remoteSongIDs == [remoteID])
+        #expect(updated.entryOrder == ["remote:\(remoteID)"])
+    }
+
+    @Test
+    func catalogAuthorityResetsWhenTheServerOrAccountContextChanges() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        model.serverURLString = "https://music.test"
+        model.remoteCatalogIsAuthoritative = true
+
+        model.serverURLString = "https://other-music.test"
+        #expect(!model.remoteCatalogIsAuthoritative)
+
+        model.remoteCatalogIsAuthoritative = true
+        model.serverToken = "different-access-token"
+        #expect(!model.remoteCatalogIsAuthoritative)
+
+        model.remoteCatalogIsAuthoritative = true
+        model.clearServerCredentials()
+        #expect(!model.remoteCatalogIsAuthoritative)
+    }
+
+    @Test
+    func libraryRemovalPreservesRawPlaylistOrderAndCanonicalRemoteOrder() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        let local = Track(title: "X", artist: "Artist", album: "Album", duration: 120, artwork: .liked)
+        let playlist = Playlist(
+            name: "Raw order",
+            artwork: .liked,
+            trackIDs: [local.id],
+            remoteSongIDs: ["A", "B"],
+            entryOrder: [
+                "remote:B",
+                "local:\(local.id.uuidString.lowercased())",
+                "remote:A",
+            ]
+        )
+        model.tracks = [local]
+        model.playlists = [.library(), playlist]
+
+        model.removeTrackFromLibrary(local)
+
+        let updated = try #require(model.playlists.first { $0.id == playlist.id })
+        #expect(updated.remoteSongIDs == ["A", "B"])
+        #expect(updated.entryOrder == ["remote:B", "remote:A"])
+    }
+
+    @Test
+    func libraryRemovalAppendsConvertedRemoteMembershipWithoutReorderingExistingIDs() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        model.serverURLString = "https://music.test"
+        let downloaded = Track(
+            title: "Downloaded C",
+            artist: "Artist",
+            album: "Album",
+            duration: 120,
+            artwork: .liked,
+            remoteID: "C",
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
+        )
+        let playlist = Playlist(
+            name: "Converted order",
+            artwork: .liked,
+            trackIDs: [downloaded.id],
+            remoteSongIDs: ["A", "B"],
+            entryOrder: [
+                "remote:B",
+                "local:\(downloaded.id.uuidString.lowercased())",
+                "remote:A",
+            ]
+        )
+        model.tracks = [downloaded]
+        model.playlists = [.library(), playlist]
+        model.remoteSongs = [try JSONDecoder().decode(RemoteSong.self, from: Data(
+            """
+            {
+              "id": "C",
+              "title": "Downloaded C",
+              "artist": "Artist",
+              "download_url": "/api/v1/songs/C/file",
+              "stream_url": "/api/v1/songs/C/stream"
+            }
+            """.utf8
+        ))]
+        model.remoteCatalogIsAuthoritative = true
+
+        model.removeTrackFromLibrary(downloaded)
+
+        let updated = try #require(model.playlists.first { $0.id == playlist.id })
+        #expect(updated.remoteSongIDs == ["A", "B", "C"])
+        #expect(updated.entryOrder == ["remote:B", "remote:C", "remote:A"])
+    }
+
+    @Test
+    func libraryRemovalDoesNotSynthesizeMembershipFromAnUnprovenCatalog() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        model.serverURLString = "https://music.test"
+        let downloaded = Track(
+            title: "Downloaded C",
+            artist: "Artist",
+            album: "Album",
+            duration: 120,
+            artwork: .liked,
+            remoteID: "C",
+            sourceServer: "https://music.test",
+            syncProfileID: "default"
+        )
+        let playlist = Playlist(
+            name: "Unproven conversion",
+            artwork: .liked,
+            trackIDs: [downloaded.id],
+            remoteSongIDs: ["A", "B"],
+            entryOrder: [
+                "remote:B",
+                "local:\(downloaded.id.uuidString.lowercased())",
+                "remote:A",
+            ]
+        )
+        model.tracks = [downloaded]
+        model.playlists = [.library(), playlist]
+        model.remoteSongs = []
+        model.remoteCatalogIsAuthoritative = false
+
+        model.removeTrackFromLibrary(downloaded)
+
+        let updated = try #require(model.playlists.first { $0.id == playlist.id })
+        #expect(updated.remoteSongIDs == ["A", "B"])
+        #expect(updated.entryOrder == ["remote:B", "remote:A"])
+    }
+
+    @Test
     func clipEditorPrefersTheExplicitContextMenuSong() throws {
         let current = Track(
             title: "Current", artist: "Artist", album: "Album", duration: 30,

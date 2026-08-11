@@ -51,6 +51,7 @@ import {
   reorderPlaylistEntries,
   resolveServerTransferModes,
   removeClipRangeForTrack,
+  removeLibraryTracksFromPlaylists,
   RESONANCE_ACCOUNT_SERVER_URL,
   resolveSyncProfile,
   restoreProfileState,
@@ -60,8 +61,11 @@ import {
   serverUploadConfigurationError,
   serverTrackRemoteIDBelongsToContext,
   serverSongRequiresDownload,
+  serverCatalogAuthorityIsCurrent,
+  serverCatalogAuthoritySnapshot,
   serverSourceDisplayFallback,
   serverSourceNeedsOriginalPage,
+  serverTransferProgressPresentation,
   serverUploadManifestRetryIDs,
   shuffledTrackIDs,
   storeActiveProfileState,
@@ -179,6 +183,7 @@ let serverSort = "title";
 let serverSelecting = false;
 let serverConnectionText = "Not connected";
 let serverConnected = false;
+let serverCatalogAuthority = null;
 let clientConfig = SAFE_CLIENT_CONFIG;
 let clientConfigRequestGeneration = 0;
 let clientConfigRenewalTimer = null;
@@ -2524,6 +2529,26 @@ function currentProfileContext() {
   };
 }
 
+function resetServerCatalogAuthority() {
+  serverCatalogAuthority = null;
+}
+
+function markServerCatalogAuthoritative(context) {
+  if (!profileContextIsCurrent(context)) return false;
+  serverCatalogAuthority = serverCatalogAuthoritySnapshot(context, serverCatalogGeneration);
+  return true;
+}
+
+function serverCatalogIsAuthoritativeForCurrentContext() {
+  try {
+    const context = currentProfileContext();
+    return profileContextIsCurrent(context)
+      && serverCatalogAuthorityIsCurrent(serverCatalogAuthority, context, serverCatalogGeneration);
+  } catch {
+    return false;
+  }
+}
+
 function currentServerTransferModes() {
   return resolveServerTransferModes({
     state,
@@ -3015,6 +3040,7 @@ function retryPendingServerCatalogMetadata() {
 }
 
 function replaceServerCatalog(songs) {
+  resetServerCatalogAuthority();
   state.remoteSongMetadataCache = normalizedRemoteSongMetadataCache(state.remoteSongMetadataCache);
   serverCatalog = (Array.isArray(songs) ? songs : []).map((song) => {
     const local = activeRemoteTrack(song?.id);
@@ -3477,19 +3503,14 @@ async function deleteStoredTracks(trackIDs) {
     }
   }
   const removed = new Set(deleted.map((track) => track.id));
-  let playlistMembershipChanged = false;
-  state.playlists.filter((playlist) => !playlist.isSystem).forEach((playlist) => {
-    const previousTrackIDs = playlist.trackIDs || [];
-    if (!previousTrackIDs.some((id) => removed.has(id))) return;
-    playlist.trackIDs = previousTrackIDs.filter((id) => !removed.has(id));
-    updatePlaylistRemoteSongIDs(state, playlist);
-    markPlaylistDirty(playlist);
-    playlistMembershipChanged = true;
+  const playlistRemoval = removeLibraryTracksFromPlaylists(state, removed, serverCatalog, {
+    catalogIsAuthoritative: serverCatalogIsAuthoritativeForCurrentContext(),
+  });
+  playlistRemoval.remoteMembershipChangedPlaylistIDs.forEach((playlistID) => {
+    markPlaylistDirty(state.playlists.find((playlist) => playlist.id === playlistID));
   });
   state.tracks = state.tracks.filter((track) => !removed.has(track.id));
   state.favorites = state.favorites.filter((id) => !removed.has(id));
-  state.playlists.filter((playlist) => playlist.isSystem)
-    .forEach((playlist) => { playlist.trackIDs = playlist.trackIDs.filter((id) => !removed.has(id)); });
   activePlaybackQueueIDs = activePlaybackQueueIDs.filter((id) => !removed.has(id));
   activePlaybackSourceQueueIDs = activePlaybackSourceQueueIDs.filter((id) => !removed.has(id));
   state.playbackQueueIDs = [...activePlaybackQueueIDs];
@@ -3509,7 +3530,7 @@ async function deleteStoredTracks(trackIDs) {
   selectedStorageIDs = new Set(failed.map(({ track }) => track.id));
   if (removed.size) {
     await persist();
-    if (playlistMembershipChanged) schedulePlaylistSync();
+    if (playlistRemoval.remoteMembershipChangedPlaylistIDs.length) schedulePlaylistSync();
   }
   render();
   updateChrome();
@@ -5343,6 +5364,7 @@ async function refreshServerCatalogAfterUpload(context) {
       contextCurrent: profileContextIsCurrent(context),
     })) return false;
     replaceServerCatalog(catalog.songs);
+    markServerCatalogAuthoritative(context);
     hydrateServerCatalogArtwork(serverCatalog);
     const count = Number.isFinite(Number(catalog.count)) ? Number(catalog.count) : serverCatalog.length;
     serverConnectionText = `Connected • ${count} song${count === 1 ? "" : "s"}`;
@@ -6196,11 +6218,30 @@ function openAddSongsDialog(playlist) {
   requestAnimationFrame(() => $("#addSongsSearch").focus());
 }
 
-function updateServerTransfer({ direction, currentFile, completed = 0, total = 1, owner = "server", title = null, autoHide = true }) {
+function updateServerTransfer({
+  direction,
+  currentFile,
+  completed = 0,
+  total = 1,
+  itemCompleted,
+  itemTotal,
+  itemIndex,
+  itemCount,
+  owner = "server",
+  title = null,
+  autoHide = true,
+}) {
   if (serverTransferCancelRequested && serverTransferOwner === owner) return;
   const toast = $("#serverTransferToast");
   if (!toast) return;
-  const ratio = total ? Math.min(1, completed / total) : 0;
+  const presentation = serverTransferProgressPresentation({
+    completed,
+    total,
+    ...(itemCompleted === undefined ? {} : { itemCompleted }),
+    ...(itemTotal === undefined ? {} : { itemTotal }),
+    ...(itemIndex === undefined ? {} : { itemIndex }),
+    ...(itemCount === undefined ? {} : { itemCount }),
+  });
   serverTransferActive = true;
   serverTransferOwner = owner;
   toast.hidden = false;
@@ -6208,8 +6249,8 @@ function updateServerTransfer({ direction, currentFile, completed = 0, total = 1
   $("#serverTransferIcon").innerHTML = direction === "upload" ? serverUploadIcon : serverDownloadIcon;
   $("#serverTransferTitle").textContent = title || (direction === "upload" ? "Uploading" : "Downloading");
   $("#serverTransferDetail").textContent = currentFile || "Preparing transfer…";
-  $("#serverTransferProgress").value = ratio;
-  $("#serverTransferPercent").textContent = `${Math.round(ratio * 100)}%`;
+  $("#serverTransferProgress").value = presentation.ratio;
+  $("#serverTransferPercent").textContent = presentation.label;
   if (autoHide && total > 0 && completed >= total) hideServerTransfer(owner);
 }
 
@@ -6322,7 +6363,18 @@ async function serverAction(mode) {
     if (mode !== "catalog") {
       const songIDs = mode === "selected" ? [...selectedRemoteIDs] : null;
       if (mode === "selected" && !songIDs.length) throw new Error("Select one or more songs first.");
-      const result = await api.syncServer({ baseURL: context.serverURL, token: context.token, profileID: context.profileID, existing: state.tracks, songIDs });
+      const selectedSongIDs = songIDs ? new Set(songIDs) : null;
+      const songTitles = Object.fromEntries(serverCatalog
+        .filter((song) => !selectedSongIDs || selectedSongIDs.has(song.id))
+        .map((song) => [song.id, song.title || "Untitled song"]));
+      const result = await api.syncServer({
+        baseURL: context.serverURL,
+        token: context.token,
+        profileID: context.profileID,
+        existing: state.tracks,
+        songIDs,
+        songTitles,
+      });
       if (!profileContextIsCurrent(context)) return;
       catalog = result.catalog;
       transferCancelled = Boolean(result.cancelled || serverTransferCancelRequested);
@@ -6349,7 +6401,9 @@ async function serverAction(mode) {
       serverConnectionText = `Connected • ${catalog.count} song${catalog.count === 1 ? "" : "s"}`;
     }
     if (catalog) {
+      if (!profileContextIsCurrent(context)) return;
       replaceServerCatalog(catalog.songs);
+      markServerCatalogAuthoritative(context);
       serverConnected = true;
       hydrateServerCatalogArtwork(serverCatalog);
       if (section === "server") renderServer();

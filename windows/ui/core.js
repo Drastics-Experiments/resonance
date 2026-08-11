@@ -182,6 +182,24 @@ export function normalizedCrossfadeSeconds(value) {
   return Number.isFinite(seconds) ? Math.max(1, Math.min(12, Math.round(seconds))) : 5;
 }
 
+export function serverTransferProgressPresentation(value = {}) {
+  const usesItemProgress = Object.hasOwn(value, "itemCompleted")
+    || Object.hasOwn(value, "itemTotal")
+    || Object.hasOwn(value, "itemIndex")
+    || Object.hasOwn(value, "itemCount");
+  const completed = Math.max(0, Number(usesItemProgress ? value.itemCompleted : value.completed) || 0);
+  const total = Math.max(0, Number(usesItemProgress ? value.itemTotal : value.total) || 0);
+  const ratio = total > 0 ? Math.min(1, completed / total) : 0;
+  const itemCount = Math.max(0, Math.floor(Number(value.itemCount) || 0));
+  const itemIndex = Math.min(itemCount, Math.max(itemCount ? 1 : 0, Math.floor(Number(value.itemIndex) || 0)));
+  const counter = itemCount ? `${itemIndex}/${itemCount}` : "";
+  return {
+    ratio,
+    counter,
+    label: `${Math.round(ratio * 100)}%${counter ? ` · ${counter}` : ""}`,
+  };
+}
+
 export function crossfadeProgress(remainingSeconds, durationSeconds) {
   const duration = Number(durationSeconds);
   if (!Number.isFinite(duration) || duration <= 0) return 0;
@@ -1481,6 +1499,86 @@ export function playlistEntryKey(playlist, track) {
   return playlistLocalEntryKey(track?.id);
 }
 
+export function removeLibraryTracksFromPlaylists(
+  state,
+  trackIDs,
+  catalog = [],
+  { catalogIsAuthoritative = false } = {},
+) {
+  const requestedIDs = new Set(Array.isArray(trackIDs)
+    ? trackIDs
+    : trackIDs instanceof Set ? [...trackIDs] : []);
+  const removedTracks = (Array.isArray(state?.tracks) ? state.tracks : [])
+    .filter((track) => requestedIDs.has(track?.id));
+  const catalogIDs = new Set((Array.isArray(catalog) ? catalog : [])
+    .map((song) => String(song?.id || "").trim())
+    .filter(Boolean));
+  const affectedPlaylistIDs = [];
+  const remoteMembershipChangedPlaylistIDs = [];
+  const preservedRemoteSongIDs = new Set();
+
+  for (const playlist of Array.isArray(state?.playlists) ? state.playlists : []) {
+    const affectedTracks = removedTracks.filter((track) =>
+      Array.isArray(playlist.trackIDs) && playlist.trackIDs.includes(track.id));
+    if (!affectedTracks.length) continue;
+    affectedPlaylistIDs.push(playlist.id);
+    if (playlist.isSystem) {
+      playlist.trackIDs = playlist.trackIDs.filter((id) => !requestedIDs.has(id));
+      continue;
+    }
+
+    const previousRemoteSongIDs = unique((Array.isArray(playlist.remoteSongIDs) ? playlist.remoteSongIDs : [])
+      .map((id) => String(id || "").trim())
+      .filter(Boolean));
+    let nextRemoteSongIDs = [...previousRemoteSongIDs];
+    let entryKeys = Array.isArray(playlist.entryOrder)
+      ? normalizedPlaylistEntryOrder(playlist.entryOrder)
+      : tracksForPlaylist(state, playlist.id, catalog)
+        .map((entry) => playlistEntryKey(playlist, entry))
+        .filter(Boolean);
+    playlist.trackIDs = playlist.trackIDs.filter((id) => !requestedIDs.has(id));
+    for (const track of affectedTracks) {
+      const localKey = playlistLocalEntryKey(track.id);
+      const remoteID = String(track.remoteID || "").trim();
+      const remoteKey = playlistRemoteEntryKey(remoteID);
+      const isActiveRemote = Boolean(remoteID && trackBelongsToActiveProfile(state, track));
+      const hasCanonicalMembership = Boolean(remoteID && nextRemoteSongIDs.includes(remoteID));
+      const catalogConfirmsMembership = Boolean(
+        isActiveRemote && catalogIsAuthoritative && catalogIDs.has(remoteID),
+      );
+      const isConclusivelyMissing = isActiveRemote
+        && catalogIsAuthoritative
+        && !catalogIDs.has(remoteID);
+      if (isActiveRemote && hasCanonicalMembership && !isConclusivelyMissing) {
+        preservedRemoteSongIDs.add(remoteID);
+        entryKeys = entryKeys.map((key) => key === localKey ? remoteKey : key);
+      } else if (!hasCanonicalMembership && catalogConfirmsMembership) {
+        preservedRemoteSongIDs.add(remoteID);
+        entryKeys = entryKeys.map((key) => key === localKey ? remoteKey : key);
+        nextRemoteSongIDs.push(remoteID);
+      } else {
+        entryKeys = entryKeys.filter((key) => key !== localKey && (!isConclusivelyMissing || key !== remoteKey));
+        if (isConclusivelyMissing) {
+          nextRemoteSongIDs = nextRemoteSongIDs.filter((id) => id !== remoteID);
+        }
+      }
+    }
+    entryKeys = normalizedPlaylistEntryOrder(entryKeys);
+    playlist.remoteSongIDs = nextRemoteSongIDs;
+    playlist.entryOrder = entryKeys;
+    if (playlist.remoteSongIDs.length !== previousRemoteSongIDs.length
+        || playlist.remoteSongIDs.some((id, index) => id !== previousRemoteSongIDs[index])) {
+      remoteMembershipChangedPlaylistIDs.push(playlist.id);
+    }
+  }
+
+  return {
+    affectedPlaylistIDs,
+    remoteMembershipChangedPlaylistIDs,
+    preservedRemoteSongIDs: [...preservedRemoteSongIDs],
+  };
+}
+
 export function reorderPlaylistEntries(state, playlist, sourceKey, targetKey, insertAfter = false) {
   if (!playlist || playlist.isSystem) return false;
   const presented = tracksForPlaylist(state, playlist.id);
@@ -1861,6 +1959,26 @@ export function mergeTrackSourceIdentity(track, sourceIdentity) {
 
 export function catalogRequestCanApply({ requestGeneration, currentGeneration, contextCurrent = true } = {}) {
   return Boolean(contextCurrent) && requestGeneration === currentGeneration;
+}
+
+export function serverCatalogAuthoritySnapshot(context = {}, catalogGeneration = 0) {
+  return {
+    profileGeneration: Number(context.generation) || 0,
+    profileID: String(context.profileID || "default"),
+    serverKey: String(context.serverKey || ""),
+    token: String(context.token || ""),
+    catalogGeneration: Number(catalogGeneration) || 0,
+  };
+}
+
+export function serverCatalogAuthorityIsCurrent(authority, context = {}, catalogGeneration = 0) {
+  if (!authority) return false;
+  const current = serverCatalogAuthoritySnapshot(context, catalogGeneration);
+  return authority.profileGeneration === current.profileGeneration
+    && authority.profileID === current.profileID
+    && authority.serverKey === current.serverKey
+    && authority.token === current.token
+    && authority.catalogGeneration === current.catalogGeneration;
 }
 
 export function serverTrackRemoteIDBelongsToContext(track, { serverURL, profileID = "default" } = {}) {

@@ -3,14 +3,7 @@ package mov.unblocked.resonance.data
 import mov.unblocked.resonance.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerialName
@@ -455,17 +448,26 @@ class ServerClient(
         val allocatedDownloads = mutableListOf<File>()
         return try {
             withContext(Dispatchers.IO) {
-                val pending = songs.withIndex().filter { it.value.id !in existingRemoteIDs }
-                val progressLock = Any()
-                var processed = songs.size - pending.size
-                val transferGate = Semaphore(permits = 2)
-                val videoGate = Mutex()
+                val pending = PendingDownloadBatchPolicy.songs(songs, existingRemoteIDs)
+                var processed = 0
 
                 suspend fun downloadItem(index: Int, song: RemoteSong): ServerDownloadItemResult {
                     coroutineContext.ensureActive()
                     // Re-evaluate the exact snapshotted client policy immediately
                     // before each file allocation and authenticated media request.
                     beforeEach()
+                    onProgress(
+                        TransferProgress(
+                            completed = processed,
+                            total = pending.size,
+                            currentFilename = song.filename,
+                            currentItem = index + 1,
+                            currentSongID = song.id,
+                            currentTitle = song.title,
+                            bytesTransferred = 0L,
+                            totalBytes = song.size.takeIf { it > 0L },
+                        ),
+                    )
                     val destination = repository.newDownloadFile(song.filename)
                     synchronized(allocatedDownloads) { allocatedDownloads += destination }
                     val result = try {
@@ -475,17 +477,18 @@ class ServerClient(
                             repository,
                             beforeRead = beforeEach,
                         ) { transferred, totalBytes ->
-                            synchronized(progressLock) {
-                                onProgress(
-                                    TransferProgress(
-                                        completed = processed,
-                                        total = songs.size,
-                                        currentFilename = song.filename,
-                                        bytesTransferred = transferred,
-                                        totalBytes = totalBytes,
-                                    ),
-                                )
-                            }
+                            onProgress(
+                                TransferProgress(
+                                    completed = processed,
+                                    total = pending.size,
+                                    currentFilename = song.filename,
+                                    currentItem = index + 1,
+                                    currentSongID = song.id,
+                                    currentTitle = song.title,
+                                    bytesTransferred = transferred,
+                                    totalBytes = totalBytes,
+                                ),
+                            )
                         }
                         ServerDownloadItemResult(
                             index = index,
@@ -518,39 +521,29 @@ class ServerClient(
                             ),
                         )
                     }
-                    synchronized(progressLock) {
-                        processed += 1
-                        onProgress(
-                            TransferProgress(
-                                completed = processed,
-                                total = songs.size,
-                                currentFilename = song.filename,
-                                bytesTransferred = destination.length(),
-                                totalBytes = song.size.takeIf { it > 0L },
-                            ),
-                        )
-                    }
+                    beforeEach()
+                    processed += 1
+                    onProgress(
+                        TransferProgress(
+                            completed = processed,
+                            total = pending.size,
+                            currentFilename = song.filename,
+                            currentItem = index + 1,
+                            currentSongID = song.id,
+                            currentTitle = song.title,
+                            bytesTransferred = destination.length(),
+                            totalBytes = song.size.takeIf { it > 0L },
+                            currentItemComplete = result.track != null,
+                        ),
+                    )
                     return result
                 }
 
-                val results = coroutineScope {
-                    pending.map { indexedSong ->
-                        async {
-                            val work: suspend () -> ServerDownloadItemResult = {
-                                transferGate.withPermit {
-                                    downloadItem(indexedSong.index, indexedSong.value)
-                                }
-                            }
-                            if (indexedSong.value.isVideoMedia) {
-                                // Videos stay one-at-a-time while audio can use both
-                                // bounded transfer slots.
-                                videoGate.withLock { work() }
-                            } else {
-                                work()
-                            }
-                        }
-                    }.awaitAll()
-                }.sortedBy(ServerDownloadItemResult::index)
+                // A single popup can only truthfully represent one active item. Keep catalog
+                // downloads sequential so its title, byte count, and progress bar cannot race.
+                val results = pending.mapIndexed { index, song ->
+                    downloadItem(index, song)
+                }
 
                 ServerDownloadBatchResult(
                     tracks = results.mapNotNull(ServerDownloadItemResult::track),

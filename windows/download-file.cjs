@@ -5,6 +5,7 @@ const MAX_SERVER_MEDIA_BYTES = 512 * 1024 * 1024;
 
 async function writeResponseToFile(response, destination, options = {}) {
   const { signal } = options;
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
   const expectedSize = Number(options.expectedSize);
   const requestedMaximum = Number(options.maximumBytes);
   const maximumBytes = Math.min(
@@ -41,9 +42,11 @@ async function writeResponseToFile(response, destination, options = {}) {
   let result = null;
   let failure = null;
   try {
+    onProgress?.({ completed: 0, total: expectedSize });
     while (true) {
       signal?.throwIfAborted();
       const { done, value } = await reader.read();
+      signal?.throwIfAborted();
       if (done) break;
       const buffer = Buffer.from(value);
       total += buffer.length;
@@ -57,6 +60,7 @@ async function writeResponseToFile(response, destination, options = {}) {
         if (!bytesWritten) throw new Error("The downloaded file could not be written.");
         offset += bytesWritten;
       }
+      onProgress?.({ completed: total, total: expectedSize });
     }
     signal?.throwIfAborted();
     if (total !== expectedSize) throw new Error("The downloaded file was incomplete.");

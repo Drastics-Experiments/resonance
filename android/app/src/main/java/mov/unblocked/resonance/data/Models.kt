@@ -289,8 +289,12 @@ data class TransferProgress(
     val completed: Int,
     val total: Int,
     val currentFilename: String,
+    val currentItem: Int = (completed + 1).coerceAtMost(total.coerceAtLeast(1)),
+    val currentSongID: String? = null,
+    val currentTitle: String = "",
     val bytesTransferred: Long = 0L,
     val totalBytes: Long? = null,
+    val currentItemComplete: Boolean = false,
 ) {
     val fraction: Float
         get() = if (total <= 0) 0f else completed.toFloat() / total.toFloat()

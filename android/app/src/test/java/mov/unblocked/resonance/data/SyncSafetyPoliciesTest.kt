@@ -191,6 +191,297 @@ class SyncSafetyPoliciesTest {
     }
 
     @Test
+    fun deletingDownloadedSongKeepsItsExactSlotAsUnavailableWhenServerStillHasIt() {
+        val before = Track(title = "Before", relativePath = "before.m4a")
+        val downloaded = Track(
+            title = "Downloaded",
+            relativePath = "downloaded.m4a",
+            remoteID = "remote-song",
+            sourceServer = "https://music.example",
+            syncProfileID = "default",
+        )
+        val after = Track(title = "After", relativePath = "after.m4a")
+        val playlist = Playlist(
+            name = "Shared",
+            trackIDs = listOf(before.id, downloaded.id, after.id),
+            remoteSongIDs = emptyList(),
+            entryOrder = listOf("local:${before.id}", "local:${downloaded.id}", "local:${after.id}"),
+        )
+
+        val updated = PlaylistLocalDeletionPolicy.apply(
+            playlist,
+            tracks = listOf(before, downloaded, after),
+            deletingTrackIDs = setOf(downloaded.id),
+            activeRemoteSongIDs = setOf("remote-song"),
+            activeServerURL = "https://music.example",
+            activeProfileID = "default",
+            catalogIsAuthoritative = true,
+        )
+
+        assertEquals(listOf(before.id, after.id), updated.trackIDs)
+        assertEquals(listOf("remote-song"), updated.remoteSongIDs)
+        assertEquals(
+            listOf("local:${before.id}", "remote:remote-song", "local:${after.id}"),
+            updated.entryOrder,
+        )
+        assertEquals(
+            updated.entryOrder,
+            PlaylistPresentationPolicy.entries(updated, listOf(before, after), emptyList())
+                .map(PlaylistPresentationEntry::stableID),
+        )
+    }
+
+    @Test
+    fun deletingDownloadedRemoteEntryPreservesExistingRemoteMembershipAndOrder() {
+        val before = Track(title = "Before", relativePath = "before.m4a")
+        val downloaded = Track(
+            title = "Downloaded",
+            relativePath = "downloaded.m4a",
+            remoteID = "remote-song",
+            sourceServer = "https://music.example",
+            syncProfileID = "default",
+        )
+        val after = Track(title = "After", relativePath = "after.m4a")
+        val expectedOrder = listOf(
+            "local:${before.id}",
+            "remote:remote-song",
+            "local:${after.id}",
+        )
+        val playlist = Playlist(
+            name = "Shared",
+            trackIDs = listOf(before.id, downloaded.id, after.id),
+            remoteSongIDs = listOf("remote-song"),
+            entryOrder = expectedOrder,
+        )
+
+        val updated = PlaylistLocalDeletionPolicy.apply(
+            playlist,
+            tracks = listOf(before, downloaded, after),
+            deletingTrackIDs = setOf(downloaded.id),
+            activeRemoteSongIDs = setOf("remote-song"),
+            activeServerURL = "https://music.example",
+            activeProfileID = "default",
+            catalogIsAuthoritative = true,
+        )
+
+        assertEquals(listOf(before.id, after.id), updated.trackIDs)
+        assertEquals(listOf("remote-song"), updated.remoteSongIDs)
+        assertEquals(expectedOrder, updated.entryOrder)
+    }
+
+    @Test
+    fun localOnlyDeletionKeepsCanonicalRemoteOrderWhenDeviceOrderIsReversed() {
+        val local = Track(title = "Device only", relativePath = "local.m4a")
+        val playlist = Playlist(
+            name = "Mixed",
+            trackIDs = listOf(local.id),
+            remoteSongIDs = listOf("remote-a", "remote-b"),
+            entryOrder = listOf("remote:remote-b", "local:${local.id}", "remote:remote-a"),
+        )
+
+        val updated = PlaylistLocalDeletionPolicy.apply(
+            playlist,
+            tracks = listOf(local),
+            deletingTrackIDs = setOf(local.id),
+            activeRemoteSongIDs = setOf("remote-a", "remote-b"),
+            activeServerURL = "https://music.example",
+            activeProfileID = "default",
+            catalogIsAuthoritative = true,
+        )
+
+        assertTrue(updated.trackIDs.isEmpty())
+        assertEquals(listOf("remote-a", "remote-b"), updated.remoteSongIDs)
+        assertEquals(listOf("remote:remote-b", "remote:remote-a"), updated.entryOrder)
+    }
+
+    @Test
+    fun legacyLocalMembershipAppendsBackedIDWithoutReorderingServerMembership() {
+        val downloaded = Track(
+            title = "Legacy download",
+            relativePath = "legacy.m4a",
+            remoteID = "remote-x",
+            sourceServer = "https://music.example",
+            syncProfileID = "default",
+        )
+        val playlist = Playlist(
+            name = "Mixed",
+            trackIDs = listOf(downloaded.id),
+            remoteSongIDs = listOf("remote-a", "remote-b"),
+            entryOrder = listOf(
+                "remote:remote-b",
+                "local:${downloaded.id}",
+                "remote:remote-a",
+            ),
+        )
+
+        val updated = PlaylistLocalDeletionPolicy.apply(
+            playlist,
+            tracks = listOf(downloaded),
+            deletingTrackIDs = setOf(downloaded.id),
+            activeRemoteSongIDs = setOf("remote-a", "remote-b", "remote-x"),
+            activeServerURL = "https://music.example",
+            activeProfileID = "default",
+            catalogIsAuthoritative = true,
+        )
+
+        assertEquals(listOf("remote-a", "remote-b", "remote-x"), updated.remoteSongIDs)
+        assertEquals(
+            listOf("remote:remote-b", "remote:remote-x", "remote:remote-a"),
+            updated.entryOrder,
+        )
+    }
+
+    @Test
+    fun offlineLegacyLocalMembershipDoesNotInventRemoteMembership() {
+        val downloaded = Track(
+            title = "Legacy download",
+            relativePath = "legacy-offline.m4a",
+            remoteID = "remote-x",
+            sourceServer = "https://music.example",
+            syncProfileID = "default",
+        )
+        val playlist = Playlist(
+            name = "Device only",
+            trackIDs = listOf(downloaded.id),
+            remoteSongIDs = emptyList(),
+            entryOrder = listOf("local:${downloaded.id}"),
+        )
+
+        val updated = PlaylistLocalDeletionPolicy.apply(
+            playlist,
+            tracks = listOf(downloaded),
+            deletingTrackIDs = setOf(downloaded.id),
+            // A retained/stale catalog ID is not authoritative after a failed refresh.
+            activeRemoteSongIDs = setOf("remote-x"),
+            activeServerURL = "https://music.example",
+            activeProfileID = "default",
+            catalogIsAuthoritative = false,
+        )
+
+        assertTrue(updated.trackIDs.isEmpty())
+        assertTrue(updated.remoteSongIDs.orEmpty().isEmpty())
+        assertTrue(updated.entryOrder.orEmpty().isEmpty())
+    }
+
+    @Test
+    fun localOnlyDeletionNeverChangesExistingRemoteMembership() {
+        val local = Track(title = "Device only", relativePath = "local.m4a")
+        val playlist = Playlist(
+            name = "Mixed",
+            trackIDs = listOf(local.id),
+            remoteSongIDs = listOf("remote-a", "remote-b"),
+            entryOrder = listOf("local:${local.id}", "remote:remote-a", "remote:remote-b"),
+        )
+
+        val updated = PlaylistLocalDeletionPolicy.apply(
+            playlist,
+            tracks = listOf(local),
+            deletingTrackIDs = setOf(local.id),
+            activeRemoteSongIDs = emptySet(),
+            activeServerURL = "https://music.example",
+            activeProfileID = "default",
+            catalogIsAuthoritative = true,
+        )
+
+        assertEquals(listOf("remote-a", "remote-b"), updated.remoteSongIDs)
+        assertEquals(listOf("remote:remote-a", "remote:remote-b"), updated.entryOrder)
+    }
+
+    @Test
+    fun sameSongIDFromAnotherContextCannotCreateActiveRemoteMembership() {
+        val foreignDownload = Track(
+            title = "Other profile",
+            relativePath = "foreign.m4a",
+            remoteID = "same-song-id",
+            sourceServer = "https://other.example",
+            syncProfileID = "other-profile",
+        )
+        val playlist = Playlist(
+            name = "Mixed",
+            trackIDs = listOf(foreignDownload.id),
+            remoteSongIDs = emptyList(),
+            entryOrder = listOf("local:${foreignDownload.id}"),
+        )
+
+        val updated = PlaylistLocalDeletionPolicy.apply(
+            playlist,
+            tracks = listOf(foreignDownload),
+            deletingTrackIDs = setOf(foreignDownload.id),
+            // The active catalog contains the same opaque ID, but for another identity tuple.
+            activeRemoteSongIDs = setOf("same-song-id"),
+            activeServerURL = "https://music.example",
+            activeProfileID = "default",
+            catalogIsAuthoritative = true,
+        )
+
+        assertTrue(updated.trackIDs.isEmpty())
+        assertTrue(updated.remoteSongIDs.orEmpty().isEmpty())
+        assertTrue(updated.entryOrder.orEmpty().isEmpty())
+    }
+
+    @Test
+    fun deletingSongWithoutActiveServerBackingRemovesMembershipAndStaleOrderToken() {
+        val downloaded = Track(
+            title = "Gone",
+            relativePath = "gone.m4a",
+            remoteID = "remote-gone",
+            sourceServer = "https://music.example",
+            syncProfileID = "default",
+        )
+        val playlist = Playlist(
+            name = "Shared",
+            trackIDs = listOf(downloaded.id),
+            remoteSongIDs = listOf("remote-a", "remote-gone", "remote-b"),
+            entryOrder = listOf("remote:remote-b", "remote:remote-gone", "remote:remote-a"),
+        )
+
+        val updated = PlaylistLocalDeletionPolicy.apply(
+            playlist,
+            tracks = listOf(downloaded),
+            deletingTrackIDs = setOf(downloaded.id),
+            activeRemoteSongIDs = emptySet(),
+            activeServerURL = "https://music.example",
+            activeProfileID = "default",
+            catalogIsAuthoritative = true,
+        )
+
+        assertTrue(updated.trackIDs.isEmpty())
+        assertEquals(listOf("remote-a", "remote-b"), updated.remoteSongIDs)
+        assertEquals(listOf("remote:remote-b", "remote:remote-a"), updated.entryOrder)
+    }
+
+    @Test
+    fun unavailableCatalogCannotRemoveRemoteMembership() {
+        val downloaded = Track(
+            title = "Still unknown",
+            relativePath = "unknown.m4a",
+            remoteID = "remote-song",
+            sourceServer = "https://music.example",
+            syncProfileID = "default",
+        )
+        val playlist = Playlist(
+            name = "Shared",
+            trackIDs = listOf(downloaded.id),
+            remoteSongIDs = listOf("remote-song"),
+            entryOrder = listOf("remote:remote-song"),
+        )
+
+        val updated = PlaylistLocalDeletionPolicy.apply(
+            playlist,
+            tracks = listOf(downloaded),
+            deletingTrackIDs = setOf(downloaded.id),
+            activeRemoteSongIDs = emptySet(),
+            activeServerURL = "https://music.example",
+            activeProfileID = "default",
+            catalogIsAuthoritative = false,
+        )
+
+        assertTrue(updated.trackIDs.isEmpty())
+        assertEquals(listOf("remote-song"), updated.remoteSongIDs)
+        assertEquals(listOf("remote:remote-song"), updated.entryOrder)
+    }
+
+    @Test
     fun stablePlaylistSubmissionClearsOnlyItsOwnDirtySnapshot() {
         val result = PlaylistSyncMutationPolicy.reconcile(
             submitted = PlaylistMutationSnapshot(4, setOf("submitted"), setOf("deleted")),
@@ -230,5 +521,22 @@ class SyncSafetyPoliciesTest {
         assertFalse(CatalogResponsePolicy.shouldApply(submitted, context.copy(connectionGeneration = 8), 3, 9))
         assertFalse(CatalogResponsePolicy.shouldApply(submitted, context, 4, 9))
         assertFalse(CatalogResponsePolicy.shouldApply(submitted, context, 3, 10))
+    }
+
+    @Test
+    fun failedOrSupersededRefreshInvalidatesDeletionAuthority() {
+        val context = ServerProfileContext("https://music.example", "default", 7)
+        val lastSuccess = CatalogRequestSnapshot(
+            context,
+            requestGeneration = 3,
+            uploadMutationGeneration = 9,
+        )
+
+        assertTrue(CatalogAuthorityPolicy.isFresh(lastSuccess, context, 3, 9))
+        // Beginning request 4 makes request 3 stale even when request 4 fails and the UI keeps
+        // the last working catalog/session visible.
+        assertFalse(CatalogAuthorityPolicy.isFresh(lastSuccess, context, 4, 9))
+        assertFalse(CatalogAuthorityPolicy.isFresh(lastSuccess, context.copy(profileID = "other"), 3, 9))
+        assertFalse(CatalogAuthorityPolicy.isFresh(lastSuccess, context, 3, 10))
     }
 }

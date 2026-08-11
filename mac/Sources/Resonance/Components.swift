@@ -7,6 +7,7 @@ struct TransferProgressOverlay: View {
     let detail: String
     let status: String
     let progress: Double?
+    let counter: String?
     let symbol: String
     let color: Color
     let cancel: () -> Void
@@ -29,6 +30,12 @@ struct TransferProgressOverlay: View {
                     Text(title)
                         .font(.system(size: 13, weight: .semibold))
                     Spacer()
+                    if let counter {
+                        Text(counter)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(palette.muted)
+                            .monospacedDigit()
+                    }
                     if let clampedProgress {
                         Text("\(Int(clampedProgress * 100))%")
                             .font(.system(size: 10, weight: .medium))
