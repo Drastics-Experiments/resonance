@@ -1,8 +1,5 @@
 package mov.unblocked.resonance.ui
 
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
@@ -33,8 +30,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterList
-import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -64,7 +60,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalFocusManager
@@ -154,14 +149,25 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
         ) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                Text("Music Server", fontSize = 36.sp, fontWeight = FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Server", fontSize = 36.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    if (state.isRefreshingServer) {
+                        CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp, color = Violet)
+                    } else {
+                        IconButton(
+                            enabled = !state.isDownloading && !state.isUploading && !state.isSyncingPlaylists,
+                            onClick = actions::refreshServer,
+                            modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
+                        ) { Icon(Icons.Default.Refresh, "Refresh server") }
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Text(
-                        if (state.isConnected) "● Connected" else "● Offline",
+                        if (state.isConnected) "\u25CF Connected" else "\u25CF Offline",
                         color = if (state.isConnected) SuccessGreen else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 12.sp,
@@ -187,14 +193,14 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                         Icon(Icons.Default.Settings, "Connection settings", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                     }
                 }
+                Text(
+                    "${state.remoteSongs.size} songs \u00B7 " +
+                        "${state.playlists.count { !it.isSystem }} playlists \u00B7 " +
+                        "$syncedCount on device",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                )
             }
-        }
-        item {
-            ServerMetricsRow(
-                songs = state.remoteSongs.size,
-                playlists = state.playlists.count { !it.isSystem },
-                onDevice = syncedCount,
-            )
         }
         item {
             ServerActionBar(
@@ -208,34 +214,12 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                     linkImportOpen = true
                 },
                 onUploadMissing = actions::uploadMissingDownloads,
+                onConnection = { connectionOpen = true },
                 onToggleSelection = {
                     selecting = !selecting
                     if (selecting) scope = ServerScope.NotDownloaded else actions.clearRemoteSelection()
                 },
-                onRefresh = actions::refreshServer,
             )
-        }
-        item {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { connectionOpen = true }
-                    .background(Color.White.copy(alpha = .045f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 12.dp, vertical = 9.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "Upload: ${state.serverUploadMode?.label ?: "Disabled"}",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .62f),
-                )
-                Text(
-                    "Download: ${state.serverDownloadMode.label}",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .62f),
-                )
-            }
         }
         if (pendingMetadataCount > 0) {
             item {
@@ -301,7 +285,6 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                 }
             }
         }
-        item { SongListHeader() }
         if (visible.isEmpty() && state.remoteSongs.isEmpty() && state.isRefreshingServer) {
             repeat(7) { index ->
                 item(key = "server-placeholder-$index") {
@@ -353,49 +336,16 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
 }
 
 @Composable
-private fun ServerMetricsRow(songs: Int, playlists: Int, onDevice: Int) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        CompactMetric(Icons.Default.MusicNote, songs.toString(), "songs")
-        MetricDivider()
-        CompactMetric(Icons.Default.Checklist, playlists.toString(), "playlists")
-        MetricDivider()
-        CompactMetric(Icons.Default.CloudDownload, onDevice.toString(), "on device")
-    }
-}
-
-@Composable
-private fun CompactMetric(icon: androidx.compose.ui.graphics.vector.ImageVector, value: String, label: String) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Icon(
-            icon,
-            null,
-            Modifier.size(30.dp).background(Violet.copy(alpha = .13f), CircleShape).padding(7.dp),
-            tint = Violet,
-        )
-        Text(value, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-        Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), maxLines = 1)
-    }
-}
-
-@Composable
-private fun MetricDivider() {
-    Text("•", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .35f), fontSize = 12.sp)
-}
-
-@Composable
 private fun ServerActionBar(
     state: ResonanceUiState,
     selecting: Boolean,
     onDownload: () -> Unit,
     onUpload: () -> Unit,
     onUploadMissing: () -> Unit,
+    onConnection: () -> Unit,
     onToggleSelection: () -> Unit,
-    onRefresh: () -> Unit,
 ) {
+    var moreOpen by remember { mutableStateOf(false) }
     val enabled = !state.isDownloading && !state.isUploading &&
         !state.isRefreshingServer && !state.isApplyingServerConnection && !state.isSyncingPlaylists
     val uploadEnabled = canStartServerUpload(state)
@@ -403,17 +353,6 @@ private fun ServerActionBar(
         state.selectedRemoteSongIds.singleOrNull()?.let { selectedID ->
             state.remoteSongs.firstOrNull { it.id == selectedID }?.isVideoMedia
         } == true
-    val refreshRotation = remember { Animatable(0f) }
-    LaunchedEffect(state.isRefreshingServer) {
-        if (state.isRefreshingServer) {
-            while (true) {
-                refreshRotation.snapTo(0f)
-                refreshRotation.animateTo(360f, tween(durationMillis = 820, easing = FastOutSlowInEasing))
-            }
-        } else {
-            refreshRotation.snapTo(0f)
-        }
-    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -437,54 +376,48 @@ private fun ServerActionBar(
             onClick = onDownload,
             modifier = Modifier.weight(1f),
         )
-        if (state.serverUploadMode == ServerUploadMode.LocalFile) {
-            ActionDivider()
-            ServerAction(
-                icon = Icons.Default.CloudUpload,
-                label = "Downloads",
-                enabled = uploadEnabled,
-                onClick = onUploadMissing,
-                modifier = Modifier.weight(1f),
-            )
-            ActionDivider()
-            ServerAction(
-                icon = Icons.Default.CloudUpload,
-                label = "Link",
-                enabled = uploadEnabled,
-                onClick = onUpload,
-                modifier = Modifier.weight(1f),
-            )
-        } else {
-            ActionDivider()
-            ServerAction(
-                icon = Icons.Default.Language,
-                label = when (state.serverUploadMode) {
-                    ServerUploadMode.ReviewedMatch -> "Review"
-                    ServerUploadMode.ServerSourceLink -> "Link"
-                    else -> "Disabled"
-                },
-                enabled = uploadEnabled,
-                onClick = onUpload,
-                modifier = Modifier.weight(2f),
-            )
-        }
         ActionDivider()
         ServerAction(
             icon = Icons.Default.Checklist,
-            label = if (selecting) state.selectedRemoteSongIds.size.toString() else null,
+            label = if (selecting) "${state.selectedRemoteSongIds.size} Selected" else "Select",
             enabled = enabled,
             onClick = onToggleSelection,
-            modifier = Modifier.width(53.dp),
+            modifier = Modifier.weight(1f),
         )
         ActionDivider()
-        ServerAction(
-            icon = Icons.Default.Refresh,
-            label = null,
-            enabled = enabled,
-            onClick = onRefresh,
-            modifier = Modifier.width(53.dp),
-            iconModifier = Modifier.rotate(refreshRotation.value),
-        )
+        Box {
+            IconButton(onClick = { moreOpen = true }, modifier = Modifier.width(53.dp)) {
+                Icon(Icons.Default.MoreVert, "More server actions")
+            }
+            DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Upload Missing Downloads") },
+                    leadingIcon = { Icon(Icons.Default.CloudUpload, null) },
+                    enabled = uploadEnabled && state.serverUploadMode == ServerUploadMode.LocalFile,
+                    onClick = { moreOpen = false; onUploadMissing() },
+                )
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            when (state.serverUploadMode) {
+                                ServerUploadMode.ReviewedMatch -> "Review Upload"
+                                ServerUploadMode.ServerSourceLink -> "Import from Link"
+                                ServerUploadMode.LocalFile -> "Upload or Import"
+                                null -> "Upload Disabled"
+                            },
+                        )
+                    },
+                    leadingIcon = { Icon(Icons.Default.CloudUpload, null) },
+                    enabled = uploadEnabled,
+                    onClick = { moreOpen = false; onUpload() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Account & Connection") },
+                    leadingIcon = { Icon(Icons.Default.Settings, null) },
+                    onClick = { moreOpen = false; onConnection() },
+                )
+            }
+        }
     }
 }
 

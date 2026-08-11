@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
@@ -69,7 +70,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 @Composable
-fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: Modifier = Modifier) {
+fun LibraryScreen(
+    state: ResonanceUiState,
+    actions: ResonanceActions,
+    modifier: Modifier = Modifier,
+    onOpenStorage: () -> Unit,
+) {
     var connectionOpen by remember { mutableStateOf(false) }
     var clipEditorOpen by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
@@ -86,18 +92,21 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Top,
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Eyebrow("Music Library")
-                    Text("Resonance", fontSize = 38.sp, fontWeight = FontWeight.Normal)
+                    Text("Library", fontSize = 36.sp, fontWeight = FontWeight.Bold)
                     Text(
-                        "${state.tracks.size} tracks • Stored locally",
+                        "${state.tracks.size} songs on this device",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
                 }
+                IconButton(
+                    onClick = onOpenStorage,
+                    modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
+                ) { Icon(Icons.Default.Storage, "Storage") }
                 ProfileButton(
                     state = state,
                     actions = actions,
@@ -105,6 +114,24 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                     onClipEditor = { clipEditorOpen = true },
                 )
             }
+        }
+        item {
+            OutlinedTextField(
+                value = state.librarySearch,
+                onValueChange = actions::setLibrarySearch,
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("Search your music") },
+                leadingIcon = { Icon(Icons.Default.Search, null) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
+                shape = RoundedCornerShape(13.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = Color.White.copy(alpha = .055f),
+                    unfocusedContainerColor = Color.White.copy(alpha = .055f),
+                    unfocusedBorderColor = Color.White.copy(alpha = .08f),
+                ),
+            )
         }
         item {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -142,24 +169,6 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
                 )
             }
         }
-        item {
-            OutlinedTextField(
-                value = state.librarySearch,
-                onValueChange = actions::setLibrarySearch,
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Search your music") },
-                leadingIcon = { Icon(Icons.Default.Search, null) },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
-                shape = RoundedCornerShape(13.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = Color.White.copy(alpha = .055f),
-                    unfocusedContainerColor = Color.White.copy(alpha = .055f),
-                    unfocusedBorderColor = Color.White.copy(alpha = .08f),
-                ),
-            )
-        }
         if (tracks.isEmpty()) {
             item {
                 Column(
@@ -178,7 +187,17 @@ fun LibraryScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: 
         } else {
             item {
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    SongListHeader()
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("All Songs", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Text(
+                            tracks.size.toString(),
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                        )
+                    }
                     tracks.forEachIndexed { index, track ->
                         TrackRow(track, state, actions, number = index + 1, queue = tracks)
                     }
