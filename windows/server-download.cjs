@@ -121,6 +121,44 @@ function serverDownloadImportedMetadata(resolvedMetadata, preferredMetadata, met
   return { ...resolved, ...preferred, sourceURL };
 }
 
+function createServerCatalogSnapshotStore() {
+  const snapshots = new Map();
+  const exactContext = (context = {}) => ({
+    origin: String(context.origin || ""),
+    profileID: String(context.profileID || "default"),
+    credentialFingerprint: String(context.credentialFingerprint || ""),
+  });
+  return Object.freeze({
+    remember(ownerID, context, catalog) {
+      snapshots.set(ownerID, Object.freeze({ ...exactContext(context), catalog }));
+      return catalog;
+    },
+    read(ownerID, context) {
+      const expected = exactContext(context);
+      const snapshot = snapshots.get(ownerID);
+      return snapshot
+        && snapshot.origin === expected.origin
+        && snapshot.profileID === expected.profileID
+        && snapshot.credentialFingerprint === expected.credentialFingerprint
+        ? snapshot.catalog
+        : null;
+    },
+    clear(ownerID) {
+      return snapshots.delete(ownerID);
+    },
+    clearContext(context) {
+      const expected = exactContext(context);
+      let removed = 0;
+      for (const [ownerID, snapshot] of snapshots) {
+        if (snapshot.origin !== expected.origin || snapshot.profileID !== expected.profileID) continue;
+        snapshots.delete(ownerID);
+        removed += 1;
+      }
+      return removed;
+    },
+  });
+}
+
 function serverDownloadProgressEvent({
   song,
   preferredTitle,
@@ -156,7 +194,7 @@ function createServerDownloadProgressPublisher(publish, options = {}) {
   let publishedInitial = false;
   let publishedFinal = false;
 
-  return (event, { force = false } = {}) => {
+  const publishProgress = (event, { force = false } = {}) => {
     const completed = Math.max(0, Number(event?.itemCompleted) || 0);
     const total = Math.max(0, Number(event?.itemTotal) || 0);
     const isInitial = completed === 0 && !publishedInitial;
@@ -171,6 +209,12 @@ function createServerDownloadProgressPublisher(publish, options = {}) {
     if (total > 0 && completed >= total) publishedFinal = true;
     return true;
   };
+  publishProgress.reset = () => {
+    lastPublishedAt = Number.NEGATIVE_INFINITY;
+    publishedInitial = false;
+    publishedFinal = false;
+  };
+  return publishProgress;
 }
 
 function waitForServerDownloadRetry(milliseconds, signal) {
@@ -221,6 +265,7 @@ module.exports = {
   SERVER_DOWNLOAD_PROGRESS_INTERVAL_MS,
   SERVER_DOWNLOAD_RETRY_DELAYS_MS,
   createServerDownloadProgressPublisher,
+  createServerCatalogSnapshotStore,
   retryServerDownload,
   serverDownloadDisplayName,
   serverDownloadImportedMetadata,

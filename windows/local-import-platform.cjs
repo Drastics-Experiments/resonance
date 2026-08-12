@@ -800,6 +800,20 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
   const temporary = await fs.mkdtemp(path.join(temporaryRoot, "resonance-local-import-"));
   const sourcePath = path.join(temporary, mediaKind === "video" ? "source.mp4" : soundCloudSource ? "source.mp3" : "source.m4a");
   const outputPath = path.join(temporary, "tagged.m4a");
+  const metadataSnapshot = input.metadataSnapshot || { settled: false, metadata: null };
+  if (input.metadataPromise) {
+    void Promise.resolve(input.metadataPromise).then(
+      (metadata) => {
+        metadataSnapshot.metadata = metadata || null;
+        metadataSnapshot.settled = true;
+      },
+      () => {
+        // Optional enrichment must never own the media-transfer lifecycle. The
+        // caller can retry metadata hydration independently after this import.
+        metadataSnapshot.settled = true;
+      },
+    );
+  }
   let savedPath = null;
   try {
     assertNotAborted(signal);
@@ -832,7 +846,9 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
     } else {
       result = await youtubeDownload(input.sourceURL, sourcePath, signal, downloadProgress);
     }
-    const metadata = normalizedMetadata(input.metadata, {
+    assertNotAborted(signal);
+    const enrichedMetadata = metadataSnapshot.settled ? metadataSnapshot.metadata : null;
+    const metadata = normalizedMetadata({ ...input.metadata, ...(enrichedMetadata || {}) }, {
       title: result.preview.title,
       artist: result.preview.author || "Unknown uploader",
       album: "Imported",
@@ -869,7 +885,9 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
       const preferred = `${safeFilename(`${metadata.artist} - ${metadata.title}`) || `Video-${randomUUID()}`}.mp4`;
       savedPath = await uniqueDestination(input.destinationDirectory, preferred);
       await fileMove(sourcePath, savedPath);
+      assertNotAborted(signal);
       const information = await fs.stat(savedPath);
+      assertNotAborted(signal);
       return {
         kind: "created",
         mediaKind,
@@ -906,7 +924,9 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
     const preferred = `${safeFilename(`${metadata.artist} - ${metadata.title}`) || `Track-${randomUUID()}`}.m4a`;
     savedPath = await uniqueDestination(input.destinationDirectory, preferred);
     await fileMove(outputPath, savedPath);
+    assertNotAborted(signal);
     const information = await fs.stat(savedPath);
+    assertNotAborted(signal);
     return {
       kind: "created",
       mediaKind,

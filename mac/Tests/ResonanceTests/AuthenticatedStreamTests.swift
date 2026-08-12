@@ -435,9 +435,36 @@ struct AuthenticatedStreamTests {
         #expect(laterConfigurationExpiration > capturedExpiration)
         #expect(MacOfflineDownloadAuthorizationPolicy.remainsAuthorized(
             lease: lease,
-            context: context
+            context: context,
+            refreshedExpiration: laterConfigurationExpiration
         ))
 
+        try await Task.sleep(for: .milliseconds(150))
+
+        #expect(!MacOfflineDownloadAuthorizationPolicy.remainsAuthorized(
+            lease: lease,
+            context: context
+        ))
+        #expect(throws: MacAuthenticatedStreamError.authorizationExpired) {
+            try lease.authorize()
+        }
+    }
+
+    @Test("a refreshed signed policy shortens an offline download deadline")
+    func offlineAuthorizationRefreshAppliesShorterExpiration() async throws {
+        let now = Date.now
+        let context = makeContext()
+        let lease = try MacAuthenticatedStreamAuthorizationLease(
+            context: context,
+            expiresAt: now.addingTimeInterval(60),
+            now: now
+        )
+
+        #expect(MacOfflineDownloadAuthorizationPolicy.remainsAuthorized(
+            lease: lease,
+            context: context,
+            refreshedExpiration: now.addingTimeInterval(0.05)
+        ))
         try await Task.sleep(for: .milliseconds(150))
 
         #expect(!MacOfflineDownloadAuthorizationPolicy.remainsAuthorized(
@@ -472,6 +499,43 @@ struct AuthenticatedStreamTests {
             }
         }
         #expect(!installCalled)
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+    }
+
+    @Test("an in-flight policy refresh settles before final installation")
+    func inFlightPolicyRevocationPreventsFinalInstallation() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("resonance-refresh-finalization-\(UUID().uuidString)", isDirectory: true)
+        let destination = root.appendingPathComponent("installed.m4a")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let now = Date.now
+        let lease = try MacAuthenticatedStreamAuthorizationLease(
+            context: makeContext(),
+            expiresAt: now.addingTimeInterval(60),
+            now: now
+        )
+        let refresh = Task<Void, Never> {
+            try? await Task.sleep(for: .milliseconds(100))
+            lease.invalidate()
+        }
+        let finalization = Task {
+            await refresh.value
+            try MacAuthorizedDownloadFinalizer.finalize(authorizationLease: lease) {
+                try Data([0x01]).write(to: destination)
+            }
+        }
+
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+
+        var revoked = false
+        do {
+            try await finalization.value
+        } catch MacAuthenticatedStreamError.authorizationExpired {
+            revoked = true
+        }
+        #expect(revoked)
         #expect(!FileManager.default.fileExists(atPath: destination.path))
     }
 

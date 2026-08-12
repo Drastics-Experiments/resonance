@@ -203,7 +203,9 @@ export function serverTransferProgressPresentation(value = {}) {
     determinate,
     label: determinate
       ? `${percentage}${counter ? ` \u00b7 ${counter}` : ""}`
-      : `Preparing${counter ? ` \u00b7 ${counter}` : "\u2026"}`,
+      : completed > 0
+        ? `Downloading${counter ? ` \u00b7 ${counter}` : "\u2026"}`
+        : counter,
   };
 }
 

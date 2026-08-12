@@ -1089,14 +1089,15 @@ test("downloads a verified MP4 video stream without stripping its video bytes", 
   }
 });
 
-test("saves a confirmed YouTube video as the original MP4 in the local library", async () => {
+test("saves a confirmed YouTube video without waiting for unfinished metadata enrichment", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "resonance-video-import-test-"));
   const library = path.join(root, "library");
   const sourceBytes = Buffer.from("original combined YouTube MP4 bytes");
   const sourceSha256 = createHash("sha256").update(sourceBytes).digest("hex");
   const stages = [];
+  let timeoutID;
   try {
-    const imported = await importConfirmedSource({
+    const importPromise = importConfirmedSource({
       sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
       mediaKind: "video",
       metadata: {
@@ -1106,6 +1107,7 @@ test("saves a confirmed YouTube video as the original MP4 in the local library",
         sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
         artworkURL: null,
       },
+      metadataPromise: new Promise(() => {}),
       existing: [],
       destinationDirectory: library,
       temporaryRoot: root,
@@ -1125,6 +1127,12 @@ test("saves a confirmed YouTube video as the original MP4 in the local library",
         };
       },
     });
+    const imported = await Promise.race([
+      importPromise,
+      new Promise((_, reject) => {
+        timeoutID = setTimeout(() => reject(new Error("media import waited for optional metadata")), 2_000);
+      }),
+    ]);
     assert.equal(imported.kind, "created");
     assert.equal(imported.mediaKind, "video");
     assert.equal(path.extname(imported.filePath), ".mp4");
@@ -1133,6 +1141,7 @@ test("saves a confirmed YouTube video as the original MP4 in the local library",
     assert.deepEqual(await fs.readFile(imported.filePath), sourceBytes);
     assert.deepEqual(stages, ["inspecting_source", "saving_local"]);
   } finally {
+    clearTimeout(timeoutID);
     await fs.rm(root, { recursive: true, force: true });
   }
 });

@@ -526,7 +526,6 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
     } else null
     val transferVerb = when {
         isUploading -> "Uploading"
-        downloadDisplayMode == DownloadProgressDisplayMode.Preparing -> "Preparing download"
         else -> "Downloading"
     }
     val title = listOfNotNull(transferVerb, counter).joinToString(" • ")
@@ -567,7 +566,6 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
             Text(
                 when {
                     isUploading -> "${(progress * 100).toInt()}%"
-                    downloadDisplayMode == DownloadProgressDisplayMode.Preparing -> "Preparing…"
                     downloadDisplayMode == DownloadProgressDisplayMode.IndeterminateTransfer ->
                         formatBytes(state.downloadBytesTransferred)
                     else -> DownloadProgressDisplayPolicy.percentageLabel(progress)
@@ -591,9 +589,7 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
         if (!isUploading) {
             val totalBytes = state.downloadTotalBytes?.takeIf { it > 0L }
             Text(
-                if (downloadDisplayMode == DownloadProgressDisplayMode.Preparing) {
-                    "Starting the media transfer…"
-                } else if (totalBytes != null) {
+                if (totalBytes != null) {
                     "${formatBytes(state.downloadBytesTransferred)} / ${formatBytes(totalBytes)}"
                 } else {
                     "${formatBytes(state.downloadBytesTransferred)} downloaded"

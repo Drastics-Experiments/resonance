@@ -300,6 +300,14 @@ data class TransferProgress(
         get() = if (total <= 0) 0f else completed.toFloat() / total.toFloat()
 }
 
+/** Clears byte presentation while preserving item identity and terminal bookkeeping. */
+internal object TransferProgressBoundaryPolicy {
+    fun hidden(progress: TransferProgress): TransferProgress = progress.copy(
+        bytesTransferred = 0L,
+        totalBytes = null,
+    )
+}
+
 sealed interface PlaylistPutResult {
     val document: RemotePlaylistsDocument
 

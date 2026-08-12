@@ -569,6 +569,10 @@ test("Windows renderer and main-process integrations retain the hardening bounda
     mainSource.indexOf('ipcMain.handle("server:upload"'),
     mainSource.indexOf('ipcMain.handle("server:cancel-transfer"'),
   );
+  const serverDeleteHandler = mainSource.slice(
+    mainSource.indexOf('ipcMain.handle("server:delete"'),
+    mainSource.indexOf('ipcMain.handle("server:open-admin"'),
+  );
   const resolveLinkImportHandler = appSource.slice(
     appSource.indexOf("async function resolveLinkImport()"),
     appSource.indexOf("async function confirmPlaylistImport()"),
@@ -620,24 +624,56 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(serverSyncHandler, /clientConfigContext\(base\.href, profileID\)/);
   assert.match(serverSyncHandler, /const downloadHeaders = \{[\s\S]+\.\.\.profileHeaders\(token, profileID\),[\s\S]+\.\.\.requestContext\.expected\.request_headers/);
   assert.equal([...serverSyncHandler.matchAll(/headers: downloadHeaders/g)].length, 2);
-  assert.match(serverSyncHandler, /fetch\(new URL\("api\/v1\/songs", base\), \{[\s\S]+headers: \{ \.\.\.downloadHeaders, Accept: "application\/json" \}[\s\S]+redirect: "manual"/);
+  assert.match(serverSyncHandler, /catalog = serverCatalogSnapshot\(event\.sender\.id, base, token, profileID\)[\s\S]+if \(!catalog\)[\s\S]+fetchServerCatalogDocument/);
+  assert.match(mainSource, /function serverCatalogSnapshot\([\s\S]+serverCatalogSnapshots\.read\(ownerID,[\s\S]+origin: base\.origin[\s\S]+profileID: String\(profileID \|\| "default"\)[\s\S]+credentialFingerprint: serverCatalogCredentialFingerprint\(token\)/);
+  assert.match(mainSource, /ipcMain\.handle\("server:catalog"[\s\S]+rememberServerCatalogSnapshot\(event\.sender\.id, base, token, profileID, catalog\)/);
+  assert.match(mainSource, /window\.webContents\.once\("destroyed"[\s\S]+serverCatalogSnapshots\.clear\(windowWebContentsID\)/);
+  assert.match(mainSource, /if \(previousFingerprint !== nextFingerprint\)[\s\S]+serverCatalogSnapshots\.clear\(event\.sender\.id\)/);
+  assert.match(mainSource, /function invalidateServerCatalogSnapshots\(base, profileID\)[\s\S]+serverCatalogSnapshots\.clearContext\(\{[\s\S]+origin: base\.origin,[\s\S]+profileID: String\(profileID \|\| "default"\)/);
+  assert.match(localRawUploadHandler, /if \(response\.status === 201 \|\| response\.status === 409\) \{[\s\S]+invalidateServerCatalogSnapshots\(base, profileID\);[\s\S]+readServerUploadResponse/);
+  assert.match(sourceImportHandler, /if \(response\.status === 201 \|\| response\.status === 409\) \{[\s\S]+invalidateServerCatalogSnapshots\(base, profileID\);[\s\S]+finishLocalImport/);
+  assert.match(rawUploadHandler, /if \(response\.status === 201 \|\| response\.status === 409\) \{[\s\S]+invalidateServerCatalogSnapshots\(base, requestedProfileID\);[\s\S]+readServerUploadResponse/);
+  assert.match(serverDeleteHandler, /if \(!response\.ok\)[\s\S]+invalidateServerCatalogSnapshots\(base, profileID\);[\s\S]+return true/);
   assert.match(mainSource, /class OfflineDownloadPolicyError extends Error[\s\S]+async function beginOfflineDownloadPolicyLease[\s\S]+createRenewablePolicyLease\(\{[\s\S]+allowUnsignedInitial:[\s\S]+errorFactory/);
   const offlineLeaseSource = mainSource.slice(
     mainSource.indexOf("async function beginOfflineDownloadPolicyLease"),
     mainSource.indexOf("async function requireServerStreamMode"),
   );
-  assert.doesNotMatch(offlineLeaseSource, /renew:/);
-  assert.match(serverSyncHandler, /retryServerDownload\(async \(\) => \{[\s\S]+beginOfflineDownloadPolicyLease\([\s\S]+signal: policyLease\.signal[\s\S]+policyLease\.assertAuthorized\(\);[\s\S]+const finalConfig = await requireOfflineDownloadMode\([\s\S]+initialConfig: finalConfig,[\s\S]+parentSignal: policyLease\.signal[\s\S]+assertFinalAuthorization[\s\S]+policyLease\.assertAuthorized\(\);[\s\S]+finalPolicyLease\.assertAuthorized\(\);[\s\S]+adoptDownloadedFile\(temporary, destination,[\s\S]+assertAuthorized: assertFinalAuthorization[\s\S]+finalPolicyLease\.close\(\)[\s\S]+policyLease\.close\(\)/);
+  assert.match(offlineLeaseSource, /requireOfflineDownloadMode\(\{ baseURL, token, profileID, force: false \}\)/);
+  assert.match(offlineLeaseSource, /renew: \(\) => requireOfflineDownloadMode\(\{ baseURL, token, profileID, force: true \}\)/);
+  assert.match(serverSyncHandler, /policyLease = await beginOfflineDownloadPolicyLease\([\s\S]+const policyRefresh = policyLease\.refresh\(\);[\s\S]+catalog = serverCatalogSnapshot/);
+  assert.match(serverSyncHandler, /downloadSavedSourceSong\([\s\S]+signal: policyLease\.signal[\s\S]+finalizeAuthorization: async \(\) => \{[\s\S]+await policyRefresh;[\s\S]+policyLease\.assertAuthorized\(\)/);
+  assert.match(serverSyncHandler, /retryServerDownload\(async \(\) => \{[\s\S]+policyLease\.signal\.throwIfAborted\(\)[\s\S]+signal: policyLease\.signal[\s\S]+await policyRefresh;[\s\S]+policyLease\.assertAuthorized\(\);[\s\S]+adoptDownloadedFile\(temporary, destination,[\s\S]+assertAuthorized: \(\) => policyLease\.assertAuthorized\(\)/);
+  assert.doesNotMatch(serverSyncHandler, /const finalConfig = await requireOfflineDownloadMode/);
   assert.match(mediaRefreshHelper, /\.\.\.profileHeaders\(token, profileID\),[\s\S]+\.\.\.requestContext\.expected\.request_headers[\s\S]+redirect: "manual"/);
   const transferProgressBodies = [...mainSource.matchAll(/event\.sender\.send\("server:transfer-progress",\s*\{([\s\S]*?)\}\);/g)]
     .map((match) => match[1]);
-  const throttledItemProgressCalls = [...serverSyncHandler.matchAll(/publishProgress\(progressEvent\(/g)];
-  assert.ok(transferProgressBodies.length + throttledItemProgressCalls.length >= 6);
   for (const body of transferProgressBodies) assert.match(body, /autoHide:\s*false/);
   assert.match(serverDownloadSource, /function serverDownloadProgressEvent[\s\S]+autoHide:\s*false/);
   assert.match(serverDownloadSource, /function createServerDownloadProgressPublisher[\s\S]+isInitial[\s\S]+isFinal[\s\S]+minimumInterval/);
   assert.match(mainSource, /function serverTransferIsActive\(event, controller, generation[\s\S]+active === controller[\s\S]+active\?\.resonanceGeneration === generation[\s\S]+controller\?\.signal\.aborted !== true/);
   assert.match(serverSyncHandler, /if \(!serverTransferIsActive\(event, controller, transferGeneration\)\) return;[\s\S]+event\.sender\.send\("server:transfer-progress", progressEvent\)/);
+  assert.match(serverSyncHandler, /let itemTransferStarted = false;[\s\S]+if \(!itemTransferStarted\) return;[\s\S]+if \(itemCompletedBytes <= 0\) return;[\s\S]+itemTransferStarted = true/);
+  assert.match(mainSource, /const imported = await importConfirmedSource\([\s\S]+options\.onProgress\?\.\(\{ stage: "transfer_complete" \}\);[\s\S]+await options\.finalizeAuthorization\?\.\(\)/);
+  assert.match(serverSyncHandler, /\["transfer_complete", "processing", "saving_local", "local_complete"\][\s\S]+itemTotalBytes = itemTotalBytes \|\| itemCompletedBytes;[\s\S]+transferEnd\.autoHide = true/);
+  assert.match(serverSyncHandler, /event\.autoHide = itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;/);
+  assert.match(serverSyncHandler, /const dismissItemTransfer = \(\) => \{[\s\S]+event\.sender\.send\("server:transfer-progress", \{[\s\S]+direction: "download",[\s\S]+dismiss: true,[\s\S]+autoHide: false,[\s\S]+itemTransferStarted = false;[\s\S]+itemCompletedBytes = 0;[\s\S]+publishProgress\.reset\(\)/);
+  assert.match(serverSyncHandler, /onRetry: dismissItemTransfer/);
+  assert.match(serverSyncHandler, /\} catch \(error\) \{[\s\S]+dismissItemTransfer\(\);[\s\S]+if \(error\?\.name === "AbortError"\) throw error;[\s\S]+failed\.push/);
+  assert.match(serverSyncHandler, /completed \+= 1;[\s\S]+if \(itemSucceeded\) \{/);
+  assert.doesNotMatch(serverSyncHandler, /title: `Retrying download|onRetry:[\s\S]{0,300}completedBytes: itemCompletedBytes|if \(itemSucceeded \|\| itemCompletedBytes > 0\)/);
+  assert.match(serverDownloadSource, /publishProgress\.reset = \(\) => \{[\s\S]+lastPublishedAt = Number\.NEGATIVE_INFINITY;[\s\S]+publishedInitial = false;[\s\S]+publishedFinal = false/);
+  assert.match(appSource, /if \(dismiss\) \{[\s\S]+hideServerTransfer\(owner\);[\s\S]+return;/);
+  assert.doesNotMatch(serverSyncHandler, /completedBytes: itemCompletedBytes \|\| 1|totalBytes: itemTotalBytes \|\| itemCompletedBytes \|\| 1/);
+  assert.doesNotMatch(appSource, /updateServerTransfer\(\{ direction: "download", currentFile: "Preparing download/);
+  assert.doesNotMatch(appSource, /Preparing transfer|Preparing download/);
+  assert.doesNotMatch(htmlSource, /Preparing transfer|Preparing download|id="serverTransferPercent">0%<|id="serverTransferProgress"[^>]+value="0"/);
+  assert.match(htmlSource, /id="serverTransferToast"[^>]+hidden[\s\S]+id="serverTransferTitle"><\/strong>[\s\S]+id="serverTransferDetail"><\/small>[\s\S]+id="serverTransferProgress" max="1"[\s\S]+id="serverTransferPercent"><\/span>/);
+  assert.match(appSource, /if \(direction === "download" && downloadBytes <= 0 && !ownsVisibleDownload\) \{[\s\S]+toast\.hidden = true;[\s\S]+return;/);
+  assert.match(appSource, /const displayedTransferComplete = itemTotal !== undefined[\s\S]+Number\(itemCompleted\) >= Number\(itemTotal\)/);
+  assert.match(appSource, /const ownsVisibleDownload = serverTransferActive[\s\S]+if \(!ownsVisibleDownload && !\(stage === "downloading" && completed > 0\)\) return;/);
+  assert.match(appSource, /if \(ownsVisibleDownload && stage === "downloading" && completed <= 0\) return;/);
+  assert.match(appSource, /serverDownloadOperationActive = true;[\s\S]+await api\.syncServer\([\s\S]+finally \{[\s\S]+serverDownloadOperationActive = false;/);
   assert.match(downloadFileSource, /const \{ done, value \} = await reader\.read\(\);\s+signal\?\.throwIfAborted\(\);\s+if \(done\) break;/);
   assert.match(replaceServerCatalogBody, /resetServerCatalogAuthority\(\);[\s\S]+serverCatalogGeneration \+= 1/);
   assert.match(refreshServerCatalogAfterUploadBody, /replaceServerCatalog\(catalog\.songs\);\s+markServerCatalogAuthoritative\(context\);/);

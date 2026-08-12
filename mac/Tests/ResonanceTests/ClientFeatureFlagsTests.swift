@@ -128,6 +128,30 @@ struct ClientFeatureFlagsTests {
         #expect(!policy.allowsReviewedMatch)
         #expect(policy.permittedUploadModes == [.localFile])
         #expect(policy.permittedDownloadModes == [.verifiedFileCache])
+        #expect(!MacServerDownloadConfigurationPolicy.canStartImmediately(with: policy))
+    }
+
+    @Test("an exact active download policy can start while it refreshes")
+    func currentDownloadPolicyStartsImmediately() throws {
+        let now = Date.now
+        let context = makeContext()
+        let fixture = try makeFixture(context: context, now: now)
+        let document = try MacClientConfigVerifier.verify(
+            body: fixture.body,
+            contentDigest: fixture.headers.contentDigest,
+            signature: fixture.headers.signature,
+            context: context,
+            accessToken: token,
+            now: now
+        )
+        #expect(MacServerDownloadConfigurationPolicy.canStartImmediately(with: .init(
+            document: document,
+            source: .verifiedServer
+        )))
+        #expect(MacServerDownloadConfigurationPolicy.canStartImmediately(with: .init(
+            document: nil,
+            source: .legacyServer
+        )))
     }
 
     @Test("cache and mode scopes separate profile, version, build, and token")
@@ -192,6 +216,7 @@ struct ClientFeatureFlagsTests {
         #expect(expired.allowsLocalFileUpload)
         #expect(expired.allowsOfflineDownload)
         #expect(!expired.allowsServerSourceLink)
+        #expect(!MacServerDownloadConfigurationPolicy.canStartImmediately(with: expired))
 
         #expect(throws: MacClientConfigVerificationError.invalidTime) {
             try MacClientConfigVerifier.verify(

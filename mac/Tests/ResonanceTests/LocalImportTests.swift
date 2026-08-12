@@ -974,7 +974,7 @@ struct LocalImportTests {
     }
 
     @Test
-    func resolvesDownloadsRemuxesAndSavesLocallyWithoutAResonanceAPIRequest() async throws {
+    func resolvesDownloadsAndSavesWithoutWaitingForUnfinishedMetadataEnrichment() async throws {
         #expect(FileManager.default.fileExists(atPath: m4a.path))
         let fixture = try Data(contentsOf: m4a)
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("LocalImportTests-\(UUID().uuidString)", isDirectory: true)
@@ -1045,6 +1045,13 @@ struct LocalImportTests {
             localRoot: library,
             temporaryRoot: temporary
         )
+        let metadataEnrichment = LocalImportMetadataEnrichment {
+            try? await Task.sleep(for: .seconds(3_600))
+            return nil
+        }
+        defer { metadataEnrichment.cancel() }
+        let authorizationChecks = LocalImportRequestCounter()
+        let prematureInstallations = LocalImportRequestCounter()
         var stages: [LocalImportStage] = []
         let resolution = try await service.resolve(source: "https://youtu.be/\(videoID)") { progress in
             stages.append(progress.stage)
@@ -1063,6 +1070,13 @@ struct LocalImportTests {
                 artworkURL: "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg",
                 sourceURL: "https://youtu.be/\(videoID)"
             ),
+            metadataEnrichment: metadataEnrichment,
+            finalizeAuthorization: {
+                _ = authorizationChecks.increment()
+                if (try? FileManager.default.contentsOfDirectory(atPath: library.path))?.isEmpty != true {
+                    _ = prematureInstallations.increment()
+                }
+            },
             existingTracks: []
         ) { progress in
             stages.append(progress.stage)
@@ -1075,6 +1089,9 @@ struct LocalImportTests {
         let player = try AVAudioPlayer(contentsOf: imported.fileURL)
         #expect(player.duration > 0)
         #expect(imported.metadata.title == "Local Test Audio")
+        #expect(metadataEnrichment.availableMetadata == nil)
+        #expect(authorizationChecks.value == 1)
+        #expect(prematureInstallations.value == 0)
         #expect(imported.downloadSourceURL?.absoluteString == "https://rr1.example.googlevideo.com/videoplayback")
         #expect(!FileManager.default.fileExists(atPath: abandoned.path))
         #expect(stages.contains(.downloading))

@@ -34,7 +34,7 @@ function createRenewablePolicyLease(options = {}) {
   let renewalTimer = null;
   let deadline = signedDeadline(initialConfig);
   let closed = false;
-  let renewing = false;
+  let renewalPromise = null;
   const unsigned = initialConfig?.verified !== true;
   if (unsigned && !(allowUnsignedInitial && !initialConfig?.expires_at)) {
     throw policyError(errorFactory, "A valid signed policy lease is required.");
@@ -78,42 +78,45 @@ function createRenewablePolicyLease(options = {}) {
     renewalTimer?.unref?.();
   };
 
-  const renewLease = async () => {
-    if (closed || controller.signal.aborted || unsigned || typeof renew !== "function" || renewing) return;
-    renewing = true;
-    try {
-      const renewed = await renew();
-      if (closed || controller.signal.aborted) return;
-      const nextDeadline = signedDeadline(renewed);
-      if (renewed?.source === "remote"
-          && Number.isFinite(nextDeadline)
-          && nextDeadline > deadline
-          && nextDeadline > now()) {
-        deadline = nextDeadline;
-        armSignedLease();
-      } else if (renewed?.source === "remote"
-          && Number.isFinite(nextDeadline)
-          && nextDeadline < deadline) {
-        // A freshly verified server response is authoritative even when it
-        // shortens the lease. Re-arm even if the shorter deadline elapsed
-        // while renewal was in flight so it revokes immediately instead of
-        // retaining the older, longer authorization. A same-expiry cached
-        // response merely retries.
-        deadline = nextDeadline;
-        armSignedLease();
-      } else {
-        scheduleRetry();
+  const renewLease = () => {
+    if (closed || controller.signal.aborted || unsigned || typeof renew !== "function") return Promise.resolve();
+    if (renewalPromise) return renewalPromise;
+    renewalPromise = (async () => {
+      try {
+        const renewed = await renew();
+        if (closed || controller.signal.aborted) return;
+        const nextDeadline = signedDeadline(renewed);
+        if (renewed?.source === "remote"
+            && Number.isFinite(nextDeadline)
+            && nextDeadline > deadline
+            && nextDeadline > now()) {
+          deadline = nextDeadline;
+          armSignedLease();
+        } else if (renewed?.source === "remote"
+            && Number.isFinite(nextDeadline)
+            && nextDeadline < deadline) {
+          // A freshly verified server response is authoritative even when it
+          // shortens the lease. Re-arm even if the shorter deadline elapsed
+          // while renewal was in flight so it revokes immediately instead of
+          // retaining the older, longer authorization. A same-expiry cached
+          // response merely retries.
+          deadline = nextDeadline;
+          armSignedLease();
+        } else {
+          scheduleRetry();
+        }
+      } catch (error) {
+        if (closed || controller.signal.aborted) return;
+        if (error?.verifiedRevocation === true) {
+          abortForPolicy(error.message || "Policy authorization was revoked.");
+        } else {
+          scheduleRetry();
+        }
       }
-    } catch (error) {
-      if (closed || controller.signal.aborted) return;
-      if (error?.verifiedRevocation === true) {
-        abortForPolicy(error.message || "Policy authorization was revoked.");
-      } else {
-        scheduleRetry();
-      }
-    } finally {
-      renewing = false;
-    }
+    })().finally(() => {
+      renewalPromise = null;
+    });
+    return renewalPromise;
   };
 
   const armSignedLease = () => {
@@ -144,6 +147,9 @@ function createRenewablePolicyLease(options = {}) {
     get deadline() { return unsigned ? null : deadline; },
     assertActive: assertAuthorized,
     assertAuthorized,
+    refresh() {
+      return renewLease();
+    },
     close() {
       if (closed) return;
       closed = true;

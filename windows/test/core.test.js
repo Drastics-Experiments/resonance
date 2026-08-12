@@ -84,6 +84,7 @@ const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdat
 const { isManagedLibraryFile } = libraryPaths;
 const {
   SERVER_DOWNLOAD_ATTEMPTS,
+  createServerCatalogSnapshotStore,
   createServerDownloadProgressPublisher,
   retryServerDownload,
   serverDownloadDisplayName,
@@ -2352,7 +2353,7 @@ test("shows catalog song titles instead of internal server download filenames", 
     ratio: null,
     counter: "4/10",
     determinate: false,
-    label: "Preparing · 4/10",
+    label: "4/10",
   });
   assert.equal(serverTransferProgressPresentation({
     itemCompleted: 1,
@@ -2360,6 +2361,12 @@ test("shows catalog song titles instead of internal server download filenames", 
     itemIndex: 1,
     itemCount: 1,
   }).label, "<1% · 1/1");
+  assert.equal(serverTransferProgressPresentation({
+    itemCompleted: 512,
+    itemTotal: 0,
+    itemIndex: 1,
+    itemCount: 2,
+  }).label, "Downloading · 1/2");
 });
 
 test("server downloads prefer already-hydrated catalog metadata", () => {
@@ -2412,15 +2419,52 @@ test("server downloads prefer already-hydrated catalog metadata", () => {
   })), false);
 });
 
+test("server catalog snapshots replace and invalidate only within their exact owner context", () => {
+  const snapshots = createServerCatalogSnapshotStore();
+  const context = {
+    origin: "https://music.test",
+    profileID: "profile-a",
+    credentialFingerprint: "credential-a",
+  };
+  const first = { songs: [{ id: "first" }] };
+  const replacement = { songs: [{ id: "replacement" }] };
+  snapshots.remember(7, context, first);
+  assert.equal(snapshots.read(7, context), first);
+  assert.equal(snapshots.read(8, context), null);
+  assert.equal(snapshots.read(7, { ...context, origin: "https://other.test" }), null);
+  assert.equal(snapshots.read(7, { ...context, profileID: "profile-b" }), null);
+  assert.equal(snapshots.read(7, { ...context, credentialFingerprint: "credential-b" }), null);
+  snapshots.remember(7, context, replacement);
+  assert.equal(snapshots.read(7, context), replacement);
+  const secondCredentialContext = { ...context, credentialFingerprint: "credential-b" };
+  const otherProfileContext = { ...context, profileID: "profile-b" };
+  const otherOriginContext = { ...context, origin: "https://other.test" };
+  snapshots.remember(8, secondCredentialContext, first);
+  snapshots.remember(9, otherProfileContext, first);
+  snapshots.remember(10, otherOriginContext, first);
+  assert.equal(snapshots.clearContext(context), 2);
+  assert.equal(snapshots.read(7, context), null);
+  assert.equal(snapshots.read(8, secondCredentialContext), null);
+  assert.equal(snapshots.read(9, otherProfileContext), first);
+  assert.equal(snapshots.read(10, otherOriginContext), first);
+  snapshots.remember(7, context, replacement);
+  snapshots.clear(7);
+  assert.equal(snapshots.read(7, context), null);
+});
+
 test("server SoundCloud downloads carry their prepared rendition into the exact import context", () => {
   const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
   const start = mainSource.indexOf("async function downloadSavedSourceSong");
   const end = mainSource.indexOf('ipcMain.handle("server:sync"', start);
   const downloadSource = mainSource.slice(start, end);
   assert.match(downloadSource, /preparationContext = JSON\.stringify\(\{[\s\S]+serverOrigin:[\s\S]+profileID:[\s\S]+songID:/);
-  assert.match(downloadSource, /resolveLocalImportDownloadSource\([\s\S]+\{ mediaKind, preparationContext \}\)/);
+  assert.match(downloadSource, /resolveLocalImportDownloadSource\([\s\S]+\{ mediaKind, preparationContext \},?[\s\S]*\)/);
   assert.match(downloadSource, /preparedSoundCloudAudio: candidate\.preparedSoundCloudAudio/);
   assert.match(downloadSource, /preparationContext,[\s\S]+existing: options\.existing/);
+  assert.match(downloadSource, /const metadataEnrichment = options\.metadataIsResolved[\s\S]+resolveLocalImportMetadata/);
+  assert.match(downloadSource, /metadataSnapshot,[\s\S]+preparedSoundCloudAudio/);
+  assert.match(downloadSource, /finally \{[\s\S]+metadataController\.abort\(\);[\s\S]+void metadataEnrichment\.then/);
+  assert.doesNotMatch(downloadSource, /const metadata = await completedMetadata/);
 });
 
 test("unresolved fallback metadata cannot be overwritten by stale display metadata", () => {
@@ -2470,6 +2514,93 @@ test("throttles current-song progress while always publishing its initial and fi
   timestamp = 101;
   assert.equal(publish(event(1_000)), true);
   assert.deepEqual(published, [0, 200, 1_000]);
+});
+
+test("a failed attempt hides stale bytes and the retry publishes only its first new byte", async () => {
+  let attempt = 0;
+  let visibleBytes = null;
+  const published = [];
+  const publish = createServerDownloadProgressPublisher((event) => {
+    visibleBytes = event.itemCompleted;
+    published.push({ attempt, bytes: event.itemCompleted });
+  }, {
+    now: () => 0,
+    minimumInterval: 100,
+  });
+
+  await retryServerDownload(async () => {
+    attempt += 1;
+    if (attempt === 1) {
+      publish({ itemCompleted: 320, itemTotal: 1_000 }, { force: true });
+      throw new Error("mid-stream failure");
+    }
+    assert.equal(visibleBytes, null);
+    assert.equal(publish({ itemCompleted: 24, itemTotal: 1_000 }), true);
+    return true;
+  }, {
+    attempts: 2,
+    pause: async () => assert.equal(visibleBytes, null),
+    onRetry: () => {
+      visibleBytes = null;
+      publish.reset();
+    },
+  });
+
+  assert.deepEqual(published, [
+    { attempt: 1, bytes: 320 },
+    { attempt: 2, bytes: 24 },
+  ]);
+});
+
+test("a permanently failed item drops its partial bytes before the next item or final reconciliation", async () => {
+  const visible = [];
+  const checkpoints = [];
+  const runFailedItem = async (label) => {
+    let visibleBytes = null;
+    const publish = createServerDownloadProgressPublisher((event) => {
+      visibleBytes = event.itemCompleted;
+      visible.push({ label, bytes: visibleBytes });
+    }, {
+      now: () => 0,
+      minimumInterval: 100,
+    });
+    const dismiss = () => {
+      visibleBytes = null;
+      publish.reset();
+    };
+
+    try {
+      await retryServerDownload(async () => {
+        publish({ itemCompleted: 640, itemTotal: 1_000 }, { force: true });
+        throw new Error("permanent mid-stream failure");
+      }, {
+        attempts: 2,
+        pause: async () => assert.equal(visibleBytes, null),
+        onRetry: dismiss,
+      });
+    } catch (error) {
+      dismiss();
+      checkpoints.push({ label, visibleBytes, message: error.message });
+    }
+  };
+
+  await runFailedItem("first");
+  checkpoints.push({ label: "next-item-discovery", visibleBytes: null });
+  await runFailedItem("last");
+  checkpoints.push({ label: "final-reconciliation", visibleBytes: null });
+
+  assert.deepEqual(visible, [
+    { label: "first", bytes: 640 },
+    { label: "first", bytes: 640 },
+    { label: "last", bytes: 640 },
+    { label: "last", bytes: 640 },
+  ]);
+  assert.deepEqual(checkpoints, [
+    { label: "first", visibleBytes: null, message: "permanent mid-stream failure" },
+    { label: "next-item-discovery", visibleBytes: null },
+    { label: "last", visibleBytes: null, message: "permanent mid-stream failure" },
+    { label: "final-reconciliation", visibleBytes: null },
+  ]);
 });
 
 test("replaces stale synced tracks instead of discarding the fresh download", () => {
@@ -2705,7 +2836,7 @@ test("reserves immutable upload contexts while account sessions replace credenti
 
   assert.match(contextSource, /Object\.freeze\(\{[\s\S]+adminToken: serverAdminToken/);
   assert.match(contextSource, /serverUploadContextIsCurrent[\s\S]+context\?\.adminToken === serverAdminToken/);
-  assert.match(contextSource, /ensureServerContextCanChange[\s\S]+serverTransferActive \|\| serverContextReservation/);
+  assert.match(contextSource, /ensureServerContextCanChange[\s\S]+serverTransferActive \|\| serverDownloadOperationActive \|\| serverContextReservation/);
   assert.match(saveFormSource, /const settingsOpen = Boolean\(\$\("#settingsDialog"\)\?\.open && settingsPanel === "server" && \$\("#serverSettingsForm"\)\)/);
   assert.doesNotMatch(saveFormSource, /#serverToken|#serverAdminToken|saveServerCredentials/);
   assert.match(saveFormSource, /serverToken = String\(accountSession\?\.accessToken \|\| ""\)\.trim\(\)/);

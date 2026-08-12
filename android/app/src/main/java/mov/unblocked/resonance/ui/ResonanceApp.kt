@@ -177,7 +177,7 @@ fun ResonanceApp(
 }
 
 internal fun shouldShowTransferPopup(state: ResonanceUiState): Boolean =
-    state.isDownloading || state.isUploading
+    state.isUploading || (state.isDownloading && state.downloadBytesTransferred > 0L)
 
 @Composable
 private fun AndroidUpdateDialog(

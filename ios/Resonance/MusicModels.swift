@@ -1281,6 +1281,38 @@ enum MobileTransferDisplayPolicy {
     }
 }
 
+/// Download reservations are intentionally invisible. A transfer card becomes
+/// truthful only once the downloader has received media bytes. A terminal
+/// update may keep an already-visible card alive, but cannot create one.
+enum MobileDownloadTransferPresentationPolicy {
+    static func shouldPresent(
+        completedBytes: Int64,
+        fallbackProgress: Double?,
+        hasReceivedBytes: Bool = false
+    ) -> Bool {
+        if completedBytes > 0 { return true }
+        guard let fallbackProgress, fallbackProgress.isFinite else { return false }
+        return hasReceivedBytes && fallbackProgress > 0
+    }
+
+    static func shouldEndBytePresentation(for stage: LocalImportStage) -> Bool {
+        stage != .downloading
+    }
+}
+
+enum MobileLoadedCatalogDownloadPolicy {
+    static func pendingSongs(
+        from catalog: [MobileRemoteSong],
+        requestedSongIDs: Set<String>?,
+        syncedSongIDs: Set<String>
+    ) -> [MobileRemoteSong] {
+        catalog.filter { song in
+            (requestedSongIDs.map { $0.contains(song.id) } ?? true)
+                && !syncedSongIDs.contains(song.id)
+        }
+    }
+}
+
 enum MobileTransferByteProgressPolicy {
     static let minimumUpdateDelta: Int64 = 256 * 1_024
 
@@ -1333,13 +1365,112 @@ enum MobileRemoteSourceMetadataReusePolicy {
             trackID: song.id,
             title: song.title,
             artist: song.artist,
-            album: album.isEmpty || album.utf8.count > 512 ? nil : album,
+            album: album.isEmpty || album == "Link only" || album.utf8.count > 512 ? nil : album,
             trackNumber: nil,
             durationSeconds: durationSeconds,
             artworkURL: song.artworkURL?.absoluteString,
             embedURL: "",
             sourceURL: source
         )
+    }
+
+    /// Produces an acquisition seed from the catalog row without performing a
+    /// provider metadata request. Direct YouTube and SoundCloud media lookup
+    /// can start from the source URL alone; a hydrated Spotify row supplies the
+    /// search terms needed to locate its audio counterpart.
+    static func acquisitionTrack(for song: MobileRemoteSong) -> LocalImportSpotifyTrack? {
+        if let known = knownTrack(for: song) { return known }
+        guard let source = song.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !source.isEmpty else { return nil }
+        let isDirectYouTube = (try? LocalImportURL.youtubeVideoID(source)) != nil
+        guard LocalImportURL.isSoundCloud(source) || isDirectYouTube else { return nil }
+        let filenameTitle = (song.filename as NSString).deletingPathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = usefulAcquisitionValue(song.title, rejecting: ["Resolving metadata…"])
+            ?? (filenameTitle.isEmpty ? "Saved song" : filenameTitle)
+        let artist = usefulAcquisitionValue(
+            song.artist,
+            rejecting: ["On-device lookup", "Retrying automatically"]
+        ) ?? "Unknown Artist"
+        let album = usefulAcquisitionValue(song.album, rejecting: ["Link only"])
+        let durationSeconds = song.duration.flatMap { duration -> Int? in
+            guard duration.isFinite,
+                  duration > 0,
+                  duration < Double(Int.max) else { return nil }
+            return Int(duration.rounded())
+        }
+        return LocalImportSpotifyTrack(
+            provider: "server",
+            type: "track",
+            trackID: song.id,
+            title: title,
+            artist: artist,
+            album: album,
+            trackNumber: nil,
+            durationSeconds: durationSeconds,
+            artworkURL: song.artworkURL?.absoluteString,
+            embedURL: "",
+            sourceURL: source
+        )
+    }
+
+    private static func usefulAcquisitionValue(
+        _ value: String,
+        rejecting placeholders: Set<String>
+    ) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.utf8.count <= 512,
+              !placeholders.contains(trimmed) else { return nil }
+        return trimmed
+    }
+}
+
+struct MobileSourceImportFinalMetadata: Equatable, Sendable {
+    let title: String
+    let artist: String
+    let album: String
+    let duration: TimeInterval
+}
+
+/// Finishes a source import from values that are already available locally.
+/// A still-running remote metadata request is never part of this decision: its
+/// eventual result can update the saved track through the normal hydrator.
+enum MobileSourceImportFinalMetadataPolicy {
+    static func resolve(
+        localTitle: String,
+        localArtist: String,
+        localAlbum: String,
+        localDuration: TimeInterval,
+        currentRemoteSong: MobileRemoteSong?
+    ) -> MobileSourceImportFinalMetadata {
+        guard let currentRemoteSong, !currentRemoteSong.isMetadataLoading else {
+            return MobileSourceImportFinalMetadata(
+                title: localTitle,
+                artist: localArtist,
+                album: localAlbum,
+                duration: localDuration
+            )
+        }
+        return MobileSourceImportFinalMetadata(
+            title: useful(currentRemoteSong.title, fallback: localTitle),
+            artist: useful(currentRemoteSong.artist, fallback: localArtist),
+            album: useful(
+                currentRemoteSong.album,
+                fallback: localAlbum,
+                rejecting: ["Link only"]
+            ),
+            duration: currentRemoteSong.duration ?? localDuration
+        )
+    }
+
+    private static func useful(
+        _ value: String,
+        fallback: String,
+        rejecting placeholders: Set<String> = []
+    ) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || placeholders.contains(trimmed) ? fallback : trimmed
     }
 }
 
@@ -1422,6 +1553,13 @@ enum MobileTransferSessionPolicy {
     ) -> Bool {
         accepts(sessionID, activeSessionID: activeSessionID)
             && operationID == activeOperationID
+    }
+
+    static func acceptsBytePresentation(
+        operationID: UUID,
+        activePresentationOperationID: UUID?
+    ) -> Bool {
+        operationID == activePresentationOperationID
     }
 }
 

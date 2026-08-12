@@ -241,29 +241,31 @@ class LinkImportService(context: Context) {
                     "VIDEO_REQUIRES_YOUTUBE",
                     "Video downloads require a YouTube link or video search result. SoundCloud links provide audio only.",
                 )
-                if (knownTrackMetadata != null) {
-                    progress(LinkImportProgress(LinkImportStage.InspectingSource))
-                    val audio = try {
-                        SoundCloudImport.resolveAudio(source.trim())
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (_: Exception) {
-                        null
-                    }
-                    if (audio != null) {
-                        rememberPreparedSoundCloudAudio(audio)
-                        val candidate = LinkImportCandidate(
-                            videoID = "soundcloud:saved",
-                            title = knownTrackMetadata.title,
-                            artist = knownTrackMetadata.artist,
-                            durationSeconds = knownTrackMetadata.durationSeconds,
-                            thumbnailURL = knownTrackMetadata.artworkURL,
-                            sourceURL = audio.track.sourceURL,
-                            score = 1.0,
-                            sourceProvider = LinkImportSourceProvider.SoundCloud,
-                        )
-                        return@withContext LinkImportResolution(knownTrackMetadata, listOf(candidate))
-                    }
+                // Resolve the playable rendition first. This single operation provides the
+                // short-lived audio URL and enough fallback tags, so catalog metadata hydration
+                // can continue independently instead of sitting in front of the media transfer.
+                progress(LinkImportProgress(LinkImportStage.InspectingSource))
+                val audio = try {
+                    SoundCloudImport.resolveAudio(source.trim())
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+                if (audio != null) {
+                    rememberPreparedSoundCloudAudio(audio)
+                    val metadata = knownTrackMetadata ?: audio.track
+                    val candidate = LinkImportCandidate(
+                        videoID = "soundcloud:saved",
+                        title = metadata.title,
+                        artist = metadata.artist,
+                        durationSeconds = metadata.durationSeconds,
+                        thumbnailURL = metadata.artworkURL,
+                        sourceURL = audio.track.sourceURL,
+                        score = 1.0,
+                        sourceProvider = LinkImportSourceProvider.SoundCloud,
+                    )
+                    return@withContext LinkImportResolution(metadata, listOf(candidate))
                 }
                 progress(LinkImportProgress(LinkImportStage.ResolvingMetadata))
                 when (val resolved = SoundCloudImport.resolve(source.trim())) {

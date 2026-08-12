@@ -833,6 +833,7 @@ actor LocalDeviceImportService {
         existingTracks: [MobileTrack],
         mediaMode: LocalImportMediaMode = .audio,
         includeArtwork: Bool = true,
+        preferResolvedMetadata: Bool = false,
         progress: @escaping LocalImportProgressHandler
     ) async throws -> LocalImportOutcome {
         try Task.checkCancellation()
@@ -850,6 +851,7 @@ actor LocalDeviceImportService {
                 metadata: inputMetadata,
                 existingTracks: existingTracks,
                 includeArtwork: includeArtwork,
+                preferResolvedMetadata: preferResolvedMetadata,
                 progress: progress
             )
         }
@@ -924,10 +926,18 @@ actor LocalDeviceImportService {
         try Task.checkCancellation()
         await progress(.init(stage: .processing))
         let metadata = LocalImportMetadata(
-            title: cleanMetadata(inputMetadata.title, fallback: resolved.preview.title),
-            artist: cleanMetadata(inputMetadata.artist, fallback: resolved.preview.author ?? "Unknown uploader"),
-            album: cleanMetadata(inputMetadata.album, fallback: "Imported"),
-            artworkURL: inputMetadata.artworkURL ?? resolved.preview.thumbnailURL,
+            title: preferResolvedMetadata
+                ? resolved.preview.title
+                : cleanMetadata(inputMetadata.title, fallback: resolved.preview.title),
+            artist: preferResolvedMetadata
+                ? (resolved.preview.author ?? "Unknown uploader")
+                : cleanMetadata(inputMetadata.artist, fallback: resolved.preview.author ?? "Unknown uploader"),
+            album: preferResolvedMetadata
+                ? "Imported"
+                : cleanMetadata(inputMetadata.album, fallback: "Imported"),
+            artworkURL: preferResolvedMetadata
+                ? (resolved.preview.thumbnailURL ?? inputMetadata.artworkURL)
+                : (inputMetadata.artworkURL ?? resolved.preview.thumbnailURL),
             sourceURL: inputMetadata.sourceURL
         )
         let artwork = includeArtwork ? await fetchArtwork(metadata.artworkURL) : nil
@@ -1011,6 +1021,7 @@ actor LocalDeviceImportService {
         metadata inputMetadata: LocalImportMetadata,
         existingTracks: [MobileTrack],
         includeArtwork: Bool,
+        preferResolvedMetadata: Bool,
         progress: LocalImportProgressHandler
     ) async throws -> LocalImportOutcome {
         let temporary = temporaryRoot.appendingPathComponent("resonance-import-\(UUID().uuidString)", isDirectory: true)
@@ -1044,10 +1055,18 @@ actor LocalDeviceImportService {
         try Task.checkCancellation()
         await progress(.init(stage: .processing))
         let metadata = LocalImportMetadata(
-            title: cleanMetadata(inputMetadata.title, fallback: stream.track.title),
-            artist: cleanMetadata(inputMetadata.artist, fallback: stream.track.artist),
-            album: cleanMetadata(inputMetadata.album, fallback: stream.track.album ?? "SoundCloud"),
-            artworkURL: inputMetadata.artworkURL ?? stream.track.artworkURL,
+            title: preferResolvedMetadata
+                ? stream.track.title
+                : cleanMetadata(inputMetadata.title, fallback: stream.track.title),
+            artist: preferResolvedMetadata
+                ? stream.track.artist
+                : cleanMetadata(inputMetadata.artist, fallback: stream.track.artist),
+            album: preferResolvedMetadata
+                ? (stream.track.album ?? "SoundCloud")
+                : cleanMetadata(inputMetadata.album, fallback: stream.track.album ?? "SoundCloud"),
+            artworkURL: preferResolvedMetadata
+                ? (stream.track.artworkURL ?? inputMetadata.artworkURL)
+                : (inputMetadata.artworkURL ?? stream.track.artworkURL),
             sourceURL: inputMetadata.sourceURL
         )
         let artwork = includeArtwork ? await fetchArtwork(metadata.artworkURL) : nil

@@ -1105,10 +1105,64 @@ struct ResonanceTests {
         #expect(MacServerDownloadProgressPolicy.fraction(completedBytes: 120, totalBytes: 100) == 1)
         #expect(MacServerDownloadProgressPolicy.presentationFraction(completedBytes: 0, totalBytes: 100) == nil)
         #expect(MacServerDownloadProgressPolicy.presentationFraction(completedBytes: 42, totalBytes: 100) == 0.42)
+        #expect(!MacServerDownloadProgressPolicy.transferHasStarted(completedBytes: 0))
+        #expect(MacServerDownloadProgressPolicy.transferHasStarted(completedBytes: 1))
         #expect(MacServerDownloadProgressPolicy.percentageLabel(0.001) == "<1%")
         #expect(MacServerDownloadProgressPolicy.percentageLabel(0.42) == "42%")
         #expect(MacServerDownloadProgressPolicy.batchCounter(position: 3, total: 10) == "3/10")
         #expect(MacServerDownloadProgressPolicy.batchCounter(position: 0, total: 0) == nil)
+    }
+
+    @Test
+    func serverDownloadTransferReleaseIsScopedToTheFailedOrCancelledItem() {
+        let stateGeneration: UInt64 = 7
+        let failedTransferGeneration: UInt64 = 11
+        let nextTransferGeneration: UInt64 = 12
+
+        #expect(MacServerDownloadTransferStatePolicy.owns(
+            stateGeneration: stateGeneration,
+            currentStateGeneration: stateGeneration,
+            transferGeneration: failedTransferGeneration,
+            currentTransferGeneration: failedTransferGeneration
+        ))
+
+        var transferIsVisible = true
+        if MacServerDownloadTransferStatePolicy.owns(
+            stateGeneration: stateGeneration,
+            currentStateGeneration: stateGeneration,
+            transferGeneration: failedTransferGeneration,
+            currentTransferGeneration: failedTransferGeneration
+        ) {
+            transferIsVisible = false
+        }
+        #expect(!transferIsVisible) // A failed item is hidden before a cache-reused next row.
+
+        transferIsVisible = true
+        if MacServerDownloadTransferStatePolicy.owns(
+            stateGeneration: stateGeneration,
+            currentStateGeneration: stateGeneration,
+            transferGeneration: failedTransferGeneration,
+            currentTransferGeneration: nextTransferGeneration
+        ) {
+            transferIsVisible = false
+        }
+        #expect(transferIsVisible) // A late failed-item defer cannot hide a newer transfer.
+
+        if MacServerDownloadTransferStatePolicy.owns(
+            stateGeneration: stateGeneration,
+            currentStateGeneration: stateGeneration,
+            transferGeneration: nextTransferGeneration,
+            currentTransferGeneration: nextTransferGeneration
+        ) {
+            transferIsVisible = false
+        }
+        #expect(!transferIsVisible) // Cancellation/failure of the final item leaves no stale card.
+        #expect(!MacServerDownloadTransferStatePolicy.owns(
+            stateGeneration: stateGeneration,
+            currentStateGeneration: stateGeneration + 1,
+            transferGeneration: nextTransferGeneration,
+            currentTransferGeneration: nextTransferGeneration
+        ))
     }
 
     @Test
@@ -1144,6 +1198,15 @@ struct ResonanceTests {
             """.utf8
         ))
 
+        #expect(MacServerDownloadMetadataPolicy.immediateCatalog(
+            knownSongs: [known],
+            catalogIsAuthoritative: true
+        )?.first?.id == known.id)
+        #expect(MacServerDownloadMetadataPolicy.immediateCatalog(
+            knownSongs: [known],
+            catalogIsAuthoritative: false
+        ) == nil)
+
         let reused = try #require(MacServerDownloadMetadataPolicy.reusingKnownMetadata(
             in: [fetched],
             knownSongs: [known],
@@ -1159,6 +1222,28 @@ struct ResonanceTests {
             catalogIsAuthoritative: false
         ).first)
         #expect(untrusted.isMetadataLoading)
+    }
+
+    @Test
+    func metadataHydrationContinuesOnlyForTheExactContextAndRequestedSources() {
+        #expect(MacRemoteMetadataHydrationPolicy.canReuse(
+            activeContext: "https://music.test|profile-a",
+            activeRequestKeys: ["audio:https://youtu.be/one", "audio:https://youtu.be/two"],
+            requestedContext: "https://music.test|profile-a",
+            requestedRequestKeys: ["audio:https://youtu.be/one"]
+        ))
+        #expect(!MacRemoteMetadataHydrationPolicy.canReuse(
+            activeContext: "https://music.test|profile-a",
+            activeRequestKeys: ["audio:https://youtu.be/one"],
+            requestedContext: "https://music.test|profile-b",
+            requestedRequestKeys: ["audio:https://youtu.be/one"]
+        ))
+        #expect(!MacRemoteMetadataHydrationPolicy.canReuse(
+            activeContext: "https://music.test|profile-a",
+            activeRequestKeys: ["audio:https://youtu.be/one"],
+            requestedContext: "https://music.test|profile-a",
+            requestedRequestKeys: ["audio:https://youtu.be/two"]
+        ))
     }
 
     @Test
@@ -1429,6 +1514,51 @@ struct ResonanceTests {
         model.remoteCatalogIsAuthoritative = true
         model.clearServerCredentials()
         #expect(!model.remoteCatalogIsAuthoritative)
+    }
+
+    @MainActor
+    @Test
+    func committedCatalogMutationInvalidatesAuthorityBeforeMalformedResponseDecoding() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = PlayerModel(loadPersistedLibrary: false, defaults: defaults, persistServerCredentials: false)
+        model.serverURLString = "https://music.test"
+        let base = try #require(URL(string: "https://music.test"))
+
+        model.remoteCatalogIsAuthoritative = true
+        #expect(model.invalidateRemoteCatalogAuthorityAfterCommittedMutation(
+            base: base,
+            profileID: "default",
+            statusCode: 201
+        ))
+        #expect(!model.remoteCatalogIsAuthoritative)
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(RemoteSong.self, from: Data("{".utf8))
+        }
+
+        model.remoteCatalogIsAuthoritative = true
+        #expect(model.invalidateRemoteCatalogAuthorityAfterCommittedMutation(
+            base: base,
+            profileID: "default",
+            statusCode: 409
+        ))
+        #expect(!model.remoteCatalogIsAuthoritative)
+
+        model.remoteCatalogIsAuthoritative = true
+        #expect(!model.invalidateRemoteCatalogAuthorityAfterCommittedMutation(
+            base: base,
+            profileID: "default",
+            statusCode: 500
+        ))
+        #expect(model.remoteCatalogIsAuthoritative)
+
+        let otherBase = try #require(URL(string: "https://other-music.test"))
+        #expect(!model.invalidateRemoteCatalogAuthorityAfterCommittedMutation(
+            base: otherBase,
+            profileID: "default",
+            statusCode: 204
+        ))
+        #expect(model.remoteCatalogIsAuthoritative)
     }
 
     @Test

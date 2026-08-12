@@ -123,6 +123,33 @@ final class MacAuthenticatedStreamAuthorizationLease: @unchecked Sendable {
         return renewed
     }
 
+    @discardableResult
+    func constrain(
+        context newContext: MacClientConfigContext,
+        expiresAt newExpiration: Date,
+        now: Date = .now
+    ) -> Bool {
+        var callback: (@Sendable () -> Void)?
+        let remainsAuthorized: Bool = lock.withLock {
+            guard !invalidated,
+                  now < expiresAt,
+                  newContext == context,
+                  newExpiration > now else {
+                if !invalidated {
+                    invalidated = true
+                    callback = invalidationHandler
+                    invalidationHandler = nil
+                }
+                return false
+            }
+            expiresAt = min(expiresAt, newExpiration)
+            scheduleTimer(now: now)
+            return true
+        }
+        callback?()
+        return remainsAuthorized
+    }
+
     func invalidate() {
         let callback: (@Sendable () -> Void)? = lock.withLock {
             guard !invalidated else { return nil }
@@ -227,8 +254,15 @@ enum MacRemoteStreamQueuePolicy {
 enum MacOfflineDownloadAuthorizationPolicy {
     static func remainsAuthorized(
         lease: MacAuthenticatedStreamAuthorizationLease,
-        context: MacClientConfigContext
+        context: MacClientConfigContext,
+        refreshedExpiration: Date? = nil
     ) -> Bool {
+        if let refreshedExpiration {
+            return lease.constrain(
+                context: context,
+                expiresAt: refreshedExpiration
+            )
+        }
         guard lease.matches(context: context) else { return false }
         do {
             try lease.authorize()

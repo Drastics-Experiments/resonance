@@ -63,7 +63,9 @@ struct ContentView: View {
             .accessibilityHidden(isNowPlayingPresented)
             .overlay(alignment: .bottom) {
                 VStack(spacing: 10) {
-                    if model.isSyncingServer && !model.isRefreshingServerCatalog {
+                    if model.isSyncingServer
+                        && !model.isRefreshingServerCatalog
+                        && model.isServerDownloadTransferVisible {
                         TransferProgressOverlay(
                             title: "Downloading",
                             detail: model.downloadCurrentFile,

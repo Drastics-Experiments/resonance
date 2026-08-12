@@ -612,6 +612,52 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
         XCTAssertEqual(MobileTransferDisplayPolicy.percentageLabel(0.42), "42%")
     }
 
+    func testDownloadCardCannotAppearBeforeTheFirstMediaByte() {
+        XCTAssertFalse(MobileDownloadTransferPresentationPolicy.shouldPresent(
+            completedBytes: 0,
+            fallbackProgress: nil
+        ))
+        XCTAssertFalse(MobileDownloadTransferPresentationPolicy.shouldPresent(
+            completedBytes: 0,
+            fallbackProgress: 1,
+            hasReceivedBytes: false
+        ), "A setup/completion signal must not manufacture a popup when no media byte was observed")
+        XCTAssertTrue(MobileDownloadTransferPresentationPolicy.shouldPresent(
+            completedBytes: 1,
+            fallbackProgress: nil
+        ))
+        XCTAssertTrue(MobileDownloadTransferPresentationPolicy.shouldPresent(
+            completedBytes: 0,
+            fallbackProgress: 1,
+            hasReceivedBytes: true
+        ))
+        XCTAssertFalse(MobileDownloadTransferPresentationPolicy.shouldEndBytePresentation(
+            for: .downloading
+        ))
+        XCTAssertTrue(MobileDownloadTransferPresentationPolicy.shouldEndBytePresentation(
+            for: .processing
+        ), "Local validation and tagging must not leave a completed byte bar on screen")
+    }
+
+    func testLoadedCatalogSnapshotPlansUnhydratedSongsWithoutARefresh() throws {
+        let first = try decodedRemoteSong(id: "one", title: "Already loaded one")
+        let second = try decodedRemoteSong(id: "two", title: "Already loaded two")
+        let unresolved = try decodedRemoteSong(
+            id: "three",
+            title: nil,
+            artist: nil
+        )
+        let planned = MobileLoadedCatalogDownloadPolicy.pendingSongs(
+            from: [first, second, unresolved],
+            requestedSongIDs: ["one", "two", "three"],
+            syncedSongIDs: ["two"]
+        )
+
+        XCTAssertEqual(planned.map(\.id), ["one", "three"])
+        XCTAssertEqual(planned.first?.title, "Already loaded one")
+        XCTAssertTrue(planned.last?.isMetadataLoading == true)
+    }
+
     func testCurrentSongBytesAndBatchPositionAreIndependent() {
         let state = MobileTransferDisplayState(
             kind: .download,
@@ -691,6 +737,89 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
             title: String(repeating: "x", count: 513),
             artist: "Catalog Artist"
         ))
+    }
+
+    func testUnhydratedSpotifyCannotFabricateSearchMetadata() throws {
+        let spotify = try decodedRemoteSong(
+            id: "spotify-row",
+            title: nil,
+            artist: nil,
+            sourceURL: "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+        )
+        let youtube = try decodedRemoteSong(
+            id: "youtube-row",
+            title: nil,
+            artist: nil,
+            sourceURL: "https://www.youtube.com/watch?v=abcdefghijk"
+        )
+        let unsupported = try decodedRemoteSong(
+            id: "unsupported-row",
+            title: nil,
+            artist: nil,
+            sourceURL: "https://example.com/audio"
+        )
+
+        XCTAssertNil(MobileRemoteSourceMetadataReusePolicy.acquisitionTrack(for: spotify))
+        XCTAssertNotNil(MobileRemoteSourceMetadataReusePolicy.acquisitionTrack(for: youtube))
+        XCTAssertNil(MobileRemoteSourceMetadataReusePolicy.acquisitionTrack(for: unsupported))
+    }
+
+    func testPendingRemoteMetadataCannotBlockBatchAdvanceOrFinalization() throws {
+        let unresolved = try decodedRemoteSong(
+            id: "pending-row",
+            title: nil,
+            artist: nil
+        )
+        let finalized = MobileSourceImportFinalMetadataPolicy.resolve(
+            localTitle: "Provider title",
+            localArtist: "Provider artist",
+            localAlbum: "Provider album",
+            localDuration: 187,
+            currentRemoteSong: unresolved
+        )
+
+        XCTAssertEqual(finalized.title, "Provider title")
+        XCTAssertEqual(finalized.artist, "Provider artist")
+        XCTAssertEqual(finalized.album, "Provider album")
+        XCTAssertEqual(finalized.duration, 187)
+
+        let titleOnlyCatalogRow = try decodedRemoteSong(
+            id: "title-only-row",
+            title: "Catalog title",
+            artist: "Catalog artist"
+        )
+        let titleOnlyFinalized = MobileSourceImportFinalMetadataPolicy.resolve(
+            localTitle: "Provider title",
+            localArtist: "Provider artist",
+            localAlbum: "Provider album",
+            localDuration: 187,
+            currentRemoteSong: titleOnlyCatalogRow
+        )
+        XCTAssertEqual(titleOnlyFinalized.title, "Catalog title")
+        XCTAssertEqual(titleOnlyFinalized.artist, "Catalog artist")
+        XCTAssertEqual(titleOnlyFinalized.album, "Provider album")
+    }
+
+    private func decodedRemoteSong(
+        id: String,
+        title: String?,
+        artist: String? = "Catalog Artist",
+        sourceURL: String = "https://www.youtube.com/watch?v=abcdefghijk"
+    ) throws -> MobileRemoteSong {
+        var object: [String: Any] = [
+            "id": id,
+            "filename": "\(id).m4a",
+            "source_url": sourceURL,
+            "media_kind": "audio",
+            "download_url": "/api/v1/songs/\(id)/file",
+            "stream_url": "/api/v1/songs/\(id)/stream",
+        ]
+        if let title { object["title"] = title }
+        if let artist { object["artist"] = artist }
+        return try JSONDecoder().decode(
+            MobileRemoteSong.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
     }
 
     func testSourceResolutionKeysAreScopedToCanonicalServerProfileAndAccount() throws {
@@ -957,6 +1086,19 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
             operationID: retryOperationID,
             activeSessionID: retrySessionID,
             activeOperationID: retryOperationID
+        ))
+    }
+
+    func testLateFinalByteCallbackCannotReopenACompletedTransferCard() {
+        let operationID = UUID()
+
+        XCTAssertTrue(MobileTransferSessionPolicy.acceptsBytePresentation(
+            operationID: operationID,
+            activePresentationOperationID: operationID
+        ))
+        XCTAssertFalse(MobileTransferSessionPolicy.acceptsBytePresentation(
+            operationID: operationID,
+            activePresentationOperationID: nil
         ))
     }
 

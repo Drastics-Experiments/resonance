@@ -26,6 +26,7 @@ import java.io.File
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.Future
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -70,6 +71,7 @@ import mov.unblocked.resonance.data.LinkImportKind
 import mov.unblocked.resonance.data.LinkImportMediaMode
 import mov.unblocked.resonance.data.LinkImportInput
 import mov.unblocked.resonance.data.LinkImportResolution
+import mov.unblocked.resonance.data.LatestValuePersistenceGate
 import mov.unblocked.resonance.data.ReviewedMatchResolutionPolicy
 import mov.unblocked.resonance.data.LibraryRepository
 import mov.unblocked.resonance.data.Playlist
@@ -81,6 +83,8 @@ import mov.unblocked.resonance.data.PlaylistOrderPolicy
 import mov.unblocked.resonance.data.PlaylistSyncMutationPolicy
 import mov.unblocked.resonance.data.PendingDownloadBatchPolicy
 import mov.unblocked.resonance.data.RemoteSongDownloadMetadataPolicy
+import mov.unblocked.resonance.data.RemoteDownloadContextChangePolicy
+import mov.unblocked.resonance.data.RemoteSourceDownloadCoordinator
 import mov.unblocked.resonance.data.RemoteSourceResolutionCacheKey
 import mov.unblocked.resonance.data.RemoteSourceResolutionCachePolicy
 import mov.unblocked.resonance.data.ProfileLibraryStatePolicy
@@ -158,6 +162,12 @@ private data class RemoteSongMetadataResult(
     val metadata: LinkImportTrack?,
 )
 
+private data class RemoteSongMetadataTaskKey(
+    val generation: Long,
+    val context: ServerProfileContext,
+    val cacheKey: String,
+)
+
 private const val STREAM_ARTWORK_URL_EXTRA = "resonance.stream.artwork_url"
 private const val MAX_PUBLISHED_ARTWORK_EDGE = 512
 private const val MAX_PUBLISHED_ARTWORK_BYTES = 256 * 1_024
@@ -207,6 +217,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     val accountBrowserRequests = mutableAccountBrowserRequests.asSharedFlow()
 
     private var library = StoredLibrary(serverURL = credentials.serverURL)
+    private val libraryPersistenceGate = LatestValuePersistenceGate<StoredLibrary>()
     private var controllerFuture: Future<MediaController>? = null
     private var controller: MediaController? = null
     private var activeQueue: List<String> = emptyList()
@@ -220,6 +231,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private var authoritativeCatalogSnapshot: CatalogRequestSnapshot? = null
     private var remoteSongMetadataHydrationGeneration = 0L
     private var remoteSongMetadataHydrationJob: Job? = null
+    private val remoteSongMetadataTaskLock = Any()
+    private val remoteSongMetadataTasks = mutableMapOf<RemoteSongMetadataTaskKey, Deferred<LinkImportTrack?>>()
     private var uploadMutationGeneration = 0L
     private var clientConfigRequestGeneration = 0L
     private var linkImportJob: Job? = null
@@ -364,13 +377,20 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun signOutAccount() {
         val current = accountSession
-        accountSession = null
-        remoteSourceResolutions.clear()
+        RemoteDownloadContextChangePolicy.mutateAfterInvalidation(
+            invalidateDownload = {
+                invalidateActiveRemoteDownload("Download stopped because the account signed out")
+            },
+            mutation = {
+                accountSession = null
+                remoteSourceResolutions.clear()
+                credentials.accountSession = null
+                credentials.pendingAccountSignIn = null
+                credentials.clearTokens()
+            },
+        )
         accountRefreshJob?.cancel()
         accountRefreshJob = null
-        credentials.accountSession = null
-        credentials.pendingAccountSignIn = null
-        credentials.clearTokens()
         authoritativeCatalogSnapshot = null
         cancelRemoteSongMetadataHydration()
         mutableState.value = mutableState.value.copy(
@@ -423,9 +443,16 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     SocialAuthClient(current.baseURL).refresh(current, library.syncProfileID)
                 }
                 if (accountSession != current) return@launch
-                migrateConfirmedLegacyProfile(refreshed)
-                accountSession = refreshed
-                credentials.accountSession = refreshed
+                RemoteDownloadContextChangePolicy.mutateAfterInvalidation(
+                    invalidateDownload = {
+                        invalidateActiveRemoteDownload("Download stopped because the account session changed")
+                    },
+                    mutation = {
+                        migrateConfirmedLegacyProfile(refreshed)
+                        accountSession = refreshed
+                        credentials.accountSession = refreshed
+                    },
+                )
                 applyAccountSession(refreshed)
                 refreshClientConfig()
                 scheduleAccountRefresh(refreshed)
@@ -474,11 +501,18 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun acceptAccountSession(session: AccountSession) {
-        migrateConfirmedLegacyProfile(session)
-        accountSession = session
-        credentials.accountSession = session
-        credentials.serverURL = session.baseURL
-        credentials.clearTokens()
+        RemoteDownloadContextChangePolicy.mutateAfterInvalidation(
+            invalidateDownload = {
+                invalidateActiveRemoteDownload("Download stopped because the account changed")
+            },
+            mutation = {
+                migrateConfirmedLegacyProfile(session)
+                accountSession = session
+                credentials.accountSession = session
+                credentials.serverURL = session.baseURL
+                credentials.clearTokens()
+            },
+        )
         applyAccountSession(session)
         scheduleAccountRefresh(session)
         saveServerConnection(
@@ -1434,7 +1468,28 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         persistImmediately: Boolean = true,
         batchProgress: ((LinkImportProgress) -> Unit)? = null,
         linkTransferGeneration: Long? = null,
+        finalMetadata: (() -> LinkImportTrack?)? = null,
     ): Track {
+        val itemNumber = completedBefore + 1
+
+        fun hideFailedAttemptBytes(expectedTitle: String) {
+            val boundary = DownloadItemProgressPolicy.hiddenBoundary(
+                currentItem = itemNumber,
+                totalItems = total,
+                title = expectedTitle,
+            )
+            if (batchProgress != null) {
+                batchProgress(LinkImportProgress(LinkImportStage.Downloading))
+            } else {
+                publishDownloadItemProgress(
+                    boundary,
+                    linkTransferGeneration = linkTransferGeneration,
+                    expectedItem = itemNumber,
+                    expectedTitle = expectedTitle,
+                )
+            }
+        }
+
         var lastError: Throwable? = null
         candidates.forEachIndexed { candidateIndex, candidate ->
             try {
@@ -1446,7 +1501,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 } else {
                     publishDownloadItemProgress(
                         DownloadItemProgressPolicy.fromBytes(
-                            currentItem = completedBefore + 1,
+                            currentItem = itemNumber,
                             totalItems = total,
                             title = metadata.title,
                             bytesTransferred = 0L,
@@ -1455,7 +1510,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         linkTransferGeneration,
                     )
                 }
-                val download = linkImportService.download(
+                val downloaded = linkImportService.download(
                     candidate = candidate,
                     metadata = metadata,
                     mediaMode = mediaMode,
@@ -1472,7 +1527,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     } else {
                         publishDownloadItemProgress(
                             DownloadItemProgressPolicy.fromBytes(
-                                currentItem = completedBefore + 1,
+                                currentItem = itemNumber,
                                 totalItems = total,
                                 title = metadata.title,
                                 bytesTransferred = progress.completedBytes,
@@ -1483,6 +1538,30 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         )
                     }
                 }
+                // Media acquisition and byte transfer are deliberately ahead of metadata
+                // enrichment. Only consult the concurrent catalog task now, immediately before
+                // the local file is tagged and registered.
+                if (finalMetadata != null) {
+                    mutableState.update { state -> state.copy(
+                        downloadBytesTransferred = 0L,
+                        downloadTotalBytes = null,
+                    ) }
+                }
+                val download = finalMetadata?.invoke()?.let { enriched ->
+                    val merged = enriched.copy(
+                        album = enriched.album ?: downloaded.metadata.album,
+                        durationSeconds = enriched.durationSeconds ?: downloaded.metadata.durationSeconds,
+                        artworkURL = enriched.artworkURL ?: downloaded.metadata.artworkURL,
+                        sourceURL = enriched.sourceURL.ifBlank { downloaded.metadata.sourceURL },
+                    )
+                    downloaded.copy(
+                        metadata = merged,
+                        durationMs = merged.durationSeconds
+                            ?.coerceAtLeast(0)
+                            ?.times(1_000L)
+                            ?: downloaded.durationMs,
+                    )
+                } ?: downloaded
                 linkTransferGeneration?.let(::requireLinkImportTransfer)
                 val duplicate = library.tracks.firstOrNull {
                     it.sourceSHA256 == download.sourceSHA256 ||
@@ -1513,6 +1592,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
+                // Clear this exact item's partial byte presentation before retry backoff or
+                // before the final failure returns into persistence/sync work.
+                linkTransferGeneration?.let(::requireLinkImportTransfer)
+                hideFailedAttemptBytes(metadata.title)
                 lastError = error
             }
         }
@@ -1650,10 +1733,16 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private fun publishDownloadItemProgress(
         progress: DownloadItemProgressPresentation,
         linkTransferGeneration: Long? = null,
+        expectedItem: Int? = null,
+        expectedTitle: String? = null,
     ) {
         if (linkTransferGeneration != null && !ownsLinkImportTransfer(linkTransferGeneration)) return
         mutableState.update { state ->
-            if (linkTransferGeneration != null && !ownsLinkImportTransfer(linkTransferGeneration)) state else state.copy(
+            if (
+                (linkTransferGeneration != null && !ownsLinkImportTransfer(linkTransferGeneration)) ||
+                (expectedItem != null && state.downloadCurrentItem != expectedItem) ||
+                (expectedTitle != null && state.downloadCurrentTitle != expectedTitle)
+            ) state else state.copy(
                 downloadProgress = progress.fraction,
                 downloadDetail = "${progress.currentItem}/${progress.totalItems} • ${progress.title}",
                 downloadCurrentItem = progress.currentItem,
@@ -2619,7 +2708,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             stopActiveStream("The server stream stopped because the download mode changed.")
         }
         if (activeDownloadPolicySnapshot?.mode != null && activeDownloadPolicySnapshot?.mode != mode) {
-            remoteDownloadJob?.cancel()
+            invalidateActiveRemoteDownload("Download stopped because the download mode changed")
         }
         mutableState.value = mutableState.value.copy(serverDownloadMode = mode)
         persistServerTransferModes()
@@ -2781,9 +2870,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     val results = coroutineScope {
                         batch.map { request ->
                             async {
-                                val metadata = runCatching {
-                                    linkImportService.resolveMetadata(request.source)
-                                }.getOrNull()
+                                val task = remoteSongMetadataTask(request, generation, context)
+                                val metadata = task.await()
                                 RemoteSongMetadataResult(request, metadata)
                             }
                         }.awaitAll()
@@ -2819,6 +2907,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         cacheChanged = true
                     }
                     mutableState.value = mutableState.value.copy(remoteSongs = songs)
+                    results.forEach { result ->
+                        forgetRemoteSongMetadataTask(result.request, generation, context)
+                    }
                 }
 
                 if (!anyFailure) break
@@ -2864,6 +2955,45 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private fun remoteSongMetadataCacheKey(song: RemoteSong): String? =
         song.sourceURL?.let { RemoteSongMetadataCachePolicy.key(it, song.mediaKind) }
 
+    private fun remoteSongMetadataTask(
+        request: RemoteSongMetadataRequest,
+        generation: Long,
+        context: ServerProfileContext,
+    ): Deferred<LinkImportTrack?> {
+        val key = RemoteSongMetadataTaskKey(generation, context, request.cacheKey)
+        return synchronized(remoteSongMetadataTaskLock) {
+            remoteSongMetadataTasks[key] ?: viewModelScope.async(Dispatchers.IO) {
+                try {
+                    linkImportService.resolveMetadata(request.source)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Throwable) {
+                    null
+                }
+            }.also { remoteSongMetadataTasks[key] = it }
+        }
+    }
+
+    private fun remoteSongMetadataTask(
+        song: RemoteSong,
+        context: ServerProfileContext,
+    ): Deferred<LinkImportTrack?>? {
+        val source = song.sourceURL?.trim().orEmpty()
+        val cacheKey = remoteSongMetadataCacheKey(song) ?: return null
+        val request = RemoteSongMetadataRequest(listOf(song.id), cacheKey, source, song.mediaKind)
+        return remoteSongMetadataTask(request, remoteSongMetadataHydrationGeneration, context)
+    }
+
+    private fun forgetRemoteSongMetadataTask(
+        request: RemoteSongMetadataRequest,
+        generation: Long,
+        context: ServerProfileContext,
+    ) {
+        synchronized(remoteSongMetadataTaskLock) {
+            remoteSongMetadataTasks.remove(RemoteSongMetadataTaskKey(generation, context, request.cacheKey))
+        }
+    }
+
     private fun isCurrentRemoteSongMetadataHydration(
         generation: Long,
         context: ServerProfileContext,
@@ -2873,6 +3003,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private fun cancelRemoteSongMetadataHydration() {
         remoteSongMetadataHydrationJob?.cancel()
         remoteSongMetadataHydrationJob = null
+        val tasks = synchronized(remoteSongMetadataTaskLock) {
+            remoteSongMetadataTasks.values.toList().also { remoteSongMetadataTasks.clear() }
+        }
+        tasks.forEach { it.cancel() }
         remoteSongMetadataHydrationGeneration += 1
     }
 
@@ -2904,33 +3038,72 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         isMetadataLoading = false,
     )
 
+    private fun recordRemoteSongMetadata(
+        songID: String,
+        metadata: LinkImportTrack,
+        context: ServerProfileContext,
+    ) {
+        if (currentServerProfileContext() != context) return
+        val song = mutableState.value.remoteSongs.firstOrNull { it.id == songID } ?: return
+        if (!song.isMetadataLoading) return
+        mutableState.value = mutableState.value.copy(
+            remoteSongs = mutableState.value.remoteSongs.map { current ->
+                if (current.id == songID && current.isMetadataLoading) {
+                    applyRemoteSongMetadata(current, metadata)
+                } else {
+                    current
+                }
+            },
+        )
+        val cacheKey = remoteSongMetadataCacheKey(song) ?: return
+        library = library.copy(
+            remoteSongMetadataCache = library.remoteSongMetadataCache + (
+                cacheKey to RemoteSongMetadataCacheEntry(
+                    sourceURL = requireNotNull(song.sourceURL).trim(),
+                    mediaKind = song.mediaKind,
+                    title = metadata.title,
+                    artist = metadata.artist,
+                    album = metadata.album,
+                    durationSeconds = metadata.durationSeconds?.toDouble(),
+                    artworkURL = metadata.artworkURL,
+                    cachedAtEpochMs = System.currentTimeMillis(),
+                )
+            ),
+        )
+    }
+
     private suspend fun backfillDownloadedArtwork(
         client: ServerClient,
         songs: List<RemoteSong>,
     ): Boolean {
         val songsByID = songs.associateBy(RemoteSong::id)
-        val updatedTracks = ArrayList<Track>(library.tracks.size)
-        var changed = false
-
-        for (track in library.tracks) {
+        val candidates = library.tracks.filter { track ->
             val existingArtwork = repository.artworkFile(track)?.takeIf(File::isFile)
             val song = track.takeIf(::trackBelongsToActiveContext)?.remoteID?.let(songsByID::get)
-            if (!trackBelongsToActiveContext(track)
-                || existingArtwork?.length()?.let { it > 0L } == true
-                || song?.artworkURL.isNullOrBlank()
-            ) {
-                updatedTracks += track
-                continue
-            }
+            trackBelongsToActiveContext(track) &&
+                existingArtwork?.length()?.let { it > 0L } != true &&
+                !song?.artworkURL.isNullOrBlank()
+        }
+        var changed = false
 
+        for (track in candidates) {
+            val song = track.remoteID?.let(songsByID::get) ?: continue
             val repaired = runCatching {
                 client.fetchArtwork(song)?.let { repository.persistArtwork(track, it) }
             }.getOrNull() ?: track
-            updatedTracks += repaired
-            changed = changed || repaired != track
+            if (repaired != track) {
+                // Metadata hydration and media downloads intentionally overlap. Merge only the
+                // artwork fields into the latest library value so a concurrent downloaded track
+                // or server association can never be replaced by this older iteration snapshot.
+                library = library.copy(tracks = library.tracks.map { current ->
+                    if (current.id != track.id) current else current.copy(
+                        artworkFilename = repaired.artworkFilename,
+                        artworkScanComplete = repaired.artworkScanComplete,
+                    )
+                })
+                changed = true
+            }
         }
-
-        if (changed) library = library.copy(tracks = updatedTracks)
         return changed
     }
 
@@ -2955,6 +3128,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val previousRemoteSongs = state.remoteSongs
         val previousSelection = state.selectedRemoteSongIds
         val previousConnectedSession = state.hasConnectedServerSession
+        invalidateActiveRemoteDownload("Download stopped because the server connection changed")
         connectionGeneration += 1
         remoteSourceResolutions.clear()
         authoritativeCatalogSnapshot = null
@@ -3077,24 +3251,32 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val sameContext = RemoteTrackIdentityPolicy.normalizedOrigin(library.serverURL) ==
             RemoteTrackIdentityPolicy.normalizedOrigin(serverURL) && profileId == library.syncProfileID
         if (sameContext) return
-        connectionGeneration += 1
-        remoteSourceResolutions.clear()
-        authoritativeCatalogSnapshot = null
-        val captured = if (currentAlreadyCaptured) library else ProfileLibraryStatePolicy.captureActive(library)
-        library = normalizeLiked(ProfileLibraryStatePolicy.restoreContext(captured, serverURL, profileId))
-        playlistMutationGeneration += 1
-        likesMutationGeneration += 1
-        clipRangeMutationGeneration += 1
-        activePlaylistId = null
-        rebuildPlaybackQueueForActiveContext()
-        refreshLibraryState()
-        mutableState.value = mutableState.value.copy(
-            syncProfileId = profileId,
-            remoteSongs = emptyList(),
-            selectedRemoteSongIds = emptySet(),
-            hasConnectedServerSession = false,
+        RemoteDownloadContextChangePolicy.mutateAfterInvalidation(
+            invalidateDownload = {
+                invalidateActiveRemoteDownload("Download stopped because the server profile changed")
+            },
+            mutation = {
+                cancelRemoteSongMetadataHydration()
+                connectionGeneration += 1
+                remoteSourceResolutions.clear()
+                authoritativeCatalogSnapshot = null
+                val captured = if (currentAlreadyCaptured) library else ProfileLibraryStatePolicy.captureActive(library)
+                library = normalizeLiked(ProfileLibraryStatePolicy.restoreContext(captured, serverURL, profileId))
+                playlistMutationGeneration += 1
+                likesMutationGeneration += 1
+                clipRangeMutationGeneration += 1
+                activePlaylistId = null
+                rebuildPlaybackQueueForActiveContext()
+                refreshLibraryState()
+                mutableState.value = mutableState.value.copy(
+                    syncProfileId = profileId,
+                    remoteSongs = emptyList(),
+                    selectedRemoteSongIds = emptySet(),
+                    hasConnectedServerSession = false,
+                )
+                resetClientConfigForCurrentContext("Safe defaults • profile changed")
+            },
         )
-        resetClientConfigForCurrentContext("Safe defaults • profile changed")
     }
 
     override fun downloadRemoteSong(songId: String) { downloadSongs(setOf(songId)) }
@@ -3147,7 +3329,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             config = mutableState.value.clientConfig,
             mode = requestedMode,
         )
-        runCatching { requireDownloadPolicySnapshot(snapshot) }.onFailure {
+        runCatching { requireDownloadPolicySnapshot(snapshot, requireOwnership = false) }.onFailure {
             mutableState.value = mutableState.value.copy(
                 errorMessage = "The server download policy changed; review the mode and try again.",
             )
@@ -3175,7 +3357,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         mutableState.value = mutableState.value.copy(
             isDownloading = true,
             downloadProgress = 0f,
-            downloadDetail = "Preparing download",
+            downloadDetail = "Downloading",
             downloadCurrentItem = 1,
             downloadTotalItems = pendingSongs.size,
             downloadCurrentTitle = firstPendingSong.title,
@@ -3183,7 +3365,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             downloadTotalBytes = firstPendingSong.size.takeIf { it > 0L },
         )
         activeDownloadPolicySnapshot = snapshot
-        cancelRemoteSongMetadataHydration()
         remoteDownloadJob?.cancel()
         remoteDownloadExpiryJob?.cancel()
         val downloadClient = serverClient(transferContext)
@@ -3217,6 +3398,14 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                                     LinkImportMediaMode.Audio
                                 }
                                 val knownCatalogMetadata = RemoteSongDownloadMetadataPolicy.knownTrack(song)
+                                val concurrentMetadata = if (
+                                    knownCatalogMetadata == null &&
+                                    remoteSongMetadataHydrationJob?.isActive == true
+                                ) {
+                                    remoteSongMetadataTask(song, snapshot.context)
+                                } else {
+                                    null
+                                }
                                 val resolutionKey = requireNotNull(
                                     RemoteSourceResolutionCachePolicy.key(
                                         context = snapshot.context,
@@ -3225,23 +3414,29 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                                         accountScope = accountSession?.accountID,
                                     ),
                                 ) { "The saved song source is not a valid HTTPS track URL." }
-                                val cachedResolution = remoteSourceResolutions[resolutionKey]
-                                val resolution = cachedResolution?.takeIf { cached ->
-                                    RemoteSourceResolutionCachePolicy.canReuse(
-                                        resolution = cached,
-                                        cachedKey = resolutionKey,
-                                        expectedKey = resolutionKey,
-                                        knownCatalogMetadata = knownCatalogMetadata,
-                                    )
-                                } ?: linkImportService.resolveForDownload(
-                                        source = source,
-                                        mediaMode = mediaMode,
-                                        knownTrackMetadata = knownCatalogMetadata,
-                                    ) { }
-                                        .also { remoteSourceResolutions[resolutionKey] = it }
+                                val acquisition = RemoteSourceDownloadCoordinator.acquireMedia(
+                                    metadata = concurrentMetadata,
+                                ) {
+                                    val cachedResolution = remoteSourceResolutions[resolutionKey]
+                                    cachedResolution?.takeIf { cached ->
+                                        RemoteSourceResolutionCachePolicy.canReuse(
+                                            resolution = cached,
+                                            cachedKey = resolutionKey,
+                                            expectedKey = resolutionKey,
+                                            knownCatalogMetadata = knownCatalogMetadata,
+                                        )
+                                    } ?: linkImportService.resolveForDownload(
+                                            source = source,
+                                            mediaMode = mediaMode,
+                                            knownTrackMetadata = knownCatalogMetadata,
+                                        ) { }
+                                            .also { remoteSourceResolutions[resolutionKey] = it }
+                                }
+                                val resolution = acquisition.media
                                 check(resolution.kind == LinkImportKind.Track) {
                                     "A saved song link resolved to a playlist instead of one song."
                                 }
+                                val transferTitle = knownCatalogMetadata?.title ?: resolution.track.title
                                 val track = downloadLinkTrack(
                                     metadata = resolution.track,
                                     candidates = resolution.candidates,
@@ -3256,14 +3451,28 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                                             DownloadItemProgressPolicy.fromBytes(
                                                 currentItem = sourceProcessed + 1,
                                                 totalItems = pendingSongs.size,
-                                                // The server catalog is the presentation source.
-                                                title = song.title,
+                                                title = transferTitle,
                                                 bytesTransferred = progress.completedBytes,
                                                 totalBytes = progress.totalBytes.takeIf { it > 0L },
                                                 isComplete = progress.totalBytes > 0L &&
                                                     progress.completedBytes >= progress.totalBytes,
                                             ),
                                         )
+                                    },
+                                    finalMetadata = {
+                                        requireDownloadPolicySnapshot(snapshot)
+                                        val currentCatalogMetadata = mutableState.value.remoteSongs
+                                            .firstOrNull { current -> current.id == song.id }
+                                            ?.let(RemoteSongDownloadMetadataPolicy::knownTrack)
+                                        if (currentCatalogMetadata != null) {
+                                            currentCatalogMetadata
+                                        } else {
+                                            RemoteSourceDownloadCoordinator.completedMetadataOrNull(
+                                                acquisition.metadata,
+                                            )?.also { enriched ->
+                                                recordRemoteSongMetadata(song.id, enriched, snapshot.context)
+                                            }
+                                        }
                                     },
                                 )
                                 requireDownloadPolicySnapshot(snapshot)
@@ -3350,7 +3559,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     remoteDownloadExpiryJob = null
                     mutableState.value = mutableState.value.copy(isDownloading = false)
                     if (currentServerProfileContext() == transferContext) {
-                        beginRemoteSongMetadataHydration(transferContext, downloadClient)
+                        retryRemoteSongMetadataIfNeeded()
                     }
                 }
             }
@@ -3367,8 +3576,37 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun requireDownloadPolicySnapshot(snapshot: ServerDownloadPolicySnapshot) {
+    private fun invalidateActiveRemoteDownload(detail: String) {
+        val job = remoteDownloadJob
+        val hadActiveDownload = activeDownloadPolicySnapshot != null || job != null
+        // Invalidate ownership before requesting cancellation. Any callback already queued on
+        // Main will fail requireDownloadPolicySnapshot even if credential mutation follows now.
+        activeDownloadPolicySnapshot = null
+        remoteDownloadExpiryJob?.cancel()
+        remoteDownloadExpiryJob = null
+        remoteDownloadJob = null
+        job?.cancel(CancellationException(detail))
+        if (!hadActiveDownload) return
+        mutableState.value = mutableState.value.copy(
+            isDownloading = false,
+            downloadProgress = 0f,
+            downloadDetail = detail,
+            downloadCurrentItem = 0,
+            downloadTotalItems = 0,
+            downloadCurrentTitle = null,
+            downloadBytesTransferred = 0L,
+            downloadTotalBytes = null,
+        )
+    }
+
+    private fun requireDownloadPolicySnapshot(
+        snapshot: ServerDownloadPolicySnapshot,
+        requireOwnership: Boolean = true,
+    ) {
         val state = mutableState.value
+        if (requireOwnership && activeDownloadPolicySnapshot != snapshot) {
+            throw CancellationException("The server download is no longer active")
+        }
         check(currentServerProfileContext() == snapshot.context) { "The server connection changed during download" }
         val now = Instant.now()
         val exactLease = state.clientConfig == snapshot.config && snapshot.config.isActive(now)
@@ -4100,10 +4338,17 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun saveSoon() { viewModelScope.launch { persistLibrary() } }
 
-    private suspend fun persistLibrary() {
-        library = ProfileLibraryStatePolicy.captureActive(library)
-        library = RemoteTrackIdentityPolicy.reconcileLibraryTracks(library)
-        repository.save(library)
+    private suspend fun persistLibrary() = withContext(Dispatchers.Main.immediate) {
+        libraryPersistenceGate.persist(
+            latestValue = {
+                RemoteTrackIdentityPolicy.reconcileLibraryTracks(
+                    ProfileLibraryStatePolicy.captureActive(library),
+                ).also { latest -> library = latest }
+            },
+            write = repository::save,
+        )
+        // Never assign the returned persisted snapshot here: library may have been enriched
+        // while the IO write was in flight. A queued caller will capture that latest value.
         refreshLibraryState()
         refreshStorage()
     }

@@ -456,18 +456,17 @@ class ServerClient(
                     // Re-evaluate the exact snapshotted client policy immediately
                     // before each file allocation and authenticated media request.
                     beforeEach()
-                    onProgress(
-                        TransferProgress(
-                            completed = processed,
-                            total = pending.size,
-                            currentFilename = song.filename,
-                            currentItem = index + 1,
-                            currentSongID = song.id,
-                            currentTitle = song.title,
-                            bytesTransferred = 0L,
-                            totalBytes = song.size.takeIf { it > 0L },
-                        ),
+                    val itemProgress = TransferProgress(
+                        completed = processed,
+                        total = pending.size,
+                        currentFilename = song.filename,
+                        currentItem = index + 1,
+                        currentSongID = song.id,
+                        currentTitle = song.title,
+                        bytesTransferred = 0L,
+                        totalBytes = song.size.takeIf { it > 0L },
                     )
+                    onProgress(itemProgress)
                     val destination = repository.newDownloadFile(song.filename)
                     synchronized(allocatedDownloads) { allocatedDownloads += destination }
                     val result = try {
@@ -490,6 +489,9 @@ class ServerClient(
                                 ),
                             )
                         }
+                        // The media stream is complete. Hide its byte card before local media
+                        // inspection/tag extraction, which may take time but is not downloading.
+                        onProgress(TransferProgressBoundaryPolicy.hidden(itemProgress))
                         ServerDownloadItemResult(
                             index = index,
                             track = repository.registerDownloadedFile(
@@ -524,16 +526,11 @@ class ServerClient(
                     beforeEach()
                     processed += 1
                     onProgress(
-                        TransferProgress(
-                            completed = processed,
-                            total = pending.size,
-                            currentFilename = song.filename,
-                            currentItem = index + 1,
-                            currentSongID = song.id,
-                            currentTitle = song.title,
-                            bytesTransferred = destination.length(),
-                            totalBytes = song.size.takeIf { it > 0L },
-                            currentItemComplete = result.track != null,
+                        TransferProgressBoundaryPolicy.hidden(
+                            itemProgress.copy(
+                                completed = processed,
+                                currentItemComplete = result.track != null,
+                            ),
                         ),
                     )
                     return result

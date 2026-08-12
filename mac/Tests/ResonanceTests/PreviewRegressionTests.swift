@@ -585,6 +585,23 @@ struct PreviewRegressionTests {
             #expect(LocalImportPresentationPolicy.continuesAfterSheetDismissal(for: stage))
         }
 
+        for stage in [
+            LocalImportStage.inspectingSource,
+            .downloading,
+            .processing,
+            .savingLocal,
+            .localComplete,
+        ] {
+            #expect(!LocalImportPresentationPolicy.showsGlobalTransfer(
+                for: stage,
+                downloadStarted: false
+            ))
+        }
+        #expect(LocalImportPresentationPolicy.showsGlobalTransfer(
+            for: .syncing,
+            downloadStarted: false
+        ))
+
         #expect(!LocalImportPresentationPolicy.showsGlobalTransfer(for: .awaitingSelection))
         #expect(!LocalImportPresentationPolicy.continuesAfterSheetDismissal(for: .failed))
         #expect(!LocalImportPresentationPolicy.continuesAfterSheetDismissal(for: .cancelled))

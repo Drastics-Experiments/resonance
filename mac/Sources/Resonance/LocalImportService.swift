@@ -5,6 +5,44 @@ import Foundation
 
 typealias LocalImportProgressHandler = @MainActor @Sendable (LocalImportProgress) -> Void
 
+final class LocalImportMetadataEnrichment: @unchecked Sendable {
+    private final class Storage: @unchecked Sendable {
+        private let lock = NSLock()
+        private var metadata: LocalImportMetadata?
+
+        func publish(_ metadata: LocalImportMetadata?) {
+            lock.lock()
+            self.metadata = metadata
+            lock.unlock()
+        }
+
+        var availableMetadata: LocalImportMetadata? {
+            lock.lock()
+            defer { lock.unlock() }
+            return metadata
+        }
+    }
+
+    private let storage: Storage
+    private let task: Task<LocalImportMetadata?, Never>
+
+    init(operation: @escaping @Sendable () async -> LocalImportMetadata?) {
+        let storage = Storage()
+        self.storage = storage
+        self.task = Task {
+            let metadata = await operation()
+            storage.publish(metadata)
+            return metadata
+        }
+    }
+
+    var availableMetadata: LocalImportMetadata? { storage.availableMetadata }
+
+    func value() async -> LocalImportMetadata? { await task.value }
+
+    func cancel() { task.cancel() }
+}
+
 enum LocalImportFeature {
     static var isEnabled: Bool {
         ProcessInfo.processInfo.environment["RESONANCE_LOCAL_DEVICE_IMPORT"] != "0"
@@ -889,6 +927,8 @@ actor LocalDeviceImportService {
     func importCandidate(
         _ candidate: LocalImportAudioSourceMatch,
         metadata inputMetadata: LocalImportMetadata,
+        metadataEnrichment: LocalImportMetadataEnrichment? = nil,
+        finalizeAuthorization: (@Sendable () async throws -> Void)? = nil,
         existingTracks: [Track],
         mediaMode: LocalImportMediaMode = .audio,
         preparationContext: String? = nil,
@@ -907,6 +947,8 @@ actor LocalDeviceImportService {
             return try await importSoundCloudCandidate(
                 candidate,
                 metadata: inputMetadata,
+                metadataEnrichment: metadataEnrichment,
+                finalizeAuthorization: finalizeAuthorization,
                 existingTracks: existingTracks,
                 preparationContext: preparationContext,
                 progress: progress
@@ -961,12 +1003,14 @@ actor LocalDeviceImportService {
 
         try Task.checkCancellation()
         await progress(.init(stage: .processing))
+        let enrichedInputMetadata = metadataEnrichment?.availableMetadata ?? inputMetadata
+        try Task.checkCancellation()
         let metadata = LocalImportMetadata(
-            title: cleanMetadata(inputMetadata.title, fallback: resolved.preview.title),
-            artist: cleanMetadata(inputMetadata.artist, fallback: resolved.preview.author ?? "Unknown uploader"),
-            album: cleanMetadata(inputMetadata.album, fallback: "Imported"),
-            artworkURL: inputMetadata.artworkURL ?? resolved.preview.thumbnailURL,
-            sourceURL: inputMetadata.sourceURL
+            title: cleanMetadata(enrichedInputMetadata.title, fallback: resolved.preview.title),
+            artist: cleanMetadata(enrichedInputMetadata.artist, fallback: resolved.preview.author ?? "Unknown uploader"),
+            album: cleanMetadata(enrichedInputMetadata.album, fallback: "Imported"),
+            artworkURL: enrichedInputMetadata.artworkURL ?? resolved.preview.thumbnailURL,
+            sourceURL: enrichedInputMetadata.sourceURL
         )
         let artwork = await fetchArtwork(metadata.artworkURL)
         try Task.checkCancellation()
@@ -999,6 +1043,8 @@ actor LocalDeviceImportService {
             return .duplicate(duplicate.id, source: sourceAssociation)
         }
 
+        try Task.checkCancellation()
+        try await finalizeAuthorization?()
         try Task.checkCancellation()
         await progress(.init(stage: .savingLocal))
         let filename = safeFilename("\(metadata.artist) - \(metadata.title)") + ".\(mediaMode.fileExtension)"
@@ -1047,6 +1093,8 @@ actor LocalDeviceImportService {
     private func importSoundCloudCandidate(
         _ candidate: LocalImportAudioSourceMatch,
         metadata inputMetadata: LocalImportMetadata,
+        metadataEnrichment: LocalImportMetadataEnrichment?,
+        finalizeAuthorization: (@Sendable () async throws -> Void)?,
         existingTracks: [Track],
         preparationContext: String?,
         progress: LocalImportProgressHandler
@@ -1095,12 +1143,14 @@ actor LocalDeviceImportService {
 
         try Task.checkCancellation()
         await progress(.init(stage: .processing))
+        let enrichedInputMetadata = metadataEnrichment?.availableMetadata ?? inputMetadata
+        try Task.checkCancellation()
         let metadata = LocalImportMetadata(
-            title: cleanMetadata(inputMetadata.title, fallback: stream.track.title),
-            artist: cleanMetadata(inputMetadata.artist, fallback: stream.track.artist),
-            album: cleanMetadata(inputMetadata.album, fallback: stream.track.album ?? "SoundCloud"),
-            artworkURL: inputMetadata.artworkURL ?? stream.track.artworkURL,
-            sourceURL: inputMetadata.sourceURL
+            title: cleanMetadata(enrichedInputMetadata.title, fallback: stream.track.title),
+            artist: cleanMetadata(enrichedInputMetadata.artist, fallback: stream.track.artist),
+            album: cleanMetadata(enrichedInputMetadata.album, fallback: stream.track.album ?? "SoundCloud"),
+            artworkURL: enrichedInputMetadata.artworkURL ?? stream.track.artworkURL,
+            sourceURL: enrichedInputMetadata.sourceURL
         )
         let artwork = await fetchArtwork(metadata.artworkURL)
         try Task.checkCancellation()
@@ -1129,6 +1179,8 @@ actor LocalDeviceImportService {
             return .duplicate(duplicate.id, source: sourceAssociation)
         }
 
+        try Task.checkCancellation()
+        try await finalizeAuthorization?()
         try Task.checkCancellation()
         await progress(.init(stage: .savingLocal))
         let filename = safeFilename("\(metadata.artist) - \(metadata.title)") + ".m4a"

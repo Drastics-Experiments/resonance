@@ -1,5 +1,7 @@
 package mov.unblocked.resonance.data
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -8,9 +10,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DownloadItemProgressPolicyTest {
-    @Test fun zeroBytesArePreparingInsteadOfDeterminateZeroPercent() {
+    @Test fun zeroBytesHaveNoPreparingModeOrDeterminateZeroPercent() {
         assertEquals(
-            DownloadProgressDisplayMode.Preparing,
+            DownloadProgressDisplayMode.IndeterminateTransfer,
             DownloadProgressDisplayPolicy.mode(bytesTransferred = 0L, totalBytes = 10_000L),
         )
         assertEquals(
@@ -23,6 +25,40 @@ class DownloadItemProgressPolicyTest {
         )
         assertEquals("<1%", DownloadProgressDisplayPolicy.percentageLabel(.001f))
         assertEquals("1%", DownloadProgressDisplayPolicy.percentageLabel(.01f))
+    }
+
+    @Test fun mediaAcquisitionDoesNotAwaitMetadataEnrichment() = runTest {
+        val metadata = CompletableDeferred<String?>()
+        var mediaStarted = false
+
+        val acquisition = RemoteSourceDownloadCoordinator.acquireMedia(
+            metadata = metadata,
+        ) {
+            mediaStarted = true
+            "audio-bytes"
+        }
+
+        assertTrue(mediaStarted)
+        assertEquals("audio-bytes", acquisition.media)
+        assertFalse(metadata.isCompleted)
+        assertNull(RemoteSourceDownloadCoordinator.completedMetadataOrNull(acquisition.metadata))
+
+        metadata.complete("final tags")
+        assertEquals(
+            "final tags",
+            RemoteSourceDownloadCoordinator.completedMetadataOrNull(acquisition.metadata),
+        )
+    }
+
+    @Test fun credentialMutationRunsOnlyAfterDownloadInvalidation() {
+        val events = mutableListOf<String>()
+
+        RemoteDownloadContextChangePolicy.mutateAfterInvalidation(
+            invalidateDownload = { events += "download invalidated" },
+            mutation = { events += "credentials cleared" },
+        )
+
+        assertEquals(listOf("download invalidated", "credentials cleared"), events)
     }
 
     @Test fun catalogMetadataCanBeReusedForAStoredSourceDownload() {
@@ -40,7 +76,7 @@ class DownloadItemProgressPolicyTest {
             durationSeconds = 123.8,
             artworkURL = "https://images.example/song.jpg",
             sourceURL = "https://open.spotify.com/track/0123456789012345678901",
-            mediaMode = LinkImportMediaMode.Audio,
+            mediaKind = "audio",
             isSourceLinkRecord = true,
             isMetadataLoading = false,
         )
@@ -66,7 +102,7 @@ class DownloadItemProgressPolicyTest {
             downloadURL = "/download/song-a",
             streamURL = "/stream/song-a",
             sourceURL = "https://www.youtube.com/watch?v=abcdefghijk",
-            mediaMode = LinkImportMediaMode.Audio,
+            mediaKind = "audio",
             isSourceLinkRecord = true,
             isMetadataLoading = true,
         )
@@ -262,6 +298,48 @@ class DownloadItemProgressPolicyTest {
         assertEquals(3, retry.currentItem)
         assertEquals("Catalog Song Title", retry.title)
         assertEquals(0f, retry.fraction, 0f)
+    }
+
+    @Test fun failedCandidateBoundaryHidesPartialBytesBeforeRetryOrFinalFailure() {
+        val boundary = DownloadItemProgressPolicy.hiddenBoundary(
+            currentItem = 3,
+            totalItems = 10,
+            title = "Catalog Song Title",
+        )
+
+        assertEquals(3, boundary.currentItem)
+        assertEquals(10, boundary.totalItems)
+        assertEquals("Catalog Song Title", boundary.title)
+        assertEquals(0L, boundary.bytesTransferred)
+        assertNull(boundary.totalBytes)
+        assertEquals(0f, boundary.fraction, 0f)
+    }
+
+    @Test fun postByteProcessingAndTerminalEventsCannotReopenTheByteCard() {
+        val lastByte = TransferProgress(
+            completed = 1,
+            total = 4,
+            currentFilename = "opaque-download.part",
+            currentItem = 2,
+            currentSongID = "song-b",
+            currentTitle = "Catalog Song Title",
+            bytesTransferred = 100L,
+            totalBytes = 100L,
+        )
+        val processing = TransferProgressBoundaryPolicy.hidden(lastByte)
+        val terminal = TransferProgressBoundaryPolicy.hidden(
+            lastByte.copy(completed = 2, currentItemComplete = true),
+        )
+
+        listOf(processing, terminal).forEach { hidden ->
+            assertEquals(0L, hidden.bytesTransferred)
+            assertNull(hidden.totalBytes)
+            assertEquals(2, hidden.currentItem)
+            assertEquals("song-b", hidden.currentSongID)
+        }
+        assertFalse(processing.currentItemComplete)
+        assertTrue(terminal.currentItemComplete)
+        assertEquals(2, terminal.completed)
     }
 
     @Test fun completedUnknownLengthTransferCanStillFinishItsBar() {

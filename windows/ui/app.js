@@ -193,6 +193,7 @@ let serverConnectInFlight = false;
 let serverConnectPending = false;
 let serverAutoAttempted = false;
 let serverTransferActive = false;
+let serverDownloadOperationActive = false;
 let serverTransferCancelRequested = false;
 let serverTransferOwner = null;
 let serverContextReservation = null;
@@ -2772,7 +2773,7 @@ function releaseServerContext(context) {
 }
 
 function ensureServerContextCanChange() {
-  if (serverTransferActive || serverContextReservation) {
+  if (serverTransferActive || serverDownloadOperationActive || serverContextReservation) {
     throw new Error("Wait for the current transfer to finish before changing the server or profile.");
   }
 }
@@ -3761,7 +3762,7 @@ async function dismissServerUploadManifest(manifestID) {
 }
 
 async function retryServerUploadManifest(manifestID) {
-  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || Boolean(serverContextReservation) })) return;
+  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || serverDownloadOperationActive || Boolean(serverContextReservation) })) return;
   try {
     await saveServerForm();
   } catch (error) {
@@ -6230,10 +6231,23 @@ function updateServerTransfer({
   owner = "server",
   title = null,
   autoHide = true,
+  dismiss = false,
 }) {
   if (serverTransferCancelRequested && serverTransferOwner === owner) return;
+  if (dismiss) {
+    hideServerTransfer(owner);
+    return;
+  }
   const toast = $("#serverTransferToast");
   if (!toast) return;
+  const ownsVisibleDownload = serverTransferActive
+    && serverTransferOwner === owner
+    && toast.dataset.direction === "download";
+  const downloadBytes = Number(itemCompleted === undefined ? completed : itemCompleted) || 0;
+  if (direction === "download" && downloadBytes <= 0 && !ownsVisibleDownload) {
+    toast.hidden = true;
+    return;
+  }
   const presentation = serverTransferProgressPresentation({
     completed,
     total,
@@ -6244,22 +6258,36 @@ function updateServerTransfer({
   });
   serverTransferActive = true;
   serverTransferOwner = owner;
-  toast.hidden = false;
   toast.dataset.direction = direction;
   $("#serverTransferIcon").innerHTML = direction === "upload" ? serverUploadIcon : serverDownloadIcon;
   $("#serverTransferTitle").textContent = title || (direction === "upload" ? "Uploading" : "Downloading");
-  $("#serverTransferDetail").textContent = currentFile || "Preparing transfer…";
+  $("#serverTransferDetail").textContent = currentFile || "";
   const progress = $("#serverTransferProgress");
   if (presentation.determinate) progress.value = presentation.ratio;
   else progress.removeAttribute("value");
   $("#serverTransferPercent").textContent = presentation.label;
-  if (autoHide && total > 0 && completed >= total) hideServerTransfer(owner);
+  toast.hidden = false;
+  const displayedTransferComplete = itemTotal !== undefined
+    ? Number(itemTotal) > 0 && Number(itemCompleted) >= Number(itemTotal)
+    : total > 0 && completed >= total;
+  if (autoHide && displayedTransferComplete) hideServerTransfer(owner);
 }
 
 function hideServerTransfer(owner = null) {
   if (owner && serverTransferOwner && owner !== serverTransferOwner) return;
   const toast = $("#serverTransferToast");
-  if (toast) toast.hidden = true;
+  if (toast) {
+    toast.hidden = true;
+    toast.removeAttribute("data-direction");
+  }
+  const progress = $("#serverTransferProgress");
+  if (progress) progress.removeAttribute("value");
+  const title = $("#serverTransferTitle");
+  if (title) title.textContent = "";
+  const detail = $("#serverTransferDetail");
+  if (detail) detail.textContent = "";
+  const percent = $("#serverTransferPercent");
+  if (percent) percent.textContent = "";
   const cancel = $("#dismissServerTransfer");
   if (cancel) cancel.disabled = false;
   serverTransferActive = false;
@@ -6295,6 +6323,9 @@ function updateLocalImportTransfer(value = {}) {
   const currentFile = value.currentFile || localImportTransferName();
   const completed = Number(value.completed) || 0;
   const total = Number(value.total) || 0;
+  const ownsVisibleDownload = serverTransferActive
+    && serverTransferOwner === "local-import"
+    && $("#serverTransferToast")?.dataset.direction === "download";
   const uploadComplete = stage === "complete"
     && serverTransferOwner === "local-import"
     && $("#serverTransferToast")?.dataset.direction === "upload";
@@ -6310,10 +6341,9 @@ function updateLocalImportTransfer(value = {}) {
     });
     return;
   }
+  if (!ownsVisibleDownload && !(stage === "downloading" && completed > 0)) return;
+  if (ownsVisibleDownload && stage === "downloading" && completed <= 0) return;
   const titles = {
-    preparing_external: "Preparing download",
-    waiting_external: "Preparing download",
-    inspecting_source: "Preparing download",
     downloading: "Downloading",
     processing: "Processing download",
     saving_local: "Saving download",
@@ -6354,7 +6384,7 @@ async function serverAction(mode) {
   serverConnectInFlight = true;
   if (mode !== "catalog") {
     serverTransferCancelRequested = false;
-    updateServerTransfer({ direction: "download", currentFile: "Preparing download…", completed: 0, total: 1 });
+    serverDownloadOperationActive = true;
   }
   serverConnectionText = mode === "catalog" ? "Connecting…" : "Syncing downloads…";
   if (section === "server") renderServer();
@@ -6443,6 +6473,7 @@ async function serverAction(mode) {
     if (mode !== "catalog") {
       hideServerTransfer("server");
       serverTransferCancelRequested = false;
+      serverDownloadOperationActive = false;
     }
     if (section === "server") renderServer();
     if (serverConnectPending) {
@@ -6453,9 +6484,9 @@ async function serverAction(mode) {
 }
 
 async function uploadServerSongs() {
-  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || Boolean(serverContextReservation) })) return;
+  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || serverDownloadOperationActive || Boolean(serverContextReservation) })) return;
   await saveServerForm();
-  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || Boolean(serverContextReservation) })) return;
+  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || serverDownloadOperationActive || Boolean(serverContextReservation) })) return;
   const uploadMode = currentServerTransferModes().uploadMode;
   if (["local_file", "server_source_link", "reviewed_match"].includes(uploadMode)) {
     openLocalImport({ serverUploadMode: uploadMode });
@@ -6513,9 +6544,9 @@ async function uploadServerSongs() {
 }
 
 async function uploadMissingDownloadedSongs() {
-  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || Boolean(serverContextReservation) })) return;
+  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || serverDownloadOperationActive || Boolean(serverContextReservation) })) return;
   await saveServerForm();
-  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || Boolean(serverContextReservation) })) return;
+  if (serverUploadBlockedByActivity({ transferActive: serverTransferActive || serverDownloadOperationActive || Boolean(serverContextReservation) })) return;
   if (currentServerTransferModes().uploadMode !== "local_file") {
     showNotice("Uploading downloaded songs is available only in Local files upload mode.");
     return;

@@ -1,5 +1,8 @@
 package mov.unblocked.resonance.data
 
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Deferred
+
 data class DownloadItemProgressPresentation(
     val currentItem: Int,
     val totalItems: Int,
@@ -16,15 +19,14 @@ data class DownloadItemProgressPresentation(
 }
 
 enum class DownloadProgressDisplayMode {
-    Preparing,
     IndeterminateTransfer,
     DeterminateTransfer,
 }
 
-/** Keeps connection/source preparation from looking like a stalled zero-byte transfer. */
+/** The popup is hidden before the first byte, so every displayed mode represents real transfer. */
 object DownloadProgressDisplayPolicy {
     fun mode(bytesTransferred: Long, totalBytes: Long?): DownloadProgressDisplayMode = when {
-        bytesTransferred <= 0L -> DownloadProgressDisplayMode.Preparing
+        bytesTransferred <= 0L -> DownloadProgressDisplayMode.IndeterminateTransfer
         totalBytes == null || totalBytes <= 0L -> DownloadProgressDisplayMode.IndeterminateTransfer
         else -> DownloadProgressDisplayMode.DeterminateTransfer
     }
@@ -32,6 +34,44 @@ object DownloadProgressDisplayPolicy {
     fun percentageLabel(fraction: Float): String = when {
         fraction > 0f && fraction < .01f -> "<1%"
         else -> "${(fraction.coerceIn(0f, 1f) * 100).toInt()}%"
+    }
+}
+
+/**
+ * Starts provider/media acquisition without awaiting the independent catalog metadata task.
+ * Completed metadata may be consumed before final tagging, but unfinished work is left for the
+ * catalog hydrator and never delays advancing the download batch.
+ */
+internal object RemoteSourceDownloadCoordinator {
+    data class Acquisition<Media, Metadata>(
+        val media: Media,
+        val metadata: Deferred<Metadata?>?,
+    )
+
+    suspend fun <Media, Metadata> acquireMedia(
+        metadata: Deferred<Metadata?>?,
+        acquire: suspend () -> Media,
+    ): Acquisition<Media, Metadata> = Acquisition(
+        media = acquire(),
+        metadata = metadata,
+    )
+
+    /** Reads completed enrichment without ever suspending the finished media path. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun <Metadata> completedMetadataOrNull(metadata: Deferred<Metadata?>?): Metadata? {
+        if (metadata == null || !metadata.isCompleted || metadata.isCancelled) return null
+        return runCatching { metadata.getCompleted() }.getOrNull()
+    }
+}
+
+/** Makes the required ordering around an account, token, server, or profile mutation explicit. */
+internal object RemoteDownloadContextChangePolicy {
+    fun <Value> mutateAfterInvalidation(
+        invalidateDownload: () -> Unit,
+        mutation: () -> Value,
+    ): Value {
+        invalidateDownload()
+        return mutation()
     }
 }
 
@@ -107,6 +147,18 @@ object RemoteSourceResolutionCachePolicy {
 
 /** Builds a single-song presentation; internal destination filenames are never presentation data. */
 object DownloadItemProgressPolicy {
+    fun hiddenBoundary(
+        currentItem: Int,
+        totalItems: Int,
+        title: String,
+    ): DownloadItemProgressPresentation = fromBytes(
+        currentItem = currentItem,
+        totalItems = totalItems,
+        title = title,
+        bytesTransferred = 0L,
+        totalBytes = null,
+    )
+
     fun fromCatalogTransfer(
         progress: TransferProgress,
         completedBefore: Int,
