@@ -1,3 +1,4 @@
+import AVFoundation
 import CryptoKit
 import Foundation
 import Testing
@@ -22,6 +23,59 @@ private final class RegressionURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+}
+
+private final class DelayedBatchDownloadRegressionURLProtocol: URLProtocol, @unchecked Sendable {
+    static var blockedPath: String?
+    static var blockedRequestStarted: AsyncSignal?
+    static var releaseBlockedRequest: DispatchSemaphore?
+    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    private let stateLock = NSLock()
+    private var stopped = false
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        if request.url?.path == Self.blockedPath,
+           let started = Self.blockedRequestStarted,
+           let release = Self.releaseBlockedRequest {
+            started.signal()
+            DispatchQueue.global().async { [weak self] in
+                _ = release.wait(timeout: .now() + 5)
+                self?.finishLoadingIfActive()
+            }
+            return
+        }
+        finishLoadingIfActive()
+    }
+
+    override func stopLoading() {
+        stateLock.withLock { stopped = true }
+    }
+
+    private func finishLoadingIfActive() {
+        guard !stateLock.withLock({ stopped }) else { return }
+        do {
+            guard let handler = Self.handler else { throw URLError(.badServerResponse) }
+            let (response, data) = try handler(request)
+            guard !stateLock.withLock({ stopped }) else { return }
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            guard !stateLock.withLock({ stopped }) else { return }
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    static func reset() {
+        blockedPath = nil
+        blockedRequestStarted = nil
+        releaseBlockedRequest = nil
+        handler = nil
+    }
 }
 
 private final class AsyncSignal: @unchecked Sendable {
@@ -239,6 +293,12 @@ struct PlayerModelRegressionTests {
         return URLSession(configuration: configuration)
     }
 
+    private func delayedBatchDownloadSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DelayedBatchDownloadRegressionURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
     private func response(for request: URLRequest, status: Int = 200) throws -> HTTPURLResponse {
         HTTPURLResponse(
             url: try #require(request.url),
@@ -250,6 +310,18 @@ struct PlayerModelRegressionTests {
 
     private func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func installedVideoTrack(at url: URL, title: String = "Installed video") throws -> Track {
+        Track(
+            title: title,
+            artist: "Video artist",
+            album: "Video album",
+            duration: try AVAudioPlayer(contentsOf: url).duration,
+            kind: .video,
+            artwork: .electric,
+            fileURL: url
+        )
     }
 
     @Test
@@ -2231,6 +2303,319 @@ struct PlayerModelRegressionTests {
             persistServerCredentials: false
         )
         #expect(relaunched.tracks.isEmpty)
+    }
+
+    @Test
+    func cancellingABatchPreservesEachAlreadyInstalledSongInTheLibrary() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let cacheRoot = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let network = delayedBatchDownloadSession()
+        let secondDownloadStarted = AsyncSignal()
+        let releaseSecondDownload = DispatchSemaphore(value: 0)
+        defer {
+            releaseSecondDownload.signal()
+            network.invalidateAndCancel()
+            DelayedBatchDownloadRegressionURLProtocol.reset()
+        }
+
+        let firstAudio = try Data(contentsOf: glass)
+        let secondAudio = try Data(contentsOf: ping)
+        DelayedBatchDownloadRegressionURLProtocol.blockedPath = "/second.aiff"
+        DelayedBatchDownloadRegressionURLProtocol.blockedRequestStarted = secondDownloadStarted
+        DelayedBatchDownloadRegressionURLProtocol.releaseBlockedRequest = releaseSecondDownload
+        DelayedBatchDownloadRegressionURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            switch url.path {
+            case "/api/v1/client-config":
+                return (try response(for: request, status: 404), Data())
+            case "/api/v1/songs":
+                let songs: [[String: Any]] = [
+                    [
+                        "id": "first-song",
+                        "filename": "first.aiff",
+                        "title": "First song",
+                        "artist": "Remote artist",
+                        "album": "Remote album",
+                        "size": firstAudio.count,
+                        "modified_at": "2026-08-12T00:00:00Z",
+                        "content_type": "audio/aiff",
+                        "download_url": "/first.aiff",
+                        "stream_url": "/stream/first-song",
+                        "content_sha256": sha256(firstAudio),
+                    ],
+                    [
+                        "id": "second-song",
+                        "filename": "second.aiff",
+                        "title": "Second song",
+                        "artist": "Remote artist",
+                        "album": "Remote album",
+                        "size": secondAudio.count,
+                        "modified_at": "2026-08-12T00:00:00Z",
+                        "content_type": "audio/aiff",
+                        "download_url": "/second.aiff",
+                        "stream_url": "/stream/second-song",
+                        "content_sha256": sha256(secondAudio),
+                    ],
+                ]
+                return (
+                    try response(for: request),
+                    try JSONSerialization.data(withJSONObject: ["count": songs.count, "songs": songs])
+                )
+            case "/first.aiff":
+                return (try response(for: request), firstAudio)
+            case "/second.aiff":
+                return (try response(for: request), secondAudio)
+            default:
+                return (try response(for: request), try emptyPlaylists())
+            }
+        }
+
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            networkSession: network,
+            serverCacheRoot: cacheRoot,
+            persistServerCredentials: false
+        )
+        model.serverURLString = "https://music.test"
+        model.serverToken = "token"
+
+        let download = Task { await model.syncServerLibrary() }
+        await secondDownloadStarted.wait()
+        download.cancel()
+        releaseSecondDownload.signal()
+        await download.value
+        model.flushPersistence()
+
+        #expect(model.tracks.compactMap(\.remoteID) == ["first-song"])
+        let relaunched = PlayerModel(
+            loadPersistedLibrary: true,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        #expect(relaunched.tracks.compactMap(\.remoteID) == ["first-song"])
+        #expect(relaunched.tracks.first?.fileURL.map {
+            FileManager.default.fileExists(atPath: $0.path)
+        } == true)
+    }
+
+    @Test
+    func installedVideoTakesTheAudibleClockOnlyAfterPreparationAndHandsItBackOnClose() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        let track = try installedVideoTrack(at: hero)
+        model.tracks = [track]
+        model.selectAndPlay(track)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(model.isPlaying)
+        #expect(model.isLocalAudioDecoderPlaying)
+
+        let videoPlayer = AVPlayer(url: hero)
+        let handoff = try #require(model.prepareInstalledVideoPlayback(
+            using: videoPlayer,
+            for: track.id
+        ))
+        #expect(handoff.shouldPlay)
+        #expect(model.isLocalAudioDecoderPlaying)
+        #expect(!model.hasActiveInstalledVideoPlayback)
+        #expect(videoPlayer.isMuted)
+
+        await videoPlayer.seek(
+            to: CMTime(seconds: handoff.position, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+        #expect(await model.activateInstalledVideoPlayback(
+            using: videoPlayer,
+            for: track.id
+        ))
+        #expect(model.hasActiveInstalledVideoPlayback)
+        #expect(model.isPlaying)
+        #expect(!model.isLocalAudioDecoderPlaying)
+        #expect(!videoPlayer.isMuted)
+
+        model.volume = 0.36
+        model.setPlaybackRate(1.25)
+        #expect(abs(Double(videoPlayer.volume) - Double(PlaybackVolumePolicy.gain(for: 0.36))) < 0.001)
+        #expect(videoPlayer.defaultRate == 1.25)
+
+        model.togglePlay()
+        #expect(!model.isPlaying)
+        #expect(!model.isLocalAudioDecoderPlaying)
+        model.togglePlay()
+        #expect(model.isPlaying)
+        #expect(!model.isLocalAudioDecoderPlaying)
+
+        let seekTarget = min(max(track.duration * 0.25, 0.05), track.duration)
+        model.seekToTime(seekTarget)
+        #expect(abs(model.position - seekTarget) < 0.001)
+        #expect(model.endInstalledVideoPlayback(
+            using: videoPlayer,
+            for: track.id,
+            resumeAudio: true
+        ))
+        #expect(abs(model.position - seekTarget) < 0.001)
+        #expect(!model.hasActiveInstalledVideoPlayback)
+        #expect(videoPlayer.isMuted)
+        #expect(model.isPlaying)
+        #expect(model.isLocalAudioDecoderPlaying)
+        model.togglePlay()
+    }
+
+    @Test
+    func pausedInstalledVideoHandoffStaysPausedAndClosingDuringWarmupKeepsAudioUntouched() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        let track = try installedVideoTrack(at: hero)
+        model.tracks = [track]
+        model.selectAndPlay(track)
+
+        let cancelledWarmupPlayer = AVPlayer(url: hero)
+        _ = try #require(model.prepareInstalledVideoPlayback(
+            using: cancelledWarmupPlayer,
+            for: track.id
+        ))
+        #expect(model.isLocalAudioDecoderPlaying)
+        #expect(model.endInstalledVideoPlayback(
+            using: cancelledWarmupPlayer,
+            for: track.id,
+            resumeAudio: true
+        ))
+        #expect(model.isLocalAudioDecoderPlaying)
+        #expect(cancelledWarmupPlayer.isMuted)
+
+        model.togglePlay()
+        #expect(!model.isPlaying)
+        let pausedPlayer = AVPlayer(url: hero)
+        let pausedHandoff = try #require(model.prepareInstalledVideoPlayback(
+            using: pausedPlayer,
+            for: track.id
+        ))
+        #expect(!pausedHandoff.shouldPlay)
+        await pausedPlayer.seek(
+            to: CMTime(seconds: pausedHandoff.position, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+        #expect(await model.activateInstalledVideoPlayback(
+            using: pausedPlayer,
+            for: track.id
+        ))
+        #expect(model.hasActiveInstalledVideoPlayback)
+        #expect(!model.isPlaying)
+        #expect(!model.isLocalAudioDecoderPlaying)
+        #expect(model.endInstalledVideoPlayback(
+            using: pausedPlayer,
+            for: track.id,
+            resumeAudio: true
+        ))
+        #expect(!model.isPlaying)
+        #expect(!model.isLocalAudioDecoderPlaying)
+    }
+
+    @Test
+    func changingTracksDiscardsTheInstalledVideoClockBeforeStartingTheNextAudioTrack() async throws {
+        let (defaults, suiteName) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        let videoTrack = try installedVideoTrack(at: hero)
+        let nextTrack = Track(
+            title: "Next track",
+            artist: "Artist",
+            album: "Album",
+            duration: try AVAudioPlayer(contentsOf: glass).duration,
+            artwork: .golden,
+            fileURL: glass
+        )
+        model.tracks = [videoTrack, nextTrack]
+        model.selectAndPlay(videoTrack)
+        let videoPlayer = AVPlayer(url: hero)
+        let handoff = try #require(model.prepareInstalledVideoPlayback(
+            using: videoPlayer,
+            for: videoTrack.id
+        ))
+        await videoPlayer.seek(
+            to: CMTime(seconds: handoff.position, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+        #expect(await model.activateInstalledVideoPlayback(
+            using: videoPlayer,
+            for: videoTrack.id
+        ))
+
+        model.toggleRepeat()
+        model.finishCurrentPlaybackRange()
+        #expect(model.currentTrackID == videoTrack.id)
+        #expect(model.hasActiveInstalledVideoPlayback)
+        #expect(model.isPlaying)
+        model.toggleRepeat()
+        model.finishCurrentPlaybackRange()
+
+        #expect(model.currentTrackID == nextTrack.id)
+        #expect(!model.hasActiveInstalledVideoPlayback)
+        #expect(videoPlayer.isMuted)
+        #expect(model.isLocalAudioDecoderPlaying)
+
+        model.previous()
+        #expect(model.currentTrackID == videoTrack.id)
+        let nextButtonVideoPlayer = AVPlayer(url: hero)
+        let nextButtonHandoff = try #require(model.prepareInstalledVideoPlayback(
+            using: nextButtonVideoPlayer,
+            for: videoTrack.id
+        ))
+        await nextButtonVideoPlayer.seek(
+            to: CMTime(seconds: nextButtonHandoff.position, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+        #expect(await model.activateInstalledVideoPlayback(
+            using: nextButtonVideoPlayer,
+            for: videoTrack.id
+        ))
+        model.next()
+        #expect(model.currentTrackID == nextTrack.id)
+        #expect(nextButtonVideoPlayer.isMuted)
+        #expect(model.isLocalAudioDecoderPlaying)
+
+        model.previous()
+        #expect(model.currentTrackID == videoTrack.id)
+        let previousButtonVideoPlayer = AVPlayer(url: hero)
+        let previousButtonHandoff = try #require(model.prepareInstalledVideoPlayback(
+            using: previousButtonVideoPlayer,
+            for: videoTrack.id
+        ))
+        await previousButtonVideoPlayer.seek(
+            to: CMTime(seconds: previousButtonHandoff.position, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+        #expect(await model.activateInstalledVideoPlayback(
+            using: previousButtonVideoPlayer,
+            for: videoTrack.id
+        ))
+        model.seekToTime(0)
+        model.previous()
+        #expect(model.currentTrackID == nextTrack.id)
+        #expect(previousButtonVideoPlayer.isMuted)
+        #expect(model.isLocalAudioDecoderPlaying)
+        if model.isPlaying { model.togglePlay() }
     }
 
     @Test

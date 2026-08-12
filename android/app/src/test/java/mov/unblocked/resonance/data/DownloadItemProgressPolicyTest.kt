@@ -261,6 +261,79 @@ class DownloadItemProgressPolicyTest {
         assertEquals(1, presentation.totalItems)
     }
 
+    @Test fun eachCompletedDownloadCanEnterTheLibraryBeforeTheBatchFinishes() {
+        val first = Track(
+            id = "local-a",
+            title = "First",
+            relativePath = "first.m4a",
+            remoteID = "remote-a",
+            sourceServer = "https://music.example",
+            syncProfileID = "default",
+        )
+        val second = first.copy(
+            id = "local-b",
+            title = "Second",
+            relativePath = "second.m4a",
+            remoteID = "remote-b",
+        )
+        var library = StoredLibrary(
+            serverURL = "https://music.example",
+            syncProfileID = "default",
+        )
+
+        library = CompletedDownloadLibraryPolicy.merge(library, listOf(first))
+        assertEquals(listOf("remote-a"), library.tracks.mapNotNull(Track::remoteID))
+
+        val afterCancellation = CompletedDownloadLibraryPolicy.merge(library, emptyList())
+        assertEquals(
+            "A later cancellation must not roll back an item checkpoint",
+            listOf("remote-a"),
+            afterCancellation.tracks.mapNotNull(Track::remoteID),
+        )
+
+        library = CompletedDownloadLibraryPolicy.merge(library, listOf(second))
+        assertEquals(listOf("remote-a", "remote-b"), library.tracks.mapNotNull(Track::remoteID))
+    }
+
+    @Test fun staleDownloadCannotMergeIntoANewerLibraryContext() {
+        val completed = Track(
+            id = "local-a",
+            title = "First",
+            relativePath = "first.m4a",
+            remoteID = "remote-a",
+            sourceServer = "https://music.example",
+            syncProfileID = "profile-a",
+        )
+        val current = StoredLibrary(
+            serverURL = "https://music.example",
+            syncProfileID = "profile-b",
+        )
+
+        val failure = runCatching {
+            CompletedDownloadLibraryPolicy.merge(current, listOf(completed)) {
+                error("stale download session")
+            }
+        }.exceptionOrNull()
+
+        assertTrue(failure?.message.orEmpty().contains("stale download session"))
+        assertTrue(current.tracks.isEmpty())
+        assertEquals(
+            listOf(completed),
+            CompletedDownloadLibraryPolicy.filesToDiscard(current, listOf(completed)),
+        )
+
+        val committed = CompletedDownloadLibraryPolicy.merge(current, listOf(completed))
+        assertTrue(CompletedDownloadLibraryPolicy.filesToDiscard(committed, listOf(completed)).isEmpty())
+    }
+
+    @Test fun cleanupNeverDeletesAMediaPathStillReferencedByTheLibrary() {
+        val retained = Track(id = "retained", title = "Retained", relativePath = "shared.m4a")
+        val completed = Track(id = "completed", title = "Completed", relativePath = "shared.m4a")
+        val library = StoredLibrary(tracks = listOf(retained))
+
+        assertTrue(CompletedDownloadLibraryPolicy.filesToDiscard(library, listOf(completed)).isEmpty())
+    }
+
     @Test fun catalogTitleAndCurrentSongBytesDriveThePresentation() {
         val presentation = DownloadItemProgressPolicy.fromCatalogTransfer(
             progress = TransferProgress(

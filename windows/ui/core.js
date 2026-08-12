@@ -215,6 +215,33 @@ export function crossfadeProgress(remainingSeconds, durationSeconds) {
   return Math.max(0, Math.min(1, 1 - (Number(remainingSeconds) || 0) / duration));
 }
 
+export function installedVideoHandoffDecision({
+  audioPlaying = false,
+  videoPlaying = false,
+  driftSeconds = 0,
+  pauseRequested = false,
+  postSeekConfirmed = false,
+  resyncAttempted = false,
+  toleranceSeconds = 0.12,
+} = {}) {
+  if (!videoPlaying) return "wait";
+  if (pauseRequested) return "pause";
+  const drift = Math.abs(Number(driftSeconds) || 0);
+  const tolerance = Math.max(0, Number(toleranceSeconds) || 0);
+  if (audioPlaying && !resyncAttempted && drift > tolerance) return "seek";
+  if (resyncAttempted && !postSeekConfirmed) return "wait";
+  return "commit";
+}
+
+export function installedVideoClockAdvanced(previousTime, currentTime, minimumAdvance = 0.01) {
+  const previous = Number(previousTime);
+  const current = Number(currentTime);
+  const threshold = Math.max(0, Number(minimumAdvance) || 0);
+  return Number.isFinite(previous)
+    && Number.isFinite(current)
+    && current - previous >= threshold;
+}
+
 export const SAFE_CLIENT_CONFIG = Object.freeze({
   schema_version: 1,
   revision: 0,
@@ -1799,6 +1826,91 @@ export function mergeSyncedTracks(state, result) {
   hydrateRemotePlaylistTracks(state);
   hydrateRemoteLikedTracks(state);
   return state;
+}
+
+export function mergeServerDownloadCheckpoint(state, result, { serverURL, profileID = "default" } = {}) {
+  const sourceServer = normalizedServerOrigin(serverURL);
+  const checkpoint = {
+    ...(result && typeof result === "object" ? result : {}),
+    downloaded: (Array.isArray(result?.downloaded) ? result.downloaded : []).map((track) => track?.remoteID ? {
+      ...track,
+      sourceServer: sourceServer || track.sourceServer || null,
+      syncProfileID: String(profileID || "default"),
+    } : track),
+    replacedTrackIDs: Array.isArray(result?.replacedTrackIDs) ? result.replacedTrackIDs : [],
+    failed: Array.isArray(result?.failed) ? result.failed : [],
+  };
+  mergeSyncedTracks(state, checkpoint);
+  return checkpoint;
+}
+
+export function createServerDownloadBatchResult() {
+  return {
+    catalog: null,
+    downloaded: [],
+    replacedTrackIDs: [],
+    failed: [],
+    cancelled: false,
+    stopReason: null,
+  };
+}
+
+export function appendServerDownloadBatchResult(aggregate, result) {
+  const target = aggregate && typeof aggregate === "object" ? aggregate : createServerDownloadBatchResult();
+  if (result?.catalog) target.catalog = result.catalog;
+  target.downloaded.push(...(Array.isArray(result?.downloaded) ? result.downloaded : []));
+  target.replacedTrackIDs.push(...(Array.isArray(result?.replacedTrackIDs) ? result.replacedTrackIDs : []));
+  target.failed.push(...(Array.isArray(result?.failed) ? result.failed : []));
+  target.cancelled = Boolean(target.cancelled || result?.cancelled);
+  return target;
+}
+
+export async function runServerDownloadCheckpoints({
+  songIDs = [],
+  invoke,
+  checkpoint,
+  stopReason = () => null,
+  aggregate = createServerDownloadBatchResult(),
+} = {}) {
+  const items = [...new Set((Array.isArray(songIDs) ? songIDs : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))];
+  for (const [index, songID] of items.entries()) {
+    const beforeReason = stopReason({ phase: "before", songID, index, itemCount: items.length });
+    if (beforeReason) {
+      aggregate.stopReason = String(beforeReason);
+      aggregate.cancelled = aggregate.cancelled || aggregate.stopReason === "cancelled";
+      break;
+    }
+    const result = await invoke(songID, index, items.length);
+    const durableResult = await checkpoint(result, songID, index, items.length);
+    appendServerDownloadBatchResult(aggregate, durableResult);
+    const afterReason = durableResult?.cancelled
+      ? "cancelled"
+      : stopReason({ phase: "after", songID, index, itemCount: items.length, result: durableResult });
+    if (afterReason) {
+      aggregate.stopReason = String(afterReason);
+      aggregate.cancelled = aggregate.cancelled || aggregate.stopReason === "cancelled";
+      break;
+    }
+  }
+  return aggregate;
+}
+
+export function serverDownloadBatchProgressEvent(value, batch) {
+  if (!batch || value?.direction !== "download") return value;
+  const itemCount = Math.max(1, Math.floor(Number(batch.itemCount) || 1));
+  const itemIndex = Math.max(1, Math.min(itemCount, Math.floor(Number(batch.itemIndex) || 1)));
+  const singletonCompleted = Math.max(0, Math.min(1, Number(value?.completed) || 0));
+  return {
+    ...value,
+    completed: Math.min(itemCount, itemIndex - 1 + singletonCompleted),
+    total: itemCount,
+    itemIndex,
+    itemCount,
+    autoHide: false,
+    dismiss: false,
+  };
 }
 
 export function formatServerDownloadFailureNotice(failures) {

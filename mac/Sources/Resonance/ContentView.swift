@@ -10,6 +10,12 @@ enum MacUpdateAlertState {
     }
 }
 
+enum MacInstalledVideoWindowLifecyclePolicy {
+    static func shouldEndPlaybackOnRootDisappear(hasMinimizedSession: Bool) -> Bool {
+        hasMinimizedSession
+    }
+}
+
 struct ContentView: View {
     @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
@@ -228,6 +234,17 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .ignoresSafeArea(.container, edges: .top)
         .task { await updateManager.automaticCheck() }
+        .onDisappear {
+            guard MacInstalledVideoWindowLifecyclePolicy.shouldEndPlaybackOnRootDisappear(
+                hasMinimizedSession: miniVideoSession != nil
+            ), let miniVideoSession else { return }
+            _ = model.endInstalledVideoPlayback(
+                using: miniVideoSession.player,
+                for: miniVideoSession.track.id,
+                resumeAudio: true
+            )
+            self.miniVideoSession = nil
+        }
     }
 
     private func presentLocalImport() {
@@ -269,7 +286,11 @@ struct ContentView: View {
 
     private func dismissMiniVideo(_ session: InstalledVideoSession) {
         guard miniVideoSession?.id == session.id else { return }
-        session.player.pause()
+        _ = model.endInstalledVideoPlayback(
+            using: session.player,
+            for: session.track.id,
+            resumeAudio: true
+        )
         miniVideoSession = nil
     }
 }

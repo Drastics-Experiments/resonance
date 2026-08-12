@@ -639,6 +639,42 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
         ), "Local validation and tagging must not leave a completed byte bar on screen")
     }
 
+    func testDownloadCardBecomesIndeterminateButStaysPresentBetweenBatchItems() throws {
+        XCTAssertNil(MobileDownloadTransferPresentationPolicy.localProcessingState(
+            from: MobileTransferDisplayState(
+                kind: .download,
+                itemID: "not-started",
+                songTitle: "Not Started",
+                detail: "Downloading song",
+                currentItem: 1,
+                totalItems: 2,
+                completedBytes: 0,
+                totalBytes: 100,
+                fallbackProgress: nil
+            )
+        ))
+
+        let processing = try XCTUnwrap(
+            MobileDownloadTransferPresentationPolicy.localProcessingState(
+                from: MobileTransferDisplayState(
+                    kind: .download,
+                    itemID: "first-song",
+                    songTitle: "First Song",
+                    detail: "Downloading song",
+                    currentItem: 1,
+                    totalItems: 2,
+                    completedBytes: 100,
+                    totalBytes: 100,
+                    fallbackProgress: nil
+                )
+            )
+        )
+        XCTAssertEqual(processing.itemID, "first-song")
+        XCTAssertEqual(processing.batchPosition, "1/2")
+        XCTAssertEqual(processing.detail, "Adding to library")
+        XCTAssertNil(processing.progress)
+    }
+
     func testLoadedCatalogSnapshotPlansUnhydratedSongsWithoutARefresh() throws {
         let first = try decodedRemoteSong(id: "one", title: "Already loaded one")
         let second = try decodedRemoteSong(id: "two", title: "Already loaded two")
@@ -1099,6 +1135,28 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
         XCTAssertFalse(MobileTransferSessionPolicy.acceptsBytePresentation(
             operationID: operationID,
             activePresentationOperationID: nil
+        ))
+    }
+
+    func testDownloadContextRejectsAStaleProfileBeforeRemoteAssociation() throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://music.example"))
+        XCTAssertTrue(MobileDownloadContextPolicy.isCurrent(
+            baseURL: baseURL,
+            profileID: "profile-a",
+            currentBaseURL: baseURL,
+            currentProfileID: "profile-a"
+        ))
+        XCTAssertFalse(MobileDownloadContextPolicy.isCurrent(
+            baseURL: baseURL,
+            profileID: "profile-a",
+            currentBaseURL: baseURL,
+            currentProfileID: "profile-b"
+        ))
+        XCTAssertFalse(MobileDownloadContextPolicy.isCurrent(
+            baseURL: try XCTUnwrap(URL(string: "https://music.example/base-a")),
+            profileID: "profile-a",
+            currentBaseURL: try XCTUnwrap(URL(string: "https://music.example/base-b")),
+            currentProfileID: "profile-a"
         ))
     }
 

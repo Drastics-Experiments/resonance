@@ -174,37 +174,59 @@ class LibraryRepository(
         }
     }
 
-    suspend fun registerLocalImport(download: LinkImportDownload): Track =
-        withContext(Dispatchers.IO) {
-            val extension = download.file.extension.lowercase().takeIf { it in setOf("m4a", "mp3", "mp4") }
-                ?: download.mediaMode.fileExtension
-            val preferred = safeFilename(download.metadata.artist + " - " + download.metadata.title) + "." + extension
-            val destination = uniqueMusicFile(preferred)
-            try {
-                if (!download.file.renameTo(destination)) {
-                    download.file.copyTo(destination)
-                    download.file.delete()
+    suspend fun registerLocalImport(
+        download: LinkImportDownload,
+        authorize: () -> Unit = {},
+    ): Track {
+        var destination: File? = null
+        var registeredTrack: Track? = null
+        return try {
+            withContext(Dispatchers.IO) {
+                val extension = download.file.extension.lowercase()
+                    .takeIf { it in setOf("m4a", "mp3", "mp4") }
+                    ?: download.mediaMode.fileExtension
+                val preferred = safeFilename(download.metadata.artist + " - " + download.metadata.title) + "." + extension
+                val target = uniqueMusicFile(preferred)
+                destination = target
+                try {
+                    if (!download.file.renameTo(target)) {
+                        download.file.copyTo(target)
+                        download.file.delete()
+                    }
+                    trackFromFile(
+                        file = target,
+                        fallbackTitle = download.metadata.title,
+                        fallbackArtist = download.metadata.artist,
+                        fallbackAlbum = download.metadata.album ?: "Imported",
+                        fallbackDurationMs = download.durationMs,
+                        fallbackArtwork = download.artwork,
+                        sourceURL = download.metadata.sourceURL,
+                        downloadSourceURL = download.downloadSourceURL,
+                        sourceSHA256 = download.sourceSHA256,
+                        contentSHA256 = download.contentSHA256,
+                        preservesUnlinkedImport = true,
+                    ).also { track ->
+                        registeredTrack = track
+                    }
+                } catch (error: Throwable) {
+                    target.delete()
+                    registeredTrack?.let { track -> artworkFile(track)?.delete() }
+                    throw error
+                } finally {
+                    download.file.parentFile?.deleteRecursively()
                 }
-                trackFromFile(
-                    file = destination,
-                    fallbackTitle = download.metadata.title,
-                    fallbackArtist = download.metadata.artist,
-                    fallbackAlbum = download.metadata.album ?: "Imported",
-                    fallbackDurationMs = download.durationMs,
-                    fallbackArtwork = download.artwork,
-                    sourceURL = download.metadata.sourceURL,
-                    downloadSourceURL = download.downloadSourceURL,
-                    sourceSHA256 = download.sourceSHA256,
-                    contentSHA256 = download.contentSHA256,
-                    preservesUnlinkedImport = true,
-                )
-            } catch (error: Throwable) {
-                destination.delete()
-                throw error
-            } finally {
-                download.file.parentFile?.deleteRecursively()
+            }.also {
+                // Run ownership checks on the caller context after the IO dispatcher handoff.
+                authorize()
             }
+        } catch (error: Throwable) {
+            // withContext can observe cancellation while returning from a successful IO block.
+            // Remove the moved file if the caller never got a chance to adopt it into the library.
+            destination?.delete()
+            registeredTrack?.let { track -> artworkFile(track)?.delete() }
+            throw error
         }
+    }
 
     /** Registers an app-owned file already downloaded into this repository's Music directory. */
     suspend fun registerDownloadedFile(

@@ -6,6 +6,7 @@ import {
   canonicalYouTubeSourcePageURL,
   catalogRequestCanApply,
   clientConfigRenewalDelay,
+  createServerDownloadBatchResult,
   createEmptyState,
   exactYouTubeSourcePageURL,
   filterPlaylists,
@@ -15,6 +16,8 @@ import {
   formatHistoryWindowLabel,
   formatTime,
   isInstalledVideoTrack,
+  installedVideoClockAdvanced,
+  installedVideoHandoffDecision,
   listeningHistoryEntryQualifiesAsPlay,
   localImportCandidateCanAutoSelect,
   localImportOperationFingerprint,
@@ -22,7 +25,7 @@ import {
   localImportNeedsServerContext,
   mergeListeningHistoryDocument,
   mergePlaylistDocument,
-  mergeSyncedTracks,
+  mergeServerDownloadCheckpoint,
   mergeTrackSourceIdentity,
   mergeUploadedSongsIntoCatalog,
   nextIndex,
@@ -50,6 +53,7 @@ import {
   reconcileUploadedTrack,
   reorderPlaylistEntries,
   resolveServerTransferModes,
+  runServerDownloadCheckpoints,
   removeClipRangeForTrack,
   removeLibraryTracksFromPlaylists,
   RESONANCE_ACCOUNT_SERVER_URL,
@@ -63,6 +67,7 @@ import {
   serverSongRequiresDownload,
   serverCatalogAuthorityIsCurrent,
   serverCatalogAuthoritySnapshot,
+  serverDownloadBatchProgressEvent,
   serverSourceDisplayFallback,
   serverSourceNeedsOriginalPage,
   serverTransferProgressPresentation,
@@ -194,6 +199,10 @@ let serverConnectPending = false;
 let serverAutoAttempted = false;
 let serverTransferActive = false;
 let serverDownloadOperationActive = false;
+let serverDownloadBatchProgress = null;
+let serverDownloadBatchInFlight = null;
+let serverDownloadSingletonInFlight = null;
+let serverDownloadCheckpointInFlight = null;
 let serverTransferCancelRequested = false;
 let serverTransferOwner = null;
 let serverContextReservation = null;
@@ -1610,7 +1619,7 @@ async function prepareClipRangePreviewMedia(track = clipEditorTrack(), { seekToS
 async function resumePlaybackAfterClipRangePreview() {
   if (!clipEditorPreviewInterruptedPlayback) return;
   clipEditorPreviewInterruptedPlayback = false;
-  if (currentTrack() && audio.paused) await requestPlayback();
+  if (currentTrack() && activePlaybackMedia().paused) await requestPlayback();
 }
 
 async function stopClipRangePreview({ resumeMain = true, unload = true } = {}) {
@@ -1649,9 +1658,10 @@ async function toggleClipRangePreview() {
   const request = ++clipEditorPreviewRequest;
   clipEditorPreviewLoading = true;
   syncClipRangePreviewButton();
-  if (!audio.paused) {
+  const playbackMedia = activePlaybackMedia();
+  if (!playbackMedia.paused) {
     clipEditorPreviewInterruptedPlayback = true;
-    audio.pause();
+    playbackMedia.pause();
   }
   const status = $("#clipEditorStatus");
   try {
@@ -1744,8 +1754,9 @@ async function saveClipRange() {
       : setClipRangeForTrack(state, track, clipEditorStartSeconds, clipEditorEndSeconds);
     if (!range) throw new Error("Choose a valid playback range.");
     clipRangeMutationGeneration += 1;
-    if (currentID === track.id && (audio.currentTime < range.startSeconds || audio.currentTime >= range.endSeconds)) {
-      audio.currentTime = range.startSeconds;
+    const playbackMedia = activePlaybackMedia();
+    if (currentID === track.id && (playbackMedia.currentTime < range.startSeconds || playbackMedia.currentTime >= range.endSeconds)) {
+      playbackMedia.currentTime = range.startSeconds;
       state.position = range.startSeconds;
     }
     await persist();
@@ -2174,7 +2185,16 @@ function openListeningHistory() {
 }
 
 function activePlaybackMedia() {
-  return audio;
+  return installedVideoOwnsPlayback() ? installedVideoPlayer : audio;
+}
+
+function installedVideoOwnsPlayback() {
+  const dialog = $("#installedVideoDialog");
+  return Boolean(
+    installedVideoSession?.videoOwnsPlayback
+    && installedVideoSession.trackID === currentID
+    && dialog?.open,
+  );
 }
 
 function playbackIsActive() {
@@ -3312,7 +3332,7 @@ function trackRow(track, index) {
     ? ` data-playlist-draggable="true" data-playlist-entry="${escapeHTML(entryKey)}" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Shift+F10"`
     : ` aria-keyshortcuts="Enter Space Shift+F10"`;
   return `<div class="track-row ${track.id === currentID ? "playing" : ""}${canReorder ? " playlist-draggable" : ""}${unavailable ? " unavailable" : ""}${notDownloaded ? " playlist-unavailable" : ""}" data-track="${escapeHTML(track.id)}" tabindex="0" aria-label="${escapeHTML(actionLabel + reorderLabel)}" aria-disabled="${unavailable}"${draggableAttributes}>
-    <span class="track-number" title="${track.id === currentID && !audio.paused ? "Now playing" : `Track ${index + 1}`}">${track.id === currentID && !audio.paused ? nowPlayingIcon : index + 1}</span>${artwork(track)}
+    <span class="track-number" title="${track.id === currentID && playbackIsActive() ? "Now playing" : `Track ${index + 1}`}">${track.id === currentID && playbackIsActive() ? nowPlayingIcon : index + 1}</span>${artwork(track)}
     <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / ${notDownloaded ? "Not downloaded" : unavailable ? "File unavailable" : mediaKind}</small></div>
     <span class="album">${escapeHTML(displayAlbum(track))}</span><span class="track-time">${notDownloaded ? "Not saved" : unavailable ? "Missing" : formatTime(track.duration)}</span>
     ${notDownloaded ? `<span class="playlist-cloud-status" title="Not downloaded on this device" aria-hidden="true">☁</span>` : `<button type="button" class="heart" data-favorite="${escapeHTML(track.id)}" aria-label="${liked ? "Remove from" : "Add to"} Liked Songs" aria-pressed="${liked}">${liked ? "♥" : "♡"}</button>`}
@@ -3337,7 +3357,7 @@ function renderLibrary() {
   const title = selectedPlaylist?.name || (selectedPlaylistID ? "Playlist" : "Library");
   const editablePlaylist = Boolean(selectedPlaylist && !selectedPlaylist.isSystem);
   const playableTrackCount = tracks.filter((track) => track.available !== false && !track.missing).length;
-  const collectionPlaying = isCurrentCollectionPlayback(tracks) && !audio.paused;
+  const collectionPlaying = isCurrentCollectionPlayback(tracks) && playbackIsActive();
   const playlistMenuItems = selectedPlaylist ? [
     `<button type="button" role="menuitem" data-hero-import>Import Songs…</button>`,
     playableTrackCount ? `<button type="button" role="menuitem" data-hero-next>Next Track</button>` : "",
@@ -3471,7 +3491,7 @@ async function deleteStoredTracks(trackIDs) {
   const releasedCurrentTrack = targetIDs.has(currentID)
     ? {
         track: currentTrack(),
-        position: Math.max(0, Number(audio.currentTime) || Number(state.position) || 0),
+        position: Math.max(0, Number(activePlaybackMedia().currentTime) || Number(state.position) || 0),
         wasPlaying: playbackIsActive(),
       }
     : null;
@@ -4096,15 +4116,17 @@ async function activateProfile(profileID, serverURL = state.serverURL) {
   state.playbackQueueIDs = [...activePlaybackQueueIDs];
   state.playbackSourceQueueIDs = [...activePlaybackSourceQueueIDs];
   if (currentID && !visibleTrackIDs.has(currentID)) {
-    audio.pause();
+    activePlaybackMedia().pause();
+    if (installedVideoSession) finishInstalledVideoClose({ session: installedVideoSession });
     audio.removeAttribute("src");
     currentID = null;
     state.currentTrackID = null;
     state.position = 0;
   } else if (currentID) {
+    const playbackMedia = activePlaybackMedia();
     const range = activeClipRange();
-    if (range && (audio.currentTime < range.startSeconds || audio.currentTime >= range.endSeconds)) {
-      audio.currentTime = range.startSeconds;
+    if (range && (playbackMedia.currentTime < range.startSeconds || playbackMedia.currentTime >= range.endSeconds)) {
+      playbackMedia.currentTime = range.startSeconds;
       state.position = range.startSeconds;
     }
   }
@@ -5179,7 +5201,7 @@ function syncLocalImportPreviewButtons() {
 async function resumePlaybackAfterLocalImportPreview() {
   if (!localImportPreviewInterruptedPlayback) return;
   localImportPreviewInterruptedPlayback = false;
-  if (currentTrack() && audio.paused) await requestPlayback();
+  if (currentTrack() && activePlaybackMedia().paused) await requestPlayback();
 }
 
 async function stopLocalImportPreview({ release = false, resumeMain = true, preserveInterruption = false } = {}) {
@@ -5208,9 +5230,10 @@ async function toggleLocalImportPreview(index) {
   }
   if (localImportPreviewIndex === index && localImportPreviewAudio.src) {
     if (localImportPreviewAudio.paused) {
-      if (!audio.paused) {
+      const playbackMedia = activePlaybackMedia();
+      if (!playbackMedia.paused) {
         localImportPreviewInterruptedPlayback = true;
-        audio.pause();
+        playbackMedia.pause();
         updateChrome();
       }
       if (localImportPreviewAudio.currentTime >= localImportPreviewLimitSeconds) localImportPreviewAudio.currentTime = 0;
@@ -5227,9 +5250,10 @@ async function toggleLocalImportPreview(index) {
   if (switchingPreview) {
     await stopLocalImportPreview({ release: true, resumeMain: false, preserveInterruption: true });
   }
-  if (!localImportPreviewInterruptedPlayback && !audio.paused) {
+  const playbackMedia = activePlaybackMedia();
+  if (!localImportPreviewInterruptedPlayback && !playbackMedia.paused) {
     localImportPreviewInterruptedPlayback = true;
-    audio.pause();
+    playbackMedia.pause();
     updateChrome();
   }
   const request = ++localImportPreviewRequest;
@@ -6362,6 +6386,29 @@ function updateLocalImportTransfer(value = {}) {
   });
 }
 
+async function checkpointServerDownloadResult(result, context) {
+  const checkpoint = (async () => {
+    const durableResult = mergeServerDownloadCheckpoint(state, result, context);
+    if (durableResult.downloaded.length || durableResult.replacedTrackIDs.length) {
+      await persist({ refreshSidebar: false });
+    }
+    return durableResult;
+  })();
+  serverDownloadCheckpointInFlight = checkpoint;
+  try {
+    return await checkpoint;
+  } finally {
+    if (serverDownloadCheckpointInFlight === checkpoint) serverDownloadCheckpointInFlight = null;
+  }
+}
+
+function activeServerDownloadStopReason(context) {
+  if (serverTransferCancelRequested) return "cancelled";
+  if (!profileContextIsCurrent(context)) return "context_changed";
+  if (currentServerTransferModes().downloadMode !== "verified_file_cache") return "policy_changed";
+  return null;
+}
+
 async function serverAction(mode) {
   if (serverConnectInFlight) {
     serverConnectPending = true;
@@ -6390,17 +6437,22 @@ async function serverAction(mode) {
   if (section === "server") renderServer();
   else if (status) status.textContent = serverConnectionText;
   let transferCancelled = false;
+  let transferStopped = false;
+  const downloadResult = createServerDownloadBatchResult();
   try {
     let catalog;
     if (mode !== "catalog") {
-      const songIDs = mode === "selected" ? [...selectedRemoteIDs] : null;
+      const capturedCatalog = serverCatalog.map((song) => ({ ...song }));
+      const songIDs = mode === "selected"
+        ? [...selectedRemoteIDs]
+        : capturedCatalog.map((song) => song.id);
       if (mode === "selected" && !songIDs.length) throw new Error("Select one or more songs first.");
-      const selectedSongIDs = songIDs ? new Set(songIDs) : null;
-      const songTitles = Object.fromEntries(serverCatalog
-        .filter((song) => !selectedSongIDs || selectedSongIDs.has(song.id))
+      const selectedSongIDs = new Set(songIDs);
+      const songTitles = Object.fromEntries(capturedCatalog
+        .filter((song) => selectedSongIDs.has(song.id))
         .map((song) => [song.id, song.title || "Untitled song"]));
-      const songMetadata = Object.fromEntries(serverCatalog
-        .filter((song) => !selectedSongIDs || selectedSongIDs.has(song.id))
+      const songMetadata = Object.fromEntries(capturedCatalog
+        .filter((song) => selectedSongIDs.has(song.id))
         .map((song) => [song.id, {
           title: song.title || "Untitled song",
           artist: song.artist || "Unknown Artist",
@@ -6411,31 +6463,64 @@ async function serverAction(mode) {
           sourceURL: typeof song.source_url === "string" ? song.source_url : null,
           mediaKind: song.media_kind === "video" ? "video" : "audio",
         }]));
-      const result = await api.syncServer({
+      const capturedSyncRequest = Object.freeze({
         baseURL: context.serverURL,
         token: context.token,
         profileID: context.profileID,
-        existing: state.tracks,
-        songIDs,
         songTitles,
         songMetadata,
       });
+      let checkpointedExistingTracks = [...state.tracks];
+      const downloadBatch = runServerDownloadCheckpoints({
+        songIDs,
+        aggregate: downloadResult,
+        stopReason: () => activeServerDownloadStopReason(context),
+        invoke: async (songID, index, itemCount) => {
+          serverDownloadBatchProgress = { itemIndex: index + 1, itemCount };
+          const singleton = api.syncServer({
+            ...capturedSyncRequest,
+            existing: checkpointedExistingTracks,
+            songIDs: [songID],
+            songTitles: songTitles[songID] ? { [songID]: songTitles[songID] } : {},
+            songMetadata: songMetadata[songID] ? { [songID]: songMetadata[songID] } : {},
+          });
+          serverDownloadSingletonInFlight = singleton;
+          try {
+            return await singleton;
+          } finally {
+            if (serverDownloadSingletonInFlight === singleton) serverDownloadSingletonInFlight = null;
+          }
+        },
+        checkpoint: async (itemResult) => {
+          const durableResult = await checkpointServerDownloadResult(itemResult, context);
+          checkpointedExistingTracks = [...state.tracks];
+          return durableResult;
+        },
+      });
+      serverDownloadBatchInFlight = downloadBatch;
+      let result;
+      try {
+        result = await downloadBatch;
+      } finally {
+        if (serverDownloadBatchInFlight === downloadBatch) serverDownloadBatchInFlight = null;
+      }
+      transferStopped = Boolean(result.stopReason);
       if (!profileContextIsCurrent(context)) return;
       catalog = result.catalog;
-      transferCancelled = Boolean(result.cancelled || serverTransferCancelRequested);
-      mergeSyncedTracks(state, result);
+      transferCancelled = Boolean(result.cancelled || result.stopReason === "cancelled" || serverTransferCancelRequested);
       const failedDownloads = Array.isArray(result.failed) ? result.failed : [];
       serverConnectionText = transferCancelled
         ? `Download cancelled${result.downloaded.length ? ` • ${result.downloaded.length} completed` : ""}`
-        : failedDownloads.length
-          ? `Downloaded ${result.downloaded.length} song${result.downloaded.length === 1 ? "" : "s"} • ${failedDownloads.length} failed`
-          : `Synced ${result.downloaded.length} new song${result.downloaded.length === 1 ? "" : "s"}`;
+        : result.stopReason === "policy_changed"
+          ? `Downloads stopped by server policy${result.downloaded.length ? ` • ${result.downloaded.length} completed` : ""}`
+          : failedDownloads.length
+            ? `Downloaded ${result.downloaded.length} song${result.downloaded.length === 1 ? "" : "s"} • ${failedDownloads.length} failed`
+            : `Synced ${result.downloaded.length} new song${result.downloaded.length === 1 ? "" : "s"}`;
       if (!transferCancelled && failedDownloads.length) {
         showNotice(formatServerDownloadFailureNotice(failedDownloads));
       }
       selectedRemoteIDs.clear();
       if (mode === "selected") serverSelecting = false;
-      await persist();
     } else {
       catalog = await api.fetchCatalog({ baseURL: context.serverURL, token: context.token, profileID: context.profileID });
       if (!catalogRequestCanApply({
@@ -6455,14 +6540,17 @@ async function serverAction(mode) {
     }
     await persist();
     renderSidebar();
-    if (!transferCancelled) schedulePlaylistSync();
+    if (!transferCancelled && !transferStopped) schedulePlaylistSync();
   } catch (error) {
     if (!profileContextIsCurrent(context)) return;
     if (mode === "catalog" && !catalogRequestCanApply({
       requestGeneration: catalogRequestGeneration,
       currentGeneration: serverCatalogGeneration,
     })) return;
-    serverConnectionText = serverTransferCancelRequested ? "Download cancelled" : friendlyIPCError(error, "Connection failed");
+    const completedDownloads = downloadResult.downloaded.length;
+    serverConnectionText = serverTransferCancelRequested
+      ? `Download cancelled${completedDownloads ? ` • ${completedDownloads} completed` : ""}`
+      : `${friendlyIPCError(error, "Connection failed")}${completedDownloads ? ` • ${completedDownloads} completed` : ""}`;
     serverConnected = false;
     replaceServerCatalog([]);
     selectedRemoteIDs.clear();
@@ -6471,6 +6559,7 @@ async function serverAction(mode) {
   } finally {
     serverConnectInFlight = false;
     if (mode !== "catalog") {
+      serverDownloadBatchProgress = null;
       hideServerTransfer("server");
       serverTransferCancelRequested = false;
       serverDownloadOperationActive = false;
@@ -6657,9 +6746,9 @@ async function uploadMissingDownloadedSongs() {
 }
 
 async function requestPlayback() {
+  const media = activePlaybackMedia();
   try {
-    await audio.play();
-    synchronizeInstalledVideoWithAudio({ forceSeek: true });
+    await media.play();
   } catch (error) {
     if (error?.name === "AbortError") return;
     updateChrome();
@@ -6678,28 +6767,29 @@ function clippedPlaybackPosition(value, track = currentTrack()) {
 }
 
 function enforceCurrentClipRange() {
+  const media = activePlaybackMedia();
   const range = activeClipRange();
-  if (!range || (audio.currentTime >= range.startSeconds && audio.currentTime < range.endSeconds)) return;
-  audio.currentTime = range.startSeconds;
+  if (!range || (media.currentTime >= range.startSeconds && media.currentTime < range.endSeconds)) return;
+  media.currentTime = range.startSeconds;
   state.position = range.startSeconds;
 }
 
 function finishClipPlaybackIfNeeded() {
   const track = currentTrack();
+  const media = activePlaybackMedia();
   const range = activeClipRange(track);
-  if (!track || !range || audio.currentTime + 0.02 < range.endSeconds || clipBoundaryTrackID === track.id) return false;
+  if (!track || !range || media.currentTime + 0.02 < range.endSeconds || clipBoundaryTrackID === track.id) return false;
   clipBoundaryTrackID = track.id;
   updateListeningSession();
   scheduleListeningHistorySync();
   if (repeat) {
     finishListeningSessionForReplay();
-    audio.currentTime = range.startSeconds;
+    media.currentTime = range.startSeconds;
     state.position = range.startSeconds;
     void requestPlayback();
-    synchronizeInstalledVideoWithAudio({ forceSeek: true });
   } else if (!move(1)) {
-    audio.pause();
-    audio.currentTime = range.endSeconds;
+    media.pause();
+    media.currentTime = range.endSeconds;
     state.position = range.endSeconds;
     persistInBackground({ refreshSidebar: false });
     updateChrome();
@@ -6710,6 +6800,14 @@ function finishClipPlaybackIfNeeded() {
 
 function play(track, queue = null, options = {}) {
   if (!track) return;
+  if (installedVideoOwnsPlayback() && track.id !== currentID && !options.installedVideoTransition) {
+    selectInstalledVideoTarget(track, {
+      recordHistory: options.recordHistory !== false,
+      queue,
+      playlistID: options.playlistID,
+    });
+    return;
+  }
   cancelCrossfade();
   if (track.available === false || track.missing) {
     showNotice(`${track.title || "This song"} is still in your library, but its file is unavailable on this device.`);
@@ -6756,22 +6854,24 @@ function toggle() {
     if (firstTrack) play(firstTrack);
     return;
   }
-  if (!audio.currentSrc && !audio.src) { play(track); return; }
-  if (audio.paused) {
+  const media = activePlaybackMedia();
+  if (!media.currentSrc && !media.src) { play(track); return; }
+  if (media.paused) {
     const range = activeClipRange(track);
-    if (range && (audio.currentTime < range.startSeconds || audio.currentTime >= range.endSeconds)) {
-      audio.currentTime = range.startSeconds;
+    if (range && (media.currentTime < range.startSeconds || media.currentTime >= range.endSeconds)) {
+      media.currentTime = range.startSeconds;
       state.position = range.startSeconds;
     }
     void requestPlayback();
   } else {
     cancelCrossfade();
-    audio.pause();
+    media.pause();
   }
   updateChrome();
 }
 
 function move(direction, recordHistory = direction > 0) {
+  if (installedVideoOwnsPlayback()) return advanceInstalledVideo(direction);
   if (currentTrack()?.transientStream) return false;
   const tracks = activePlaybackTracks();
   const index = nextIndex(tracks, currentID, direction);
@@ -6934,6 +7034,10 @@ function promoteCrossfade() {
 }
 
 function previous() {
+  if (installedVideoOwnsPlayback()) {
+    previousInstalledVideo();
+    return;
+  }
   if (currentTrack()?.transientStream) return;
   const range = activeClipRange();
   const start = range?.startSeconds ?? 0;
@@ -7054,7 +7158,7 @@ function renderFullPlayerQueue() {
 }
 
 function updateFullPlayerProgress() {
-  const elapsed = Number(audio.currentTime) || 0;
+  const elapsed = Number(activePlaybackMedia().currentTime) || 0;
   const duration = currentPlaybackDuration();
   const seek = $("#fullPlayerSeek");
   $("#fullPlayerElapsed").textContent = formatTime(elapsed);
@@ -7065,7 +7169,7 @@ function updateFullPlayerProgress() {
 }
 
 function updatePlaybackProgressUI() {
-  const elapsed = Number(audio.currentTime) || 0;
+  const elapsed = Number(activePlaybackMedia().currentTime) || 0;
   const duration = currentPlaybackDuration();
   $("#elapsed").textContent = formatTime(elapsed);
   $("#duration").textContent = formatTime(duration);
@@ -7084,13 +7188,15 @@ function stopPlaybackProgressAnimation() {
 function animatePlaybackProgress() {
   playbackProgressAnimationFrame = null;
   updatePlaybackProgressUI();
-  if (!audio.paused && !audio.ended) {
+  const media = activePlaybackMedia();
+  if (!media.paused && !media.ended) {
     playbackProgressAnimationFrame = requestAnimationFrame(animatePlaybackProgress);
   }
 }
 
 function startPlaybackProgressAnimation() {
-  if (playbackProgressAnimationFrame || audio.paused || audio.ended) return;
+  const media = activePlaybackMedia();
+  if (playbackProgressAnimationFrame || media.paused || media.ended) return;
   playbackProgressAnimationFrame = requestAnimationFrame(animatePlaybackProgress);
 }
 
@@ -7102,6 +7208,7 @@ function setAudioSource(track) {
 
 function currentPlaybackDuration(track = currentTrack()) {
   const storedDuration = Number(track?.duration) || 0;
+  if (installedVideoOwnsPlayback()) return Number(installedVideoPlayer.duration) || storedDuration;
   if (!track || audioMetadataTrackID !== track.id) return storedDuration;
   if (isInstalledVideoTrack(track) && storedDuration > 0) return storedDuration;
   return Number(audio.duration) || storedDuration;
@@ -7272,8 +7379,7 @@ function installedVideoBounds(track = installedVideoTrack()) {
 
 function syncInstalledVideoVolume() {
   const value = normalizedVolume(state.volume);
-  installedVideoPlayer.muted = true;
-  installedVideoPlayer.volume = 0;
+  installedVideoPlayer.volume = playbackGainForVolume(value);
   const input = $("#installedVideoVolume");
   input.value = String(value);
   input.setAttribute("aria-valuetext", `${Math.round(value * 100)} percent`);
@@ -7282,7 +7388,7 @@ function syncInstalledVideoVolume() {
 
 function syncInstalledVideoProgress() {
   const { start, end, duration } = installedVideoBounds();
-  const current = Math.max(start, Math.min(Number(audio.currentTime) || 0, end || duration));
+  const current = Math.max(start, Math.min(Number(activePlaybackMedia().currentTime) || 0, end || duration));
   const span = Math.max(0, end - start);
   const seek = $("#installedVideoSeek");
   seek.value = span > 0 ? String(Math.round((current - start) / span * 1000)) : "0";
@@ -7293,7 +7399,8 @@ function syncInstalledVideoProgress() {
 }
 
 function syncInstalledVideoTransport() {
-  const playing = !audio.paused && !audio.ended;
+  const media = activePlaybackMedia();
+  const playing = !media.paused && !media.ended;
   const toggleButton = $("#installedVideoToggle");
   toggleButton.innerHTML = playing ? playbackPauseIcon : playbackPlayIcon;
   toggleButton.setAttribute("aria-label", playing ? "Pause" : "Play");
@@ -7314,7 +7421,7 @@ function hideInstalledVideoControls() {
   const keyboardFocusedControl = dialog.querySelector(
     ".installed-video-return:focus-visible, .installed-video-window-actions :focus-visible, #installedVideoControls :focus-visible",
   );
-  if (audio.paused || keyboardFocusedControl) return;
+  if (activePlaybackMedia().paused || keyboardFocusedControl) return;
   dialog.classList.remove("video-controls-visible");
 }
 
@@ -7322,29 +7429,129 @@ function showInstalledVideoControls({ keepVisible = false } = {}) {
   if (installedVideoControlsTimer) clearTimeout(installedVideoControlsTimer);
   installedVideoControlsTimer = null;
   $("#installedVideoDialog").classList.add("video-controls-visible");
-  if (!keepVisible && !audio.paused) {
+  if (!keepVisible && !activePlaybackMedia().paused) {
     installedVideoControlsTimer = setTimeout(hideInstalledVideoControls, INSTALLED_VIDEO_CONTROLS_TIMEOUT_MS);
   }
 }
 
-function synchronizeInstalledVideoWithAudio({ forceSeek = false } = {}) {
+function finishInstalledVideoHandoff(session, { postSeekConfirmed = false } = {}) {
+  if (installedVideoSession !== session || session.closing || session.videoOwnsPlayback) return;
+  const track = installedVideoTrack();
+  if (!track || session.trackID !== currentID || installedVideoPlayer.paused) return;
+  const audioWasPlaying = !audio.paused && !audio.ended;
+  const audioTime = clippedPlaybackPosition(audio.currentTime, track);
+  const drift = Math.abs((Number(installedVideoPlayer.currentTime) || 0) - audioTime);
+  const decision = installedVideoHandoffDecision({
+    audioPlaying: audioWasPlaying,
+    videoPlaying: !installedVideoPlayer.paused,
+    driftSeconds: drift,
+    pauseRequested: session.audioWasPlayingWhenHandoffStarted && audio.paused && !audio.ended,
+    postSeekConfirmed,
+    resyncAttempted: session.handoffResynced,
+    toleranceSeconds: INSTALLED_VIDEO_SYNC_TOLERANCE_SECONDS,
+  });
+  if (decision === "wait") return;
+  if (decision === "pause") {
+    session.waitingForAudioHandoff = false;
+    session.audioWasPlayingWhenHandoffStarted = false;
+    session.handoffAwaitingPostSeekConfirmation = false;
+    session.handoffSeekCompleted = false;
+    session.handoffSeekedTime = null;
+    session.videoOwnsPlayback = true;
+    session.autoplayRequested = false;
+    installedVideoPlayer.currentTime = audioTime;
+    installedVideoPlayer.pause();
+    installedVideoPlayer.volume = playbackGainForVolume(state.volume);
+    installedVideoPlayer.muted = false;
+    state.position = audioTime;
+    stopPlaybackProgressAnimation();
+    syncInstalledVideoTransport();
+    updatePlaybackProgressUI();
+    updateChrome();
+    return;
+  }
+  if (decision === "seek") {
+    session.handoffResynced = true;
+    session.handoffAwaitingPostSeekConfirmation = true;
+    session.handoffSeekCompleted = false;
+    session.handoffSeekedTime = null;
+    installedVideoPlayer.currentTime = audioTime;
+    return;
+  }
+
+  session.waitingForAudioHandoff = false;
+  session.audioWasPlayingWhenHandoffStarted = false;
+  session.handoffAwaitingPostSeekConfirmation = false;
+  session.handoffSeekCompleted = false;
+  session.handoffSeekedTime = null;
+  session.videoOwnsPlayback = true;
+  session.autoplayRequested = false;
+  audio.pause();
+  installedVideoPlayer.volume = playbackGainForVolume(state.volume);
+  installedVideoPlayer.muted = false;
+  state.position = clippedPlaybackPosition(installedVideoPlayer.currentTime, track);
+  beginListeningSession();
+  startPlaybackProgressAnimation();
+  syncInstalledVideoTransport();
+  updatePlaybackProgressUI();
+  updateChrome();
+}
+
+function startInstalledVideoPlayback({ shouldPlay = true } = {}) {
   const session = installedVideoSession;
   const track = installedVideoTrack();
   if (!session?.metadataReady || session.closing || !track) return;
   if (session.trackID !== currentID) return;
-  const audioTime = clippedPlaybackPosition(audio.currentTime, track);
-  if (forceSeek
-      || Math.abs((Number(installedVideoPlayer.currentTime) || 0) - audioTime)
-        > INSTALLED_VIDEO_SYNC_TOLERANCE_SECONDS) {
-    installedVideoPlayer.currentTime = audioTime;
-  }
-  installedVideoPlayer.muted = true;
-  installedVideoPlayer.volume = 0;
+  session.autoplayRequested = Boolean(shouldPlay);
   installedVideoPlayer.playbackRate = Number(audio.playbackRate) || 1;
-  if (audio.paused || audio.ended) {
+  installedVideoPlayer.volume = playbackGainForVolume(state.volume);
+
+  if (!session.videoOwnsPlayback) {
+    const audioTime = clippedPlaybackPosition(audio.currentTime, track);
+    if (Math.abs((Number(installedVideoPlayer.currentTime) || 0) - audioTime) > 0.02) {
+      installedVideoPlayer.currentTime = audioTime;
+    }
+  }
+
+  if (!shouldPlay) {
     installedVideoPlayer.pause();
-  } else if (installedVideoPlayer.paused || installedVideoPlayer.ended) {
+    session.waitingForAudioHandoff = false;
+    session.audioWasPlayingWhenHandoffStarted = false;
+    session.handoffAwaitingPostSeekConfirmation = false;
+    session.handoffSeekCompleted = false;
+    session.handoffSeekedTime = null;
+    session.videoOwnsPlayback = true;
+    audio.pause();
+    installedVideoPlayer.muted = false;
+    state.position = clippedPlaybackPosition(installedVideoPlayer.currentTime, track);
+    syncInstalledVideoTransport();
+    updatePlaybackProgressUI();
+    updateChrome();
+    return;
+  }
+
+  if (session.videoOwnsPlayback) {
+    installedVideoPlayer.muted = false;
+  } else {
+    session.waitingForAudioHandoff = true;
+    session.audioWasPlayingWhenHandoffStarted = !audio.paused && !audio.ended;
+    session.handoffResynced = false;
+    session.handoffAwaitingPostSeekConfirmation = false;
+    session.handoffSeekCompleted = false;
+    session.handoffSeekedTime = null;
+    installedVideoPlayer.muted = true;
+  }
+  if (installedVideoPlayer.paused || installedVideoPlayer.ended) {
     void installedVideoPlayer.play().catch((error) => {
+      if (installedVideoSession === session) {
+        session.waitingForAudioHandoff = false;
+        session.audioWasPlayingWhenHandoffStarted = false;
+        session.handoffAwaitingPostSeekConfirmation = false;
+        session.handoffSeekCompleted = false;
+        session.handoffSeekedTime = null;
+        session.autoplayRequested = false;
+      }
+      installedVideoPlayer.muted = true;
       showInstalledVideoControls({ keepVisible: true });
       showNotice(error?.message ? `Could not play this video: ${error.message}` : "Resonance could not play this video.");
     });
@@ -7356,7 +7563,22 @@ function updateInstalledVideoTime() {
   const session = installedVideoSession;
   const track = installedVideoTrack();
   if (!session || !track || session.closing) return;
-  synchronizeInstalledVideoWithAudio();
+  if (!session.videoOwnsPlayback) {
+    if (session.waitingForAudioHandoff
+        && session.handoffAwaitingPostSeekConfirmation
+        && session.handoffSeekCompleted
+        && installedVideoClockAdvanced(session.handoffSeekedTime, installedVideoPlayer.currentTime)) {
+      finishInstalledVideoHandoff(session, { postSeekConfirmed: true });
+    }
+    syncInstalledVideoProgress();
+    return;
+  }
+  if (finishClipPlaybackIfNeeded()) return;
+  state.position = Number(installedVideoPlayer.currentTime) || 0;
+  updateListeningSession();
+  schedulePlaybackProgressSave();
+  syncInstalledVideoProgress();
+  updatePlaybackProgressUI();
 }
 
 function installedVideoPlaybackStarted() {
@@ -7368,23 +7590,46 @@ function installedVideoPlaybackStarted() {
 function installedVideoPlaybackPlaying() {
   const session = installedVideoSession;
   if (!session || session.closing) return;
-  installedVideoPlayer.muted = true;
-  installedVideoPlayer.volume = 0;
+  if (!session.videoOwnsPlayback) {
+    finishInstalledVideoHandoff(session, {
+      postSeekConfirmed: !session.handoffAwaitingPostSeekConfirmation || session.handoffSeekCompleted,
+    });
+    return;
+  }
+  installedVideoPlayer.muted = false;
+  installedVideoPlayer.volume = playbackGainForVolume(state.volume);
+  beginListeningSession();
+  startPlaybackProgressAnimation();
   syncInstalledVideoTransport();
   updateChrome();
 }
 
 function installedVideoPlaybackPaused() {
+  if (!installedVideoSession?.videoOwnsPlayback) return;
+  stopPlaybackProgressAnimation();
+  updatePlaybackProgressUI();
+  updateListeningSession();
+  scheduleListeningHistorySync();
   syncInstalledVideoTransport();
-  if (!installedVideoSession?.closing && audio.paused) showInstalledVideoControls({ keepVisible: true });
+  if (!installedVideoSession.closing) showInstalledVideoControls({ keepVisible: true });
   updateChrome();
 }
 
-function configureInstalledVideoSource(track, startTime) {
+function configureInstalledVideoSource(track, startTime, { autoplay = false } = {}) {
   const dialog = $("#installedVideoDialog");
   if (!installedVideoSession || !isInstalledVideoTrack(track)) return;
+  installedVideoSession.videoOwnsPlayback = false;
+  installedVideoPlayer.pause();
   installedVideoSession.trackID = track.id;
   installedVideoSession.metadataReady = false;
+  installedVideoSession.waitingForAudioHandoff = false;
+  installedVideoSession.audioWasPlayingWhenHandoffStarted = false;
+  installedVideoSession.handoffResynced = false;
+  installedVideoSession.handoffAwaitingPostSeekConfirmation = false;
+  installedVideoSession.handoffSeekCompleted = false;
+  installedVideoSession.handoffSeekedTime = null;
+  installedVideoSession.autoplayRequested = Boolean(autoplay);
+  installedVideoSession.handlingEnd = false;
   $("#installedVideoArtwork").innerHTML = track.artwork
     ? squareArtworkImageMarkup(track.artwork)
     : '<span aria-hidden="true">♪</span>';
@@ -7393,7 +7638,7 @@ function configureInstalledVideoSource(track, startTime) {
   installedVideoPlayer.src = track.fileUrl;
   installedVideoPlayer.playbackRate = Number(state.playbackRate) || 1;
   installedVideoPlayer.muted = true;
-  installedVideoPlayer.volume = 0;
+  installedVideoPlayer.volume = playbackGainForVolume(state.volume);
   syncInstalledVideoVolume();
   installedVideoPlayer.onloadedmetadata = () => {
     if (installedVideoSession?.trackID !== track.id) return;
@@ -7402,7 +7647,9 @@ function configureInstalledVideoSource(track, startTime) {
     installedVideoPlayer.currentTime = Math.max(start, Math.min(requested, Math.max((end || duration) - 0.05, start)));
     installedVideoSession.metadataReady = true;
     syncInstalledVideoTransport();
-    if (dialog.classList.contains("video-revealed")) synchronizeInstalledVideoWithAudio({ forceSeek: true });
+    if (dialog.classList.contains("video-revealed")) {
+      startInstalledVideoPlayback({ shouldPlay: installedVideoSession.autoplayRequested });
+    }
   };
   installedVideoPlayer.onerror = () => {
     showInstalledVideoControls({ keepVisible: true });
@@ -7412,8 +7659,17 @@ function configureInstalledVideoSource(track, startTime) {
   installedVideoPlayer.onplay = installedVideoPlaybackStarted;
   installedVideoPlayer.onplaying = installedVideoPlaybackPlaying;
   installedVideoPlayer.onpause = installedVideoPlaybackPaused;
-  installedVideoPlayer.onseeked = () => synchronizeInstalledVideoWithAudio();
-  installedVideoPlayer.onended = () => synchronizeInstalledVideoWithAudio({ forceSeek: true });
+  installedVideoPlayer.onseeked = () => {
+    const session = installedVideoSession;
+    if (session?.waitingForAudioHandoff && session.handoffAwaitingPostSeekConfirmation) {
+      session.handoffSeekCompleted = true;
+      session.handoffSeekedTime = Number(installedVideoPlayer.currentTime) || 0;
+      syncInstalledVideoProgress();
+      return;
+    }
+    if (session?.videoOwnsPlayback) updateInstalledVideoTime();
+  };
+  installedVideoPlayer.onended = handleInstalledVideoEnded;
   installedVideoPlayer.load();
 }
 
@@ -7422,9 +7678,11 @@ function openInstalledVideo(track = currentTrack()) {
   const dialog = $("#installedVideoDialog");
   if (dialog.open) return;
 
+  const playbackMedia = activePlaybackMedia();
   const startTime = track.id === currentID
-    ? Math.max(0, Number(audio.currentTime) || Number(state.position) || 0)
+    ? Math.max(0, Number(playbackMedia.currentTime) || Number(state.position) || 0)
     : 0;
+  const autoplay = track.id === currentID && !playbackMedia.paused && !playbackMedia.ended;
   const sourceRect = $("#fullPlayerArtwork").getBoundingClientRect();
   if (installedVideoTransitionTimer) clearTimeout(installedVideoTransitionTimer);
   cancelInstalledVideoGeometryAnimation();
@@ -7450,12 +7708,21 @@ function openInstalledVideo(track = currentTrack()) {
   const geometry = setInstalledVideoSourceGeometry(sourceRect, targetRect);
   installedVideoSession = {
     trackID: track.id,
+    videoOwnsPlayback: false,
+    waitingForAudioHandoff: false,
+    audioWasPlayingWhenHandoffStarted: false,
+    handoffResynced: false,
+    handoffAwaitingPostSeekConfirmation: false,
+    handoffSeekCompleted: false,
+    handoffSeekedTime: null,
+    autoplayRequested: autoplay,
     metadataReady: false,
     closing: false,
     mini: false,
+    handlingEnd: false,
     geometry,
   };
-  configureInstalledVideoSource(track, startTime);
+  configureInstalledVideoSource(track, startTime, { autoplay });
   applyInstalledVideoStageGeometry(geometry.source);
   dialog.classList.add("video-active", "video-from-art");
   $("#nowPlayingDialog").classList.add("video-active");
@@ -7465,7 +7732,7 @@ function openInstalledVideo(track = currentTrack()) {
     if (!installedVideoSession || installedVideoSession.closing) return;
     dialog.classList.remove("video-from-art");
     dialog.classList.add("video-expanded", "video-revealed");
-    synchronizeInstalledVideoWithAudio({ forceSeek: true });
+    startInstalledVideoPlayback({ shouldPlay: installedVideoSession.autoplayRequested });
     const session = installedVideoSession;
     animateInstalledVideoStage(geometry.source, geometry.target, () => {
       if (installedVideoSession !== session || session.closing) return;
@@ -7475,21 +7742,37 @@ function openInstalledVideo(track = currentTrack()) {
   }, installedVideoAnimationDuration(INSTALLED_VIDEO_LEAD_IN_MS));
 }
 
-function playInstalledVideoTrack(track, { recordHistory = true } = {}) {
+function playInstalledVideoTrack(track, {
+  recordHistory = true,
+  queue = null,
+  playlistID = activePlaybackPlaylistID,
+} = {}) {
   if (!isInstalledVideoTrack(track) || !installedVideoSession) return;
-  play(track, null, { recordHistory });
-  configureInstalledVideoSource(track, playbackRangeForTrack(state, track)?.startSeconds ?? 0);
+  play(track, queue, {
+    recordHistory,
+    playlistID,
+    autoplay: false,
+    installedVideoTransition: true,
+  });
+  configureInstalledVideoSource(track, playbackRangeForTrack(state, track)?.startSeconds ?? 0, { autoplay: true });
   showInstalledVideoControls();
 }
 
-function selectInstalledVideoTarget(track, { recordHistory = true } = {}) {
+function selectInstalledVideoTarget(track, {
+  recordHistory = true,
+  queue = null,
+  playlistID = activePlaybackPlaylistID,
+} = {}) {
   if (!track) return;
   if (isInstalledVideoTrack(track)) {
-    playInstalledVideoTrack(track, { recordHistory });
+    playInstalledVideoTrack(track, { recordHistory, queue, playlistID });
     return;
   }
-  play(track, null, { recordHistory });
-  closeInstalledVideo();
+  play(track, queue, { recordHistory, playlistID, installedVideoTransition: true });
+  installedVideoPlayer.muted = true;
+  installedVideoPlayer.pause();
+  installedVideoSession.videoOwnsPlayback = false;
+  closeInstalledVideo({ resumePlayback: false });
 }
 
 function advanceInstalledVideo(direction = 1) {
@@ -7502,7 +7785,9 @@ function advanceInstalledVideo(direction = 1) {
 
 function previousInstalledVideo() {
   const { start } = installedVideoBounds();
-  if (audio.currentTime > start + 3) {
+  const media = activePlaybackMedia();
+  if (media.currentTime > start + 3) {
+    media.currentTime = start;
     audio.currentTime = start;
     installedVideoPlayer.currentTime = start;
     state.position = start;
@@ -7517,8 +7802,44 @@ function previousInstalledVideo() {
 }
 
 function toggleInstalledVideoPlayback() {
-  toggle();
-  synchronizeInstalledVideoWithAudio({ forceSeek: true });
+  const session = installedVideoSession;
+  if (!session?.metadataReady) return;
+  if (!session.videoOwnsPlayback) {
+    startInstalledVideoPlayback({ shouldPlay: audio.paused || audio.ended });
+    return;
+  }
+  if (installedVideoPlayer.paused || installedVideoPlayer.ended) {
+    if (installedVideoPlayer.ended) {
+      const { start } = installedVideoBounds();
+      installedVideoPlayer.currentTime = start;
+      state.position = start;
+    }
+    void requestPlayback();
+  } else {
+    installedVideoPlayer.pause();
+  }
+}
+
+function handleInstalledVideoEnded() {
+  const session = installedVideoSession;
+  const track = installedVideoTrack();
+  if (!session?.videoOwnsPlayback || !track || session.closing || session.handlingEnd) return;
+  session.handlingEnd = true;
+  updateListeningSession();
+  scheduleListeningHistorySync();
+  if (repeat) {
+    finishListeningSessionForReplay();
+    const { start } = installedVideoBounds(track);
+    installedVideoPlayer.currentTime = start;
+    state.position = start;
+    session.handlingEnd = false;
+    void requestPlayback();
+    return;
+  }
+  if (!advanceInstalledVideo(1)) {
+    session.handlingEnd = false;
+    updateChrome();
+  }
 }
 
 function minimizeInstalledVideo() {
@@ -7549,7 +7870,6 @@ function minimizeInstalledVideo() {
   finishNowPlayingClose();
   dialog.show();
   clearInstalledVideoStageGeometry();
-  synchronizeInstalledVideoWithAudio({ forceSeek: true });
   showInstalledVideoControls();
   requestAnimationFrame(() => $("#restoreInstalledVideo").focus());
 }
@@ -7566,12 +7886,15 @@ function restoreInstalledVideo() {
   $("#nowPlayingDialog").classList.add("video-active");
   clearInstalledVideoStageGeometry();
   dialog.showModal();
-  synchronizeInstalledVideoWithAudio({ forceSeek: true });
   showInstalledVideoControls();
   requestAnimationFrame(() => $("#minimizeInstalledVideo").focus());
 }
 
 function finishInstalledVideoClose({ session }) {
+  if (session.audioHandoffPending) {
+    session.finishAfterAudioHandoff = true;
+    return;
+  }
   const dialog = $("#installedVideoDialog");
   cancelInstalledVideoGeometryAnimation();
   installedVideoPlayer.onloadedmetadata = null;
@@ -7585,6 +7908,7 @@ function finishInstalledVideoClose({ session }) {
   installedVideoPlayer.removeAttribute("src");
   installedVideoPlayer.load();
   installedVideoPlayer.muted = true;
+  audio.muted = false;
   installedVideoSession = null;
   installedVideoTransitionTimer = null;
   if (installedVideoChromeTimer) clearTimeout(installedVideoChromeTimer);
@@ -7613,19 +7937,88 @@ function finishInstalledVideoClose({ session }) {
   updateChrome();
 }
 
-function closeInstalledVideo() {
+function handOffInstalledVideoToAudio(session, { shouldPlay }) {
+  const track = state.tracks.find((item) => item.id === session.trackID);
+  if (!session.videoOwnsPlayback || !track || track.id !== currentID) {
+    session.videoOwnsPlayback = false;
+    session.waitingForAudioHandoff = false;
+    installedVideoPlayer.muted = true;
+    installedVideoPlayer.pause();
+    audio.muted = false;
+    return false;
+  }
+
+  const position = clippedPlaybackPosition(installedVideoPlayer.currentTime, track);
+  state.position = position;
+  let restoredImmediately = false;
+  if ((audio.currentSrc || audio.src) && audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
+    try {
+      audio.currentTime = position;
+      restoredImmediately = true;
+    } catch {
+      // The loadedmetadata handler applies the saved position if Chromium has not made the source seekable yet.
+    }
+  }
+  pendingRestorePosition = restoredImmediately ? null : position;
+  persistInBackground({ refreshSidebar: false });
+  session.waitingForAudioHandoff = false;
+
+  if (!shouldPlay) {
+    session.videoOwnsPlayback = false;
+    installedVideoPlayer.muted = true;
+    installedVideoPlayer.pause();
+    audio.muted = false;
+    return false;
+  }
+
+  session.audioHandoffPending = true;
+  audio.muted = true;
+  const completeHandoff = () => {
+    if (installedVideoSession !== session) return;
+    audio.removeEventListener("playing", completeHandoff);
+    session.audioHandoffPending = false;
+    session.videoOwnsPlayback = false;
+    installedVideoPlayer.muted = true;
+    installedVideoPlayer.pause();
+    audio.muted = false;
+    beginListeningSession();
+    startPlaybackProgressAnimation();
+    updatePlaybackProgressUI();
+    updateChrome();
+    if (session.finishAfterAudioHandoff) finishInstalledVideoClose({ session });
+  };
+  audio.addEventListener("playing", completeHandoff, { once: true });
+  void audio.play().catch((error) => {
+    audio.removeEventListener("playing", completeHandoff);
+    if (installedVideoSession !== session) return;
+    session.audioHandoffPending = false;
+    session.videoOwnsPlayback = false;
+    installedVideoPlayer.muted = true;
+    installedVideoPlayer.pause();
+    audio.muted = false;
+    updateChrome();
+    if (error?.name !== "AbortError") {
+      showNotice(error?.message ? `Could not resume this song: ${error.message}` : "Resonance could not resume this song.");
+    }
+    if (session.finishAfterAudioHandoff) finishInstalledVideoClose({ session });
+  });
+  return true;
+}
+
+function closeInstalledVideo({ resumePlayback = null } = {}) {
   const dialog = $("#installedVideoDialog");
   const session = installedVideoSession;
   if (!dialog.open || !session || session.closing) return;
+  const videoWasPlaying = session.videoOwnsPlayback && !installedVideoPlayer.paused && !installedVideoPlayer.ended;
   if (session.mini) {
     session.closing = true;
-    installedVideoPlayer.pause();
+    handOffInstalledVideoToAudio(session, { shouldPlay: resumePlayback ?? videoWasPlaying });
     finishInstalledVideoClose({ session });
     return;
   }
   session.closing = true;
 
-  installedVideoPlayer.pause();
+  handOffInstalledVideoToAudio(session, { shouldPlay: resumePlayback ?? videoWasPlaying });
   if (installedVideoTransitionTimer) {
     clearTimeout(installedVideoTransitionTimer);
     installedVideoTransitionTimer = null;
@@ -7888,8 +8281,8 @@ $("#installedVideoSeek").oninput = (event) => {
   const { start, end } = installedVideoBounds();
   if (end > start) {
     const position = start + (end - start) * Number(event.target.value) / 1000;
-    audio.currentTime = position;
     installedVideoPlayer.currentTime = position;
+    if (!installedVideoOwnsPlayback() && (audio.currentSrc || audio.src)) audio.currentTime = position;
     state.position = position;
   }
   syncInstalledVideoProgress();
@@ -8430,8 +8823,7 @@ function setPlaybackVolume(value, { shouldPersist = true } = {}) {
   const gain = playbackGainForVolume(state.volume);
   audio.volume = gain;
   applyCrossfadeVolumes();
-  installedVideoPlayer.muted = true;
-  installedVideoPlayer.volume = 0;
+  installedVideoPlayer.volume = gain;
   const percent = Math.round(state.volume * 100);
   [$("#volume"), $("#fullPlayerVolume"), $("#installedVideoVolume")].forEach((input) => {
     input.value = String(state.volume);
@@ -8465,25 +8857,27 @@ $("#fullPlayerSpeed").onchange = (event) => {
 };
 $("#seek").oninput = (event) => {
   cancelCrossfade();
+  const media = activePlaybackMedia();
   const duration = currentPlaybackDuration();
-  if (duration) audio.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
-  event.target.value = duration ? String(Math.round(audio.currentTime / duration * 1000)) : "0";
-  event.target.setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(duration)}`);
+  if (duration) media.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
+  event.target.value = duration ? String(Math.round(media.currentTime / duration * 1000)) : "0";
+  event.target.setAttribute("aria-valuetext", `${formatTime(media.currentTime)} of ${formatTime(duration)}`);
   paintRange(event.target);
 };
 $("#fullPlayerSeek").oninput = (event) => {
   cancelCrossfade();
+  const media = activePlaybackMedia();
   const duration = currentPlaybackDuration();
-  if (duration) audio.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
-  event.target.value = duration ? String(Math.round(audio.currentTime / duration * 1000)) : "0";
+  if (duration) media.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
+  event.target.value = duration ? String(Math.round(media.currentTime / duration * 1000)) : "0";
   updateFullPlayerProgress();
   $("#seek").value = event.target.value;
-  $("#seek").setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(duration)}`);
+  $("#seek").setAttribute("aria-valuetext", `${formatTime(media.currentTime)} of ${formatTime(duration)}`);
   paintRange($("#seek"));
 };
 function bindPrimaryAudioEvents(media) {
   media.ontimeupdate = () => {
-    if (media !== audio || pendingRestorePosition !== null) return;
+    if (media !== audio || installedVideoOwnsPlayback() || pendingRestorePosition !== null) return;
     maybeStartCrossfade();
     if (crossfadeStarted) {
       const bounds = crossfadePlaybackBounds(currentTrack(), audio);
@@ -8494,24 +8888,23 @@ function bindPrimaryAudioEvents(media) {
     state.position = audio.currentTime;
     updateListeningSession();
     schedulePlaybackProgressSave();
-    synchronizeInstalledVideoWithAudio();
   };
   media.onplay = () => {
     if (media !== audio) return;
+    if (installedVideoOwnsPlayback()) return;
     beginListeningSession();
     startPlaybackProgressAnimation();
-    synchronizeInstalledVideoWithAudio({ forceSeek: true });
     updateChrome();
     renderQueue();
   };
   media.onpause = () => {
     if (media !== audio) return;
+    if (installedVideoOwnsPlayback()) return;
     if (crossfadeTrackID) cancelCrossfade();
     stopPlaybackProgressAnimation();
     updatePlaybackProgressUI();
     updateListeningSession();
     scheduleListeningHistorySync();
-    synchronizeInstalledVideoWithAudio({ forceSeek: true });
     updateChrome();
     if (playbackProgressTimer) {
       clearTimeout(playbackProgressTimer);
@@ -8521,6 +8914,7 @@ function bindPrimaryAudioEvents(media) {
   };
   media.onended = () => {
     if (media !== audio) return;
+    if (installedVideoOwnsPlayback()) return;
     if (crossfadeStarted && promoteCrossfade()) return;
     stopPlaybackProgressAnimation();
     updatePlaybackProgressUI();
@@ -8597,8 +8991,20 @@ api.onPrepareToClose(async () => {
   clientConfigRenewalTimer = null;
   releaseActiveServerStream({ stopPlayback: true });
   updateListeningSession();
-  state.position = Number(audio.currentTime) || state.position || 0;
+  state.position = Number(activePlaybackMedia().currentTime) || state.position || 0;
   try {
+    const downloadBatch = serverDownloadBatchInFlight;
+    const downloadSingleton = serverDownloadSingletonInFlight;
+    if (downloadBatch || downloadSingleton) {
+      serverTransferCancelRequested = true;
+      await api.cancelServerTransfer().catch(() => false);
+    }
+    if (downloadSingleton) {
+      await downloadSingleton.catch(() => undefined);
+    }
+    if (downloadBatch) await downloadBatch.catch(() => undefined);
+    const downloadCheckpoint = serverDownloadCheckpointInFlight;
+    if (downloadCheckpoint) await downloadCheckpoint.catch(() => undefined);
     await persist({ refreshSidebar: false });
     await Promise.race([
       syncListeningHistoryNow({ force: true }),
@@ -8667,7 +9073,7 @@ if (currentID) {
 }
 if (libraryLoad?.warning) showNotice(libraryLoad.warning);
 api.onTransferProgress((value) => {
-  updateServerTransfer(value);
+  updateServerTransfer(serverDownloadBatchProgressEvent(value, serverDownloadBatchProgress));
 });
 api.onLocalImportProgress((value) => {
   updateLocalImportTransfer(value);

@@ -23,7 +23,7 @@ enum class DownloadProgressDisplayMode {
     DeterminateTransfer,
 }
 
-/** The popup is hidden before the first byte, so every displayed mode represents real transfer. */
+/** Zero-byte preparation and item boundaries keep the batch popup in indeterminate mode. */
 object DownloadProgressDisplayPolicy {
     fun mode(bytesTransferred: Long, totalBytes: Long?): DownloadProgressDisplayMode = when {
         bytesTransferred <= 0L -> DownloadProgressDisplayMode.IndeterminateTransfer
@@ -206,4 +206,33 @@ object PendingDownloadBatchPolicy {
         requestedSongs: List<RemoteSong>,
         existingRemoteSongIDs: Set<String>,
     ): List<RemoteSong> = requestedSongs.filterNot { it.id in existingRemoteSongIDs }
+}
+
+/**
+ * Merges files into the library snapshot at the same boundary where their download completes.
+ * Keeping this operation item-scoped means a later song cannot delay or discard an earlier
+ * successful download.
+ */
+object CompletedDownloadLibraryPolicy {
+    fun merge(
+        library: StoredLibrary,
+        completedTracks: List<Track>,
+        authorize: () -> Unit = {},
+    ): StoredLibrary {
+        authorize()
+        if (completedTracks.isEmpty()) return library
+        return RemoteTrackIdentityPolicy.reconcileLibraryTracks(
+            library.copy(tracks = library.tracks + completedTracks),
+        )
+    }
+
+    fun filesToDiscard(
+        library: StoredLibrary,
+        completedTracks: List<Track>,
+    ): List<Track> {
+        // Physical paths are the deletion boundary. Even if identity reconciliation retained a
+        // different Track record, never delete media that any current library record references.
+        val referencedPaths = library.tracks.mapTo(hashSetOf(), Track::relativePath)
+        return completedTracks.filterNot { it.relativePath in referencedPaths }
+    }
 }

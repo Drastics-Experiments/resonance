@@ -34,6 +34,24 @@ enum MacCrossfadePolicy {
     }
 }
 
+struct MacInstalledVideoPlaybackHandoff: Equatable, Sendable {
+    let position: TimeInterval
+    let shouldPlay: Bool
+}
+
+enum MacInstalledVideoPlaybackPolicy {
+    static let usesSingleAudibleClock = true
+    static let retainsClockWhenMinimized = true
+
+    static func handoffPosition(
+        _ requestedPosition: TimeInterval,
+        bounds: ClosedRange<TimeInterval>
+    ) -> TimeInterval {
+        guard requestedPosition.isFinite else { return bounds.lowerBound }
+        return min(max(requestedPosition, bounds.lowerBound), bounds.upperBound)
+    }
+}
+
 enum PlaylistOrderPolicy {
     static func merge<Element: Hashable>(
         previous: [Element],
@@ -94,6 +112,24 @@ enum PlaylistPresentationEntryID: Hashable {
 }
 
 enum MacServerDownloadProgressPolicy {
+    enum PresentationPhase {
+        case reserved
+        case receivedBytes
+        case localProcessing
+        case sessionFinished
+    }
+
+    static func isVisible(after phase: PresentationPhase, wasVisible: Bool) -> Bool {
+        switch phase {
+        case .receivedBytes:
+            true
+        case .reserved, .localProcessing:
+            wasVisible
+        case .sessionFinished:
+            false
+        }
+    }
+
     static func transferHasStarted(completedBytes: Int64) -> Bool {
         completedBytes > 0
     }
@@ -225,6 +261,23 @@ enum MacRemoteSourceResolutionCachePolicy {
 enum MacServerDownloadStatePolicy {
     static func owns(generation: UInt64, currentGeneration: UInt64) -> Bool {
         generation == currentGeneration
+    }
+
+    static func owns(
+        generation: UInt64,
+        currentGeneration: UInt64,
+        baseURL: URL,
+        currentBaseURL: URL?,
+        profileID: String,
+        currentProfileID: String,
+        credentialFingerprint: String,
+        currentCredentialFingerprint: String
+    ) -> Bool {
+        guard generation == currentGeneration,
+              profileID == currentProfileID,
+              credentialFingerprint == currentCredentialFingerprint,
+              let currentBaseURL else { return false }
+        return baseURL.absoluteString == currentBaseURL.absoluteString
     }
 }
 
@@ -674,6 +727,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         didSet {
             applyCrossfadeVolumes()
             remoteStreamPlayer?.volume = PlaybackVolumePolicy.gain(for: volume)
+            installedVideoPlayer?.volume = installedVideoPlaybackIsReady
+                ? PlaybackVolumePolicy.gain(for: volume)
+                : 0
             defaults.set(volume, forKey: Self.volumeKey)
         }
     }
@@ -684,6 +740,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             remoteStreamPlayer?.defaultRate = playbackRate
             if remoteStreamPlayer?.timeControlStatus == .playing {
                 remoteStreamPlayer?.rate = playbackRate
+            }
+            installedVideoPlayer?.defaultRate = playbackRate
+            if installedVideoPlayer?.timeControlStatus == .playing {
+                installedVideoPlayer?.rate = playbackRate
             }
             defaults.set(Double(playbackRate), forKey: Self.playbackRateKey)
         }
@@ -955,6 +1015,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var crossfadePlayer: AVAudioPlayer?
     private var crossfadeTrackID: UUID?
     private var activeCrossfadeDuration: TimeInterval = 0
+    private var installedVideoPlayer: AVPlayer?
+    private var installedVideoTrackID: UUID?
+    private var installedVideoPlaybackIsReady = false
+    private var installedVideoFallbackPosition: TimeInterval = 0
+    private var installedVideoSeekGeneration: UInt64 = 0
+    private var installedVideoPendingSeekPosition: TimeInterval?
     private var remoteStreamPlayer: AVPlayer?
     private var remoteStreamTrack: Track?
     private var remoteStreamSongID: String?
@@ -2762,7 +2828,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         ) else { return }
         serverDownloadTransferGeneration &+= 1
         isSyncingServer = false
-        isServerDownloadTransferVisible = false
+        isServerDownloadTransferVisible = MacServerDownloadProgressPolicy.isVisible(
+            after: .sessionFinished,
+            wasVisible: isServerDownloadTransferVisible
+        )
         downloadCurrentFile = ""
         downloadBatchPosition = 0
         downloadBatchTotal = 0
@@ -2775,7 +2844,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         ) else { throw CancellationError() }
         serverDownloadTransferGeneration &+= 1
         let transferGeneration = serverDownloadTransferGeneration
-        isServerDownloadTransferVisible = false
+        isServerDownloadTransferVisible = MacServerDownloadProgressPolicy.isVisible(
+            after: .reserved,
+            wasVisible: isServerDownloadTransferVisible
+        )
         downloadProgress = nil
         return transferGeneration
     }
@@ -2794,7 +2866,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         ), MacServerDownloadProgressPolicy.transferHasStarted(
             completedBytes: completedBytes
         ) else { return }
-        isServerDownloadTransferVisible = true
+        isServerDownloadTransferVisible = MacServerDownloadProgressPolicy.isVisible(
+            after: .receivedBytes,
+            wasVisible: isServerDownloadTransferVisible
+        )
         downloadProgress = MacServerDownloadProgressPolicy.presentationFraction(
             completedBytes: completedBytes,
             totalBytes: totalBytes
@@ -2811,8 +2886,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             transferGeneration: transferGeneration,
             currentTransferGeneration: serverDownloadTransferGeneration
         ) else { return }
-        isServerDownloadTransferVisible = false
+        isServerDownloadTransferVisible = MacServerDownloadProgressPolicy.isVisible(
+            after: .localProcessing,
+            wasVisible: isServerDownloadTransferVisible
+        )
         downloadProgress = nil
+        if isServerDownloadTransferVisible {
+            downloadStatus = "Adding \(downloadCurrentFile) to library"
+        }
     }
 
     nonisolated private static func awaitServerDownloadAuthorizationRefresh(
@@ -3003,11 +3084,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             let catalogSongs = applyingKnownRemoteSongMetadata(
                 to: applyingCurrentRemoteSongMetadata(to: fetchedCatalog)
             )
-            guard catalogProfileID == syncProfileID,
-                  credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken),
-                  let currentBase = try? normalizedServerURL(),
-                  Self.serverContextKey(base: currentBase, profileID: catalogProfileID)
-                    == Self.serverContextKey(base: base, profileID: catalogProfileID) else {
+            guard MacServerDownloadStatePolicy.owns(
+                generation: stateGeneration,
+                currentGeneration: serverDownloadStateGeneration,
+                baseURL: base,
+                currentBaseURL: try? normalizedServerURL(),
+                profileID: catalogProfileID,
+                currentProfileID: syncProfileID,
+                credentialFingerprint: credentialFingerprint,
+                currentCredentialFingerprint: MacClientConfigContext.tokenFingerprint(serverToken)
+            ) else {
                 throw CancellationError()
             }
             remoteSongs = catalogSongs
@@ -3018,7 +3104,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             reconcileDownloadedMediaKinds(with: catalogSongs)
             let songs = songIDs.map { ids in catalogSongs.filter { ids.contains($0.id) } } ?? catalogSongs
             downloadStatus = songs.isEmpty ? "Nothing to download" : "Checking \(songs.count) songs"
-            let cache = try serverCacheDirectory(for: base, profileID: syncProfileID)
+            let cache = try serverCacheDirectory(for: base, profileID: catalogProfileID)
             var pendingSongIDs = Set<String>()
             var downloadPlans: [ServerSongDownloadPlan] = []
             downloadPlans.reserveCapacity(songs.count)
@@ -3035,11 +3121,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     pendingSongIDs.insert(remote.id)
                 }
             }
-            guard catalogProfileID == syncProfileID,
-                  credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken),
-                  let currentBase = try? normalizedServerURL(),
-                  Self.serverContextKey(base: currentBase, profileID: catalogProfileID)
-                    == Self.serverContextKey(base: base, profileID: catalogProfileID) else {
+            guard MacServerDownloadStatePolicy.owns(
+                generation: stateGeneration,
+                currentGeneration: serverDownloadStateGeneration,
+                baseURL: base,
+                currentBaseURL: try? normalizedServerURL(),
+                profileID: catalogProfileID,
+                currentProfileID: syncProfileID,
+                credentialFingerprint: credentialFingerprint,
+                currentCredentialFingerprint: MacClientConfigContext.tokenFingerprint(serverToken)
+            ) else {
                 throw CancellationError()
             }
             downloadBatchTotal = pendingSongIDs.count
@@ -3049,11 +3140,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
             for (remote, plan) in zip(songs, downloadPlans) {
                 try Task.checkCancellation()
-                guard catalogProfileID == syncProfileID,
-                      credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken),
-                      let currentBase = try? normalizedServerURL(),
-                      Self.serverContextKey(base: currentBase, profileID: catalogProfileID)
-                        == Self.serverContextKey(base: base, profileID: catalogProfileID) else {
+                guard MacServerDownloadStatePolicy.owns(
+                    generation: stateGeneration,
+                    currentGeneration: serverDownloadStateGeneration,
+                    baseURL: base,
+                    currentBaseURL: try? normalizedServerURL(),
+                    profileID: catalogProfileID,
+                    currentProfileID: syncProfileID,
+                    credentialFingerprint: credentialFingerprint,
+                    currentCredentialFingerprint: MacClientConfigContext.tokenFingerprint(serverToken)
+                ) else {
                     throw CancellationError()
                 }
                 var isPendingDownload = plan.requiresDownload
@@ -3090,7 +3186,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     downloadBatchPosition = pendingPosition
                     downloadCurrentFile = remote.title
                     downloadStatus = "Downloading \(pendingPosition) of \(pendingSongIDs.count)"
-                    isServerDownloadTransferVisible = false
                     downloadProgress = nil
                 }
                 var stagingURL: URL?
@@ -3098,7 +3193,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     if remote.isSourceLinkRecord {
                         let remoteIdentity = ServerSongIdentity(
                             serverURL: base,
-                            profileID: syncProfileID,
+                            profileID: catalogProfileID,
                             songID: remote.id
                         )
                         if let existing = tracks.first(where: { $0.remoteIdentity == remoteIdentity }),
@@ -3122,6 +3217,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                                 remote,
                                 base: base,
                                 profileID: catalogProfileID,
+                                credentialFingerprint: credentialFingerprint,
                                 authorizationLease: lease,
                                 authorizationRefresh: authorizationRefresh,
                                 stateGeneration: stateGeneration,
@@ -3150,7 +3246,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     let expectedContentSHA256 = try Self.catalogSHA256(remote.contentSHA256)
                     let remoteIdentity = ServerSongIdentity(
                         serverURL: base,
-                        profileID: syncProfileID,
+                        profileID: catalogProfileID,
                         songID: remote.id
                     )
                     let existingIndex = tracks.firstIndex {
@@ -3236,6 +3332,19 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     }
 
                     let metadata = await Self.metadata(for: destination)
+                    try Task.checkCancellation()
+                    guard MacServerDownloadStatePolicy.owns(
+                        generation: stateGeneration,
+                        currentGeneration: serverDownloadStateGeneration,
+                        baseURL: base,
+                        currentBaseURL: try? normalizedServerURL(),
+                        profileID: catalogProfileID,
+                        currentProfileID: syncProfileID,
+                        credentialFingerprint: credentialFingerprint,
+                        currentCredentialFingerprint: MacClientConfigContext.tokenFingerprint(serverToken)
+                    ) else {
+                        throw CancellationError()
+                    }
                     if let validation = reusableCachedValidation,
                        !MacServerDownloadValidationPolicy.isReusable(
                         validated: validation.snapshot,
@@ -3257,7 +3366,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         fileURL: destination,
                         remoteID: remote.id,
                         sourceServer: ServerSongIdentity.normalizedOrigin(base),
-                        syncProfileID: syncProfileID,
+                        syncProfileID: catalogProfileID,
                         downloadSourceURL: remote.sourceURL ?? existingIndex.flatMap { tracks[$0].downloadSourceURL },
                         contentSHA256: resolvedContentSHA256,
                         preservesUnlinkedImport: existingIndex.flatMap { tracks[$0].preservesUnlinkedImport } ?? false,
@@ -3275,6 +3384,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         tracks.append(track)
                     }
                     changedCount += 1
+                    // Each fully adopted song is durable on its own. A later
+                    // cancellation, credential change, or profile change must
+                    // not roll an earlier batch item back on relaunch.
+                    persistLibrary()
                     if isPendingDownload { downloadProgress = 1 }
                 } catch is CancellationError {
                     if let stagingURL { try? FileManager.default.removeItem(at: stagingURL) }
@@ -3606,12 +3719,366 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         startTrack(track.id, preservingShuffleQueue: false)
     }
 
+    var hasActiveInstalledVideoPlayback: Bool {
+        installedVideoPlaybackIsReady
+            && installedVideoPlayer != nil
+            && installedVideoTrackID == currentTrackID
+    }
+
+    var isLocalAudioDecoderPlaying: Bool {
+        audioPlayer?.isPlaying == true
+    }
+
+    func ownsInstalledVideoPlayback(_ player: AVPlayer, trackID: UUID) -> Bool {
+        installedVideoPlayer === player
+            && installedVideoTrackID == trackID
+            && currentTrackID == trackID
+    }
+
+    private func seekInstalledVideo(
+        _ player: AVPlayer,
+        trackID: UUID,
+        to target: TimeInterval
+    ) {
+        installedVideoSeekGeneration &+= 1
+        let generation = installedVideoSeekGeneration
+        let shouldResume = installedVideoPlaybackIsReady && isPlaying
+        installedVideoPendingSeekPosition = target
+        player.seek(
+            to: CMTime(seconds: target, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        ) { [weak self, weak player] finished in
+            Task { @MainActor [weak self, weak player] in
+                guard let self,
+                      let player,
+                      self.installedVideoSeekGeneration == generation,
+                      self.ownsInstalledVideoPlayback(player, trackID: trackID) else { return }
+                if finished {
+                    self.installedVideoFallbackPosition = target
+                    if shouldResume,
+                       self.isPlaying,
+                       self.installedVideoPlaybackIsReady {
+                        player.playImmediately(atRate: self.playbackRate)
+                    }
+                }
+                self.installedVideoPendingSeekPosition = nil
+            }
+        }
+    }
+
+    func prepareInstalledVideoPlayback(
+        using player: AVPlayer,
+        for trackID: UUID
+    ) -> MacInstalledVideoPlaybackHandoff? {
+        guard installedVideoPlayer == nil,
+              currentTrackID == trackID,
+              let track = currentTrack,
+              track.installedVideoURL != nil else { return nil }
+
+        let duration = playbackDuration > 0 ? playbackDuration : track.duration
+        let bounds = playbackBounds(for: track, duration: duration)
+        let handoffPosition = MacInstalledVideoPlaybackPolicy.handoffPosition(
+            currentPlaybackPosition,
+            bounds: bounds.start...bounds.end
+        )
+        let shouldPlay = isPlaying
+        cancelCrossfade()
+        installedVideoPlayer = player
+        installedVideoTrackID = trackID
+        installedVideoPlaybackIsReady = false
+        installedVideoFallbackPosition = handoffPosition
+        installedVideoSeekGeneration &+= 1
+        installedVideoPendingSeekPosition = nil
+        position = handoffPosition
+        player.pause()
+        player.isMuted = true
+        player.volume = 0
+        player.defaultRate = playbackRate
+        return MacInstalledVideoPlaybackHandoff(
+            position: handoffPosition,
+            shouldPlay: shouldPlay
+        )
+    }
+
+    @discardableResult
+    func activateInstalledVideoPlayback(
+        using player: AVPlayer,
+        for trackID: UUID
+    ) async -> Bool {
+        guard !Task.isCancelled,
+              ownsInstalledVideoPlayback(player, trackID: trackID),
+              let track = currentTrack else { return false }
+        let duration = playbackDuration > 0 ? playbackDuration : track.duration
+        let bounds = playbackBounds(for: track, duration: duration)
+        var target = MacInstalledVideoPlaybackPolicy.handoffPosition(
+            currentPlaybackPosition,
+            bounds: bounds.start...bounds.end
+        )
+        var aligned = false
+        for _ in 0..<3 {
+            let preparingToPlay = isPlaying
+            let currentPosition = MacInstalledVideoPlaybackPolicy.handoffPosition(
+                currentPlaybackPosition,
+                bounds: bounds.start...bounds.end
+            )
+            // Warm the muted video decoder ahead of the audible audio clock.
+            // Once AVPlayer is actually advancing, park it and let audio catch
+            // that exact media time before the clocks exchange ownership.
+            target = preparingToPlay && currentPosition < bounds.end - 0.05
+                ? min(
+                    currentPosition + (0.25 * Double(max(playbackRate, 0.1))),
+                    bounds.end
+                )
+                : currentPosition
+            await player.seek(
+                to: CMTime(seconds: target, preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+            guard !Task.isCancelled,
+                  ownsInstalledVideoPlayback(player, trackID: trackID) else { return false }
+            guard preparingToPlay == isPlaying else { continue }
+
+            if preparingToPlay {
+                player.defaultRate = playbackRate
+                player.isMuted = true
+                player.volume = 0
+                player.playImmediately(atRate: playbackRate)
+                let warmupDeadline = Date.now.addingTimeInterval(1)
+                var warmed = false
+                let warmupStartTime = player.currentTime().seconds
+                while isPlaying, Date.now < warmupDeadline {
+                    let videoTime = player.currentTime().seconds
+                    if player.timeControlStatus == .playing,
+                       videoTime.isFinite,
+                       (!warmupStartTime.isFinite || videoTime > warmupStartTime + 0.005) {
+                        warmed = true
+                        break
+                    }
+                    do {
+                        try await Task.sleep(for: .milliseconds(5))
+                    } catch {
+                        player.pause()
+                        return false
+                    }
+                    guard ownsInstalledVideoPlayback(player, trackID: trackID) else {
+                        player.pause()
+                        return false
+                    }
+                }
+                player.pause()
+                guard isPlaying else { continue }
+                guard warmed else { continue }
+
+                target = MacInstalledVideoPlaybackPolicy.handoffPosition(
+                    player.currentTime().seconds,
+                    bounds: bounds.start...bounds.end
+                )
+                await player.seek(
+                    to: CMTime(seconds: target, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                )
+                guard !Task.isCancelled,
+                      ownsInstalledVideoPlayback(player, trackID: trackID),
+                      isPlaying else { continue }
+
+                let alignmentDeadline = Date.now.addingTimeInterval(1)
+                while isPlaying, Date.now < alignmentDeadline {
+                    let audioTime = currentPlaybackPosition
+                    if audioTime >= target,
+                       audioTime - target <= 0.05 {
+                        aligned = true
+                        break
+                    }
+                    do {
+                        try await Task.sleep(for: .milliseconds(5))
+                    } catch {
+                        player.pause()
+                        return false
+                    }
+                    guard ownsInstalledVideoPlayback(player, trackID: trackID) else {
+                        return false
+                    }
+                }
+                if aligned { break }
+                guard isPlaying else { continue }
+            } else {
+                aligned = true
+            }
+        }
+        guard !Task.isCancelled,
+              aligned,
+              ownsInstalledVideoPlayback(player, trackID: trackID) else {
+            player.pause()
+            return false
+        }
+
+        let shouldPlay = isPlaying
+        player.defaultRate = playbackRate
+        if shouldPlay {
+            player.isMuted = true
+            player.volume = 0
+            player.playImmediately(atRate: playbackRate)
+            guard !Task.isCancelled,
+                  isPlaying,
+                  ownsInstalledVideoPlayback(player, trackID: trackID),
+                  player.timeControlStatus == .playing else {
+                player.pause()
+                return false
+            }
+            // The paused, exact-seeked player is now warm. Its first play call
+            // must synchronously enter .playing before audio gives up ownership.
+            let videoTime = player.currentTime().seconds
+            let audioTime = currentPlaybackPosition
+            guard videoTime.isFinite,
+                  audioTime.isFinite,
+                  abs(videoTime - audioTime) <= 0.075 else {
+                player.pause()
+                return false
+            }
+            target = MacInstalledVideoPlaybackPolicy.handoffPosition(
+                videoTime,
+                bounds: bounds.start...bounds.end
+            )
+        }
+
+        // Sample the still-audible audio clock before publishing video ownership.
+        updateListeningSession()
+        installedVideoPlaybackIsReady = true
+        installedVideoFallbackPosition = target
+        installedVideoPendingSeekPosition = nil
+        position = target
+        if shouldPlay {
+            audioPlayer?.pause()
+            player.isMuted = false
+            player.volume = PlaybackVolumePolicy.gain(for: volume)
+            startPlaybackTimer()
+        } else {
+            player.isMuted = false
+            player.volume = PlaybackVolumePolicy.gain(for: volume)
+            player.pause()
+            stopPlaybackTimer()
+        }
+        publishSystemPlayback()
+        return true
+    }
+
+    @discardableResult
+    func endInstalledVideoPlayback(
+        using player: AVPlayer,
+        for trackID: UUID,
+        resumeAudio: Bool
+    ) -> Bool {
+        guard ownsInstalledVideoPlayback(player, trackID: trackID),
+              let track = currentTrack else { return false }
+        if !installedVideoPlaybackIsReady {
+            let audioPosition = audioPlayer?.currentTime ?? position
+            installedVideoPlayer = nil
+            installedVideoTrackID = nil
+            installedVideoSeekGeneration &+= 1
+            installedVideoPendingSeekPosition = nil
+            installedVideoFallbackPosition = audioPosition
+            player.isMuted = true
+            player.volume = 0
+            player.pause()
+            return true
+        }
+        let shouldResume = resumeAudio && isPlaying
+        updateListeningSession(flush: true)
+        let duration = playbackDuration > 0 ? playbackDuration : track.duration
+        let bounds = playbackBounds(for: track, duration: duration)
+        let handoffPosition = MacInstalledVideoPlaybackPolicy.handoffPosition(
+            currentPlaybackPosition,
+            bounds: bounds.start...bounds.end
+        )
+
+        var audioResumed = false
+        if loadedAudioTrackID == trackID, let audioPlayer {
+            audioPlayer.currentTime = handoffPosition
+            audioPlayer.enableRate = true
+            audioPlayer.rate = playbackRate
+            audioPlayer.volume = PlaybackVolumePolicy.gain(for: volume)
+            if shouldResume {
+                isPlaying = audioPlayer.play()
+                audioResumed = isPlaying
+            }
+        } else if shouldResume {
+            if let fileURL = track.fileURL,
+               let replacement = try? AVAudioPlayer(contentsOf: fileURL) {
+                replacement.delegate = self
+                replacement.volume = PlaybackVolumePolicy.gain(for: volume)
+                replacement.numberOfLoops = 0
+                replacement.enableRate = true
+                replacement.rate = playbackRate
+                replacement.currentTime = handoffPosition
+                replacement.prepareToPlay()
+                audioPlayer = replacement
+                loadedAudioTrackID = trackID
+                isPlaying = replacement.play()
+                audioResumed = isPlaying
+            } else {
+                isPlaying = false
+            }
+        }
+
+        // Request the replacement audio clock before muting the video. The
+        // synchronous play() result confirms only that AVAudioPlayer accepted it.
+        // Muting precedes pausing so no stale video sample can escape later.
+        player.isMuted = true
+        player.volume = 0
+        player.pause()
+        installedVideoPlayer = nil
+        installedVideoTrackID = nil
+        installedVideoPlaybackIsReady = false
+        installedVideoSeekGeneration &+= 1
+        installedVideoPendingSeekPosition = nil
+        installedVideoFallbackPosition = handoffPosition
+        position = handoffPosition
+        stopPlaybackTimer()
+
+        if audioResumed {
+            beginListeningSession(for: track)
+            startPlaybackTimer()
+        }
+        if !shouldResume { isPlaying = false }
+        persistPlaybackPosition()
+        publishSystemPlayback()
+        return true
+    }
+
     func togglePlay() {
         if isPlaying {
             pausePlayback()
             return
         }
         guard let track = currentTrack ?? tracks.first else { return }
+        if installedVideoPlaybackIsReady,
+           installedVideoTrackID == track.id,
+           let installedVideoPlayer {
+            let bounds = playbackBounds(for: track, duration: playbackDuration)
+            if position >= bounds.end - 0.05 || position < bounds.start {
+                position = bounds.start
+                installedVideoFallbackPosition = bounds.start
+                seekInstalledVideo(
+                    installedVideoPlayer,
+                    trackID: track.id,
+                    to: bounds.start
+                )
+                playbackDiscontinuities.send(bounds.start)
+            }
+            isPlaying = true
+            if installedVideoPlaybackIsReady {
+                installedVideoPlayer.isMuted = false
+                installedVideoPlayer.volume = PlaybackVolumePolicy.gain(for: volume)
+                installedVideoPlayer.playImmediately(atRate: playbackRate)
+                startPlaybackTimer()
+            }
+            beginListeningSession(for: track)
+            publishSystemPlayback()
+            return
+        }
         if remoteStreamTrack?.id == track.id {
             guard let remoteStreamPlayer else { return }
             let bounds = playbackBounds(for: track, duration: playbackDuration)
@@ -3649,7 +4116,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             pausePlayback()
         } else if let currentInContext, !isPlaying {
             setPlaybackContext(context, ensuring: currentInContext.id)
-            beginPlayback(of: currentInContext, resuming: true)
+            if installedVideoPlaybackIsReady,
+               installedVideoTrackID == currentInContext.id {
+                togglePlay()
+            } else {
+                beginPlayback(of: currentInContext, resuming: true)
+            }
         } else if let first = context.first {
             setPlaybackContext(context, ensuring: first.id)
             startTrack(first.id, preservingShuffleQueue: false)
@@ -3760,7 +4232,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         captureFallbackPlaybackContextIfNeeded(context)
         if position > 3, let currentTrack {
             seek(to: 0)
-            beginPlayback(of: currentTrack, resuming: true)
+            if installedVideoPlaybackIsReady,
+               installedVideoTrackID == currentTrack.id {
+                if !isPlaying { togglePlay() }
+            } else {
+                beginPlayback(of: currentTrack, resuming: true)
+            }
             return
         }
 
@@ -3846,6 +4323,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         if remoteStreamPlayer?.timeControlStatus == .playing {
             remoteStreamPlayer?.rate = rate
         }
+        installedVideoPlayer?.defaultRate = rate
+        if installedVideoPlayer?.timeControlStatus == .playing {
+            installedVideoPlayer?.rate = rate
+        }
         publishSystemPlayback()
     }
 
@@ -3868,6 +4349,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         position = safeTime.clamped(to: bounds.start...bounds.end)
         if loadedAudioTrackID == track.id {
             audioPlayer?.currentTime = position
+        }
+        if installedVideoTrackID == track.id, let installedVideoPlayer {
+            installedVideoFallbackPosition = position
+            seekInstalledVideo(
+                installedVideoPlayer,
+                trackID: track.id,
+                to: position
+            )
         }
         if remoteStreamTrack?.id == track.id, let remoteStreamPlayer {
             remoteStreamPlayer.seek(
@@ -4323,7 +4812,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private func pausePlayback() {
         cancelCrossfade()
         updateListeningSession(flush: true)
-        if remoteStreamTrack?.id == currentTrackID, let remoteStreamPlayer {
+        if installedVideoPlaybackIsReady,
+           installedVideoTrackID == currentTrackID,
+           let installedVideoPlayer {
+            let currentTime = currentPlaybackPosition
+            installedVideoPlayer.pause()
+            if currentTime.isFinite {
+                position = max(currentTime, 0)
+                installedVideoFallbackPosition = position
+            }
+        } else if remoteStreamTrack?.id == currentTrackID, let remoteStreamPlayer {
             remoteStreamPlayer.pause()
             let currentTime = remoteStreamPlayer.currentTime().seconds
             position = currentTime.isFinite ? max(currentTime, 0) : position
@@ -4342,6 +4840,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private func stopCurrentPlayback(preservingRemoteNavigation: Bool = false) {
         cancelCrossfade()
         endListeningSession()
+        discardInstalledVideoPlayback()
         remoteStreamLoadGeneration &+= 1
         remoteStreamPreparationTask?.cancel()
         remoteStreamPreparationTask = nil
@@ -4375,7 +4874,18 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         systemPlaybackController?.publish(nil)
     }
 
-    private func finishCurrentPlaybackRange() {
+    private func discardInstalledVideoPlayback() {
+        installedVideoPlayer?.isMuted = true
+        installedVideoPlayer?.volume = 0
+        installedVideoPlayer?.pause()
+        installedVideoPlayer = nil
+        installedVideoTrackID = nil
+        installedVideoPlaybackIsReady = false
+        installedVideoSeekGeneration &+= 1
+        installedVideoPendingSeekPosition = nil
+    }
+
+    func finishCurrentPlaybackRange() {
         guard let track = currentTrack else { return }
         let bounds = playbackBounds(for: track, duration: playbackDuration)
         updateListeningSession(flush: true)
@@ -4384,7 +4894,54 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         if repeatEnabled {
             endListeningSession()
             position = bounds.start
-            if remoteStreamTrack?.id == track.id, let remoteStreamPlayer {
+            if installedVideoPlaybackIsReady,
+               installedVideoTrackID == track.id,
+               let installedVideoPlayer {
+                installedVideoFallbackPosition = bounds.start
+                installedVideoPlayer.pause()
+                stopPlaybackTimer()
+                installedVideoSeekGeneration &+= 1
+                let seekGeneration = installedVideoSeekGeneration
+                installedVideoPendingSeekPosition = bounds.start
+                installedVideoPlayer.seek(
+                    to: CMTime(seconds: bounds.start, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                ) { [weak self, weak installedVideoPlayer] finished in
+                    Task { @MainActor [weak self, weak installedVideoPlayer] in
+                        guard let self,
+                              let installedVideoPlayer,
+                              self.installedVideoSeekGeneration == seekGeneration,
+                              self.ownsInstalledVideoPlayback(
+                                installedVideoPlayer,
+                                trackID: track.id
+                              ) else { return }
+                        self.installedVideoPendingSeekPosition = nil
+                        guard finished,
+                              self.repeatEnabled,
+                              self.isPlaying,
+                              self.installedVideoPlaybackIsReady,
+                              self.currentTrackID == track.id else {
+                            if self.isPlaying {
+                                self.isPlaying = false
+                                self.persistPlaybackPosition()
+                                self.publishSystemPlayback()
+                            }
+                            return
+                        }
+                        installedVideoPlayer.playImmediately(atRate: self.playbackRate)
+                        self.isPlaying = true
+                        self.beginListeningSession(for: track)
+                        self.startPlaybackTimer()
+                        self.publishSystemPlayback()
+                    }
+                }
+                isPlaying = true
+                playbackDiscontinuities.send(bounds.start)
+                persistPlaybackPosition()
+                publishSystemPlayback()
+                return
+            } else if remoteStreamTrack?.id == track.id, let remoteStreamPlayer {
                 remoteStreamPlayer.seek(
                     to: CMTime(seconds: bounds.start, preferredTimescale: 600),
                     toleranceBefore: .zero,
@@ -4406,6 +4963,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             return
         }
 
+        installedVideoPlayer?.pause()
         remoteStreamPlayer?.pause()
         audioPlayer?.pause()
         isPlaying = false
@@ -4420,7 +4978,19 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.isPlaying else { return }
-                if self.remoteStreamTrack?.id == self.currentTrackID,
+                if self.installedVideoPlaybackIsReady,
+                   self.installedVideoTrackID == self.currentTrackID,
+                   let installedVideoPlayer = self.installedVideoPlayer {
+                    if let pending = self.installedVideoPendingSeekPosition {
+                        self.position = pending
+                    } else {
+                        let currentTime = installedVideoPlayer.currentTime().seconds
+                        if currentTime.isFinite {
+                            self.position = max(currentTime, 0)
+                            self.installedVideoFallbackPosition = self.position
+                        }
+                    }
+                } else if self.remoteStreamTrack?.id == self.currentTrackID,
                    let remoteStreamPlayer = self.remoteStreamPlayer {
                     let currentTime = remoteStreamPlayer.currentTime().seconds
                     if currentTime.isFinite { self.position = max(currentTime, 0) }
@@ -4471,6 +5041,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private func updateCrossfadeIfNeeded(for currentTrack: Track) -> Bool {
         guard crossfadeEnabled, !repeatEnabled, remoteStreamTrack == nil,
+              installedVideoPlayer == nil,
               let currentPlayer = audioPlayer else {
             cancelCrossfade()
             return false
@@ -4707,6 +5278,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     private var currentPlaybackPosition: TimeInterval {
+        if installedVideoPlaybackIsReady,
+           installedVideoTrackID == currentTrackID,
+           let installedVideoPlayer {
+            if let installedVideoPendingSeekPosition {
+                return installedVideoPendingSeekPosition
+            }
+            let currentTime = installedVideoPlayer.currentTime().seconds
+            if currentTime.isFinite { return max(currentTime, 0) }
+            return installedVideoFallbackPosition
+        }
         if remoteStreamTrack?.id == currentTrackID, let remoteStreamPlayer {
             let currentTime = remoteStreamPlayer.currentTime().seconds
             if currentTime.isFinite { return max(currentTime, 0) }
@@ -6545,6 +7126,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         _ remote: RemoteSong,
         base: URL,
         profileID: String,
+        credentialFingerprint: String,
         authorizationLease: MacAuthenticatedStreamAuthorizationLease,
         authorizationRefresh: Task<Void, Never>?,
         stateGeneration: UInt64,
@@ -6643,6 +7225,19 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         do {
             try await Self.awaitServerDownloadAuthorizationRefresh(authorizationRefresh)
             try authorizationLease.authorize()
+            try Task.checkCancellation()
+            guard MacServerDownloadStatePolicy.owns(
+                generation: stateGeneration,
+                currentGeneration: serverDownloadStateGeneration,
+                baseURL: base,
+                currentBaseURL: try? normalizedServerURL(),
+                profileID: profileID,
+                currentProfileID: syncProfileID,
+                credentialFingerprint: credentialFingerprint,
+                currentCredentialFingerprint: MacClientConfigContext.tokenFingerprint(serverToken)
+            ) else {
+                throw CancellationError()
+            }
         } catch {
             if case .created(let imported) = outcome {
                 try? FileManager.default.removeItem(at: imported.fileURL)

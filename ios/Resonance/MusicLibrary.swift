@@ -3414,6 +3414,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private func importSavedRemoteSource(
         _ song: MobileRemoteSong,
         baseURL: URL,
+        profileID: String,
         accessToken: String,
         downloadPolicyLease: MobileTransferPolicyLease,
         transferSessionID: UUID,
@@ -3561,7 +3562,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             }
         }
         guard accessToken == serverToken,
-              isCurrentServerContext(baseURL: baseURL, profileID: syncProfileID) else {
+              isCurrentServerContext(baseURL: baseURL, profileID: profileID) else {
             // Preserve the completed local import even if the server/profile
             // changed before its remote association could be committed.
             save()
@@ -3577,7 +3578,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             trackID: track.id,
             remoteID: song.id,
             sourceServer: baseURL.absoluteString,
-            profileID: syncProfileID,
+            profileID: profileID,
             persistImmediately: false
         )
         // Import, provenance, and remote identity are committed together so a
@@ -3617,6 +3618,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 _ = try await importSavedRemoteSource(
                     song,
                     baseURL: baseURL,
+                    profileID: profileID,
                     accessToken: accessToken,
                     downloadPolicyLease: downloadPolicyLease,
                     transferSessionID: transferSessionID,
@@ -3624,9 +3626,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                     currentItem: currentItem,
                     totalItems: totalItems
                 )
-                // The source importer may still be validating or tagging the
-                // completed local file. The transfer card represents network
-                // bytes only, so it must not linger at 100% for that work.
+                // Stop presenting byte progress while retaining the batch card
+                // through validation, tagging, and the next queued song.
                 endNativeDownloadBytePresentation(
                     sessionID: transferSessionID,
                     operationID: operationID
@@ -3714,9 +3715,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 }
             )
             let downloaded = try await boundedDownload.run(request: request)
-            // Network acquisition is finished. Hide byte progress before local
-            // integrity checks, media inspection, artwork reads, or tagging so
-            // those steps cannot masquerade as a stalled 100% transfer.
+            // Network acquisition is finished. Replace byte progress with an
+            // indeterminate local-processing state so the batch card remains
+            // stable without masquerading as a stalled 100% transfer.
             endNativeDownloadBytePresentation(
                 sessionID: transferSessionID,
                 operationID: operationID
@@ -3849,9 +3850,6 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             )
             results.append(result)
             if isInterrupted(result) { break }
-            if index + 1 < songs.count {
-                hideTransferPresentation(sessionID: transferSessionID)
-            }
         }
         return results
     }
@@ -5150,17 +5148,14 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private func endNativeDownloadBytePresentation(sessionID: UUID, operationID: UUID) {
         guard ownsNativeDownloadOperation(sessionID: sessionID, operationID: operationID) else { return }
-        activeNativeDownloadPresentationOperationID = nil
-        hideTransferPresentation(sessionID: sessionID)
-    }
-
-    private func hideTransferPresentation(sessionID: UUID) {
-        guard MobileTransferSessionPolicy.accepts(
-            sessionID,
-            activeSessionID: activeTransferSessionID
+        guard MobileTransferSessionPolicy.acceptsBytePresentation(
+            operationID: operationID,
+            activePresentationOperationID: activeNativeDownloadPresentationOperationID
         ) else { return }
-        transferDisplay = nil
-        downloadProgress = 0
+        activeNativeDownloadPresentationOperationID = nil
+        guard let processingDisplay = MobileDownloadTransferPresentationPolicy
+            .localProcessingState(from: transferDisplay) else { return }
+        applyTransferSession(processingDisplay, sessionID: sessionID)
     }
 
     private func ownsNativeDownloadOperation(sessionID: UUID, operationID: UUID) -> Bool {
@@ -5837,7 +5832,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func isCurrentServerContext(baseURL: URL, profileID: String) -> Bool {
-        syncProfileID == profileID && normalizedServer()?.absoluteString == baseURL.absoluteString
+        MobileDownloadContextPolicy.isCurrent(
+            baseURL: baseURL,
+            profileID: profileID,
+            currentBaseURL: normalizedServer(),
+            currentProfileID: syncProfileID
+        )
     }
 
     private func mergedPlaylistDocument(

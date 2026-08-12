@@ -1298,6 +1298,44 @@ enum MobileDownloadTransferPresentationPolicy {
     static func shouldEndBytePresentation(for stage: LocalImportStage) -> Bool {
         stage != .downloading
     }
+
+    static func localProcessingState(
+        from display: MobileTransferDisplayState?
+    ) -> MobileTransferDisplayState? {
+        guard let display,
+              display.kind == .download,
+              display.completedBytes > 0 else { return nil }
+        return MobileTransferDisplayState(
+            kind: .download,
+            itemID: display.itemID,
+            songTitle: display.songTitle,
+            detail: "Adding to library",
+            currentItem: display.currentItem,
+            totalItems: display.totalItems,
+            completedBytes: 0,
+            totalBytes: 0,
+            fallbackProgress: nil
+        )
+    }
+}
+
+enum MobileDownloadContextPolicy {
+    static func isCurrent(
+        baseURL: URL,
+        profileID: String,
+        currentBaseURL: URL?,
+        currentProfileID: String
+    ) -> Bool {
+        guard profileID == currentProfileID,
+              let currentBaseURL,
+              let submitted = try? MobileServerEndpointPolicy.resolve(
+                baseURL.absoluteString
+              ).url,
+              let current = try? MobileServerEndpointPolicy.resolve(
+                currentBaseURL.absoluteString
+              ).url else { return false }
+        return submitted.absoluteString == current.absoluteString
+    }
 }
 
 enum MobileLoadedCatalogDownloadPolicy {

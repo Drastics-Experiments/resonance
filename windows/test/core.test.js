@@ -7,6 +7,7 @@ import {
   APP_THEMES,
   buildLocalImportSourceIdentity,
   catalogRequestCanApply,
+  createServerDownloadBatchResult,
   createEmptyState,
   filterPlaylists,
   filterTracks,
@@ -15,6 +16,8 @@ import {
   formatHistoryWindowLabel,
   formatTime,
   isInstalledVideoTrack,
+  installedVideoClockAdvanced,
+  installedVideoHandoffDecision,
   listeningHistoryEntryQualifiesAsPlay,
   localImportCandidateCanAutoSelect,
   localImportOperationFingerprint,
@@ -23,6 +26,7 @@ import {
   mergeListeningHistoryDocument,
   mergePlaylistOrderWithPreservedItems,
   mergePlaylistDocument,
+  mergeServerDownloadCheckpoint,
   mergeSyncedTracks,
   mergeTrackSourceIdentity,
   mergeUploadedSongsIntoCatalog,
@@ -48,6 +52,7 @@ import {
   serverSongMetadataMatches,
   serverCatalogAuthorityIsCurrent,
   serverCatalogAuthoritySnapshot,
+  serverDownloadBatchProgressEvent,
   reconcileServerBackedTrackDuplicates,
   reconcileUploadedTrack,
   reorderPlaylistEntries,
@@ -56,6 +61,7 @@ import {
   removeLibraryTracksFromPlaylists,
   restoreProfileState,
   resolveSyncProfile,
+  runServerDownloadCheckpoints,
   serverUploadBlockedByActivity,
   serverUploadConfigurationError,
   serverTrackRemoteIDBelongsToContext,
@@ -127,6 +133,162 @@ test("migrates the legacy production server without losing saved profile state",
   );
 });
 
+test("checkpoints each singleton server download before invoking the next song", async () => {
+  const state = createEmptyState();
+  state.serverURL = "https://active.example";
+  state.syncProfileID = "active-profile";
+  state.tracks = [{
+    id: "old-a",
+    remoteID: "song-a",
+    sourceServer: "https://captured.example",
+    syncProfileID: "captured-profile",
+  }];
+  const events = [];
+  const persistedTrackIDs = [];
+  const responses = {
+    "song-a": {
+      downloaded: [{ id: "new-a", remoteID: "song-a", sourceServer: "https://wrong.example", syncProfileID: "wrong" }],
+      replacedTrackIDs: ["old-a"],
+      failed: [],
+      catalog: { songs: [{ id: "song-a" }] },
+    },
+    "song-b": {
+      downloaded: [{ id: "new-b", remoteID: "song-b" }],
+      replacedTrackIDs: [],
+      failed: [],
+      cancelled: true,
+      catalog: { songs: [{ id: "song-b" }] },
+    },
+  };
+
+  const result = await runServerDownloadCheckpoints({
+    songIDs: ["song-a", "song-b", "song-c"],
+    aggregate: createServerDownloadBatchResult(),
+    invoke: async (songID) => {
+      if (songID === "song-b") assert.deepEqual(persistedTrackIDs, [["new-a"]]);
+      events.push(`invoke:${songID}`);
+      return responses[songID];
+    },
+    checkpoint: async (itemResult, songID) => {
+      events.push(`merge:${songID}`);
+      const durableResult = mergeServerDownloadCheckpoint(state, itemResult, {
+        serverURL: "https://captured.example/library",
+        profileID: "captured-profile",
+      });
+      await Promise.resolve();
+      persistedTrackIDs.push(state.tracks.map((track) => track.id));
+      events.push(`persist:${songID}`);
+      return durableResult;
+    },
+  });
+
+  assert.deepEqual(events, [
+    "invoke:song-a", "merge:song-a", "persist:song-a",
+    "invoke:song-b", "merge:song-b", "persist:song-b",
+  ]);
+  assert.deepEqual(persistedTrackIDs, [["new-a"], ["new-a", "new-b"]]);
+  assert.equal(result.downloaded.length, 2);
+  assert.equal(result.cancelled, true);
+  assert.equal(result.stopReason, "cancelled");
+  assert.deepEqual(state.tracks.map((track) => ({
+    id: track.id,
+    sourceServer: track.sourceServer,
+    syncProfileID: track.syncProfileID,
+  })), [
+    { id: "new-a", sourceServer: "https://captured.example", syncProfileID: "captured-profile" },
+    { id: "new-b", sourceServer: "https://captured.example", syncProfileID: "captured-profile" },
+  ]);
+});
+
+test("keeps earlier server-download checkpoints when a later policy lease throws", async () => {
+  const state = createEmptyState();
+  let persisted = 0;
+  await assert.rejects(runServerDownloadCheckpoints({
+    songIDs: ["kept", "blocked", "never-started"],
+    invoke: async (songID) => {
+      if (songID === "blocked") throw new Error("Offline download authorization expired.");
+      return { downloaded: [{ id: songID, remoteID: songID }], replacedTrackIDs: [], failed: [] };
+    },
+    checkpoint: async (itemResult) => {
+      const durableResult = mergeServerDownloadCheckpoint(state, itemResult, {
+        serverURL: "https://captured.example",
+        profileID: "listener",
+      });
+      persisted += 1;
+      return durableResult;
+    },
+  }), /authorization expired/);
+  assert.equal(persisted, 1);
+  assert.deepEqual(state.tracks.map((track) => track.id), ["kept"]);
+});
+
+test("maps singleton download progress into one non-dismissing outer batch", () => {
+  const mapped = serverDownloadBatchProgressEvent({
+    direction: "download",
+    currentFile: "Second song",
+    completed: 1,
+    total: 1,
+    itemCompleted: 100,
+    itemTotal: 100,
+    itemIndex: 1,
+    itemCount: 1,
+    autoHide: true,
+    dismiss: true,
+  }, { itemIndex: 2, itemCount: 4 });
+  assert.deepEqual(mapped, {
+    direction: "download",
+    currentFile: "Second song",
+    completed: 2,
+    total: 4,
+    itemCompleted: 100,
+    itemTotal: 100,
+    itemIndex: 2,
+    itemCount: 4,
+    autoHide: false,
+    dismiss: false,
+  });
+});
+
+test("commits installed-video ownership only after a corrective seek resumes", () => {
+  assert.equal(installedVideoHandoffDecision({
+    audioPlaying: true,
+    videoPlaying: false,
+    driftSeconds: 2,
+  }), "wait");
+  assert.equal(installedVideoHandoffDecision({
+    audioPlaying: true,
+    videoPlaying: true,
+    driftSeconds: 0.4,
+  }), "seek");
+  assert.equal(installedVideoHandoffDecision({
+    audioPlaying: true,
+    videoPlaying: true,
+    driftSeconds: 0.4,
+    resyncAttempted: true,
+  }), "wait");
+  assert.equal(installedVideoHandoffDecision({
+    audioPlaying: true,
+    videoPlaying: true,
+    driftSeconds: 0.4,
+    resyncAttempted: true,
+    postSeekConfirmed: true,
+  }), "commit");
+  assert.equal(installedVideoHandoffDecision({
+    audioPlaying: false,
+    videoPlaying: true,
+    driftSeconds: 20,
+  }), "commit");
+  assert.equal(installedVideoHandoffDecision({
+    audioPlaying: false,
+    videoPlaying: true,
+    driftSeconds: 0,
+    pauseRequested: true,
+  }), "pause");
+  assert.equal(installedVideoClockAdvanced(12, 12), false);
+  assert.equal(installedVideoClockAdvanced(12, 12.005), false);
+  assert.equal(installedVideoClockAdvanced(12, 12.02), true);
+});
+
 test("uses a custom fullscreen video player with queue, repeat, controls, and shared volume", () => {
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.mp4", fileUrl: "file:///C:/Music/clip.mp4" }), true);
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.MOV", fileUrl: "file:///C:/Music/clip.MOV" }), true);
@@ -145,7 +307,7 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(appSource, /const videoAvailable = isInstalledVideoTrack\(track\)[\s\S]+classList\.toggle\("video-available", videoAvailable\)[\s\S]+videoLaunch\.hidden = !videoAvailable/);
   assert.match(appSource, /#fullPlayerVideoLaunch"\)\.onclick = \(\) => \{[\s\S]+openInstalledVideo\(track\)/);
   assert.match(styleSource, /\.full-player-artwork\.video-available:hover \.full-player-video-launch[\s\S]+opacity: 1/);
-  assert.match(htmlSource, /id="installedVideoPlayer"[^>]*\smuted(?:\s|>)/);
+  assert.match(htmlSource, /id="installedVideoPlayer"[^>]*\spreload="auto"[^>]*\smuted(?:\s|>)/);
   assert.doesNotMatch(htmlSource, /id="installedVideoPlayer"[^>]*\scontrols(?:\s|>|=)/);
   assert.match(htmlSource, /id="installedVideoControls"[\s\S]+id="installedVideoSeek"[\s\S]+id="installedVideoPrevious"[\s\S]+id="installedVideoToggle"[\s\S]+id="installedVideoNext"[\s\S]+id="installedVideoRepeat"[\s\S]+id="installedVideoVolume"/);
   assert.match(htmlSource, /id="minimizeInstalledVideo"[\s\S]+id="restoreInstalledVideo"[\s\S]+id="dismissMiniVideo"/);
@@ -157,21 +319,34 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(appSource, /INSTALLED_VIDEO_LEAD_IN_MS = 35[\s\S]+INSTALLED_VIDEO_TRANSITION_MS = 400[\s\S]+INSTALLED_VIDEO_REVEAL_MS = 140[\s\S]+INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS = 190[\s\S]+INSTALLED_VIDEO_CHROME_RESTORE_LEAD_MS = 120/);
   assert.match(appSource, /function openInstalledVideo\([\s\S]+video-from-art[\s\S]+video-expanded[\s\S]+video-revealed/);
   assert.doesNotMatch(appSource, /function openInstalledVideo\([^]*?if \(!audio\.paused\) audio\.pause\(\)/);
-  assert.match(appSource, /function synchronizeInstalledVideoWithAudio\([^)]*\)[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0[\s\S]+audio\.paused[\s\S]+installedVideoPlayer\.play/);
-  assert.match(appSource, /async function requestPlayback\(\)[\s\S]+await audio\.play\(\)[\s\S]+synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\)/);
-  assert.match(appSource, /function installedVideoPlaybackPlaying\(\)[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0/);
-  assert.doesNotMatch(appSource, /videoOwnsPlayback|waitingForAudioHandoff|handOffInstalledVideoToAudio/);
+  assert.doesNotMatch(appSource, /synchronizeInstalledVideoWithAudio/);
+  assert.match(appSource, /function activePlaybackMedia\(\)[\s\S]+installedVideoOwnsPlayback\(\) \? installedVideoPlayer : audio/);
+  assert.match(appSource, /function startInstalledVideoPlayback\([^]*?waitingForAudioHandoff = true[^]*?installedVideoPlayer\.muted = true[^]*?installedVideoPlayer\.play\(\)/);
+  assert.match(appSource, /function finishInstalledVideoHandoff\([^]*?installedVideoHandoffDecision\([^]*?session\.videoOwnsPlayback = true[^]*?audio\.pause\(\)[^]*?installedVideoPlayer\.muted = false/);
+  assert.match(appSource, /pauseRequested: session\.audioWasPlayingWhenHandoffStarted && audio\.paused && !audio\.ended[^]*?decision === "pause"[^]*?installedVideoPlayer\.currentTime = audioTime[^]*?installedVideoPlayer\.pause\(\)[^]*?state\.position = audioTime/);
+  assert.match(appSource, /function toggleInstalledVideoPlayback\(\)[^]*?!session\.videoOwnsPlayback[^]*?startInstalledVideoPlayback\(\{ shouldPlay: audio\.paused \|\| audio\.ended \}\)/);
+  assert.match(appSource, /function handOffInstalledVideoToAudio\([^]*?audio\.currentTime = position[^]*?audio\.muted = true[^]*?addEventListener\("playing"[^]*?installedVideoPlayer\.muted = true[^]*?audio\.muted = false/);
+  assert.match(appSource, /async function requestPlayback\(\)[\s\S]+const media = activePlaybackMedia\(\)[\s\S]+await media\.play\(\)/);
   assert.match(appSource, /function animateInstalledVideoStage\(from, to, onFinish\)[\s\S]+classList\.add\("video-geometry-animating"\)[\s\S]+applyInstalledVideoStageGeometry\(from\)[\s\S]+\.animate\(\[from, to\],[\s\S]+animation\.cancel\(\)[\s\S]+clearInstalledVideoStageGeometry\(\)[\s\S]+classList\.remove\("video-geometry-animating"\)/);
-  assert.match(appSource, /dialog\.classList\.add\("video-expanded", "video-revealed"\);[\s\S]+synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\);[\s\S]+animateInstalledVideoStage\(geometry\.source, geometry\.target/);
+  assert.match(appSource, /dialog\.classList\.add\("video-expanded", "video-revealed"\);[\s\S]+startInstalledVideoPlayback\([^;]+;[\s\S]+animateInstalledVideoStage\(geometry\.source, geometry\.target/);
   assert.match(appSource, /function closeInstalledVideo\([^)]*\)[\s\S]+currentGeometry = installedVideoStageGeometry\(\)[\s\S]+classList\.add\("video-revealed", "video-closing"\)[\s\S]+syncFullPlayerTitleMarquee\(\)[\s\S]+animateInstalledVideoStage\(currentGeometry, geometry\.source[\s\S]+finishInstalledVideoClose/);
   assert.match(appSource, /installedVideoArtworkTimer = setTimeout\([\s\S]+classList\.add\("video-artwork-restored"\)[\s\S]+geometryDuration - installedVideoAnimationDuration\(INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS\)/);
   assert.match(appSource, /function advanceInstalledVideo\(direction = 1\)[\s\S]+nextIndex\(tracks, currentID, direction\)[\s\S]+selectInstalledVideoTarget/);
-  assert.match(appSource, /installedVideoPlayer\.onseeked = \(\) => synchronizeInstalledVideoWithAudio\(\)/);
-  assert.match(appSource, /installedVideoPlayer\.onended = \(\) => synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\)/);
+  const installedVideoSeekedStart = appSource.indexOf("installedVideoPlayer.onseeked =");
+  const installedVideoSeekedHandler = appSource.slice(
+    installedVideoSeekedStart,
+    appSource.indexOf("installedVideoPlayer.onended =", installedVideoSeekedStart),
+  );
+  assert.match(installedVideoSeekedHandler, /handoffSeekCompleted = true[^]*?handoffSeekedTime = Number\(installedVideoPlayer\.currentTime\)[^]*?syncInstalledVideoProgress\(\)/);
+  assert.doesNotMatch(installedVideoSeekedHandler, /finishInstalledVideoHandoff/);
+  assert.match(appSource, /function installedVideoPlaybackPlaying\(\)[^]*?finishInstalledVideoHandoff\(session, \{[^]*?postSeekConfirmed: !session\.handoffAwaitingPostSeekConfirmation \|\| session\.handoffSeekCompleted/);
+  assert.match(appSource, /function updateInstalledVideoTime\(\)[^]*?installedVideoClockAdvanced\(session\.handoffSeekedTime, installedVideoPlayer\.currentTime\)[^]*?finishInstalledVideoHandoff\(session, \{ postSeekConfirmed: true \}\)/);
+  assert.match(appSource, /installedVideoPlayer\.onended = handleInstalledVideoEnded/);
+  assert.match(appSource, /function handleInstalledVideoEnded\(\)[^]*?if \(repeat\)[^]*?finishListeningSessionForReplay\(\)[^]*?advanceInstalledVideo\(1\)/);
   assert.match(appSource, /function hideInstalledVideoControls\(\)[\s\S]+installed-video-return:focus-visible[\s\S]+#installedVideoControls :focus-visible[\s\S]+classList\.remove\("video-controls-visible"\)/);
   assert.match(appSource, /installedVideoStage\.onpointermove = \(\) => showInstalledVideoControls\(\)[\s\S]+installedVideoControls\.onpointerenter = \(\) => showInstalledVideoControls\(\)/);
   assert.doesNotMatch(appSource, /installedVideoControls\.onpointerenter = \(\) => showInstalledVideoControls\(\{ keepVisible: true \}\)/);
-  assert.match(appSource, /function setPlaybackVolume\([\s\S]+audio\.volume = gain[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0[\s\S]+installedVideoVolume/);
+  assert.match(appSource, /function setPlaybackVolume\([\s\S]+audio\.volume = gain[\s\S]+installedVideoPlayer\.volume = gain[\s\S]+installedVideoVolume/);
   assert.match(styleSource, /\.full-player-dialog\.video-active \.full-player-details[\s\S]+opacity: 0/);
   assert.doesNotMatch(styleSource, /\.installed-video-dialog\.video-from-art \.installed-video-stage/);
   assert.match(styleSource, /\.installed-video-stage\s*\{[\s\S]+transform: none[\s\S]+will-change: auto[\s\S]+transition: none/);
@@ -2296,6 +2471,23 @@ test("retries individual server downloads and reports every song that still fail
   assert.match(syncSource, /return \{ catalog, downloaded, replacedTrackIDs, failed \}/);
   assert.match(appSource, /showNotice\(formatServerDownloadFailureNotice\(failedDownloads\)\)/);
   assert.ok(packageJSON.build.files.includes("server-download.cjs"));
+});
+
+test("renderer durably checkpoints one server song at a time without dismissing the batch popup", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const sourceBetween = (start, end) => appSource.slice(appSource.indexOf(start), appSource.indexOf(end));
+  const checkpointSource = sourceBetween("async function checkpointServerDownloadResult", "function activeServerDownloadStopReason");
+  const serverActionSource = sourceBetween("async function serverAction", "async function uploadServerSongs");
+  const shutdownSource = sourceBetween("api.onPrepareToClose", "accountSession = await api.loadAccountSession");
+  const transferProgressSource = sourceBetween("api.onTransferProgress", "api.onLocalImportProgress");
+
+  assert.match(checkpointSource, /mergeServerDownloadCheckpoint\(state, result, context\)[\s\S]+await persist\(\{ refreshSidebar: false \}\)/);
+  assert.match(serverActionSource, /const capturedSyncRequest = Object\.freeze\(\{[\s\S]+baseURL: context\.serverURL,[\s\S]+token: context\.token,[\s\S]+profileID: context\.profileID/);
+  assert.match(serverActionSource, /runServerDownloadCheckpoints\(\{[\s\S]+invoke: async \(songID, index, itemCount\)[\s\S]+api\.syncServer\(\{[\s\S]+songIDs: \[songID\][\s\S]+checkpoint: async \(itemResult\)[\s\S]+await checkpointServerDownloadResult\(itemResult, context\)/);
+  assert.match(serverActionSource, /stopReason: \(\) => activeServerDownloadStopReason\(context\)/);
+  assert.match(serverActionSource, /finally \{[\s\S]+serverDownloadBatchProgress = null;[\s\S]+hideServerTransfer\("server"\)/);
+  assert.match(transferProgressSource, /updateServerTransfer\(serverDownloadBatchProgressEvent\(value, serverDownloadBatchProgress\)\)/);
+  assert.match(shutdownSource, /serverDownloadBatchInFlight[\s\S]+serverDownloadSingletonInFlight[\s\S]+serverTransferCancelRequested = true;[\s\S]+await api\.cancelServerTransfer\(\)[\s\S]+await downloadSingleton\.catch[\s\S]+await downloadBatch\.catch[\s\S]+serverDownloadCheckpointInFlight[\s\S]+await downloadCheckpoint\.catch[\s\S]+await persist\(\{ refreshSidebar: false \}\)/);
 });
 
 test("shows catalog song titles instead of internal server download filenames", () => {

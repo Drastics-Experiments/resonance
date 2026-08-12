@@ -157,14 +157,15 @@ enum InstalledVideoControlsPolicy {
 
 enum InstalledVideoSyncPolicy {
     static let continuouslyPollsAudioClock = false
+    static let usesSingleAudibleClock = true
+}
 
-    static func shouldResumeAfterSeek(
-        audioIsPlaying: Bool,
-        trackMatches: Bool,
-        videoIsVisible: Bool,
+enum InstalledVideoStartupPolicy {
+    static func shouldCloseFailedSession(
+        sessionMatches: Bool,
         isClosing: Bool
     ) -> Bool {
-        audioIsPlaying && trackMatches && videoIsVisible && !isClosing
+        sessionMatches && !isClosing
     }
 }
 
@@ -188,6 +189,8 @@ struct NowPlayingView: View {
     @State private var isInstalledVideoArtworkRestored = false
     @State private var isClosingInstalledVideo = false
     @State private var isRestoringNowPlayingChrome = false
+    @State private var installedVideoStartupTask: Task<Void, Never>?
+    @State private var isHandingOffInstalledVideoToMiniPlayer = false
 
     init(
         onDismiss: @escaping () -> Void,
@@ -278,6 +281,18 @@ struct NowPlayingView: View {
             guard let installedVideoSession,
                   trackID != installedVideoSession.track.id else { return }
             closeInstalledVideo(installedVideoSession)
+        }
+        .onDisappear {
+            guard !isHandingOffInstalledVideoToMiniPlayer else { return }
+            guard let installedVideoSession else { return }
+            isClosingInstalledVideo = true
+            installedVideoStartupTask?.cancel()
+            installedVideoStartupTask = nil
+            _ = model.endInstalledVideoPlayback(
+                using: installedVideoSession.player,
+                for: installedVideoSession.track.id,
+                resumeAudio: true
+            )
         }
     }
 
@@ -715,10 +730,12 @@ struct NowPlayingView: View {
     private func openInstalledVideo(_ track: Track) {
         guard let url = track.installedVideoURL else { return }
         isQueuePresented = false
+        isHandingOffInstalledVideoToMiniPlayer = false
 
         let player = AVPlayer(url: url)
         player.isMuted = true
         player.volume = 0
+        player.automaticallyWaitsToMinimizeStalling = false
         let session = InstalledVideoSession(
             track: track,
             player: player
@@ -731,39 +748,70 @@ struct NowPlayingView: View {
         withAnimation(reduceMotion ? nil : InstalledVideoLayoutPolicy.chromeAnimation) {
             installedVideoSession = session
         }
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + InstalledVideoLayoutPolicy.duration(
-                InstalledVideoLayoutPolicy.revealDelay,
-                reduceMotion: reduceMotion
-            )
-        ) {
-            guard installedVideoSession?.id == session.id,
-                  !isClosingInstalledVideo else { return }
-            withAnimation(reduceMotion ? nil : InstalledVideoLayoutPolicy.geometryAnimation) {
-                isInstalledVideoExpanded = true
-            }
-            withAnimation(
-                reduceMotion
-                    ? nil
-                    : .easeInOut(duration: InstalledVideoLayoutPolicy.revealDuration)
-            ) {
-                isInstalledVideoRevealed = true
-            }
-            let handoffDuration = model.playbackDuration > 0
-                ? model.playbackDuration
-                : track.duration
-            let handoffTime = min(max(model.position, 0), max(handoffDuration, 0))
-            player.seek(
-                to: CMTime(seconds: handoffTime, preferredTimescale: 600),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
-            )
-            player.isMuted = true
-            player.volume = 0
-            if model.isPlaying {
-                player.playImmediately(atRate: model.playbackRate)
-            } else {
-                player.pause()
+        installedVideoStartupTask?.cancel()
+        let revealDelay = InstalledVideoLayoutPolicy.duration(
+            InstalledVideoLayoutPolicy.revealDelay,
+            reduceMotion: reduceMotion
+        )
+        installedVideoStartupTask = Task { @MainActor in
+            do {
+                if revealDelay > 0 {
+                    try await Task.sleep(for: .seconds(revealDelay))
+                }
+                guard installedVideoSession?.id == session.id,
+                      !isClosingInstalledVideo else { return }
+                guard let handoff = model.prepareInstalledVideoPlayback(
+                    using: player,
+                    for: track.id
+                ) else {
+                    closeInstalledVideo(session)
+                    return
+                }
+                await player.seek(
+                    to: CMTime(seconds: handoff.position, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                )
+                try Task.checkCancellation()
+                let activated = await model.activateInstalledVideoPlayback(
+                    using: player,
+                    for: track.id
+                )
+                guard installedVideoSession?.id == session.id,
+                      !isClosingInstalledVideo,
+                      activated else {
+                    if InstalledVideoStartupPolicy.shouldCloseFailedSession(
+                        sessionMatches: installedVideoSession?.id == session.id,
+                        isClosing: isClosingInstalledVideo
+                    ) {
+                        closeInstalledVideo(session)
+                    }
+                    return
+                }
+                withAnimation(reduceMotion ? nil : InstalledVideoLayoutPolicy.geometryAnimation) {
+                    isInstalledVideoExpanded = true
+                }
+                withAnimation(
+                    reduceMotion
+                        ? nil
+                        : .easeInOut(duration: InstalledVideoLayoutPolicy.revealDuration)
+                ) {
+                    isInstalledVideoRevealed = true
+                }
+                installedVideoStartupTask = nil
+            } catch {
+                if InstalledVideoStartupPolicy.shouldCloseFailedSession(
+                    sessionMatches: installedVideoSession?.id == session.id,
+                    isClosing: isClosingInstalledVideo
+                ) {
+                    closeInstalledVideo(session)
+                } else if installedVideoSession?.id != session.id {
+                    _ = model.endInstalledVideoPlayback(
+                        using: player,
+                        for: track.id,
+                        resumeAudio: true
+                    )
+                }
             }
         }
     }
@@ -772,9 +820,13 @@ struct NowPlayingView: View {
         guard installedVideoSession?.id == session.id,
               !isClosingInstalledVideo else { return }
         isClosingInstalledVideo = true
-        session.player.isMuted = true
-        session.player.volume = 0
-        session.player.pause()
+        installedVideoStartupTask?.cancel()
+        installedVideoStartupTask = nil
+        _ = model.endInstalledVideoPlayback(
+            using: session.player,
+            for: session.track.id,
+            resumeAudio: true
+        )
         withAnimation(reduceMotion ? nil : InstalledVideoLayoutPolicy.geometryAnimation) {
             isInstalledVideoExpanded = false
         }
@@ -825,9 +877,13 @@ struct NowPlayingView: View {
 
     private func minimizeInstalledVideo(_ session: InstalledVideoSession) {
         guard installedVideoSession?.id == session.id,
-              !isClosingInstalledVideo else { return }
-        session.player.isMuted = true
-        session.player.volume = 0
+              !isClosingInstalledVideo,
+              model.hasActiveInstalledVideoPlayback,
+              model.ownsInstalledVideoPlayback(
+                session.player,
+                trackID: session.track.id
+              ) else { return }
+        isHandingOffInstalledVideoToMiniPlayer = true
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -1144,20 +1200,7 @@ private struct InstalledVideoPlayerView: View {
             }
         }
         .onAppear {
-            session.player.isMuted = true
-            session.player.volume = 0
-            session.player.defaultRate = model.playbackRate
-            applyAudioPlaybackState()
             showControls()
-        }
-        .onChange(of: model.playbackRate) { _, rate in
-            session.player.defaultRate = rate
-            if model.isPlaying {
-                session.player.rate = rate
-            }
-        }
-        .onChange(of: model.isPlaying) { _, _ in
-            applyAudioPlaybackState(seekToAudioClock: true)
         }
         .onChange(of: model.currentTrackID) { _, trackID in
             if trackID != session.track.id { onClose() }
@@ -1169,60 +1212,8 @@ private struct InstalledVideoPlayerView: View {
                 showControls(keepVisible: true)
             }
         }
-        .onReceive(model.playbackDiscontinuities) { position in
-            seekVideo(to: position, resumeAfterSeek: true)
-        }
         .onDisappear {
             controlsHideTask?.cancel()
-            session.player.pause()
-        }
-    }
-
-    private func applyAudioPlaybackState(seekToAudioClock: Bool = false) {
-        guard model.currentTrackID == session.track.id else {
-            session.player.pause()
-            return
-        }
-        session.player.isMuted = true
-        session.player.volume = 0
-        session.player.defaultRate = model.playbackRate
-        let shouldPlay = InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: model.isPlaying,
-            trackMatches: true,
-            videoIsVisible: isVideoRevealed,
-            isClosing: isClosing
-        )
-        if seekToAudioClock {
-            seekVideo(to: model.position, resumeAfterSeek: shouldPlay)
-            if !shouldPlay { session.player.pause() }
-            return
-        }
-        if shouldPlay {
-            if session.player.timeControlStatus == .paused {
-                session.player.playImmediately(atRate: model.playbackRate)
-            }
-        } else {
-            session.player.pause()
-        }
-    }
-
-    private func seekVideo(to time: TimeInterval, resumeAfterSeek: Bool = false) {
-        guard time.isFinite else { return }
-        session.player.seek(
-            to: CMTime(seconds: max(time, 0), preferredTimescale: 600),
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
-        ) { finished in
-            guard finished, resumeAfterSeek else { return }
-            Task { @MainActor in
-                guard InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-                    audioIsPlaying: model.isPlaying,
-                    trackMatches: model.currentTrackID == session.track.id,
-                    videoIsVisible: isVideoRevealed,
-                    isClosing: isClosing
-                ) else { return }
-                session.player.playImmediately(atRate: model.playbackRate)
-            }
         }
     }
 
@@ -1263,7 +1254,6 @@ private struct InstalledVideoPlayerView: View {
 
     private func togglePlayback() {
         model.togglePlay()
-        applyAudioPlaybackState()
         if model.isPlaying { showControls() }
         else { showControls(keepVisible: true) }
     }
@@ -1273,13 +1263,11 @@ private struct InstalledVideoPlayerView: View {
             seek(to: 0)
             return
         }
-        session.player.pause()
         model.previous()
         onClose()
     }
 
     private func next() {
-        session.player.pause()
         model.next()
         onClose()
     }
@@ -1340,16 +1328,10 @@ struct InstalledVideoMiniPlayer: View {
         }
         .shadow(color: Color.black.opacity(0.62), radius: 24, y: 12)
         .foregroundStyle(Color.white)
-        .onAppear { applyAudioPlaybackState() }
-        .onChange(of: model.isPlaying) { _, _ in
-            applyAudioPlaybackState(seekToAudioClock: true)
-        }
-        .onChange(of: model.playbackRate) { _, _ in applyAudioPlaybackState() }
+        .onAppear { isPlaying = model.isPlaying }
+        .onChange(of: model.isPlaying) { _, playing in isPlaying = playing }
         .onChange(of: model.currentTrackID) { _, trackID in
             if trackID != session.track.id { onClose() }
-        }
-        .onReceive(model.playbackDiscontinuities) { position in
-            seekVideo(to: position, resumeAfterSeek: true)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Video mini-player for \(session.track.title)")
@@ -1368,56 +1350,6 @@ struct InstalledVideoMiniPlayer: View {
         .accessibilityLabel(label)
     }
 
-    private func applyAudioPlaybackState(seekToAudioClock: Bool = false) {
-        guard model.currentTrackID == session.track.id else {
-            session.player.pause()
-            isPlaying = false
-            return
-        }
-        session.player.isMuted = true
-        session.player.volume = 0
-        session.player.defaultRate = model.playbackRate
-        isPlaying = model.isPlaying
-        let shouldPlay = InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: model.isPlaying,
-            trackMatches: true,
-            videoIsVisible: true,
-            isClosing: false
-        )
-        if seekToAudioClock {
-            seekVideo(to: model.position, resumeAfterSeek: shouldPlay)
-            if !shouldPlay { session.player.pause() }
-            return
-        }
-        if shouldPlay {
-            if session.player.timeControlStatus == .paused {
-                session.player.playImmediately(atRate: model.playbackRate)
-            }
-        } else {
-            session.player.pause()
-        }
-    }
-
-    private func seekVideo(to time: TimeInterval, resumeAfterSeek: Bool = false) {
-        guard time.isFinite else { return }
-        session.player.seek(
-            to: CMTime(seconds: max(time, 0), preferredTimescale: 600),
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
-        ) { finished in
-            guard finished, resumeAfterSeek else { return }
-            Task { @MainActor in
-                guard InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-                    audioIsPlaying: model.isPlaying,
-                    trackMatches: model.currentTrackID == session.track.id,
-                    videoIsVisible: true,
-                    isClosing: false
-                ) else { return }
-                session.player.playImmediately(atRate: model.playbackRate)
-                isPlaying = true
-            }
-        }
-    }
 }
 
 private struct InstalledVideoControlsOverlay: View {

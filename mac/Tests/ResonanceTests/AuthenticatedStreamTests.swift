@@ -382,6 +382,63 @@ struct AuthenticatedStreamTests {
         #expect(!MacServerDownloadStatePolicy.owns(generation: 4, currentGeneration: 5))
     }
 
+    @Test("download adoption requires the original generation and exact server context")
+    func serverDownloadAdoptionIsContextOwned() throws {
+        let base = try #require(URL(string: "https://music.example/base-a"))
+        func owns(
+            generation: UInt64 = 4,
+            currentGeneration: UInt64 = 4,
+            currentBaseURL: URL? = nil,
+            currentProfileID: String = "profile-a",
+            currentCredentialFingerprint: String = "token-a"
+        ) -> Bool {
+            MacServerDownloadStatePolicy.owns(
+                generation: generation,
+                currentGeneration: currentGeneration,
+                baseURL: base,
+                currentBaseURL: currentBaseURL ?? base,
+                profileID: "profile-a",
+                currentProfileID: currentProfileID,
+                credentialFingerprint: "token-a",
+                currentCredentialFingerprint: currentCredentialFingerprint
+            )
+        }
+
+        #expect(owns())
+        #expect(!owns(currentGeneration: 5))
+        #expect(!owns(currentBaseURL: URL(string: "https://music.example/base-b")))
+        #expect(!owns(currentProfileID: "profile-b"))
+        #expect(!owns(currentCredentialFingerprint: "token-b"))
+    }
+
+    @Test("the download card remains visible between batch items")
+    func serverDownloadPresentationSurvivesLocalProcessingAndNextReservation() {
+        var visible = MacServerDownloadProgressPolicy.isVisible(
+            after: .reserved,
+            wasVisible: false
+        )
+        #expect(!visible)
+        visible = MacServerDownloadProgressPolicy.isVisible(
+            after: .receivedBytes,
+            wasVisible: visible
+        )
+        #expect(visible)
+        visible = MacServerDownloadProgressPolicy.isVisible(
+            after: .localProcessing,
+            wasVisible: visible
+        )
+        #expect(visible)
+        visible = MacServerDownloadProgressPolicy.isVisible(
+            after: .reserved,
+            wasVisible: visible
+        )
+        #expect(visible)
+        #expect(!MacServerDownloadProgressPolicy.isVisible(
+            after: .sessionFinished,
+            wasVisible: visible
+        ))
+    }
+
     @Test("cancelling the parent download cancels its worker and removes staged bytes")
     func parentDownloadCancellationReachesWorker() async throws {
         let configuration = URLSessionConfiguration.ephemeral

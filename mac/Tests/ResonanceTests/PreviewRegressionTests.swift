@@ -347,37 +347,48 @@ struct PreviewRegressionTests {
     }
 
     @Test
-    func fullscreenVideoDoesNotContinuouslySeekAgainstTheSampledAudioClock() {
+    func fullscreenVideoUsesOneAudiblePlaybackClock() {
         #expect(!InstalledVideoSyncPolicy.continuouslyPollsAudioClock)
-        #expect(InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: true,
-            trackMatches: true,
-            videoIsVisible: true,
+        #expect(InstalledVideoSyncPolicy.usesSingleAudibleClock)
+        #expect(MacInstalledVideoPlaybackPolicy.usesSingleAudibleClock)
+        #expect(MacInstalledVideoPlaybackPolicy.retainsClockWhenMinimized)
+        #expect(MacInstalledVideoPlaybackPolicy.handoffPosition(
+            -Double.infinity,
+            bounds: 5...120
+        ) == 5)
+        #expect(MacInstalledVideoPlaybackPolicy.handoffPosition(
+            30,
+            bounds: 5...120
+        ) == 30)
+        #expect(MacInstalledVideoPlaybackPolicy.handoffPosition(
+            180,
+            bounds: 5...120
+        ) == 120)
+    }
+
+    @Test
+    func failedVideoStartupOnlyClosesTheSessionThatStillOwnsTheFullscreenSurface() {
+        #expect(InstalledVideoStartupPolicy.shouldCloseFailedSession(
+            sessionMatches: true,
             isClosing: false
         ))
-        #expect(!InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: false,
-            trackMatches: true,
-            videoIsVisible: true,
+        #expect(!InstalledVideoStartupPolicy.shouldCloseFailedSession(
+            sessionMatches: false,
             isClosing: false
         ))
-        #expect(!InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: true,
-            trackMatches: false,
-            videoIsVisible: true,
-            isClosing: false
-        ))
-        #expect(!InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: true,
-            trackMatches: true,
-            videoIsVisible: false,
-            isClosing: false
-        ))
-        #expect(!InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: true,
-            trackMatches: true,
-            videoIsVisible: true,
+        #expect(!InstalledVideoStartupPolicy.shouldCloseFailedSession(
+            sessionMatches: true,
             isClosing: true
+        ))
+    }
+
+    @Test
+    func closingAWindowEndsOnlyItsMinimizedVideoSession() {
+        #expect(MacInstalledVideoWindowLifecyclePolicy.shouldEndPlaybackOnRootDisappear(
+            hasMinimizedSession: true
+        ))
+        #expect(!MacInstalledVideoWindowLifecyclePolicy.shouldEndPlaybackOnRootDisappear(
+            hasMinimizedSession: false
         ))
     }
 
