@@ -2284,6 +2284,7 @@ struct PlayerModelRegressionTests {
 
         catalogHash = String(repeating: "0", count: 64)
         failDownload = true
+        await model.refreshServerCatalogNow()
         await model.syncServerLibrary()
 
         #expect(model.downloadStatus == "Downloaded 0; 1 failed")
@@ -2295,6 +2296,7 @@ struct PlayerModelRegressionTests {
         downloadData = replacement
         catalogHash = sha256(replacement)
         failDownload = false
+        await model.refreshServerCatalogNow()
         await model.syncServerLibrary()
 
         #expect(model.downloadStatus == "Downloaded 1 songs")
