@@ -245,8 +245,6 @@ let clipEditorVisualizerBinRanges = null;
 let clipEditorVisualizerStaticLevels = new Float32Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT).fill(.08);
 let clipEditorVisualizerDisplayedLevels = new Float32Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT);
 let clipEditorVisualizerTargetLevels = new Float32Array(CLIP_EDITOR_VISUALIZER_BAR_COUNT);
-let clipEditorVisualizerGradient = null;
-let clipEditorVisualizerGradientSize = "";
 let clipEditorAudioContext = null;
 let clipEditorAudioSource = null;
 let clipEditorAnalyser = null;
@@ -278,8 +276,6 @@ function applyAppTheme(value) {
   const theme = normalizedAppTheme(value);
   document.documentElement.dataset.theme = theme;
   cacheAppTheme(theme);
-  clipEditorVisualizerGradient = null;
-  clipEditorVisualizerGradientSize = "";
   return theme;
 }
 
@@ -1079,23 +1075,12 @@ function drawClipEditorStageVisualizer(levels, { live = false } = {}) {
   if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
     canvas.width = pixelWidth;
     canvas.height = pixelHeight;
-    clipEditorVisualizerGradient = null;
-    clipEditorVisualizerGradientSize = "";
   }
 
   const context = clipEditorVisualizerContext;
   if (!context) return;
   context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   context.clearRect(0, 0, width, height);
-  const gradientSize = `${pixelWidth}x${pixelHeight}`;
-  if (!clipEditorVisualizerGradient || clipEditorVisualizerGradientSize !== gradientSize) {
-    clipEditorVisualizerGradient = context.createLinearGradient(0, height, 0, 0);
-    clipEditorVisualizerGradient.addColorStop(0, themeCSSColor("--clip-visualizer-low", "#4e1a95"));
-    clipEditorVisualizerGradient.addColorStop(.72, themeCSSColor("--clip-visualizer-mid", "#bc5df8"));
-    clipEditorVisualizerGradient.addColorStop(1, themeCSSColor("--clip-visualizer-high", "#7140d4"));
-    clipEditorVisualizerGradientSize = gradientSize;
-  }
-
   const gap = 2;
   const barWidth = Math.max((width - gap * (CLIP_EDITOR_VISUALIZER_BAR_COUNT - 1)) / CLIP_EDITOR_VISUALIZER_BAR_COUNT, 2);
   context.beginPath();
@@ -1116,7 +1101,7 @@ function drawClipEditorStageVisualizer(levels, { live = false } = {}) {
     context.lineTo(x + barWidth, height);
     context.closePath();
   }
-  context.fillStyle = clipEditorVisualizerGradient;
+  context.fillStyle = themeCSSColor("--clip-visualizer-mid", "#bc5df8");
   context.fill();
 }
 
@@ -1939,10 +1924,6 @@ function historyChartMarkup(summary) {
     ? `${summary.days.length} hours of hourly`
     : `${summary.days.length} days of daily`;
   return `<div class="history-chart-frame"><div class="history-chart-viewport" data-day-count="${summary.days.length}"><svg class="history-chart-svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" data-plot-left="${left}" data-plot-right="${right}" data-plot-top="${top}" data-plot-bottom="${bottom}" data-axis-maximum="${axisMaximum}" role="img" aria-label="${periodDescription} listening minutes">
-    <defs>
-      <linearGradient id="historyBarGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--history-bar-start)"/><stop offset="1" style="stop-color:var(--history-bar-end)"/></linearGradient>
-      <linearGradient id="historyPeakBarGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--history-peak-start)"/><stop offset="1" style="stop-color:var(--history-peak-end)"/></linearGradient>
-    </defs>
     <g class="history-grid">${grid}</g>
     ${bars}
     <g class="history-x-axis">${xAxis}</g>
@@ -3549,13 +3530,13 @@ function renderStorage() {
   const remoteTracks = visibleTracks.filter((track) => physicalStorageClassForTrack(track) === "downloads" && track.available !== false);
   const localBytes = localTracks.reduce((sum, track) => sum + (track.size || 0), 0);
   const remoteBytes = remoteTracks.reduce((sum, track) => sum + (track.size || 0), 0);
-  const total = Math.max(localBytes + remoteBytes, 1);
-  const localDegrees = Math.round(localBytes / total * 360);
+  const managedBytes = localBytes + remoteBytes;
+  const localShare = managedBytes ? Math.round(localBytes / managedBytes * 100) : 0;
   const storageHasQuery = Boolean(storageQuery.trim());
   const storageEmptyTitle = storageHasQuery ? "No matching songs" : storageScope === "downloads" ? "No server downloads yet" : storageScope === "files" ? "No imported files yet" : "No songs stored yet";
   const storageEmptyHelp = storageHasQuery ? "Try another search." : storageScope === "downloads" ? "Download songs from Music Server to keep them on this device." : "Import audio files to add them to this device.";
   content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><div><span class="eyebrow">ON THIS DEVICE</span><h1>Song Storage</h1></div><div class="page-title-actions"><div class="storage-import-control" id="storageImportControl"><button class="primary storage-import-trigger" id="storageImportMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="storageImportMenu"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg></span><span>Import</span><svg class="storage-import-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="storage-import-menu" id="storageImportMenu" role="menu" aria-label="Choose an import type" hidden>${localImportAvailable ? '<button class="storage-import-option" type="button" role="menuitem" data-storage-import="link"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span><span><strong>Import from Web</strong><small>Paste a link or search music</small></span></button>' : ""}<button class="storage-import-option" type="button" role="menuitem" data-storage-import="files"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4zM12 10v6m-3-3h6"/></svg></span><span><strong>Import files</strong><small>Choose audio from this device</small></span></button></div></div><button class="secondary" id="storageEdit" ${!storageEditing && !tracks.length ? "disabled" : ""}>${storageEditing ? "Done" : "Edit"}</button></div></div>
-    <div class="storage-summary" id="storageSummary"><div class="storage-ring" id="storageRing" style="--local:${localDegrees}deg"><span>♪</span></div><div class="storage-stat"><small>Local audio</small><strong id="storageLocalBytes">${formatBytes(localBytes)}</strong><span>${localTracks.length} available library ${localTracks.length === 1 ? "file" : "files"}</span></div><div class="storage-stat"><small>Server downloads</small><strong id="storageRemoteBytes">${formatBytes(remoteBytes)}</strong><span>${remoteTracks.length} available library ${remoteTracks.length === 1 ? "file" : "files"}</span></div><div class="storage-stat"><small>Available</small><strong id="storageAvailable">Calculating…</strong><span id="storageFreePercent">Disk space</span></div></div>
+    <div class="storage-summary" id="storageSummary"><div class="storage-ring ${managedBytes ? "" : "empty"}${localShare ? "" : " no-local"}" id="storageRing" style="--local-share:${localShare}" role="img" aria-label="${managedBytes ? `${localShare}% local audio and ${100 - localShare}% server downloads` : "No managed audio storage"}"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="storage-ring-remote" cx="50" cy="50" r="42" pathLength="100"/><circle class="storage-ring-local" cx="50" cy="50" r="42" pathLength="100"/></svg><span>♪</span></div><div class="storage-stat"><small>Local audio</small><strong id="storageLocalBytes">${formatBytes(localBytes)}</strong><span>${localTracks.length} available library ${localTracks.length === 1 ? "file" : "files"}</span></div><div class="storage-stat"><small>Server downloads</small><strong id="storageRemoteBytes">${formatBytes(remoteBytes)}</strong><span>${remoteTracks.length} available library ${remoteTracks.length === 1 ? "file" : "files"}</span></div><div class="storage-stat"><small>Available</small><strong id="storageAvailable">Calculating…</strong><span id="storageFreePercent">Disk space</span></div></div>
     <div class="segmented storage-tabs" role="group" aria-label="Storage scope"><button class="${storageScope === "songs" ? "active" : ""}" data-storage-scope="songs" aria-pressed="${storageScope === "songs"}">Songs</button><button class="${storageScope === "downloads" ? "active" : ""}" data-storage-scope="downloads" aria-pressed="${storageScope === "downloads"}">Downloads</button><button class="${storageScope === "files" ? "active" : ""}" data-storage-scope="files" aria-pressed="${storageScope === "files"}">Files</button></div>
     ${storageEditing ? `<div class="selection-bar"><span>${selectedStorageIDs.size} selected</span><button class="danger" id="deleteSelectedStorage" ${selectedStorageIDs.size ? "" : "disabled"}>Delete selected</button></div>` : ""}
     <div class="storage-section-heading"><strong>${storageScope === "downloads" ? "DOWNLOADED FROM SERVER" : storageScope === "files" ? "IMPORTED ON THIS PC" : "ALL SONGS"}</strong><span>${tracks.length} songs</span></div>
@@ -3654,8 +3635,18 @@ function renderStorage() {
     const percent = $("#storageFreePercent");
     if (local) local.textContent = formatBytes(summary.localBytes);
     if (remote) remote.textContent = formatBytes(summary.remoteBytes);
-    const managedBytes = Math.max(0, Number(summary.localBytes) || 0) + Math.max(0, Number(summary.remoteBytes) || 0);
-    if (ring) ring.style.setProperty("--local", `${managedBytes ? Math.round((Number(summary.localBytes) || 0) / managedBytes * 360) : 0}deg`);
+    const managedLocalBytes = Math.max(0, Number(summary.localBytes) || 0);
+    const managedRemoteBytes = Math.max(0, Number(summary.remoteBytes) || 0);
+    const managedBytes = managedLocalBytes + managedRemoteBytes;
+    const localShare = managedBytes ? Math.round(managedLocalBytes / managedBytes * 100) : 0;
+    if (ring) {
+      ring.style.setProperty("--local-share", String(localShare));
+      ring.classList.toggle("empty", !managedBytes);
+      ring.classList.toggle("no-local", !localShare);
+      ring.setAttribute("aria-label", managedBytes
+        ? `${localShare}% local audio and ${100 - localShare}% server downloads`
+        : "No managed audio storage");
+    }
     if (available) available.textContent = formatBytes(summary.availableBytes);
     if (percent) percent.textContent = summary.capacityBytes ? `${Math.round(summary.availableBytes / summary.capacityBytes * 100)}% free` : "Disk space";
   }).catch((error) => {
@@ -3883,6 +3874,7 @@ function serverCatalogPlaceholderRows() {
 }
 
 function renderServer() {
+  document.body.querySelector("#serverMoreMenu")?.remove();
   updateTopSearch();
   const transferModes = currentServerTransferModes();
   const offlineDownloadAvailable = transferModes.downloadMode === "verified_file_cache";
@@ -3901,6 +3893,9 @@ function renderServer() {
       ? `Download ${selectedRemoteIDs.size} selected song${selectedRemoteIDs.size === 1 ? "" : "s"}`
       : "Select songs to download"
     : "Download all songs";
+  const uploadLabel = uploadAvailable
+    ? `Upload — ${serverUploadModeOptions[transferModes.uploadMode]}`
+    : "Upload unavailable — uploads are disabled";
   const filtered = Boolean(serverQuery.trim()) || serverScope !== "all";
   const resultSummary = filtered ? `Showing ${filteredCount} of ${serverCatalog.length} tracks` : "All tracks";
   const pendingMetadata = pendingServerMetadataCount();
@@ -3919,18 +3914,90 @@ function renderServer() {
       <span class="server-dot">•</span><span class="server-inline-metric green">${serverDeviceIcon}<strong>${downloaded}</strong><span>on device</span></span>
     </div></div>
     ${serverUploadManifestMarkup()}
-    <div class="server-library-bar"><div><strong>${resultSummary}</strong>${pendingMetadata ? `<small class="server-metadata-status"><span aria-hidden="true"></span>${serverMetadataHydrationActive ? "Resolving" : "Automatically retrying"} metadata for ${pendingMetadata} ${pendingMetadata === 1 ? "song" : "songs"}</small>` : ""}<small class="server-transfer-mode-summary">${escapeHTML(`${serverUploadModeOptions[transferModes.uploadMode] || "Uploads disabled"} · ${serverDownloadModeOptions[transferModes.downloadMode] || "Downloads disabled"}`)}</small></div><div class="server-actions">
-      <button id="uploadMissingDownloads" title="${fileUploadSelected ? "Upload downloaded songs missing from the server" : "Available only in Local files upload mode"}" aria-label="Upload downloaded songs missing from the server" ${fileUploadSelected ? "" : "disabled"}>${serverUploadMissingIcon}</button>
-      <button id="uploadServer" title="${escapeHTML(uploadAvailable ? serverUploadModeOptions[transferModes.uploadMode] : "Uploads are disabled")}" aria-label="${escapeHTML(uploadAvailable ? serverUploadModeOptions[transferModes.uploadMode] : "Uploads are disabled")}" ${uploadAvailable ? "" : "disabled"}>${serverUploadIcon}</button>
-      <button id="syncAll" title="${downloadLabel}" aria-label="${downloadLabel}" ${!offlineDownloadAvailable || (serverSelecting && !selectedRemoteIDs.size) ? "disabled" : ""}>${serverDownloadIcon}</button>
-      <button id="syncSelected" class="${serverSelecting ? "active" : ""}" title="${offlineDownloadAvailable ? selectLabel : downloadLabel}" aria-label="${offlineDownloadAvailable ? selectLabel : downloadLabel}" aria-pressed="${serverSelecting}" ${offlineDownloadAvailable ? "" : "disabled"}>${serverSelecting ? `<b>${selectedRemoteIDs.size}</b>` : serverSelectIcon}</button>
-      <button id="syncServerPlaylists" title="Sync playlists" aria-label="Sync playlists">${serverPlaylistIcon}</button>
+    <div class="server-library-bar"><div><strong>${resultSummary}</strong>${pendingMetadata ? `<small class="server-metadata-status"><span aria-hidden="true"></span>${serverMetadataHydrationActive ? "Resolving" : "Automatically retrying"} metadata for ${pendingMetadata} ${pendingMetadata === 1 ? "song" : "songs"}</small>` : ""}<small class="server-transfer-mode-summary">${escapeHTML(`${serverUploadModeOptions[transferModes.uploadMode] || "Uploads disabled"} · ${serverDownloadModeOptions[transferModes.downloadMode] || "Downloads disabled"}`)}</small></div><div class="server-actions" role="group" aria-label="Server actions">
+      <button class="server-action-primary" id="syncAll" type="button" title="${downloadLabel}" aria-label="${downloadLabel}" ${!offlineDownloadAvailable || (serverSelecting && !selectedRemoteIDs.size) ? "disabled" : ""}>${serverDownloadIcon}<span>Download</span>${serverSelecting ? `<b class="server-action-count" aria-hidden="true">${selectedRemoteIDs.size}</b>` : ""}</button>
+      <button class="server-action-primary" id="uploadServer" type="button" title="${escapeHTML(uploadLabel)}" aria-label="${escapeHTML(uploadLabel)}" ${uploadAvailable ? "" : "disabled"}>${serverUploadIcon}<span>Upload</span></button>
+      <button id="serverMore" class="server-more" type="button" title="More server actions" aria-label="More server actions" aria-haspopup="menu" aria-controls="serverMoreMenu" aria-expanded="false"><span aria-hidden="true">•••</span></button>
     </div></div>
     <div class="server-table-head ${serverSelecting ? "selecting" : ""}">${serverSelecting ? "<span></span>" : ""}<span></span><span>TITLE</span><span>ARTIST</span><span>ALBUM</span><span>DURATION</span><span></span></div>
     <div id="remoteSongs" class="remote-list redesigned server-library">${catalogRows}</div>
+    <div class="server-more-menu" id="serverMoreMenu" role="menu" aria-label="More server actions" hidden>
+      <button id="uploadMissingDownloads" type="button" role="menuitem" title="${fileUploadSelected ? "Upload downloaded songs missing from the server" : "Available only in Local files upload mode"}" ${fileUploadSelected ? "" : "disabled"}>${serverUploadMissingIcon}<span>Upload downloaded songs</span></button>
+      <button id="syncSelected" class="${serverSelecting ? "active" : ""}" type="button" role="menuitemcheckbox" aria-label="${offlineDownloadAvailable ? selectLabel : downloadLabel}" aria-checked="${serverSelecting}" ${offlineDownloadAvailable ? "" : "disabled"}>${serverSelectIcon}${serverSelecting ? "<span>Cancel selection</span>" : "<span>Select songs</span>"}</button>
+      <button id="syncServerPlaylists" type="button" role="menuitem">${serverPlaylistIcon}<span>Sync playlists</span></button>
+    </div>
   </div>`;
   $("#serverSettings").onclick = openServerSettings;
+  const serverMore = $("#serverMore");
+  const serverMoreMenu = $("#serverMoreMenu");
+  document.body.append(serverMoreMenu);
+  const enabledServerMoreItems = () => [...serverMoreMenu.querySelectorAll('[role^="menuitem"]:not(:disabled)')];
+  const closeServerMoreMenu = ({ restoreFocus = false } = {}) => {
+    serverMoreMenu.hidden = true;
+    serverMore.setAttribute("aria-expanded", "false");
+    if (restoreFocus) serverMore.focus();
+  };
+  const positionServerMoreMenu = () => {
+    const summaryRect = serverMore.getBoundingClientRect();
+    const menuRect = serverMoreMenu.getBoundingClientRect();
+    const viewportGap = 12;
+    const left = Math.min(
+      window.innerWidth - menuRect.width - viewportGap,
+      Math.max(viewportGap, summaryRect.right - menuRect.width),
+    );
+    const roomBelow = window.innerHeight - summaryRect.bottom - viewportGap;
+    const roomAbove = summaryRect.top - viewportGap;
+    const top = roomBelow >= menuRect.height + 9 || roomBelow >= roomAbove
+      ? Math.min(window.innerHeight - menuRect.height - viewportGap, summaryRect.bottom + 9)
+      : Math.max(viewportGap, summaryRect.top - menuRect.height - 9);
+    serverMoreMenu.style.left = `${Math.round(left)}px`;
+    serverMoreMenu.style.top = `${Math.round(top)}px`;
+  };
+  const openServerMoreMenu = ({ focus = "first" } = {}) => {
+    serverMoreMenu.hidden = false;
+    serverMore.setAttribute("aria-expanded", "true");
+    positionServerMoreMenu();
+    const items = enabledServerMoreItems();
+    const target = focus === "last" ? items.at(-1) : items[0];
+    requestAnimationFrame(() => target?.focus());
+  };
+  serverMore.onclick = () => serverMoreMenu.hidden ? openServerMoreMenu() : closeServerMoreMenu();
+  serverMore.onkeydown = (event) => {
+    if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+    event.preventDefault();
+    const focus = event.key === "ArrowUp" ? "last" : "first";
+    if (!serverMoreMenu.hidden) {
+      const items = enabledServerMoreItems();
+      (focus === "last" ? items.at(-1) : items[0])?.focus();
+    } else {
+      openServerMoreMenu({ focus });
+    }
+  };
+  serverMoreMenu.onkeydown = (event) => {
+    const items = enabledServerMoreItems();
+    const currentIndex = items.indexOf(document.activeElement);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeServerMoreMenu({ restoreFocus: true });
+    } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      const nextIndex = event.key === "Home" ? 0
+        : event.key === "End" ? items.length - 1
+          : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+      items[nextIndex]?.focus();
+    } else if (event.key === "Tab") {
+      event.preventDefault();
+      const outsideFocusable = [...document.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), [href], [tabindex]:not([tabindex="-1"])')]
+        .filter((element) => !serverMoreMenu.contains(element) && !element.hidden && element.getClientRects().length);
+      const moreIndex = outsideFocusable.indexOf(serverMore);
+      const target = event.shiftKey ? serverMore : outsideFocusable[moreIndex + 1];
+      closeServerMoreMenu();
+      (target || serverMore).focus();
+    }
+  };
   $("#syncSelected").onclick = () => {
+    closeServerMoreMenu();
     if (!serverSelecting) {
       serverSelecting = true;
     } else {
@@ -3940,9 +4007,9 @@ function renderServer() {
     renderServer();
   };
   $("#syncAll").onclick = () => serverAction(serverSelecting ? "selected" : "all");
-  $("#uploadMissingDownloads").onclick = uploadMissingDownloadedSongs;
+  $("#uploadMissingDownloads").onclick = () => { closeServerMoreMenu(); uploadMissingDownloadedSongs(); };
   $("#uploadServer").onclick = uploadServerSongs;
-  $("#syncServerPlaylists").onclick = () => syncPlaylistsNow();
+  $("#syncServerPlaylists").onclick = () => { closeServerMoreMenu(); syncPlaylistsNow(); };
   bindServerArtworkLoadStates();
   bindRemoteRows();
   document.querySelectorAll("[data-retry-upload-manifest]").forEach((button) => {
@@ -4442,6 +4509,7 @@ function scheduleDiscordPresenceUpdate() {
 }
 
 function render() {
+  if (section !== "server") document.body.querySelector("#serverMoreMenu")?.remove();
   if (section === "library") renderLibrary();
   else if (section === "playlists") renderPlaylists();
   else if (section === "storage") renderStorage();
@@ -8327,12 +8395,23 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest("#trackContextMenu")) closeTrackContextMenu();
   if (!event.target.closest("#searchSort")) closeSearchSort();
   if (!event.target.closest("#playlistMore")) $("#playlistMore")?.removeAttribute("open");
+  if (!event.target.closest("#serverMore") && !event.target.closest("#serverMoreMenu")) {
+    $("#serverMoreMenu")?.setAttribute("hidden", "");
+    $("#serverMore")?.setAttribute("aria-expanded", "false");
+  }
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closeTrackContextMenu();
     closeSearchSort();
     $("#playlistMore")?.removeAttribute("open");
+    const serverMore = $("#serverMore");
+    if (serverMore?.getAttribute("aria-expanded") === "true") {
+      $("#serverMoreMenu")?.setAttribute("hidden", "");
+      serverMore.setAttribute("aria-expanded", "false");
+      serverMore.focus();
+      return;
+    }
     if (section === "server" && serverSelecting) {
       serverSelecting = false;
       selectedRemoteIDs.clear();
@@ -8340,7 +8419,15 @@ document.addEventListener("keydown", (event) => {
     }
   }
 });
-window.addEventListener("blur", closeTrackContextMenu);
+window.addEventListener("blur", () => {
+  closeTrackContextMenu();
+  $("#serverMoreMenu")?.setAttribute("hidden", "");
+  $("#serverMore")?.setAttribute("aria-expanded", "false");
+});
+window.addEventListener("resize", () => {
+  $("#serverMoreMenu")?.setAttribute("hidden", "");
+  $("#serverMore")?.setAttribute("aria-expanded", "false");
+});
 window.addEventListener("focus", () => {
   syncPlaylistsNow({ automatic: true });
   retryPendingServerCatalogMetadata();

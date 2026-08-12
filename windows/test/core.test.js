@@ -838,30 +838,21 @@ test("defines complete Windows palettes and routes major chrome through theme to
       ["background", "#020305"], ["base", "#05060a"], ["panel", "#0c0d13"],
       ["surface", "#0b0c12"], ["surface-raised", "#11131c"], ["accent", "#7547ff"],
       ["accent-secondary", "#6540f5"], ["accent-tertiary", "#9b82ff"],
-      ["gradient-accent", "linear-gradient(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%)"],
-      ["action-background", "linear-gradient(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%)"],
-      ["gradient-artwork", "linear-gradient(145deg, #3349c9 0%, #6857ff 52%, #f18cb2 100%)"],
     ],
     ocean: [
       ["background", "#02070d"], ["panel", "#050d14"], ["surface", "#07121b"],
       ["surface-raised", "#0d1d2a"], ["accent", "#1769c2"], ["accent-secondary", "#0f5caa"],
       ["accent-tertiary", "#55b8ff"],
-      ["action-background", "var(--accent-secondary)"],
-      ["gradient-accent", "linear-gradient(135deg, #0f5caa 0%, #218bd6 50%, #62c3ff 100%)"],
     ],
     forest: [
       ["background", "#020805"], ["panel", "#050d09"], ["surface", "#07120c"],
       ["surface-raised", "#0d1d14"], ["accent", "#198754"], ["accent-secondary", "#126b43"],
       ["accent-tertiary", "#5fd49a"],
-      ["action-background", "var(--accent-secondary)"],
-      ["gradient-accent", "linear-gradient(135deg, #126b43 0%, #219c64 50%, #69d89e 100%)"],
     ],
     sunset: [
       ["background", "#0a0403"], ["panel", "#100706"], ["surface", "#150a07"],
       ["surface-raised", "#21120e"], ["accent", "#c45132"], ["accent-secondary", "#a33a53"],
       ["accent-tertiary", "#ff9a62"],
-      ["action-background", "var(--accent-secondary)"],
-      ["gradient-accent", "linear-gradient(135deg, #a33a53 0%, #d25b3f 50%, #ff9a62 100%)"],
     ],
   };
   for (const [theme, expected] of Object.entries(palettes)) {
@@ -907,15 +898,14 @@ test("defines complete Windows palettes and routes major chrome through theme to
   assert.match(styleSource, /\.clip-editor-handle\.dragging span\s*\{[^}]*background: var\(--accent\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-glow\)/);
   assert.match(styleSource, /\.clip-editor-selection-summary input:focus\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-soft\)/);
   assert.doesNotMatch(styleSource, /#(?:6841f1|7751ff|7654ff2e|8f72ff55|8f72ff|7654ff24|b49eff)/i);
-  assert.match(styleSource, /\.profile-button\s*\{[^}]*border: 1px solid #a58cff52[^}]*linear-gradient\(145deg, #6f3cff, #3a207d\)/);
-  assert.match(styleSource, /\.filters button\.active\s*\{[^}]*background: var\(--gradient-accent\)[^}]*#ad96ff4d/);
+  assert.match(styleSource, /\.profile-button,[\s\S]+?background: var\(--control-surface\)/);
+  assert.match(styleSource, /\.filters button\.active,[\s\S]+?background: var\(--accent-soft\)/);
   assert.match(styleSource, /\.settings-nav button\.active svg\s*\{[^}]*#9f82ff[^}]*#805aff/);
   assert.match(styleSource, /\.storage-import-option-icon\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
-  assert.match(styleSource, /\.segmented button\.active\s*\{[^}]*#845bff[^}]*#5c2ee8[^}]*color: #fff/);
+  assert.match(styleSource, /\.segmented button\.active[^}]*background: var\(--accent-soft\)[^}]*color: var\(--accent-text\)/);
   assert.match(styleSource, /\.history-bar\.peak\s*\{[^}]*filter: drop-shadow\([^)]*var\(--history-peak-shadow\)/);
   assert.match(styleSource, /\.local-import-provider-pill\s*\{[^}]*border: 1px solid var\(--accent-border\)/);
   assert.match(styleSource, /\.clip-editor-selection\s*\{[^}]*background: var\(--clip-selection-background\)/);
-  assert.match(styleSource, /--history-bar-start: #9b7aff;[\s\S]+--history-peak-start: #ff806c;[\s\S]+--clip-visualizer-low: #4e1a95/);
   assert.match(styleSource, /\.settings-theme-grid\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(styleSource, /\.settings-theme-card\s*\{[^}]*grid-template-rows: 92px auto/);
   const alternateChrome = styleSource.slice(styleSource.indexOf("@scope (:root[data-theme=\"ocean\"]"));
@@ -1099,6 +1089,31 @@ test("keeps reviewed Windows empty, selection, filter, and metadata states truth
   assert.match(appSource, /\["all", "All"\][\s\S]+\["device", "On Device"\][\s\S]+\["available", "Not Downloaded"\]/);
   assert.match(appSource, /const selectLabel = serverSelecting \? "Cancel song selection"/);
   assert.match(appSource, /id="syncAll"[\s\S]+!offlineDownloadAvailable \|\| \(serverSelecting && !selectedRemoteIDs\.size\) \? "disabled"/);
+  assert.match(appSource, /<button(?=[^>]*id="syncAll")(?=[^>]*class="server-action-primary")[^>]*>\$\{serverDownloadIcon\}<span>Download<\/span>[\s\S]*?<\/button>/);
+  assert.match(appSource, /<button(?=[^>]*id="uploadServer")(?=[^>]*class="server-action-primary")[^>]*>\$\{serverUploadIcon\}<span>Upload<\/span>[\s\S]*?<\/button>/);
+  assert.equal((appSource.match(/<button id="serverMore" class="server-more"/g) || []).length, 1);
+  assert.match(appSource, /<button id="serverMore"[^>]*aria-haspopup="menu"[^>]*aria-controls="serverMoreMenu"[^>]*aria-expanded="false"[^>]*><span aria-hidden="true">\u2022{3}<\/span><\/button>/);
+  const serverMoreStart = appSource.indexOf('<div class="server-more-menu" id="serverMoreMenu"');
+  const serverMoreEnd = appSource.indexOf("</div>", serverMoreStart);
+  assert.ok(serverMoreStart >= 0 && serverMoreEnd > serverMoreStart);
+  const serverMoreSource = appSource.slice(serverMoreStart, serverMoreEnd);
+  assert.doesNotMatch(serverMoreSource, /id="(?:syncAll|uploadServer)"/);
+  assert.match(serverMoreSource, /class="server-more-menu"[^>]*role="menu"/);
+  for (const [id, label] of [
+    ["uploadMissingDownloads", "Upload downloaded songs"],
+    ["syncSelected", "Select songs"],
+    ["syncServerPlaylists", "Sync playlists"],
+  ]) {
+    assert.equal((appSource.match(new RegExp(`id="${id}"`, "g")) || []).length, 1);
+    const buttonBody = serverMoreSource.match(new RegExp(`<button[^>]*id="${id}"[^>]*>([\\s\\S]*?)<\\/button>`))?.[1] || "";
+    assert.ok(buttonBody, `${id} is missing from the server overflow menu`);
+    assert.match(buttonBody, new RegExp(label));
+  }
+  assert.match(appSource, /serverMoreMenu\.onkeydown = \(event\) => \{[\s\S]*?"ArrowDown"[\s\S]*?"ArrowUp"[\s\S]*?"Home"[\s\S]*?"End"/);
+  assert.match(appSource, /event\.key === "Escape"[\s\S]*?event\.stopPropagation\(\)[\s\S]*?closeServerMoreMenu\(\{ restoreFocus: true \}\)/);
+  assert.match(appSource, /event\.key === "Tab"[\s\S]*?outsideFocusable[\s\S]*?closeServerMoreMenu\(\)[\s\S]*?\.focus\(\)/);
+  assert.match(appSource, /const uploadLabel = uploadAvailable[\s\S]*?`Upload —/);
+  assert.match(appSource, /class="server-action-count"[^>]*>\$\{selectedRemoteIDs\.size\}/);
   assert.match(appSource, /event\.key === "Escape"[\s\S]+serverSelecting = false;[\s\S]+selectedRemoteIDs\.clear\(\)/);
   assert.match(appSource, /const resultSummary = filtered \? `Showing \$\{filteredCount\} of \$\{serverCatalog\.length\} tracks` : "All tracks"/);
   assert.match(appSource, /const showConnectionDetail = !connected;/);
@@ -1175,15 +1190,32 @@ test("keeps playlist heroes while the root Library starts with compact filter pi
   assert.match(styleSource, /\.library-top-filters \+ \.recently-added\s*\{[\s\S]*?border-top: 0/);
 });
 
-test("uses the macOS-inspired ambient, artwork, and action gradients", () => {
+test("uses flat colors throughout CSS, SVG, and canvas rendering", () => {
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
-  assert.match(styleSource, /--gradient-accent: linear-gradient\(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%\)/);
-  assert.match(styleSource, /--gradient-artwork: linear-gradient\(145deg, #3349c9 0%, #6857ff 52%, #f18cb2 100%\)/);
-  assert.match(styleSource, /--gradient-ambient:[\s\S]*?radial-gradient\(circle at 74% 4%, #6540f524[\s\S]*?linear-gradient\(180deg, #080910ad, #020305 76%\)/);
-  assert.match(styleSource, /\.hero\s*\{[\s\S]*?radial-gradient\(circle at 12% 20%, #6540f533[\s\S]*?linear-gradient\(90deg, #08090e, #09080f, #07070b\)/);
-  assert.match(styleSource, /\.hero-art\s*\{[\s\S]*?var\(--gradient-artwork\)/);
-  assert.match(styleSource, /\.primary\s*\{[\s\S]*?background: var\(--gradient-accent\)/);
-  assert.match(styleSource, /\.playerbar\s*\{[\s\S]*?linear-gradient\(180deg, #080910f7, #040509fc\)/);
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+
+  assert.doesNotMatch(styleSource, /(?:linear|radial|conic)-gradient\s*\(/i);
+  assert.doesNotMatch(styleSource, /(?:fill|stroke)\s*:\s*url\([^)]*gradient/i);
+  assert.doesNotMatch(appSource, /(?:linear|radial|conic)-gradient\s*\(/i);
+  assert.doesNotMatch(appSource, /<\s*(?:linearGradient|radialGradient)\b/i);
+  assert.doesNotMatch(appSource, /\b(?:fill|stroke)=["']url\([^)]*gradient/i);
+  assert.doesNotMatch(appSource, /\.create(?:Linear|Radial|Conic)Gradient\s*\(/);
+  assert.doesNotMatch(appSource, /\.addColorStop\s*\(/);
+  assert.match(styleSource, /\.primary,[\s\S]+?background: var\(--action-background\)/);
+  assert.match(styleSource, /\.hero-art,[^{]*\{[^}]*background:\s*(?:var\(--[\w-]+\)|#[\da-f]{3,8});/i);
+  assert.match(styleSource, /\.history-bar\s*\{[^}]*fill: var\(--[^)]+\)/);
+  assert.match(styleSource, /\.history-bar\.peak\s*\{[^}]*fill: var\(--[^)]+\)/);
+  const visualizerSource = appSource.slice(
+    appSource.indexOf("function drawClipEditorStageVisualizer"),
+    appSource.indexOf("function renderClipEditorWaveform", appSource.indexOf("function drawClipEditorStageVisualizer")),
+  );
+  assert.match(visualizerSource, /context\.fillStyle = themeCSSColor\(/);
+  assert.match(styleSource, /input\[type="range"\]::-webkit-slider-thumb\s*\{[^}]*-1000px 0 0 1000px var\(--accent\)/);
+  assert.match(styleSource, /\.storage-ring-local\s*\{[^}]*stroke-dasharray: var\(--local-share\) 100/);
+  assert.match(styleSource, /\.storage-ring\.no-local \.storage-ring-local\s*\{\s*display: none/);
+  assert.match(styleSource, /\.server-more-menu\[hidden\]\s*\{\s*display: none/);
+  assert.match(appSource, /class="storage-ring[^\n]+style="--local-share:\$\{localShare\}"/);
+  assert.match(appSource, /<circle class="storage-ring-remote"[^>]*>[\s\S]*?<circle class="storage-ring-local"/);
 });
 
 test("opens a synchronized full-screen Now Playing viewer from the mini-player", () => {
@@ -1225,7 +1257,7 @@ test("opens a synchronized full-screen Now Playing viewer from the mini-player",
   assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.full-player-dialog\[open\],[\s\S]*?\.full-player-dialog\[open\]\.closing \{ animation: none; \}/);
   assert.match(styleSource, /\.full-player-backdrop\s*\{[\s\S]*?z-index: 0[\s\S]*?filter: blur\(64px\) saturate\(1\.18\)[\s\S]*?opacity: \.88/);
   assert.match(styleSource, /\.full-player-backdrop img\s*\{[\s\S]*?object-fit: cover/);
-  assert.match(styleSource, /\.full-player-shade\s*\{[\s\S]*?z-index: 1[\s\S]*?linear-gradient\(180deg, #00000075 0%, #07071194 52%, #000000c2 100%\)/);
+  assert.match(styleSource, /\.full-player-shade\s*\{[\s\S]*?z-index: 1/);
   assert.match(styleSource, /\.full-player-layout\s*\{[\s\S]*?z-index: 2/);
   assert.match(styleSource, /\.full-player-layout\s*\{[\s\S]+grid-template-columns/);
   assert.match(styleSource, /\.full-player-artwork\s*\{[\s\S]+aspect-ratio: 1/);
@@ -1504,9 +1536,22 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(styleSource, /html\s*\{[\s\S]*?overflow: hidden/);
   assert.match(styleSource, /\.local-import-dialog\s*\{[\s\S]*?position: fixed/);
   assert.doesNotMatch(styleSource, /\.local-import-dialog\s*\{[\s\S]{0,160}?position: relative/);
+  assert.match(styleSource, /\.local-import-dialog\s*\{[^}]*border:\s*0;/);
+  const localImportOutline = styleSource.match(/\.local-import-dialog::before\s*\{([^}]*)\}/)?.[1] || "";
+  assert.ok(localImportOutline, "local import full-shell outline is missing");
+  for (const declaration of [
+    /content:\s*"";/,
+    /position:\s*absolute;/,
+    /inset:\s*0;/,
+    /pointer-events:\s*none;/,
+    /border:\s*1px solid var\(--accent-border\);/,
+    /border-radius:\s*inherit;/,
+  ]) assert.match(localImportOutline, declaration);
+  assert.match(styleSource, /\.local-import-panel\s*\{[^}]*position:\s*relative;/);
   assert.match(styleSource, /\.local-import-dialog:not\(\.expanded\)\s*\{[\s\S]*?height: 280px/);
   assert.match(styleSource, /\.local-import-dialog\.expanded\s*\{[\s\S]*?height: min\(600px, calc\(100vh - 64px\)\)/);
   assert.match(styleSource, /\.local-import-dialog\.expanded \.local-import-panel\s*\{\s*height: 100%/);
+  assert.match(styleSource, /@media \(max-width: 1050px\)\s*\{[\s\S]*?\.local-import-dialog\s*\{\s*width: min\(840px, calc\(100vw - 160px\)\)/);
   assert.match(styleSource, /\.local-import-resolved fieldset\s*\{[\s\S]*?flex: 1 1 auto[\s\S]*?overflow: hidden/);
   assert.match(styleSource, /\.local-import-candidates\.search-results\s*\{[\s\S]*?height: 100%[\s\S]*?overscroll-behavior: contain/);
   assert.match(appSource, /LOCAL_IMPORT_PROVIDER_ORDER = Object\.freeze\(\[\s*\["youtube", "YouTube"\],[\s\S]*?\["spotify", "Spotify"\],[\s\S]*?\["soundcloud", "SoundCloud"\]/);
@@ -1660,7 +1705,7 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.doesNotMatch(appSource, /class="history-area"/);
   assert.doesNotMatch(appSource, /class="history-line"/);
   assert.match(styleSource, /\.listening-history-stats/);
-  assert.match(styleSource, /\.listening-history-panel\s*\{[\s\S]*?--history-ambient-surface:[\s\S]*?radial-gradient\(circle at 16% 12%, #536bff24[\s\S]*?radial-gradient\(circle at 76% 20%, #7547ff20[\s\S]*?radial-gradient\(circle at 88% 100%, #ff806c10/);
+  assert.match(styleSource, /\.listening-history-panel\s*\{[^}]*--history-ambient-surface:\s*[^;]+;/);
   assert.match(styleSource, /\.history-content-toolbar\s*\{[\s\S]*?background: transparent/);
   assert.match(styleSource, /\.listening-history-stats\s*\{[\s\S]*?background: transparent/);
   assert.match(styleSource, /\.listening-history-chart\s*\{[\s\S]*?background: transparent/);
@@ -1680,8 +1725,8 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(styleSource, /\.history-song-ranking\s*\{[\s\S]*?grid-auto-flow: column[\s\S]*?max-width: 100%[\s\S]*?overflow-x: auto/);
   assert.match(styleSource, /\.history-ranked-song \.row-art\s*\{[\s\S]*?width: 146px[\s\S]*?height: 146px/);
   assert.match(styleSource, /\.listening-history-stats\[hidden\],[\s\S]+\.listening-history-chart\[hidden\][\s\S]+display: none/);
-  assert.match(styleSource, /\.history-bar\s*\{[\s\S]*?fill: url\("#historyBarGradient"\)/);
-  assert.match(styleSource, /\.history-bar\.peak\s*\{[\s\S]*?fill: url\("#historyPeakBarGradient"\)/);
+  assert.match(styleSource, /\.history-bar\s*\{[^}]*fill: var\(--[^)]+\)/);
+  assert.match(styleSource, /\.history-bar\.peak\s*\{[^}]*fill: var\(--[^)]+\)/);
   assert.match(styleSource, /\.history-bar\.selected[\s\S]*?stroke: var\(--accent-tertiary\)/);
   assert.doesNotMatch(styleSource, /\.history-song-line|\.history-song-legend|\.history-highlight-label|\.song-mode/);
   assert.match(styleSource, /\.history-chart-viewport\s*\{[\s\S]*?overflow: hidden/);
