@@ -81,6 +81,8 @@ data class Playlist(
     val trackIDs: List<String> = emptyList(),
     val isSystem: Boolean = false,
     val remoteSongIDs: List<String>? = null,
+    /** Device-local merged ordering for local and server-only entries. */
+    val entryOrder: List<String>? = null,
 ) {
     val automaticArtworkTrackIDs: List<String>
         get() = if (isSystem) emptyList() else trackIDs.take(4)
@@ -287,11 +289,23 @@ data class TransferProgress(
     val completed: Int,
     val total: Int,
     val currentFilename: String,
+    val currentItem: Int = (completed + 1).coerceAtMost(total.coerceAtLeast(1)),
+    val currentSongID: String? = null,
+    val currentTitle: String = "",
     val bytesTransferred: Long = 0L,
     val totalBytes: Long? = null,
+    val currentItemComplete: Boolean = false,
 ) {
     val fraction: Float
         get() = if (total <= 0) 0f else completed.toFloat() / total.toFloat()
+}
+
+/** Clears byte presentation while preserving item identity and terminal bookkeeping. */
+internal object TransferProgressBoundaryPolicy {
+    fun hidden(progress: TransferProgress): TransferProgress = progress.copy(
+        bytesTransferred = 0L,
+        totalBytes = null,
+    )
 }
 
 sealed interface PlaylistPutResult {

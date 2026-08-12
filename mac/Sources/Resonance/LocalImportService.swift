@@ -5,6 +5,44 @@ import Foundation
 
 typealias LocalImportProgressHandler = @MainActor @Sendable (LocalImportProgress) -> Void
 
+final class LocalImportMetadataEnrichment: @unchecked Sendable {
+    private final class Storage: @unchecked Sendable {
+        private let lock = NSLock()
+        private var metadata: LocalImportMetadata?
+
+        func publish(_ metadata: LocalImportMetadata?) {
+            lock.lock()
+            self.metadata = metadata
+            lock.unlock()
+        }
+
+        var availableMetadata: LocalImportMetadata? {
+            lock.lock()
+            defer { lock.unlock() }
+            return metadata
+        }
+    }
+
+    private let storage: Storage
+    private let task: Task<LocalImportMetadata?, Never>
+
+    init(operation: @escaping @Sendable () async -> LocalImportMetadata?) {
+        let storage = Storage()
+        self.storage = storage
+        self.task = Task {
+            let metadata = await operation()
+            storage.publish(metadata)
+            return metadata
+        }
+    }
+
+    var availableMetadata: LocalImportMetadata? { storage.availableMetadata }
+
+    func value() async -> LocalImportMetadata? { await task.value }
+
+    func cancel() { task.cancel() }
+}
+
 enum LocalImportFeature {
     static var isEnabled: Bool {
         ProcessInfo.processInfo.environment["RESONANCE_LOCAL_DEVICE_IMPORT"] != "0"
@@ -83,6 +121,163 @@ struct LocalImportSessions: @unchecked Sendable {
             googleVideo: session,
             artwork: session
         )
+    }
+}
+
+struct LocalImportSoundCloudOperations: Sendable {
+    let resolveSource: @Sendable (String, URLSession) async throws -> LocalImportSoundCloudSource
+    let resolveAudio: @Sendable (String, URLSession) async throws -> LocalImportSoundCloudAudioStream
+
+    static let production = LocalImportSoundCloudOperations(
+        resolveSource: { source, session in
+            try await LocalImportSoundCloud.resolve(source: source, session: session)
+        },
+        resolveAudio: { source, session in
+            try await LocalImportSoundCloud.resolveAudio(source: source, session: session)
+        }
+    )
+}
+
+/// A small in-memory handoff for the expiring SoundCloud rendition prepared by
+/// a saved server download. Its key deliberately contains only non-secret
+/// server/profile context plus the exact validated source and media mode.
+struct LocalImportPreparedSoundCloudStreamCache: Sendable {
+    private struct Key: Hashable, Sendable {
+        let preparationContext: String
+        let normalizedSource: String
+        let mediaMode: LocalImportMediaMode
+    }
+
+    private struct Entry: Sendable {
+        let stream: LocalImportSoundCloudAudioStream
+        let expiresAt: Date
+    }
+
+    private let maximumCount: Int
+    private let lifetime: TimeInterval
+    private var entries: [Key: Entry] = [:]
+
+    init(maximumCount: Int = 8, lifetime: TimeInterval = 30) {
+        self.maximumCount = min(max(maximumCount, 1), 32)
+        self.lifetime = min(max(lifetime, 1), 120)
+    }
+
+    static func normalizedSource(_ value: String) throws -> String {
+        let source = try LocalImportURL.soundCloudSource(value)
+        guard var components = URLComponents(url: source, resolvingAgainstBaseURL: false) else {
+            throw LocalImportError(
+                stage: .inspectingSource,
+                code: "INVALID_SOUNDCLOUD_URL",
+                message: "Source must be a SoundCloud track or playlist URL."
+            )
+        }
+        components.scheme = components.scheme?.lowercased()
+        components.host = components.host?.lowercased()
+        if components.port == 443 { components.port = nil }
+        components.fragment = nil
+        guard let normalized = components.url else {
+            throw LocalImportError(
+                stage: .inspectingSource,
+                code: "INVALID_SOUNDCLOUD_URL",
+                message: "Source must be a SoundCloud track or playlist URL."
+            )
+        }
+        return normalized.absoluteString
+    }
+
+    mutating func store(
+        _ stream: LocalImportSoundCloudAudioStream,
+        source: String,
+        mediaMode: LocalImportMediaMode,
+        preparationContext: String,
+        now: Date = .now
+    ) throws {
+        let key = try key(
+            source: source,
+            mediaMode: mediaMode,
+            preparationContext: preparationContext
+        )
+        prune(at: now)
+        if entries[key] == nil,
+           entries.count >= maximumCount,
+           let oldestKey = entries.min(by: { $0.value.expiresAt < $1.value.expiresAt })?.key {
+            entries.removeValue(forKey: oldestKey)
+        }
+        entries[key] = Entry(stream: stream, expiresAt: now.addingTimeInterval(lifetime))
+    }
+
+    /// Removes the entry before returning it, so cancellation or a failed
+    /// transfer can never replay the same short-lived rendition handoff.
+    mutating func take(
+        source: String,
+        mediaMode: LocalImportMediaMode,
+        preparationContext: String,
+        now: Date = .now
+    ) -> LocalImportSoundCloudAudioStream? {
+        guard let key = try? key(
+            source: source,
+            mediaMode: mediaMode,
+            preparationContext: preparationContext
+        ) else { return nil }
+        prune(at: now)
+        return entries.removeValue(forKey: key)?.stream
+    }
+
+    mutating func discard(
+        source: String,
+        mediaMode: LocalImportMediaMode,
+        preparationContext: String,
+        now: Date = .now
+    ) {
+        prune(at: now)
+        guard let key = try? key(
+            source: source,
+            mediaMode: mediaMode,
+            preparationContext: preparationContext
+        ) else { return }
+        entries.removeValue(forKey: key)
+    }
+
+    mutating func cachedCount(now: Date = .now) -> Int {
+        prune(at: now)
+        return entries.count
+    }
+
+    private func key(
+        source: String,
+        mediaMode: LocalImportMediaMode,
+        preparationContext: String
+    ) throws -> Key {
+        let loweredContext = preparationContext.lowercased()
+        let forbiddenCredentialMarkers = [
+            "authorization:",
+            "bearer ",
+            "token=",
+            "access_token",
+            "admin_key",
+        ]
+        guard !preparationContext.isEmpty,
+              preparationContext.utf8.count <= 4_096,
+              preparationContext.unicodeScalars.allSatisfy({
+                  !CharacterSet.controlCharacters.contains($0)
+              }),
+              !forbiddenCredentialMarkers.contains(where: { loweredContext.contains($0) }) else {
+            throw LocalImportError(
+                stage: .inspectingSource,
+                code: "INVALID_PREPARATION_CONTEXT",
+                message: "The saved download context is invalid. Refresh the server library and try again."
+            )
+        }
+        let normalizedSource = try Self.normalizedSource(source)
+        return Key(
+            preparationContext: preparationContext,
+            normalizedSource: normalizedSource,
+            mediaMode: mediaMode
+        )
+    }
+
+    private mutating func prune(at now: Date) {
+        entries = entries.filter { $0.value.expiresAt > now }
     }
 }
 
@@ -203,6 +398,8 @@ actor LocalDeviceImportService {
     private let localRoot: URL
     private let temporaryRoot: URL
     private let fileManager: FileManager
+    private let soundCloudOperations: LocalImportSoundCloudOperations
+    private var preparedSoundCloudStreams = LocalImportPreparedSoundCloudStreamCache()
     private var preparedDirectories = false
 
     private let maxDocumentBytes = 6 * 1_024 * 1_024
@@ -216,11 +413,13 @@ actor LocalDeviceImportService {
         sessions: LocalImportSessions = .production(),
         localRoot: URL? = nil,
         temporaryRoot: URL = FileManager.default.temporaryDirectory,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        soundCloudOperations: LocalImportSoundCloudOperations = .production
     ) {
         self.sessions = sessions
         self.temporaryRoot = temporaryRoot
         self.fileManager = fileManager
+        self.soundCloudOperations = soundCloudOperations
         if let localRoot {
             self.localRoot = localRoot
         } else {
@@ -257,7 +456,7 @@ actor LocalDeviceImportService {
                     message: "SoundCloud links can only be imported as audio."
                 )
             }
-            switch try await LocalImportSoundCloud.resolve(source: source, session: sessions.soundcloud) {
+            switch try await soundCloudOperations.resolveSource(source, sessions.soundcloud) {
             case .track(let track):
                 return track.metadata
             case .playlist:
@@ -298,6 +497,166 @@ actor LocalDeviceImportService {
         return try await resolveYouTubeMetadata(videoID: videoID)
     }
 
+    /// Builds the downloadable candidate for a server song while reusing the
+    /// metadata that the catalog screen already hydrated. SoundCloud's
+    /// short-lived rendition is prepared once here and handed directly to the
+    /// immediately following import.
+    func resolveSavedDownload(
+        source: String,
+        metadata: LocalImportSpotifyTrack,
+        mediaMode: LocalImportMediaMode = .audio,
+        preparationContext: String,
+        progress: LocalImportProgressHandler
+    ) async throws -> LocalImportResolution {
+        try Task.checkCancellation()
+        try await prepareDirectories()
+
+        if LocalImportURL.isSoundCloud(source) {
+            guard mediaMode == .audio else {
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "SOUNDCLOUD_AUDIO_ONLY",
+                    message: "SoundCloud links can only be imported as audio."
+                )
+            }
+            guard metadata.type == "track" else {
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "PLAYLIST_METADATA_UNSUPPORTED",
+                    message: "A saved server song must identify one track, not a playlist."
+                )
+            }
+            let normalizedSource = try LocalImportPreparedSoundCloudStreamCache.normalizedSource(source)
+            let normalizedMetadataSource = try LocalImportPreparedSoundCloudStreamCache.normalizedSource(metadata.sourceURL)
+            guard normalizedMetadataSource == normalizedSource else {
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "SAVED_METADATA_SOURCE_MISMATCH",
+                    message: "The saved metadata no longer matches this SoundCloud source. Refresh the server library and try again."
+                )
+            }
+
+            preparedSoundCloudStreams.discard(
+                source: normalizedSource,
+                mediaMode: mediaMode,
+                preparationContext: preparationContext
+            )
+            await progress(.init(stage: .inspectingSource))
+            let stream = try await soundCloudOperations.resolveAudio(normalizedSource, sessions.soundcloud)
+            try Task.checkCancellation()
+            try preparedSoundCloudStreams.store(
+                stream,
+                source: normalizedSource,
+                mediaMode: mediaMode,
+                preparationContext: preparationContext
+            )
+            do {
+                try Task.checkCancellation()
+            } catch {
+                preparedSoundCloudStreams.discard(
+                    source: normalizedSource,
+                    mediaMode: mediaMode,
+                    preparationContext: preparationContext
+                )
+                throw error
+            }
+            let candidate = LocalImportAudioSourceMatch(
+                videoID: "soundcloud:\(metadata.trackID)",
+                title: metadata.title,
+                artist: metadata.artist,
+                album: metadata.album,
+                durationSeconds: metadata.durationSeconds,
+                thumbnailURL: metadata.artworkURL,
+                sourceProvider: .soundcloud,
+                officialArtist: true,
+                sourceURL: normalizedSource,
+                score: 1,
+                confidence: "direct",
+                match: .init(
+                    title: 1,
+                    artist: 1,
+                    album: metadata.album == nil ? nil : 1,
+                    duration: metadata.durationSeconds == nil ? nil : 1,
+                    durationDeltaSeconds: 0
+                )
+            )
+            return LocalImportResolution(
+                kind: .soundCloud,
+                track: metadata,
+                candidates: [candidate],
+                releases: []
+            )
+        }
+
+        if LocalImportURL.isSpotify(source) {
+            guard mediaMode == .audio else {
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "SPOTIFY_VIDEO_UNSUPPORTED",
+                    message: "Video downloads require a direct YouTube video URL."
+                )
+            }
+            guard try LocalImportURL.spotifyPlaylist(source) == nil,
+                  metadata.type == "track" else {
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "PLAYLIST_METADATA_UNSUPPORTED",
+                    message: "A saved server song must identify one track, not a playlist."
+                )
+            }
+            await progress(.init(stage: .searchingCandidates))
+            let candidates = try await searchCandidates(for: metadata)
+            guard !candidates.isEmpty else {
+                throw LocalImportError(
+                    stage: .searchingCandidates,
+                    code: "NO_AUDIO_MATCH",
+                    message: "No file-backed audio source matched this Spotify track. Try a direct YouTube URL instead."
+                )
+            }
+            return LocalImportResolution(
+                kind: .spotify,
+                track: metadata,
+                candidates: candidates,
+                releases: []
+            )
+        }
+
+        guard let videoID = try LocalImportURL.youtubeVideoID(source) else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "UNSUPPORTED_SOURCE",
+                message: "A saved server song must identify one supported YouTube track."
+            )
+        }
+        await progress(.init(stage: .inspectingSource))
+        let candidate = LocalImportAudioSourceMatch(
+            videoID: videoID,
+            title: metadata.title,
+            artist: metadata.artist,
+            album: metadata.album,
+            durationSeconds: metadata.durationSeconds,
+            thumbnailURL: metadata.artworkURL,
+            sourceProvider: .youtube,
+            officialArtist: false,
+            sourceURL: source,
+            score: 1,
+            confidence: "high",
+            match: .init(
+                title: 1,
+                artist: 1,
+                album: nil,
+                duration: 1,
+                durationDeltaSeconds: 0
+            )
+        )
+        return LocalImportResolution(
+            kind: .youtube,
+            track: metadata,
+            candidates: [candidate],
+            releases: []
+        )
+    }
+
     func resolve(
         source: String,
         mediaMode: LocalImportMediaMode = .audio,
@@ -315,7 +674,7 @@ actor LocalDeviceImportService {
                 )
             }
             await progress(.init(stage: .resolvingMetadata))
-            let soundCloudSource = try await LocalImportSoundCloud.resolve(source: source, session: sessions.soundcloud)
+            let soundCloudSource = try await soundCloudOperations.resolveSource(source, sessions.soundcloud)
             switch soundCloudSource {
             case .track(let soundCloudTrack):
                 let track = soundCloudTrack.metadata
@@ -568,8 +927,11 @@ actor LocalDeviceImportService {
     func importCandidate(
         _ candidate: LocalImportAudioSourceMatch,
         metadata inputMetadata: LocalImportMetadata,
+        metadataEnrichment: LocalImportMetadataEnrichment? = nil,
+        finalizeAuthorization: (@Sendable () async throws -> Void)? = nil,
         existingTracks: [Track],
         mediaMode: LocalImportMediaMode = .audio,
+        preparationContext: String? = nil,
         progress: LocalImportProgressHandler
     ) async throws -> LocalImportOutcome {
         try Task.checkCancellation()
@@ -585,7 +947,10 @@ actor LocalDeviceImportService {
             return try await importSoundCloudCandidate(
                 candidate,
                 metadata: inputMetadata,
+                metadataEnrichment: metadataEnrichment,
+                finalizeAuthorization: finalizeAuthorization,
                 existingTracks: existingTracks,
+                preparationContext: preparationContext,
                 progress: progress
             )
         }
@@ -638,12 +1003,14 @@ actor LocalDeviceImportService {
 
         try Task.checkCancellation()
         await progress(.init(stage: .processing))
+        let enrichedInputMetadata = metadataEnrichment?.availableMetadata ?? inputMetadata
+        try Task.checkCancellation()
         let metadata = LocalImportMetadata(
-            title: cleanMetadata(inputMetadata.title, fallback: resolved.preview.title),
-            artist: cleanMetadata(inputMetadata.artist, fallback: resolved.preview.author ?? "Unknown uploader"),
-            album: cleanMetadata(inputMetadata.album, fallback: "Imported"),
-            artworkURL: inputMetadata.artworkURL ?? resolved.preview.thumbnailURL,
-            sourceURL: inputMetadata.sourceURL
+            title: cleanMetadata(enrichedInputMetadata.title, fallback: resolved.preview.title),
+            artist: cleanMetadata(enrichedInputMetadata.artist, fallback: resolved.preview.author ?? "Unknown uploader"),
+            album: cleanMetadata(enrichedInputMetadata.album, fallback: "Imported"),
+            artworkURL: enrichedInputMetadata.artworkURL ?? resolved.preview.thumbnailURL,
+            sourceURL: enrichedInputMetadata.sourceURL
         )
         let artwork = await fetchArtwork(metadata.artworkURL)
         try Task.checkCancellation()
@@ -676,6 +1043,8 @@ actor LocalDeviceImportService {
             return .duplicate(duplicate.id, source: sourceAssociation)
         }
 
+        try Task.checkCancellation()
+        try await finalizeAuthorization?()
         try Task.checkCancellation()
         await progress(.init(stage: .savingLocal))
         let filename = safeFilename("\(metadata.artist) - \(metadata.title)") + ".\(mediaMode.fileExtension)"
@@ -724,7 +1093,10 @@ actor LocalDeviceImportService {
     private func importSoundCloudCandidate(
         _ candidate: LocalImportAudioSourceMatch,
         metadata inputMetadata: LocalImportMetadata,
+        metadataEnrichment: LocalImportMetadataEnrichment?,
+        finalizeAuthorization: (@Sendable () async throws -> Void)?,
         existingTracks: [Track],
+        preparationContext: String?,
         progress: LocalImportProgressHandler
     ) async throws -> LocalImportOutcome {
         let temporary = temporaryRoot.appendingPathComponent("resonance-import-\(UUID().uuidString)", isDirectory: true)
@@ -734,10 +1106,24 @@ actor LocalDeviceImportService {
         let source = temporary.appendingPathComponent("source.mp3")
         let processed = temporary.appendingPathComponent("processed.m4a")
         await progress(.init(stage: .inspectingSource))
-        let stream = try await LocalImportSoundCloud.resolveAudio(
-            source: candidate.sourceURL,
-            session: sessions.soundcloud
-        )
+        try Task.checkCancellation()
+        let preparedStream: LocalImportSoundCloudAudioStream?
+        if let preparationContext {
+            preparedStream = preparedSoundCloudStreams.take(
+                source: candidate.sourceURL,
+                mediaMode: .audio,
+                preparationContext: preparationContext
+            )
+        } else {
+            preparedStream = nil
+        }
+        let stream: LocalImportSoundCloudAudioStream
+        if let preparedStream {
+            stream = preparedStream
+        } else {
+            stream = try await soundCloudOperations.resolveAudio(candidate.sourceURL, sessions.soundcloud)
+        }
+        try Task.checkCancellation()
         let sourceAssociation = LocalImportSourceAssociation(
             sourceURL: inputMetadata.sourceURL,
             downloadSourceURL: stream.streamingURL
@@ -757,12 +1143,14 @@ actor LocalDeviceImportService {
 
         try Task.checkCancellation()
         await progress(.init(stage: .processing))
+        let enrichedInputMetadata = metadataEnrichment?.availableMetadata ?? inputMetadata
+        try Task.checkCancellation()
         let metadata = LocalImportMetadata(
-            title: cleanMetadata(inputMetadata.title, fallback: stream.track.title),
-            artist: cleanMetadata(inputMetadata.artist, fallback: stream.track.artist),
-            album: cleanMetadata(inputMetadata.album, fallback: stream.track.album ?? "SoundCloud"),
-            artworkURL: inputMetadata.artworkURL ?? stream.track.artworkURL,
-            sourceURL: inputMetadata.sourceURL
+            title: cleanMetadata(enrichedInputMetadata.title, fallback: stream.track.title),
+            artist: cleanMetadata(enrichedInputMetadata.artist, fallback: stream.track.artist),
+            album: cleanMetadata(enrichedInputMetadata.album, fallback: stream.track.album ?? "SoundCloud"),
+            artworkURL: enrichedInputMetadata.artworkURL ?? stream.track.artworkURL,
+            sourceURL: enrichedInputMetadata.sourceURL
         )
         let artwork = await fetchArtwork(metadata.artworkURL)
         try Task.checkCancellation()
@@ -791,6 +1179,8 @@ actor LocalDeviceImportService {
             return .duplicate(duplicate.id, source: sourceAssociation)
         }
 
+        try Task.checkCancellation()
+        try await finalizeAuthorization?()
         try Task.checkCancellation()
         await progress(.init(stage: .savingLocal))
         let filename = safeFilename("\(metadata.artist) - \(metadata.title)") + ".m4a"
@@ -824,10 +1214,7 @@ actor LocalDeviceImportService {
     func previewStream(for candidate: LocalImportAudioSourceMatch) async throws -> LocalImportPreviewStream {
         try Task.checkCancellation()
         if candidate.sourceProvider == .soundcloud {
-            let stream = try await LocalImportSoundCloud.resolveAudio(
-                source: candidate.sourceURL,
-                session: sessions.soundcloud
-            )
+            let stream = try await soundCloudOperations.resolveAudio(candidate.sourceURL, sessions.soundcloud)
             return LocalImportPreviewStream(url: stream.streamingURL, httpHeaders: [:])
         }
         guard let videoID = try LocalImportURL.youtubeVideoID(candidate.sourceURL) else {

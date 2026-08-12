@@ -34,7 +34,18 @@ const {
 const { readAudioMetadata } = require("./metadata.cjs");
 const { normalizeSourceIdentities, normalizeSourceIdentity } = require("./provenance.cjs");
 const { createRenewablePolicyLease } = require("./policy-lease.cjs");
-const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload, serverDownloadDisplayName } = require("./server-download.cjs");
+const {
+  SERVER_DOWNLOAD_ATTEMPTS,
+  createServerCatalogSnapshotStore,
+  createServerDownloadProgressPublisher,
+  retryServerDownload,
+  serverDownloadImportedMetadata,
+  serverDownloadMetadata,
+  serverDownloadMetadataContextMatches,
+  serverDownloadMetadataIsResolved,
+  serverDownloadMetadataSnapshot,
+  serverDownloadProgressEvent,
+} = require("./server-download.cjs");
 const {
   SERVER_STREAM_SCHEME,
   ServerStreamValidationError,
@@ -49,12 +60,13 @@ const {
 } = require("./server-stream.cjs");
 const { catalogSHA256, normalizeServerBaseURL } = require("./server-policy.cjs");
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
-const { LocalImportError, searchYouTubeAudioSources, youtubeVideoID } = require("./local-import-core.cjs");
+const { LocalImportError, isSpotifyURL, searchYouTubeAudioSources, youtubeVideoID } = require("./local-import-core.cjs");
 const { importFileBackedSource, searchFileBackedSources } = require("./local-debrid.cjs");
 const {
   artworkFileDataURL,
   fetchArtwork,
   importConfirmedSource,
+  resolveLocalImportDownloadSource,
   resolveLocalImportMetadata,
   resolveLocalImportSource,
   safeArtworkURL,
@@ -158,6 +170,7 @@ const APP_THEME_IDS = new Set([DEFAULT_APP_THEME, "ocean", "forest", "sunset"]);
 let runtimeAppPreferences = { theme: DEFAULT_APP_THEME, runInBackground: false, discordRichPresence: false };
 let currentDiscordPresenceStatus = { state: "disabled", message: "Rich Presence is off.", applicationConfigured: false };
 const activeServerTransfers = new Map();
+let serverTransferGeneration = 0;
 const activeLocalImports = new Map();
 const activeLocalImportPreviews = new Map();
 const cachedLocalImportPreviews = new Map();
@@ -178,6 +191,7 @@ let clientConfigMutationQueue = Promise.resolve();
 let clientConfigState = null;
 const serverUploadRetries = new Map();
 const serverStreamSessions = new Map();
+const serverCatalogSnapshots = createServerCatalogSnapshotStore();
 const rendererCredentialFingerprints = new Map();
 const rendererCredentialEpochs = new Map();
 const credentialFingerprintKey = randomBytes(32);
@@ -587,8 +601,19 @@ function beginServerTransfer(event) {
   const senderID = event.sender.id;
   activeServerTransfers.get(senderID)?.abort();
   const controller = new AbortController();
+  Object.defineProperty(controller, "resonanceGeneration", {
+    value: ++serverTransferGeneration,
+    enumerable: false,
+  });
   activeServerTransfers.set(senderID, controller);
   return controller;
+}
+
+function serverTransferIsActive(event, controller, generation = controller?.resonanceGeneration) {
+  const active = activeServerTransfers.get(event.sender.id);
+  return active === controller
+    && active?.resonanceGeneration === generation
+    && controller?.signal.aborted !== true;
 }
 
 function finishServerTransfer(event, controller) {
@@ -1232,6 +1257,7 @@ function createWindow() {
   const windowWebContentsID = window.webContents.id;
   window.webContents.once("destroyed", () => {
     revokeServerStreamsForOwner(windowWebContentsID);
+    serverCatalogSnapshots.clear(windowWebContentsID);
     rendererCredentialFingerprints.delete(windowWebContentsID);
     rendererCredentialEpochs.delete(windowWebContentsID);
   });
@@ -1647,6 +1673,14 @@ function credentialFingerprint(value) {
     .digest("hex");
 }
 
+function serverCatalogCredentialFingerprint(token) {
+  const value = canonicalCredentialToken(token);
+  return createHmac("sha256", credentialFingerprintKey)
+    .update(`${Buffer.byteLength(value, "utf8")}:`, "utf8")
+    .update(value, "utf8")
+    .digest("hex");
+}
+
 ipcMain.handle("server:credentials:load", async (event) => {
   let rawValue = { clientToken: "", adminToken: "" };
   if (usesPreviewCredentialStore()) {
@@ -1692,6 +1726,7 @@ ipcMain.handle("server:credentials:save", async (event, value) => {
   if (previousFingerprint !== nextFingerprint) {
     rendererCredentialEpochs.set(event.sender.id, (rendererCredentialEpochs.get(event.sender.id) || 0) + 1);
     revokeServerStreamsForOwner(event.sender.id);
+    serverCatalogSnapshots.clear(event.sender.id);
   }
   rendererCredentialFingerprints.set(event.sender.id, nextFingerprint);
   return true;
@@ -2147,6 +2182,9 @@ ipcMain.handle("local-import:upload", async (event, {
       item: { mediaSourceURL, mediaKind },
       signal: controller.signal,
     });
+    if (response.status === 201 || response.status === 409) {
+      invalidateServerCatalogSnapshots(base, profileID);
+    }
     const { song: remoteSong } = await readServerUploadResponse(response, { serverOrigin: base.origin });
     completed = 1;
     publishUploadProgress();
@@ -2392,8 +2430,8 @@ async function requireClientUploadMode({ baseURL, token, profileID, mode, force 
   return evaluated.config;
 }
 
-async function requireOfflineDownloadMode({ baseURL, token, profileID }) {
-  const evaluated = await loadClientConfig({ baseURL, token, profileID, force: true });
+async function requireOfflineDownloadMode({ baseURL, token, profileID, force = true }) {
+  const evaluated = await loadClientConfig({ baseURL, token, profileID, force });
   const values = evaluated.config?.values || {};
   const kills = evaluated.config?.kill_switches || {};
   if (kills.offline_downloads || values["download.offline_mode"] !== "verified_file_cache") {
@@ -2415,7 +2453,7 @@ class OfflineDownloadPolicyError extends Error {
 async function beginOfflineDownloadPolicyLease({ baseURL, token, profileID, parentSignal }) {
   let initialConfig;
   try {
-    initialConfig = await requireOfflineDownloadMode({ baseURL, token, profileID });
+    initialConfig = await requireOfflineDownloadMode({ baseURL, token, profileID, force: false });
   } catch (error) {
     const policyError = new OfflineDownloadPolicyError(error?.message || undefined);
     policyError.verifiedRevocation = error?.verifiedRevocation === true;
@@ -2426,6 +2464,7 @@ async function beginOfflineDownloadPolicyLease({ baseURL, token, profileID, pare
     initialConfig,
     allowUnsignedInitial: initialConfig?.verified !== true,
     parentSignal,
+    renew: () => requireOfflineDownloadMode({ baseURL, token, profileID, force: true }),
     errorFactory: (message) => new OfflineDownloadPolicyError(message),
   });
 }
@@ -2536,7 +2575,10 @@ ipcMain.handle("server:source-import", async (event, settings = {}) => {
   // HTTP 201/409 means the server has committed. Stop exposing cancellation
   // before reading and reconciling that authoritative response body. Error
   // responses remain cancellable while their body is read.
-  if (response.status === 201 || response.status === 409) finishLocalImport(event, controller);
+  if (response.status === 201 || response.status === 409) {
+    invalidateServerCatalogSnapshots(base, profileID);
+    finishLocalImport(event, controller);
+  }
   const responseContentType = String(response.headers.get("content-type") || "")
     .split(";", 1)[0]
     .trim()
@@ -2610,12 +2652,11 @@ ipcMain.handle("server:artwork", async (_event, { baseURL, token, profileID, son
   return `data:${contentType};base64,${bytes.toString("base64")}`;
 });
 
-ipcMain.handle("server:catalog", async (_event, { baseURL, token, profileID }) => {
-  if (!token) throw new Error("Sign in to your Resonance account.");
-  const base = normalizeBaseURL(baseURL);
+async function fetchServerCatalogDocument(base, token, profileID, { signal, extraHeaders = {} } = {}) {
   const response = await fetch(new URL("api/v1/songs", base), {
-    headers: { ...profileHeaders(token, profileID), Accept: "application/json" },
+    headers: { ...profileHeaders(token, profileID), ...extraHeaders, Accept: "application/json" },
     redirect: "manual",
+    signal,
   });
   if (response.status !== 200) {
     response.body?.cancel?.().catch?.(() => undefined);
@@ -2634,6 +2675,36 @@ ipcMain.handle("server:catalog", async (_event, { baseURL, token, profileID }) =
     throw new Error("The server returned an invalid catalog document.");
   }
   return catalog;
+}
+
+function rememberServerCatalogSnapshot(ownerID, base, token, profileID, catalog) {
+  return serverCatalogSnapshots.remember(ownerID, {
+    origin: base.origin,
+    profileID: String(profileID || "default"),
+    credentialFingerprint: serverCatalogCredentialFingerprint(token),
+  }, catalog);
+}
+
+function serverCatalogSnapshot(ownerID, base, token, profileID) {
+  return serverCatalogSnapshots.read(ownerID, {
+    origin: base.origin,
+    profileID: String(profileID || "default"),
+    credentialFingerprint: serverCatalogCredentialFingerprint(token),
+  });
+}
+
+function invalidateServerCatalogSnapshots(base, profileID) {
+  return serverCatalogSnapshots.clearContext({
+    origin: base.origin,
+    profileID: String(profileID || "default"),
+  });
+}
+
+ipcMain.handle("server:catalog", async (event, { baseURL, token, profileID }) => {
+  if (!token) throw new Error("Sign in to your Resonance account.");
+  const base = normalizeBaseURL(baseURL);
+  const catalog = await fetchServerCatalogDocument(base, token, profileID);
+  return rememberServerCatalogSnapshot(event.sender.id, base, token, profileID, catalog);
 });
 
 ipcMain.handle("server:playlists:get", async (_event, { baseURL, token, profileID }) => {
@@ -3169,18 +3240,57 @@ async function downloadSavedSourceSong(song, options) {
   const sourceURL = preservedMediaSourceURL(song?.source_url);
   if (!sourceURL) throw new Error("The server returned an invalid saved source link.");
   const mediaKind = song?.media_kind === "video" ? "video" : "audio";
-  const resolution = await resolveLocalImportSource(sourceURL, options.signal, options.onProgress, {
-    searchYouTubeAudioSources,
-  }, { mediaKind });
+  const preparationContext = JSON.stringify({
+    serverOrigin: new URL(options.serverOrigin).origin,
+    profileID: String(options.profileID || "default"),
+    songID: String(song?.id || ""),
+  });
+  const metadataController = new AbortController();
+  const metadataSignal = AbortSignal.any([options.signal, metadataController.signal]);
+  const metadataSnapshot = { settled: options.metadataIsResolved, metadata: null };
+  const metadataEnrichment = options.metadataIsResolved
+    ? Promise.resolve({ metadata: null, error: null })
+    : resolveLocalImportMetadata(sourceURL, metadataSignal, {}, { mediaKind })
+      .then((metadata) => ({ metadata, error: null }))
+      .catch((error) => ({ metadata: null, error }));
+  void metadataEnrichment.then((enrichment) => {
+    metadataSnapshot.metadata = enrichment.metadata || null;
+    metadataSnapshot.settled = true;
+  }, () => {
+    // The promise above already converts resolver failures into a value. Keep
+    // this rejection handler as a final ownership guard if that ever changes.
+    metadataSnapshot.settled = true;
+  });
+  try {
+  // YouTube and SoundCloud can begin media discovery from their source URL
+  // while missing display metadata is enriched independently. Spotify needs
+  // the resolved title/artist to locate its audio match, so that provider is
+  // the one unavoidable exception when the catalog truly has no metadata.
+  let acquisitionMetadata = options.metadata;
+  if (!options.metadataIsResolved && isSpotifyURL(sourceURL)) {
+    const enrichment = await metadataEnrichment;
+    options.signal.throwIfAborted();
+    acquisitionMetadata = { ...options.metadata, ...(enrichment.metadata || {}) };
+  }
+  const resolution = await resolveLocalImportDownloadSource(
+    sourceURL,
+    acquisitionMetadata,
+    options.signal,
+    options.onProgress,
+    { searchYouTubeAudioSources },
+    { mediaKind, preparationContext },
+  );
   if (resolution?.track?.type === "playlist") {
     throw new Error("A saved song link resolved to a playlist instead of one song.");
   }
   const candidate = resolution?.candidates?.[0];
   if (!candidate?.sourceURL) throw new Error("No downloadable source matched this saved song link.");
-  const metadata = {
-    ...(candidate.importMetadata || resolution.track || {}),
+  const initialMetadata = serverDownloadImportedMetadata(
+    resolution.track || candidate.importMetadata,
+    options.metadata,
+    options.metadataIsResolved,
     sourceURL,
-  };
+  );
   const imported = await importConfirmedSource({
     sourceURL: candidate.sourceURL,
     sourceIdentity: normalizeSourceIdentity(candidate.sourceIdentity, {
@@ -3189,11 +3299,31 @@ async function downloadSavedSourceSong(song, options) {
       sourcePageURL: sourceURL,
     }),
     mediaKind,
-    metadata,
+    metadata: initialMetadata,
+    metadataSnapshot,
+    preparedSoundCloudAudio: candidate.preparedSoundCloudAudio,
+    preparationContext,
     existing: options.existing,
     destinationDirectory: options.destinationDirectory,
     temporaryRoot: app.getPath("temp"),
   }, options.signal, options.onProgress);
+  options.onProgress?.({ stage: "transfer_complete" });
+  try {
+    await options.finalizeAuthorization?.();
+  } catch (error) {
+    if (imported.kind === "created" && imported.filePath) {
+      await fs.rm(imported.filePath, { force: true }).catch(() => undefined);
+    }
+    throw error;
+  }
+  const metadata = imported.metadata || serverDownloadImportedMetadata(
+    metadataSnapshot.settled && metadataSnapshot.metadata
+      ? metadataSnapshot.metadata
+      : resolution.track || candidate.importMetadata,
+    options.metadata,
+    options.metadataIsResolved,
+    sourceURL,
+  );
   const duplicate = imported.kind === "duplicate" ? imported.track : null;
   const filePath = duplicate?.filePath || imported.filePath;
   if (!filePath) throw new Error("The resolved song did not produce a local file.");
@@ -3219,55 +3349,92 @@ async function downloadSavedSourceSong(song, options) {
       ? duplicate.preservesUnlinkedImport
       : storageLocationForPath(filePath) !== "server-cache",
   });
+  } finally {
+    metadataController.abort();
+    void metadataEnrichment.then(() => undefined, () => undefined);
+  }
 }
 
-ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existing = [], songIDs = null }) => {
+ipcMain.handle("server:sync", async (event, {
+  baseURL,
+  token,
+  profileID,
+  existing = [],
+  songIDs = null,
+  songTitles = {},
+  songMetadata = {},
+}) => {
   token = canonicalCredentialToken(token);
   if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
-  await requireOfflineDownloadMode({ baseURL: base.href, token, profileID });
-  const requestContext = await clientConfigContext(base.href, profileID);
-  const downloadHeaders = {
-    ...profileHeaders(token, profileID),
-    ...requestContext.expected.request_headers,
-  };
   const controller = beginServerTransfer(event);
-  const { signal } = controller;
+  const transferGeneration = controller.resonanceGeneration;
+  let policyLease = null;
   let catalog = null;
   const downloaded = [];
   const replacedTrackIDs = [];
   const failed = [];
   try {
-  {
-    const response = await fetch(new URL("api/v1/songs", base), {
-      headers: { ...downloadHeaders, Accept: "application/json" },
-      redirect: "manual",
+  policyLease = await beginOfflineDownloadPolicyLease({
+    baseURL: base.href,
+    token,
+    profileID,
+    parentSignal: controller.signal,
+  });
+  // The exact, active cached policy is sufficient to start. A server refresh
+  // overlaps acquisition and invalidates this lease immediately on a verified
+  // revocation or shorter expiry instead of gating the first media byte.
+  const policyRefresh = policyLease.refresh();
+  const { signal } = policyLease;
+  const requestContext = await clientConfigContext(base.href, profileID);
+  const downloadHeaders = {
+    ...profileHeaders(token, profileID),
+    ...requestContext.expected.request_headers,
+  };
+  catalog = serverCatalogSnapshot(event.sender.id, base, token, profileID);
+  if (!catalog) {
+    catalog = await fetchServerCatalogDocument(base, token, profileID, {
       signal,
+      extraHeaders: requestContext.expected.request_headers,
     });
-    if (response.status !== 200) {
-      response.body?.cancel?.().catch?.(() => undefined);
-      throw new Error(`Server catalog request returned HTTP ${response.status}.`);
-    }
-    const contentType = String(response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
-    if (contentType !== "application/json") {
-      response.body?.cancel?.().catch?.(() => undefined);
-      throw new Error("The server returned an invalid catalog content type.");
-    }
-    const rawCatalog = await boundedResponseBody(response, MAX_SERVER_STREAM_CATALOG_BYTES, "Server catalog");
-    try { catalog = JSON.parse(rawCatalog.toString("utf8")); }
-    catch { throw new Error("The server returned malformed catalog JSON."); }
-    if (!catalog || typeof catalog !== "object" || Array.isArray(catalog) || !Array.isArray(catalog.songs)) {
-      throw new Error("The server returned an invalid catalog document.");
-    }
+    rememberServerCatalogSnapshot(event.sender.id, base, token, profileID, catalog);
   }
   const paths = await ensureDirectories();
   const requested = Array.isArray(songIDs) ? new Set(songIDs) : null;
+  const preferredTitles = new Map(Object.entries(
+    songTitles && typeof songTitles === "object" && !Array.isArray(songTitles) ? songTitles : {},
+  ).slice(0, 2_000).flatMap(([id, title]) => {
+    const songID = String(id || "").trim();
+    const displayTitle = typeof title === "string" ? title.trim().slice(0, 500) : "";
+    return songID && songID.length <= 256 && displayTitle ? [[songID, displayTitle]] : [];
+  }));
+  const preferredMetadata = new Map(Object.entries(
+    songMetadata && typeof songMetadata === "object" && !Array.isArray(songMetadata) ? songMetadata : {},
+  ).slice(0, 2_000).flatMap(([id, metadata]) => {
+    const songID = String(id || "").trim();
+    const snapshot = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? serverDownloadMetadataSnapshot(metadata)
+      : null;
+    return songID && songID.length <= 256 && snapshot
+      ? [[songID, snapshot]]
+      : [];
+  }));
   const songs = (catalog.songs || []).filter((song) => !requested || requested.has(song.id));
-  let completed = 0;
+  const pendingDownloads = [];
   for (const song of songs) {
     signal.throwIfAborted();
     const remoteName = song.filename || song.name || `Track-${song.id}.mp3`;
-    const displayName = serverDownloadDisplayName(song, remoteName);
+    const metadataSnapshot = preferredMetadata.get(String(song.id));
+    const metadataContextMatches = serverDownloadMetadataContextMatches(song, metadataSnapshot);
+    const displayMetadata = serverDownloadMetadata(song, metadataContextMatches ? {
+      ...metadataSnapshot,
+      title: metadataSnapshot?.title || preferredTitles.get(String(song.id)),
+    } : {});
+    const metadataIsResolved = serverDownloadMetadataIsResolved(
+      song,
+      metadataSnapshot,
+    );
+    const displayName = displayMetadata.title;
     const remoteModified = song.modified_at || song.modified_utc || null;
     const expectedSize = Number(song.size);
     const expectedSHA256 = catalogSHA256(song);
@@ -3298,35 +3465,122 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
         alreadyDownloaded = false;
       }
     }
-    if (alreadyDownloaded) {
-      completed += 1;
-      event.sender.send("server:transfer-progress", { direction: "download", currentFile: displayName, completed, total: songs.length, autoHide: false });
-      // Skip only this song. The rest of a Download All batch must still run.
-      continue;
-    }
-    event.sender.send("server:transfer-progress", { direction: "download", currentFile: displayName, completed, total: songs.length, autoHide: false });
+    if (alreadyDownloaded) continue;
+    pendingDownloads.push({
+      song,
+      remoteName,
+      displayName,
+      remoteModified,
+      expectedSize,
+      expectedSHA256,
+      savedSourceURL,
+      mediaLocation,
+      matching,
+      displayMetadata,
+      metadataIsResolved,
+    });
+  }
+
+  let completed = 0;
+  for (const [pendingIndex, pending] of pendingDownloads.entries()) {
+    signal.throwIfAborted();
+    const {
+      song,
+      remoteName,
+      displayName,
+      remoteModified,
+      expectedSize,
+      expectedSHA256,
+      savedSourceURL,
+      mediaLocation,
+      matching,
+      displayMetadata,
+      metadataIsResolved,
+    } = pending;
+    const itemIndex = pendingIndex + 1;
+    const itemCount = pendingDownloads.length;
+    let itemCompletedBytes = 0;
+    let itemTotalBytes = Number.isSafeInteger(expectedSize) && expectedSize > 0 ? expectedSize : 0;
+    let itemTransferStarted = false;
+    const publishProgress = createServerDownloadProgressPublisher((progressEvent) => {
+      if (!itemTransferStarted) return;
+      if (!serverTransferIsActive(event, controller, transferGeneration)) return;
+      event.sender.send("server:transfer-progress", progressEvent);
+    });
+    const progressEvent = (overrides = {}) => serverDownloadProgressEvent({
+      song,
+      preferredTitle: displayName,
+      itemIndex,
+      itemCount,
+      completedBytes: itemCompletedBytes,
+      totalBytes: itemTotalBytes,
+      completedItems: completed,
+      ...overrides,
+    });
+    const dismissItemTransfer = () => {
+      if (itemTransferStarted && serverTransferIsActive(event, controller, transferGeneration)) {
+        event.sender.send("server:transfer-progress", {
+          direction: "download",
+          dismiss: true,
+          autoHide: false,
+        });
+      }
+      itemTransferStarted = false;
+      itemCompletedBytes = 0;
+      itemTotalBytes = Number.isSafeInteger(expectedSize) && expectedSize > 0 ? expectedSize : 0;
+      publishProgress.reset();
+    };
+    let itemSucceeded = false;
     try {
       if (savedSourceURL) {
         const downloadedTrack = await downloadSavedSourceSong(song, {
-          signal,
+          signal: policyLease.signal,
           existing,
           destinationDirectory: paths.remote,
           serverOrigin: base.origin,
           profileID: profileID || "default",
-          onProgress: (progress) => event.sender.send("server:transfer-progress", {
-            direction: "download",
-            currentFile: displayName,
-            completed,
-            total: songs.length,
-            autoHide: false,
-          }),
+          metadata: displayMetadata,
+          metadataIsResolved,
+          finalizeAuthorization: async () => {
+            await policyRefresh;
+            policyLease.assertAuthorized();
+          },
+          onProgress: (progress) => {
+            if (progress?.stage !== "downloading") {
+              if (itemTransferStarted && ["transfer_complete", "processing", "saving_local", "local_complete"].includes(progress?.stage)) {
+                itemTotalBytes = itemTotalBytes || itemCompletedBytes;
+                const transferEnd = progressEvent({
+                  completedBytes: itemCompletedBytes,
+                  totalBytes: itemTotalBytes,
+                });
+                transferEnd.autoHide = true;
+                publishProgress(transferEnd, { force: true });
+              }
+              return;
+            }
+            itemCompletedBytes = Math.max(0, Number(progress.completed) || 0);
+            itemTotalBytes = Math.max(0, Number(progress.total) || 0);
+            if (itemCompletedBytes <= 0) return;
+            itemTransferStarted = true;
+            const event = progressEvent();
+            event.autoHide = itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;
+            publishProgress(event);
+          },
         });
+        policyLease.assertAuthorized();
         if (matching?.id || existing.some((item) => item.id === downloadedTrack.id)) {
           replacedTrackIDs.push(matching?.id || downloadedTrack.id);
         }
         downloaded.push(downloadedTrack);
+        itemSucceeded = true;
         completed += 1;
-        event.sender.send("server:transfer-progress", { direction: "download", currentFile: displayName, completed, total: songs.length, autoHide: false });
+        const completionEvent = progressEvent({
+          completedBytes: itemTotalBytes || itemCompletedBytes,
+          totalBytes: itemTotalBytes || itemCompletedBytes,
+          completedItems: completed,
+        });
+        completionEvent.autoHide = true;
+        publishProgress(completionEvent, { force: true });
         continue;
       }
       let fileURL = sameOriginServerMediaURL(mediaLocation?.download_url || song.download_url, base, "download");
@@ -3337,13 +3591,6 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
       let downloadedSize = 0;
       let downloadedSHA256 = null;
       await retryServerDownload(async () => {
-        const policyLease = await beginOfflineDownloadPolicyLease({
-          baseURL: base.href,
-          token,
-          profileID,
-          parentSignal: signal,
-        });
-        try {
           policyLease.signal.throwIfAborted();
           let response = await fetch(fileURL, {
             headers: downloadHeaders,
@@ -3368,55 +3615,39 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
               expectedSize,
               expectedSHA256,
               maximumBytes: MAX_SERVER_MEDIA_BYTES,
+              onProgress: (progress) => {
+                itemCompletedBytes = Math.max(0, Number(progress.completed) || 0);
+                itemTotalBytes = Math.max(0, Number(progress.total) || 0);
+                if (itemCompletedBytes <= 0) return;
+                const isFirstAttemptByte = !itemTransferStarted;
+                itemTransferStarted = true;
+                const event = progressEvent();
+                event.autoHide = itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;
+                publishProgress(event, { force: isFirstAttemptByte });
+              },
             });
             downloadedSize = downloadedFile.size;
             downloadedSHA256 = downloadedFile.sha256;
+            await policyRefresh;
             policyLease.assertAuthorized();
-            const finalConfig = await requireOfflineDownloadMode({ baseURL: base.href, token, profileID });
-            const finalPolicyLease = createRenewablePolicyLease({
-              initialConfig: finalConfig,
-              allowUnsignedInitial: finalConfig?.verified !== true,
-              parentSignal: policyLease.signal,
-              errorFactory: (message) => new OfflineDownloadPolicyError(message),
+            await adoptDownloadedFile(temporary, destination, {
+              assertAuthorized: () => policyLease.assertAuthorized(),
             });
-            try {
-              const assertFinalAuthorization = () => {
-                // The original fixed lease remains the maximum authorization
-                // window. A freshly verified shorter config also constrains
-                // the atomic adoption boundary instead of being discarded.
-                policyLease.assertAuthorized();
-                finalPolicyLease.assertAuthorized();
-              };
-              await adoptDownloadedFile(temporary, destination, {
-                assertAuthorized: assertFinalAuthorization,
-              });
-            } finally {
-              finalPolicyLease.close();
-            }
           } catch (error) {
             await fs.rm(temporary, { force: true });
             throw error;
           }
-        } finally {
-          policyLease.close();
-        }
       }, {
-        signal,
-        onRetry: ({ nextAttempt }) => event.sender.send("server:transfer-progress", {
-          direction: "download",
-          currentFile: `Retrying ${displayName} (${nextAttempt}/${SERVER_DOWNLOAD_ATTEMPTS})`,
-          completed,
-          total: songs.length,
-          autoHide: false,
-        }),
+        signal: policyLease.signal,
+        onRetry: dismissItemTransfer,
       });
       if (matching?.id) replacedTrackIDs.push(matching.id);
       downloaded.push(await enrichedTrack(destination, {
         id: matching?.id,
-        title: song.title || path.basename(remoteName, path.extname(remoteName)),
-        artist: song.artist || "Unknown Artist",
-        album: song.album || "Server Library",
-        artworkURL: song.artwork_url || song.artworkURL || null,
+        title: displayMetadata.title,
+        artist: displayMetadata.artist,
+        album: displayMetadata.album,
+        artworkURL: displayMetadata.artworkURL,
         remoteID: song.id,
         sourceServer: base.origin,
         syncProfileID: profileID || "default",
@@ -3430,7 +3661,11 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
           ? matching.preservesUnlinkedImport
           : false,
       }));
+      itemSucceeded = true;
     } catch (error) {
+      // A failed final attempt owns no terminal progress. Scrub its partial bytes
+      // before retry reconciliation, the next item, or cancellation can proceed.
+      dismissItemTransfer();
       if (error?.name === "AbortError") throw error;
       if (error instanceof OfflineDownloadPolicyError) throw error;
       failed.push({
@@ -3443,13 +3678,22 @@ ipcMain.handle("server:sync", async (event, { baseURL, token, profileID, existin
       });
     }
     completed += 1;
-    event.sender.send("server:transfer-progress", { direction: "download", currentFile: displayName, completed, total: songs.length, autoHide: false });
+    if (itemSucceeded) {
+      const completionEvent = progressEvent({
+        completedBytes: itemTotalBytes || itemCompletedBytes,
+        totalBytes: itemTotalBytes || itemCompletedBytes,
+        completedItems: completed,
+      });
+      completionEvent.autoHide = true;
+      publishProgress(completionEvent, { force: true });
+    }
   }
   return { catalog, downloaded, replacedTrackIDs, failed };
   } catch (error) {
     if (error?.name === "AbortError") return { catalog, downloaded, replacedTrackIDs, failed, cancelled: true };
     throw error;
   } finally {
+    policyLease?.close();
     finishServerTransfer(event, controller);
   }
 });
@@ -3559,6 +3803,9 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
           item,
           signal,
         });
+        if (response.status === 201 || response.status === 409) {
+          invalidateServerCatalogSnapshots(base, requestedProfileID);
+        }
         ({ song: remoteSong, duplicate } = await readServerUploadResponse(response, { serverOrigin: base.origin }));
       } catch (error) {
         if (signal.aborted || error?.name === "AbortError") throw error;
@@ -3671,6 +3918,7 @@ ipcMain.handle("server:delete", async (_event, { baseURL, adminToken, profileID,
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload?.error || `Server returned HTTP ${response.status}`);
   }
+  invalidateServerCatalogSnapshots(base, profileID);
   return true;
 });
 

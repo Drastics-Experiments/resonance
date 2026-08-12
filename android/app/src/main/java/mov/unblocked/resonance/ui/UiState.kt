@@ -107,6 +107,9 @@ data class ResonanceUiState(
     val repeatEnabled: Boolean = false,
     val playbackSpeed: Float = 1f,
     val volume: Float = .8f,
+    val crossfadeEnabled: Boolean = false,
+    val crossfadeSeconds: Float = 5f,
+    val themeChoice: ResonanceThemeChoice = ResonanceThemeChoice.Midnight,
     val librarySearch: String = "",
     val serverUrl: String = "https://resonance-core.blithe-haven-9710.chatgpt.site",
     val serverToken: String = "",
@@ -118,6 +121,7 @@ data class ResonanceUiState(
     val isSigningIn: Boolean = false,
     val isNativeAccountSignInOpen: Boolean = false,
     val serverMessage: String = "Not connected",
+    val hasConnectedServerSession: Boolean = false,
     val clientConfig: EffectiveClientConfig = EffectiveClientConfig.safeDefaults(),
     val clientConfigStatus: String = "Safe defaults",
     val serverUploadMode: ServerUploadMode? = ServerUploadMode.LocalFile,
@@ -133,6 +137,11 @@ data class ResonanceUiState(
     val downloadProgress: Float = 0f,
     val uploadProgress: Float = 0f,
     val downloadDetail: String = "Idle",
+    val downloadCurrentItem: Int = 0,
+    val downloadTotalItems: Int = 0,
+    val downloadCurrentTitle: String? = null,
+    val downloadBytesTransferred: Long = 0L,
+    val downloadTotalBytes: Long? = null,
     val uploadDetail: String = "Idle",
     val playlistSyncDetail: String = "Idle",
     val syncProfileId: String = "default",
@@ -151,7 +160,8 @@ data class ResonanceUiState(
         get() = currentTrackId != null && transientCurrentTrack?.id == currentTrackId
 
     val isConnected: Boolean
-        get() = remoteSongs.isNotEmpty() || serverMessage.startsWith("Connected", ignoreCase = true)
+        get() = hasConnectedServerSession || remoteSongs.isNotEmpty() ||
+            serverMessage.startsWith("Connected", ignoreCase = true)
 
     val hasServerUploadCredentials: Boolean
         get() = serverUrl.isNotBlank() && serverAdminKey.isNotBlank()

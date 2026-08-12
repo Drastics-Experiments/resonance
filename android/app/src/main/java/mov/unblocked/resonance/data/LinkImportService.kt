@@ -123,6 +123,17 @@ internal object LinkImportSearchRequestPolicy {
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
 }
 
+internal object PreparedMediaReusePolicy {
+    const val MaximumAgeNanos = 90L * 1_000_000_000
+    const val MaximumEntries = 24
+
+    fun key(videoID: String, mediaMode: LinkImportMediaMode): String =
+        "${mediaMode.name.lowercase()}:$videoID"
+
+    fun isFresh(preparedAtNanos: Long, nowNanos: Long): Boolean =
+        nowNanos >= preparedAtNanos && nowNanos - preparedAtNanos <= MaximumAgeNanos
+}
+
 class LinkImportService(context: Context) {
     private data class SpotifyPlaylistResolution(
         val info: LinkImportPlaylist,
@@ -140,6 +151,14 @@ class LinkImportService(context: Context) {
         val primary: ResolvedStream,
         val companionAudio: ResolvedStream? = null,
     )
+    private data class PreparedMedia(
+        val media: ResolvedMedia,
+        val preparedAtNanos: Long,
+    )
+    private data class PreparedSoundCloudAudio(
+        val audio: SoundCloudAudio,
+        val preparedAtNanos: Long,
+    )
 
     private val appContext = context.applicationContext
     private val json = Json { ignoreUnknownKeys = true }
@@ -149,6 +168,9 @@ class LinkImportService(context: Context) {
     private val maxVideoBytes = 1_024L * 1_024 * 1_024
     private val webAgent = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36"
     private val playerAgent = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L) gzip"
+    private val preparedMedia = linkedMapOf<String, PreparedMedia>()
+    private val preparedSoundCloudAudio = linkedMapOf<String, PreparedSoundCloudAudio>()
+    private val preparedMediaLock = Any()
 
     suspend fun resolveMetadata(source: String): LinkImportTrack = withContext(Dispatchers.IO) {
         val input = source.trim()
@@ -188,6 +210,29 @@ class LinkImportService(context: Context) {
         source: String,
         mediaMode: LinkImportMediaMode = LinkImportMediaMode.Audio,
         progress: (LinkImportProgress) -> Unit,
+    ): LinkImportResolution = resolveInternal(
+        source = source,
+        mediaMode = mediaMode,
+        knownTrackMetadata = null,
+        progress = progress,
+    )
+
+    /**
+     * Resolves a saved server source for download without fetching track metadata a second time.
+     * Provider stream inspection/search can still be required because those URLs are short-lived.
+     */
+    suspend fun resolveForDownload(
+        source: String,
+        mediaMode: LinkImportMediaMode,
+        knownTrackMetadata: LinkImportTrack?,
+        progress: (LinkImportProgress) -> Unit,
+    ): LinkImportResolution = resolveInternal(source, mediaMode, knownTrackMetadata, progress)
+
+    private suspend fun resolveInternal(
+        source: String,
+        mediaMode: LinkImportMediaMode,
+        knownTrackMetadata: LinkImportTrack?,
+        progress: (LinkImportProgress) -> Unit,
     ): LinkImportResolution =
         withContext(Dispatchers.IO) {
             if (SoundCloudImportUrls.source(source.trim()) != null) {
@@ -196,6 +241,32 @@ class LinkImportService(context: Context) {
                     "VIDEO_REQUIRES_YOUTUBE",
                     "Video downloads require a YouTube link or video search result. SoundCloud links provide audio only.",
                 )
+                // Resolve the playable rendition first. This single operation provides the
+                // short-lived audio URL and enough fallback tags, so catalog metadata hydration
+                // can continue independently instead of sitting in front of the media transfer.
+                progress(LinkImportProgress(LinkImportStage.InspectingSource))
+                val audio = try {
+                    SoundCloudImport.resolveAudio(source.trim())
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+                if (audio != null) {
+                    rememberPreparedSoundCloudAudio(audio)
+                    val metadata = knownTrackMetadata ?: audio.track
+                    val candidate = LinkImportCandidate(
+                        videoID = "soundcloud:saved",
+                        title = metadata.title,
+                        artist = metadata.artist,
+                        durationSeconds = metadata.durationSeconds,
+                        thumbnailURL = metadata.artworkURL,
+                        sourceURL = audio.track.sourceURL,
+                        score = 1.0,
+                        sourceProvider = LinkImportSourceProvider.SoundCloud,
+                    )
+                    return@withContext LinkImportResolution(metadata, listOf(candidate))
+                }
                 progress(LinkImportProgress(LinkImportStage.ResolvingMetadata))
                 when (val resolved = SoundCloudImport.resolve(source.trim())) {
                     is SoundCloudSource.Track -> {
@@ -210,7 +281,10 @@ class LinkImportService(context: Context) {
                             "SOUNDCLOUD_STREAM_UNAVAILABLE",
                             "This SoundCloud track has no direct public audio rendition and no matching alternate source was found.",
                         )
-                        return@withContext LinkImportResolution(soundCloudTrack.metadata, candidates)
+                        return@withContext LinkImportResolution(
+                            knownTrackMetadata ?: soundCloudTrack.metadata,
+                            candidates,
+                        )
                     }
 
                     is SoundCloudSource.Playlist -> {
@@ -349,7 +423,10 @@ class LinkImportService(context: Context) {
                         playlist = info.copy(skippedItems = skipped.sortedBy(LinkImportSkippedItem::position)),
                     )
                 }
-                val track = resolveSpotify(spotify)
+                val trackID = parts.takeIf { it.firstOrNull() == "track" }
+                    ?.getOrNull(1)
+                    ?.takeIf { it.matches(Regex("[A-Za-z0-9]{22}")) }
+                val track = knownTrackMetadata?.takeIf { trackID != null } ?: resolveSpotify(spotify)
                 progress(LinkImportProgress(LinkImportStage.SearchingCandidates))
                 val matches = searchYouTube(track)
                 if (matches.isEmpty()) throw LinkImportException(
@@ -365,8 +442,8 @@ class LinkImportService(context: Context) {
                 "Enter a Spotify, SoundCloud, or supported YouTube track or playlist URL.",
             )
             progress(LinkImportProgress(LinkImportStage.InspectingSource))
-            val resolved = resolveYouTube(id, mediaMode)
-            val track = LinkImportTrack(
+            val resolved = resolveYouTube(id, mediaMode).also(::rememberPreparedMedia)
+            val track = knownTrackMetadata ?: LinkImportTrack(
                 resolved.candidate.title,
                 resolved.candidate.artist ?: "Unknown uploader",
                 durationSeconds = resolved.candidate.durationSeconds,
@@ -485,12 +562,14 @@ class LinkImportService(context: Context) {
     suspend fun preview(candidate: LinkImportCandidate): LinkImportPreview = withContext(Dispatchers.IO) {
         if (candidate.sourceProvider == LinkImportSourceProvider.SoundCloud) {
             val stream = SoundCloudImport.resolveAudio(candidate.sourceURL)
+                .also(::rememberPreparedSoundCloudAudio)
             return@withContext LinkImportPreview(
                 url = stream.url.toString(),
                 headers = mapOf("User-Agent" to webAgent),
             )
         }
         val resolved = resolveYouTube(candidate.videoID, LinkImportMediaMode.Audio)
+            .also(::rememberPreparedMedia)
         LinkImportPreview(
             url = resolved.primary.url.toString(),
             headers = mapOf(
@@ -513,7 +592,8 @@ class LinkImportService(context: Context) {
                 "VIDEO_REQUIRES_YOUTUBE",
                 "This SoundCloud result is audio only. Choose a YouTube result for video.",
             )
-            val resolved = SoundCloudImport.resolveAudio(candidate.sourceURL)
+            val resolved = takePreparedSoundCloudAudio(candidate.sourceURL)
+                ?: SoundCloudImport.resolveAudio(candidate.sourceURL)
             val directory = File(appContext.cacheDir, "resonance-link-import-" + System.nanoTime()).apply { mkdirs() }
             val output = File(directory, "source.mp3")
             try {
@@ -541,7 +621,8 @@ class LinkImportService(context: Context) {
                 throw error
             }
         }
-        val resolved = resolveYouTube(candidate.videoID, mediaMode)
+        val resolved = takePreparedMedia(candidate, mediaMode)
+            ?: resolveYouTube(candidate.videoID, mediaMode)
         val directory = File(appContext.cacheDir, "resonance-link-import-" + System.nanoTime()).apply { mkdirs() }
         val primaryFile = File(directory, "primary.${mediaMode.fileExtension}")
         val companionFile = resolved.companionAudio?.let { File(directory, "companion.m4a") }
@@ -787,7 +868,9 @@ class LinkImportService(context: Context) {
         val candidates = buildList {
             for (id in ids) {
                 currentCoroutineContext().ensureActive()
-                runCatching { resolveYouTube(id).candidate }.getOrNull()?.let(::add)
+                runCatching { resolveYouTube(id).also(::rememberPreparedMedia).candidate }
+                    .getOrNull()
+                    ?.let(::add)
             }
         }
         return scoreCandidates(track, candidates).take(maximumMatches)
@@ -883,7 +966,7 @@ class LinkImportService(context: Context) {
         ids.map { id ->
             async {
                 try {
-                    resolveYouTube(id, mediaMode).candidate
+                    resolveYouTube(id, mediaMode).also(::rememberPreparedMedia).candidate
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Exception) {
@@ -1076,6 +1159,64 @@ class LinkImportService(context: Context) {
             "YouTube did not provide a direct, verifiable MP4 video for this result.",
         )
         return ResolvedMedia(mediaMode, candidate, verifiedStream(format, maxVideoBytes, "video"))
+    }
+
+    private fun rememberPreparedMedia(media: ResolvedMedia) {
+        val now = System.nanoTime()
+        synchronized(preparedMediaLock) {
+            preparedMedia.entries.removeAll { (_, prepared) ->
+                !PreparedMediaReusePolicy.isFresh(prepared.preparedAtNanos, now)
+            }
+            val key = PreparedMediaReusePolicy.key(media.candidate.videoID, media.mediaMode)
+            preparedMedia.remove(key)
+            preparedMedia[key] = PreparedMedia(media, now)
+            while (preparedMedia.size > PreparedMediaReusePolicy.MaximumEntries) {
+                preparedMedia.remove(preparedMedia.keys.first())
+            }
+        }
+    }
+
+    private fun takePreparedMedia(
+        candidate: LinkImportCandidate,
+        mediaMode: LinkImportMediaMode,
+    ): ResolvedMedia? {
+        if (candidate.sourceProvider != LinkImportSourceProvider.YouTube) return null
+        val now = System.nanoTime()
+        return synchronized(preparedMediaLock) {
+            preparedMedia.entries.removeAll { (_, prepared) ->
+                !PreparedMediaReusePolicy.isFresh(prepared.preparedAtNanos, now)
+            }
+            val key = PreparedMediaReusePolicy.key(candidate.videoID, mediaMode)
+            preparedMedia.remove(key)?.media?.takeIf { prepared ->
+                prepared.candidate.sourceURL == candidate.sourceURL
+            }
+        }
+    }
+
+    private fun rememberPreparedSoundCloudAudio(audio: SoundCloudAudio) {
+        val key = SoundCloudImportUrls.normalizePermalink(audio.track.sourceURL) ?: return
+        val now = System.nanoTime()
+        synchronized(preparedMediaLock) {
+            preparedSoundCloudAudio.entries.removeAll { (_, prepared) ->
+                !PreparedMediaReusePolicy.isFresh(prepared.preparedAtNanos, now)
+            }
+            preparedSoundCloudAudio.remove(key)
+            preparedSoundCloudAudio[key] = PreparedSoundCloudAudio(audio, now)
+            while (preparedSoundCloudAudio.size > PreparedMediaReusePolicy.MaximumEntries) {
+                preparedSoundCloudAudio.remove(preparedSoundCloudAudio.keys.first())
+            }
+        }
+    }
+
+    private fun takePreparedSoundCloudAudio(sourceURL: String): SoundCloudAudio? {
+        val key = SoundCloudImportUrls.normalizePermalink(sourceURL) ?: return null
+        val now = System.nanoTime()
+        return synchronized(preparedMediaLock) {
+            preparedSoundCloudAudio.entries.removeAll { (_, prepared) ->
+                !PreparedMediaReusePolicy.isFresh(prepared.preparedAtNanos, now)
+            }
+            preparedSoundCloudAudio.remove(key)?.audio
+        }
     }
 
     private fun isVerifiedYouTubeFormat(format: JsonObject): Boolean {

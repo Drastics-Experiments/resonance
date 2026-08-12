@@ -32,6 +32,7 @@ struct PreviewRegressionTests {
         #expect(Notification.Name.newMusicPlaylist.rawValue == "newMusicPlaylist")
         #expect(Notification.Name.focusMusicSearch != .newMusicPlaylist)
         #expect(Notification.Name.openResonanceSettings.rawValue == "openResonanceSettings")
+        #expect(Notification.Name.openClipEditor.rawValue == "openClipEditor")
     }
 
     @Test
@@ -121,7 +122,7 @@ struct PreviewRegressionTests {
         #expect(song.id == "saved-song-uuid")
         #expect(song.filename == "Local Title.m4a")
         #expect(song.title == "Resolving metadata…")
-        #expect(song.artist == "On-device lookup")
+        #expect(song.artist == "Automatic lookup")
         #expect(song.album == "Link only")
         #expect(song.size == 0)
         #expect(song.sourceURL == "https://media.example/Local%20Title.m4a?token=preserved")
@@ -583,6 +584,23 @@ struct PreviewRegressionTests {
             #expect(LocalImportPresentationPolicy.showsGlobalTransfer(for: stage))
             #expect(LocalImportPresentationPolicy.continuesAfterSheetDismissal(for: stage))
         }
+
+        for stage in [
+            LocalImportStage.inspectingSource,
+            .downloading,
+            .processing,
+            .savingLocal,
+            .localComplete,
+        ] {
+            #expect(!LocalImportPresentationPolicy.showsGlobalTransfer(
+                for: stage,
+                downloadStarted: false
+            ))
+        }
+        #expect(LocalImportPresentationPolicy.showsGlobalTransfer(
+            for: .syncing,
+            downloadStarted: false
+        ))
 
         #expect(!LocalImportPresentationPolicy.showsGlobalTransfer(for: .awaitingSelection))
         #expect(!LocalImportPresentationPolicy.continuesAfterSheetDismissal(for: .failed))

@@ -196,6 +196,7 @@ private enum MobileClipVideoFrameSampler {
 }
 
 struct MobileClipEditorSheet: View {
+    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @StateObject private var preview = MobileClipPreviewPlayer()
@@ -225,7 +226,7 @@ struct MobileClipEditorSheet: View {
 
     var body: some View {
         ZStack {
-            Color(hex: 0x080910).ignoresSafeArea()
+            palette.background.ignoresSafeArea()
 
             VStack(spacing: 10) {
                 topBar
@@ -290,7 +291,7 @@ struct MobileClipEditorSheet: View {
                 .font(.subheadline.weight(.bold))
                 .padding(.horizontal, 12)
                 .frame(height: 32)
-                .background(hasUnsavedChanges ? Color(hex: 0x7942DF) : Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
+                .background(hasUnsavedChanges ? palette.accent : Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
                 .foregroundStyle(hasUnsavedChanges ? Color.white : Color.white.opacity(0.35))
                 .disabled(!hasUnsavedChanges || selectedTrack == nil || (selectedTrack?.duration ?? 0) < 0.25)
 
@@ -404,7 +405,7 @@ struct MobileClipEditorSheet: View {
     private func previewTransport(_ track: MobileTrack) -> some View {
         ZStack {
             HStack(spacing: 6) {
-                Text(formatTime(preview.position)).foregroundStyle(Color(hex: 0xAC75FF))
+                Text(formatTime(preview.position)).foregroundStyle(palette.tertiary)
                 Text("/").foregroundStyle(.secondary)
                 Text(formatTime(endSeconds)).foregroundStyle(.white)
                 Spacer()
@@ -430,7 +431,7 @@ struct MobileClipEditorSheet: View {
         .foregroundStyle(.white)
         .padding(.horizontal, 14)
         .frame(height: 58)
-        .background(Color(hex: 0x0D0E15).opacity(0.97))
+        .background(palette.surface.opacity(0.97))
         .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.08)).frame(height: 1) }
     }
 
@@ -477,7 +478,7 @@ struct MobileClipEditorSheet: View {
                         Text("CLIP LENGTH").eyebrow()
                         Text(formatTime(max(endSeconds - startSeconds, 0)))
                             .font(.headline.monospacedDigit())
-                            .foregroundStyle(Color(hex: 0xB56AFF))
+                            .foregroundStyle(palette.tertiary)
                     }
                     Spacer()
                     if let track = selectedTrack {
@@ -514,7 +515,7 @@ struct MobileClipEditorSheet: View {
             content()
                 .padding(18)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .background(Color(hex: 0x11121B).opacity(0.94), in: RoundedRectangle(cornerRadius: 20))
+                .background(palette.raisedSurface.opacity(0.94), in: RoundedRectangle(cornerRadius: 20))
                 .overlay { RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.12), lineWidth: 1) }
                 .frame(maxWidth: 430)
                 .padding(.horizontal, 20)
@@ -682,6 +683,7 @@ struct MobileClipEditorSheet: View {
 }
 
 private struct MobileCinematicVisualizer: View {
+    @Environment(\.resonancePalette) private var palette
     let samples: [Double]
     let isPlaying: Bool
     let position: TimeInterval
@@ -716,7 +718,7 @@ private struct MobileCinematicVisualizer: View {
                 context.fill(
                     bars,
                     with: .linearGradient(
-                        Gradient(colors: [Color(hex: 0x4D1B91), Color(hex: 0xB456EF)]),
+                        Gradient(colors: [palette.secondary, palette.tertiary]),
                         startPoint: CGPoint(x: 0, y: size.height),
                         endPoint: .zero
                     )
@@ -732,7 +734,7 @@ private struct MobileCinematicVisualizer: View {
                 }
             }
         }
-        .background(RadialGradient(colors: [Color(hex: 0x2C1647), .black], center: .center, startRadius: 8, endRadius: 380))
+        .background(RadialGradient(colors: [palette.secondary.opacity(0.5), palette.background], center: .center, startRadius: 8, endRadius: 380))
         .onChange(of: isPlaying) { _, playing in
             if !playing { livePosition = nil }
         }
@@ -828,6 +830,7 @@ private struct MobileClipRuler: View {
 }
 
 private struct MobileCinematicWaveform: View {
+    @Environment(\.resonancePalette) private var palette
     let track: MobileTrack
     let samples: [Double]
     let videoFrames: [UIImage]
@@ -869,7 +872,7 @@ private struct MobileCinematicWaveform: View {
                         .position(x: endX + max(width - endX, 0) / 2, y: geometry.size.height / 2)
                 }
 
-                Rectangle().fill(Color(hex: 0x7130AF).opacity(0.14))
+                Rectangle().fill(palette.secondary.opacity(0.14))
                     .frame(width: max(width * (endRatio - startRatio), 0))
                     .position(x: width * (startRatio + endRatio) / 2, y: geometry.size.height / 2)
 
@@ -878,7 +881,7 @@ private struct MobileCinematicWaveform: View {
                         ForEach(Array(levels.enumerated()), id: \.offset) { index, level in
                             let ratio = (Double(index) + 0.5) / Double(levels.count)
                             Rectangle()
-                                .fill(ratio >= startRatio && ratio <= endRatio ? Color(hex: 0x934ADD) : .white.opacity(0.25))
+                                .fill(ratio >= startRatio && ratio <= endRatio ? palette.tertiary : .white.opacity(0.25))
                                 .frame(maxWidth: .infinity)
                                 .frame(height: max(9, geometry.size.height * (0.16 + 0.72 * level)))
                         }
@@ -944,6 +947,7 @@ private func mobileClipLevels(seed: String, count: Int) -> [Double] {
 }
 
 private struct LegacyMobileClipEditorSheet: View {
+    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @StateObject private var preview = MobileClipPreviewPlayer()
@@ -966,7 +970,7 @@ private struct LegacyMobileClipEditorSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Color.appBackground.ignoresSafeArea()
+                palette.background.ignoresSafeArea()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
                         if library.tracksForActiveProfile.isEmpty {
@@ -1107,7 +1111,7 @@ private struct LegacyMobileClipEditorSheet: View {
                     ForEach(Array(waveformLevels(for: track).enumerated()), id: \.offset) { index, level in
                         let ratio = (Double(index) + 0.5) / 72
                         Capsule()
-                            .fill(ratio >= startRatio && ratio <= endRatio ? Color.violet : .white.opacity(0.16))
+                            .fill(ratio >= startRatio && ratio <= endRatio ? palette.secondary : .white.opacity(0.16))
                             .frame(maxWidth: .infinity)
                             .frame(height: 18 + 54 * level)
                     }
@@ -1150,8 +1154,8 @@ private struct LegacyMobileClipEditorSheet: View {
             .font(.caption.bold())
             .foregroundStyle(.white)
             .frame(width: 26, height: 38)
-            .background(Color.violet, in: Capsule())
-            .shadow(color: Color.violet.opacity(0.35), radius: 8)
+            .background(palette.secondary, in: Capsule())
+            .shadow(color: palette.secondary.opacity(0.35), radius: 8)
             .position(x: x, y: 52)
             .accessibilityLabel(accessibilityName)
     }
@@ -1163,7 +1167,7 @@ private struct LegacyMobileClipEditorSheet: View {
                 Text("CLIP LENGTH").eyebrow()
                 Text(formatTime(max(endSeconds - startSeconds, 0)))
                     .font(.headline.monospacedDigit())
-                    .foregroundStyle(Color.violet)
+                    .foregroundStyle(palette.foregroundAccent)
             }
             .frame(maxWidth: .infinity)
             timeField("END", text: $endText, boundary: .end)
@@ -1203,7 +1207,7 @@ private struct LegacyMobileClipEditorSheet: View {
                 library.saveClipRange(for: track, start: startSeconds, end: endSeconds)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.violet)
+            .tint(palette.secondary)
         }
     }
 
@@ -1230,7 +1234,7 @@ private struct LegacyMobileClipEditorSheet: View {
                 Image(systemName: preview.isPlaying ? "pause.fill" : "play.fill")
                     .font(.callout.bold())
                     .frame(width: 38, height: 38)
-                    .background(Color.violet, in: Circle())
+                    .background(palette.secondary, in: Circle())
                     .foregroundStyle(.white)
             }
             .buttonStyle(.plain)
@@ -1248,7 +1252,7 @@ private struct LegacyMobileClipEditorSheet: View {
                 ),
                 in: sliderRange
             )
-            .tint(.violet)
+            .tint(palette.foregroundAccent)
             .accessibilityLabel("Preview position")
 
             Text(formatTime(endSeconds))
@@ -1704,7 +1708,19 @@ private final class MobileLocalImportViewModel: ObservableObject {
         let shouldSync = syncAfterImport
         let reviewLease = usesReviewedUpload ? reviewedMatchLease : nil
         let selectedMediaMode = mediaMode
-        reserveTransfer(library)
+        guard let transferSessionID = reserveTransfer(
+            title: resolution.track.title,
+            total: 1,
+            library: library
+        ) else {
+            error = LocalImportError(
+                stage: .inspectingSource,
+                code: "TRANSFER_BUSY",
+                message: "Wait for the current upload or download to finish before starting an import."
+            )
+            stage = .failed
+            return false
+        }
         task = Task { [self, library] in
             await runSingleImport(
                 spotifyTrack: resolution.track,
@@ -1713,6 +1729,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 mediaMode: selectedMediaMode,
                 shouldSync: shouldSync,
                 reviewedMatchLease: reviewLease,
+                transferSessionID: transferSessionID,
                 library: library
             )
             task = nil
@@ -1739,13 +1756,26 @@ private final class MobileLocalImportViewModel: ObservableObject {
         stage = .inspectingSource
         let shouldSync = syncAfterImport
         let selectedMediaMode = mediaMode
-        reserveTransfer(library)
+        guard let transferSessionID = reserveTransfer(
+            title: items.first?.track.title ?? playlist.title,
+            total: items.count,
+            library: library
+        ) else {
+            error = LocalImportError(
+                stage: .inspectingSource,
+                code: "TRANSFER_BUSY",
+                message: "Wait for the current upload or download to finish before starting an import."
+            )
+            stage = .failed
+            return
+        }
         task = Task { [self, library] in
             await runPlaylistImport(
                 items: items,
                 playlist: playlist,
                 mediaMode: selectedMediaMode,
                 shouldSync: shouldSync,
+                transferSessionID: transferSessionID,
                 library: library
             )
             task = nil
@@ -1856,8 +1886,13 @@ private final class MobileLocalImportViewModel: ObservableObject {
         mediaMode: LocalImportMediaMode,
         shouldSync: Bool,
         reviewedMatchLease: MobileReviewedMatchLease?,
+        transferSessionID: UUID,
         library: MusicLibrary
     ) async {
+        defer {
+            finishTransfers(sessionID: transferSessionID, library: library)
+            batchCurrentTitle = nil
+        }
         do {
             try Task.checkCancellation()
             let isReviewedUpload = reviewedMatchLease != nil
@@ -1883,7 +1918,13 @@ private final class MobileLocalImportViewModel: ObservableObject {
             }
             let plannedDownloads = track == nil ? 1 : 0
             if plannedDownloads > 0 {
-                beginDownloads(total: plannedDownloads, library: library)
+                beginDownloads(
+                    sessionID: transferSessionID,
+                    total: plannedDownloads,
+                    title: spotifyTrack.title,
+                    itemID: spotifyTrack.trackID,
+                    library: library
+                )
                 batchCurrentTitle = "1 of 1 • \(spotifyTrack.title)"
                 track = try await downloadTrack(
                     spotifyTrack,
@@ -1892,11 +1933,21 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     mediaMode: mediaMode,
                     completedBefore: 0,
                     total: plannedDownloads,
+                    transferSessionID: transferSessionID,
                     library: library
                 )
-                library.downloadProgress = 1
+                updateTransfer(
+                    sessionID: transferSessionID,
+                    kind: .download,
+                    itemID: spotifyTrack.trackID,
+                    title: spotifyTrack.title,
+                    detail: "Download complete",
+                    currentItem: 1,
+                    totalItems: plannedDownloads,
+                    fallbackProgress: 1,
+                    library: library
+                )
             }
-            library.isDownloading = false
             guard let track else {
                 throw LocalImportError(stage: .savingLocal, code: "LOCAL_IMPORT_MISSING", message: "The imported song could not be found on this device.")
             }
@@ -1913,8 +1964,6 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 )
             if let serverID = match.serverSongID {
                 guard library.reconcileLocalImportWithServer(trackID: track.id, remoteID: serverID) else {
-                    finishTransfers(library)
-                    batchCurrentTitle = nil
                     let detail = "\(track.title) — \(track.artist) (\(library.serverMessage))"
                     self.error = LocalImportError(
                         stage: .syncing,
@@ -1933,22 +1982,37 @@ private final class MobileLocalImportViewModel: ObservableObject {
             var uploadFailure: String?
             if shouldSync, match.serverSongID == nil {
                 stage = .syncing
-                beginUploads(total: 1, library: library)
+                beginUploads(
+                    sessionID: transferSessionID,
+                    total: 1,
+                    title: track.title,
+                    itemID: track.id.uuidString,
+                    library: library
+                )
                 do {
                     _ = try await uploadWithRetry(
                         track,
                         index: 0,
                         total: 1,
                         reviewedMatchLease: reviewedMatchLease,
+                        transferSessionID: transferSessionID,
                         library: library
                     )
-                    library.uploadProgress = 1
+                    updateTransfer(
+                        sessionID: transferSessionID,
+                        kind: .upload,
+                        itemID: track.id.uuidString,
+                        title: track.title,
+                        detail: "Upload complete",
+                        currentItem: 1,
+                        totalItems: 1,
+                        fallbackProgress: 1,
+                        library: library
+                    )
                 } catch {
                     uploadFailure = error.localizedDescription
                 }
             }
-            finishTransfers(library)
-            batchCurrentTitle = nil
             if let uploadFailure {
                 let detail = "\(track.title) — \(track.artist) (\(uploadFailure))"
                 self.error = LocalImportError(stage: .syncing, code: "SERVER_UPLOAD_FAILED", message: detail)
@@ -1962,10 +2026,8 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 library.showTransferNotice(title: "Import complete", detail: localDetail + serverDetail, isError: false)
             }
         } catch is CancellationError {
-            finishTransfers(library)
             stage = .cancelled
         } catch {
-            finishTransfers(library)
             let message = (error as? LocalImportError)?.message ?? error.localizedDescription
             self.error = LocalImportError(stage: stage, code: "LOCAL_IMPORT_FAILED", message: message)
             stage = .failed
@@ -1978,8 +2040,13 @@ private final class MobileLocalImportViewModel: ObservableObject {
         playlist: LocalImportPlaylist,
         mediaMode: LocalImportMediaMode,
         shouldSync: Bool,
+        transferSessionID: UUID,
         library: MusicLibrary
     ) async {
+        defer {
+            finishTransfers(sessionID: transferSessionID, library: library)
+            batchCurrentTitle = nil
+        }
         var importedTracks: [(item: LocalImportPlaylistItem, track: MobileTrack)] = []
         var downloadFailures: [String] = []
         var associationFailures: [String] = []
@@ -1998,7 +2065,15 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 )
             }
             let downloadItems = items.filter { initialMatches[$0.track.trackID]?.deviceTrackID == nil }
-            if !downloadItems.isEmpty { beginDownloads(total: downloadItems.count, library: library) }
+            if let firstDownload = downloadItems.first {
+                beginDownloads(
+                    sessionID: transferSessionID,
+                    total: downloadItems.count,
+                    title: firstDownload.track.title,
+                    itemID: firstDownload.track.trackID,
+                    library: library
+                )
+            }
             var completedDownloads = 0
             for item in items {
                 try Task.checkCancellation()
@@ -2030,6 +2105,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
                             mediaMode: mediaMode,
                             completedBefore: completedDownloads,
                             total: downloadItems.count,
+                            transferSessionID: transferSessionID,
                             library: library
                         )
                     } catch is CancellationError {
@@ -2038,7 +2114,17 @@ private final class MobileLocalImportViewModel: ObservableObject {
                         downloadFailures.append("\(item.track.title) — \(item.track.artist) (\(error.localizedDescription))")
                     }
                     completedDownloads += 1
-                    library.downloadProgress = Double(completedDownloads) / Double(max(downloadItems.count, 1))
+                    updateTransfer(
+                        sessionID: transferSessionID,
+                        kind: .download,
+                        itemID: item.track.trackID,
+                        title: item.track.title,
+                        detail: track == nil ? "Download failed" : "Download complete",
+                        currentItem: completedDownloads,
+                        totalItems: downloadItems.count,
+                        fallbackProgress: track == nil ? nil : 1,
+                        library: library
+                    )
                 }
                 if let track {
                     if let serverID = initialMatch?.serverSongID,
@@ -2054,7 +2140,6 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     }
                 }
             }
-            library.isDownloading = false
             library.upsertImportedPlaylist(named: playlist.title, tracks: importedTracks.map(\.track))
 
             let uploadQueue = shouldSync ? importedTracks.filter { pair in
@@ -2070,27 +2155,44 @@ private final class MobileLocalImportViewModel: ObservableObject {
             } : []
             if !uploadQueue.isEmpty {
                 stage = .syncing
-                beginUploads(total: uploadQueue.count, library: library)
+                beginUploads(
+                    sessionID: transferSessionID,
+                    total: uploadQueue.count,
+                    title: uploadQueue[0].track.title,
+                    itemID: uploadQueue[0].track.id.uuidString,
+                    library: library
+                )
                 for (index, pair) in uploadQueue.enumerated() {
                     try Task.checkCancellation()
+                    var uploadFailed = false
                     do {
                         _ = try await uploadWithRetry(
                             pair.track,
                             index: index,
                             total: uploadQueue.count,
                             reviewedMatchLease: nil,
+                            transferSessionID: transferSessionID,
                             library: library
                         )
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
+                        uploadFailed = true
                         uploadFailures.append("\(pair.track.title) — \(pair.track.artist) (\(error.localizedDescription))")
                     }
-                    library.uploadProgress = Double(index + 1) / Double(uploadQueue.count)
+                    updateTransfer(
+                        sessionID: transferSessionID,
+                        kind: .upload,
+                        itemID: pair.track.id.uuidString,
+                        title: pair.track.title,
+                        detail: uploadFailed ? "Upload failed" : "Upload complete",
+                        currentItem: index + 1,
+                        totalItems: uploadQueue.count,
+                        fallbackProgress: uploadFailed ? nil : 1,
+                        library: library
+                    )
                 }
             }
-            finishTransfers(library)
-            batchCurrentTitle = nil
             completedSummary = "Kept \(importedTracks.count) of \(items.count) selected songs in \(playlist.title)."
             if !downloadFailures.isEmpty {
                 let detail = "Kept \(importedTracks.count) song\(importedTracks.count == 1 ? "" : "s"). Downloads failed after retrying: \(downloadFailures.joined(separator: "; "))"
@@ -2118,11 +2220,9 @@ private final class MobileLocalImportViewModel: ObservableObject {
             }
         } catch is CancellationError {
             library.upsertImportedPlaylist(named: playlist.title, tracks: importedTracks.map(\.track))
-            finishTransfers(library)
             stage = .cancelled
         } catch {
             library.upsertImportedPlaylist(named: playlist.title, tracks: importedTracks.map(\.track))
-            finishTransfers(library)
             let message = error.localizedDescription
             self.error = LocalImportError(stage: stage, code: "LOCAL_IMPORT_FAILED", message: message)
             stage = .failed
@@ -2137,6 +2237,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
         mediaMode: LocalImportMediaMode,
         completedBefore: Int,
         total: Int,
+        transferSessionID: UUID,
         library: MusicLibrary
     ) async throws -> MobileTrack {
         var lastError: Error?
@@ -2151,11 +2252,19 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 ) { [weak self, weak library] progress in
                     self?.apply(progress)
                     guard let library else { return }
-                    let byteFraction = progress.total > 0
-                        ? min(max(Double(progress.completed) / Double(progress.total), 0), 1)
-                        : 0
-                    library.downloadProgress = (Double(completedBefore) + byteFraction) / Double(max(total, 1))
-                    library.downloadDetail = "Downloading \(completedBefore + 1) of \(total) • \(spotifyTrack.title)"
+                    self?.updateTransfer(
+                        sessionID: transferSessionID,
+                        kind: .download,
+                        itemID: spotifyTrack.trackID,
+                        title: spotifyTrack.title,
+                        detail: progress.stage == .downloading ? "Downloading song" : "Preparing song",
+                        currentItem: completedBefore + 1,
+                        totalItems: total,
+                        completedBytes: progress.completed,
+                        totalBytes: progress.total,
+                        fallbackProgress: progress.stage == .complete ? 1 : nil,
+                        library: library
+                    )
                 }
                 switch outcome {
                 case .created(let imported): return try library.insertLocalImportedAudio(imported)
@@ -2182,6 +2291,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
         index: Int,
         total: Int,
         reviewedMatchLease: MobileReviewedMatchLease?,
+        transferSessionID: UUID,
         library: MusicLibrary
     ) async throws -> Bool {
         var lastError: Error?
@@ -2196,10 +2306,20 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     )
                 }
                 if attempt > 1 { try await Task.sleep(for: .milliseconds(attempt == 2 ? 500 : 1_500)) }
-                library.uploadDetail = "Uploading \(index + 1) of \(total) • \(track.title)"
+                updateTransfer(
+                    sessionID: transferSessionID,
+                    kind: .upload,
+                    itemID: track.id.uuidString,
+                    title: track.title,
+                    detail: attempt == 1 ? "Uploading song" : "Retrying upload (\(attempt)/3)",
+                    currentItem: index + 1,
+                    totalItems: total,
+                    library: library
+                )
                 return try await library.uploadLocalImportToActiveProfile(
                     track,
-                    reviewedMatchLease: reviewedMatchLease
+                    reviewedMatchLease: reviewedMatchLease,
+                    transferSessionID: transferSessionID
                 )
             } catch is CancellationError {
                 throw CancellationError()
@@ -2210,34 +2330,95 @@ private final class MobileLocalImportViewModel: ObservableObject {
         throw lastError ?? URLError(.cannotConnectToHost)
     }
 
-    private func beginDownloads(total: Int, library: MusicLibrary) {
-        library.isUploading = false
-        library.isDownloading = true
-        library.downloadProgress = 0
-        library.downloadDetail = "Preparing 1 of \(total)"
+    private func beginDownloads(
+        sessionID: UUID,
+        total: Int,
+        title: String,
+        itemID: String,
+        library: MusicLibrary
+    ) {
+        updateTransfer(
+            sessionID: sessionID,
+            kind: .download,
+            itemID: itemID,
+            title: title,
+            detail: "Preparing song",
+            currentItem: 1,
+            totalItems: total,
+            library: library
+        )
     }
 
-    private func reserveTransfer(_ library: MusicLibrary) {
-        library.isUploading = false
-        library.isDownloading = true
-        library.downloadProgress = 0
-        library.downloadDetail = "Preparing import…"
+    private func reserveTransfer(
+        title: String,
+        total: Int,
+        library: MusicLibrary
+    ) -> UUID? {
+        library.beginTransferSession(with: MobileTransferDisplayState(
+            kind: .download,
+            itemID: "local-import-\(UUID().uuidString)",
+            songTitle: title,
+            detail: "Preparing import",
+            currentItem: 1,
+            totalItems: max(total, 1),
+            completedBytes: 0,
+            totalBytes: 0,
+            fallbackProgress: nil
+        ))
     }
 
-    private func beginUploads(total: Int, library: MusicLibrary) {
-        library.isDownloading = false
-        library.isUploading = true
-        library.uploadProgress = 0
-        library.uploadDetail = "Preparing 1 of \(total)"
+    private func beginUploads(
+        sessionID: UUID,
+        total: Int,
+        title: String,
+        itemID: String,
+        library: MusicLibrary
+    ) {
+        updateTransfer(
+            sessionID: sessionID,
+            kind: .upload,
+            itemID: itemID,
+            title: title,
+            detail: "Preparing upload",
+            currentItem: 1,
+            totalItems: total,
+            library: library
+        )
     }
 
-    private func finishTransfers(_ library: MusicLibrary) {
-        library.isDownloading = false
-        library.isUploading = false
+    private func updateTransfer(
+        sessionID: UUID,
+        kind: MobileTransferDisplayState.Kind,
+        itemID: String,
+        title: String,
+        detail: String,
+        currentItem: Int,
+        totalItems: Int,
+        completedBytes: Int64 = 0,
+        totalBytes: Int64 = 0,
+        fallbackProgress: Double? = nil,
+        library: MusicLibrary
+    ) {
+        library.updateTransferSession(sessionID, with: MobileTransferDisplayState(
+            kind: kind,
+            itemID: itemID,
+            songTitle: title,
+            detail: detail,
+            currentItem: currentItem,
+            totalItems: max(totalItems, 1),
+            completedBytes: completedBytes,
+            totalBytes: totalBytes,
+            fallbackProgress: fallbackProgress
+        ))
+    }
+
+    private func finishTransfers(sessionID: UUID, library: MusicLibrary) {
+        library.finishTransferSession(sessionID)
     }
 }
 
 struct MobileLocalImportSheet: View {
+    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @StateObject private var viewModel = MobileLocalImportViewModel()
@@ -2247,7 +2428,7 @@ struct MobileLocalImportSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Color.appBackground.ignoresSafeArea()
+                palette.background.ignoresSafeArea()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         VStack(alignment: .leading, spacing: 8) {
@@ -2325,7 +2506,7 @@ struct MobileLocalImportSheet: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                            .tint(.violet)
+                            .tint(palette.secondary)
                         }
 
                         stageCard
@@ -2362,7 +2543,7 @@ struct MobileLocalImportSheet: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
             }
-            .navigationTitle(reviewedServerMatch ? "Reviewed Match" : "Import from Link")
+            .navigationTitle(reviewedServerMatch ? "Reviewed Match" : "Import from Web")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -2409,7 +2590,7 @@ struct MobileLocalImportSheet: View {
     private var stageCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Image(systemName: stageSymbol(viewModel.stage)).foregroundStyle(Color.violet)
+                Image(systemName: stageSymbol(viewModel.stage)).foregroundStyle(palette.foregroundAccent)
                 Text(stageTitle(viewModel.stage, mediaMode: viewModel.mediaMode)).font(.headline)
                 Spacer()
                 if viewModel.isRunning { ProgressView() }
@@ -2419,7 +2600,7 @@ struct MobileLocalImportSheet: View {
                 .foregroundStyle(.secondary)
             if viewModel.totalBytes > 0 {
                 ProgressView(value: Double(viewModel.completedBytes), total: Double(viewModel.totalBytes))
-                    .tint(.violet)
+                    .tint(palette.foregroundAccent)
                 Text("\(ByteCountFormatter.string(fromByteCount: viewModel.completedBytes, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: viewModel.totalBytes, countStyle: .file))")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -2444,7 +2625,7 @@ struct MobileLocalImportSheet: View {
                 Spacer()
                 Text("\(response.results.count) \(viewModel.mediaMode == .video ? "downloadable" : "previewable")")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.violet)
+                    .foregroundStyle(palette.foregroundAccent)
             }
 
             ForEach(LocalImportSearchProvider.allCases) { provider in
@@ -2483,7 +2664,7 @@ struct MobileLocalImportSheet: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(Color.violet)
+                        .foregroundStyle(palette.foregroundAccent)
                     searchResultArtwork(result)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(result.track.title)
@@ -2512,7 +2693,7 @@ struct MobileLocalImportSheet: View {
                     } else {
                         Image(systemName: viewModel.previewingVideoID == candidate.videoID ? "stop.fill" : "play.fill")
                             .frame(width: 34, height: 34)
-                            .background(Color.violet.opacity(0.18), in: Circle())
+                            .background(palette.secondary.opacity(0.18), in: Circle())
                     }
                 }
                 .buttonStyle(.plain)
@@ -2523,7 +2704,7 @@ struct MobileLocalImportSheet: View {
         .background(.white.opacity(selected ? 0.08 : 0.035), in: RoundedRectangle(cornerRadius: 12))
         .overlay {
             RoundedRectangle(cornerRadius: 12)
-                .stroke(selected ? Color.violet.opacity(0.45) : Color.white.opacity(0.05))
+                .stroke(selected ? palette.secondary.opacity(0.45) : Color.white.opacity(0.05))
         }
         .disabled(viewModel.isRunning)
     }
@@ -2532,7 +2713,7 @@ struct MobileLocalImportSheet: View {
         let artworkURL = (result.track.artworkURL ?? result.candidates.first?.thumbnailURL).flatMap(URL.init(string:))
         return ZStack {
             LinearGradient(
-                colors: [Color.violet.opacity(0.42), Color.purple.opacity(0.22)],
+                colors: [palette.secondary.opacity(0.42), palette.tertiary.opacity(0.22)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -2597,7 +2778,7 @@ struct MobileLocalImportSheet: View {
                     } label: {
                         HStack(spacing: 11) {
                             Image(systemName: viewModel.selectedVideoID == candidate.videoID ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(Color.violet)
+                                .foregroundStyle(palette.foregroundAccent)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(candidate.title).font(.subheadline.weight(.semibold)).lineLimit(2)
                                 Text([
@@ -2620,7 +2801,7 @@ struct MobileLocalImportSheet: View {
                         } else {
                             Image(systemName: viewModel.previewingVideoID == candidate.videoID ? "stop.fill" : "play.fill")
                                 .frame(width: 32, height: 32)
-                                .background(Color.violet.opacity(0.18), in: Circle())
+                                .background(palette.secondary.opacity(0.18), in: Circle())
                         }
                     }
                     .buttonStyle(.plain)
@@ -2639,7 +2820,7 @@ struct MobileLocalImportSheet: View {
                 Spacer()
                 Text("\(viewModel.selectedPlaylistItems.count) of \(playlist.items.count)")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.violet)
+                    .foregroundStyle(palette.foregroundAccent)
             }
             if playlist.unavailableCount > 0 {
                 VStack(alignment: .leading, spacing: 5) {
@@ -2662,7 +2843,7 @@ struct MobileLocalImportSheet: View {
                 HStack(spacing: 8) {
                     Button { viewModel.togglePlaylistItem(item) } label: {
                         HStack(spacing: 11) {
-                            Image(systemName: selected ? "checkmark.square.fill" : "square").foregroundStyle(Color.violet)
+                            Image(systemName: selected ? "checkmark.square.fill" : "square").foregroundStyle(palette.foregroundAccent)
                             Text("\(item.position)").font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 24)
                             playlistItemArtwork(item)
                             VStack(alignment: .leading, spacing: 3) {
@@ -2688,7 +2869,7 @@ struct MobileLocalImportSheet: View {
                         } else {
                             Image(systemName: viewModel.previewingVideoID == item.candidate.videoID ? "stop.fill" : "play.fill")
                                 .frame(width: 32, height: 32)
-                                .background(Color.violet.opacity(0.18), in: Circle())
+                                .background(palette.secondary.opacity(0.18), in: Circle())
                         }
                     }
                     .buttonStyle(.plain)
@@ -2705,7 +2886,7 @@ struct MobileLocalImportSheet: View {
         let artworkURL = (item.track.artworkURL ?? item.candidate.thumbnailURL).flatMap(URL.init(string:))
         return ZStack {
             LinearGradient(
-                colors: [Color.violet.opacity(0.42), Color.purple.opacity(0.22)],
+                colors: [palette.secondary.opacity(0.42), palette.tertiary.opacity(0.22)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )

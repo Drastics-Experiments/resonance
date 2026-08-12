@@ -99,6 +99,9 @@ final class ThemeTests: XCTestCase {
         }
         XCTAssertTrue(sidebarSource.contains(".tint(palette.foregroundAccent)"))
         XCTAssertTrue(sidebarSource.contains(".stroke(palette.divider)"))
+        XCTAssertTrue(sidebarSource.contains("Text(\"Sign in with Clerk\")"))
+        XCTAssertTrue(sidebarSource.contains(".fixedSize(horizontal: false, vertical: true)"))
+        XCTAssertTrue(sidebarSource.contains(".minimumScaleFactor(0.82)"))
     }
 
     private func contrastRatio(_ first: UInt32, _ second: UInt32) -> Double {

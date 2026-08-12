@@ -9,6 +9,7 @@ struct MainContentView: View {
     @State private var serverSearchText = ""
     @State private var serverScope: MacServerScope = .all
     @State private var serverSort: MacServerSort = .title
+    @State private var clipEditorSelection: MacClipEditorSelection?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,7 +44,21 @@ struct MainContentView: View {
             )
         }
         .clipped()
+        .sheet(item: $clipEditorSelection) { selection in
+            MacClipEditorSheet(initialTrackID: selection.trackID)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openClipEditor)) { notification in
+            guard let trackID = notification.object as? UUID,
+                  let track = model.tracks.first(where: { $0.id == trackID }),
+                  ClipEditorTrackPolicy.isEditable(track) else { return }
+            clipEditorSelection = MacClipEditorSelection(trackID: trackID)
+        }
     }
+}
+
+struct MacClipEditorSelection: Identifiable, Equatable {
+    let trackID: UUID
+    var id: UUID { trackID }
 }
 
 private struct ServerLibraryView: View {
@@ -683,6 +698,7 @@ private struct MacServerSongRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .clipEditorAccessibilityAction(for: localTrack)
 
             HStack(spacing: 11) {
                 if let localTrack {
@@ -731,6 +747,9 @@ private struct MacServerSongRow: View {
         .contextMenu {
             if let localTrack {
                 Button("Play", action: { model.selectAndPlay(localTrack) })
+                if ClipEditorTrackPolicy.isEditable(localTrack) {
+                    Button("Open in Clip Editor") { openClipEditor(localTrack) }
+                }
                 Button("Show in Finder", action: { model.revealInFinder(localTrack) })
             } else {
                 if model.clientConfiguration.allowsStreamOnlyPlayback {
@@ -3155,6 +3174,12 @@ private struct RecentlyAddedArtworkCard: View {
         .animation(.easeOut(duration: 0.14), value: isHovering)
         .help("\(playbackActionTitle) \(track.title)")
         .accessibilityLabel("\(playbackActionTitle) \(track.title) by \(track.artist)")
+        .clipEditorAccessibilityAction(for: track)
+        .contextMenu {
+            if ClipEditorTrackPolicy.isEditable(track) {
+                Button("Open in Clip Editor") { openClipEditor(track) }
+            }
+        }
     }
 }
 
@@ -3357,15 +3382,14 @@ private struct TrackAreaView: View {
     let onAddSongs: () -> Void
     let showsFilters: Bool
     let topPadding: CGFloat
-    @State private var draggedTrackID: UUID?
+    @State private var draggedEntryID: PlaylistPresentationEntryID?
     @State private var dragOffset: CGFloat = 0
     @State private var dropPreviewIndex: Int?
     @State private var isShowingImportChooser = false
 
     private var reorderablePlaylistID: UUID? {
         guard model.section == .playlists,
-              let playlist = model.selectedPlaylist,
-              !model.selectedPlaylistHasUnavailableEntries else { return nil }
+              let playlist = model.selectedPlaylist else { return nil }
         return playlist.id
     }
 
@@ -3444,68 +3468,56 @@ private struct TrackAreaView: View {
                 } else {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(model.displayedCollectionEntries.enumerated()), id: \.element.id) { index, entry in
-                            if let track = entry.track {
-                                let row = TrackRowView(
-                                    track: track,
-                                    number: index + 1,
-                                    showAlbum: showAlbum
-                                )
-                                let previewEdge = playlistDropPreviewEdge(for: track.id)
+                            let row = playlistEntryRow(entry, number: index + 1)
+                            let previewEdge = playlistDropPreviewEdge(for: entry.id)
 
-                                if let playlistID = reorderablePlaylistID {
-                                    row
-                                        .frame(height: draggedTrackID == track.id ? 0 : 61)
-                                        .padding(
-                                            .top,
-                                            previewEdge == .top ? 61 : 0
-                                        )
-                                        .padding(
-                                            .bottom,
-                                            previewEdge == .bottom ? 61 : 0
-                                        )
-                                        .overlay(alignment: .top) {
-                                            if previewEdge == .top {
-                                                playlistDropPreview(number: dropPreviewNumber)
-                                                    .transition(.move(edge: .top).combined(with: .opacity))
-                                            }
+                            if let playlistID = reorderablePlaylistID {
+                                row
+                                    .frame(height: draggedEntryID == entry.id ? 0 : 61)
+                                    .padding(
+                                        .top,
+                                        previewEdge == .top ? 61 : 0
+                                    )
+                                    .padding(
+                                        .bottom,
+                                        previewEdge == .bottom ? 61 : 0
+                                    )
+                                    .overlay(alignment: .top) {
+                                        if previewEdge == .top {
+                                            playlistDropPreview(number: dropPreviewNumber)
+                                                .transition(.move(edge: .top).combined(with: .opacity))
                                         }
-                                        .overlay(alignment: .bottom) {
-                                            if previewEdge == .bottom {
-                                                playlistDropPreview(number: dropPreviewNumber)
-                                                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                                            }
+                                    }
+                                    .overlay(alignment: .bottom) {
+                                        if previewEdge == .bottom {
+                                            playlistDropPreview(number: dropPreviewNumber)
+                                                .transition(.move(edge: .bottom).combined(with: .opacity))
                                         }
-                                        .animation(.spring(response: 0.24, dampingFraction: 0.84), value: dropPreviewIndex)
-                                        .offset(y: draggedTrackID == track.id ? draggedRowOffset : 0)
-                                        .scaleEffect(draggedTrackID == track.id ? 1.015 : 1)
-                                        .shadow(
-                                            color: draggedTrackID == track.id ? Color.black.opacity(0.38) : .clear,
-                                            radius: draggedTrackID == track.id ? 12 : 0,
-                                            y: draggedTrackID == track.id ? 6 : 0
-                                        )
-                                        .zIndex(draggedTrackID == track.id ? 2 : 0)
-                                        .animation(.easeOut(duration: 0.12), value: draggedTrackID)
-                                        .highPriorityGesture(
-                                            DragGesture(minimumDistance: 5)
-                                                .onChanged { value in
-                                                    updatePlaylistDrag(
-                                                        trackID: track.id,
-                                                        translation: value.translation.height
-                                                    )
-                                                }
-                                                .onEnded { _ in
-                                                    finishPlaylistDrag(trackID: track.id, playlistID: playlistID)
-                                                }
-                                        )
-                                } else {
-                                    row
-                                }
+                                    }
+                                    .animation(.spring(response: 0.24, dampingFraction: 0.84), value: dropPreviewIndex)
+                                    .offset(y: draggedEntryID == entry.id ? draggedRowOffset : 0)
+                                    .scaleEffect(draggedEntryID == entry.id ? 1.015 : 1)
+                                    .shadow(
+                                        color: draggedEntryID == entry.id ? Color.black.opacity(0.38) : .clear,
+                                        radius: draggedEntryID == entry.id ? 12 : 0,
+                                        y: draggedEntryID == entry.id ? 6 : 0
+                                    )
+                                    .zIndex(draggedEntryID == entry.id ? 2 : 0)
+                                    .animation(.easeOut(duration: 0.12), value: draggedEntryID)
+                                    .highPriorityGesture(
+                                        DragGesture(minimumDistance: 5)
+                                            .onChanged { value in
+                                                updatePlaylistDrag(
+                                                    entryID: entry.id,
+                                                    translation: value.translation.height
+                                                )
+                                            }
+                                            .onEnded { _ in
+                                                finishPlaylistDrag(entryID: entry.id, playlistID: playlistID)
+                                            }
+                                    )
                             } else {
-                                UnavailablePlaylistTrackRow(
-                                    entry: entry,
-                                    number: index + 1,
-                                    showAlbum: showAlbum
-                                )
+                                row
                             }
                         }
                     }
@@ -3521,14 +3533,19 @@ private struct TrackAreaView: View {
     }
 
     @ViewBuilder
+    private func playlistEntryRow(_ entry: PlaylistPresentationEntry, number: Int) -> some View {
+        if let track = entry.track {
+            TrackRowView(track: track, number: number, showAlbum: showAlbum)
+        } else {
+            UnavailablePlaylistTrackRow(entry: entry, number: number, showAlbum: showAlbum)
+        }
+    }
+
+    @ViewBuilder
     private func playlistDropPreview(number: Int) -> some View {
-        if let draggedTrackID,
-           let draggedTrack = model.displayedTracks.first(where: { $0.id == draggedTrackID }) {
-            TrackRowView(
-                track: draggedTrack,
-                number: number,
-                showAlbum: showAlbum
-            )
+        if let draggedEntryID,
+           let draggedEntry = model.displayedCollectionEntries.first(where: { $0.id == draggedEntryID }) {
+            playlistEntryRow(draggedEntry, number: number)
             .opacity(0.32)
             .scaleEffect(0.985)
             .allowsHitTesting(false)
@@ -3541,54 +3558,54 @@ private struct TrackAreaView: View {
     }
 
     private var draggedRowOffset: CGFloat {
-        guard let draggedTrackID,
-              let sourceIndex = model.displayedTracks.firstIndex(where: { $0.id == draggedTrackID })
+        guard let draggedEntryID,
+              let sourceIndex = model.displayedCollectionEntries.firstIndex(where: { $0.id == draggedEntryID })
         else { return dragOffset + 30.5 }
         let layoutCompensation: CGFloat = (dropPreviewIndex ?? sourceIndex) < sourceIndex ? -61 : 0
         return dragOffset + 30.5 + layoutCompensation
     }
 
-    private func playlistDropPreviewEdge(for trackID: UUID) -> PlaylistTrackDropEdge? {
-        guard let draggedTrackID,
+    private func playlistDropPreviewEdge(for entryID: PlaylistPresentationEntryID) -> PlaylistTrackDropEdge? {
+        guard let draggedEntryID,
               let dropPreviewIndex
         else { return nil }
 
-        let remainingTracks = model.displayedTracks.filter { $0.id != draggedTrackID }
-        if remainingTracks.isEmpty {
-            return trackID == draggedTrackID ? .top : nil
+        let remainingEntries = model.displayedCollectionEntries.filter { $0.id != draggedEntryID }
+        if remainingEntries.isEmpty {
+            return entryID == draggedEntryID ? .top : nil
         }
-        if dropPreviewIndex < remainingTracks.count {
-            return remainingTracks[dropPreviewIndex].id == trackID ? .top : nil
+        if dropPreviewIndex < remainingEntries.count {
+            return remainingEntries[dropPreviewIndex].id == entryID ? .top : nil
         }
-        return remainingTracks.last?.id == trackID ? .bottom : nil
+        return remainingEntries.last?.id == entryID ? .bottom : nil
     }
 
-    private func updatePlaylistDrag(trackID: UUID, translation: CGFloat) {
-        if draggedTrackID == nil {
-            draggedTrackID = trackID
+    private func updatePlaylistDrag(entryID: PlaylistPresentationEntryID, translation: CGFloat) {
+        if draggedEntryID == nil {
+            draggedEntryID = entryID
         }
-        guard draggedTrackID == trackID else { return }
+        guard draggedEntryID == entryID else { return }
 
         dragOffset = translation
-        let visibleTrackIDs = model.displayedTracks.map(\.id)
-        guard let sourceIndex = visibleTrackIDs.firstIndex(of: trackID), !visibleTrackIDs.isEmpty else { return }
+        let visibleEntryIDs = model.displayedCollectionEntries.map(\.id)
+        guard let sourceIndex = visibleEntryIDs.firstIndex(of: entryID), !visibleEntryIDs.isEmpty else { return }
         let destinationIndex = min(
-            max(Int((CGFloat(sourceIndex) + (translation / 61)).rounded()), visibleTrackIDs.startIndex),
-            visibleTrackIDs.index(before: visibleTrackIDs.endIndex)
+            max(Int((CGFloat(sourceIndex) + (translation / 61)).rounded()), visibleEntryIDs.startIndex),
+            visibleEntryIDs.index(before: visibleEntryIDs.endIndex)
         )
         withAnimation(.spring(response: 0.24, dampingFraction: 0.84)) {
             dropPreviewIndex = destinationIndex
         }
     }
 
-    private func finishPlaylistDrag(trackID: UUID, playlistID: UUID) {
-        guard draggedTrackID == trackID else { return }
+    private func finishPlaylistDrag(entryID: PlaylistPresentationEntryID, playlistID: UUID) {
+        guard draggedEntryID == entryID else { return }
         let destinationIndex = dropPreviewIndex
         withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
             if let destinationIndex {
-                model.moveTrack(trackID, to: destinationIndex, in: playlistID)
+                model.movePlaylistEntry(entryID, to: destinationIndex, in: playlistID)
             }
-            draggedTrackID = nil
+            draggedEntryID = nil
             dragOffset = 0
             dropPreviewIndex = nil
         }
@@ -3915,6 +3932,7 @@ private struct TrackRowView: View {
             .accessibilityAction(named: isFavorite ? "Remove from Liked Songs" : "Add to Liked Songs") {
                 model.toggleFavorite(track)
             }
+            .clipEditorAccessibilityAction(for: track)
             .help("Play \(track.title)")
 
             Button {
@@ -3952,6 +3970,9 @@ private struct TrackRowView: View {
             }
 
             Button("Show in Finder") { model.revealInFinder(track) }
+            if ClipEditorTrackPolicy.isEditable(track) {
+                Button("Open in Clip Editor") { openClipEditor(track) }
+            }
             Divider()
 
             if let selected = model.selectedPlaylist, model.section == .playlists {
@@ -4311,7 +4332,7 @@ private struct MacImportChooser: View {
                     Button(action: onImportLink) {
                         MacImportChoiceRow(
                             symbol: "link.badge.plus",
-                            title: "Import from Link",
+                            title: "Import from Web",
                             detail: "Paste a supported link, or search Spotify, SoundCloud, and YouTube"
                         )
                     }
@@ -4682,6 +4703,7 @@ private struct MacStorageTrackRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .clipEditorAccessibilityAction(for: track)
 
         }
         .padding(.horizontal, 10)
@@ -4696,6 +4718,9 @@ private struct MacStorageTrackRow: View {
         .contextMenu {
             Button("Play", action: { model.selectAndPlay(track) })
             Button("Show in Finder", action: { model.revealInFinder(track) })
+            if ClipEditorTrackPolicy.isEditable(track) {
+                Button("Open in Clip Editor") { openClipEditor(track) }
+            }
             Divider()
             Button(track.remoteID == nil ? "Delete Original File" : "Delete Downloaded Copy", role: .destructive, action: onDelete)
         }
@@ -4706,9 +4731,36 @@ private func storageByteText(_ bytes: Int64) -> String {
     ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
 }
 
+private func openClipEditor(_ track: Track) {
+    guard ClipEditorTrackPolicy.isEditable(track) else { return }
+    NotificationCenter.default.post(name: .openClipEditor, object: track.id)
+}
+
+private struct ClipEditorAccessibilityAction: ViewModifier {
+    let track: Track?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let track, ClipEditorTrackPolicy.isEditable(track) {
+            content.accessibilityAction(named: "Open in Clip Editor") {
+                openClipEditor(track)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+private extension View {
+    func clipEditorAccessibilityAction(for track: Track?) -> some View {
+        modifier(ClipEditorAccessibilityAction(track: track))
+    }
+}
+
 extension Notification.Name {
     static let focusMusicSearch = Notification.Name("focusMusicSearch")
     static let newMusicPlaylist = Notification.Name("newMusicPlaylist")
     static let importMusicFromLink = Notification.Name("importMusicFromLink")
     static let openResonanceSettings = Notification.Name("openResonanceSettings")
+    static let openClipEditor = Notification.Name("openClipEditor")
 }

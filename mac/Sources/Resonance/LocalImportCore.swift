@@ -48,7 +48,7 @@ enum LocalImportTransferContextError: LocalizedError {
         case .uploadModeUnavailable:
             "The selected upload mode is disabled by the verified server configuration. Choose an available mode and try again."
         case .unsupportedSourceLink:
-            "Server source-link upload requires the exact original https://www.youtube.com/watch?v=… page typed into Import from Link. Short links, rewritten links, and discovered matches must use Reviewed match."
+            "Server source-link upload requires the exact original https://www.youtube.com/watch?v=… page typed into Import from Web. Short links, rewritten links, and discovered matches must use Reviewed match."
         case .sourceLinkRequiresAudio:
             "Server source-link import creates audio only. Choose Audio before uploading this source."
         case .reviewedMatchRequired:

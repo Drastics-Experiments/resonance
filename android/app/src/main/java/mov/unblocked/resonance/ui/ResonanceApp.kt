@@ -20,6 +20,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -46,13 +47,23 @@ fun ResonanceApp(
     onInstallUpdate: (AndroidUpdateInfo) -> Unit = {},
     onDismissUpdate: () -> Unit = {},
 ) {
-    ResonanceTheme {
+    ResonanceTheme(state.themeChoice) {
         var selectedTab by rememberSaveable { mutableStateOf(ResonanceTab.Library) }
         var openPlaylistId by rememberSaveable { mutableStateOf<String?>(null) }
         var showStorage by rememberSaveable { mutableStateOf(false) }
         var showNowPlaying by rememberSaveable { mutableStateOf(false) }
         var showSettings by rememberSaveable { mutableStateOf(false) }
         val focusManager = LocalFocusManager.current
+        val palette = LocalResonancePalette.current
+        val navigationItemColors = NavigationBarItemDefaults.colors(
+            selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            selectedTextColor = MaterialTheme.colorScheme.onSurface,
+            indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
+            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            disabledIconColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .38f),
+            disabledTextColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .38f),
+        )
 
         BackHandler(enabled = showSettings) { showSettings = false }
         BackHandler(enabled = !showSettings && showNowPlaying) { showNowPlaying = false }
@@ -71,7 +82,7 @@ fun ResonanceApp(
                                     MiniPlayer(state, actions, onOpen = { showNowPlaying = true })
                                 }
                                 if (!showStorage) {
-                                    NavigationBar(containerColor = Color(0xF5050609)) {
+                                    NavigationBar(containerColor = palette.panel.copy(alpha = .96f)) {
                                         ResonanceTab.entries.forEach { tab ->
                                             val icon = when (tab) {
                                                 ResonanceTab.Library -> Icons.Default.LibraryMusic
@@ -87,6 +98,7 @@ fun ResonanceApp(
                                                 },
                                                 icon = { Icon(icon, tab.label) },
                                                 label = { Text(tab.label) },
+                                                colors = navigationItemColors,
                                             )
                                         }
                                     }
@@ -165,7 +177,7 @@ fun ResonanceApp(
 }
 
 internal fun shouldShowTransferPopup(state: ResonanceUiState): Boolean =
-    state.isDownloading || state.isUploading
+    state.isUploading || (state.isDownloading && state.downloadBytesTransferred > 0L)
 
 @Composable
 private fun AndroidUpdateDialog(

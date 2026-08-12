@@ -69,12 +69,13 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun ResonanceBackground(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    val palette = LocalResonancePalette.current
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(
                 Brush.linearGradient(
-                    colors = listOf(Navy, DeepNavy),
+                    colors = listOf(palette.panel, palette.background),
                 ),
             ),
     ) {
@@ -90,6 +91,7 @@ fun Artwork(
     modifier: Modifier = Modifier,
     showWaveform: Boolean = false,
 ) {
+    val palette = LocalResonancePalette.current
     val bitmap = remember(path) {
         path?.takeIf { it.isNotBlank() }?.let { runCatching { BitmapFactory.decodeFile(it)?.asImageBitmap() }.getOrNull() }
     }
@@ -97,7 +99,7 @@ fun Artwork(
         modifier = modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(12.dp))
-            .background(Brush.linearGradient(listOf(Violet, Color(0xFF874BFF), Color(0xFFB079FF)))),
+            .background(Brush.linearGradient(palette.artworkStops)),
         contentAlignment = Alignment.Center,
     ) {
         if (bitmap != null) {
@@ -154,6 +156,7 @@ fun PlaylistArtwork(
 
 @Composable
 private fun PlaylistArtworkCell(path: String?, modifier: Modifier) {
+    val palette = LocalResonancePalette.current
     val bitmap = remember(path) {
         path?.takeIf { it.isNotBlank() }?.let {
             runCatching { BitmapFactory.decodeFile(it)?.asImageBitmap() }.getOrNull()
@@ -161,7 +164,7 @@ private fun PlaylistArtworkCell(path: String?, modifier: Modifier) {
     }
     Box(
         modifier = modifier.background(
-            Brush.linearGradient(listOf(Violet, Color(0xFF874BFF), Color(0xFFB079FF))),
+            Brush.linearGradient(palette.artworkStops),
         ),
         contentAlignment = Alignment.Center,
     ) {
@@ -189,6 +192,7 @@ fun RemoteArtwork(
     serverURL: String,
     modifier: Modifier = Modifier,
 ) {
+    val palette = LocalResonancePalette.current
     val resolvedURL = remember(artworkURL, serverURL) {
         resolveRemoteArtworkURL(serverURL, artworkURL)
     }
@@ -201,7 +205,7 @@ fun RemoteArtwork(
         modifier = modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(12.dp))
-            .background(Brush.linearGradient(listOf(Violet, Color(0xFF874BFF), Color(0xFFB079FF)))),
+            .background(Brush.linearGradient(palette.artworkStops)),
         contentAlignment = Alignment.Center,
     ) {
         if (bitmap != null) {
@@ -367,7 +371,7 @@ fun SegmentedControl(
                     .weight(1f)
                     .height(40.dp)
                     .clip(RoundedCornerShape(11.dp))
-                    .background(if (index == selectedIndex) Accent else Color.Transparent)
+                    .background(if (index == selectedIndex) MaterialTheme.colorScheme.primary else Color.Transparent)
                     .clickable { onSelected(index) },
                 contentAlignment = Alignment.Center,
             ) {
@@ -462,7 +466,11 @@ fun TrackRow(
                         if (selected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
                         contentDescription = if (selected) "Selected" else "Not selected",
                         modifier = Modifier.size(18.dp),
-                        tint = if (selected) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = .42f),
+                        tint = if (selected) {
+                            MaterialTheme.colorScheme.tertiary
+                        } else {
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = .42f)
+                        },
                     )
                 } else {
                     Text(
@@ -490,7 +498,7 @@ fun TrackRow(
                         Icons.Default.CheckCircle,
                         contentDescription = "Stored on device",
                         modifier = Modifier.size(9.dp),
-                        tint = SuccessGreen,
+                        tint = LocalResonancePalette.current.success,
                     )
                 }
                 Text(

@@ -182,6 +182,33 @@ export function normalizedCrossfadeSeconds(value) {
   return Number.isFinite(seconds) ? Math.max(1, Math.min(12, Math.round(seconds))) : 5;
 }
 
+export function serverTransferProgressPresentation(value = {}) {
+  const usesItemProgress = Object.hasOwn(value, "itemCompleted")
+    || Object.hasOwn(value, "itemTotal")
+    || Object.hasOwn(value, "itemIndex")
+    || Object.hasOwn(value, "itemCount");
+  const completed = Math.max(0, Number(usesItemProgress ? value.itemCompleted : value.completed) || 0);
+  const total = Math.max(0, Number(usesItemProgress ? value.itemTotal : value.total) || 0);
+  const determinate = total > 0 && completed > 0;
+  const ratio = determinate ? Math.min(1, completed / total) : null;
+  const itemCount = Math.max(0, Math.floor(Number(value.itemCount) || 0));
+  const itemIndex = Math.min(itemCount, Math.max(itemCount ? 1 : 0, Math.floor(Number(value.itemIndex) || 0)));
+  const counter = itemCount ? `${itemIndex}/${itemCount}` : "";
+  const percentage = ratio !== null && ratio > 0 && ratio < 0.01
+    ? "<1%"
+    : `${Math.round((ratio || 0) * 100)}%`;
+  return {
+    ratio,
+    counter,
+    determinate,
+    label: determinate
+      ? `${percentage}${counter ? ` \u00b7 ${counter}` : ""}`
+      : completed > 0
+        ? `Downloading${counter ? ` \u00b7 ${counter}` : "\u2026"}`
+        : counter,
+  };
+}
+
 export function crossfadeProgress(remainingSeconds, durationSeconds) {
   const duration = Number(durationSeconds);
   if (!Number.isFinite(duration) || duration <= 0) return 0;
@@ -391,7 +418,7 @@ export function serverSourceNeedsOriginalPage(sourceURL) {
   }
 }
 
-export function serverSourceDisplayFallback(sourceURL, { failed = false } = {}) {
+export function serverSourceDisplayFallback(sourceURL) {
   if (serverSourceNeedsOriginalPage(sourceURL)) {
     return {
       title: "Original source link needed",
@@ -399,9 +426,7 @@ export function serverSourceDisplayFallback(sourceURL, { failed = false } = {}) 
       album: "Legacy expired link",
     };
   }
-  return failed
-    ? { title: "Metadata unavailable", artist: "Refresh to retry", album: "Link only" }
-    : { title: "Resolving metadata…", artist: "On-device lookup", album: "Link only" };
+  return { title: "Resolving metadata…", artist: "Automatic lookup", album: "Link only" };
 }
 
 export function localImportOperationFingerprint({ source, mediaKind, selection = [], uploadRequested = false } = {}) {
@@ -781,6 +806,7 @@ function customPlaylistSnapshot(playlists) {
       id: normalizedPlaylistID(playlist.id),
       trackIDs: unique(Array.isArray(playlist.trackIDs) ? playlist.trackIDs : []),
       remoteSongIDs: unique(Array.isArray(playlist.remoteSongIDs) ? playlist.remoteSongIDs : []),
+      entryOrder: normalizedPlaylistEntryOrder(playlist.entryOrder),
       isSystem: false,
     }));
 }
@@ -1054,6 +1080,7 @@ export function normalizeState(value) {
     playlist.id = normalizedPlaylistID(playlist.id);
     playlist.trackIDs = unique(Array.isArray(playlist.trackIDs) ? playlist.trackIDs : []);
     playlist.remoteSongIDs = unique(Array.isArray(playlist.remoteSongIDs) ? playlist.remoteSongIDs : []);
+    playlist.entryOrder = normalizedPlaylistEntryOrder(playlist.entryOrder);
   });
   const favorites = new Set(state.favorites);
   if (!hadRemoteLikedSongIDs) {
@@ -1411,25 +1438,30 @@ export function tracksForPlaylist(state, playlistID, catalog = []) {
   const orderedRemoteIDs = unique(playlist.remoteSongIDs.map((id) => String(id || "").trim()).filter(Boolean));
   const remoteIDSet = new Set(orderedRemoteIDs);
   const downloadedByRemoteID = new Map();
-  const previousKeys = localTracks.map((track) => {
+  const fallbackPreviousKeys = localTracks.map((track) => {
     const remoteID = String(track?.remoteID || "").trim();
     if (!remoteID || !remoteIDSet.has(remoteID) || !trackBelongsToActiveProfile(state, track)) {
-      return `local\0${track.id}`;
+      return playlistLocalEntryKey(track.id);
     }
     if (!downloadedByRemoteID.has(remoteID)) downloadedByRemoteID.set(remoteID, track);
-    return `remote\0${remoteID}`;
+    return playlistRemoteEntryKey(remoteID);
   });
-  const orderedKeys = orderedRemoteIDs.map((remoteID) => `remote\0${remoteID}`);
-  const preservedKeys = previousKeys.filter((key) => key.startsWith("local\0"));
+  const orderedKeys = orderedRemoteIDs.map(playlistRemoteEntryKey);
+  const validLocalKeys = new Set(fallbackPreviousKeys.filter((key) => key.startsWith("local:")));
+  const validRemoteKeys = new Set(orderedKeys);
+  const storedPreviousKeys = normalizedPlaylistEntryOrder(playlist.entryOrder).filter((key) =>
+    key.startsWith("local:") ? validLocalKeys.has(key) : validRemoteKeys.has(key));
+  const previousKeys = unique([...storedPreviousKeys, ...fallbackPreviousKeys]);
+  const preservedKeys = previousKeys.filter((key) => key.startsWith("local:"));
   const catalogByID = new Map((Array.isArray(catalog) ? catalog : [])
     .filter((song) => song?.id)
     .map((song) => [String(song.id), song]));
 
   return mergePlaylistOrderWithPreservedItems(previousKeys, orderedKeys, preservedKeys).map((key) => {
-    if (key.startsWith("local\0")) {
-      return state.tracks.find((track) => track.id === key.slice("local\0".length));
+    if (key.startsWith("local:")) {
+      return state.tracks.find((track) => track.id === key.slice("local:".length));
     }
-    const remoteID = key.slice("remote\0".length);
+    const remoteID = key.slice("remote:".length);
     const downloaded = downloadedByRemoteID.get(remoteID);
     if (downloaded) return downloaded;
     const song = catalogByID.get(remoteID);
@@ -1449,6 +1481,145 @@ export function tracksForPlaylist(state, playlistID, catalog = []) {
       playlistUnavailable: true,
     };
   }).filter(Boolean);
+}
+
+function playlistLocalEntryKey(trackID) {
+  const id = String(trackID || "").trim();
+  return id ? `local:${id}` : "";
+}
+
+function playlistRemoteEntryKey(remoteID) {
+  const id = String(remoteID || "").trim();
+  return id ? `remote:${id}` : "";
+}
+
+export function normalizedPlaylistEntryOrder(value) {
+  return unique((Array.isArray(value) ? value : [])
+    .map((key) => String(key || "").trim())
+    .filter((key) => (key.startsWith("local:") && key.length > "local:".length)
+      || (key.startsWith("remote:") && key.length > "remote:".length)));
+}
+
+export function playlistEntryKey(playlist, track) {
+  const remoteID = String(track?.remoteID || "").trim();
+  if (remoteID && Array.isArray(playlist?.remoteSongIDs) && playlist.remoteSongIDs.includes(remoteID)) {
+    return playlistRemoteEntryKey(remoteID);
+  }
+  return playlistLocalEntryKey(track?.id);
+}
+
+export function removeLibraryTracksFromPlaylists(
+  state,
+  trackIDs,
+  catalog = [],
+  { catalogIsAuthoritative = false } = {},
+) {
+  const requestedIDs = new Set(Array.isArray(trackIDs)
+    ? trackIDs
+    : trackIDs instanceof Set ? [...trackIDs] : []);
+  const removedTracks = (Array.isArray(state?.tracks) ? state.tracks : [])
+    .filter((track) => requestedIDs.has(track?.id));
+  const catalogIDs = new Set((Array.isArray(catalog) ? catalog : [])
+    .map((song) => String(song?.id || "").trim())
+    .filter(Boolean));
+  const affectedPlaylistIDs = [];
+  const remoteMembershipChangedPlaylistIDs = [];
+  const preservedRemoteSongIDs = new Set();
+
+  for (const playlist of Array.isArray(state?.playlists) ? state.playlists : []) {
+    const affectedTracks = removedTracks.filter((track) =>
+      Array.isArray(playlist.trackIDs) && playlist.trackIDs.includes(track.id));
+    if (!affectedTracks.length) continue;
+    affectedPlaylistIDs.push(playlist.id);
+    if (playlist.isSystem) {
+      playlist.trackIDs = playlist.trackIDs.filter((id) => !requestedIDs.has(id));
+      continue;
+    }
+
+    const previousRemoteSongIDs = unique((Array.isArray(playlist.remoteSongIDs) ? playlist.remoteSongIDs : [])
+      .map((id) => String(id || "").trim())
+      .filter(Boolean));
+    let nextRemoteSongIDs = [...previousRemoteSongIDs];
+    let entryKeys = Array.isArray(playlist.entryOrder)
+      ? normalizedPlaylistEntryOrder(playlist.entryOrder)
+      : tracksForPlaylist(state, playlist.id, catalog)
+        .map((entry) => playlistEntryKey(playlist, entry))
+        .filter(Boolean);
+    playlist.trackIDs = playlist.trackIDs.filter((id) => !requestedIDs.has(id));
+    for (const track of affectedTracks) {
+      const localKey = playlistLocalEntryKey(track.id);
+      const remoteID = String(track.remoteID || "").trim();
+      const remoteKey = playlistRemoteEntryKey(remoteID);
+      const isActiveRemote = Boolean(remoteID && trackBelongsToActiveProfile(state, track));
+      const hasCanonicalMembership = Boolean(remoteID && nextRemoteSongIDs.includes(remoteID));
+      const catalogConfirmsMembership = Boolean(
+        isActiveRemote && catalogIsAuthoritative && catalogIDs.has(remoteID),
+      );
+      const isConclusivelyMissing = isActiveRemote
+        && catalogIsAuthoritative
+        && !catalogIDs.has(remoteID);
+      if (isActiveRemote && hasCanonicalMembership && !isConclusivelyMissing) {
+        preservedRemoteSongIDs.add(remoteID);
+        entryKeys = entryKeys.map((key) => key === localKey ? remoteKey : key);
+      } else if (!hasCanonicalMembership && catalogConfirmsMembership) {
+        preservedRemoteSongIDs.add(remoteID);
+        entryKeys = entryKeys.map((key) => key === localKey ? remoteKey : key);
+        nextRemoteSongIDs.push(remoteID);
+      } else {
+        entryKeys = entryKeys.filter((key) => key !== localKey && (!isConclusivelyMissing || key !== remoteKey));
+        if (isConclusivelyMissing) {
+          nextRemoteSongIDs = nextRemoteSongIDs.filter((id) => id !== remoteID);
+        }
+      }
+    }
+    entryKeys = normalizedPlaylistEntryOrder(entryKeys);
+    playlist.remoteSongIDs = nextRemoteSongIDs;
+    playlist.entryOrder = entryKeys;
+    if (playlist.remoteSongIDs.length !== previousRemoteSongIDs.length
+        || playlist.remoteSongIDs.some((id, index) => id !== previousRemoteSongIDs[index])) {
+      remoteMembershipChangedPlaylistIDs.push(playlist.id);
+    }
+  }
+
+  return {
+    affectedPlaylistIDs,
+    remoteMembershipChangedPlaylistIDs,
+    preservedRemoteSongIDs: [...preservedRemoteSongIDs],
+  };
+}
+
+export function reorderPlaylistEntries(state, playlist, sourceKey, targetKey, insertAfter = false) {
+  if (!playlist || playlist.isSystem) return false;
+  const presented = tracksForPlaylist(state, playlist.id);
+  const currentOrder = presented.map((track) => playlistEntryKey(playlist, track)).filter(Boolean);
+  const reordered = reorderPlaylistTrackIDs(currentOrder, sourceKey, targetKey, insertAfter);
+  if (reordered.length !== currentOrder.length
+      || reordered.every((key, index) => key === currentOrder[index])) return false;
+
+  const localTrackIDs = new Map();
+  const downloadedTrackIDs = new Map();
+  for (const track of state.tracks || []) {
+    const localKey = playlistLocalEntryKey(track?.id);
+    if (localKey) localTrackIDs.set(localKey, track.id);
+    const remoteID = String(track?.remoteID || "").trim();
+    if (remoteID && trackBelongsToActiveProfile(state, track) && !downloadedTrackIDs.has(remoteID)) {
+      downloadedTrackIDs.set(remoteID, track.id);
+    }
+  }
+
+  playlist.entryOrder = reordered;
+  playlist.trackIDs = reordered.flatMap((key) => {
+    if (key.startsWith("local:")) {
+      const trackID = localTrackIDs.get(key);
+      return trackID ? [trackID] : [];
+    }
+    const trackID = downloadedTrackIDs.get(key.slice("remote:".length));
+    return trackID ? [trackID] : [];
+  });
+  playlist.remoteSongIDs = reordered
+    .filter((key) => key.startsWith("remote:"))
+    .map((key) => key.slice("remote:".length));
+  return true;
 }
 
 export function reorderPlaylistTrackIDs(trackIDs, sourceID, targetID, insertAfter = false) {
@@ -1799,6 +1970,26 @@ export function catalogRequestCanApply({ requestGeneration, currentGeneration, c
   return Boolean(contextCurrent) && requestGeneration === currentGeneration;
 }
 
+export function serverCatalogAuthoritySnapshot(context = {}, catalogGeneration = 0) {
+  return {
+    profileGeneration: Number(context.generation) || 0,
+    profileID: String(context.profileID || "default"),
+    serverKey: String(context.serverKey || ""),
+    token: String(context.token || ""),
+    catalogGeneration: Number(catalogGeneration) || 0,
+  };
+}
+
+export function serverCatalogAuthorityIsCurrent(authority, context = {}, catalogGeneration = 0) {
+  if (!authority) return false;
+  const current = serverCatalogAuthoritySnapshot(context, catalogGeneration);
+  return authority.profileGeneration === current.profileGeneration
+    && authority.profileID === current.profileID
+    && authority.serverKey === current.serverKey
+    && authority.token === current.token
+    && authority.catalogGeneration === current.catalogGeneration;
+}
+
 export function serverTrackRemoteIDBelongsToContext(track, { serverURL, profileID = "default" } = {}) {
   if (!String(track?.remoteID || "").trim()) return false;
   const sourceServer = normalizedServerOrigin(track?.sourceServer);
@@ -2072,6 +2263,7 @@ export function applyRemotePlaylistDocument(state, document, options = {}) {
         localOnly,
       ),
       remoteSongIDs,
+      entryOrder: normalizedPlaylistEntryOrder(previous?.entryOrder),
       isSystem: false,
     }];
   });

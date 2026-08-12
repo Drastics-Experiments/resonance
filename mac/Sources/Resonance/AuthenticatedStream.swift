@@ -123,6 +123,33 @@ final class MacAuthenticatedStreamAuthorizationLease: @unchecked Sendable {
         return renewed
     }
 
+    @discardableResult
+    func constrain(
+        context newContext: MacClientConfigContext,
+        expiresAt newExpiration: Date,
+        now: Date = .now
+    ) -> Bool {
+        var callback: (@Sendable () -> Void)?
+        let remainsAuthorized: Bool = lock.withLock {
+            guard !invalidated,
+                  now < expiresAt,
+                  newContext == context,
+                  newExpiration > now else {
+                if !invalidated {
+                    invalidated = true
+                    callback = invalidationHandler
+                    invalidationHandler = nil
+                }
+                return false
+            }
+            expiresAt = min(expiresAt, newExpiration)
+            scheduleTimer(now: now)
+            return true
+        }
+        callback?()
+        return remainsAuthorized
+    }
+
     func invalidate() {
         let callback: (@Sendable () -> Void)? = lock.withLock {
             guard !invalidated else { return nil }
@@ -227,8 +254,15 @@ enum MacRemoteStreamQueuePolicy {
 enum MacOfflineDownloadAuthorizationPolicy {
     static func remainsAuthorized(
         lease: MacAuthenticatedStreamAuthorizationLease,
-        context: MacClientConfigContext
+        context: MacClientConfigContext,
+        refreshedExpiration: Date? = nil
     ) -> Bool {
+        if let refreshedExpiration {
+            return lease.constrain(
+                context: context,
+                expiresAt: refreshedExpiration
+            )
+        }
         guard lease.matches(context: context) else { return false }
         do {
             try lease.authorize()
@@ -244,18 +278,38 @@ enum MacAuthorizedDownloadFinalizer {
         authorizationLease: MacAuthenticatedStreamAuthorizationLease,
         install: () throws -> Void
     ) throws {
+        try Task.checkCancellation()
         try authorizationLease.authorize()
+        try Task.checkCancellation()
         try install()
     }
 }
 
+enum MacDownloadProgressPolicy {
+    static let minimumInterval: TimeInterval = 0.1
+
+    static func shouldPublish(
+        completedBytes: Int64,
+        totalBytes: Int64,
+        lastPublishedAt: TimeInterval,
+        now: TimeInterval
+    ) -> Bool {
+        completedBytes == 0
+            || (totalBytes > 0 && completedBytes >= totalBytes)
+            || now - lastPublishedAt >= minimumInterval
+    }
+}
+
 enum MacLeaseBoundDownloader {
+    typealias ProgressHandler = @MainActor @Sendable (_ completedBytes: Int64, _ totalBytes: Int64) -> Void
+
     static func download(
         request originalRequest: URLRequest,
         to destination: URL,
         expectedContentLength: Int64,
         authorizationLease: MacAuthenticatedStreamAuthorizationLease,
-        session: URLSession
+        session: URLSession,
+        progress: ProgressHandler? = nil
     ) async throws -> HTTPURLResponse {
         try authorizationLease.authorize()
         let worker = Task {
@@ -264,12 +318,16 @@ enum MacLeaseBoundDownloader {
                 to: destination,
                 expectedContentLength: expectedContentLength,
                 authorizationLease: authorizationLease,
-                session: session
+                session: session,
+                progress: progress
             )
         }
         authorizationLease.setInvalidationHandler { worker.cancel() }
         defer { authorizationLease.setInvalidationHandler(nil) }
-        return try await worker.value
+        return try await withTaskCancellationHandler(
+            operation: { try await worker.value },
+            onCancel: { worker.cancel() }
+        )
     }
 
     private static func downloadBody(
@@ -277,7 +335,8 @@ enum MacLeaseBoundDownloader {
         to destination: URL,
         expectedContentLength: Int64,
         authorizationLease: MacAuthenticatedStreamAuthorizationLease,
-        session: URLSession
+        session: URLSession,
+        progress: ProgressHandler?
     ) async throws -> HTTPURLResponse {
         guard expectedContentLength > 0,
               let expectedURL = originalRequest.url else {
@@ -320,6 +379,9 @@ enum MacLeaseBoundDownloader {
                declaredLength != expectedContentLength {
                 throw MacAuthenticatedStreamError.resourceMismatch
             }
+            await progress?(0, expectedContentLength)
+            var lastPublishedAt = ProcessInfo.processInfo.systemUptime
+            var lastPublishedBytes: Int64 = 0
 
             var received: Int64 = 0
             var buffer = Data()
@@ -335,11 +397,26 @@ enum MacLeaseBoundDownloader {
                     try authorizationLease.authorize()
                     try handle.write(contentsOf: buffer)
                     buffer.removeAll(keepingCapacity: true)
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if MacDownloadProgressPolicy.shouldPublish(
+                        completedBytes: received,
+                        totalBytes: expectedContentLength,
+                        lastPublishedAt: lastPublishedAt,
+                        now: now
+                    ) {
+                        await progress?(received, expectedContentLength)
+                        lastPublishedAt = now
+                        lastPublishedBytes = received
+                    }
                 }
             }
+            try Task.checkCancellation()
             try authorizationLease.authorize()
             guard received == expectedContentLength else {
                 throw MacAuthenticatedStreamError.truncatedResponse
+            }
+            if lastPublishedBytes != received {
+                await progress?(received, expectedContentLength)
             }
             return response
         } catch {

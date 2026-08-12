@@ -46,10 +46,14 @@ import {
   remoteAssociationConflictMessage,
   remoteSongMetadataCacheKey,
   serverSongMetadataMatches,
+  serverCatalogAuthorityIsCurrent,
+  serverCatalogAuthoritySnapshot,
   reconcileServerBackedTrackDuplicates,
   reconcileUploadedTrack,
+  reorderPlaylistEntries,
   reorderPlaylistTrackIDs,
   removeClipRangeForTrack,
+  removeLibraryTracksFromPlaylists,
   restoreProfileState,
   resolveSyncProfile,
   serverUploadBlockedByActivity,
@@ -58,6 +62,7 @@ import {
   serverSongRequiresDownload,
   serverSourceDisplayFallback,
   serverSourceNeedsOriginalPage,
+  serverTransferProgressPresentation,
   shuffledTrackIDs,
   storeActiveProfileState,
   setClipRangeForTrack,
@@ -77,7 +82,19 @@ import discordRPC from "../discord-rpc.cjs";
 
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = updaterFeed;
 const { isManagedLibraryFile } = libraryPaths;
-const { SERVER_DOWNLOAD_ATTEMPTS, retryServerDownload, serverDownloadDisplayName } = serverDownload;
+const {
+  SERVER_DOWNLOAD_ATTEMPTS,
+  createServerCatalogSnapshotStore,
+  createServerDownloadProgressPublisher,
+  retryServerDownload,
+  serverDownloadDisplayName,
+  serverDownloadImportedMetadata,
+  serverDownloadMetadata,
+  serverDownloadMetadataContextMatches,
+  serverDownloadMetadataIsResolved,
+  serverDownloadMetadataSnapshot,
+  serverDownloadProgressEvent,
+} = serverDownload;
 const { discordArtworkURL, sanitizeDiscordActivity } = discordRPC;
 
 test("playlist artwork uses only the first four custom-playlist songs", () => {
@@ -175,6 +192,7 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
 test("renders the Clerk account name and picture without local profile controls", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
+  const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   assert.match(htmlSource, /id="profileMenuName"[\s\S]+id="profileMenuEmail"/);
   assert.match(appSource, /safeAccountDisplayName\(accountSession\)/);
   assert.match(appSource, /accountSession\?\.imageURL/);
@@ -185,6 +203,16 @@ test("renders the Clerk account name and picture without local profile controls"
   assert.doesNotMatch(appSource, /Signed in as \$\{accountSession\.email\}/);
   assert.doesNotMatch(htmlSource, /id="profileSwitchDialog"|Choose profile picture|Remove profile picture/);
   assert.doesNotMatch(appSource, /api\.chooseProfilePicture|api\.removeProfilePicture/);
+  assert.match(appSource, /class="clerk-sign-in-button"[\s\S]+Sign in with Clerk/);
+  assert.match(styleSource, /\.clerk-sign-in-button\s*\{[\s\S]+var\(--action-background\)/);
+  const accountCardStyles = styleSource.slice(
+    styleSource.indexOf(".settings-account-card {"),
+    styleSource.indexOf("/* Cinematic cross-platform clip editor."),
+  );
+  assert.match(accountCardStyles, /\.settings-account-card\s*\{[\s\S]*?width: 100%;[\s\S]*?min-width: 0;/);
+  assert.match(accountCardStyles, /> div:first-child[^}]+flex: 1 1 0;[^}]+min-width: 0;/);
+  assert.match(accountCardStyles, /\.settings-auth-grid\s*\{[\s\S]*?flex: 0 1 220px;[\s\S]*?width: min\(220px, 100%\);[\s\S]*?min-width: 0;[\s\S]*?max-width: 220px;/);
+  assert.match(accountCardStyles, /\.clerk-sign-in-button\s*\{[\s\S]*?width: 100%;[\s\S]*?min-width: 0;[\s\S]*?max-width: 100%;/);
 });
 
 test("classifies remote video as download-required without confusing audio MP4", () => {
@@ -199,12 +227,12 @@ test("classifies remote video as download-required without confusing audio MP4",
 test("uses honest on-device states instead of URL pathnames for saved links", () => {
   assert.deepEqual(serverSourceDisplayFallback("https://www.youtube.com/watch?v=example"), {
     title: "Resolving metadata…",
-    artist: "On-device lookup",
+    artist: "Automatic lookup",
     album: "Link only",
   });
   assert.deepEqual(serverSourceDisplayFallback("https://www.youtube.com/watch?v=example", { failed: true }), {
-    title: "Metadata unavailable",
-    artist: "Refresh to retry",
+    title: "Resolving metadata…",
+    artist: "Automatic lookup",
     album: "Link only",
   });
   assert.equal(serverSourceNeedsOriginalPage("https://rr1.example.googlevideo.com/videoplayback?expire=1"), true);
@@ -258,6 +286,10 @@ test("uses lightweight batched Windows metadata hydration and mac-like song skel
   assert.match(appSource, /server-metadata-title[\s\S]+server-metadata-subtitle/);
   assert.match(appSource, /Math\.min\(4, queue\.length\)/);
   assert.match(appSource, /bufferedResults\.length >= 4/);
+  assert.match(appSource, /SERVER_METADATA_RETRY_DELAYS_MS = \[400, 1600\]/);
+  assert.match(appSource, /resolveServerMetadataWithRetry/);
+  assert.match(appSource, /retryPendingServerCatalogMetadata/);
+  assert.doesNotMatch(appSource, /Metadata unavailable|Refresh to retry/);
   assert.match(styleSource, /\.server-metadata-title\s*\{ width: 148px; height: 11px; \}/);
   assert.match(styleSource, /\.server-metadata-artwork \.server-artwork-placeholder[\s\S]+border-top-color/);
 });
@@ -543,6 +575,23 @@ test("rejects stale same-context catalog responses after an upload mutates the c
     currentGeneration: 4,
     contextCurrent: false,
   }), false);
+});
+
+test("catalog authority is scoped to the exact catalog generation, server, profile, and token", () => {
+  const context = {
+    generation: 7,
+    profileID: "profile-a",
+    serverKey: "https://music.example/",
+    token: "token-a",
+  };
+  const authority = serverCatalogAuthoritySnapshot(context, 11);
+  assert.equal(serverCatalogAuthorityIsCurrent(authority, context, 11), true);
+  assert.equal(serverCatalogAuthorityIsCurrent(authority, { ...context, generation: 8 }, 11), false);
+  assert.equal(serverCatalogAuthorityIsCurrent(authority, { ...context, profileID: "profile-b" }, 11), false);
+  assert.equal(serverCatalogAuthorityIsCurrent(authority, { ...context, serverKey: "https://other.example/" }, 11), false);
+  assert.equal(serverCatalogAuthorityIsCurrent(authority, { ...context, token: "token-b" }, 11), false);
+  assert.equal(serverCatalogAuthorityIsCurrent(authority, context, 12), false);
+  assert.equal(serverCatalogAuthorityIsCurrent(null, context, 11), false);
 });
 
 test("moves fullscreen titles only by their rendered overflow", () => {
@@ -982,7 +1031,10 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   assert.match(htmlSource, /id="clipEditorPreviewCurrent"[\s\S]+id="clipEditorPreviewSeek"[^>]+type="range"[\s\S]+id="clipEditorPreviewEnd"/);
   assert.match(htmlSource, /id="clearClipRange"[^>]*>Use full song/);
   assert.match(htmlSource, /id="clipEditorStatus"[^>]+role="status"/);
-  assert.match(appSource, /function openClipEditor\(\)[\s\S]+clipEditorDialog[\s\S]+showModal\(\)/);
+  assert.match(appSource, /function clipEditorTrackIsEditable\(track\)[\s\S]+track\.available !== false[\s\S]+track\.fileUrl/);
+  assert.match(appSource, /function openClipEditor\(trackID = null\)[\s\S]+requestedTrackID[\s\S]+track\.id === requestedTrackID[\s\S]+clipEditorDialog[\s\S]+showModal\(\)/);
+  assert.match(appSource, /label: "Open in Clip Editor",[\s\S]{0,180}openClipEditor\(track\.id\)/);
+  assert.match(appSource, /openServerTrackContextMenu[\s\S]+\.\.\.\(localTrack \? \[\{[\s\S]+label: "Open in Clip Editor"[\s\S]+openClipEditor\(localTrack\.id\)/);
   assert.match(appSource, /async function saveClipRange\(\)[\s\S]+setClipRangeForTrack\(state, track/);
   assert.match(appSource, /#saveClipRange"\)\.onclick = saveClipRange/);
   const saveFunctionSource = appSource.slice(appSource.indexOf("async function saveClipRange()"), appSource.indexOf("function clearClipRange()"));
@@ -1199,6 +1251,8 @@ test("hides inline playlist row buttons while preserving drag and context contro
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   assert.match(appSource, /data-playlist-draggable="true"/);
+  assert.match(appSource, /data-playlist-entry=/);
+  assert.match(appSource, /const canReorder = Boolean\(editablePlaylist && entryKey[\s\S]+notDownloaded/);
   assert.match(appSource, /row\.onpointerdown\s*=/);
   assert.match(appSource, /row\.onpointerup\s*=/);
   assert.doesNotMatch(appSource, /row\.ondragstart\s*=/);
@@ -1270,7 +1324,7 @@ test("ports playback reliability, recovery notices, and keyboard operation into 
   assert.match(appSource, /replace\(\/\^Error invoking remote method/);
   assert.match(appSource, /const deleted = \[\];[\s\S]+const failed = \[\];[\s\S]+The files remain in your library/);
   assert.match(appSource, /Alt\+Up or Alt\+Down/);
-  assert.match(appSource, /row\.onkeydown = async[\s\S]+CSS\.escape\(trackID\)/);
+  assert.match(appSource, /row\.onkeydown = async[\s\S]+dataset\.playlistEntry[\s\S]+CSS\.escape\(entryKey\)/);
   assert.match(appSource, /menu\.onkeydown = \(keyEvent\)[\s\S]+ArrowDown[\s\S]+Home[\s\S]+End/);
   assert.match(mainSource, /\.corrupt-\$\{Date\.now\(\)\}/);
   assert.match(mainSource, /playbackQueueIDs:[\s\S]+playbackPlaylistID:/);
@@ -1332,7 +1386,9 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(preloadSource, /uploadLocalImport:[\s\S]+local-import:upload/);
   assert.match(preloadSource, /onLocalImportProgress:[\s\S]+local-import:progress/);
   assert.match(htmlSource, /id="localImportDialog"/);
-  assert.match(htmlSource, /id="localImportTitle">Import from Link/);
+  assert.match(htmlSource, /id="localImportTitle">Import from Web/);
+  assert.match(styleSource, /\.local-import-panel\s*\{[\s\S]*?border-radius: 29px/);
+  assert.match(styleSource, /\.storage-import-menu\s*\{[\s\S]*?overflow: hidden;[\s\S]*?isolation: isolate;[\s\S]*?border-radius: 18px/);
   assert.doesNotMatch(htmlSource, /Spotify tracks are matched against/);
   assert.match(htmlSource, /id="localImportStage"[^>]*hidden/);
   assert.doesNotMatch(htmlSource, /Choose a source|Confirm the match before/);
@@ -2166,9 +2222,8 @@ test("guards profile transitions, authenticated downloads, persistence, and tran
   assert.match(syncSource, /sameOriginServerMediaURL\(mediaLocation\?\.download_url \|\| song\.download_url/);
   assert.match(syncSource, /redirect: "manual"/);
   assert.match(syncSource, /syncProfileID \|\| "default"\) === \(profileID \|\| "default"\)/);
-  const alreadyDownloadedBranch = syncSource.match(/if \(alreadyDownloaded\) \{([\s\S]*?)\n    \}/)?.[1] || "";
-  assert.match(alreadyDownloadedBranch, /continue;/);
-  assert.doesNotMatch(alreadyDownloadedBranch, /return/);
+  assert.match(syncSource, /if \(alreadyDownloaded\) continue;/);
+  assert.doesNotMatch(syncSource, /if \(alreadyDownloaded\) return/);
   assert.match(syncSource, /writeResponseToFile\(response, temporary/);
   assert.doesNotMatch(syncSource, /response\.arrayBuffer\(\)/);
   assert.doesNotMatch(uploadSource, /createReadStream\(filePath\)|duplex: "half"/);
@@ -2236,6 +2291,7 @@ test("retries individual server downloads and reports every song that still fail
   const packageJSON = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const syncSource = mainSource.slice(mainSource.indexOf('ipcMain.handle("server:sync"'), mainSource.indexOf('ipcMain.handle("server:upload"'));
   assert.match(syncSource, /retryServerDownload/);
+  assert.match(syncSource, /const pendingDownloads = \[\][\s\S]+if \(alreadyDownloaded\) continue;[\s\S]+itemCount = pendingDownloads\.length/);
   assert.match(syncSource, /failed\.push\(\{/);
   assert.match(syncSource, /return \{ catalog, downloaded, replacedTrackIDs, failed \}/);
   assert.match(appSource, /showNotice\(formatServerDownloadFailureNotice\(failedDownloads\)\)/);
@@ -2252,7 +2308,299 @@ test("shows catalog song titles instead of internal server download filenames", 
     "Actual Song Name",
   );
   assert.equal(serverDownloadDisplayName({ title: "  Trimmed Name  " }, "Track-id.mp3"), "Trimmed Name");
-  assert.equal(serverDownloadDisplayName({ name: "Legacy Song" }, "Track-id.mp3"), "Legacy Song");
+  assert.equal(serverDownloadDisplayName({ name: "Track-id.mp3" }, "Track-id.mp3", "Resolved Legacy Song"), "Resolved Legacy Song");
+  assert.equal(serverDownloadDisplayName({ name: "Track-id.mp3" }), "Untitled song");
+
+  assert.deepEqual(serverDownloadProgressEvent({
+    song: { id: "song-a", filename: "5wxQw7ll2TSFbwjaQcoJVB.m4a" },
+    preferredTitle: "Nevada",
+    itemIndex: 3,
+    itemCount: 10,
+    completedBytes: 42,
+    totalBytes: 100,
+    completedItems: 2,
+  }), {
+    direction: "download",
+    currentFile: "Nevada",
+    completed: 2,
+    total: 10,
+    itemCompleted: 42,
+    itemTotal: 100,
+    itemIndex: 3,
+    itemCount: 10,
+    title: undefined,
+    autoHide: false,
+  });
+  assert.deepEqual(
+    serverTransferProgressPresentation({
+      completed: 7,
+      total: 10,
+      itemCompleted: 42,
+      itemTotal: 100,
+      itemIndex: 3,
+      itemCount: 10,
+    }),
+    { ratio: 0.42, counter: "3/10", determinate: true, label: "42% · 3/10" },
+  );
+  assert.deepEqual(serverTransferProgressPresentation({
+    completed: 7,
+    total: 10,
+    itemCompleted: 0,
+    itemTotal: 100,
+    itemIndex: 4,
+    itemCount: 10,
+  }), {
+    ratio: null,
+    counter: "4/10",
+    determinate: false,
+    label: "4/10",
+  });
+  assert.equal(serverTransferProgressPresentation({
+    itemCompleted: 1,
+    itemTotal: 10_000,
+    itemIndex: 1,
+    itemCount: 1,
+  }).label, "<1% · 1/1");
+  assert.equal(serverTransferProgressPresentation({
+    itemCompleted: 512,
+    itemTotal: 0,
+    itemIndex: 1,
+    itemCount: 2,
+  }).label, "Downloading · 1/2");
+});
+
+test("server downloads prefer already-hydrated catalog metadata", () => {
+  const sourceURL = "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8";
+  assert.deepEqual(serverDownloadMetadata({
+    title: "Catalog placeholder",
+    artist: "Automatic lookup",
+    album: "Link only",
+    duration_seconds: 10,
+    artwork_url: "https://server.example/old.jpg",
+    source_url: sourceURL,
+  }, {
+    title: "Hydrated title",
+    artist: "Hydrated artist",
+    album: "Hydrated album",
+    duration: 42,
+    artworkURL: "https://i.scdn.co/image/current",
+  }), {
+    title: "Hydrated title",
+    artist: "Hydrated artist",
+    album: "Hydrated album",
+    durationSeconds: 42,
+    artworkURL: "https://i.scdn.co/image/current",
+    sourceURL,
+  });
+  const snapshot = serverDownloadMetadataSnapshot({
+    title: "Hydrated title",
+    artist: "Hydrated artist",
+    resolved: true,
+    sourceURL,
+    mediaKind: "audio",
+  });
+  const freshSong = { source_url: sourceURL, media_kind: "audio" };
+  assert.equal(serverDownloadMetadataContextMatches(freshSong, snapshot), true);
+  assert.equal(serverDownloadMetadataIsResolved(freshSong, snapshot), true);
+  assert.equal(serverDownloadMetadataIsResolved(freshSong, {
+    ...snapshot,
+    sourceURL: "https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl",
+  }), false);
+  assert.equal(serverDownloadMetadataIsResolved(freshSong, {
+    ...snapshot,
+    mediaKind: "video",
+  }), false);
+  assert.equal(serverDownloadMetadataIsResolved(freshSong, serverDownloadMetadataSnapshot({
+    title: "Resolving metadata…",
+    artist: "Automatic lookup",
+    resolved: false,
+    sourceURL,
+    mediaKind: "audio",
+  })), false);
+});
+
+test("server catalog snapshots replace and invalidate only within their exact owner context", () => {
+  const snapshots = createServerCatalogSnapshotStore();
+  const context = {
+    origin: "https://music.test",
+    profileID: "profile-a",
+    credentialFingerprint: "credential-a",
+  };
+  const first = { songs: [{ id: "first" }] };
+  const replacement = { songs: [{ id: "replacement" }] };
+  snapshots.remember(7, context, first);
+  assert.equal(snapshots.read(7, context), first);
+  assert.equal(snapshots.read(8, context), null);
+  assert.equal(snapshots.read(7, { ...context, origin: "https://other.test" }), null);
+  assert.equal(snapshots.read(7, { ...context, profileID: "profile-b" }), null);
+  assert.equal(snapshots.read(7, { ...context, credentialFingerprint: "credential-b" }), null);
+  snapshots.remember(7, context, replacement);
+  assert.equal(snapshots.read(7, context), replacement);
+  const secondCredentialContext = { ...context, credentialFingerprint: "credential-b" };
+  const otherProfileContext = { ...context, profileID: "profile-b" };
+  const otherOriginContext = { ...context, origin: "https://other.test" };
+  snapshots.remember(8, secondCredentialContext, first);
+  snapshots.remember(9, otherProfileContext, first);
+  snapshots.remember(10, otherOriginContext, first);
+  assert.equal(snapshots.clearContext(context), 2);
+  assert.equal(snapshots.read(7, context), null);
+  assert.equal(snapshots.read(8, secondCredentialContext), null);
+  assert.equal(snapshots.read(9, otherProfileContext), first);
+  assert.equal(snapshots.read(10, otherOriginContext), first);
+  snapshots.remember(7, context, replacement);
+  snapshots.clear(7);
+  assert.equal(snapshots.read(7, context), null);
+});
+
+test("server SoundCloud downloads carry their prepared rendition into the exact import context", () => {
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const start = mainSource.indexOf("async function downloadSavedSourceSong");
+  const end = mainSource.indexOf('ipcMain.handle("server:sync"', start);
+  const downloadSource = mainSource.slice(start, end);
+  assert.match(downloadSource, /preparationContext = JSON\.stringify\(\{[\s\S]+serverOrigin:[\s\S]+profileID:[\s\S]+songID:/);
+  assert.match(downloadSource, /resolveLocalImportDownloadSource\([\s\S]+\{ mediaKind, preparationContext \},?[\s\S]*\)/);
+  assert.match(downloadSource, /preparedSoundCloudAudio: candidate\.preparedSoundCloudAudio/);
+  assert.match(downloadSource, /preparationContext,[\s\S]+existing: options\.existing/);
+  assert.match(downloadSource, /const metadataEnrichment = options\.metadataIsResolved[\s\S]+resolveLocalImportMetadata/);
+  assert.match(downloadSource, /metadataSnapshot,[\s\S]+preparedSoundCloudAudio/);
+  assert.match(downloadSource, /finally \{[\s\S]+metadataController\.abort\(\);[\s\S]+void metadataEnrichment\.then/);
+  assert.doesNotMatch(downloadSource, /const metadata = await completedMetadata/);
+});
+
+test("unresolved fallback metadata cannot be overwritten by stale display metadata", () => {
+  const resolved = {
+    title: "Fresh resolver title",
+    artist: "Fresh resolver artist",
+    album: "Fresh resolver album",
+    durationSeconds: 210,
+  };
+  const stale = {
+    title: "Resolving metadata…",
+    artist: "Automatic lookup",
+    album: "Link only",
+  };
+  assert.deepEqual(
+    serverDownloadImportedMetadata(resolved, stale, false, "https://youtu.be/jNQXAC9IVRw"),
+    { ...resolved, sourceURL: "https://youtu.be/jNQXAC9IVRw" },
+  );
+  assert.deepEqual(
+    serverDownloadImportedMetadata(resolved, {
+      title: "Hydrated title",
+      artist: "Hydrated artist",
+    }, true, "https://youtu.be/jNQXAC9IVRw"),
+    {
+      ...resolved,
+      title: "Hydrated title",
+      artist: "Hydrated artist",
+      sourceURL: "https://youtu.be/jNQXAC9IVRw",
+    },
+  );
+});
+
+test("throttles current-song progress while always publishing its initial and final values", () => {
+  let timestamp = 0;
+  const published = [];
+  const publish = createServerDownloadProgressPublisher((event) => published.push(event.itemCompleted), {
+    now: () => timestamp,
+    minimumInterval: 100,
+  });
+  const event = (itemCompleted) => ({ itemCompleted, itemTotal: 1_000 });
+
+  assert.equal(publish(event(0)), true);
+  timestamp = 10;
+  assert.equal(publish(event(100)), false);
+  timestamp = 100;
+  assert.equal(publish(event(200)), true);
+  timestamp = 101;
+  assert.equal(publish(event(1_000)), true);
+  assert.deepEqual(published, [0, 200, 1_000]);
+});
+
+test("a failed attempt hides stale bytes and the retry publishes only its first new byte", async () => {
+  let attempt = 0;
+  let visibleBytes = null;
+  const published = [];
+  const publish = createServerDownloadProgressPublisher((event) => {
+    visibleBytes = event.itemCompleted;
+    published.push({ attempt, bytes: event.itemCompleted });
+  }, {
+    now: () => 0,
+    minimumInterval: 100,
+  });
+
+  await retryServerDownload(async () => {
+    attempt += 1;
+    if (attempt === 1) {
+      publish({ itemCompleted: 320, itemTotal: 1_000 }, { force: true });
+      throw new Error("mid-stream failure");
+    }
+    assert.equal(visibleBytes, null);
+    assert.equal(publish({ itemCompleted: 24, itemTotal: 1_000 }), true);
+    return true;
+  }, {
+    attempts: 2,
+    pause: async () => assert.equal(visibleBytes, null),
+    onRetry: () => {
+      visibleBytes = null;
+      publish.reset();
+    },
+  });
+
+  assert.deepEqual(published, [
+    { attempt: 1, bytes: 320 },
+    { attempt: 2, bytes: 24 },
+  ]);
+});
+
+test("a permanently failed item drops its partial bytes before the next item or final reconciliation", async () => {
+  const visible = [];
+  const checkpoints = [];
+  const runFailedItem = async (label) => {
+    let visibleBytes = null;
+    const publish = createServerDownloadProgressPublisher((event) => {
+      visibleBytes = event.itemCompleted;
+      visible.push({ label, bytes: visibleBytes });
+    }, {
+      now: () => 0,
+      minimumInterval: 100,
+    });
+    const dismiss = () => {
+      visibleBytes = null;
+      publish.reset();
+    };
+
+    try {
+      await retryServerDownload(async () => {
+        publish({ itemCompleted: 640, itemTotal: 1_000 }, { force: true });
+        throw new Error("permanent mid-stream failure");
+      }, {
+        attempts: 2,
+        pause: async () => assert.equal(visibleBytes, null),
+        onRetry: dismiss,
+      });
+    } catch (error) {
+      dismiss();
+      checkpoints.push({ label, visibleBytes, message: error.message });
+    }
+  };
+
+  await runFailedItem("first");
+  checkpoints.push({ label: "next-item-discovery", visibleBytes: null });
+  await runFailedItem("last");
+  checkpoints.push({ label: "final-reconciliation", visibleBytes: null });
+
+  assert.deepEqual(visible, [
+    { label: "first", bytes: 640 },
+    { label: "first", bytes: 640 },
+    { label: "last", bytes: 640 },
+    { label: "last", bytes: 640 },
+  ]);
+  assert.deepEqual(checkpoints, [
+    { label: "first", visibleBytes: null, message: "permanent mid-stream failure" },
+    { label: "next-item-discovery", visibleBytes: null },
+    { label: "last", visibleBytes: null, message: "permanent mid-stream failure" },
+    { label: "final-reconciliation", visibleBytes: null },
+  ]);
 });
 
 test("replaces stale synced tracks instead of discarding the fresh download", () => {
@@ -2488,7 +2836,7 @@ test("reserves immutable upload contexts while account sessions replace credenti
 
   assert.match(contextSource, /Object\.freeze\(\{[\s\S]+adminToken: serverAdminToken/);
   assert.match(contextSource, /serverUploadContextIsCurrent[\s\S]+context\?\.adminToken === serverAdminToken/);
-  assert.match(contextSource, /ensureServerContextCanChange[\s\S]+serverTransferActive \|\| serverContextReservation/);
+  assert.match(contextSource, /ensureServerContextCanChange[\s\S]+serverTransferActive \|\| serverDownloadOperationActive \|\| serverContextReservation/);
   assert.match(saveFormSource, /const settingsOpen = Boolean\(\$\("#settingsDialog"\)\?\.open && settingsPanel === "server" && \$\("#serverSettingsForm"\)\)/);
   assert.doesNotMatch(saveFormSource, /#serverToken|#serverAdminToken|saveServerCredentials/);
   assert.match(saveFormSource, /serverToken = String\(accountSession\?\.accessToken \|\| ""\)\.trim\(\)/);
@@ -2649,6 +2997,210 @@ test("playlist presentation includes undownloaded server songs in order", () => 
   assert.equal(entries[2].title, "Server-only song");
   assert.equal(entries[2].available, false);
   assert.equal(entries[2].playlistUnavailable, true);
+});
+
+test("removing a download keeps its server playlist slot until the server song is gone", () => {
+  const state = createEmptyState();
+  const kept = {
+    id: "downloaded-a",
+    title: "Downloaded A",
+    remoteID: "remote-a",
+    sourceServer: state.serverURL,
+    syncProfileID: "default",
+  };
+  const local = { id: "local", title: "Local" };
+  state.tracks = [kept, local];
+  const playlist = {
+    id: "shared",
+    name: "Shared",
+    trackIDs: [local.id, kept.id],
+    remoteSongIDs: [kept.remoteID],
+    entryOrder: ["local:local", "remote:remote-a"],
+    isSystem: false,
+  };
+  state.playlists.push(playlist);
+
+  const preserved = removeLibraryTracksFromPlaylists(state, new Set([kept.id]), [{
+    id: kept.remoteID,
+    title: "Downloaded A",
+  }], { catalogIsAuthoritative: true });
+  assert.deepEqual(playlist.trackIDs, [local.id]);
+  assert.deepEqual(playlist.remoteSongIDs, [kept.remoteID]);
+  assert.deepEqual(playlist.entryOrder, ["local:local", "remote:remote-a"]);
+  assert.deepEqual(preserved.remoteMembershipChangedPlaylistIDs, []);
+  state.tracks = [local];
+  assert.deepEqual(tracksForPlaylist(state, playlist.id, [{ id: kept.remoteID, title: "Downloaded A" }])
+    .map((track) => track.id), [local.id, `playlist-remote:${kept.remoteID}`]);
+
+  const missing = {
+    id: "downloaded-b",
+    title: "Downloaded B",
+    remoteID: "remote-b",
+    sourceServer: state.serverURL,
+    syncProfileID: "default",
+  };
+  state.tracks.push(missing);
+  playlist.trackIDs.push(missing.id);
+  playlist.remoteSongIDs.push(missing.remoteID);
+  playlist.entryOrder.push("remote:remote-b");
+  const unavailableCatalog = removeLibraryTracksFromPlaylists(state, [missing.id], []);
+  assert.deepEqual(playlist.remoteSongIDs, [kept.remoteID, missing.remoteID]);
+  assert.deepEqual(playlist.entryOrder, ["local:local", "remote:remote-a", "remote:remote-b"]);
+  assert.deepEqual(unavailableCatalog.remoteMembershipChangedPlaylistIDs, []);
+
+  playlist.trackIDs.push(missing.id);
+  const removed = removeLibraryTracksFromPlaylists(
+    state,
+    [missing.id],
+    [{ id: kept.remoteID }],
+    { catalogIsAuthoritative: true },
+  );
+  assert.deepEqual(playlist.remoteSongIDs, [kept.remoteID]);
+  assert.deepEqual(playlist.entryOrder, ["local:local", "remote:remote-a"]);
+  assert.deepEqual(removed.remoteMembershipChangedPlaylistIDs, [playlist.id]);
+});
+
+test("library removal mutates only the deleted raw entry-order token", () => {
+  const state = createEmptyState();
+  const removed = { id: "X", title: "Local X" };
+  state.tracks = [removed];
+  const playlist = {
+    id: "raw-order",
+    name: "Raw order",
+    trackIDs: [removed.id],
+    remoteSongIDs: ["A", "B"],
+    entryOrder: ["remote:B", "local:X", "remote:A"],
+    isSystem: false,
+  };
+  state.playlists.push(playlist);
+
+  const result = removeLibraryTracksFromPlaylists(
+    state,
+    [removed.id],
+    [{ id: "A" }, { id: "B" }],
+    { catalogIsAuthoritative: true },
+  );
+
+  assert.deepEqual(playlist.remoteSongIDs, ["A", "B"]);
+  assert.deepEqual(playlist.entryOrder, ["remote:B", "remote:A"]);
+  assert.deepEqual(result.remoteMembershipChangedPlaylistIDs, []);
+});
+
+test("library removal appends a newly converted remote membership without reordering existing IDs", () => {
+  const state = createEmptyState();
+  const downloaded = {
+    id: "downloaded-c",
+    title: "Downloaded C",
+    remoteID: "C",
+    sourceServer: state.serverURL,
+    syncProfileID: "default",
+  };
+  state.tracks = [downloaded];
+  const playlist = {
+    id: "converted-order",
+    name: "Converted order",
+    trackIDs: [downloaded.id],
+    remoteSongIDs: ["A", "B"],
+    entryOrder: ["remote:B", "local:downloaded-c", "remote:A"],
+    isSystem: false,
+  };
+  state.playlists.push(playlist);
+
+  const result = removeLibraryTracksFromPlaylists(
+    state,
+    [downloaded.id],
+    [{ id: "A" }, { id: "B" }, { id: "C" }],
+    { catalogIsAuthoritative: true },
+  );
+
+  assert.deepEqual(playlist.remoteSongIDs, ["A", "B", "C"]);
+  assert.deepEqual(playlist.entryOrder, ["remote:B", "remote:C", "remote:A"]);
+  assert.deepEqual(result.remoteMembershipChangedPlaylistIDs, [playlist.id]);
+});
+
+test("library removal does not synthesize legacy remote membership from an unproven catalog", () => {
+  const state = createEmptyState();
+  const downloaded = {
+    id: "downloaded-c",
+    title: "Downloaded C",
+    remoteID: "C",
+    sourceServer: state.serverURL,
+    syncProfileID: "default",
+  };
+  state.tracks = [downloaded];
+  const playlist = {
+    id: "unproven-conversion",
+    name: "Unproven conversion",
+    trackIDs: [downloaded.id],
+    remoteSongIDs: ["A", "B"],
+    entryOrder: ["remote:B", "local:downloaded-c", "remote:A"],
+    isSystem: false,
+  };
+  state.playlists.push(playlist);
+
+  const result = removeLibraryTracksFromPlaylists(state, [downloaded.id], []);
+
+  assert.deepEqual(playlist.remoteSongIDs, ["A", "B"]);
+  assert.deepEqual(playlist.entryOrder, ["remote:B", "remote:A"]);
+  assert.deepEqual(result.remoteMembershipChangedPlaylistIDs, []);
+});
+
+test("mixed playlist reorders and persists undownloaded server entries", () => {
+  const state = createEmptyState();
+  state.tracks = [
+    { id: "downloaded-a", title: "Downloaded A", remoteID: "remote-a", sourceServer: state.serverURL, syncProfileID: "default" },
+    { id: "local", title: "Local", remoteID: null },
+    { id: "downloaded-b", title: "Downloaded B", remoteID: "remote-b", sourceServer: state.serverURL, syncProfileID: "default" },
+  ];
+  const playlist = {
+    id: "shared",
+    name: "Shared",
+    trackIDs: ["downloaded-a", "local", "downloaded-b"],
+    remoteSongIDs: ["remote-b", "remote-missing", "remote-a"],
+    isSystem: false,
+  };
+  state.playlists.push(playlist);
+
+  assert.equal(reorderPlaylistEntries(
+    state,
+    playlist,
+    "remote:remote-missing",
+    "remote:remote-b",
+  ), true);
+  assert.deepEqual(playlist.trackIDs, ["downloaded-b", "local", "downloaded-a"]);
+  assert.deepEqual(playlist.remoteSongIDs, ["remote-missing", "remote-b", "remote-a"]);
+  assert.deepEqual(playlist.entryOrder, [
+    "remote:remote-missing",
+    "remote:remote-b",
+    "local:local",
+    "remote:remote-a",
+  ]);
+  assert.deepEqual(tracksForPlaylist(state, "shared").map((entry) => entry.id), [
+    "playlist-remote:remote-missing",
+    "downloaded-b",
+    "local",
+    "downloaded-a",
+  ]);
+  const mergedDocument = mergePlaylistDocument(state, {
+    revision: 0,
+    playlists: [],
+    liked_song_ids: [],
+    clip_ranges: [],
+  }).document;
+  assert.deepEqual(mergedDocument.playlists, [{
+    id: "shared",
+    name: "Shared",
+    song_ids: ["remote-missing", "remote-b", "remote-a"],
+  }]);
+
+  const reloaded = normalizeState(structuredClone(state));
+  assert.deepEqual(reloaded.playlists.find((item) => item.id === "shared").entryOrder, playlist.entryOrder);
+  assert.deepEqual(tracksForPlaylist(reloaded, "shared").map((entry) => entry.id), [
+    "playlist-remote:remote-missing",
+    "downloaded-b",
+    "local",
+    "downloaded-a",
+  ]);
 });
 
 test("animates playback progress independently of media timeupdate events", () => {

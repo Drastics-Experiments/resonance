@@ -3,7 +3,6 @@ package mov.unblocked.resonance.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -69,6 +68,7 @@ fun StorageScreen(
     var sort by remember { mutableStateOf(StorageSort.Title) }
     var filterMenu by remember { mutableStateOf(false) }
     var importMenu by remember { mutableStateOf(false) }
+    var actionsMenu by remember { mutableStateOf(false) }
     var linkImportOpen by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(setOf<String>()) }
@@ -123,10 +123,10 @@ fun StorageScreen(
                     IconButton(
                         onClick = { importMenu = true },
                         modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
-                    ) { Icon(Icons.Default.MoreVert, "Storage actions") }
+                    ) { Icon(Icons.Default.Add, "Import songs") }
                     DropdownMenu(expanded = importMenu, onDismissRequest = { importMenu = false }) {
                         DropdownMenuItem(
-                            text = { Text("Import from Link") },
+                            text = { Text("Import from Web") },
                             leadingIcon = { Icon(Icons.Default.Link, null) },
                             onClick = {
                                 importMenu = false
@@ -141,12 +141,20 @@ fun StorageScreen(
                                 actions.importAudio()
                             },
                         )
+                    }
+                }
+                Box {
+                    IconButton(
+                        onClick = { actionsMenu = true },
+                        modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
+                    ) { Icon(Icons.Default.MoreVert, "Song storage actions") }
+                    DropdownMenu(expanded = actionsMenu, onDismissRequest = { actionsMenu = false }) {
                         DropdownMenuItem(
                             text = { Text(if (editing) "Done Editing" else "Select Songs") },
                             leadingIcon = { Icon(if (editing) Icons.Default.Check else Icons.Default.Checklist, null) },
                             enabled = state.tracks.isNotEmpty(),
                             onClick = {
-                                importMenu = false
+                                actionsMenu = false
                                 editing = !editing
                                 if (!editing) selected = emptySet()
                             },
@@ -221,7 +229,12 @@ fun StorageScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(Icons.Default.MusicNote, null, Modifier.size(44.dp), tint = Violet)
+                    Icon(
+                        Icons.Default.MusicNote,
+                        null,
+                        Modifier.size(44.dp),
+                        tint = MaterialTheme.colorScheme.tertiary,
+                    )
                     Text(if (query.isNotEmpty()) "No Results" else "No Stored Songs", style = MaterialTheme.typography.titleMedium)
                     Text("Import audio or video, or download songs from your music server.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
                 }
@@ -304,7 +317,7 @@ private fun StorageSummary(
         LinearProgressIndicator(
             progress = { usedBytes.toFloat() / totalBytes.toFloat() },
             modifier = Modifier.fillMaxWidth(),
-            color = Violet,
+            color = MaterialTheme.colorScheme.secondary,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("$importedCount local", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
@@ -344,7 +357,6 @@ private fun StorageSection(
                     onSelect = { onToggle(track.id) },
                     allowDeleteFromDevice = true,
                     onDeleteFromDevice = { onDelete(track) },
-                    showFavorite = false,
                     showMenu = !editing,
                 )
             }

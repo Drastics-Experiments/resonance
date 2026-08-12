@@ -3,6 +3,1115 @@ import Foundation
 import XCTest
 @testable import Resonance
 
+final class MobileCrossfadePolicyTests: XCTestCase {
+    func testCrossfadeRangeAndShortTrackLimit() {
+        XCTAssertEqual(MobileCrossfadePolicy.normalizedSeconds(-2), 1)
+        XCTAssertEqual(MobileCrossfadePolicy.normalizedSeconds(30), 12)
+        XCTAssertEqual(
+            MobileCrossfadePolicy.effectiveDuration(
+                requestedSeconds: 12,
+                currentDuration: 4,
+                nextDuration: 20
+            ),
+            2
+        )
+        XCTAssertEqual(MobileCrossfadePolicy.progress(remaining: 2.5, duration: 5), 0.5)
+    }
+
+    func testMetadataRetryWindowUsesBoundedBackoff() {
+        XCTAssertEqual(MobileRemoteMetadataRetryPolicy.maximumImmediateAttempts, 4)
+        XCTAssertEqual(MobileRemoteMetadataRetryPolicy.delaySeconds(afterFailureCount: 1), 1)
+        XCTAssertEqual(MobileRemoteMetadataRetryPolicy.delaySeconds(afterFailureCount: 2), 3)
+        XCTAssertEqual(MobileRemoteMetadataRetryPolicy.delaySeconds(afterFailureCount: 99), 10)
+    }
+}
+
+final class MobileNowPlayingPolicyTests: XCTestCase {
+    private let track = MobileTrack(
+        id: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA")!,
+        title: "Control Center Song",
+        artist: "Resonance",
+        album: "Now Playing",
+        duration: 200,
+        relativePath: "control-center.m4a"
+    )
+
+    func testSnapshotPublishesClipRelativeElapsedDurationAndRate() {
+        let snapshot = MobileNowPlayingPolicy.snapshot(
+            for: track,
+            position: 25,
+            bounds: .init(start: 10, end: 70),
+            playbackRate: 1.25,
+            isPlaying: true,
+            allowsTrackNavigation: true
+        )
+
+        XCTAssertEqual(snapshot.identifier, track.id.uuidString)
+        XCTAssertEqual(snapshot.title, track.title)
+        XCTAssertEqual(snapshot.artist, track.artist)
+        XCTAssertEqual(snapshot.album, track.album)
+        XCTAssertEqual(snapshot.duration, 60)
+        XCTAssertEqual(snapshot.elapsed, 15)
+        XCTAssertEqual(snapshot.playbackRate, 1.25)
+        XCTAssertEqual(snapshot.defaultPlaybackRate, 1.25)
+        XCTAssertTrue(snapshot.allowsTrackNavigation)
+    }
+
+    func testSnapshotClampsElapsedAndPublishesZeroRateWhenPaused() {
+        let snapshot = MobileNowPlayingPolicy.snapshot(
+            for: track,
+            position: 500,
+            bounds: .init(start: 10, end: 70),
+            playbackRate: .nan,
+            isPlaying: false,
+            allowsTrackNavigation: false
+        )
+
+        XCTAssertEqual(snapshot.elapsed, 60)
+        XCTAssertEqual(snapshot.playbackRate, 0)
+        XCTAssertEqual(snapshot.defaultPlaybackRate, 1)
+        XCTAssertFalse(snapshot.allowsTrackNavigation)
+    }
+
+    func testControlCenterPositionMapsToClipRelativeSeekFraction() {
+        let bounds = MobileClipPlaybackPolicy.Bounds(start: 10, end: 70)
+        XCTAssertEqual(MobileNowPlayingPolicy.seekFraction(elapsedTime: -10, bounds: bounds), 0)
+        XCTAssertEqual(MobileNowPlayingPolicy.seekFraction(elapsedTime: 30, bounds: bounds), 0.5)
+        XCTAssertEqual(MobileNowPlayingPolicy.seekFraction(elapsedTime: 90, bounds: bounds), 1)
+        XCTAssertEqual(MobileNowPlayingPolicy.seekFraction(elapsedTime: .nan, bounds: bounds), 0)
+    }
+}
+
+final class MobileCatalogRefreshFailurePolicyTests: XCTestCase {
+    func testRefreshFailurePreservesAnExistingConnectionOrCatalog() {
+        XCTAssertTrue(MobileCatalogRefreshFailurePolicy.preservesLastKnownCatalog(
+            wasConnected: true,
+            hadCatalog: false,
+            wasCancelled: false,
+            isAuthenticationFailure: false
+        ))
+        XCTAssertTrue(MobileCatalogRefreshFailurePolicy.preservesLastKnownCatalog(
+            wasConnected: false,
+            hadCatalog: true,
+            wasCancelled: false,
+            isAuthenticationFailure: false
+        ))
+    }
+
+    func testCancelledNativeRefreshNeverTearsDownConnectionState() {
+        XCTAssertTrue(MobileCatalogRefreshFailurePolicy.preservesLastKnownCatalog(
+            wasConnected: false,
+            hadCatalog: false,
+            wasCancelled: true,
+            isAuthenticationFailure: false
+        ))
+        XCTAssertFalse(MobileCatalogRefreshFailurePolicy.preservesLastKnownCatalog(
+            wasConnected: false,
+            hadCatalog: false,
+            wasCancelled: false,
+            isAuthenticationFailure: false
+        ))
+    }
+
+    func testAuthenticationFailureAlwaysRequiresARealReconnect() {
+        XCTAssertFalse(MobileCatalogRefreshFailurePolicy.preservesLastKnownCatalog(
+            wasConnected: true,
+            hadCatalog: true,
+            wasCancelled: false,
+            isAuthenticationFailure: true
+        ))
+    }
+}
+
+final class MobileFullCatalogAuthorityPolicyTests: XCTestCase {
+    private let context = MobileServerContext(
+        origin: "https://music.example:443",
+        profileID: "listener"
+    )
+
+    func testUploadOnlyPartialCatalogNeverBecomesAuthority() {
+        XCTAssertNil(MobileFullCatalogAuthorityPolicy.completedFetch(
+            context: context,
+            requestGeneration: 7,
+            currentRequestGeneration: 7,
+            credentialIsCurrent: true,
+            catalogMutationGenerationUnchanged: false,
+            hasPendingCatalogMerges: true,
+            songIDs: ["catalog-song"]
+        ))
+        XCTAssertNil(MobileFullCatalogAuthorityPolicy.completedFetch(
+            context: context,
+            requestGeneration: 7,
+            currentRequestGeneration: 7,
+            credentialIsCurrent: true,
+            catalogMutationGenerationUnchanged: true,
+            hasPendingCatalogMerges: true,
+            songIDs: ["catalog-song", "upload-response-only-song"]
+        ))
+    }
+
+    func testSuccessfulCurrentFullCatalogBecomesExactContextAuthority() throws {
+        let snapshot = try XCTUnwrap(MobileFullCatalogAuthorityPolicy.completedFetch(
+            context: context,
+            requestGeneration: 8,
+            currentRequestGeneration: 8,
+            credentialIsCurrent: true,
+            catalogMutationGenerationUnchanged: true,
+            hasPendingCatalogMerges: false,
+            songIDs: ["catalog-a", "catalog-b"]
+        ))
+
+        XCTAssertEqual(
+            MobileFullCatalogAuthorityPolicy.songIDsIfCurrent(
+                snapshot,
+                context: context,
+                requestGeneration: 8
+            ),
+            Set(["catalog-a", "catalog-b"])
+        )
+        XCTAssertNil(MobileFullCatalogAuthorityPolicy.songIDsIfCurrent(
+            snapshot,
+            context: MobileServerContext(
+                origin: context.origin,
+                profileID: "other-profile"
+            ),
+            requestGeneration: 8
+        ))
+        XCTAssertNil(MobileFullCatalogAuthorityPolicy.songIDsIfCurrent(
+            snapshot,
+            context: context,
+            requestGeneration: 9
+        ))
+        XCTAssertNil(MobileFullCatalogAuthorityPolicy.completedFetch(
+            context: context,
+            requestGeneration: 8,
+            currentRequestGeneration: 8,
+            credentialIsCurrent: false,
+            catalogMutationGenerationUnchanged: true,
+            hasPendingCatalogMerges: false,
+            songIDs: ["catalog-a", "catalog-b"]
+        ))
+        XCTAssertNil(MobileFullCatalogAuthorityPolicy.completedFetch(
+            context: context,
+            requestGeneration: 8,
+            currentRequestGeneration: 9,
+            credentialIsCurrent: true,
+            catalogMutationGenerationUnchanged: true,
+            hasPendingCatalogMerges: false,
+            songIDs: ["catalog-a", "catalog-b"]
+        ))
+    }
+}
+
+final class MobilePlaylistPresentationMovePolicyTests: XCTestCase {
+    func testUnavailableRemoteEntryMovesWithoutCorruptingPersistedOrders() {
+        let localTrack = MobileTrack(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            title: "Local",
+            duration: 120,
+            relativePath: "Local.m4a"
+        )
+        let downloadedTrack = MobileTrack(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            title: "Downloaded",
+            duration: 180,
+            relativePath: "Downloaded.m4a",
+            remoteID: "remote-downloaded"
+        )
+        let entries = [
+            MobilePlaylistPresentationEntry(
+                id: .local(localTrack.id),
+                track: localTrack,
+                remoteSongID: nil,
+                remoteSong: nil
+            ),
+            MobilePlaylistPresentationEntry(
+                id: .remote("remote-downloaded"),
+                track: downloadedTrack,
+                remoteSongID: "remote-downloaded",
+                remoteSong: nil
+            ),
+            MobilePlaylistPresentationEntry(
+                id: .remote("remote-unavailable"),
+                track: nil,
+                remoteSongID: "remote-unavailable",
+                remoteSong: nil
+            ),
+        ]
+
+        let reordered = MobilePlaylistPresentationMovePolicy.move(
+            entries,
+            fromOffsets: IndexSet(integer: 2),
+            toOffset: 0
+        )
+        XCTAssertEqual(
+            reordered.map(\.id),
+            [.remote("remote-unavailable"), .local(localTrack.id), .remote("remote-downloaded")]
+        )
+
+        let persisted = MobilePlaylistPresentationMovePolicy.persistedOrder(for: reordered)
+        XCTAssertEqual(persisted.trackIDs, [localTrack.id, downloadedTrack.id])
+        XCTAssertEqual(persisted.remoteSongIDs, ["remote-unavailable", "remote-downloaded"])
+        XCTAssertEqual(
+            persisted.entryOrder,
+            [
+                "remote:remote-unavailable",
+                "local:\(localTrack.id.uuidString.lowercased())",
+                "remote:remote-downloaded",
+            ]
+        )
+
+        let roundTrippedPlaylist = MobilePlaylist(
+            name: "Mixed",
+            trackIDs: persisted.trackIDs,
+            remoteSongIDs: persisted.remoteSongIDs,
+            entryOrder: ["remote:stale"] + persisted.entryOrder
+        )
+        XCTAssertEqual(
+            MobilePlaylistPresentationPolicy.entries(
+                in: roundTrippedPlaylist,
+                tracks: [localTrack, downloadedTrack],
+                remoteSongs: []
+            ).map(\.id),
+            reordered.map(\.id)
+        )
+    }
+
+    func testPlaylistEntryOrderCodableRemainsBackwardCompatible() throws {
+        let playlist = MobilePlaylist(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!,
+            name: "Ordered",
+            entryOrder: ["remote:a", "local:00000000-0000-0000-0000-000000000001"]
+        )
+        let encoded = try JSONEncoder().encode(playlist)
+        XCTAssertEqual(try JSONDecoder().decode(MobilePlaylist.self, from: encoded).entryOrder, playlist.entryOrder)
+
+        let legacy = Data(#"{"id":"00000000-0000-0000-0000-000000000003","name":"Legacy","trackIDs":[],"isSystem":false}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(MobilePlaylist.self, from: legacy).entryOrder)
+    }
+}
+
+final class MobileLocalTrackRemovalPlaylistPolicyTests: XCTestCase {
+    private let remoteTrack = MobileTrack(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000011")!,
+        title: "Downloaded A",
+        duration: 120,
+        relativePath: "A.m4a",
+        remoteID: "remote-a"
+    )
+    private let localTrack = MobileTrack(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000012")!,
+        title: "Local",
+        duration: 120,
+        relativePath: "Local.m4a"
+    )
+    private let secondRemoteTrack = MobileTrack(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000013")!,
+        title: "Downloaded B",
+        duration: 120,
+        relativePath: "B.m4a",
+        remoteID: "remote-b"
+    )
+
+    func testRemovingDownloadPreservesRemoteMembershipAndExactPresentationSlot() {
+        let playlist = MobilePlaylist(
+            name: "Mixed",
+            trackIDs: [remoteTrack.id, localTrack.id, secondRemoteTrack.id],
+            remoteSongIDs: ["remote-a", "remote-b"],
+            entryOrder: [
+                "remote:remote-b",
+                "local:\(localTrack.id.uuidString.lowercased())",
+                "remote:remote-a",
+            ]
+        )
+        let before = MobilePlaylistPresentationPolicy.entries(
+            in: playlist,
+            tracks: [remoteTrack, localTrack, secondRemoteTrack],
+            remoteSongs: []
+        )
+
+        let result = MobileLocalTrackRemovalPlaylistPolicy.removing(
+            trackID: remoteTrack.id,
+            remoteSongID: "remote-a",
+            remoteBackingAuthority: .confirmedPresent,
+            from: playlist,
+            presentationOrder: before.map(\.id)
+        )
+
+        XCTAssertEqual(result.playlist.trackIDs, [localTrack.id, secondRemoteTrack.id])
+        XCTAssertEqual(result.playlist.remoteSongIDs, ["remote-a", "remote-b"])
+        XCTAssertEqual(result.playlist.entryOrder, playlist.entryOrder)
+        XCTAssertFalse(result.remoteMembershipChanged)
+
+        let after = MobilePlaylistPresentationPolicy.entries(
+            in: result.playlist,
+            tracks: [localTrack, secondRemoteTrack],
+            remoteSongs: []
+        )
+        XCTAssertEqual(after.map(\.id), before.map(\.id))
+        XCTAssertNil(after.last?.track)
+    }
+
+    func testRemovingDownloadDropsMembershipOnlyWhenRemoteSongIsMissing() {
+        let playlist = MobilePlaylist(
+            name: "Server Playlist",
+            trackIDs: [remoteTrack.id, secondRemoteTrack.id],
+            remoteSongIDs: ["remote-a", "remote-b"],
+            entryOrder: ["remote:remote-a", "remote:remote-b"]
+        )
+        let before = MobilePlaylistPresentationPolicy.entries(
+            in: playlist,
+            tracks: [remoteTrack, secondRemoteTrack],
+            remoteSongs: []
+        )
+
+        let result = MobileLocalTrackRemovalPlaylistPolicy.removing(
+            trackID: remoteTrack.id,
+            remoteSongID: "remote-a",
+            remoteBackingAuthority: .confirmedAbsent,
+            from: playlist,
+            presentationOrder: before.map(\.id)
+        )
+
+        XCTAssertEqual(result.playlist.trackIDs, [secondRemoteTrack.id])
+        XCTAssertEqual(result.playlist.remoteSongIDs, ["remote-b"])
+        XCTAssertEqual(result.playlist.entryOrder, ["remote:remote-b"])
+        XCTAssertTrue(result.remoteMembershipChanged)
+    }
+
+    func testLegacyLocalEntryBecomesRemotePlaceholderWithoutMoving() {
+        let playlist = MobilePlaylist(
+            name: "Legacy Mixed",
+            trackIDs: [remoteTrack.id, localTrack.id],
+            remoteSongIDs: []
+        )
+        let before = MobilePlaylistPresentationPolicy.entries(
+            in: playlist,
+            tracks: [remoteTrack, localTrack],
+            remoteSongs: []
+        )
+        let result = MobileLocalTrackRemovalPlaylistPolicy.removing(
+            trackID: remoteTrack.id,
+            remoteSongID: "remote-a",
+            remoteBackingAuthority: .confirmedPresent,
+            from: playlist,
+            presentationOrder: before.map(\.id)
+        )
+
+        XCTAssertEqual(result.playlist.remoteSongIDs, ["remote-a"])
+        XCTAssertEqual(result.playlist.entryOrder, [
+            "remote:remote-a",
+            "local:\(localTrack.id.uuidString.lowercased())",
+        ])
+        XCTAssertEqual(
+            MobilePlaylistPresentationPolicy.entries(
+                in: result.playlist,
+                tracks: [localTrack],
+                remoteSongs: []
+            ).map(\.id),
+            [.remote("remote-a"), .local(localTrack.id)]
+        )
+    }
+
+    func testRawLegacyLocalSlotWinsWhenCanonicalMembershipAlreadyExists() {
+        let legacyLocalKey = "local:\(remoteTrack.id.uuidString.lowercased())"
+        let playlist = MobilePlaylist(
+            name: "Raw legacy order",
+            trackIDs: [remoteTrack.id, localTrack.id, secondRemoteTrack.id],
+            remoteSongIDs: ["remote-a", "remote-b"],
+            entryOrder: [
+                "remote:remote-a",
+                "local:\(localTrack.id.uuidString.lowercased())",
+                legacyLocalKey,
+                "remote:remote-b",
+            ]
+        )
+        let presentation = MobilePlaylistPresentationPolicy.entries(
+            in: playlist,
+            tracks: [remoteTrack, localTrack, secondRemoteTrack],
+            remoteSongs: []
+        )
+        XCTAssertFalse(presentation.map(\.id).contains(.local(remoteTrack.id)))
+
+        let result = MobileLocalTrackRemovalPlaylistPolicy.removing(
+            trackID: remoteTrack.id,
+            remoteSongID: "remote-a",
+            remoteBackingAuthority: .confirmedPresent,
+            from: playlist,
+            presentationOrder: presentation.map(\.id)
+        )
+
+        XCTAssertEqual(result.playlist.remoteSongIDs, ["remote-a", "remote-b"])
+        XCTAssertEqual(result.playlist.entryOrder, [
+            "local:\(localTrack.id.uuidString.lowercased())",
+            "remote:remote-a",
+            "remote:remote-b",
+        ])
+        XCTAssertFalse(result.remoteMembershipChanged)
+    }
+
+    func testUnprovenBackingPreservesExistingCanonicalTokenInPlace() {
+        let playlist = MobilePlaylist(
+            name: "Offline canonical order",
+            trackIDs: [remoteTrack.id, localTrack.id],
+            remoteSongIDs: ["remote-a"],
+            entryOrder: [
+                "remote:remote-a",
+                "local:\(remoteTrack.id.uuidString.lowercased())",
+                "local:\(localTrack.id.uuidString.lowercased())",
+            ]
+        )
+
+        let result = MobileLocalTrackRemovalPlaylistPolicy.removing(
+            trackID: remoteTrack.id,
+            remoteSongID: "remote-a",
+            remoteBackingAuthority: .unproven,
+            from: playlist,
+            presentationOrder: []
+        )
+
+        XCTAssertEqual(result.playlist.remoteSongIDs, ["remote-a"])
+        XCTAssertEqual(result.playlist.entryOrder, [
+            "remote:remote-a",
+            "local:\(localTrack.id.uuidString.lowercased())",
+        ])
+        XCTAssertFalse(result.remoteMembershipChanged)
+    }
+
+    func testOfflineLocalOnlyMembershipNeverSynthesizesRemoteMembership() {
+        let playlist = MobilePlaylist(
+            name: "Offline legacy",
+            trackIDs: [remoteTrack.id, localTrack.id],
+            remoteSongIDs: [],
+            entryOrder: [
+                "local:\(remoteTrack.id.uuidString.lowercased())",
+                "local:\(localTrack.id.uuidString.lowercased())",
+            ]
+        )
+
+        let result = MobileLocalTrackRemovalPlaylistPolicy.removing(
+            trackID: remoteTrack.id,
+            remoteSongID: "remote-a",
+            remoteBackingAuthority: .unproven,
+            from: playlist,
+            presentationOrder: []
+        )
+
+        XCTAssertEqual(result.playlist.remoteSongIDs, [])
+        XCTAssertEqual(result.playlist.entryOrder, [
+            "local:\(localTrack.id.uuidString.lowercased())",
+        ])
+        XCTAssertFalse(result.remoteMembershipChanged)
+    }
+
+    func testForeignContextDeletionCannotRemoveSameIDActiveMembership() {
+        let foreignTrack = MobileTrack(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000014")!,
+            title: "Foreign A",
+            duration: 120,
+            relativePath: "Foreign.m4a",
+            remoteID: "remote-a",
+            sourceServer: "https://foreign.example",
+            syncProfileID: "foreign"
+        )
+        let playlist = MobilePlaylist(
+            name: "Context scoped",
+            trackIDs: [foreignTrack.id, localTrack.id],
+            remoteSongIDs: ["remote-a"],
+            entryOrder: [
+                "remote:remote-a",
+                "local:\(foreignTrack.id.uuidString.lowercased())",
+                "local:\(localTrack.id.uuidString.lowercased())",
+            ]
+        )
+        let backing = MobileLocalTrackRemovalAuthorityPolicy.resolve(
+            track: foreignTrack,
+            activeContext: MobileServerContext(
+                origin: "https://active.example",
+                profileID: "active"
+            ),
+            catalogIsAuthoritative: true,
+            catalogRemoteSongIDs: ["remote-a"]
+        )
+        XCTAssertNil(backing.remoteSongID)
+        XCTAssertEqual(backing.authority, .unproven)
+
+        let result = MobileLocalTrackRemovalPlaylistPolicy.removing(
+            trackID: foreignTrack.id,
+            remoteSongID: backing.remoteSongID,
+            remoteBackingAuthority: backing.authority,
+            from: playlist,
+            presentationOrder: []
+        )
+
+        XCTAssertEqual(result.playlist.remoteSongIDs, ["remote-a"])
+        XCTAssertEqual(result.playlist.entryOrder, [
+            "remote:remote-a",
+            "local:\(localTrack.id.uuidString.lowercased())",
+        ])
+        XCTAssertFalse(result.remoteMembershipChanged)
+    }
+
+    func testExactContextNeedsAuthoritativeCatalogToConfirmBacking() {
+        let activeTrack = MobileTrack(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000015")!,
+            title: "Active A",
+            duration: 120,
+            relativePath: "Active.m4a",
+            remoteID: "remote-a",
+            sourceServer: "https://active.example",
+            syncProfileID: "active"
+        )
+        let activeContext = MobileServerContext(
+            origin: "https://active.example:443",
+            profileID: "active"
+        )
+
+        XCTAssertEqual(
+            MobileLocalTrackRemovalAuthorityPolicy.resolve(
+                track: activeTrack,
+                activeContext: activeContext,
+                catalogIsAuthoritative: false,
+                catalogRemoteSongIDs: ["remote-a"]
+            ),
+            MobileLocalTrackRemovalRemoteBacking(
+                remoteSongID: "remote-a",
+                authority: .unproven
+            )
+        )
+        XCTAssertEqual(
+            MobileLocalTrackRemovalAuthorityPolicy.resolve(
+                track: activeTrack,
+                activeContext: activeContext,
+                catalogIsAuthoritative: true,
+                catalogRemoteSongIDs: ["remote-a"]
+            ),
+            MobileLocalTrackRemovalRemoteBacking(
+                remoteSongID: "remote-a",
+                authority: .confirmedPresent
+            )
+        )
+        XCTAssertEqual(
+            MobileLocalTrackRemovalAuthorityPolicy.resolve(
+                track: activeTrack,
+                activeContext: activeContext,
+                catalogIsAuthoritative: true,
+                catalogRemoteSongIDs: []
+            ),
+            MobileLocalTrackRemovalRemoteBacking(
+                remoteSongID: "remote-a",
+                authority: .confirmedAbsent
+            )
+        )
+    }
+}
+
+final class MobileTransferDisplayPolicyTests: XCTestCase {
+    func testSubOnePercentProgressNeverDisplaysAsZero() {
+        XCTAssertEqual(MobileTransferDisplayPolicy.percentageLabel(0.001), "<1%")
+        XCTAssertEqual(MobileTransferDisplayPolicy.percentageLabel(0.42), "42%")
+    }
+
+    func testDownloadCardCannotAppearBeforeTheFirstMediaByte() {
+        XCTAssertFalse(MobileDownloadTransferPresentationPolicy.shouldPresent(
+            completedBytes: 0,
+            fallbackProgress: nil
+        ))
+        XCTAssertFalse(MobileDownloadTransferPresentationPolicy.shouldPresent(
+            completedBytes: 0,
+            fallbackProgress: 1,
+            hasReceivedBytes: false
+        ), "A setup/completion signal must not manufacture a popup when no media byte was observed")
+        XCTAssertTrue(MobileDownloadTransferPresentationPolicy.shouldPresent(
+            completedBytes: 1,
+            fallbackProgress: nil
+        ))
+        XCTAssertTrue(MobileDownloadTransferPresentationPolicy.shouldPresent(
+            completedBytes: 0,
+            fallbackProgress: 1,
+            hasReceivedBytes: true
+        ))
+        XCTAssertFalse(MobileDownloadTransferPresentationPolicy.shouldEndBytePresentation(
+            for: .downloading
+        ))
+        XCTAssertTrue(MobileDownloadTransferPresentationPolicy.shouldEndBytePresentation(
+            for: .processing
+        ), "Local validation and tagging must not leave a completed byte bar on screen")
+    }
+
+    func testLoadedCatalogSnapshotPlansUnhydratedSongsWithoutARefresh() throws {
+        let first = try decodedRemoteSong(id: "one", title: "Already loaded one")
+        let second = try decodedRemoteSong(id: "two", title: "Already loaded two")
+        let unresolved = try decodedRemoteSong(
+            id: "three",
+            title: nil,
+            artist: nil
+        )
+        let planned = MobileLoadedCatalogDownloadPolicy.pendingSongs(
+            from: [first, second, unresolved],
+            requestedSongIDs: ["one", "two", "three"],
+            syncedSongIDs: ["two"]
+        )
+
+        XCTAssertEqual(planned.map(\.id), ["one", "three"])
+        XCTAssertEqual(planned.first?.title, "Already loaded one")
+        XCTAssertTrue(planned.last?.isMetadataLoading == true)
+    }
+
+    func testCurrentSongBytesAndBatchPositionAreIndependent() {
+        let state = MobileTransferDisplayState(
+            kind: .download,
+            itemID: "catalog-song-id",
+            songTitle: "Catalog Song Title",
+            detail: "Downloading song",
+            currentItem: 3,
+            totalItems: 10,
+            completedBytes: 25,
+            totalBytes: 100,
+            fallbackProgress: nil
+        )
+
+        XCTAssertEqual(state.songTitle, "Catalog Song Title")
+        XCTAssertEqual(state.batchPosition, "3/10")
+        XCTAssertEqual(state.progress, 0.25)
+    }
+
+    func testNoPendingTransfersUsesZeroBatchPosition() {
+        let state = MobileTransferDisplayState(
+            kind: .download,
+            itemID: "cached-song-id",
+            songTitle: "Cached Song",
+            detail: "All requested songs are already on this device",
+            currentItem: 0,
+            totalItems: 0,
+            completedBytes: 0,
+            totalBytes: 0,
+            fallbackProgress: 1
+        )
+
+        XCTAssertEqual(state.batchPosition, "0/0")
+        XCTAssertEqual(state.progress, 1)
+    }
+
+    func testProgressClampsAndStaysIndeterminateWithoutByteOrFallbackTotal() {
+        XCTAssertNil(MobileTransferDisplayPolicy.progress(
+            completedBytes: 0,
+            totalBytes: 0,
+            fallbackProgress: nil
+        ))
+        XCTAssertNil(MobileTransferDisplayPolicy.progress(
+            completedBytes: 0,
+            totalBytes: 100,
+            fallbackProgress: nil
+        ), "A catalog or response size must not render as a stalled zero-percent download")
+        XCTAssertEqual(MobileTransferDisplayPolicy.progress(
+            completedBytes: 500,
+            totalBytes: 100,
+            fallbackProgress: nil
+        ), 1)
+        XCTAssertEqual(MobileTransferDisplayPolicy.progress(
+            completedBytes: 0,
+            totalBytes: 0,
+            fallbackProgress: -1
+        ), 0)
+    }
+
+    func testLoadedCatalogMetadataIsReusedForSavedLinkDownloads() {
+        XCTAssertTrue(MobileRemoteSourceMetadataReusePolicy.canReuseCatalogMetadata(
+            isMetadataLoading: false,
+            title: "Catalog Title",
+            artist: "Catalog Artist"
+        ))
+        XCTAssertFalse(MobileRemoteSourceMetadataReusePolicy.canReuseCatalogMetadata(
+            isMetadataLoading: true,
+            title: "Resolving metadata…",
+            artist: "On-device lookup"
+        ))
+        XCTAssertFalse(MobileRemoteSourceMetadataReusePolicy.canReuseCatalogMetadata(
+            isMetadataLoading: false,
+            title: " ",
+            artist: "Catalog Artist"
+        ))
+        XCTAssertFalse(MobileRemoteSourceMetadataReusePolicy.canReuseCatalogMetadata(
+            isMetadataLoading: false,
+            title: String(repeating: "x", count: 513),
+            artist: "Catalog Artist"
+        ))
+    }
+
+    func testUnhydratedSpotifyCannotFabricateSearchMetadata() throws {
+        let spotify = try decodedRemoteSong(
+            id: "spotify-row",
+            title: nil,
+            artist: nil,
+            sourceURL: "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+        )
+        let youtube = try decodedRemoteSong(
+            id: "youtube-row",
+            title: nil,
+            artist: nil,
+            sourceURL: "https://www.youtube.com/watch?v=abcdefghijk"
+        )
+        let unsupported = try decodedRemoteSong(
+            id: "unsupported-row",
+            title: nil,
+            artist: nil,
+            sourceURL: "https://example.com/audio"
+        )
+
+        XCTAssertNil(MobileRemoteSourceMetadataReusePolicy.acquisitionTrack(for: spotify))
+        XCTAssertNotNil(MobileRemoteSourceMetadataReusePolicy.acquisitionTrack(for: youtube))
+        XCTAssertNil(MobileRemoteSourceMetadataReusePolicy.acquisitionTrack(for: unsupported))
+    }
+
+    func testPendingRemoteMetadataCannotBlockBatchAdvanceOrFinalization() throws {
+        let unresolved = try decodedRemoteSong(
+            id: "pending-row",
+            title: nil,
+            artist: nil
+        )
+        let finalized = MobileSourceImportFinalMetadataPolicy.resolve(
+            localTitle: "Provider title",
+            localArtist: "Provider artist",
+            localAlbum: "Provider album",
+            localDuration: 187,
+            currentRemoteSong: unresolved
+        )
+
+        XCTAssertEqual(finalized.title, "Provider title")
+        XCTAssertEqual(finalized.artist, "Provider artist")
+        XCTAssertEqual(finalized.album, "Provider album")
+        XCTAssertEqual(finalized.duration, 187)
+
+        let titleOnlyCatalogRow = try decodedRemoteSong(
+            id: "title-only-row",
+            title: "Catalog title",
+            artist: "Catalog artist"
+        )
+        let titleOnlyFinalized = MobileSourceImportFinalMetadataPolicy.resolve(
+            localTitle: "Provider title",
+            localArtist: "Provider artist",
+            localAlbum: "Provider album",
+            localDuration: 187,
+            currentRemoteSong: titleOnlyCatalogRow
+        )
+        XCTAssertEqual(titleOnlyFinalized.title, "Catalog title")
+        XCTAssertEqual(titleOnlyFinalized.artist, "Catalog artist")
+        XCTAssertEqual(titleOnlyFinalized.album, "Provider album")
+    }
+
+    private func decodedRemoteSong(
+        id: String,
+        title: String?,
+        artist: String? = "Catalog Artist",
+        sourceURL: String = "https://www.youtube.com/watch?v=abcdefghijk"
+    ) throws -> MobileRemoteSong {
+        var object: [String: Any] = [
+            "id": id,
+            "filename": "\(id).m4a",
+            "source_url": sourceURL,
+            "media_kind": "audio",
+            "download_url": "/api/v1/songs/\(id)/file",
+            "stream_url": "/api/v1/songs/\(id)/stream",
+        ]
+        if let title { object["title"] = title }
+        if let artist { object["artist"] = artist }
+        return try JSONDecoder().decode(
+            MobileRemoteSong.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+    }
+
+    func testSourceResolutionKeysAreScopedToCanonicalServerProfileAndAccount() throws {
+        let source = "https://www.youtube.com/watch?v=abcdefghijk"
+        let context = MobileServerContext(
+            origin: "https://Music.Example/library",
+            profileID: "profile-a"
+        )
+        let key = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: context,
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+        let sameCanonicalContext = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: MobileServerContext(
+                origin: "https://music.example:443/other-path",
+                profileID: "profile-a"
+            ),
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+
+        let otherProfileKey = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: MobileServerContext(origin: context.origin, profileID: "profile-b"),
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+        let otherAccountKey = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: context,
+            accountScope: "account-b",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+        let otherServerKey = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: MobileServerContext(origin: "https://other.example", profileID: "profile-a"),
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+        let videoKey = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: context,
+            accountScope: "account-a",
+            mediaKind: "video",
+            sourceURL: source
+        ))
+
+        XCTAssertEqual(key, sameCanonicalContext)
+        XCTAssertNotEqual(key, otherProfileKey)
+        XCTAssertNotEqual(key, otherAccountKey)
+        XCTAssertNotEqual(key, otherServerKey)
+        XCTAssertNotEqual(key, videoKey)
+        XCTAssertNil(MobileRemoteSourceResolutionCachePolicy.key(
+            context: context,
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: "https://user:secret@www.youtube.com/watch?v=abcdefghijk"
+        ))
+    }
+
+    func testCorrectedCatalogMetadataInvalidatesSameSourceResolution() throws {
+        let source = "https://www.youtube.com/watch?v=abcdefghijk"
+        let context = MobileServerContext(origin: "https://music.example", profileID: "profile-a")
+        let key = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: context,
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+        let metadata = LocalImportSpotifyTrack(
+            provider: "server",
+            type: "track",
+            trackID: "server-song",
+            title: "Original title",
+            artist: "Artist",
+            album: nil,
+            trackNumber: nil,
+            durationSeconds: nil,
+            artworkURL: nil,
+            embedURL: "",
+            sourceURL: source
+        )
+        let resolution = LocalImportResolution(
+            kind: .youtube,
+            track: metadata,
+            candidates: [LocalImportAudioSourceMatch(
+                videoID: "abcdefghijk",
+                title: metadata.title,
+                artist: metadata.artist,
+                album: nil,
+                durationSeconds: nil,
+                thumbnailURL: nil,
+                sourceProvider: .youtube,
+                officialArtist: false,
+                sourceURL: source,
+                score: 1,
+                confidence: "catalog",
+                match: .init(
+                    title: 1,
+                    artist: 1,
+                    album: nil,
+                    duration: nil,
+                    durationDeltaSeconds: nil
+                )
+            )]
+        )
+
+        XCTAssertTrue(MobileRemoteSourceResolutionCachePolicy.canReuse(
+            resolution,
+            cachedKey: key,
+            expectedKey: key,
+            knownCatalogMetadata: metadata
+        ))
+        let corrected = LocalImportSpotifyTrack(
+            provider: metadata.provider,
+            type: metadata.type,
+            trackID: metadata.trackID,
+            title: "Corrected title",
+            artist: metadata.artist,
+            album: metadata.album,
+            trackNumber: metadata.trackNumber,
+            durationSeconds: metadata.durationSeconds,
+            artworkURL: metadata.artworkURL,
+            embedURL: metadata.embedURL,
+            sourceURL: metadata.sourceURL
+        )
+        XCTAssertFalse(MobileRemoteSourceResolutionCachePolicy.canReuse(
+            resolution,
+            cachedKey: key,
+            expectedKey: key,
+            knownCatalogMetadata: corrected
+        ))
+        let otherProfileKey = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: MobileServerContext(origin: context.origin, profileID: "profile-b"),
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+        XCTAssertFalse(MobileRemoteSourceResolutionCachePolicy.canReuse(
+            resolution,
+            cachedKey: key,
+            expectedKey: otherProfileKey,
+            knownCatalogMetadata: metadata
+        ))
+    }
+
+    func testFirstReceivedBytesPublishProgressImmediatelyThenThrottle() {
+        XCTAssertTrue(MobileTransferByteProgressPolicy.shouldReport(
+            completedBytes: 16 * 1_024,
+            lastReportedBytes: 0,
+            totalBytes: 1_024 * 1_024
+        ))
+        XCTAssertFalse(MobileTransferByteProgressPolicy.shouldReport(
+            completedBytes: 32 * 1_024,
+            lastReportedBytes: 16 * 1_024,
+            totalBytes: 1_024 * 1_024
+        ))
+        XCTAssertTrue(MobileTransferByteProgressPolicy.shouldReport(
+            completedBytes: 272 * 1_024,
+            lastReportedBytes: 16 * 1_024,
+            totalBytes: 1_024 * 1_024
+        ))
+    }
+
+    func testRangeProgressIsAbsoluteAndClampedAcrossChunks() {
+        XCTAssertEqual(LocalImportRangeProgressPolicy.absoluteCompleted(
+            completedBeforeRange: 10 * 1_024 * 1_024,
+            receivedInRange: 256 * 1_024,
+            total: 25 * 1_024 * 1_024
+        ), 10 * 1_024 * 1_024 + 256 * 1_024)
+        XCTAssertEqual(LocalImportRangeProgressPolicy.absoluteCompleted(
+            completedBeforeRange: 24 * 1_024 * 1_024,
+            receivedInRange: 2 * 1_024 * 1_024,
+            total: 25 * 1_024 * 1_024
+        ), 25 * 1_024 * 1_024)
+        XCTAssertEqual(LocalImportRangeProgressPolicy.absoluteCompleted(
+            completedBeforeRange: Int64.max,
+            receivedInRange: Int64.max,
+            total: 100
+        ), 100)
+    }
+
+    func testYouTubeDownloadPreparationBuildsFromCatalogMetadata() async throws {
+        let source = "https://www.youtube.com/watch?v=abcdefghijk"
+        let metadata = LocalImportSpotifyTrack(
+            provider: "server",
+            type: "track",
+            trackID: "server-song",
+            title: "Already Loaded Title",
+            artist: "Already Loaded Artist",
+            album: "Already Loaded Album",
+            trackNumber: nil,
+            durationSeconds: 181,
+            artworkURL: nil,
+            embedURL: "",
+            sourceURL: source
+        )
+        let service = LocalDeviceImportService(
+            localRoot: FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        )
+
+        let resolution = try await service.resolveUsingCatalogMetadata(
+            source: source,
+            metadata: metadata
+        ) { _ in }
+
+        XCTAssertEqual(resolution.track.title, metadata.title)
+        XCTAssertEqual(resolution.track.artist, metadata.artist)
+        XCTAssertEqual(resolution.candidates.count, 1)
+        XCTAssertEqual(resolution.candidates.first?.videoID, "abcdefghijk")
+        XCTAssertEqual(resolution.candidates.first?.sourceURL, source)
+    }
+
+    func testOnlyActiveTransferSessionCanPublishOrClearTheOverlay() {
+        let staleSessionID = UUID()
+        let activeSessionID = UUID()
+
+        XCTAssertFalse(MobileTransferSessionPolicy.accepts(
+            staleSessionID,
+            activeSessionID: activeSessionID
+        ))
+        XCTAssertTrue(MobileTransferSessionPolicy.accepts(
+            activeSessionID,
+            activeSessionID: activeSessionID
+        ))
+        XCTAssertFalse(MobileTransferSessionPolicy.accepts(
+            activeSessionID,
+            activeSessionID: nil
+        ))
+    }
+
+    func testActiveTransferOwnerBlocksEveryOtherProducer() {
+        let activeSessionID = UUID()
+
+        XCTAssertTrue(MobileTransferSessionPolicy.canBegin(activeSessionID: nil))
+        XCTAssertFalse(MobileTransferSessionPolicy.canBegin(
+            activeSessionID: activeSessionID
+        ))
+    }
+
+    func testCancelledDownloadCallbackCannotUpdateSameSongRetry() {
+        let cancelledSessionID = UUID()
+        let cancelledOperationID = UUID()
+        let retrySessionID = UUID()
+        let retryOperationID = UUID()
+
+        XCTAssertFalse(MobileTransferSessionPolicy.acceptsOperation(
+            sessionID: cancelledSessionID,
+            operationID: cancelledOperationID,
+            activeSessionID: retrySessionID,
+            activeOperationID: retryOperationID
+        ))
+        XCTAssertFalse(MobileTransferSessionPolicy.acceptsOperation(
+            sessionID: retrySessionID,
+            operationID: cancelledOperationID,
+            activeSessionID: retrySessionID,
+            activeOperationID: retryOperationID
+        ))
+        XCTAssertTrue(MobileTransferSessionPolicy.acceptsOperation(
+            sessionID: retrySessionID,
+            operationID: retryOperationID,
+            activeSessionID: retrySessionID,
+            activeOperationID: retryOperationID
+        ))
+    }
+
+    func testLateFinalByteCallbackCannotReopenACompletedTransferCard() {
+        let operationID = UUID()
+
+        XCTAssertTrue(MobileTransferSessionPolicy.acceptsBytePresentation(
+            operationID: operationID,
+            activePresentationOperationID: operationID
+        ))
+        XCTAssertFalse(MobileTransferSessionPolicy.acceptsBytePresentation(
+            operationID: operationID,
+            activePresentationOperationID: nil
+        ))
+    }
+
+    func testBoundedDownloadRejectsResponseAfterCancellation() {
+        XCTAssertTrue(MobileBoundedDownloadCallbackPolicy.acceptsResponse(
+            isFinished: false
+        ))
+        XCTAssertFalse(MobileBoundedDownloadCallbackPolicy.acceptsResponse(
+            isFinished: true
+        ))
+    }
+}
+
 final class MobileClientConfigurationTests: XCTestCase {
     private let token = "test-access-token"
     private let cohortKey = "AAECAwQFBgcICQoLDA0ODw"
@@ -804,10 +1913,12 @@ final class MobileClientConfigurationTests: XCTestCase {
         MobileChunkedDownloadProtocol.state.configure(onFirstChunk: {}, onStop: {})
         let session = URLSession(configuration: chunkedSessionConfiguration())
         defer { session.invalidateAndCancel() }
+        let progress = LocalImportByteProgressRecorder()
         let operation = LocalImportBoundedDataOperation(
             session: session,
             maximumSize: 8,
-            redirectValidator: { _ in true }
+            redirectValidator: { _ in true },
+            progress: { progress.record($0) }
         )
 
         let (data, response) = try await operation.run(
@@ -816,6 +1927,52 @@ final class MobileClientConfigurationTests: XCTestCase {
 
         XCTAssertEqual(response.statusCode, 200)
         XCTAssertEqual(data, Data("aaaabbbb".utf8))
+        let updates = progress.values
+        XCTAssertEqual(updates.first, 4, "The first nonzero URLSession chunk must publish immediately")
+        XCTAssertEqual(updates.last, 8, "A final exact range-byte event must always publish")
+        XCTAssertTrue(updates.allSatisfy { $0 > 0 })
+        XCTAssertEqual(updates, updates.sorted())
+    }
+
+    func testCancelledLocalImportRangeCannotPublishDelayedChunks() async throws {
+        let firstProgress = expectation(description: "first local-import range progress")
+        let stopped = expectation(description: "local-import range stopped")
+        MobileChunkedDownloadProtocol.state.configure(
+            onFirstChunk: {},
+            onStop: { stopped.fulfill() }
+        )
+        let session = URLSession(configuration: chunkedSessionConfiguration())
+        defer { session.invalidateAndCancel() }
+        let progress = LocalImportByteProgressRecorder()
+        let operation = LocalImportBoundedDataOperation(
+            session: session,
+            maximumSize: 8,
+            redirectValidator: { _ in true },
+            progress: {
+                progress.record($0)
+                if $0 == 4 { firstProgress.fulfill() }
+            }
+        )
+        let task = Task {
+            try await operation.run(
+                request: URLRequest(url: URL(string: "https://music.example/audio")!)
+            )
+        }
+
+        await fulfillment(of: [firstProgress], timeout: 2)
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled range must not complete")
+        } catch {
+            XCTAssertTrue(
+                error is CancellationError || (error as? URLError)?.code == .cancelled
+            )
+        }
+        await fulfillment(of: [stopped], timeout: 2)
+
+        XCTAssertFalse(MobileChunkedDownloadProtocol.state.secondChunkWasDelivered)
+        XCTAssertEqual(progress.values.last, 4)
     }
 
     func testLocalImportRangeDownloadRejectsDeclaredOverflow() async throws {
@@ -1517,6 +2674,23 @@ private final class MobileMetadataURLProtocol: URLProtocol, @unchecked Sendable 
     }
 
     override func stopLoading() {}
+}
+
+private final class LocalImportByteProgressRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedValues: [Int64] = []
+
+    var values: [Int64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedValues
+    }
+
+    func record(_ value: Int64) {
+        lock.lock()
+        recordedValues.append(value)
+        lock.unlock()
+    }
 }
 
 private final class MobileChunkedDownloadProtocolState: @unchecked Sendable {

@@ -417,22 +417,68 @@ struct MacSettingsSheet: View {
                                 .font(.system(size: 9, weight: .semibold))
                                 .foregroundStyle(palette.muted)
                         }
-                        Button("Sign in or create account") {
+                        Button {
                             Task {
                                 await model.signIn(with: .clerk)
                             }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "person.badge.key.fill")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .frame(width: 30, height: 30)
+                                    .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                            .stroke(Color.white.opacity(0.18))
+                                    }
+                                Text("Sign in with Clerk")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.82)
+                                    .layoutPriority(1)
+                                Spacer(minLength: 8)
+                                if model.isAuthenticatingAccount {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .tint(.white)
+                                        .frame(width: 16, height: 16)
+                                } else {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .opacity(0.75)
+                                        .frame(width: 16, height: 16)
+                                }
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .frame(maxWidth: .infinity, minHeight: 46)
+                            .background(
+                                LinearGradient(
+                                    colors: [palette.accent, palette.secondary],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                ),
+                                in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                    .stroke(Color.white.opacity(0.2))
+                            }
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(palette.accent)
+                        .buttonStyle(PressableScaleStyle())
                         .frame(maxWidth: .infinity)
+                        .fixedSize(horizontal: false, vertical: true)
                         .disabled(model.isAuthenticatingAccount)
+                        .accessibilityLabel("Sign in with Clerk")
                         Text("Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/ in the secure system browser.")
                             .font(.system(size: 9))
                             .foregroundStyle(palette.muted)
                     }
                 }
                 .padding(15)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .overlay { RoundedRectangle(cornerRadius: 15).stroke(palette.divider) }
 
                 HStack(spacing: 12) {

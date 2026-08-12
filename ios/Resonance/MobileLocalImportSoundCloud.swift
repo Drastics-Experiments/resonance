@@ -434,6 +434,7 @@ enum LocalImportSoundCloud {
         }
         var hasher = SHA256()
         var completed: Int64 = 0
+        var lastReportedBytes: Int64 = 0
         var buffer = Data()
         buffer.reserveCapacity(64 * 1_024)
         do {
@@ -454,7 +455,12 @@ enum LocalImportSoundCloud {
                     hasher.update(data: buffer)
                     buffer.removeAll(keepingCapacity: true)
                 }
-                if completed % (256 * 1_024) == 0 {
+                if MobileTransferByteProgressPolicy.shouldReport(
+                    completedBytes: completed,
+                    lastReportedBytes: lastReportedBytes,
+                    totalBytes: stream.contentLength
+                ) {
+                    lastReportedBytes = completed
                     await progress(.init(stage: .downloading, completed: completed, total: stream.contentLength))
                 }
             }

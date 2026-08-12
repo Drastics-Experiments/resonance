@@ -260,6 +260,108 @@ struct MobileTrack: Identifiable, Codable, Hashable {
     }
 }
 
+struct MobileNowPlayingSnapshot: Equatable {
+    let identifier: String
+    let title: String
+    let artist: String
+    let album: String
+    let duration: TimeInterval
+    let elapsed: TimeInterval
+    let playbackRate: Double
+    let defaultPlaybackRate: Double
+    let allowsTrackNavigation: Bool
+}
+
+enum MobileNowPlayingPolicy {
+    static func seekFraction(
+        elapsedTime: TimeInterval,
+        bounds: MobileClipPlaybackPolicy.Bounds
+    ) -> Double {
+        let duration = max(bounds.end - bounds.start, 0.01)
+        guard elapsedTime.isFinite else { return 0 }
+        return min(max(elapsedTime / duration, 0), 1)
+    }
+
+    static func snapshot(
+        for track: MobileTrack,
+        position: TimeInterval,
+        bounds: MobileClipPlaybackPolicy.Bounds,
+        playbackRate: Float,
+        isPlaying: Bool,
+        allowsTrackNavigation: Bool
+    ) -> MobileNowPlayingSnapshot {
+        let duration = max(bounds.end - bounds.start, 0.01)
+        let safePosition = position.isFinite ? position : bounds.start
+        let elapsed = min(max(safePosition - bounds.start, 0), duration)
+        let normalizedRate = playbackRate.isFinite && playbackRate > 0
+            ? Double(playbackRate)
+            : 1
+        return MobileNowPlayingSnapshot(
+            identifier: track.id.uuidString,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            duration: duration,
+            elapsed: elapsed,
+            playbackRate: isPlaying ? normalizedRate : 0,
+            defaultPlaybackRate: normalizedRate,
+            allowsTrackNavigation: allowsTrackNavigation
+        )
+    }
+}
+
+enum MobileCatalogRefreshFailurePolicy {
+    static func preservesLastKnownCatalog(
+        wasConnected: Bool,
+        hadCatalog: Bool,
+        wasCancelled: Bool,
+        isAuthenticationFailure: Bool
+    ) -> Bool {
+        guard !isAuthenticationFailure else { return false }
+        return wasConnected || hadCatalog || wasCancelled
+    }
+}
+
+struct MobileFullCatalogAuthoritySnapshot: Equatable, Sendable {
+    let context: MobileServerContext
+    let requestGeneration: UInt64
+    let songIDs: Set<String>
+}
+
+enum MobileFullCatalogAuthorityPolicy {
+    static func completedFetch(
+        context: MobileServerContext?,
+        requestGeneration: UInt64,
+        currentRequestGeneration: UInt64,
+        credentialIsCurrent: Bool,
+        catalogMutationGenerationUnchanged: Bool,
+        hasPendingCatalogMerges: Bool,
+        songIDs: Set<String>
+    ) -> MobileFullCatalogAuthoritySnapshot? {
+        guard let context,
+              requestGeneration == currentRequestGeneration,
+              credentialIsCurrent,
+              catalogMutationGenerationUnchanged,
+              !hasPendingCatalogMerges else { return nil }
+        return MobileFullCatalogAuthoritySnapshot(
+            context: context,
+            requestGeneration: requestGeneration,
+            songIDs: songIDs
+        )
+    }
+
+    static func songIDsIfCurrent(
+        _ snapshot: MobileFullCatalogAuthoritySnapshot?,
+        context: MobileServerContext?,
+        requestGeneration: UInt64
+    ) -> Set<String>? {
+        guard let snapshot,
+              snapshot.context == context,
+              snapshot.requestGeneration == requestGeneration else { return nil }
+        return snapshot.songIDs
+    }
+}
+
 enum MobileUnlinkedDownloadMigrationPolicy {
     static let identifier = "delete-unlinked-downloads-v1"
 
@@ -626,19 +728,22 @@ struct MobilePlaylist: Identifiable, Codable, Hashable {
     var trackIDs: [UUID]
     var isSystem: Bool
     var remoteSongIDs: [String]?
+    var entryOrder: [String]?
 
     init(
         id: UUID = UUID(),
         name: String,
         trackIDs: [UUID] = [],
         isSystem: Bool = false,
-        remoteSongIDs: [String]? = nil
+        remoteSongIDs: [String]? = nil,
+        entryOrder: [String]? = nil
     ) {
         self.id = id
         self.name = name
         self.trackIDs = trackIDs
         self.isSystem = isSystem
         self.remoteSongIDs = remoteSongIDs
+        self.entryOrder = entryOrder
     }
 
     var automaticArtworkTrackIDs: [UUID] {
@@ -1085,6 +1190,383 @@ enum MobilePlaylistOrderPolicy {
 enum MobilePlaylistPresentationEntryID: Hashable {
     case local(UUID)
     case remote(String)
+
+    var storageKey: String {
+        switch self {
+        case .local(let id):
+            "local:\(id.uuidString.lowercased())"
+        case .remote(let songID):
+            "remote:\(songID)"
+        }
+    }
+
+    init?(storageKey: String) {
+        if storageKey.hasPrefix("local:"),
+           let id = UUID(uuidString: String(storageKey.dropFirst("local:".count))) {
+            self = .local(id)
+        } else if storageKey.hasPrefix("remote:"),
+                  !storageKey.dropFirst("remote:".count).isEmpty {
+            self = .remote(String(storageKey.dropFirst("remote:".count)))
+        } else {
+            return nil
+        }
+    }
+}
+
+struct MobileTransferDisplayState: Equatable, Sendable {
+    enum Kind: String, Equatable, Sendable {
+        case download
+        case upload
+
+        var title: String {
+            switch self {
+            case .download: "Downloading"
+            case .upload: "Uploading"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .download: "arrow.down"
+            case .upload: "arrow.up"
+            }
+        }
+    }
+
+    let kind: Kind
+    let itemID: String
+    let songTitle: String
+    let detail: String
+    let currentItem: Int
+    let totalItems: Int
+    let completedBytes: Int64
+    let totalBytes: Int64
+    let fallbackProgress: Double?
+
+    var progress: Double? {
+        MobileTransferDisplayPolicy.progress(
+            completedBytes: completedBytes,
+            totalBytes: totalBytes,
+            fallbackProgress: fallbackProgress
+        )
+    }
+
+    var batchPosition: String {
+        guard totalItems > 0 else { return "0/0" }
+        return "\(min(max(currentItem, 1), totalItems))/\(totalItems)"
+    }
+}
+
+enum MobileTransferDisplayPolicy {
+    static func progress(
+        completedBytes: Int64,
+        totalBytes: Int64,
+        fallbackProgress: Double?
+    ) -> Double? {
+        // A known catalog or response size is not progress by itself. Keep
+        // connection setup and source preparation indeterminate until the
+        // downloader has actually received bytes.
+        if completedBytes > 0, totalBytes > 0 {
+            return min(max(Double(max(completedBytes, 0)) / Double(totalBytes), 0), 1)
+        }
+        guard let fallbackProgress, fallbackProgress.isFinite else { return nil }
+        return min(max(fallbackProgress, 0), 1)
+    }
+
+    static func percentageLabel(_ progress: Double) -> String {
+        let clamped = min(max(progress, 0), 1)
+        return clamped > 0 && clamped < 0.01
+            ? "<1%"
+            : "\(Int(clamped * 100))%"
+    }
+}
+
+/// Download reservations are intentionally invisible. A transfer card becomes
+/// truthful only once the downloader has received media bytes. A terminal
+/// update may keep an already-visible card alive, but cannot create one.
+enum MobileDownloadTransferPresentationPolicy {
+    static func shouldPresent(
+        completedBytes: Int64,
+        fallbackProgress: Double?,
+        hasReceivedBytes: Bool = false
+    ) -> Bool {
+        if completedBytes > 0 { return true }
+        guard let fallbackProgress, fallbackProgress.isFinite else { return false }
+        return hasReceivedBytes && fallbackProgress > 0
+    }
+
+    static func shouldEndBytePresentation(for stage: LocalImportStage) -> Bool {
+        stage != .downloading
+    }
+}
+
+enum MobileLoadedCatalogDownloadPolicy {
+    static func pendingSongs(
+        from catalog: [MobileRemoteSong],
+        requestedSongIDs: Set<String>?,
+        syncedSongIDs: Set<String>
+    ) -> [MobileRemoteSong] {
+        catalog.filter { song in
+            (requestedSongIDs.map { $0.contains(song.id) } ?? true)
+                && !syncedSongIDs.contains(song.id)
+        }
+    }
+}
+
+enum MobileTransferByteProgressPolicy {
+    static let minimumUpdateDelta: Int64 = 256 * 1_024
+
+    static func shouldReport(
+        completedBytes: Int64,
+        lastReportedBytes: Int64,
+        totalBytes: Int64
+    ) -> Bool {
+        guard completedBytes > lastReportedBytes else { return false }
+        let delta = completedBytes.subtractingReportingOverflow(lastReportedBytes)
+        return lastReportedBytes == 0
+            || delta.overflow
+            || delta.partialValue >= minimumUpdateDelta
+            || (totalBytes > 0 && completedBytes >= totalBytes)
+    }
+}
+
+enum MobileRemoteSourceMetadataReusePolicy {
+    static func canReuseCatalogMetadata(
+        isMetadataLoading: Bool,
+        title: String,
+        artist: String
+    ) -> Bool {
+        guard !isMetadataLoading else { return false }
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !cleanTitle.isEmpty
+            && !cleanArtist.isEmpty
+            && cleanTitle.utf8.count <= 512
+            && cleanArtist.utf8.count <= 512
+    }
+
+    static func knownTrack(for song: MobileRemoteSong) -> LocalImportSpotifyTrack? {
+        guard canReuseCatalogMetadata(
+            isMetadataLoading: song.isMetadataLoading,
+            title: song.title,
+            artist: song.artist
+        ), let source = song.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !source.isEmpty else { return nil }
+        let durationSeconds = song.duration.flatMap { duration -> Int? in
+            guard duration.isFinite,
+                  duration > 0,
+                  duration < Double(Int.max) else { return nil }
+            return Int(duration.rounded())
+        }
+        let album = song.album.trimmingCharacters(in: .whitespacesAndNewlines)
+        return LocalImportSpotifyTrack(
+            provider: "server",
+            type: "track",
+            trackID: song.id,
+            title: song.title,
+            artist: song.artist,
+            album: album.isEmpty || album == "Link only" || album.utf8.count > 512 ? nil : album,
+            trackNumber: nil,
+            durationSeconds: durationSeconds,
+            artworkURL: song.artworkURL?.absoluteString,
+            embedURL: "",
+            sourceURL: source
+        )
+    }
+
+    /// Produces an acquisition seed from the catalog row without performing a
+    /// provider metadata request. Direct YouTube and SoundCloud media lookup
+    /// can start from the source URL alone; a hydrated Spotify row supplies the
+    /// search terms needed to locate its audio counterpart.
+    static func acquisitionTrack(for song: MobileRemoteSong) -> LocalImportSpotifyTrack? {
+        if let known = knownTrack(for: song) { return known }
+        guard let source = song.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !source.isEmpty else { return nil }
+        let isDirectYouTube = (try? LocalImportURL.youtubeVideoID(source)) != nil
+        guard LocalImportURL.isSoundCloud(source) || isDirectYouTube else { return nil }
+        let filenameTitle = (song.filename as NSString).deletingPathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = usefulAcquisitionValue(song.title, rejecting: ["Resolving metadata…"])
+            ?? (filenameTitle.isEmpty ? "Saved song" : filenameTitle)
+        let artist = usefulAcquisitionValue(
+            song.artist,
+            rejecting: ["On-device lookup", "Retrying automatically"]
+        ) ?? "Unknown Artist"
+        let album = usefulAcquisitionValue(song.album, rejecting: ["Link only"])
+        let durationSeconds = song.duration.flatMap { duration -> Int? in
+            guard duration.isFinite,
+                  duration > 0,
+                  duration < Double(Int.max) else { return nil }
+            return Int(duration.rounded())
+        }
+        return LocalImportSpotifyTrack(
+            provider: "server",
+            type: "track",
+            trackID: song.id,
+            title: title,
+            artist: artist,
+            album: album,
+            trackNumber: nil,
+            durationSeconds: durationSeconds,
+            artworkURL: song.artworkURL?.absoluteString,
+            embedURL: "",
+            sourceURL: source
+        )
+    }
+
+    private static func usefulAcquisitionValue(
+        _ value: String,
+        rejecting placeholders: Set<String>
+    ) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.utf8.count <= 512,
+              !placeholders.contains(trimmed) else { return nil }
+        return trimmed
+    }
+}
+
+struct MobileSourceImportFinalMetadata: Equatable, Sendable {
+    let title: String
+    let artist: String
+    let album: String
+    let duration: TimeInterval
+}
+
+/// Finishes a source import from values that are already available locally.
+/// A still-running remote metadata request is never part of this decision: its
+/// eventual result can update the saved track through the normal hydrator.
+enum MobileSourceImportFinalMetadataPolicy {
+    static func resolve(
+        localTitle: String,
+        localArtist: String,
+        localAlbum: String,
+        localDuration: TimeInterval,
+        currentRemoteSong: MobileRemoteSong?
+    ) -> MobileSourceImportFinalMetadata {
+        guard let currentRemoteSong, !currentRemoteSong.isMetadataLoading else {
+            return MobileSourceImportFinalMetadata(
+                title: localTitle,
+                artist: localArtist,
+                album: localAlbum,
+                duration: localDuration
+            )
+        }
+        return MobileSourceImportFinalMetadata(
+            title: useful(currentRemoteSong.title, fallback: localTitle),
+            artist: useful(currentRemoteSong.artist, fallback: localArtist),
+            album: useful(
+                currentRemoteSong.album,
+                fallback: localAlbum,
+                rejecting: ["Link only"]
+            ),
+            duration: currentRemoteSong.duration ?? localDuration
+        )
+    }
+
+    private static func useful(
+        _ value: String,
+        fallback: String,
+        rejecting placeholders: Set<String> = []
+    ) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || placeholders.contains(trimmed) ? fallback : trimmed
+    }
+}
+
+struct MobileRemoteSourceResolutionCacheKey: Hashable, Sendable {
+    let context: MobileServerContext
+    let accountScope: String?
+    let mediaMode: LocalImportMediaMode
+    let sourceURL: String
+}
+
+enum MobileRemoteSourceResolutionCachePolicy {
+    static func key(
+        context: MobileServerContext?,
+        accountScope: String?,
+        mediaKind: String,
+        sourceURL: String?
+    ) -> MobileRemoteSourceResolutionCacheKey? {
+        guard let context,
+              !context.profileID.isEmpty,
+              let originURL = URL(string: context.origin),
+              originURL.user == nil,
+              originURL.password == nil,
+              MobileServerEndpointPolicy.normalizedOrigin(of: originURL) != nil,
+              let source = sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !source.isEmpty,
+              source.utf8.count <= 8_192,
+              let url = URL(string: source),
+              url.scheme?.lowercased() == "https",
+              url.host != nil,
+              url.user == nil,
+              url.password == nil else { return nil }
+        let scope = accountScope?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return MobileRemoteSourceResolutionCacheKey(
+            context: MobileServerEndpointPolicy.canonicalContext(context),
+            accountScope: scope.flatMap { $0.isEmpty ? nil : $0 },
+            mediaMode: LocalImportMediaMode(rawValue: mediaKind) ?? .audio,
+            sourceURL: source
+        )
+    }
+
+    static func canReuse(
+        _ resolution: LocalImportResolution,
+        cachedKey: MobileRemoteSourceResolutionCacheKey,
+        expectedKey: MobileRemoteSourceResolutionCacheKey,
+        knownCatalogMetadata: LocalImportSpotifyTrack?
+    ) -> Bool {
+        guard cachedKey == expectedKey,
+              resolution.playlist == nil,
+              !resolution.candidates.isEmpty else { return false }
+        switch resolution.kind {
+        case .spotifyPlaylist, .soundCloudPlaylist:
+            return false
+        case .spotify, .soundCloud, .youtube:
+            break
+        }
+        guard let knownCatalogMetadata else { return true }
+        guard knownCatalogMetadata.sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            == expectedKey.sourceURL else { return false }
+        return resolution.track.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            == knownCatalogMetadata.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            && resolution.track.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+            == knownCatalogMetadata.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+enum MobileTransferSessionPolicy {
+    static func canBegin(activeSessionID: UUID?) -> Bool {
+        activeSessionID == nil
+    }
+
+    static func accepts(_ sessionID: UUID, activeSessionID: UUID?) -> Bool {
+        sessionID == activeSessionID
+    }
+
+    static func acceptsOperation(
+        sessionID: UUID,
+        operationID: UUID,
+        activeSessionID: UUID?,
+        activeOperationID: UUID?
+    ) -> Bool {
+        accepts(sessionID, activeSessionID: activeSessionID)
+            && operationID == activeOperationID
+    }
+
+    static func acceptsBytePresentation(
+        operationID: UUID,
+        activePresentationOperationID: UUID?
+    ) -> Bool {
+        operationID == activePresentationOperationID
+    }
+}
+
+enum MobileBoundedDownloadCallbackPolicy {
+    static func acceptsResponse(isFinished: Bool) -> Bool {
+        !isFinished
+    }
 }
 
 struct MobilePlaylistPresentationEntry: Identifiable, Hashable {
@@ -1100,6 +1582,244 @@ struct MobilePlaylistPresentationEntry: Identifiable, Hashable {
     var durationText: String { track?.durationText ?? remoteSong?.durationText ?? "—" }
 }
 
+struct MobilePlaylistPersistedOrder: Equatable {
+    let trackIDs: [UUID]
+    let remoteSongIDs: [String]
+    let entryOrder: [String]
+}
+
+enum MobilePlaylistPresentationMovePolicy {
+    static func move(
+        _ entries: [MobilePlaylistPresentationEntry],
+        fromOffsets source: IndexSet,
+        toOffset destination: Int
+    ) -> [MobilePlaylistPresentationEntry] {
+        var reordered = entries
+        let validOffsets = source.filter { reordered.indices.contains($0) }.sorted()
+        guard !validOffsets.isEmpty else { return entries }
+
+        let movingEntries = validOffsets.map { reordered[$0] }
+        for offset in validOffsets.reversed() {
+            reordered.remove(at: offset)
+        }
+        let removedBeforeDestination = validOffsets.count { $0 < destination }
+        let insertionIndex = min(max(destination - removedBeforeDestination, 0), reordered.count)
+        reordered.insert(contentsOf: movingEntries, at: insertionIndex)
+        return reordered
+    }
+
+    static func persistedOrder(
+        for entries: [MobilePlaylistPresentationEntry]
+    ) -> MobilePlaylistPersistedOrder {
+        MobilePlaylistPersistedOrder(
+            trackIDs: entries.compactMap { $0.track?.id },
+            remoteSongIDs: entries.compactMap(\.remoteSongID),
+            entryOrder: entries.map { $0.id.storageKey }
+        )
+    }
+}
+
+struct MobileLocalTrackRemovalPlaylistResult: Equatable {
+    let playlist: MobilePlaylist
+    let remoteMembershipChanged: Bool
+}
+
+enum MobileLocalTrackRemoteBackingAuthority: Equatable {
+    case unproven
+    case confirmedPresent
+    case confirmedAbsent
+}
+
+struct MobileLocalTrackRemovalRemoteBacking: Equatable {
+    let remoteSongID: String?
+    let authority: MobileLocalTrackRemoteBackingAuthority
+}
+
+enum MobileLocalTrackRemovalAuthorityPolicy {
+    static func resolve(
+        track: MobileTrack,
+        activeContext: MobileServerContext?,
+        catalogIsAuthoritative: Bool,
+        catalogRemoteSongIDs: Set<String>
+    ) -> MobileLocalTrackRemovalRemoteBacking {
+        guard let remoteSongID = track.remoteID,
+              let activeContext,
+              track.remoteIdentity() == MobileRemoteIdentity(
+                  context: activeContext,
+                  remoteID: remoteSongID
+              ) else {
+            return MobileLocalTrackRemovalRemoteBacking(
+                remoteSongID: nil,
+                authority: .unproven
+            )
+        }
+        guard catalogIsAuthoritative else {
+            return MobileLocalTrackRemovalRemoteBacking(
+                remoteSongID: remoteSongID,
+                authority: .unproven
+            )
+        }
+        return MobileLocalTrackRemovalRemoteBacking(
+            remoteSongID: remoteSongID,
+            authority: catalogRemoteSongIDs.contains(remoteSongID)
+                ? .confirmedPresent
+                : .confirmedAbsent
+        )
+    }
+}
+
+enum MobileLocalTrackRemovalPlaylistPolicy {
+    static func removing(
+        trackID: UUID,
+        remoteSongID: String?,
+        remoteBackingAuthority: MobileLocalTrackRemoteBackingAuthority,
+        from playlist: MobilePlaylist,
+        presentationOrder: [MobilePlaylistPresentationEntryID]
+    ) -> MobileLocalTrackRemovalPlaylistResult {
+        guard playlist.trackIDs.contains(trackID) else {
+            return MobileLocalTrackRemovalPlaylistResult(
+                playlist: playlist,
+                remoteMembershipChanged: false
+            )
+        }
+
+        var updated = playlist
+        updated.trackIDs.removeAll { $0 == trackID }
+        guard !playlist.isSystem else {
+            return MobileLocalTrackRemovalPlaylistResult(
+                playlist: updated,
+                remoteMembershipChanged: false
+            )
+        }
+
+        let previousRemoteIDs = playlist.remoteSongIDs
+        let localEntry = MobilePlaylistPresentationEntryID.local(trackID)
+        let storedOrder = playlist.entryOrder ?? presentationOrder.map(\.storageKey)
+        guard let remoteSongID else {
+            updated.entryOrder = removing(localEntry, from: storedOrder)
+            return MobileLocalTrackRemovalPlaylistResult(
+                playlist: updated,
+                remoteMembershipChanged: false
+            )
+        }
+
+        let remoteEntry = MobilePlaylistPresentationEntryID.remote(remoteSongID)
+        switch remoteBackingAuthority {
+        case .confirmedPresent:
+            let promotedOrder = promoting(
+                localEntry: localEntry,
+                to: remoteEntry,
+                in: storedOrder,
+                appendIfMissing: true
+            )
+            updated.entryOrder = promotedOrder
+            var remoteIDs = playlist.remoteSongIDs ?? []
+            if !remoteIDs.contains(remoteSongID) {
+                insert(
+                    remoteSongID,
+                    into: &remoteIDs,
+                    followingOrder: promotedOrder
+                )
+            }
+            updated.remoteSongIDs = remoteIDs
+        case .unproven:
+            // Without an authoritative catalog, deleting a local-only track
+            // must neither create nor relocate server playlist membership.
+            // Preserve any existing canonical remote token exactly as stored.
+            updated.entryOrder = removing(localEntry, from: storedOrder)
+        case .confirmedAbsent:
+            if playlist.remoteSongIDs != nil {
+                updated.remoteSongIDs?.removeAll { $0 == remoteSongID }
+            }
+            updated.entryOrder = removing(
+                [localEntry, remoteEntry],
+                from: storedOrder
+            )
+        }
+
+        return MobileLocalTrackRemovalPlaylistResult(
+            playlist: updated,
+            remoteMembershipChanged: previousRemoteIDs != updated.remoteSongIDs
+        )
+    }
+
+    private static func promoting(
+        localEntry: MobilePlaylistPresentationEntryID,
+        to remoteEntry: MobilePlaylistPresentationEntryID,
+        in storedOrder: [String],
+        appendIfMissing: Bool
+    ) -> [String] {
+        let hasLocalSlot = storedOrder.contains { entryID(for: $0) == localEntry }
+        guard hasLocalSlot else {
+            guard appendIfMissing,
+                  !storedOrder.contains(where: { entryID(for: $0) == remoteEntry }) else {
+                return storedOrder
+            }
+            return storedOrder + [remoteEntry.storageKey]
+        }
+
+        var insertedReplacement = false
+        return storedOrder.compactMap { key in
+            let id = entryID(for: key)
+            if id == localEntry {
+                guard !insertedReplacement else { return nil }
+                insertedReplacement = true
+                return remoteEntry.storageKey
+            }
+            if id == remoteEntry {
+                // Prefer the exact legacy local slot over a reconciled remote
+                // token elsewhere in the raw order.
+                return nil
+            }
+            return key
+        }
+    }
+
+    private static func insert(
+        _ remoteSongID: String,
+        into remoteIDs: inout [String],
+        followingOrder storedOrder: [String]
+    ) {
+        let displayedRemoteIDs = unique(storedOrder.compactMap { key -> String? in
+            guard let entry = entryID(for: key),
+                  case .remote(let id) = entry else { return nil }
+            return id
+        })
+        let displayedIndex = displayedRemoteIDs.firstIndex(of: remoteSongID) ?? displayedRemoteIDs.endIndex
+        let precedingRemoteIDs = displayedRemoteIDs[..<displayedIndex]
+        let insertionIndex = precedingRemoteIDs.reduce(into: 0) { count, id in
+            if remoteIDs.contains(id) { count += 1 }
+        }
+        remoteIDs.insert(remoteSongID, at: min(insertionIndex, remoteIDs.count))
+    }
+
+    private static func removing(
+        _ entry: MobilePlaylistPresentationEntryID,
+        from storedOrder: [String]
+    ) -> [String] {
+        removing([entry], from: storedOrder)
+    }
+
+    private static func removing(
+        _ entries: Set<MobilePlaylistPresentationEntryID>,
+        from storedOrder: [String]
+    ) -> [String] {
+        storedOrder.filter { key in
+            guard let id = entryID(for: key) else { return true }
+            return !entries.contains(id)
+        }
+    }
+
+    private static func entryID(for storageKey: String) -> MobilePlaylistPresentationEntryID? {
+        MobilePlaylistPresentationEntryID(storageKey: storageKey)
+    }
+
+    private static func unique<Element: Hashable>(_ values: [Element]) -> [Element] {
+        var seen = Set<Element>()
+        return values.filter { seen.insert($0).inserted }
+    }
+}
+
 enum MobilePlaylistPresentationPolicy {
     static func entries(
         in playlist: MobilePlaylist,
@@ -1111,7 +1831,7 @@ enum MobilePlaylistPresentationPolicy {
         }
         let playlistTracks = playlist.trackIDs.compactMap { tracksByID[$0] }
         guard !playlist.isSystem, let remoteSongIDs = playlist.remoteSongIDs else {
-            return playlistTracks.map {
+            let entries = playlistTracks.map {
                 MobilePlaylistPresentationEntry(
                     id: .local($0.id),
                     track: $0,
@@ -1119,6 +1839,7 @@ enum MobilePlaylistPresentationPolicy {
                     remoteSong: nil
                 )
             }
+            return applyingStoredOrder(playlist.entryOrder, to: entries)
         }
 
         let orderedRemoteIDs = unique(remoteSongIDs)
@@ -1140,11 +1861,11 @@ enum MobilePlaylistPresentationPolicy {
             if result[song.id] == nil { result[song.id] = song }
         }
 
-        return MobilePlaylistOrderPolicy.merge(
+        let entries = MobilePlaylistOrderPolicy.merge(
             previous: previousKeys,
             ordered: orderedKeys,
             preserving: preservedKeys
-        ).compactMap { key in
+        ).compactMap { key -> MobilePlaylistPresentationEntry? in
             switch key {
             case .local(let trackID):
                 guard let track = tracksByID[trackID] else { return nil }
@@ -1163,6 +1884,25 @@ enum MobilePlaylistPresentationPolicy {
                 )
             }
         }
+        return applyingStoredOrder(playlist.entryOrder, to: entries)
+    }
+
+    private static func applyingStoredOrder(
+        _ storedOrder: [String]?,
+        to entries: [MobilePlaylistPresentationEntry]
+    ) -> [MobilePlaylistPresentationEntry] {
+        guard let storedOrder, !storedOrder.isEmpty else { return entries }
+        let entriesByID = entries.reduce(into: [MobilePlaylistPresentationEntryID: MobilePlaylistPresentationEntry]()) {
+            if $0[$1.id] == nil { $0[$1.id] = $1 }
+        }
+        var seen = Set<MobilePlaylistPresentationEntryID>()
+        var reconciled = storedOrder.compactMap { key -> MobilePlaylistPresentationEntry? in
+            guard let id = MobilePlaylistPresentationEntryID(storageKey: key),
+                  seen.insert(id).inserted else { return nil }
+            return entriesByID[id]
+        }
+        reconciled.append(contentsOf: entries.filter { seen.insert($0.id).inserted })
+        return reconciled
     }
 
     private static func unique<Element: Hashable>(_ values: [Element]) -> [Element] {

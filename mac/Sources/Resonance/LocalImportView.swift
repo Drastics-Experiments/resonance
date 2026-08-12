@@ -120,6 +120,7 @@ final class MacLocalImportViewModel: ObservableObject {
     private var previewTask: Task<Void, Never>?
     private var previewPlayer: AVPlayer?
     private var previewEndObserver: NSObjectProtocol?
+    private var downloadTransferStarted = false
 
     init(model: PlayerModel, service: LocalDeviceImportService = LocalDeviceImportService()) {
         self.model = model
@@ -257,7 +258,10 @@ final class MacLocalImportViewModel: ObservableObject {
 
     var showsTransferPopup: Bool {
         if isPlaylist, batchPhase == nil { return false }
-        return LocalImportPresentationPolicy.showsGlobalTransfer(for: stage)
+        return LocalImportPresentationPolicy.showsGlobalTransfer(
+            for: stage,
+            downloadStarted: downloadTransferStarted
+        )
     }
 
     var showsFailurePopup: Bool {
@@ -337,7 +341,7 @@ final class MacLocalImportViewModel: ObservableObject {
             ?? completedTrack?.title
             ?? resolution?.track.title
             ?? selectedCandidate?.title
-            ?? "Import from Link"
+            ?? "Import from Web"
         guard stage == .downloading, totalBytes > 0 else { return trackTitle }
         let completed = ByteCountFormatter.string(fromByteCount: completedBytes, countStyle: .file)
         let total = ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
@@ -471,6 +475,7 @@ final class MacLocalImportViewModel: ObservableObject {
         completedTrack = nil
         completedBytes = 0
         totalBytes = 0
+        downloadTransferStarted = false
         batchCurrentTitle = nil
         batchPhase = nil
         batchCompletedItems = 0
@@ -515,6 +520,7 @@ final class MacLocalImportViewModel: ObservableObject {
         error = nil
         completedBytes = 0
         totalBytes = 0
+        downloadTransferStarted = false
         stage = .inspectingSource
         let metadata = LocalImportMetadata(
             title: resolution.track.title,
@@ -654,6 +660,7 @@ final class MacLocalImportViewModel: ObservableObject {
         error = nil
         completedBytes = 0
         totalBytes = 0
+        downloadTransferStarted = false
         completedSummary = nil
         completedTrack = nil
         let initialMatchesByTrackID = Dictionary(
@@ -1012,6 +1019,7 @@ final class MacLocalImportViewModel: ObservableObject {
         stage = .idle
         completedBytes = 0
         totalBytes = 0
+        downloadTransferStarted = false
         resolution = nil
         resolvedSourceInput = nil
         searchResponse = nil
@@ -1032,6 +1040,9 @@ final class MacLocalImportViewModel: ObservableObject {
     }
 
     private func apply(_ progress: LocalImportProgress) {
+        if progress.stage == .downloading, progress.completed > 0 {
+            downloadTransferStarted = true
+        }
         stage = progress.stage
         completedBytes = progress.completed
         totalBytes = progress.total
@@ -1049,9 +1060,14 @@ enum LocalImportCandidatePreviewPolicy {
 }
 
 enum LocalImportPresentationPolicy {
-    static func showsGlobalTransfer(for stage: LocalImportStage) -> Bool {
-        switch stage {
-        case .inspectingSource, .downloading, .processing, .savingLocal, .localComplete, .syncing:
+    static func showsGlobalTransfer(
+        for stage: LocalImportStage,
+        downloadStarted: Bool = true
+    ) -> Bool {
+        if stage == .syncing { return true }
+        guard downloadStarted else { return false }
+        return switch stage {
+        case .inspectingSource, .downloading, .processing, .savingLocal, .localComplete:
             true
         default:
             false
@@ -1265,7 +1281,7 @@ struct MacLocalImportSheet: View {
                 .background(palette.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
             VStack(alignment: .leading, spacing: 3) {
-                Text("Import from Link")
+                Text("Import from Web")
                     .font(.system(size: 21, weight: .bold, design: .rounded))
                 Text("Search for a track or paste a link to get started.")
                     .font(.system(size: 10))

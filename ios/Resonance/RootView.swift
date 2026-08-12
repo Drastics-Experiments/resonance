@@ -7,6 +7,7 @@ private enum MobileSection: Hashable {
 }
 
 struct RootView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @State private var selection: MobileSection = .library
     @State private var importing = false
@@ -31,7 +32,7 @@ struct RootView: View {
                     .tabItem { Label("Server", systemImage: "network") }
                     .tag(MobileSection.server)
             }
-            .toolbarBackground(Color.appBackground.opacity(0.96), for: .tabBar)
+            .toolbarBackground(palette.background.opacity(0.96), for: .tabBar)
             .toolbarBackground(.visible, for: .tabBar)
             .toolbarColorScheme(.dark, for: .tabBar)
 
@@ -41,7 +42,7 @@ struct RootView: View {
                     .transition(.move(edge: .bottom))
             }
         }
-        .tint(.accent)
+        .tint(palette.foregroundAccent)
         .preferredColorScheme(.dark)
         .fileImporter(
             isPresented: $importing,
@@ -80,8 +81,8 @@ private struct PlayerAwareTab<Content: View>: View {
                 }
             }
 
-            if library.isDownloading || library.isUploading {
-                ServerTransferPopup()
+            if let transfer = library.transferDisplay {
+                ServerTransferPopup(transfer: transfer)
                     .padding(.horizontal, 20)
                     .padding(.bottom, library.currentTrack == nil ? 12 : 82)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -95,12 +96,13 @@ private struct PlayerAwareTab<Content: View>: View {
             }
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
-        .animation(.easeInOut(duration: 0.22), value: library.isDownloading || library.isUploading)
+        .animation(.easeInOut(duration: 0.22), value: library.transferDisplay)
         .animation(.easeInOut(duration: 0.22), value: library.transferNotice)
     }
 }
 
 private struct LibraryView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @Binding var importing: Bool
     @State private var presentedSheet: LibrarySheet?
@@ -129,10 +131,10 @@ private struct LibraryView: View {
                         }
                         Spacer()
                         NavigationLink {
-                            StorageView(importing: $importing)
+                            NativeStorageView(importing: $importing)
                         } label: {
                             Image(systemName: "internaldrive")
-                                .roundButton(active: false)
+                                .roundButton(active: false, activeColor: palette.secondary)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Storage")
@@ -152,18 +154,6 @@ private struct LibraryView: View {
                         .textFieldStyle(.plain)
                         .padding(13)
                         .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
-                    HStack(spacing: 10) {
-                        Button { library.togglePlay() } label: {
-                            Label(library.isPlaying ? "Pause" : "Play", systemImage: library.isPlaying ? "pause.fill" : "play.fill")
-                                .pill(color: .accent)
-                        }
-                        .disabled(library.tracksForActiveProfile.isEmpty)
-                        Button { library.shuffleEnabled.toggle() } label: {
-                            Image(systemName: "shuffle").roundButton(active: library.shuffleEnabled)
-                        }
-                        .disabled(library.tracksForActiveProfile.isEmpty)
-                        Spacer()
-                    }
                     if library.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                        !recentlyAddedTracks.isEmpty {
                         RecentlyAddedSection(tracks: recentlyAddedTracks)
@@ -228,7 +218,9 @@ private struct MobileSettingsSheet: View {
         var id: String { rawValue }
     }
 
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
+    @EnvironmentObject private var themeStore: ResonanceThemeStore
     @Environment(\.dismiss) private var dismiss
     @State private var presentedSheet: PresentedSheet?
 
@@ -269,16 +261,35 @@ private struct MobileSettingsSheet: View {
                                 .monospacedDigit()
                         }
                         Slider(value: $library.volume, in: 0...1)
-                            .tint(.accent)
+                            .tint(palette.accent)
                             .accessibilityLabel("Playback volume")
                     }
                     .padding(.vertical, 4)
 
-                    Picker("Playback Speed", selection: $library.playbackRate) {
-                        ForEach([Float(0.75), 1, 1.25, 1.5, 2], id: \.self) { rate in
-                            Text("\(Double(rate), specifier: "%g")×").tag(rate)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle(isOn: $library.crossfadeEnabled) {
+                            Label("Crossfade", systemImage: "waveform.path")
                         }
+                        HStack {
+                            Text("Transition duration")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(Int(library.crossfadeSeconds.rounded())) sec")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(value: $library.crossfadeSeconds, in: 1...12, step: 1)
+                            .tint(palette.accent)
+                            .disabled(!library.crossfadeEnabled)
+                            .accessibilityLabel("Crossfade duration")
+                            .accessibilityValue("\(Int(library.crossfadeSeconds.rounded())) seconds")
                     }
+                    .padding(.vertical, 4)
+                }
+
+                Section("Appearance") {
+                    MobileThemePicker(selectedTheme: $themeStore.selectedTheme)
                 }
 
                 Section("App") {
@@ -287,7 +298,7 @@ private struct MobileSettingsSheet: View {
                     } label: {
                         HStack(spacing: 12) {
                             Image(systemName: "network")
-                                .foregroundStyle(Color.accent)
+                                .foregroundStyle(palette.foregroundAccent)
                                 .frame(width: 24)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text("Music Server")
@@ -300,7 +311,7 @@ private struct MobileSettingsSheet: View {
                             Spacer()
                             Text("Configure")
                                 .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(Color.accent)
+                                .foregroundStyle(palette.foregroundAccent)
                             Image(systemName: "chevron.right")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.tertiary)
@@ -322,7 +333,7 @@ private struct MobileSettingsSheet: View {
                 }
             }
             .scrollContentBackground(.hidden)
-            .background(Color.appBackground)
+            .background(palette.background)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -345,7 +356,7 @@ private struct MobileSettingsSheet: View {
     private var accountSummary: some View {
         HStack(spacing: 13) {
             ZStack {
-                Circle().fill(Color.violet)
+                Circle().fill(palette.secondary)
                 if let imageURL = library.accountImageURL {
                     AsyncImage(url: imageURL) { phase in
                         if let image = phase.image {
@@ -378,7 +389,62 @@ private struct MobileSettingsSheet: View {
     }
 }
 
+private struct MobileThemePicker: View {
+    @Binding var selectedTheme: ResonanceTheme
+
+    private let columns = [
+        GridItem(.flexible(), spacing: 10),
+        GridItem(.flexible(), spacing: 10),
+    ]
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 10) {
+            ForEach(ResonanceTheme.allCases) { theme in
+                let candidate = theme.palette
+                let isSelected = selectedTheme == theme
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        selectedTheme = theme
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 8) {
+                        LinearGradient(
+                            colors: candidate.gradientStops,
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        .frame(height: 58)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                        HStack(spacing: 5) {
+                            Text(theme.title)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(candidate.ink)
+                            Spacer(minLength: 2)
+                            if isSelected {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(candidate.tertiary)
+                            }
+                        }
+                    }
+                    .padding(9)
+                    .background(candidate.surface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .stroke(isSelected ? candidate.tertiary : candidate.divider, lineWidth: isSelected ? 2 : 1)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(theme.title) theme")
+                .accessibilityValue(isSelected ? "Selected" : "Not selected")
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 private struct ProfileButton: View {
+    @Environment(\.resonancePalette) private var palette
     let displayName: String
     let email: String?
     let imageURL: URL?
@@ -413,7 +479,7 @@ private struct ProfileButton: View {
             Button("Settings", systemImage: "gearshape", action: onSettings)
         } label: {
             ZStack {
-                Circle().fill(Color.violet)
+                Circle().fill(palette.secondary)
                 if let imageURL {
                     AsyncImage(url: imageURL) { phase in
                         if let image = phase.image {
@@ -436,7 +502,7 @@ private struct ProfileButton: View {
                 Circle()
                     .stroke(.white.opacity(0.18), lineWidth: 1)
             }
-            .shadow(color: Color.violet.opacity(0.28), radius: 12, y: 5)
+            .shadow(color: palette.secondary.opacity(0.28), radius: 12, y: 5)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(resolvedDisplayName) account")
@@ -659,6 +725,7 @@ private struct PlaylistsView: View {
 }
 
 private struct PlaylistDetailView: View {
+    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @State private var addingToPlaylist: MobilePlaylist?
@@ -669,10 +736,6 @@ private struct PlaylistDetailView: View {
     private var playlistEntries: [MobilePlaylistPresentationEntry] {
         playlist.map(library.playlistEntries(in:)) ?? []
     }
-    private var hasUnavailableEntries: Bool {
-        playlistEntries.contains { !$0.isDownloaded }
-    }
-
     var body: some View {
         ZStack {
             AppBackground()
@@ -685,6 +748,7 @@ private struct PlaylistDetailView: View {
                     if !playlist.isSystem {
                         Button("Add Songs") { addingToPlaylist = playlist }
                             .buttonStyle(.borderedProminent)
+                            .tint(palette.accent)
                     }
                 }
             } else {
@@ -702,7 +766,7 @@ private struct PlaylistDetailView: View {
                                     isPlaying ? "Pause" : (library.shuffleEnabled && !isActive ? "Shuffle Play" : "Play"),
                                     systemImage: isPlaying ? "pause.fill" : (library.shuffleEnabled && !isActive ? "shuffle" : "play.fill")
                                 )
-                                .pill(color: .accent)
+                                .pill(color: palette.accent)
                             }
                         }
                         .buttonStyle(.plain)
@@ -712,7 +776,8 @@ private struct PlaylistDetailView: View {
                         Button {
                             library.shuffleEnabled.toggle()
                         } label: {
-                            Image(systemName: "shuffle").roundButton(active: library.shuffleEnabled)
+                            Image(systemName: "shuffle")
+                                .roundButton(active: library.shuffleEnabled, activeColor: palette.secondary)
                         }
                         .buttonStyle(.plain)
                         .contentShape(Circle())
@@ -743,7 +808,7 @@ private struct PlaylistDetailView: View {
                         .listRowBackground(Color.clear)
                     }
                     .onMove { source, destination in
-                        library.moveTracks(in: playlistID, fromOffsets: source, toOffset: destination)
+                        library.movePlaylistEntries(in: playlistID, fromOffsets: source, toOffset: destination)
                     }
                 }
                 .listStyle(.plain)
@@ -759,7 +824,7 @@ private struct PlaylistDetailView: View {
                     Button { addingToPlaylist = playlist } label: {
                         Label("Add Songs", systemImage: "plus")
                     }
-                    if playlistTracks.count > 1 && !hasUnavailableEntries {
+                    if playlistEntries.count > 1 {
                         EditButton()
                     }
                     Menu {
@@ -793,6 +858,7 @@ private struct PlaylistDetailView: View {
 }
 
 private struct PlaylistSongPicker: View {
+    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     let playlistID: UUID
@@ -822,7 +888,7 @@ private struct PlaylistSongPicker: View {
                                     trailingDetail: track.durationText
                                 )
                                 Image(systemName: playlist?.trackIDs.contains(track.id) == true ? "checkmark.circle.fill" : "plus.circle")
-                                    .foregroundStyle(playlist?.trackIDs.contains(track.id) == true ? Color.accent : .secondary)
+                                    .foregroundStyle(playlist?.trackIDs.contains(track.id) == true ? palette.accent : .secondary)
                                     .frame(width: 28, height: 44)
                             }
                             .mobileCatalogRow(isSelected: playlist?.trackIDs.contains(track.id) == true)
@@ -849,21 +915,21 @@ private struct PlaylistSongPicker: View {
     }
 }
 
-private struct StorageView: View {
-    @Environment(\.dismiss) private var dismiss
+private struct NativeStorageView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @Binding var importing: Bool
     @State private var searchText = ""
     @State private var scope: StorageScope = .songs
     @State private var sort: StorageSort = .title
-    @State private var isEditing = false
+    @State private var editMode: EditMode = .inactive
     @State private var selectedTrackIDs: Set<UUID> = []
     @State private var fileSizes: [UUID: Int64] = [:]
     @State private var availableBytes: Int64 = 0
     @State private var deletionCandidate: MobileTrack?
     @State private var showsBatchDeleteConfirmation = false
     @State private var presentedSheet: StorageSheet?
-    @FocusState private var searchIsFocused: Bool
+    @State private var startsFileImportAfterSheet = false
 
     private var visibleTracks: [MobileTrack] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -902,6 +968,10 @@ private struct StorageView: View {
         visibleTracks.filter { $0.sourceServer == nil && $0.remoteID == nil }
     }
 
+    private var presentedTracks: [MobileTrack] {
+        downloadedTracks + importedTracks
+    }
+
     private var downloadedBytes: Int64 {
         library.tracks
             .filter { $0.sourceServer != nil || $0.remoteID != nil }
@@ -915,159 +985,143 @@ private struct StorageView: View {
     }
 
     var body: some View {
-        ZStack {
-            AppBackground()
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    HStack(spacing: 10) {
-                        Button { dismiss() } label: {
-                            Image(systemName: "chevron.left")
-                                .roundButton(active: false)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Back to Library")
-                        Text("Storage")
-                            .font(.system(size: 34, weight: .bold, design: .rounded))
-                        Spacer()
-                        Menu {
-                            Button("Import from Link", systemImage: "link.badge.plus") {
-                                presentedSheet = .linkImport
-                            }
-                            Button("Import Files", systemImage: "doc.badge.plus") {
-                                importing = true
-                            }
-                            Divider()
-                            Button(isEditing ? "Done Editing" : "Select Songs", systemImage: isEditing ? "checkmark" : "checklist") {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    isEditing.toggle()
-                                    if !isEditing { selectedTrackIDs.removeAll() }
-                                }
-                            }
-                            .disabled(library.tracks.isEmpty)
-                        } label: {
-                            Image(systemName: "ellipsis")
-                                .roundButton(active: false)
-                        }
-                        .accessibilityLabel("Storage actions")
-                        .accessibilityHint("Import files or select songs")
-                    }
+        List(selection: $selectedTrackIDs) {
+            Section {
+                StorageSummaryCard(
+                    importedBytes: importedBytes,
+                    importedCount: library.tracks.filter { $0.sourceServer == nil && $0.remoteID == nil }.count,
+                    downloadedBytes: downloadedBytes,
+                    downloadedCount: library.tracks.filter { $0.sourceServer != nil || $0.remoteID != nil }.count,
+                    availableBytes: availableBytes
+                )
+                .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 0))
+                .listRowBackground(Color.clear)
+            }
 
-                    StorageSummaryCard(
-                        importedBytes: importedBytes,
-                        importedCount: library.tracks.filter { $0.sourceServer == nil && $0.remoteID == nil }.count,
-                        downloadedBytes: downloadedBytes,
-                        downloadedCount: library.tracks.filter { $0.sourceServer != nil || $0.remoteID != nil }.count,
-                        availableBytes: availableBytes
-                    )
-
-                    HStack(spacing: 10) {
-                        HStack(spacing: 10) {
-                            Image(systemName: "magnifyingglass")
-                                .foregroundStyle(.secondary)
-                            TextField("Search songs, artists, albums, files…", text: $searchText)
-                                .focused($searchIsFocused)
-                                .submitLabel(.done)
-                                .onSubmit { searchIsFocused = false }
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                        }
-                        .padding(.horizontal, 14)
-                        .frame(height: 48)
-                        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                .stroke(.white.opacity(0.09), lineWidth: 1)
-                        }
-
-                        Menu {
-                            Picker("Sort songs", selection: $sort) {
-                                ForEach(StorageSort.allCases) { option in
-                                    Label(option.title, systemImage: option.symbol).tag(option)
-                                }
-                            }
-                        } label: {
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.headline)
-                                .frame(width: 48, height: 48)
-                                .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                        .stroke(.white.opacity(0.09), lineWidth: 1)
-                                }
-                        }
-                        .accessibilityLabel("Sort songs")
-                    }
-
-                    StorageScopePicker(scope: $scope)
-
-                    if isEditing, !selectedTrackIDs.isEmpty {
-                        HStack {
-                            Text("\(selectedTrackIDs.count) selected")
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Button(role: .destructive) {
-                                showsBatchDeleteConfirmation = true
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                            .font(.subheadline.weight(.semibold))
-                        }
-                        .padding(.horizontal, 4)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                    }
-
-                    if visibleTracks.isEmpty {
-                        ContentUnavailableView(
-                            searchText.isEmpty ? scope.emptyTitle : "No Results",
-                            systemImage: searchText.isEmpty ? scope.symbol : "magnifyingglass",
-                            description: Text(searchText.isEmpty ? scope.emptyMessage : "Try a different search term or storage filter.")
-                        )
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 44)
-                    } else {
-                        if !downloadedTracks.isEmpty {
-                            StorageSection(
-                                title: "DOWNLOADED FROM SERVER",
-                                symbol: "icloud.and.arrow.down",
-                                tracks: downloadedTracks,
-                                fileSizes: fileSizes,
-                                isEditing: isEditing,
-                                selectedTrackIDs: $selectedTrackIDs,
-                                deletionCandidate: $deletionCandidate
-                            )
-                        }
-
-                        if !importedTracks.isEmpty {
-                            StorageSection(
-                                title: "IMPORTED ON DEVICE",
-                                symbol: "internaldrive",
-                                tracks: importedTracks,
-                                fileSizes: fileSizes,
-                                isEditing: isEditing,
-                                selectedTrackIDs: $selectedTrackIDs,
-                                deletionCandidate: $deletionCandidate
-                            )
-                        }
+            Section {
+                Picker("Show", selection: $scope) {
+                    ForEach(StorageScope.allCases) { option in
+                        Text(option.rawValue).tag(option)
                     }
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 18)
-                .padding(.bottom, 24)
+                .pickerStyle(.segmented)
+                .accessibilityLabel("Storage filter")
             }
-            .scrollDismissesKeyboard(.interactively)
+
+            if visibleTracks.isEmpty {
+                Section {
+                    ContentUnavailableView(
+                        searchText.isEmpty ? scope.emptyTitle : "No Results",
+                        systemImage: searchText.isEmpty ? scope.symbol : "magnifyingglass",
+                        description: Text(searchText.isEmpty ? scope.emptyMessage : "Try a different search term or storage filter.")
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 34)
+                    .listRowBackground(Color.clear)
+                }
+            } else {
+                if !downloadedTracks.isEmpty {
+                    Section {
+                        ForEach(downloadedTracks) { track in
+                            NativeStorageTrackRow(
+                                track: track,
+                                number: storageIndex(for: track),
+                                fileSize: fileSizes[track.id, default: 0],
+                                onDelete: { deletionCandidate = track }
+                            )
+                            .tag(track.id)
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                        }
+                    } header: {
+                        Label("Downloaded from Server", systemImage: "icloud.and.arrow.down")
+                    }
+                }
+
+                if !importedTracks.isEmpty {
+                    Section {
+                        ForEach(importedTracks) { track in
+                            NativeStorageTrackRow(
+                                track: track,
+                                number: storageIndex(for: track),
+                                fileSize: fileSizes[track.id, default: 0],
+                                onDelete: { deletionCandidate = track }
+                            )
+                            .tag(track.id)
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                        }
+                    } header: {
+                        Label("Imported on Device", systemImage: "internaldrive")
+                    }
+                }
+            }
         }
-        .navigationBarHidden(true)
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(palette.background)
+        .contentMargins(.horizontal, 20, for: .scrollContent)
+        .environment(\.defaultMinListRowHeight, 1)
+        .searchable(
+            text: $searchText,
+            placement: .navigationBarDrawer(displayMode: .always),
+            prompt: "Songs, artists, albums, or files"
+        )
+        .navigationTitle("Song Storage")
+        .navigationBarTitleDisplayMode(.large)
         .toolbar(.hidden, for: .tabBar)
-        .sheet(item: $presentedSheet) { sheet in
+        .environment(\.editMode, $editMode)
+        .sheet(item: $presentedSheet, onDismiss: {
+            guard startsFileImportAfterSheet else { return }
+            startsFileImportAfterSheet = false
+            importing = true
+        }) { sheet in
             switch sheet {
-            case .linkImport:
+            case .importChooser:
+                StorageImportChooser(
+                    presentedSheet: $presentedSheet,
+                    startsFileImportAfterSheet: $startsFileImportAfterSheet
+                )
+            case .webImport:
                 MobileLocalImportSheet()
             }
         }
         .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("Done") { searchIsFocused = false }
+            ToolbarItem(placement: .topBarTrailing) {
+                EditButton()
+                    .disabled(library.tracks.isEmpty)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Picker("Sort by", selection: $sort) {
+                        ForEach(StorageSort.allCases) { option in
+                            Label(option.title, systemImage: option.symbol).tag(option)
+                        }
+                    }
+                } label: {
+                    Label("Sort", systemImage: "arrow.up.arrow.down")
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { presentedSheet = .importChooser } label: {
+                    Label("Import", systemImage: "plus")
+                }
+                .accessibilityHint("Choose whether to import from the web or Files")
+            }
+            if editMode.isEditing {
+                ToolbarItem(placement: .bottomBar) {
+                    Button(role: .destructive) {
+                        showsBatchDeleteConfirmation = true
+                    } label: {
+                        Label(
+                            selectedTrackIDs.isEmpty ? "Delete" : "Delete \(selectedTrackIDs.count)",
+                            systemImage: "trash"
+                        )
+                    }
+                    .disabled(selectedTrackIDs.isEmpty)
+                }
             }
         }
         .task(id: library.tracks.map(\.id)) {
@@ -1083,7 +1137,7 @@ private struct StorageView: View {
                 let selectedTracks = library.tracks.filter { selectedTrackIDs.contains($0.id) }
                 selectedTracks.forEach(library.remove)
                 selectedTrackIDs.removeAll()
-                isEditing = false
+                editMode = .inactive
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -1103,6 +1157,9 @@ private struct StorageView: View {
         } message: { _ in
             Text("The server copy, if one exists, will remain available to download again.")
         }
+        .onChange(of: editMode) { _, mode in
+            if !mode.isEditing { selectedTrackIDs.removeAll() }
+        }
     }
 
     private func refreshStorageMetrics() {
@@ -1114,10 +1171,92 @@ private struct StorageView: View {
         let values = try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         availableBytes = max(values?.volumeAvailableCapacityForImportantUsage ?? 0, 0)
     }
+
+    private func storageIndex(for track: MobileTrack) -> Int {
+        (presentedTracks.firstIndex(where: { $0.id == track.id }) ?? 0) + 1
+    }
 }
 
+private struct NativeStorageTrackRow: View {
+    @Environment(\.editMode) private var editMode
+    @EnvironmentObject private var library: MusicLibrary
+    let track: MobileTrack
+    let number: Int
+    let fileSize: Int64
+    let onDelete: () -> Void
+
+    var body: some View {
+        Group {
+            if editMode?.wrappedValue.isEditing == true {
+                rowContent
+            } else {
+                Button { library.play(track) } label: { rowContent }
+                    .buttonStyle(.plain)
+            }
+        }
+        .mobileCatalogRow()
+        .contextMenu {
+            Button { library.play(track) } label: {
+                Label("Play", systemImage: "play.fill")
+            }
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete from Device", systemImage: "trash")
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(track.title) by \(track.artist), \(formatBytes(fileSize))")
+        .accessibilityAction(named: "Play") { library.play(track) }
+    }
+
+    private var rowContent: some View {
+        LocalSongRowContent(
+            track: track,
+            number: number,
+            trailingDetail: formatBytes(fileSize),
+            isPlaying: library.currentTrackID == track.id && library.isPlaying
+        )
+    }
+}
+
+private struct StorageImportChooser: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var presentedSheet: StorageSheet?
+    @Binding var startsFileImportAfterSheet: Bool
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button {
+                        presentedSheet = .webImport
+                    } label: {
+                        Label("Import from Web", systemImage: "link.badge.plus")
+                    }
+                    Button {
+                        startsFileImportAfterSheet = true
+                        dismiss()
+                    } label: {
+                        Label("Import Files", systemImage: "doc.badge.plus")
+                    }
+                } footer: {
+                    Text("Import from a supported web link, or choose audio and video files already available to this device.")
+                }
+            }
+            .navigationTitle("Import Songs")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
+
 private enum StorageSheet: String, Identifiable {
-    case linkImport
+    case importChooser, webImport
     var id: String { rawValue }
 }
 
@@ -1172,35 +1311,9 @@ private enum StorageSort: String, CaseIterable, Identifiable {
     }
 }
 
-private struct StorageScopePicker: View {
-    @Binding var scope: StorageScope
-
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(StorageScope.allCases) { option in
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) { scope = option }
-                } label: {
-                    Text(option.rawValue)
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 42)
-                        .background(scope == option ? Color.accent : .clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-                        .foregroundStyle(scope == option ? .white : .secondary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(4)
-        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(.white.opacity(0.08), lineWidth: 1)
-        }
-    }
-}
 
 private struct StorageSummaryCard: View {
+    @Environment(\.resonancePalette) private var palette
     let importedBytes: Int64
     let importedCount: Int
     let downloadedBytes: Int64
@@ -1226,7 +1339,7 @@ private struct StorageSummaryCard: View {
                     .foregroundStyle(.secondary)
             }
             ProgressView(value: Double(usedBytes), total: Double(totalBytes))
-                .tint(Color.violet)
+                .tint(palette.foregroundAccent)
             HStack(spacing: 14) {
                 Label("\(importedCount) local", systemImage: "internaldrive")
                 Label("\(downloadedCount) downloaded", systemImage: "icloud.and.arrow.down")
@@ -1247,101 +1360,13 @@ private struct StorageSummaryCard: View {
     }
 }
 
-private struct StorageSection: View {
-    let title: String
-    let symbol: String
-    let tracks: [MobileTrack]
-    let fileSizes: [UUID: Int64]
-    let isEditing: Bool
-    @Binding var selectedTrackIDs: Set<UUID>
-    @Binding var deletionCandidate: MobileTrack?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 7) {
-                Image(systemName: symbol).foregroundStyle(Color.violet)
-                Text(title).eyebrow()
-                Spacer()
-                Text("\(tracks.count) \(tracks.count == 1 ? "SONG" : "SONGS")")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 5)
-
-            VStack(spacing: 0) {
-                MobileSongListHeader(trailingTitle: "Size")
-
-                LazyVStack(spacing: 0) {
-                    ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
-                        StorageTrackRow(
-                            track: track,
-                            number: index + 1,
-                            fileSize: fileSizes[track.id, default: 0],
-                            isEditing: isEditing,
-                            isSelected: selectedTrackIDs.contains(track.id),
-                            onSelect: {
-                                if selectedTrackIDs.contains(track.id) {
-                                    selectedTrackIDs.remove(track.id)
-                                } else {
-                                    selectedTrackIDs.insert(track.id)
-                                }
-                            },
-                            onDelete: { deletionCandidate = track }
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-private struct StorageTrackRow: View {
-    @EnvironmentObject private var library: MusicLibrary
-    let track: MobileTrack
-    let number: Int
-    let fileSize: Int64
-    let isEditing: Bool
-    let isSelected: Bool
-    let onSelect: () -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Button(action: isEditing ? onSelect : { library.play(track) }) {
-                LocalSongRowContent(
-                    track: track,
-                    number: number,
-                    trailingDetail: formatBytes(fileSize),
-                    selectionState: isEditing ? isSelected : nil
-                )
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isEditing ? "Select \(track.title)" : "Play \(track.title) by \(track.artist)")
-
-        }
-        .mobileCatalogRow(isSelected: isSelected)
-        .contentShape(Rectangle())
-        .contextMenu {
-            if !isEditing {
-                Group {
-                    Button { library.play(track) } label: {
-                        Label("Play", systemImage: "play.fill")
-                    }
-                    Button(role: .destructive, action: onDelete) {
-                        Label("Delete from Device", systemImage: "trash")
-                    }
-                }
-            }
-        }
-        .animation(.easeInOut(duration: 0.18), value: isEditing)
-    }
-}
 
 private func formatBytes(_ bytes: Int64) -> String {
     ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
 }
 
 private struct ServerView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @State private var deletionCandidate: MobileRemoteSong?
     @State private var presentedSheet: ServerSheet?
@@ -1422,11 +1447,11 @@ private struct ServerView: View {
                                     .frame(width: 44, height: 44)
                             } else {
                                 Image(systemName: "arrow.clockwise")
-                                    .roundButton(active: false)
+                                    .roundButton(active: false, activeColor: palette.secondary)
                             }
                         }
                         .buttonStyle(.plain)
-                        .disabled(library.isSyncing || library.isUploading || library.isSyncingPlaylists)
+                        .disabled(library.isSyncing || library.isTransferBusy || library.isSyncingPlaylists)
                         .accessibilityLabel("Refresh server")
                     }
                     .padding(.bottom, 8)
@@ -1494,7 +1519,7 @@ private struct ServerView: View {
                         HStack(spacing: 7) {
                             ProgressView()
                                 .controlSize(.mini)
-                                .tint(Color.violet)
+                                .tint(palette.foregroundAccent)
                             Text(
                                 "Loading metadata for \(library.pendingRemoteSongMetadataCount) "
                                     + (library.pendingRemoteSongMetadataCount == 1 ? "song" : "songs")
@@ -1545,7 +1570,7 @@ private struct ServerView: View {
                 .padding(.bottom, 24)
             }
             .refreshable {
-                guard !library.isSyncing, !library.isUploading else { return }
+                guard !library.isSyncing, !library.isTransferBusy else { return }
                 await library.refreshCatalog()
             }
             .scrollDismissesKeyboard(.interactively)
@@ -1564,7 +1589,7 @@ private struct ServerView: View {
             guard hasServer,
                   hasAccessToken || hasAdminToken,
                   !library.isSyncing,
-                  !library.isUploading,
+                  !library.isTransferBusy,
                   !library.isSyncingPlaylists else { return }
             if hasAccessToken {
                 await library.refreshCatalog()
@@ -1634,7 +1659,7 @@ private struct ServerView: View {
                 symbol: "tray.and.arrow.down",
                 label: library.activeDownloadMode == .streamOnly ? "Tap a Song" : "Download",
                 isDisabled: library.isSyncing
-                    || library.isUploading
+                    || library.isTransferBusy
                     || library.activeDownloadMode == nil
                     || library.activeDownloadMode == .streamOnly
                     || (isSelecting && library.selectedRemoteSongIDs.isEmpty)
@@ -1655,7 +1680,7 @@ private struct ServerView: View {
                 symbol: "checklist",
                 label: isSelecting ? "\(library.selectedRemoteSongIDs.count) Selected" : "Select",
                 isDisabled: library.isSyncing
-                    || library.isUploading
+                    || library.isTransferBusy
                     || library.activeDownloadMode == .streamOnly
                     || library.activeDownloadMode == nil
             ) {
@@ -1697,7 +1722,7 @@ private struct ServerView: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.serverActionForeground)
+                    .foregroundStyle(palette.serverActionForeground)
                     .frame(width: 54, height: 58)
                     .contentShape(Rectangle())
             }
@@ -1820,6 +1845,7 @@ private enum ServerLibrarySort: String, CaseIterable, Identifiable {
 }
 
 private struct ServerTextActionButton: View {
+    @Environment(\.resonancePalette) private var palette
     let symbol: String
     let label: String
     var isDisabled = false
@@ -1832,7 +1858,7 @@ private struct ServerTextActionButton: View {
         } label: {
             Label(label, systemImage: symbol)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.serverActionForeground)
+                .foregroundStyle(palette.serverActionForeground)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity)
@@ -1863,36 +1889,43 @@ private struct ServerActionButtonStyle: ButtonStyle {
 }
 
 private struct ServerTransferPopup: View {
-    @EnvironmentObject private var library: MusicLibrary
-
-    private var progress: Double {
-        if library.isUploading { return library.uploadProgress }
-        return library.downloadProgress
-    }
+    @Environment(\.resonancePalette) private var palette
+    let transfer: MobileTransferDisplayState
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: library.isUploading ? "arrow.up" : "arrow.down")
+            Image(systemName: transfer.kind.symbol)
                 .font(.subheadline.weight(.bold))
-                .foregroundStyle(Color.violet)
+                .foregroundStyle(palette.foregroundAccent)
                 .frame(width: 36, height: 36)
-                .background(Color.violet.opacity(0.13), in: Circle())
+                .background(palette.secondary.opacity(0.13), in: Circle())
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(library.isUploading ? "Uploading" : "Downloading")
-                    .font(.caption.weight(.semibold))
-                Text(activeDetail)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Text(transfer.kind.title)
+                        .font(.caption.weight(.semibold))
+                    Spacer(minLength: 4)
+                    Text(transfer.batchPosition)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Text(transfer.songTitle)
+                    .font(.caption.weight(.medium))
                     .lineLimit(1)
-                ProgressView(value: progress).tint(.violet)
+                if let progress = transfer.progress {
+                    ProgressView(value: progress)
+                        .tint(palette.foregroundAccent)
+                } else {
+                    ProgressView()
+                        .tint(palette.foregroundAccent)
+                }
             }
 
-            Spacer(minLength: 4)
-
-            Text("\(Int(progress * 100))%")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+            if let progress = transfer.progress {
+                Text(MobileTransferDisplayPolicy.percentageLabel(progress))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(13)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -1912,11 +1945,9 @@ private struct ServerTransferPopup: View {
             .allowsHitTesting(false)
         }
         .shadow(color: .black.opacity(0.28), radius: 18, y: 8)
-    }
-
-    private var activeDetail: String {
-        if library.isUploading { return library.uploadDetail }
-        return library.downloadDetail
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(transfer.kind.title) \(transfer.songTitle), \(transfer.batchPosition)")
+        .accessibilityValue(transfer.detail)
     }
 }
 
@@ -1988,6 +2019,7 @@ private struct MobileSongListHeader: View {
 }
 
 private struct LocalSongRowContent: View {
+    @Environment(\.resonancePalette) private var palette
     let track: MobileTrack
     let number: Int
     let trailingDetail: String
@@ -1999,7 +2031,7 @@ private struct LocalSongRowContent: View {
             Group {
                 if let selectionState {
                     Image(systemName: selectionState ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(selectionState ? Color.accent : .secondary)
+                        .foregroundStyle(selectionState ? palette.accent : .secondary)
                 } else {
                     Text("\(number)")
                         .foregroundStyle(.secondary)
@@ -2127,6 +2159,7 @@ private extension View {
 }
 
 private struct ServerSongRow: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     let song: MobileRemoteSong
     let number: Int
@@ -2174,7 +2207,7 @@ private struct ServerSongRow: View {
                     Group {
                         if isSelecting {
                             Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(isSelected ? Color.accent : .secondary)
+                                .foregroundStyle(isSelected ? palette.accent : .secondary)
                         } else {
                             Text("\(number)")
                                 .foregroundStyle(.secondary)
@@ -2237,6 +2270,7 @@ private struct ServerSongRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .disabled(primaryActionIsDisabled)
             .accessibilityLabel(
                 showsMetadataPlaceholder
                     ? "Loading server song metadata"
@@ -2256,8 +2290,10 @@ private struct ServerSongRow: View {
                             remoteActionTitle,
                             systemImage: remoteActionSymbol
                         ) { Task { await library.download(song) } }
+                            .disabled(remoteTransferIsDisabled)
                     }
                     Button("Delete from Server", systemImage: "trash", role: .destructive, action: onDelete)
+                        .disabled(library.isTransferBusy)
                 }
             }
         }
@@ -2268,8 +2304,20 @@ private struct ServerSongRow: View {
         if let localTrack {
             library.play(localTrack)
         } else {
+            guard !library.isTransferBusy else { return }
             Task { await library.download(song) }
         }
+    }
+
+    private var primaryActionIsDisabled: Bool {
+        guard !isSelecting, localTrack == nil else { return false }
+        return remoteTransferIsDisabled
+    }
+
+    private var remoteTransferIsDisabled: Bool {
+        if library.isTransferBusy || library.activeDownloadMode == nil { return true }
+        return library.activeDownloadMode == .streamOnly
+            && MobileAuthenticatedStreamPolicy.normalizedAudioMIMEType(song.contentType) == nil
     }
 
     private var remoteActionTitle: String {
@@ -2336,6 +2384,7 @@ private struct MobileServerMetadataPlaceholder: View {
 }
 
 private struct ServerConnectionSheet: View {
+    @Environment(\.resonancePalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: MusicLibrary
     @State private var isConnecting = false
@@ -2381,12 +2430,51 @@ private struct ServerConnectionSheet: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        Button("Sign in or create account") {
+                        Button {
                             Task {
                                 await library.signIn(with: .clerk)
                                 validationMessage = library.serverConfigurationMessage
                             }
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "person.badge.key.fill")
+                                    .font(.headline)
+                                    .frame(width: 36, height: 36)
+                                    .background(.white.opacity(0.16), in: Circle())
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Sign in with Clerk")
+                                        .font(.headline)
+                                    Text("Secure Resonance account access")
+                                        .font(.caption)
+                                        .foregroundStyle(.white.opacity(0.78))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                Spacer(minLength: 8)
+                                if library.isAuthenticatingAccount {
+                                    ProgressView()
+                                        .tint(.white)
+                                } else {
+                                    Image(systemName: "arrow.right")
+                                        .font(.subheadline.weight(.bold))
+                                }
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .background(
+                                LinearGradient(
+                                    colors: [palette.secondary, palette.accent],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                ),
+                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            )
+                            .shadow(color: palette.accent.opacity(0.24), radius: 10, y: 5)
                         }
+                        .buttonStyle(.plain)
+                        .controlSize(.large)
+                        .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
                         .disabled(library.isAuthenticatingAccount)
                         Text("Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/ in the secure system browser.")
                             .font(.caption)
@@ -2510,7 +2598,7 @@ private struct ServerSourceImportSheet: View {
                     }
                 }
             }
-            .navigationTitle("Upload from Link")
+            .navigationTitle("Import from Web")
             .navigationBarTitleDisplayMode(.inline)
             .scrollDismissesKeyboard(.interactively)
             .onAppear { sourceIsFocused = true }
@@ -2548,6 +2636,7 @@ private struct ServerSourceImportSheet: View {
 }
 
 private struct MobilePlayerBar: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @Binding var showsNowPlaying: Bool
 
@@ -2578,10 +2667,10 @@ private struct MobilePlayerBar: View {
                         Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
                             .font(.title3)
                             .frame(width: 38, height: 38)
-                            .background(Color.appSurfaceRaised, in: Circle())
-                            .overlay { Circle().stroke(Color.accent.opacity(0.72), lineWidth: 1.5) }
+                            .background(palette.raisedSurface, in: Circle())
+                            .overlay { Circle().stroke(palette.accent.opacity(0.72), lineWidth: 1.5) }
                             .foregroundStyle(.white)
-                            .shadow(color: Color.accent.opacity(0.22), radius: 8)
+                            .shadow(color: palette.accent.opacity(0.22), radius: 8)
                     }
                     Button { library.next() } label: { Image(systemName: "forward.end.fill") }
                         .disabled(library.isTransientStreamActive)
@@ -2589,7 +2678,7 @@ private struct MobilePlayerBar: View {
                 GeometryReader { geometry in
                     ZStack(alignment: .leading) {
                         Capsule().fill(.white.opacity(0.13)).frame(height: 3)
-                        Capsule().fill(Color.accent).frame(width: geometry.size.width * library.playbackProgress(for: track), height: 3)
+                        Capsule().fill(palette.accent).frame(width: geometry.size.width * library.playbackProgress(for: track), height: 3)
                     }
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0).onChanged { library.seek(to: $0.location.x / max(geometry.size.width, 1)) })
@@ -2597,13 +2686,14 @@ private struct MobilePlayerBar: View {
             }
         }
         .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 6)
-        .background(Color.appSurface.opacity(0.98))
+        .background(palette.surface.opacity(0.98))
         .background(.ultraThinMaterial.opacity(0.08))
         .overlay(alignment: .top) { Divider() }
     }
 }
 
 private struct NowPlayingView: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @Binding var isPresented: Bool
     @State private var dismissalOffset: CGFloat = 0
@@ -2637,7 +2727,7 @@ private struct NowPlayingView: View {
                                 Button { library.toggleFavorite(track) } label: {
                                     Image(systemName: library.favorites.contains(track.id) ? "heart.fill" : "heart")
                                         .font(.title2)
-                                        .foregroundStyle(library.favorites.contains(track.id) ? Color.accent : .primary)
+                                        .foregroundStyle(library.favorites.contains(track.id) ? palette.accent : .primary)
                                         .frame(width: 44, height: 44)
                                 }
                                 .accessibilityLabel(library.favorites.contains(track.id) ? "Remove from Liked Songs" : "Add to Liked Songs")
@@ -2646,7 +2736,6 @@ private struct NowPlayingView: View {
 
                         progress(for: track)
                         transportControls
-                        volumeControl
                         playbackOptions
                         trackDetails(track)
                     }
@@ -2729,7 +2818,7 @@ private struct NowPlayingView: View {
                 ),
                 in: 0...1
             )
-            .tint(.accent)
+            .tint(palette.accent)
             HStack {
                 Text(timeText(library.playbackElapsed(for: track)))
                 Spacer()
@@ -2750,10 +2839,10 @@ private struct NowPlayingView: View {
                 Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 30, weight: .bold))
                     .frame(width: 72, height: 72)
-                    .background(Color.appSurfaceRaised, in: Circle())
-                    .overlay { Circle().stroke(Color.accent.opacity(0.72), lineWidth: 2) }
+                    .background(palette.raisedSurface, in: Circle())
+                    .overlay { Circle().stroke(palette.accent.opacity(0.72), lineWidth: 2) }
                     .foregroundStyle(.white)
-                    .shadow(color: Color.accent.opacity(0.24), radius: 14)
+                    .shadow(color: palette.accent.opacity(0.24), radius: 14)
             }
             Button { library.next() } label: {
                 Image(systemName: "forward.end.fill").font(.title)
@@ -2763,24 +2852,6 @@ private struct NowPlayingView: View {
         .buttonStyle(.plain)
     }
 
-    private var volumeControl: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Label("Volume", systemImage: "speaker.wave.2.fill")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text("\(Int((library.volume * 100).rounded()))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            Slider(value: $library.volume, in: 0...1)
-                .tint(.accent)
-                .accessibilityLabel("Volume")
-                .accessibilityValue("\(Int((library.volume * 100).rounded())) percent")
-        }
-        .padding(.horizontal, 10)
-    }
-
     private var playbackOptions: some View {
         HStack {
             Button { library.shuffleEnabled.toggle() } label: {
@@ -2788,7 +2859,7 @@ private struct NowPlayingView: View {
                     .foregroundStyle(
                         library.isTransientStreamActive
                             ? AnyShapeStyle(.tertiary)
-                            : AnyShapeStyle(library.shuffleEnabled ? Color.accent : .secondary)
+                            : AnyShapeStyle(library.shuffleEnabled ? palette.accent : .secondary)
                     )
             }
             .disabled(library.isTransientStreamActive)
@@ -2803,7 +2874,7 @@ private struct NowPlayingView: View {
             Spacer()
             Button { library.repeatEnabled.toggle() } label: {
                 Label("Repeat", systemImage: "repeat")
-                    .foregroundStyle(library.repeatEnabled ? Color.accent : .secondary)
+                    .foregroundStyle(library.repeatEnabled ? palette.accent : .secondary)
             }
         }
         .font(.subheadline.weight(.semibold))
@@ -2843,11 +2914,13 @@ private struct NowPlayingView: View {
 }
 
 private struct AppBackground: View {
+    @Environment(\.resonancePalette) private var palette
+
     var body: some View {
         ZStack {
-            Color.appBackground
+            palette.background
             RadialGradient(
-                colors: [Color.violet.opacity(0.16), .clear],
+                colors: [palette.secondary.opacity(0.16), .clear],
                 center: UnitPoint(x: 0.76, y: 0.04),
                 startRadius: 10,
                 endRadius: 520
@@ -2885,13 +2958,14 @@ private struct ArtworkTile: View {
 }
 
 private struct ArtworkPlaceholder: View {
+    @Environment(\.resonancePalette) private var palette
     let symbol: String
     var compact = false
 
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [.violet, Color(hex: 0x874BFF), Color(hex: 0xB079FF)],
+                colors: palette.gradientStops,
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -3015,25 +3089,17 @@ private struct ServerArtwork: View {
     }
 }
 
-extension Color {
-    static let appBackground = Color(hex: 0x020305)
-    static let appSurface = Color(hex: 0x0B0C11)
-    static let appSurfaceRaised = Color(hex: 0x12131A)
-    static let accent = Color(hex: 0x7547FF)
-    static let violet = Color(hex: 0x6540F5)
-    static let serverActionForeground = Color(hex: 0xB0ADBF)
-    init(hex: UInt32) {
-        self.init(.sRGB, red: Double((hex >> 16) & 255) / 255, green: Double((hex >> 8) & 255) / 255, blue: Double(hex & 255) / 255)
-    }
-}
-
 extension Text {
     func eyebrow() -> some View { font(.caption2.weight(.semibold)).tracking(1.6).foregroundStyle(.secondary) }
 }
 
 extension View {
     func pill(color: Color) -> some View { font(.subheadline.weight(.bold)).padding(.horizontal, 17).frame(height: 42).background(color, in: Capsule()).foregroundStyle(.white) }
-    func roundButton(active: Bool) -> some View { frame(width: 42, height: 42).background(active ? Color.violet : .white.opacity(0.08), in: Circle()).foregroundStyle(.white) }
+    func roundButton(active: Bool, activeColor: Color) -> some View {
+        frame(width: 42, height: 42)
+            .background(active ? activeColor : .white.opacity(0.08), in: Circle())
+            .foregroundStyle(.white)
+    }
     func serverActionButton() -> some View {
         font(.subheadline.weight(.semibold))
             .lineLimit(1)

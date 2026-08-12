@@ -64,9 +64,9 @@
     <div id="serverTransferToast" class="server-transfer-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
       <span id="serverTransferIcon" class="transfer-toast-icon" aria-hidden="true"></span>
       <div>
-        <strong id="serverTransferTitle">Downloading</strong>
-        <small id="serverTransferDetail">Preparing transfer…</small>
-        <div class="transfer-toast-progress"><progress id="serverTransferProgress" max="1" value="0"></progress><span id="serverTransferPercent">0%</span></div>
+        <strong id="serverTransferTitle"></strong>
+        <small id="serverTransferDetail"></small>
+        <div class="transfer-toast-progress"><progress id="serverTransferProgress" max="1"></progress><span id="serverTransferPercent"></span></div>
       </div>
       <button id="dismissServerTransfer" title="Cancel transfer" aria-label="Cancel transfer">×</button>
     </div>
@@ -333,7 +333,7 @@
       <header>
         <div class="local-import-heading">
           <span class="local-import-spark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 2 1.8 5.2L19 9l-5.2 1.8L12 16l-1.8-5.2L5 9l5.2-1.8z"/><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg></span>
-          <span><h2 id="localImportTitle">Import from Link</h2><p>Search for a track or paste a supported link to get started.</p></span>
+          <span><h2 id="localImportTitle">Import from Web</h2><p>Search for a track or paste a supported link to get started.</p></span>
         </div>
         <div class="local-import-header-actions">
           <fieldset id="localImportMediaKind" class="local-import-media-kind">

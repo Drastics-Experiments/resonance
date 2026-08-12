@@ -21,20 +21,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -49,10 +49,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
 import mov.unblocked.resonance.BuildConfig
 import mov.unblocked.resonance.data.AccountEmailPrivacy
-
-private val settingsPlaybackSpeeds = listOf(.75f, 1f, 1.25f, 1.5f, 2f)
 
 @Composable
 fun SettingsScreen(
@@ -61,7 +60,7 @@ fun SettingsScreen(
     onDismiss: () -> Unit,
 ) {
     var connectionOpen by remember { mutableStateOf(false) }
-    var speedMenuOpen by remember { mutableStateOf(false) }
+    var appearanceOpen by remember { mutableStateOf(false) }
     val displayName = AccountEmailPrivacy.safeDisplayName(
         state.accountDisplayName ?: activeSyncProfileName(state),
         state.accountEmail,
@@ -93,10 +92,7 @@ fun SettingsScreen(
                     )
                 }
                 Spacer(Modifier.weight(1f))
-                IconButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.size(40.dp),
-                ) {
+                IconButton(onClick = onDismiss, modifier = Modifier.size(40.dp)) {
                     Surface(shape = CircleShape, color = Color.White.copy(alpha = .07f)) {
                         Icon(
                             Icons.Default.Close,
@@ -114,63 +110,15 @@ fun SettingsScreen(
                 contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(18.dp),
             ) {
-                item {
-                    SettingsIdentityCard(displayName, accountStatus)
-                }
+                item { SettingsIdentityCard(displayName, accountStatus) }
 
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         SettingsSectionHeading("PLAYBACK", "Defaults saved on this device.")
                         SettingsCard {
-                            Column(
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 13.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.VolumeUp, contentDescription = null, tint = Accent)
-                                    Text("Volume", modifier = Modifier.padding(start = 12.dp), fontWeight = FontWeight.SemiBold)
-                                    Spacer(Modifier.weight(1f))
-                                    Text(
-                                        "${(state.volume * 100).toInt()}%",
-                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .62f),
-                                        fontSize = 12.sp,
-                                    )
-                                }
-                                Slider(
-                                    value = state.volume,
-                                    onValueChange = actions::setVolume,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
+                            VolumeSettings(state, actions)
                             SettingsDivider()
-                            Box {
-                                SettingsRow(
-                                    icon = Icons.Default.Speed,
-                                    title = "Playback Speed",
-                                    detail = "Used for local and server playback.",
-                                    trailing = settingsSpeedLabel(state.playbackSpeed),
-                                    onClick = { speedMenuOpen = true },
-                                )
-                                DropdownMenu(
-                                    expanded = speedMenuOpen,
-                                    onDismissRequest = { speedMenuOpen = false },
-                                ) {
-                                    settingsPlaybackSpeeds.forEach { speed ->
-                                        DropdownMenuItem(
-                                            text = { Text(settingsSpeedLabel(speed)) },
-                                            leadingIcon = {
-                                                if (speed == state.playbackSpeed) {
-                                                    Icon(Icons.Default.MusicNote, contentDescription = null, tint = Accent)
-                                                }
-                                            },
-                                            onClick = {
-                                                actions.setPlaybackSpeed(speed)
-                                                speedMenuOpen = false
-                                            },
-                                        )
-                                    }
-                                }
-                            }
+                            CrossfadeSettings(state, actions)
                         }
                     }
                 }
@@ -179,6 +127,14 @@ fun SettingsScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         SettingsSectionHeading("APP", "Connection and mobile playback behavior.")
                         SettingsCard {
+                            SettingsRow(
+                                icon = Icons.Default.Palette,
+                                title = "Appearance",
+                                detail = "Choose a color theme for this device.",
+                                trailing = state.themeChoice.label,
+                                onClick = { appearanceOpen = true },
+                            )
+                            SettingsDivider()
                             SettingsRow(
                                 icon = Icons.Default.Cloud,
                                 title = "Music Server",
@@ -219,7 +175,9 @@ fun SettingsScreen(
             ) {
                 Button(
                     onClick = onDismiss,
-                    colors = ButtonDefaults.buttonColors(containerColor = Violet),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondary,
+                    ),
                     contentPadding = PaddingValues(horizontal = 24.dp, vertical = 10.dp),
                 ) {
                     Text("Done", fontWeight = FontWeight.Bold)
@@ -230,6 +188,84 @@ fun SettingsScreen(
 
     if (connectionOpen) {
         ConnectionDialog(state, actions) { connectionOpen = false }
+    }
+    if (appearanceOpen) {
+        AppearanceDialog(
+            selected = state.themeChoice,
+            onSelected = actions::setThemeChoice,
+            onDismiss = { appearanceOpen = false },
+        )
+    }
+}
+
+@Composable
+private fun VolumeSettings(state: ResonanceUiState, actions: ResonanceActions) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 13.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Default.VolumeUp,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.tertiary,
+            )
+            Text(
+                "Volume",
+                modifier = Modifier.padding(start = 12.dp),
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                "${(state.volume * 100).roundToInt()}%",
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .62f),
+                fontSize = 12.sp,
+            )
+        }
+        Slider(
+            value = state.volume,
+            onValueChange = actions::setVolume,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@Composable
+private fun CrossfadeSettings(state: ResonanceUiState, actions: ResonanceActions) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 13.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SettingsIcon(Icons.Default.GraphicEq)
+            Column(
+                modifier = Modifier.weight(1f).padding(start = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text("Crossfade", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text(
+                    if (state.crossfadeEnabled) {
+                        "Overlap songs by ${state.crossfadeSeconds.roundToInt()} seconds."
+                    } else {
+                        "Start the next song early while fading between both."
+                    },
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                    fontSize = 11.sp,
+                )
+            }
+            Switch(
+                checked = state.crossfadeEnabled,
+                onCheckedChange = actions::setCrossfadeEnabled,
+            )
+        }
+        Slider(
+            value = state.crossfadeSeconds,
+            onValueChange = actions::setCrossfadeSeconds,
+            valueRange = 1f..12f,
+            steps = 10,
+            enabled = state.crossfadeEnabled,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 
@@ -249,7 +285,7 @@ private fun SettingsIdentityCard(displayName: String, accountStatus: String) {
             Surface(
                 modifier = Modifier.size(48.dp),
                 shape = CircleShape,
-                color = Violet,
+                color = MaterialTheme.colorScheme.secondary,
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Text(
@@ -261,7 +297,12 @@ private fun SettingsIdentityCard(displayName: String, accountStatus: String) {
                 }
             }
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(displayName, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    displayName,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Text(
                     accountStatus,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
@@ -275,8 +316,18 @@ private fun SettingsIdentityCard(displayName: String, accountStatus: String) {
 @Composable
 private fun SettingsSectionHeading(label: String, detail: String) {
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(label, color = Accent, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
-        Text(detail, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .56f), fontSize = 12.sp)
+        Text(
+            label,
+            color = MaterialTheme.colorScheme.tertiary,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.5.sp,
+        )
+        Text(
+            detail,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .56f),
+            fontSize = 12.sp,
+        )
     }
 }
 
@@ -284,11 +335,27 @@ private fun SettingsSectionHeading(label: String, detail: String) {
 private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = Color.Black.copy(alpha = .18f),
+        color = LocalResonancePalette.current.panel,
         shape = RoundedCornerShape(16.dp),
         border = BorderStroke(1.dp, Color.White.copy(alpha = .09f)),
     ) {
         Column(content = content)
+    }
+}
+
+@Composable
+private fun SettingsIcon(icon: ImageVector) {
+    Surface(
+        modifier = Modifier.size(38.dp),
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.primary.copy(alpha = .11f),
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.tertiary,
+            modifier = Modifier.padding(9.dp),
+        )
     }
 }
 
@@ -306,13 +373,7 @@ private fun SettingsRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Surface(
-            modifier = Modifier.size(38.dp),
-            shape = RoundedCornerShape(10.dp),
-            color = Accent.copy(alpha = .11f),
-        ) {
-            Icon(icon, contentDescription = null, tint = Accent, modifier = Modifier.padding(9.dp))
-        }
+        SettingsIcon(icon)
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
             Text(
@@ -325,7 +386,11 @@ private fun SettingsRow(
         }
         Text(
             trailing,
-            color = if (onClick == null) MaterialTheme.colorScheme.onSurface.copy(alpha = .58f) else Accent,
+            color = if (onClick == null) {
+                MaterialTheme.colorScheme.onSurface.copy(alpha = .58f)
+            } else {
+                MaterialTheme.colorScheme.tertiary
+            },
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,
         )
@@ -336,6 +401,3 @@ private fun SettingsRow(
 private fun SettingsDivider() {
     HorizontalDivider(color = Color.White.copy(alpha = .08f))
 }
-
-private fun settingsSpeedLabel(speed: Float): String =
-    if (speed % 1f == 0f) "${speed.toInt()}×" else "${speed}×"

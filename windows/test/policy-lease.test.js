@@ -101,6 +101,56 @@ test("same-expiry and transient renewals retry before the old deadline", async (
   lease.close();
 });
 
+test("an active signed lease can refresh immediately without delaying its authorization", async () => {
+  const clock = fakeTime();
+  let releaseRefresh;
+  const refreshPending = new Promise((resolve) => { releaseRefresh = resolve; });
+  let attempts = 0;
+  const lease = createRenewablePolicyLease({
+    initialConfig: signed(11_000),
+    renew: async () => {
+      attempts += 1;
+      await refreshPending;
+      return { ...signed(21_000), source: "remote" };
+    },
+    now: clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  const refresh = lease.refresh();
+  assert.equal(lease.refresh(), refresh);
+  assert.equal(attempts, 1);
+  assert.equal(lease.assertAuthorized(), true);
+  assert.equal(lease.deadline, 11_000);
+  releaseRefresh();
+  await refresh;
+  assert.equal(lease.deadline, 21_000);
+  lease.close();
+});
+
+test("the concrete refresh settles before final authorization observes a revocation", async () => {
+  const clock = fakeTime();
+  let releaseRefresh;
+  const refreshPending = new Promise((resolve) => { releaseRefresh = resolve; });
+  const revoked = Object.assign(new Error("Offline downloads were revoked."), { verifiedRevocation: true });
+  const lease = createRenewablePolicyLease({
+    initialConfig: signed(11_000),
+    renew: async () => {
+      await refreshPending;
+      throw revoked;
+    },
+    now: clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  const refresh = lease.refresh();
+  assert.equal(lease.assertAuthorized(), true);
+  releaseRefresh();
+  await refresh;
+  assert.throws(() => lease.assertAuthorized(), /revoked/);
+  lease.close();
+});
+
 test("a later-expiry cache fallback retains but never extends the current lease", async () => {
   const clock = fakeTime();
   let attempts = 0;
