@@ -97,7 +97,7 @@ struct PlayerBarView: View {
             HStack(spacing: 4) {
                 Text("\(Double(model.playbackRate).formatted())×")
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
             }
             .font(.system(size: 11, weight: .medium))
             .contentShape(Rectangle())
@@ -209,7 +209,7 @@ private struct PlayerBarProgressView: View {
             Text(Track.timeText(duration))
                 .frame(width: 28, alignment: .leading)
         }
-        .font(.system(size: 9))
+        .font(.system(size: 10))
         .foregroundStyle(palette.muted)
     }
 }

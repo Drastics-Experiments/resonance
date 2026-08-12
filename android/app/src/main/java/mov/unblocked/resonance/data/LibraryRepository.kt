@@ -5,6 +5,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.StatFs
 import android.provider.OpenableColumns
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -14,6 +15,11 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
+
+data class AudioImportBatchResult(
+    val tracks: List<Track>,
+    val failedCount: Int,
+)
 
 class LibraryRepository(
     context: Context,
@@ -164,14 +170,25 @@ class LibraryRepository(
     suspend fun importAudio(
         uris: List<Uri>,
         onProgress: (TransferProgress) -> Unit = {},
-    ): List<Track> = withContext(Dispatchers.IO) {
-        uris.mapIndexedNotNull { index, uri ->
+    ): AudioImportBatchResult = withContext(Dispatchers.IO) {
+        val imported = mutableListOf<Track>()
+        var failedCount = 0
+        uris.forEachIndexed { index, uri ->
             val name = displayName(uri) ?: "Audio-${index + 1}"
             onProgress(TransferProgress(index, uris.size, name))
-            runCatching { importAudio(uri, name) }.getOrNull().also {
-                onProgress(TransferProgress(index + 1, uris.size, name))
+            try {
+                imported += importAudio(uri, name)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                failedCount += 1
             }
+            onProgress(TransferProgress(index + 1, uris.size, name))
         }
+        AudioImportBatchResult(
+            tracks = imported,
+            failedCount = failedCount,
+        )
     }
 
     suspend fun registerLocalImport(download: LinkImportDownload): Track =

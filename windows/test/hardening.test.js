@@ -627,7 +627,7 @@ test("Windows renderer and main-process integrations retain the hardening bounda
     mainSource.indexOf("async function requireServerStreamMode"),
   );
   assert.doesNotMatch(offlineLeaseSource, /renew:/);
-  assert.match(serverSyncHandler, /retryServerDownload\(async \(\) => \{[\s\S]+beginOfflineDownloadPolicyLease\([\s\S]+signal: policyLease\.signal[\s\S]+policyLease\.assertAuthorized\(\);[\s\S]+const finalConfig = await requireOfflineDownloadMode\([\s\S]+initialConfig: finalConfig,[\s\S]+parentSignal: policyLease\.signal[\s\S]+assertFinalAuthorization[\s\S]+policyLease\.assertAuthorized\(\);[\s\S]+finalPolicyLease\.assertAuthorized\(\);[\s\S]+adoptDownloadedFile\(temporary, destination,[\s\S]+assertAuthorized: assertFinalAuthorization[\s\S]+finalPolicyLease\.close\(\)[\s\S]+policyLease\.close\(\)/);
+  assert.match(serverSyncHandler, /retryServerDownload\(async \(attempt\) => \{[\s\S]+beginOfflineDownloadPolicyLease\([\s\S]+signal: policyLease\.signal[\s\S]+policyLease\.assertAuthorized\(\);[\s\S]+const finalConfig = await requireOfflineDownloadMode\([\s\S]+initialConfig: finalConfig,[\s\S]+parentSignal: policyLease\.signal[\s\S]+assertFinalAuthorization[\s\S]+policyLease\.assertAuthorized\(\);[\s\S]+finalPolicyLease\.assertAuthorized\(\);[\s\S]+adoptDownloadedFile\(temporary, destination,[\s\S]+assertAuthorized: assertFinalAuthorization[\s\S]+finalPolicyLease\.close\(\)[\s\S]+policyLease\.close\(\)/);
   assert.match(mediaRefreshHelper, /\.\.\.profileHeaders\(token, profileID\),[\s\S]+\.\.\.requestContext\.expected\.request_headers[\s\S]+redirect: "manual"/);
   const transferProgressBodies = [...mainSource.matchAll(/event\.sender\.send\("server:transfer-progress",\s*\{([\s\S]*?)\}\);/g)]
     .map((match) => match[1]);

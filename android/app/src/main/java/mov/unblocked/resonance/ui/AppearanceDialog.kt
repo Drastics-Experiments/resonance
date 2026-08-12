@@ -41,11 +41,6 @@ internal fun AppearanceDialog(
                 modifier = Modifier.selectableGroup(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    "Choose a theme for this device.",
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
-                    modifier = Modifier.padding(bottom = 4.dp),
-                )
                 ResonanceThemeChoice.entries.forEach { choice ->
                     ThemeChoiceRow(
                         choice = choice,

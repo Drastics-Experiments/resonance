@@ -278,8 +278,8 @@ struct LocalImportError: LocalizedError, Hashable, Sendable {
 }
 
 enum LocalImportURL {
-    private static let spotifyID = try! NSRegularExpression(pattern: "^[A-Za-z0-9]{22}$")
-    private static let youtubeID = try! NSRegularExpression(pattern: "^[A-Za-z0-9_-]{11}$")
+    private static let spotifyIDPattern = "^[A-Za-z0-9]{22}$"
+    private static let youtubeIDPattern = "^[A-Za-z0-9_-]{11}$"
     private static let spotifyHosts = Set(["open.spotify.com", "www.open.spotify.com", "spotify.link", "www.spotify.link"])
     private static let youtubeHosts = Set(["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"])
     private static let youtubeEmbedHosts = Set(["youtube-nocookie.com", "www.youtube-nocookie.com"])
@@ -312,7 +312,7 @@ enum LocalImportURL {
         var segments = source.pathComponents.filter { $0 != "/" }
         if segments.first?.hasPrefix("intl-") == true { segments.removeFirst() }
         if segments.first == "playlist" { return nil }
-        guard segments.count == 2, segments[0] == "track", matches(spotifyID, segments[1]) else {
+        guard segments.count == 2, segments[0] == "track", matches(spotifyIDPattern, segments[1]) else {
             throw LocalImportError(
                 stage: .resolvingMetadata,
                 code: "UNSUPPORTED_SPOTIFY_RESOURCE",
@@ -335,7 +335,7 @@ enum LocalImportURL {
         var segments = source.pathComponents.filter { $0 != "/" }
         if segments.first?.hasPrefix("intl-") == true { segments.removeFirst() }
         if segments.first == "track" { return nil }
-        guard segments.count == 2, segments[0] == "playlist", matches(spotifyID, segments[1]) else {
+        guard segments.count == 2, segments[0] == "playlist", matches(spotifyIDPattern, segments[1]) else {
             throw LocalImportError(stage: .resolvingMetadata, code: "UNSUPPORTED_SPOTIFY_RESOURCE", message: "Only Spotify track and playlist links are supported.")
         }
         var components = URLComponents()
@@ -352,7 +352,7 @@ enum LocalImportURL {
         let prefix = "spotify:track:"
         guard value.hasPrefix(prefix) else { return nil }
         let id = String(value.dropFirst(prefix.count))
-        return matches(spotifyID, id) ? id : nil
+        return matches(spotifyIDPattern, id) ? id : nil
     }
 
     static func youtubeVideoID(_ value: String) throws -> String? {
@@ -389,7 +389,7 @@ enum LocalImportURL {
         } else {
             return nil
         }
-        guard let candidate, matches(youtubeID, candidate) else {
+        guard let candidate, matches(youtubeIDPattern, candidate) else {
             throw LocalImportError(
                 stage: .inspectingSource,
                 code: "INVALID_YOUTUBE_VIDEO",
@@ -448,9 +448,8 @@ enum LocalImportURL {
         return true
     }
 
-    private static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
-        let range = NSRange(value.startIndex..<value.endIndex, in: value)
-        return expression.firstMatch(in: value, range: range)?.range == range
+    private static func matches(_ pattern: String, _ value: String) -> Bool {
+        value.range(of: pattern, options: .regularExpression) != nil
     }
 }
 
@@ -816,16 +815,16 @@ struct LocalImportSearchCandidate: Hashable, Sendable {
 }
 
 enum LocalImportMatcher {
-    private static let versionWords = try! NSRegularExpression(
+    private static let versionWords = try? NSRegularExpression(
         pattern: #"\b(cover|instrumental|karaoke|live|nightcore|remaster(?:ed)?|remix|reverb|slowed|sped up|tribute)\b"#,
         options: .caseInsensitive
     )
-    private static let qualifier = try! NSRegularExpression(pattern: #"(?:\(([^)]{1,120})\)|\[([^\]]{1,120})\])"#)
-    private static let removable = try! NSRegularExpression(
+    private static let qualifier = try? NSRegularExpression(pattern: #"(?:\(([^)]{1,120})\)|\[([^\]]{1,120})\])"#)
+    private static let removable = try? NSRegularExpression(
         pattern: #"\b(official|audio|video|visualizer|lyrics?|hd|hq|topic|provided to youtube by)\b"#,
         options: .caseInsensitive
     )
-    private static let punctuation = try! NSRegularExpression(pattern: #"[^\p{L}\p{N}]+"#)
+    private static let punctuation = try? NSRegularExpression(pattern: #"[^\p{L}\p{N}]+"#)
 
     static func normalize(_ value: String?) -> String {
         var text = (value ?? "").folding(options: .diacriticInsensitive, locale: Locale(identifier: "en_US_POSIX")).lowercased()
@@ -909,6 +908,7 @@ enum LocalImportMatcher {
     }
 
     private static func hasUnmatchedQualifier(expected: String, candidate: String) -> Bool {
+        guard let qualifier else { return false }
         let expected = normalize(expected)
         let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
         return qualifier.matches(in: candidate, range: range).contains { match in
@@ -919,11 +919,13 @@ enum LocalImportMatcher {
         }
     }
 
-    private static func contains(_ expression: NSRegularExpression, _ value: String) -> Bool {
+    private static func contains(_ expression: NSRegularExpression?, _ value: String) -> Bool {
+        guard let expression else { return false }
         expression.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
     }
 
-    private static func replacing(_ expression: NSRegularExpression, in value: String, with replacement: String) -> String {
+    private static func replacing(_ expression: NSRegularExpression?, in value: String, with replacement: String) -> String {
+        guard let expression else { return value }
         expression.stringByReplacingMatches(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value), withTemplate: replacement)
     }
 

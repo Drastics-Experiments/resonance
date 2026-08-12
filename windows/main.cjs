@@ -128,6 +128,23 @@ function protectDetachedOutput(stream) {
 protectDetachedOutput(process.stdout);
 protectDetachedOutput(process.stderr);
 
+function continueAfterQueuedFailure(operation) {
+  return (error) => {
+    console.error(`${operation} failed; continuing with the next queued operation.`, error);
+  };
+}
+
+function logBestEffortFailure(operation) {
+  return (error) => {
+    if (error?.code !== "ENOENT") console.warn(`${operation} failed.`, error);
+  };
+}
+
+function ignoreResponseCancellationFailure() {
+  // Cancelling an already closed response is cleanup only; the original result remains authoritative.
+  return undefined;
+}
+
 const AUDIO_EXTENSIONS = new Set([".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".wav"]);
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v", ".webm"]);
 const SERVER_ARTWORK_TYPES = new Set(["image/avif", "image/gif", "image/jpeg", "image/png", "image/webp"]);
@@ -215,7 +232,7 @@ async function atomicWriteFile(destination, data, options = "utf8") {
     await fs.writeFile(temporary, data, options);
     await fs.rename(temporary, destination);
   } catch (error) {
-    await fs.rm(temporary, { force: true }).catch(() => undefined);
+    await fs.rm(temporary, { force: true }).catch(logBestEffortFailure("Temporary file cleanup"));
     throw error;
   }
 }
@@ -326,7 +343,7 @@ async function writePreviewCredentials(credentials) {
     await fs.rename(temporary, destination);
     await fs.chmod(destination, 0o600);
   } catch (error) {
-    await fs.rm(temporary, { force: true }).catch(() => undefined);
+    await fs.rm(temporary, { force: true }).catch(logBestEffortFailure("Credential temporary-file cleanup"));
     throw error;
   }
 }
@@ -345,7 +362,7 @@ async function persistServerCredentials(credentialsValue) {
   const { credentials, credentialsBackup } = await ensureDirectories();
   const payload = JSON.stringify(credentialsValue);
   const save = credentialSaveQueue
-    .catch(() => {})
+    .catch(continueAfterQueuedFailure("Previous credential save"))
     .then(() => crashSafeReplace(credentials, safeStorage.encryptString(payload), { backupPath: credentialsBackup }));
   credentialSaveQueue = save;
   await save;
@@ -400,7 +417,7 @@ async function persistAccountSession(value) {
   const session = canonicalStoredAccountSession(value);
   if (!session) throw new Error("The account session is invalid.");
   const save = accountSessionSaveQueue
-    .catch(() => {})
+    .catch(continueAfterQueuedFailure("Previous account-session save"))
     .then(async () => {
       if (usesPreviewCredentialStore()) {
         const destination = previewAccountSessionPath();
@@ -429,11 +446,11 @@ async function clearPersistedAccountSession() {
   accountSessionRefreshTimer = null;
   const paths = applicationPaths();
   const clear = accountSessionSaveQueue
-    .catch(() => {})
+    .catch(continueAfterQueuedFailure("Previous account-session operation"))
     .then(() => Promise.all([
-      fs.rm(previewAccountSessionPath(), { force: true }).catch(() => undefined),
-      fs.rm(paths.accountSession, { force: true }).catch(() => undefined),
-      fs.rm(paths.accountSessionBackup, { force: true }).catch(() => undefined),
+      fs.rm(previewAccountSessionPath(), { force: true }),
+      fs.rm(paths.accountSession, { force: true }),
+      fs.rm(paths.accountSessionBackup, { force: true }),
     ]));
   accountSessionSaveQueue = clear;
   await clear;
@@ -442,9 +459,9 @@ async function clearPersistedAccountSession() {
 async function purgeLegacyServerCredentials() {
   const paths = applicationPaths();
   await Promise.all([
-    fs.rm(previewCredentialStorePath(), { force: true }).catch(() => undefined),
-    fs.rm(paths.credentials, { force: true }).catch(() => undefined),
-    fs.rm(paths.credentialsBackup, { force: true }).catch(() => undefined),
+    fs.rm(previewCredentialStorePath(), { force: true }),
+    fs.rm(paths.credentials, { force: true }),
+    fs.rm(paths.credentialsBackup, { force: true }),
   ]);
 }
 
@@ -573,7 +590,7 @@ async function clearLocalImportPreview(senderID) {
   cachedLocalImportPreviews.delete(senderID);
   const directories = new Set([active?.directory, cached?.directory].filter(Boolean));
   await Promise.all([...directories].map((directory) =>
-    fs.rm(directory, { recursive: true, force: true }).catch(() => undefined)));
+    fs.rm(directory, { recursive: true, force: true }).catch(logBestEffortFailure("Local-import preview cleanup"))));
 }
 
 function localImportFailure(error, fallbackStage) {
@@ -603,6 +620,7 @@ function beginServerTransfer(event) {
 }
 
 function serverTransferIsActive(event, controller, generation = controller?.resonanceGeneration) {
+  if (!event?.sender || event.sender.isDestroyed?.()) return false;
   const active = activeServerTransfers.get(event.sender.id);
   return active === controller
     && active?.resonanceGeneration === generation
@@ -746,7 +764,7 @@ async function persistClientConfigState() {
   const snapshot = safeClientConfigState(clientConfigState);
   if (!snapshot) return;
   const save = clientConfigStateSaveQueue
-    .catch(() => {})
+    .catch(continueAfterQueuedFailure("Previous client-config state save"))
     .then(() => crashSafeReplaceMirrored(destination, JSON.stringify(snapshot, null, 2), {
       backupPath,
       encoding: "utf8",
@@ -758,7 +776,7 @@ async function persistClientConfigState() {
 
 function mutateClientConfigState(operation) {
   const pending = clientConfigMutationQueue
-    .catch(() => undefined)
+    .catch(continueAfterQueuedFailure("Previous client-config mutation"))
     .then(operation);
   clientConfigMutationQueue = pending;
   return pending;
@@ -867,7 +885,7 @@ async function putSourceLinkRegistration({ url, headers, item, signal }) {
   if (item.mediaKind !== "video" && response.status === 400) {
     const payload = await response.clone().json().catch(() => null);
     if (payload?.error === "Unsupported source-link schema_version") {
-      await response.body?.cancel?.().catch(() => undefined);
+      await response.body?.cancel?.().catch(ignoreResponseCancellationFailure);
       response = await fetch(url, options(sourceLinkRegistrationBody(item, { schemaVersion: 2 })));
     }
   }
@@ -904,7 +922,7 @@ async function persistServerUploadRetries() {
   serverUploadRetries.clear();
   for (const record of records) serverUploadRetries.set(record.retryID, record);
   const save = serverUploadRetrySaveQueue
-    .catch(() => {})
+    .catch(continueAfterQueuedFailure("Previous server-upload retry save"))
     .then(() => crashSafeReplace(
       uploadRetries,
       JSON.stringify(records, null, 2),
@@ -1075,7 +1093,8 @@ async function cleanupLocalImportTemporaryFiles() {
   }
   await Promise.all(entries
     .filter((entry) => entry.isDirectory() && entry.name.startsWith("resonance-local-import-"))
-    .map((entry) => fs.rm(path.join(temporaryRoot, entry.name), { recursive: true, force: true }).catch(() => undefined)));
+    .map((entry) => fs.rm(path.join(temporaryRoot, entry.name), { recursive: true, force: true })
+      .catch(logBestEffortFailure("Stale local-import cleanup"))));
 }
 
 async function uniqueDestination(directory, preferred) {
@@ -1628,7 +1647,7 @@ ipcMain.handle("library:save", async (_event, state) => {
       : [],
   };
   const save = librarySaveQueue
-    .catch(() => {})
+    .catch(continueAfterQueuedFailure("Previous library save"))
     .then(() => atomicWriteFile(paths.state, JSON.stringify(safeState, null, 2), "utf8"));
   librarySaveQueue = save;
   await save;
@@ -1695,7 +1714,9 @@ ipcMain.handle("server:credentials:load", async (event) => {
     canMigrate = false;
   }
   if (canMigrate && (value.clientToken !== rawValue.clientToken || value.adminToken !== rawValue.adminToken)) {
-    await persistServerCredentials(value).catch(() => undefined);
+    await persistServerCredentials(value).catch((error) => {
+      console.error("Could not persist normalized server credentials.", error);
+    });
   }
   rendererCredentialFingerprints.set(event.sender.id, credentialFingerprint(value));
   if (!rendererCredentialEpochs.has(event.sender.id)) rendererCredentialEpochs.set(event.sender.id, 0);
@@ -1844,7 +1865,7 @@ ipcMain.handle("local-import:artwork", async (_event, { url } = {}) => {
   } catch {
     return null;
   } finally {
-    await fs.rm(temporary, { recursive: true, force: true }).catch(() => undefined);
+    await fs.rm(temporary, { recursive: true, force: true }).catch(logBestEffortFailure("Artwork temporary-directory cleanup"));
   }
 });
 
@@ -1891,7 +1912,7 @@ ipcMain.handle("local-import:preview", async (event, { sourceURL } = {}) => {
   } finally {
     if (activeLocalImportPreviews.get(senderID) === operation) activeLocalImportPreviews.delete(senderID);
     if (cachedLocalImportPreviews.get(senderID)?.directory !== directory) {
-      await fs.rm(directory, { recursive: true, force: true }).catch(() => undefined);
+      await fs.rm(directory, { recursive: true, force: true }).catch(logBestEffortFailure("Preview temporary-directory cleanup"));
     }
   }
 });
@@ -2383,7 +2404,7 @@ async function loadClientConfig({ baseURL, token, profileID, force = false }) {
     }
     return { config: { ...verified, source: "remote" }, source: "remote" };
   } finally {
-    response?.body?.cancel?.().catch?.(() => undefined);
+    response?.body?.cancel?.().catch?.(ignoreResponseCancellationFailure);
   }
 }
 
@@ -2560,7 +2581,7 @@ ipcMain.handle("server:source-import", async (event, settings = {}) => {
     .trim()
     .toLowerCase();
   if (responseContentType !== "application/json") {
-    response.body?.cancel?.().catch?.(() => undefined);
+    response.body?.cancel?.().catch?.(ignoreResponseCancellationFailure);
     throw new Error(`Server returned HTTP ${response.status} with an invalid source-import content type.`);
   }
   const rawBody = await boundedResponseBody(response, CLIENT_CONFIG_MAX_BYTES, "Source-import response");
@@ -2636,12 +2657,12 @@ ipcMain.handle("server:catalog", async (_event, { baseURL, token, profileID }) =
     redirect: "manual",
   });
   if (response.status !== 200) {
-    response.body?.cancel?.().catch?.(() => undefined);
+    response.body?.cancel?.().catch?.(ignoreResponseCancellationFailure);
     throw new Error(`Server catalog request returned HTTP ${response.status}.`);
   }
   const contentType = String(response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
   if (contentType !== "application/json") {
-    response.body?.cancel?.().catch?.(() => undefined);
+    response.body?.cancel?.().catch?.(ignoreResponseCancellationFailure);
     throw new Error("The server returned an invalid catalog content type.");
   }
   const rawBody = await boundedResponseBody(response, MAX_SERVER_STREAM_CATALOG_BYTES, "Server catalog");
@@ -2919,12 +2940,12 @@ async function fetchFreshStreamCatalogSong({ base, token, profileID, songID, req
     signal,
   });
   if (response.status !== 200) {
-    response.body?.cancel?.().catch?.(() => undefined);
+    response.body?.cancel?.().catch?.(ignoreResponseCancellationFailure);
     throw new ServerStreamValidationError("CATALOG_UNAVAILABLE", "The server catalog is unavailable.", 502);
   }
   const contentType = String(response.headers.get("content-type") || "").split(";", 1)[0].trim().toLocaleLowerCase();
   if (contentType !== "application/json") {
-    response.body?.cancel?.().catch?.(() => undefined);
+    response.body?.cancel?.().catch?.(ignoreResponseCancellationFailure);
     throw new ServerStreamValidationError("INVALID_CATALOG", "The server returned an invalid catalog.", 502);
   }
   const rawBody = await boundedResponseBody(response, MAX_SERVER_STREAM_CATALOG_BYTES, "Server catalog");
@@ -3058,7 +3079,7 @@ async function handleServerStreamRequest(request) {
       signal: policyLease.signal,
     });
     if (response.status === 409) {
-      response.body?.cancel?.().catch?.(() => undefined);
+      response.body?.cancel?.().catch?.(ignoreResponseCancellationFailure);
       const refreshed = await refreshedSongMediaLocation(
         session.song,
         session.base,
@@ -3092,7 +3113,7 @@ async function handleServerStreamRequest(request) {
     });
     session.lastAccessAt = Date.now();
     if (method === "HEAD") {
-      response.body?.cancel?.().catch?.(() => undefined);
+      response.body?.cancel?.().catch?.(ignoreResponseCancellationFailure);
       finishRequest();
       return new Response(null, { status: validated.status, headers: validated.headers });
     }
@@ -3100,7 +3121,7 @@ async function handleServerStreamRequest(request) {
     const body = createExactLengthRelay(response.body, validated.contentLength, finishRequest, resetIdleTimeout);
     return new Response(body, { status: validated.status, headers: validated.headers });
   } catch (error) {
-    response?.body?.cancel?.().catch?.(() => undefined);
+    response?.body?.cancel?.().catch?.(ignoreResponseCancellationFailure);
     controller?.abort();
     finishRequest();
     return serverStreamErrorResponse(error, session.expectedSize);
@@ -3264,19 +3285,18 @@ ipcMain.handle("server:sync", async (event, {
   const replacedTrackIDs = [];
   const failed = [];
   try {
-  {
     const response = await fetch(new URL("api/v1/songs", base), {
       headers: { ...downloadHeaders, Accept: "application/json" },
       redirect: "manual",
       signal,
     });
     if (response.status !== 200) {
-      response.body?.cancel?.().catch?.(() => undefined);
+      response.body?.cancel?.().catch?.(ignoreResponseCancellationFailure);
       throw new Error(`Server catalog request returned HTTP ${response.status}.`);
     }
     const contentType = String(response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
     if (contentType !== "application/json") {
-      response.body?.cancel?.().catch?.(() => undefined);
+      response.body?.cancel?.().catch?.(ignoreResponseCancellationFailure);
       throw new Error("The server returned an invalid catalog content type.");
     }
     const rawCatalog = await boundedResponseBody(response, MAX_SERVER_STREAM_CATALOG_BYTES, "Server catalog");
@@ -3285,7 +3305,6 @@ ipcMain.handle("server:sync", async (event, {
     if (!catalog || typeof catalog !== "object" || Array.isArray(catalog) || !Array.isArray(catalog.songs)) {
       throw new Error("The server returned an invalid catalog document.");
     }
-  }
   const paths = await ensureDirectories();
   const requested = Array.isArray(songIDs) ? new Set(songIDs) : null;
   const preferredTitles = new Map(Object.entries(
@@ -3300,12 +3319,11 @@ ipcMain.handle("server:sync", async (event, {
   for (const song of songs) {
     signal.throwIfAborted();
     const remoteName = song.filename || song.name || `Track-${song.id}.mp3`;
-    const displayName = serverDownloadDisplayName(song, remoteName, preferredTitles.get(String(song.id)));
+    const displayName = serverDownloadDisplayName(song, preferredTitles.get(String(song.id)));
     const remoteModified = song.modified_at || song.modified_utc || null;
     const expectedSize = Number(song.size);
     const expectedSHA256 = catalogSHA256(song);
     const savedSourceURL = preservedMediaSourceURL(song.source_url);
-    const mediaLocation = savedSourceURL ? null : validateCatalogMediaLocation(song);
     const matching = existing.find((item) =>
       item.remoteID === song.id
       && matchesServerOrigin(item.sourceServer, base.origin)
@@ -3340,7 +3358,6 @@ ipcMain.handle("server:sync", async (event, {
       expectedSize,
       expectedSHA256,
       savedSourceURL,
-      mediaLocation,
       matching,
     });
   }
@@ -3356,7 +3373,6 @@ ipcMain.handle("server:sync", async (event, {
       expectedSize,
       expectedSHA256,
       savedSourceURL,
-      mediaLocation,
       matching,
     } = pending;
     const itemIndex = pendingIndex + 1;
@@ -3379,8 +3395,10 @@ ipcMain.handle("server:sync", async (event, {
     });
     publishProgress(progressEvent(), { force: true });
     let itemSucceeded = false;
+    let attemptsMade = 0;
     try {
       if (savedSourceURL) {
+        attemptsMade = 1;
         const downloadedTrack = await downloadSavedSourceSong(song, {
           signal,
           existing,
@@ -3408,6 +3426,7 @@ ipcMain.handle("server:sync", async (event, {
         }), { force: true });
         continue;
       }
+      const mediaLocation = validateCatalogMediaLocation(song);
       let fileURL = sameOriginServerMediaURL(mediaLocation?.download_url || song.download_url, base, "download");
       let refreshedMediaLocation = false;
       const destination = matching?.filePath && path.dirname(path.resolve(matching.filePath)) === path.resolve(paths.remote)
@@ -3415,7 +3434,8 @@ ipcMain.handle("server:sync", async (event, {
         : await uniqueDestination(paths.remote, remoteName);
       let downloadedSize = 0;
       let downloadedSHA256 = null;
-      await retryServerDownload(async () => {
+      await retryServerDownload(async (attempt) => {
+        attemptsMade = attempt;
         const policyLease = await beginOfflineDownloadPolicyLease({
           baseURL: base.href,
           token,
@@ -3430,7 +3450,7 @@ ipcMain.handle("server:sync", async (event, {
             signal: policyLease.signal,
           });
           if (response.status === 409 && !refreshedMediaLocation) {
-            response.body?.cancel?.().catch?.(() => undefined);
+            response.body?.cancel?.().catch?.(ignoreResponseCancellationFailure);
             fileURL = await refreshedSongDownloadURL(song, base, token, profileID, requestContext, policyLease.signal);
             refreshedMediaLocation = true;
             response = await fetch(fileURL, {
@@ -3525,7 +3545,7 @@ ipcMain.handle("server:sync", async (event, {
         title: song.title || song.name || path.basename(remoteName, path.extname(remoteName)),
         artist: song.artist || "",
         filename: remoteName,
-        attempts: SERVER_DOWNLOAD_ATTEMPTS,
+        attempts: attemptsMade,
         message: error?.message || "Download failed.",
       });
     }

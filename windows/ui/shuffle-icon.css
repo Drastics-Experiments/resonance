@@ -57,13 +57,13 @@
 }
 
 .update-panel strong {
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .update-panel small {
   margin-top: 3px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 #installUpdate {
@@ -72,7 +72,7 @@
   padding: 9px;
   border-radius: 9px;
   background: var(--action-background);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -104,7 +104,7 @@
 
 .playlist-dialog label {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .playlist-dialog input {
@@ -165,5 +165,5 @@
 .playlist-page-actions small,
 [data-playlist-sync-status] {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
 }

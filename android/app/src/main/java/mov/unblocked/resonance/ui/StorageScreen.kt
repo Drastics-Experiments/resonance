@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -107,7 +108,7 @@ fun StorageScreen(
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.Top,
     ) {
         item {
             Row(
@@ -134,7 +135,7 @@ fun StorageScreen(
                             },
                         )
                         DropdownMenuItem(
-                            text = { Text("Import Files") },
+                            text = { Text("Import files") },
                             leadingIcon = { Icon(Icons.Default.Add, null) },
                             onClick = {
                                 importMenu = false
@@ -150,7 +151,7 @@ fun StorageScreen(
                     ) { Icon(Icons.Default.MoreVert, "Song storage actions") }
                     DropdownMenu(expanded = actionsMenu, onDismissRequest = { actionsMenu = false }) {
                         DropdownMenuItem(
-                            text = { Text(if (editing) "Done Editing" else "Select Songs") },
+                            text = { Text(if (editing) "Done editing" else "Select songs") },
                             leadingIcon = { Icon(if (editing) Icons.Default.Check else Icons.Default.Checklist, null) },
                             enabled = state.tracks.isNotEmpty(),
                             onClick = {
@@ -163,6 +164,7 @@ fun StorageScreen(
                 }
             }
         }
+        item { Spacer(Modifier.height(14.dp)) }
         item {
             StorageSummary(
                 importedBytes = importedBytes,
@@ -172,6 +174,7 @@ fun StorageScreen(
                 availableBytes = state.availableStorageBytes,
             )
         }
+        item { Spacer(Modifier.height(14.dp)) }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
@@ -207,10 +210,12 @@ fun StorageScreen(
                 }
             }
         }
+        item { Spacer(Modifier.height(14.dp)) }
         item {
             SegmentedControl(StorageScope.entries.map { it.label }, scope.ordinal, { scope = StorageScope.entries[it] })
         }
         if (editing && selected.isNotEmpty()) {
+            item { Spacer(Modifier.height(14.dp)) }
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("${selected.size} selected", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
@@ -223,6 +228,7 @@ fun StorageScreen(
             }
         }
         if (visible.isEmpty()) {
+            item { Spacer(Modifier.height(14.dp)) }
             item {
                 Column(
                     Modifier.fillMaxWidth().padding(vertical = 44.dp),
@@ -235,23 +241,63 @@ fun StorageScreen(
                         Modifier.size(44.dp),
                         tint = MaterialTheme.colorScheme.tertiary,
                     )
-                    Text(if (query.isNotEmpty()) "No Results" else "No Stored Songs", style = MaterialTheme.typography.titleMedium)
+                    Text(if (query.isNotEmpty()) "No results" else "No stored songs", style = MaterialTheme.typography.titleMedium)
                     Text("Import audio or video, or download songs from your music server.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
                 }
             }
         } else {
-            if (visibleDownloaded.isNotEmpty()) item {
-                StorageSection("Downloaded from server", visibleDownloaded, state, actions, editing, selected, { track ->
-                    deleteCandidate = track
-                }) { id ->
-                    selected = if (id in selected) selected - id else selected + id
+            if (visibleDownloaded.isNotEmpty()) {
+                item { Spacer(Modifier.height(14.dp)) }
+                item(key = "downloaded-header") {
+                    StorageSectionHeader("Downloaded from server", visibleDownloaded.size)
+                }
+                itemsIndexed(
+                    items = visibleDownloaded,
+                    key = { _, track -> "downloaded-${track.id}" },
+                ) { index, track ->
+                    TrackRow(
+                        track = track,
+                        state = state,
+                        actions = actions,
+                        number = index + 1,
+                        queue = visibleDownloaded,
+                        trailingText = formatBytes(state.trackSizesById[track.id] ?: 0),
+                        showSelection = editing,
+                        selected = track.id in selected,
+                        onSelect = {
+                            selected = if (track.id in selected) selected - track.id else selected + track.id
+                        },
+                        allowDeleteFromDevice = true,
+                        onDeleteFromDevice = { deleteCandidate = track },
+                        showMenu = !editing,
+                    )
                 }
             }
-            if (visibleImported.isNotEmpty()) item {
-                StorageSection("Imported on device", visibleImported, state, actions, editing, selected, { track ->
-                    deleteCandidate = track
-                }) { id ->
-                    selected = if (id in selected) selected - id else selected + id
+            if (visibleImported.isNotEmpty()) {
+                item { Spacer(Modifier.height(14.dp)) }
+                item(key = "imported-header") {
+                    StorageSectionHeader("Imported on device", visibleImported.size)
+                }
+                itemsIndexed(
+                    items = visibleImported,
+                    key = { _, track -> "imported-${track.id}" },
+                ) { index, track ->
+                    TrackRow(
+                        track = track,
+                        state = state,
+                        actions = actions,
+                        number = index + 1,
+                        queue = visibleImported,
+                        trailingText = formatBytes(state.trackSizesById[track.id] ?: 0),
+                        showSelection = editing,
+                        selected = track.id in selected,
+                        onSelect = {
+                            selected = if (track.id in selected) selected - track.id else selected + track.id
+                        },
+                        allowDeleteFromDevice = true,
+                        onDeleteFromDevice = { deleteCandidate = track },
+                        showMenu = !editing,
+                    )
                 }
             }
         }
@@ -269,7 +315,7 @@ fun StorageScreen(
                     selected = emptySet()
                     editing = false
                     confirmDelete = false
-                }) { Text("Delete Songs", color = MaterialTheme.colorScheme.error) }
+                }) { Text("Delete songs", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
         )
@@ -283,7 +329,7 @@ fun StorageScreen(
                 TextButton(onClick = {
                     actions.deleteTracksFromDevice(setOf(track.id))
                     deleteCandidate = null
-                }) { Text("Delete Song", color = MaterialTheme.colorScheme.error) }
+                }) { Text("Delete song", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { deleteCandidate = null }) { Text("Cancel") } },
         )
@@ -320,46 +366,22 @@ private fun StorageSummary(
             color = MaterialTheme.colorScheme.secondary,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("$importedCount local", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
-            Text("$downloadedCount downloaded", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+            Text("$importedCount local", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+            Text("$downloadedCount downloaded", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
         }
     }
 }
 
 @Composable
-private fun StorageSection(
+private fun StorageSectionHeader(
     title: String,
-    tracks: List<Track>,
-    state: ResonanceUiState,
-    actions: ResonanceActions,
-    editing: Boolean,
-    selected: Set<String>,
-    onDelete: (Track) -> Unit,
-    onToggle: (String) -> Unit,
+    count: Int,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
         Row(Modifier.padding(horizontal = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-            Eyebrow(title, Modifier.weight(1f))
-            Text("${tracks.size} ${if (tracks.size == 1) "SONG" else "SONGS"}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+            SectionLabel(title, Modifier.weight(1f))
+            Text("$count ${if (count == 1) "song" else "songs"}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
         }
-        Column(Modifier.fillMaxWidth()) {
-            SongListHeader(trailingTitle = "Size")
-            tracks.forEachIndexed { index, track ->
-                TrackRow(
-                    track = track,
-                    state = state,
-                    actions = actions,
-                    number = index + 1,
-                    queue = tracks,
-                    trailingText = formatBytes(state.trackSizesById[track.id] ?: 0),
-                    showSelection = editing,
-                    selected = track.id in selected,
-                    onSelect = { onToggle(track.id) },
-                    allowDeleteFromDevice = true,
-                    onDeleteFromDevice = { onDelete(track) },
-                    showMenu = !editing,
-                )
-            }
-        }
+        SongListHeader(trailingTitle = "Size")
     }
 }

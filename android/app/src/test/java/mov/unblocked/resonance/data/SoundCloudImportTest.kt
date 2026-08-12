@@ -46,8 +46,7 @@ class SoundCloudImportTest {
         val hydration = SoundCloudImportParser.hydration(html)
         assertEquals("abcdefghijklmnopqrstuvwxyz123456", SoundCloudImportParser.clientID(hydration))
         val track = SoundCloudImportParser.track(hydration["sound"])
-        assertNotNull(track)
-        val resolvedTrack = track!!
+        val resolvedTrack = requireNotNull(track)
         assertEquals("Direct [Mix]", resolvedTrack.metadata.title)
         assertEquals("Artist", resolvedTrack.metadata.artist)
         assertEquals("Album", resolvedTrack.metadata.album)
@@ -71,10 +70,13 @@ class SoundCloudImportTest {
         """.trimIndent()
 
         val track = SoundCloudImportParser.track(SoundCloudImportParser.hydration(html)["sound"])
-        assertNotNull(track)
-        val resolvedTrack = track!!
+        val resolvedTrack = requireNotNull(track)
         assertFalse(resolvedTrack.directlyImportable)
         assertNull(resolvedTrack.directCandidate())
+    }
+
+    @Test
+    fun `only playlist import kinds report playlist behavior`() {
         assertTrue(LinkImportKind.SpotifyPlaylist.isPlaylist)
         assertTrue(LinkImportKind.SoundCloudPlaylist.isPlaylist)
         assertFalse(LinkImportKind.Track.isPlaylist)

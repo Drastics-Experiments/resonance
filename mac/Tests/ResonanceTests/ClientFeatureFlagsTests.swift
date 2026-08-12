@@ -313,49 +313,6 @@ struct ClientFeatureFlagsTests {
         #expect(defaults.string(forKey: MacClientConfigIdentity.cohortKeyDefaultsKey) == regenerated)
     }
 
-    @Test("source imports accept only an exact raw canonical YouTube page")
-    func canonicalSourcePages() {
-        #expect(
-            MacSourceImportPolicy.exactCanonicalYouTubePage("https://www.youtube.com/watch?v=dQw4w9WgXcQ")?.absoluteString
-                == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-        )
-        #expect(MacSourceImportPolicy.exactCanonicalYouTubePage("https://youtu.be/dQw4w9WgXcQ?t=1") == nil)
-        #expect(MacSourceImportPolicy.exactCanonicalYouTubePage("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=1") == nil)
-        #expect(MacSourceImportPolicy.exactCanonicalYouTubePage(" https://www.youtube.com/watch?v=dQw4w9WgXcQ") == nil)
-        #expect(MacSourceImportPolicy.exactCanonicalYouTubePage("https://open.spotify.com/track/abc") == nil)
-        #expect(MacSourceImportPolicy.exactCanonicalYouTubePage("https://rr1---sn.test.googlevideo.com/videoplayback") == nil)
-    }
-
-    @Test("source-import 409 accepts only schema v1 duplicate responses")
-    func strictSourceImportDuplicateResponse() throws {
-        let song: [String: Any] = [
-            "id": "song-1",
-            "filename": "song.m4a",
-            "title": "Song",
-            "artist": "Artist",
-            "album": "Album",
-            "size": 42,
-            "modified_at": "now",
-            "content_type": "audio/mp4",
-            "download_url": "/api/v1/songs/song-1/file",
-            "stream_url": "/api/v1/songs/song-1/stream",
-        ]
-        func payload(schema: Int, status: String, duplicateKey: String = "duplicate_of") throws -> Data {
-            try JSONSerialization.data(withJSONObject: [
-                "schema_version": schema,
-                "status": status,
-                duplicateKey: song,
-            ])
-        }
-
-        #expect(MacSourceImportPolicy.duplicateSong(from: try payload(schema: 1, status: "duplicate"))?.id == "song-1")
-        #expect(MacSourceImportPolicy.duplicateSong(from: try payload(schema: 2, status: "duplicate")) == nil)
-        #expect(MacSourceImportPolicy.duplicateSong(from: try payload(schema: 1, status: "restored")) == nil)
-        #expect(MacSourceImportPolicy.duplicateSong(
-            from: try payload(schema: 1, status: "duplicate", duplicateKey: "song")
-        ) == nil)
-    }
-
     @Test("client-config request uses exact headers and admin-only fallback")
     func exactRequestHeaders() async throws {
         let suite = "ClientFeatureFlagsNetworkTests.\(UUID().uuidString)"

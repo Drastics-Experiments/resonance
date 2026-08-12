@@ -3,6 +3,28 @@ import XCTest
 @testable import Resonance
 
 final class MobileLegacyAppMigrationTests: XCTestCase {
+    func testApplicationSupportFallbackStaysInsideSandboxHome() {
+        let home = URL(fileURLWithPath: "/private/var/mobile/Containers/Data/Application/test", isDirectory: true)
+        XCTAssertEqual(
+            MobileApplicationSupport.fallbackRoot(discoveredRoot: nil, homeDirectory: home),
+            home
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("Application Support", isDirectory: true)
+        )
+    }
+
+    func testApplicationSupportFallbackPrefersDiscoveredDirectory() {
+        let discovered = URL(fileURLWithPath: "/resolved/Application Support", isDirectory: true)
+        let home = URL(fileURLWithPath: "/sandbox", isDirectory: true)
+        XCTAssertEqual(
+            MobileApplicationSupport.fallbackRoot(
+                discoveredRoot: discovered,
+                homeDirectory: home
+            ),
+            discovered
+        )
+    }
+
     func testMovesLegacyStorageAndRemovesTheOldDirectory() throws {
         let fileManager = FileManager.default
         let temporaryRoot = fileManager.temporaryDirectory

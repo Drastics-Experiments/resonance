@@ -1168,14 +1168,7 @@ struct MacLocalImportSheet: View {
             footer
         }
         .frame(width: 620, height: sheetHeight)
-        .background(
-            RadialGradient(
-                colors: [palette.secondary.opacity(0.12), palette.background],
-                center: .topTrailing,
-                startRadius: 0,
-                endRadius: 430
-            )
-        )
+        .background(palette.background)
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .shadow(color: .black.opacity(0.72), radius: 30, y: 18)
         .overlay {
@@ -1227,7 +1220,7 @@ struct MacLocalImportSheet: View {
                     .fill(Color(red: 1, green: 0.12, blue: 0.12))
                     .frame(width: 26, height: 18)
                 Image(systemName: "play.fill")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.white)
                     .offset(x: 1)
             }
@@ -1311,62 +1304,52 @@ struct MacLocalImportSheet: View {
     }
 
     private var sourceField: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("LINK OR MUSIC SEARCH")
-                .font(.system(size: 10, weight: .bold))
-                .tracking(1.0)
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
                 .foregroundStyle(palette.muted)
-
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(palette.muted)
-                TextField("Link or music search", text: $viewModel.source)
-                    .textFieldStyle(.plain)
-                    .focused($sourceFocused)
-                    .submitLabel(.search)
-                    .onSubmit {
-                        viewModel.resolve()
-                    }
-                    .disabled(viewModel.isRunning)
-                    .onChange(of: viewModel.source) { _, _ in
-                        viewModel.normalizeMediaModeForSource()
-                        if let provider = providerForSource(viewModel.source) {
-                            selectedProvider = provider
-                        }
-                    }
-
-                Button(action: viewModel.resolve) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 13, weight: .bold))
-                        .frame(width: 22, height: 18)
+            TextField("Link or music search", text: $viewModel.source)
+                .textFieldStyle(.plain)
+                .focused($sourceFocused)
+                .submitLabel(.search)
+                .onSubmit {
+                    viewModel.resolve()
                 }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.roundedRectangle(radius: 10))
-                    .tint(palette.secondary)
-                    .controlSize(.regular)
-                    .disabled(viewModel.isRunning || viewModel.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .help(viewModel.resolveButtonTitle)
-                    .accessibilityLabel(viewModel.resolveButtonTitle)
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 50)
-            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(palette.secondary.opacity(0.52)) }
-            .shadow(color: palette.secondary.opacity(0.12), radius: 12)
+                .disabled(viewModel.isRunning)
+                .onChange(of: viewModel.source) { _, _ in
+                    viewModel.normalizeMediaModeForSource()
+                    if let provider = providerForSource(viewModel.source) {
+                        selectedProvider = provider
+                    }
+                }
 
+            Button(action: viewModel.resolve) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 13, weight: .bold))
+                    .frame(width: 22, height: 18)
+            }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.roundedRectangle(radius: 10))
+                .tint(palette.secondary)
+                .controlSize(.regular)
+                .disabled(viewModel.isRunning || viewModel.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help(viewModel.resolveButtonTitle)
+                .accessibilityLabel(viewModel.resolveButtonTitle)
         }
+        .padding(.horizontal, 14)
+        .frame(height: 50)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(palette.secondary.opacity(0.52)) }
     }
 
     private func searchResultList(_ response: LocalImportSearchResponse) -> some View {
         VStack(alignment: .leading, spacing: 15) {
             HStack(alignment: .firstTextBaseline) {
-                Text("SEARCH RESULTS")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(1.0)
+                Text("Search results")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(palette.muted)
                 Spacer()
                 Text("\(response.results.count) \(viewModel.mediaMode == .video ? "downloadable" : "previewable")")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(palette.foregroundAccent)
             }
 
@@ -1374,20 +1357,19 @@ struct MacLocalImportSheet: View {
                 let results = viewModel.searchResults(for: provider)
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text(provider.displayName.uppercased())
-                            .font(.system(size: 9, weight: .bold))
-                            .tracking(0.8)
+                        Text(provider.displayName)
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(palette.ink)
                         Spacer()
                         Text("\(results.count) result\(results.count == 1 ? "" : "s")")
-                            .font(.system(size: 8, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(palette.muted)
                     }
                     .padding(.horizontal, 3)
 
                     if results.isEmpty {
                         Text(viewModel.mediaMode == .video ? "No downloadable videos." : "No previewable results.")
-                            .font(.system(size: 9))
+                            .font(.system(size: 11))
                             .foregroundStyle(palette.muted)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(11)
@@ -1439,13 +1421,13 @@ struct MacLocalImportSheet: View {
                             .foregroundStyle(palette.ink)
                             .lineLimit(1)
                         Text(searchResultDetails(result))
-                            .font(.system(size: 9))
+                            .font(.system(size: 10))
                             .foregroundStyle(palette.muted)
                             .lineLimit(1)
                     }
                     Spacer(minLength: 8)
-                    Text(result.provider.displayName.uppercased())
-                        .font(.system(size: 8, weight: .bold))
+                    Text(result.provider.displayName)
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(palette.foregroundAccent)
                         .padding(.horizontal, 8)
                         .frame(height: 22)
@@ -1546,12 +1528,12 @@ struct MacLocalImportSheet: View {
                     .lineLimit(1)
                 if let duration = track.durationSeconds {
                     Text(Track.timeText(TimeInterval(duration)))
-                        .font(.system(size: 9, design: .monospaced))
+                        .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(palette.muted)
                 }
                 if let status = viewModel.existingStatus(for: track) {
                     Text(status)
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Color.green)
                         .lineLimit(1)
                 }
@@ -1565,23 +1547,22 @@ struct MacLocalImportSheet: View {
     private func playlistItemList(_ playlist: LocalImportPlaylist) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
-                Text("TRACKS TO IMPORT")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(1.0)
+                Text("Tracks to import")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(palette.muted)
                 Spacer()
                 Text("\(viewModel.selectedPlaylistItems.count) of \(playlist.items.count) selected")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(palette.foregroundAccent)
             }
             if playlist.unavailableCount > 0 {
                 Text("\(playlist.unavailableCount) \(viewModel.playlistProviderName) track\(playlist.unavailableCount == 1 ? "" : "s") will be skipped. Each reason is listed below.")
-                    .font(.system(size: 9))
+                    .font(.system(size: 11))
                     .foregroundStyle(palette.muted)
             }
             if let summary = viewModel.existingSummary(for: playlist) {
                 Text(summary)
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.green)
             }
             ForEach(playlist.items) { item in
@@ -1593,7 +1574,7 @@ struct MacLocalImportSheet: View {
                                 .font(.system(size: 16))
                                 .foregroundStyle(selected ? palette.foregroundAccent : palette.muted)
                             Text("\(item.position)")
-                                .font(.system(size: 9, design: .monospaced))
+                                .font(.system(size: 10, design: .monospaced))
                                 .foregroundStyle(palette.muted)
                                 .frame(width: 24, alignment: .trailing)
                             playlistItemArtwork(item)
@@ -1603,12 +1584,12 @@ struct MacLocalImportSheet: View {
                                     .foregroundStyle(palette.ink)
                                     .lineLimit(1)
                                 Text([item.track.artist, item.track.durationSeconds.map { Track.timeText(TimeInterval($0)) }].compactMap { $0 }.joined(separator: " • "))
-                                    .font(.system(size: 9))
+                                    .font(.system(size: 10))
                                     .foregroundStyle(palette.muted)
                                     .lineLimit(1)
                                 if let status = viewModel.existingStatus(for: item.track) {
                                     Text(status)
-                                        .font(.system(size: 8, weight: .semibold))
+                                        .font(.system(size: 10, weight: .semibold))
                                         .foregroundStyle(Color.green)
                                         .lineLimit(1)
                                 }
@@ -1636,9 +1617,8 @@ struct MacLocalImportSheet: View {
             }
 
             if !playlist.skippedItems.isEmpty {
-                Text("SKIPPED")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(1.0)
+                Text("Skipped")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(palette.foregroundAccent)
                     .padding(.top, 5)
 
@@ -1648,7 +1628,7 @@ struct MacLocalImportSheet: View {
                             .font(.system(size: 11, weight: .bold))
                             .foregroundStyle(palette.foregroundAccent)
                         Text("\(item.position)")
-                            .font(.system(size: 9, design: .monospaced))
+                            .font(.system(size: 10, design: .monospaced))
                             .foregroundStyle(palette.muted)
                             .frame(width: 24, alignment: .trailing)
                         VStack(alignment: .leading, spacing: 4) {
@@ -1657,7 +1637,7 @@ struct MacLocalImportSheet: View {
                                 .foregroundStyle(palette.ink)
                                 .lineLimit(1)
                             Text([item.artist, item.reason].compactMap { $0 }.joined(separator: " • "))
-                                .font(.system(size: 9))
+                                .font(.system(size: 10))
                                 .foregroundStyle(palette.muted)
                                 .lineLimit(2)
                         }
@@ -1734,17 +1714,16 @@ struct MacLocalImportSheet: View {
     private func candidateList(_ candidates: [LocalImportAudioSourceMatch]) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             Text(viewModel.mediaMode == .video
-                ? "DIRECT YOUTUBE VIDEO"
+                ? "Direct YouTube video"
                 : candidates.contains(where: viewModel.isServerReviewCandidate)
-                    ? "REVIEW AUDIO MATCHES"
-                    : "DIRECT AUDIO MATCHES")
-                .font(.system(size: 10, weight: .bold))
-                .tracking(1.0)
+                    ? "Review audio matches"
+                    : "Direct audio matches")
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(palette.muted)
 
             if candidates.contains(where: viewModel.isServerReviewCandidate) {
                 Text("Server matches are metadata-only suggestions. Preview and explicitly select the exact recording before importing or uploading it.")
-                    .font(.system(size: 9))
+                    .font(.system(size: 11))
                     .foregroundStyle(palette.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1765,7 +1744,7 @@ struct MacLocalImportSheet: View {
                                     .foregroundStyle(palette.ink)
                                     .lineLimit(1)
                                 Text([candidate.artist ?? "Unknown uploader", candidate.durationSeconds.map { Track.timeText(TimeInterval($0)) }, candidateProviderName(candidate)].compactMap { $0 }.joined(separator: " • "))
-                                    .font(.system(size: 9))
+                                    .font(.system(size: 10))
                                     .foregroundStyle(palette.muted)
                                     .lineLimit(1)
                             }
@@ -1773,9 +1752,9 @@ struct MacLocalImportSheet: View {
                             Spacer(minLength: 8)
 
                             Text(viewModel.isServerReviewCandidate(candidate)
-                                ? "SERVER REVIEW"
-                                : candidate.confidence.uppercased())
-                                .font(.system(size: 8, weight: .bold))
+                                ? "Server review"
+                                : candidate.confidence.capitalized)
+                                .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(palette.foregroundAccent)
                                 .padding(.horizontal, 8)
                                 .frame(height: 22)
@@ -1815,7 +1794,7 @@ struct MacLocalImportSheet: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(palette.foregroundAccent)
                 Text(previewErrorMessage)
-                    .font(.system(size: 9))
+                    .font(.system(size: 10))
                     .foregroundStyle(palette.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1850,18 +1829,17 @@ struct MacLocalImportSheet: View {
     private func releaseList(_ releases: [LocalImportDebridRelease]) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .firstTextBaseline) {
-                Text("OTHER RELEASE SOURCES")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(1.0)
+                Text("Other release sources")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(palette.muted)
                 Spacer()
                 Text("Debrid Vault")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(palette.foregroundAccent)
             }
 
             Text("These are release torrents, not verified single-track files. Open one externally, choose the exact audio file, then use Import Files.")
-                .font(.system(size: 9))
+                .font(.system(size: 11))
                 .foregroundStyle(palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -1880,7 +1858,7 @@ struct MacLocalImportSheet: View {
                                 .foregroundStyle(palette.ink)
                                 .lineLimit(1)
                             Text(releaseDetails(release))
-                                .font(.system(size: 9))
+                                .font(.system(size: 10))
                                 .foregroundStyle(palette.muted)
                                 .lineLimit(1)
                         }
@@ -1944,7 +1922,7 @@ struct MacLocalImportSheet: View {
 
             if !viewModel.canSync {
                 Text(viewModel.syncAvailabilityMessage)
-                    .font(.system(size: 8))
+                    .font(.system(size: 10))
                     .foregroundStyle(palette.muted)
                     .lineLimit(2)
                     .frame(maxWidth: 300, alignment: .leading)
@@ -1964,7 +1942,7 @@ struct MacLocalImportSheet: View {
                     .foregroundStyle(palette.muted)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(error.code)
-                    .font(.system(size: 8, design: .monospaced))
+                    .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(palette.muted.opacity(0.8))
             }
             Spacer()

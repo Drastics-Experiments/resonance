@@ -424,8 +424,10 @@ struct LocalImportTests {
         #expect(!release.title.contains("&#39;"))
         #expect(release.seeders == 42)
         #expect(release.size == 543_210_987)
-        #expect(LocalImportURL.isDebridVaultDocument(URL(string: "https://debridvault.elfhosted.com/api/torrents/search")!))
-        #expect(!LocalImportURL.isDebridVaultDocument(URL(string: "https://evil.debridvault.elfhosted.com/api/torrents/search")!))
+        let trustedURL = try #require(URL(string: "https://debridvault.elfhosted.com/api/torrents/search"))
+        let lookalikeURL = try #require(URL(string: "https://evil.debridvault.elfhosted.com/api/torrents/search"))
+        #expect(LocalImportURL.isDebridVaultDocument(trustedURL))
+        #expect(!LocalImportURL.isDebridVaultDocument(lookalikeURL))
     }
 
     @Test

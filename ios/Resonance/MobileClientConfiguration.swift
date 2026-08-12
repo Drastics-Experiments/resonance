@@ -858,15 +858,12 @@ enum MobileBoundedResponsePolicy {
 }
 
 enum MobileSourcePagePolicy {
-    private static let canonicalYouTubePage = try! NSRegularExpression(
-        pattern: #"^https://www\.youtube\.com/watch\?v=[A-Za-z0-9_-]{11}$"#
-    )
+    private static let canonicalYouTubePagePattern = #"^https://www\.youtube\.com/watch\?v=[A-Za-z0-9_-]{11}$"#
 
     static func validatedOriginalYouTubePage(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
-        guard canonicalYouTubePage.firstMatch(in: trimmed, range: range)?.range == range else {
+        guard trimmed.range(of: canonicalYouTubePagePattern, options: .regularExpression) != nil else {
             return nil
         }
         return trimmed

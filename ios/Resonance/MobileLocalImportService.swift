@@ -27,12 +27,6 @@ private final class LocalImportCombinedProgress {
     }
 }
 
-enum LocalImportFeature {
-    static var isEnabled: Bool {
-        ProcessInfo.processInfo.environment["RESONANCE_LOCAL_DEVICE_IMPORT"] != "0"
-    }
-}
-
 private final class LocalImportRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let validator: @Sendable (URL) -> Bool
 
@@ -272,13 +266,18 @@ struct LocalImportSessions: @unchecked Sendable {
 }
 
 enum LocalImportRangeVerifier {
+    private static let contentRangeExpression = try? NSRegularExpression(
+        pattern: #"^bytes\s+(\d+)-(\d+)/(\d+)$"#,
+        options: .caseInsensitive
+    )
+
     static func expectedLength(_ value: String?, start: Int64, end: Int64, total: Int64) throws -> Int64 {
         guard let value else {
             throw LocalImportError(stage: .downloading, code: "YOUTUBE_RANGE_MISMATCH", message: "YouTube returned an unverifiable audio range.")
         }
-        let expression = try! NSRegularExpression(pattern: #"^bytes\s+(\d+)-(\d+)/(\d+)$"#, options: .caseInsensitive)
         let range = NSRange(value.startIndex..<value.endIndex, in: value)
-        guard let match = expression.firstMatch(in: value, range: range),
+        guard let expression = contentRangeExpression,
+              let match = expression.firstMatch(in: value, range: range),
               let startRange = Range(match.range(at: 1), in: value),
               let endRange = Range(match.range(at: 2), in: value),
               let totalRange = Range(match.range(at: 3), in: value),
@@ -360,7 +359,7 @@ actor LocalDeviceImportService {
         if let localRoot {
             self.localRoot = localRoot
         } else {
-            let support = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            let support = MobileApplicationSupport.root(fileManager: fileManager)
             self.localRoot = support
                 .appendingPathComponent(MobileLegacyAppMigration.applicationSupportName, isDirectory: true)
                 .appendingPathComponent("LocalImports", isDirectory: true)
@@ -1262,15 +1261,20 @@ actor LocalDeviceImportService {
 
     private func searchCandidates(for track: LocalImportSpotifyTrack) async throws -> [LocalImportAudioSourceMatch] {
         let query = [track.artist, track.title, track.album].compactMap { $0 }.joined(separator: " ")
-        var musicComponents = URLComponents(string: "https://music.youtube.com/search")!
+        guard var musicComponents = URLComponents(string: "https://music.youtube.com/search") else {
+            throw URLError(.badURL)
+        }
         musicComponents.queryItems = [URLQueryItem(name: "q", value: query)]
-        var webComponents = URLComponents(string: "https://www.youtube.com/results")!
+        guard var webComponents = URLComponents(string: "https://www.youtube.com/results") else {
+            throw URLError(.badURL)
+        }
         webComponents.queryItems = [
             URLQueryItem(name: "search_query", value: "\(track.artist) \(track.title) official audio"),
             URLQueryItem(name: "sp", value: "EgIQAQ%3D%3D"),
         ]
-        let musicURL = musicComponents.url!
-        let webURL = webComponents.url!
+        guard let musicURL = musicComponents.url, let webURL = webComponents.url else {
+            throw URLError(.badURL)
+        }
         async let musicHTML = searchDocument(musicURL)
         async let webHTML = searchDocument(webURL)
         let documents = try await (musicHTML, webHTML)
@@ -1385,8 +1389,10 @@ actor LocalDeviceImportService {
             ]
             return components?.url
         }
-        pages.append(URL(string: "https://www.youtube.com/embed/\(videoID)")!)
-        pages.append(URL(string: "https://www.youtube-nocookie.com/embed/\(videoID)")!)
+        pages.append(contentsOf: [
+            "https://www.youtube.com/embed/\(videoID)",
+            "https://www.youtube-nocookie.com/embed/\(videoID)",
+        ].compactMap(URL.init(string:)))
         var reached = false
         var retryAfter: String?
         for page in pages {
@@ -1428,7 +1434,7 @@ actor LocalDeviceImportService {
         var lastError: LocalImportError?
         var retryAfter: String?
         for origin in ["https://www.youtube.com", "https://youtubei.googleapis.com"] {
-            let url = URL(string: origin + "/youtubei/v1/player?prettyPrint=false")!
+            guard let url = URL(string: origin + "/youtubei/v1/player?prettyPrint=false") else { continue }
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1824,8 +1830,16 @@ actor LocalDeviceImportService {
         return cleaned.isEmpty ? fallback : String(cleaned.prefix(500))
     }
 
+    private static let youtubeVisitorDataExpression = try? NSRegularExpression(
+        pattern: #""(?:VISITOR_DATA|visitorData)"\s*:\s*"((?:\\.|[^"\\])+)""#
+    )
+
+    private static let youtubeCookieExpression = try? NSRegularExpression(
+        pattern: #"(?:^|,\s*)([!#$%&'*+\-.^_`|~0-9A-Za-z]+)=([^;,\r\n]*)"#
+    )
+
     static func youtubeVisitorData(_ html: String) -> String? {
-        let expression = try! NSRegularExpression(pattern: #""(?:VISITOR_DATA|visitorData)"\s*:\s*"((?:\\.|[^"\\])+)""#)
+        guard let expression = youtubeVisitorDataExpression else { return nil }
         let range = NSRange(html.startIndex..<html.endIndex, in: html)
         for match in expression.matches(in: html, range: range) {
             guard let capture = Range(match.range(at: 1), in: html) else { continue }
@@ -1840,7 +1854,7 @@ actor LocalDeviceImportService {
     private static func youtubeCookieHeader(_ response: HTTPURLResponse) -> String? {
         guard let raw = response.value(forHTTPHeaderField: "Set-Cookie") else { return nil }
         let allowed = Set(["GPS", "VISITOR_INFO1_LIVE", "VISITOR_PRIVACY_METADATA", "YSC", "__Secure-ROLLOUT_TOKEN", "__Secure-YEC", "__Secure-YNID"])
-        let expression = try! NSRegularExpression(pattern: #"(?:^|,\s*)([!#$%&'*+\-.^_`|~0-9A-Za-z]+)=([^;,\r\n]*)"#)
+        guard let expression = youtubeCookieExpression else { return nil }
         let range = NSRange(raw.startIndex..<raw.endIndex, in: raw)
         let values = expression.matches(in: raw, range: range).compactMap { match -> String? in
             guard let nameRange = Range(match.range(at: 1), in: raw),
@@ -2064,6 +2078,6 @@ enum LocalImportMediaProcessor {
         let item = AVMutableMetadataItem()
         item.identifier = identifier
         item.value = value
-        return item.copy() as! AVMetadataItem
+        return item.copy() as? AVMetadataItem ?? item
     }
 }

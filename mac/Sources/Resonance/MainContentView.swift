@@ -1,7 +1,6 @@
 import AppKit
 import Charts
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct MainContentView: View {
     @Environment(\.resonancePalette) private var palette
@@ -137,6 +136,8 @@ private struct ServerLibraryView: View {
     var body: some View {
         GeometryReader { proxy in
             let showAlbum = proxy.size.width >= 690
+            let songs = visibleSongs
+            let localTracks = localTracksByRemoteID
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -149,11 +150,10 @@ private struct ServerLibraryView: View {
                         .padding(.bottom, 32)
 
                     HStack(alignment: .center, spacing: 12) {
-                        Text("SERVER LIBRARY")
+                        Text("Server library")
                             .font(.system(size: 12, weight: .semibold))
-                            .tracking(1.1)
                             .foregroundStyle(Color(hex: 0xD4D7E0))
-                        Text("\(visibleSongs.count) \(visibleSongs.count == 1 ? "song" : "songs")")
+                        Text("\(songs.count) \(songs.count == 1 ? "song" : "songs")")
                             .font(.system(size: 11))
                             .foregroundStyle(palette.muted)
 
@@ -165,13 +165,13 @@ private struct ServerLibraryView: View {
                                 "Loading metadata for \(model.pendingRemoteSongMetadataCount) "
                                     + (model.pendingRemoteSongMetadataCount == 1 ? "song" : "songs")
                             )
-                                .font(.system(size: 10, weight: .medium))
+                                .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(palette.muted)
                         }
 
                         if scope != .all {
                             Text(scope.rawValue)
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(palette.foregroundAccent)
                                 .padding(.horizontal, 8)
                                 .frame(height: 22)
@@ -189,7 +189,7 @@ private struct ServerLibraryView: View {
 
                     MacServerCatalogHeader(showAlbum: showAlbum)
 
-                    if visibleSongs.isEmpty,
+                    if songs.isEmpty,
                        model.remoteSongs.isEmpty,
                        model.isRefreshingServerCatalog {
                         LazyVStack(spacing: 0) {
@@ -197,7 +197,7 @@ private struct ServerLibraryView: View {
                                 MacServerCatalogPlaceholderRow(number: index + 1, showAlbum: showAlbum)
                             }
                         }
-                    } else if visibleSongs.isEmpty {
+                    } else if songs.isEmpty {
                         ContentUnavailableView(
                             model.remoteSongs.isEmpty ? "No Server Songs" : "No Results",
                             systemImage: model.remoteSongs.isEmpty ? "network.slash" : "magnifyingglass",
@@ -207,8 +207,7 @@ private struct ServerLibraryView: View {
                         .padding(.vertical, 60)
                     } else {
                         LazyVStack(spacing: 0) {
-                            let localTracks = localTracksByRemoteID
-                            ForEach(Array(visibleSongs.enumerated()), id: \.element.id) { index, song in
+                            ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
                                 MacServerSongRow(
                                     song: song,
                                     number: index + 1,
@@ -229,22 +228,6 @@ private struct ServerLibraryView: View {
                 .padding(.bottom, 44)
             }
             .scrollIndicators(.hidden)
-            .background {
-                ZStack {
-                    RadialGradient(
-                        colors: [palette.secondary.opacity(0.10), .clear],
-                        center: UnitPoint(x: 0.83, y: 0.04),
-                        startRadius: 10,
-                        endRadius: 520
-                    )
-                    RadialGradient(
-                        colors: [palette.secondary.opacity(0.055), .clear],
-                        center: UnitPoint(x: 0.48, y: 0.88),
-                        startRadius: 10,
-                        endRadius: 520
-                    )
-                }
-            }
         }
         .alert(item: $deletionCandidate) { song in
             Alert(
@@ -656,14 +639,14 @@ private struct MacServerSongRow: View {
 
                                     if isSynced {
                                         Image(systemName: "checkmark.circle.fill")
-                                            .font(.system(size: 8))
+                                            .font(.system(size: 10))
                                             .foregroundStyle(Color(hex: 0x55D98B))
                                             .help("On this Mac")
                                     }
                                 }
 
                                 Text("\(displayArtist) / \(mediaKind)")
-                                    .font(.system(size: 9))
+                                    .font(.system(size: 10))
                                     .foregroundStyle(Color(hex: 0x8F96A7))
                                     .lineLimit(1)
                             }
@@ -894,14 +877,9 @@ private struct PlaylistsOverviewView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                Text("YOUR COLLECTIONS")
-                    .font(.system(size: 10, weight: .medium))
-                    .tracking(1.7)
-                    .foregroundStyle(Color(hex: 0xA9AFBD))
                 Text("Playlists")
                     .font(.system(size: 52, weight: .regular))
                     .tracking(-2.2)
-                    .padding(.top, 6)
                 Text("Organize your local music into collections.")
                     .font(.system(size: 12))
                     .foregroundStyle(palette.muted)
@@ -936,7 +914,7 @@ private struct PlaylistsOverviewView: View {
                                         .font(.system(size: 13, weight: .semibold))
                                         .lineLimit(1)
                                     Text("\(trackCount) \(trackCount == 1 ? "track" : "tracks")")
-                                        .font(.system(size: 10))
+                                        .font(.system(size: 11))
                                         .foregroundStyle(palette.muted)
                                 }
                                 Spacer()
@@ -958,14 +936,6 @@ private struct PlaylistsOverviewView: View {
                 .padding(.top, 30)
             }
             .padding(42)
-        }
-        .background {
-            RadialGradient(
-                colors: [palette.secondary.opacity(0.20), .clear],
-                center: UnitPoint(x: 0.72, y: 0.08),
-                startRadius: 10,
-                endRadius: 420
-            )
         }
     }
 }
@@ -1017,7 +987,6 @@ private struct TopBarView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(WindowDragArea())
         .background(palette.panel.opacity(0.94))
-        .background(.ultraThinMaterial.opacity(0.10))
         .overlay(alignment: .bottom) {
             Rectangle().fill(palette.divider).frame(height: 1)
         }
@@ -1354,6 +1323,36 @@ private struct ProfilePopoverRow: View {
     }
 }
 
+@MainActor
+private enum ListeningHistoryDateFormatting {
+    private static let formatters: [String: DateFormatter] = {
+        let formats = [
+            "MMMM",
+            "MMMM d",
+            "MMMM d, yyyy",
+            "EEEE, MMMM d, yyyy",
+            "EEEE, MMMM d, yyyy, h a",
+            "MMM d",
+            "EEEE, MMM d",
+            "MMM d, h a",
+            "EEEE, MMM d, h a",
+        ]
+        return Dictionary(uniqueKeysWithValues: formats.map { format in
+            let formatter = DateFormatter()
+            formatter.locale = .autoupdatingCurrent
+            formatter.timeZone = .autoupdatingCurrent
+            formatter.dateFormat = format
+            return (format, formatter)
+        })
+    }()
+
+    static func string(from date: Date, format: String) -> String {
+        guard let formatter = formatters[format] else { return date.formatted() }
+        return formatter.string(from: date)
+    }
+}
+
+@MainActor
 private struct MacListeningHistorySheet: View {
     @Environment(\.resonancePalette) private var palette
     private enum Mode: String, CaseIterable, Identifiable {
@@ -1652,7 +1651,7 @@ private struct MacListeningHistorySheet: View {
                 Text(range.title)
                     .font(.system(size: 11, weight: .medium))
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(palette.muted)
             }
             .foregroundStyle(Color(hex: 0xCBC8D3))
@@ -1742,16 +1741,6 @@ private struct MacListeningHistorySheet: View {
         .frame(height: 116)
     }
 
-    @ViewBuilder
-    private var historyContent: some View {
-        switch mode {
-        case .overall:
-            chart
-        case .stats:
-            bySongContent
-        }
-    }
-
     private var chart: some View {
         VStack(spacing: 0) {
             ZStack {
@@ -1782,112 +1771,6 @@ private struct MacListeningHistorySheet: View {
         }
     }
 
-    private var bySongContent: some View {
-        let songs = Array(summary.songSeries.prefix(5))
-        let longestListeningTime = songs.first?.seconds ?? 1
-
-        return VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Top songs in this period")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Color(hex: 0xA8A4B0))
-
-                Spacer()
-
-                Text(windowLabel)
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(Color(hex: 0x777481))
-            }
-            .frame(height: 25)
-
-            if songs.isEmpty {
-                Text("Play something and your most-listened songs will appear here.")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color(hex: 0x7F7C89))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(Array(songs.enumerated()), id: \.element.id) {
-                        index,
-                        song in
-                        ListeningHistorySongRow(
-                            position: index + 1,
-                            song: song,
-                            maximumSeconds: longestListeningTime,
-                            listeningTime: historyListenedTime(song.seconds)
-                        )
-
-                        if index < songs.count - 1 {
-                            Rectangle()
-                                .fill(Color.white.opacity(0.055))
-                                .frame(height: 1)
-                                .padding(.leading, 48)
-                        }
-                    }
-                }
-            }
-        }
-        .padding(.horizontal, 24)
-        .padding(.top, 12)
-        .padding(.bottom, 10)
-        .frame(height: 247)
-    }
-
-    private var summaryFooter: some View {
-        HStack(spacing: 0) {
-            if mode == .overall {
-                ListeningHistoryFooterItem(
-                    value: footerDateTitle,
-                    label: "Most active day",
-                    accent: Color(hex: 0xF5F3FA)
-                )
-
-                metricDivider
-
-                ListeningHistoryFooterItem(
-                    value: historyListenedTime(
-                        summary.mostActiveDay?.seconds ?? 0
-                    ),
-                    label: "Listening time",
-                    accent: palette.tertiary
-                )
-
-                metricDivider
-
-                ListeningHistoryFooterItem(
-                    value: (summary.mostActiveDay?.plays ?? 0).formatted(),
-                    label: "Tracks started",
-                    accent: Color(hex: 0xFF735D)
-                )
-            } else {
-                ListeningHistoryFooterItem(
-                    value: summary.songs.formatted(),
-                    label: "Songs heard",
-                    accent: Color(hex: 0xF5F3FA)
-                )
-
-                metricDivider
-
-                ListeningHistoryFooterItem(
-                    value: summary.songSeries.first?.track.title ?? "No song yet",
-                    label: "Most listened",
-                    accent: palette.tertiary
-                )
-
-                metricDivider
-
-                ListeningHistoryFooterItem(
-                    value: historyListenedTime(
-                        summary.songSeries.first?.seconds ?? 0
-                    ),
-                    label: "Top song time",
-                    accent: Color(hex: 0xFF735D)
-                )
-            }
-        }
-        .frame(height: 63)
-    }
-
     private var topSongSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 17) {
@@ -1913,7 +1796,7 @@ private struct MacListeningHistorySheet: View {
                         }
 
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(Color(hex: 0xF4EFFF))
                             .frame(width: 22, height: 22)
                             .background(palette.surface.opacity(0.85), in: Circle())
@@ -1939,9 +1822,8 @@ private struct MacListeningHistorySheet: View {
                 )
 
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("MOST LISTENED SONG")
-                        .font(.system(size: 8, weight: .bold))
-                        .tracking(1.2)
+                    Text("Most listened song")
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color(hex: 0x8F8C99))
 
                     Text(topSongTitle)
@@ -1951,7 +1833,7 @@ private struct MacListeningHistorySheet: View {
                         .padding(.top, 5)
 
                     Text(topSongSubtitle)
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(Color(hex: 0xAAA6B2))
                         .lineLimit(1)
                         .padding(.top, 5)
@@ -1961,7 +1843,7 @@ private struct MacListeningHistorySheet: View {
                             ? "Your song ranking will appear here."
                             : "Click the cover to view every song from most to least listened."
                     )
-                    .font(.system(size: 9))
+                    .font(.system(size: 11))
                     .foregroundStyle(Color(hex: 0x827E8B))
                     .lineLimit(1)
                     .padding(.top, 8)
@@ -2008,11 +1890,10 @@ private struct MacListeningHistorySheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(
                         summary.granularity == .hour
-                            ? "HOUR BREAKDOWN"
-                            : "DAY BREAKDOWN"
+                            ? "Hour breakdown"
+                            : "Day breakdown"
                     )
-                    .font(.system(size: 8, weight: .bold))
-                    .tracking(1.2)
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color(hex: 0x8F8C99))
 
                     Text(dayDetailsTitle(day.date))
@@ -2066,7 +1947,7 @@ private struct MacListeningHistorySheet: View {
                 .foregroundStyle(Color(hex: 0xF8F7FC))
                 .lineLimit(1)
             Text(label)
-                .font(.system(size: 8))
+                .font(.system(size: 10))
                 .foregroundStyle(Color(hex: 0x85818E))
         }
         .frame(minWidth: 62, alignment: .trailing)
@@ -2102,7 +1983,7 @@ private struct MacListeningHistorySheet: View {
                         song in
                         HStack(spacing: 10) {
                             Text((index + 1).formatted())
-                                .font(.system(size: 9))
+                                .font(.system(size: 10))
                                 .foregroundStyle(palette.muted)
                                 .frame(width: 28)
 
@@ -2119,14 +2000,14 @@ private struct MacListeningHistorySheet: View {
                                     .foregroundStyle(Color(hex: 0xF5F4F8))
                                     .lineLimit(2)
                                 Text("\(song.track.artist) / Audio")
-                                    .font(.system(size: 9))
+                                    .font(.system(size: 10))
                                     .foregroundStyle(palette.muted)
                                     .lineLimit(1)
                             }
                             .frame(width: 420, alignment: .leading)
 
                             Text(song.track.album)
-                                .font(.system(size: 9))
+                                .font(.system(size: 10))
                                 .foregroundStyle(palette.muted)
                                 .lineLimit(2)
                                 .frame(width: 220, alignment: .leading)
@@ -2138,7 +2019,7 @@ private struct MacListeningHistorySheet: View {
                                 .frame(width: 96, alignment: .leading)
 
                             Text(song.plays.formatted())
-                                .font(.system(size: 9))
+                                .font(.system(size: 10))
                                 .foregroundStyle(palette.muted)
                                 .monospacedDigit()
                                 .frame(width: 52, alignment: .leading)
@@ -2158,8 +2039,8 @@ private struct MacListeningHistorySheet: View {
         width: CGFloat,
         alignment: Alignment = .center
     ) -> some View {
-        Text(title.uppercased())
-            .font(.system(size: 9, weight: .medium))
+        Text(title)
+            .font(.system(size: 11, weight: .medium))
             .foregroundStyle(palette.muted)
             .frame(width: width, alignment: alignment)
     }
@@ -2275,25 +2156,6 @@ private struct MacListeningHistorySheet: View {
             : "Show next \(range.rawValue) days"
     }
 
-    private func chartAxisDate(_ date: Date) -> String {
-        formattedDate(
-            date,
-            format: summary.granularity == .hour ? "ha" : "MMM d"
-        )
-    }
-
-    private var footerDateTitle: String {
-        guard summary.totalSeconds > 0, let date = summary.mostActiveDay?.date else {
-            return "No activity yet"
-        }
-        return formattedDate(
-            date,
-            format: summary.granularity == .hour
-                ? "EEEE, h a"
-                : "EEEE, MMMM d"
-        )
-    }
-
     private func dayDetailsTitle(_ date: Date) -> String {
         formattedDate(
             date,
@@ -2304,11 +2166,7 @@ private struct MacListeningHistorySheet: View {
     }
 
     private func formattedDate(_ date: Date, format: String) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = .current
-        formatter.timeZone = .current
-        formatter.dateFormat = format
-        return formatter.string(from: date)
+        ListeningHistoryDateFormatting.string(from: date, format: format)
     }
 
     private func historyListenedTime(_ seconds: TimeInterval) -> String {
@@ -2317,10 +2175,6 @@ private struct MacListeningHistorySheet: View {
             return "\(max(1, Int(value.rounded()))) sec"
         }
         return "\(Int((value / 60).rounded()).formatted()) min"
-    }
-
-    private func historyYAxisLabel(_ value: Double) -> String {
-        Int(max(0, value).rounded()).formatted()
     }
 
     private func niceChartMaximum(_ value: Double) -> Double {
@@ -2348,31 +2202,11 @@ private struct MacListeningHistorySheet: View {
     }
 
     private var historyBackground: some View {
-        ZStack {
-            LinearGradient(
-                colors: [palette.surface, palette.panel],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            RadialGradient(
-                colors: [palette.accent.opacity(0.14), .clear],
-                center: UnitPoint(x: 0.16, y: 0.12),
-                startRadius: 0,
-                endRadius: 330
-            )
-            RadialGradient(
-                colors: [palette.accent.opacity(0.12), .clear],
-                center: UnitPoint(x: 0.76, y: 0.20),
-                startRadius: 0,
-                endRadius: 380
-            )
-            RadialGradient(
-                colors: [Color(hex: 0xFF806C).opacity(0.06), .clear],
-                center: UnitPoint(x: 0.88, y: 1),
-                startRadius: 0,
-                endRadius: 300
-            )
-        }
+        LinearGradient(
+            colors: [palette.surface, palette.panel],
+            startPoint: .top,
+            endPoint: .bottom
+        )
     }
 
     private var divider: some View {
@@ -2403,6 +2237,7 @@ enum ListeningHistoryChartHitTesting {
     }
 }
 
+@MainActor
 private struct ListeningHistoryBarChart: View {
     @Environment(\.resonancePalette) private var palette
     let summary: ListeningHistoryCalendarSummary
@@ -2476,7 +2311,7 @@ private struct ListeningHistoryBarChart: View {
                 AxisValueLabel {
                     if let minutes = value.as(Double.self) {
                         Text(axisLabel(minutes))
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(Color(hex: 0xAAA7B0))
                             .monospacedDigit()
                     }
@@ -2638,11 +2473,7 @@ private struct ListeningHistoryBarChart: View {
         } else {
             format = includesWeekday ? "EEEE, MMM d" : "MMM d"
         }
-        let formatter = DateFormatter()
-        formatter.locale = .current
-        formatter.timeZone = .current
-        formatter.dateFormat = format
-        return formatter.string(from: date)
+        return ListeningHistoryDateFormatting.string(from: date, format: format)
     }
 
     private func listenedTime(_ seconds: TimeInterval) -> String {
@@ -2702,111 +2533,13 @@ private struct ListeningHistoryMetric: View {
                     .minimumScaleFactor(0.72)
 
                 Text(label)
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color(hex: 0x8F8C99))
                     .lineLimit(1)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.horizontal, 22)
-    }
-}
-
-private struct ListeningHistorySongRow: View {
-    @Environment(\.resonancePalette) private var palette
-    let position: Int
-    let song: ListeningHistorySongSeries
-    let maximumSeconds: TimeInterval
-    let listeningTime: String
-
-    private var progress: CGFloat {
-        CGFloat(min(1, max(0, song.seconds / max(1, maximumSeconds))))
-    }
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Text(position.formatted())
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(Color(hex: 0x777481))
-                .frame(width: 18, alignment: .trailing)
-
-            TrackArtworkView(
-                track: song.track,
-                symbolSize: 11,
-                cornerRadius: 6
-            )
-            .frame(width: 30, height: 30)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(song.track.title)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Color(hex: 0xF5F3F9))
-                    .lineLimit(1)
-
-                Text(song.track.artist)
-                    .font(.system(size: 8))
-                    .foregroundStyle(Color(hex: 0x85818E))
-                    .lineLimit(1)
-            }
-            .frame(width: 188, alignment: .leading)
-
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.white.opacity(0.055))
-
-                    Capsule()
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    palette.tertiary,
-                                    palette.secondary
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(width: max(4, geometry.size.width * progress))
-                }
-            }
-            .frame(height: 5)
-
-            Text(listeningTime)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(palette.tertiary)
-                .monospacedDigit()
-                .frame(width: 64, alignment: .trailing)
-
-            Text("\(song.plays.formatted()) \(song.plays == 1 ? "play" : "plays")")
-                .font(.system(size: 8))
-                .foregroundStyle(Color(hex: 0x777481))
-                .monospacedDigit()
-                .frame(width: 55, alignment: .trailing)
-        }
-        .frame(height: 38)
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private struct ListeningHistoryFooterItem: View {
-    let value: String
-    let label: String
-    let accent: Color
-
-    var body: some View {
-        VStack(spacing: 4) {
-            Text(value)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(accent)
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-
-            Text(label)
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(Color(hex: 0x85818E))
-        }
-        .padding(.horizontal, 18)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -2820,19 +2553,19 @@ private struct ListeningHistoryChartTooltip: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(date)
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color(hex: 0xAAA6B2))
 
             HStack(alignment: .firstTextBaseline, spacing: 14) {
                 Text(listeningTime)
                     .font(.system(size: 14, weight: .bold))
                 Text("\(plays.formatted()) \(plays == 1 ? "play" : "plays")")
-                    .font(.system(size: 9))
+                    .font(.system(size: 11))
                     .foregroundStyle(Color(hex: 0xAAA6B2))
             }
 
             Text(topSong.map { "Top song: \($0)" } ?? "No listening recorded")
-                .font(.system(size: 9))
+                .font(.system(size: 11))
                 .foregroundStyle(Color(hex: 0x8C8895))
                 .lineLimit(1)
         }
@@ -2866,7 +2599,7 @@ private struct ListeningHistoryRankedSongCard: View {
                 .frame(width: 146, height: 146)
 
                 Text("#\(position)")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(Color.white)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
@@ -2885,7 +2618,7 @@ private struct ListeningHistoryRankedSongCard: View {
                 .padding(.top, 9)
 
             Text(song.track.artist)
-                .font(.system(size: 9))
+                .font(.system(size: 10))
                 .foregroundStyle(Color(hex: 0x9894A1))
                 .lineLimit(1)
                 .padding(.top, 4)
@@ -2894,7 +2627,7 @@ private struct ListeningHistoryRankedSongCard: View {
                 "\(listeningTime) · \(song.plays.formatted()) "
                     + (song.plays == 1 ? "play" : "plays")
             )
-            .font(.system(size: 9))
+            .font(.system(size: 10))
                 .foregroundStyle(palette.tertiary)
             .lineLimit(1)
             .padding(.top, 5)
@@ -3049,11 +2782,6 @@ private struct RecentlyAddedSection: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .bottom, spacing: 18) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("FRESH TO YOUR LIBRARY")
-                        .font(.system(size: 8, weight: .bold))
-                        .tracking(1.3)
-                        .foregroundStyle(palette.muted)
-
                     Text("Recently Added")
                         .font(.system(size: 20, weight: .bold))
                         .tracking(-0.3)
@@ -3063,7 +2791,7 @@ private struct RecentlyAddedSection: View {
                 Spacer(minLength: 0)
 
                 Text("\(tracks.count) newest")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(palette.muted)
             }
 
@@ -3161,7 +2889,7 @@ private struct RecentlyAddedArtworkCard: View {
                     .padding(.top, 10)
 
                 Text(track.artist)
-                    .font(.system(size: 9))
+                    .font(.system(size: 10))
                     .foregroundStyle(palette.muted)
                     .lineLimit(1)
                     .padding(.top, 4)
@@ -3205,16 +2933,6 @@ private struct CollectionHeroView: View {
         }
     }
 
-    private func showMoreMenu() {
-        guard let window = NSApp.keyWindow, let contentView = window.contentView else { return }
-        let menu = NSMenu()
-        menu.addItem(ClosureMenuItem(title: "Import Songs…", action: model.importLocalFiles))
-        menu.addItem(ClosureMenuItem(title: "Next Track", action: model.next))
-        let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
-        let viewPoint = contentView.convert(windowPoint, from: nil)
-        menu.popUp(positioning: nil, at: viewPoint, in: contentView)
-    }
-
     var body: some View {
         GeometryReader { proxy in
             ZStack {
@@ -3222,20 +2940,6 @@ private struct CollectionHeroView: View {
                     colors: [palette.panel, palette.background, palette.surface],
                     startPoint: .leading,
                     endPoint: .trailing
-                )
-
-                RadialGradient(
-                    colors: [palette.secondary.opacity(0.20), .clear],
-                    center: UnitPoint(x: 0.12, y: 0.20),
-                    startRadius: 10,
-                    endRadius: 270
-                )
-
-                RadialGradient(
-                    colors: [palette.accent.opacity(0.10), .clear],
-                    center: UnitPoint(x: 0.72, y: 0.70),
-                    startRadius: 8,
-                    endRadius: 260
                 )
 
                 HStack(spacing: proxy.size.width < 620 ? 24 : 32) {
@@ -3259,15 +2963,7 @@ private struct CollectionHeroView: View {
                             .frame(width: proxy.size.width < 550 ? 202 : 232)
                         }
                     }
-                    .shadow(color: palette.secondary.opacity(0.42), radius: 28, y: 18)
-
                     VStack(alignment: .leading, spacing: 0) {
-                        Text(collectionKindLabel)
-                            .font(.system(size: 10, weight: .medium))
-                            .tracking(1.7)
-                            .foregroundStyle(palette.ink.opacity(0.76))
-                            .padding(.bottom, 10)
-
                         Text(model.collectionTitle)
                             .font(.system(size: model.collectionTitle.count > 13 ? 48 : 58, weight: .regular))
                             .tracking(-2.2)
@@ -3320,15 +3016,24 @@ private struct CollectionHeroView: View {
                                     action: addSongs
                                 )
 
-                                CircleIconButton(
-                                    systemImage: "ellipsis",
-                                    label: "More",
-                                    size: 34,
-                                    symbolSize: 14,
-                                    background: .clear,
-                                    hoverBackground: Color.white.opacity(0.12),
-                                    action: showMoreMenu
-                                )
+                                Menu {
+                                    Button("Import Songs…", action: model.importLocalFiles)
+                                    Button("Next Track", action: model.next)
+                                } label: {
+                                    HoverCircleIconSurface(
+                                        systemImage: "ellipsis",
+                                        label: "More",
+                                        size: 34,
+                                        symbolSize: 14,
+                                        background: .clear,
+                                        hoverBackground: Color.white.opacity(0.12)
+                                    )
+                                }
+                                .menuStyle(.borderlessButton)
+                                .menuIndicator(.hidden)
+                                .fixedSize()
+                                .help("More")
+                                .accessibilityLabel("More")
                             }
                             .padding(.horizontal, 9)
                             .padding(.vertical, 7)
@@ -3350,29 +3055,6 @@ private struct CollectionHeroView: View {
         }
     }
 
-    private var collectionKindLabel: String {
-        if model.section == .library { return "LIBRARY" }
-        return isLikedCollection ? "YOUR COLLECTION" : "PLAYLIST"
-    }
-}
-
-private final class ClosureMenuItem: NSMenuItem {
-    private let handler: () -> Void
-
-    init(title: String, action: @escaping () -> Void) {
-        handler = action
-        super.init(title: title, action: nil, keyEquivalent: "")
-        target = self
-        self.action = #selector(performAction)
-    }
-
-    required init(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    @objc private func performAction() {
-        handler()
-    }
 }
 
 private struct TrackAreaView: View {
@@ -3817,7 +3499,7 @@ private struct UnavailablePlaylistTrackRow: View {
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
                     Text("\(entry.artist) / Not downloaded")
-                        .font(.system(size: 9))
+                        .font(.system(size: 10))
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
@@ -3896,13 +3578,13 @@ private struct TrackRowView: View {
                                     .lineLimit(1)
                                 if isFavorite {
                                     Image(systemName: "heart.fill")
-                                        .font(.system(size: 7))
+                                        .font(.system(size: 10))
                                         .foregroundStyle(palette.foregroundAccent)
                                 }
                             }
 
                             Text("\(track.artist) / \(track.kind == .video ? "Video" : "Audio")")
-                                .font(.system(size: 9))
+                                .font(.system(size: 10))
                                 .foregroundStyle(Color(hex: 0x8F96A7))
                                 .lineLimit(1)
                         }
@@ -4054,8 +3736,6 @@ private struct StorageView: View {
         }
     }
 
-    private var downloadedTracks: [Track] { visibleTracks.filter { $0.remoteID != nil } }
-    private var importedTracks: [Track] { visibleTracks.filter { $0.remoteID == nil } }
     private var visibleTrackIDs: Set<UUID> { Set(visibleTracks.map(\.id)) }
     private var selectedVisibleTrackIDs: Set<UUID> {
         StorageSelectionPolicy.visibleSelection(
@@ -4063,15 +3743,21 @@ private struct StorageView: View {
             visibleTrackIDs: visibleTrackIDs
         )
     }
-    private var downloadedBytes: Int64 {
-        model.tracks.filter { $0.remoteID != nil }.reduce(0) { $0 + fileSizes[$1.id, default: 0] }
-    }
-    private var importedBytes: Int64 {
-        model.tracks.filter { $0.remoteID == nil }.reduce(0) { $0 + fileSizes[$1.id, default: 0] }
-    }
-
     var body: some View {
         GeometryReader { proxy in
+            let allTracks = model.tracks
+            let renderedTracks = visibleTracks
+            let renderedDownloads = renderedTracks.filter { $0.remoteID != nil }
+            let renderedImports = renderedTracks.filter { $0.remoteID == nil }
+            let renderedSelection = StorageSelectionPolicy.visibleSelection(
+                from: selectedTrackIDs,
+                visibleTrackIDs: Set(renderedTracks.map(\.id))
+            )
+            let allDownloads = allTracks.filter { $0.remoteID != nil }
+            let allImports = allTracks.filter { $0.remoteID == nil }
+            let downloadedBytes = allDownloads.reduce(0) { $0 + fileSizes[$1.id, default: 0] }
+            let importedBytes = allImports.reduce(0) { $0 + fileSizes[$1.id, default: 0] }
+
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .firstTextBaseline) {
@@ -4094,7 +3780,7 @@ private struct StorageView: View {
                             Image(systemName: "plus")
                             Text("Import")
                             Image(systemName: "chevron.down")
-                                .font(.system(size: 8, weight: .bold))
+                                .font(.system(size: 10, weight: .bold))
                                 .opacity(0.78)
                         }
                         .font(.system(size: 11, weight: .bold))
@@ -4123,9 +3809,9 @@ private struct StorageView: View {
 
                 MacStorageSummaryCard(
                     importedBytes: importedBytes,
-                    importedCount: model.tracks.filter { $0.remoteID == nil }.count,
+                    importedCount: allImports.count,
                     downloadedBytes: downloadedBytes,
-                    downloadedCount: model.tracks.filter { $0.remoteID != nil }.count,
+                    downloadedCount: allDownloads.count,
                     availableBytes: availableBytes
                 )
 
@@ -4160,9 +3846,9 @@ private struct StorageView: View {
 
                 MacStorageScopePicker(scope: $scope)
 
-                if isEditing, !selectedVisibleTrackIDs.isEmpty {
+                if isEditing, !renderedSelection.isEmpty {
                     HStack {
-                        Text("\(selectedVisibleTrackIDs.count) selected")
+                        Text("\(renderedSelection.count) selected")
                             .font(.system(size: 11, weight: .semibold))
                         Spacer()
                         Button("Delete Selected", role: .destructive) { confirmsBatchDeletion = true }
@@ -4172,7 +3858,7 @@ private struct StorageView: View {
                     .padding(.horizontal, 4)
                 }
 
-                if visibleTracks.isEmpty {
+                if renderedTracks.isEmpty {
                     ContentUnavailableView(
                         searchText.isEmpty ? scope.emptyTitle : "No Results",
                         systemImage: searchText.isEmpty ? scope.symbol : "magnifyingglass",
@@ -4181,11 +3867,11 @@ private struct StorageView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 40)
                 } else {
-                    if !downloadedTracks.isEmpty {
+                    if !renderedDownloads.isEmpty {
                         MacStorageSection(
-                            title: "DOWNLOADED FROM SERVER",
+                            title: "Downloaded from server",
                             symbol: "icloud.and.arrow.down",
-                            tracks: downloadedTracks,
+                            tracks: renderedDownloads,
                             fileSizes: fileSizes,
                             showAlbum: proxy.size.width >= 690,
                             isEditing: isEditing,
@@ -4194,11 +3880,11 @@ private struct StorageView: View {
                         )
                     }
 
-                    if !importedTracks.isEmpty {
+                    if !renderedImports.isEmpty {
                         MacStorageSection(
-                            title: "IMPORTED ON THIS MAC",
+                            title: "Imported on this Mac",
                             symbol: "desktopcomputer",
-                            tracks: importedTracks,
+                            tracks: renderedImports,
                             fileSizes: fileSizes,
                             showAlbum: proxy.size.width >= 690,
                             isEditing: isEditing,
@@ -4209,14 +3895,6 @@ private struct StorageView: View {
                 }
                 }
                 .padding(34)
-            }
-            .background {
-                RadialGradient(
-                    colors: [palette.secondary.opacity(0.18), .clear],
-                    center: UnitPoint(x: 0.72, y: 0.06),
-                    startRadius: 10,
-                    endRadius: 360
-                )
             }
         }
         .task(id: model.tracks.map(\.id)) {
@@ -4376,7 +4054,7 @@ private struct MacImportChoiceRow: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(palette.ink)
                 Text(detail)
-                    .font(.system(size: 9))
+                    .font(.system(size: 10))
                     .foregroundStyle(palette.muted)
                     .lineLimit(1)
             }
@@ -4384,7 +4062,7 @@ private struct MacImportChoiceRow: View {
             Spacer(minLength: 0)
 
             Image(systemName: "chevron.right")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(palette.muted.opacity(0.75))
         }
         .padding(.horizontal, 10)
@@ -4537,7 +4215,7 @@ private struct MacStorageMetric: View {
                 Text(title).font(.system(size: 10, weight: .medium))
             }
             Text(storageByteText(bytes)).font(.system(size: 16, weight: .semibold))
-            Text(detail).font(.system(size: 9)).foregroundStyle(palette.muted)
+            Text(detail).font(.system(size: 10)).foregroundStyle(palette.muted)
         }
         .frame(minWidth: 120, alignment: .leading)
     }
@@ -4562,7 +4240,6 @@ private struct MacStorageSection: View {
                     .foregroundStyle(palette.foregroundAccent)
                 Text(title)
                     .font(.system(size: 12, weight: .semibold))
-                    .tracking(1.1)
                     .foregroundStyle(Color(hex: 0xD4D7E0))
                 Spacer()
                 Text("\(tracks.count) \(tracks.count == 1 ? "song" : "songs")")
@@ -4672,13 +4349,13 @@ private struct MacStorageTrackRow: View {
                                     .lineLimit(1)
 
                                 Image(systemName: track.remoteID == nil ? "desktopcomputer" : "checkmark.circle.fill")
-                                    .font(.system(size: 7))
+                                    .font(.system(size: 10))
                                     .foregroundStyle(track.remoteID == nil ? Color(hex: 0x7BA7E8) : Color(hex: 0x55D98B))
                                     .help(track.remoteID == nil ? "Imported on this Mac" : "Downloaded from server")
                             }
 
                             Text("\(track.artist) / \(track.kind == .video ? "Video" : "Audio")")
-                                .font(.system(size: 9))
+                                .font(.system(size: 10))
                                 .foregroundStyle(Color(hex: 0x8F96A7))
                                 .lineLimit(1)
                         }

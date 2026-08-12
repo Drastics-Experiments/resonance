@@ -4,6 +4,32 @@ enum MobileAppCompatibility {
     static let legacyApplicationSupportName = ["Liked", "SongsMobile"].joined()
 }
 
+enum MobileApplicationSupport {
+    static func root(fileManager: FileManager = .default) -> URL {
+        if let resolved = try? fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        ) {
+            return resolved
+        }
+        return fallbackRoot(
+            discoveredRoot: fileManager.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first,
+            homeDirectory: fileManager.homeDirectoryForCurrentUser
+        )
+    }
+
+    static func fallbackRoot(discoveredRoot: URL?, homeDirectory: URL) -> URL {
+        discoveredRoot ?? homeDirectory
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+    }
+}
+
 enum MobileLegacyAppMigration {
     static let applicationSupportName = "Resonance"
 
@@ -12,8 +38,7 @@ enum MobileLegacyAppMigration {
         fileManager: FileManager = .default,
         applicationSupportRoot: URL? = nil
     ) -> Bool {
-        let support = applicationSupportRoot
-            ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let support = applicationSupportRoot ?? MobileApplicationSupport.root(fileManager: fileManager)
         let storageMigrated = migrateDirectory(
             from: support.appendingPathComponent(
                 MobileAppCompatibility.legacyApplicationSupportName,

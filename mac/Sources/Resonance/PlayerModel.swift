@@ -4,6 +4,7 @@ import Combine
 import CryptoKit
 import Darwin
 import Foundation
+import OSLog
 import UniformTypeIdentifiers
 
 enum MacCrossfadePolicy {
@@ -248,6 +249,10 @@ private final class PersistenceWork<Value: Encodable>: @unchecked Sendable {
     private let value: Value
     private let key: String
     private let defaults: UserDefaults
+    private let logger = Logger(
+        subsystem: "com.gavindietrich.Resonance",
+        category: "Persistence"
+    )
 
     init(value: Value, key: String, defaults: UserDefaults) {
         self.value = value
@@ -256,8 +261,11 @@ private final class PersistenceWork<Value: Encodable>: @unchecked Sendable {
     }
 
     func perform() {
-        guard let data = try? JSONEncoder().encode(value) else { return }
-        defaults.set(data, forKey: key)
+        do {
+            defaults.set(try JSONEncoder().encode(value), forKey: key)
+        } catch {
+            logger.error("Could not encode persistent app state")
+        }
     }
 }
 
@@ -584,14 +592,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             if !oldValue.isEmpty {
                 let oldURL = URL(string: oldValue)
                 let newURL = URL(string: newValue)
-                if oldURL == nil || newURL == nil || !Self.sameOrigin(oldURL!, newURL!) {
+                if let oldURL, let newURL, Self.sameOrigin(oldURL, newURL) {
+                    serverContextChanged = false
+                } else {
                     cancelRemoteSongMetadataHydration()
                     serverCatalogRequestGeneration &+= 1
                     serverCatalogUploadMutations.removeAll()
                     remoteSongs.removeAll()
                     selectedRemoteSongIDs.removeAll()
-                } else {
-                    serverContextChanged = false
                 }
             }
             if serverContextChanged {
@@ -904,9 +912,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         self.serverCacheRoot = serverCacheRoot
         self.shouldPersistServerCredentials = persistServerCredentials
         self.systemPlaybackController = systemPlaybackController
-        if persistServerCredentials {
-            Self.prepareCredentialStore()
-        }
+        var credentialStorePrepared = !persistServerCredentials || Self.prepareCredentialStore()
 
         let loadResult = loadPersistedLibrary ? Self.loadLibrary(from: defaults) : .missing
         var stored: StoredLibrary?
@@ -1038,8 +1044,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         accountDisplayName = restoredAccountSession?.profileDisplayName
         accountImageURL = restoredAccountSession?.imageURL
         if restoredAccountSession != nil {
-            Self.saveServerToken("")
-            Self.saveServerToken("", key: Self.adminCredentialKey)
+            let deletedClientToken = Self.saveServerToken("")
+            let deletedAdminToken = Self.saveServerToken("", key: Self.adminCredentialKey)
+            credentialStorePrepared = credentialStorePrepared
+                && deletedClientToken
+                && deletedAdminToken
         }
         playlistRevision = stored?.playlistRevision ?? 0
         knownRemotePlaylistIDs = stored?.knownRemotePlaylistIDs ?? []
@@ -1167,6 +1176,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             persistLibrary()
         }
         didFinishInitialization = true
+        if !credentialStorePrepared {
+            serverMessage = Self.credentialPersistenceFailureMessage
+        }
         resetClientConfigurationForCurrentContext()
         configureSystemPlaybackHandlers()
         if let restoredAccountSession { scheduleAccountRefresh(restoredAccountSession) }
@@ -1836,7 +1848,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         accountSession = nil
         accountRefreshTask?.cancel()
         accountRefreshTask = nil
-        Self.deleteAccountSession()
+        let deletedAccountSession = !shouldPersistServerCredentials || Self.deleteAccountSession()
         accountEmail = nil
         accountRole = nil
         accountDisplayName = nil
@@ -1847,7 +1859,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         remoteSongs.removeAll()
         remoteCatalogIsAuthoritative = false
         selectedRemoteSongIDs.removeAll()
-        serverMessage = "Not connected"
+        let clearedStoredCredentials = persistServerCredentialsImmediately()
+        serverMessage = deletedAccountSession && clearedStoredCredentials
+            ? "Not connected"
+            : Self.credentialPersistenceFailureMessage
         downloadStatus = ""
         uploadStatus = ""
         playlistSyncStatus = ""
@@ -1894,8 +1909,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 isDefault: true
             ))
         }
-        Self.saveServerToken("")
-        Self.saveServerToken("", key: Self.adminCredentialKey)
+        guard !shouldPersistServerCredentials || persistServerCredentialsImmediately() else {
+            throw ResonanceSocialAuthError.rejected("The account credentials could not be saved securely.")
+        }
         scheduleAccountRefresh(session)
         serverMessage = "Signed in with Clerk"
         await refreshClientConfigurationNow()
@@ -3491,7 +3507,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             let currentTrackID,
             let currentIndex = context.firstIndex(where: { $0.id == currentTrackID })
         else {
-            startTrack(context.last!.id, preservingShuffleQueue: false)
+            guard let fallbackTrack = context.last else { return }
+            startTrack(fallbackTrack.id, preservingShuffleQueue: false)
             return
         }
         let previousIndex = currentIndex == context.startIndex ? context.index(before: context.endIndex) : context.index(before: currentIndex)
@@ -3792,54 +3809,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         )
         serverMessage = "Connected • \(remoteSongs.count) songs available"
         return true
-    }
-
-    private func importServerSourcePage(
-        for track: Track,
-        rawUserInput: String?,
-        base: URL,
-        adminToken: String,
-        profileID: String,
-        context: LocalImportTransferContext
-    ) async throws -> RemoteSong {
-        guard clientConfiguration.allowsServerSourceLink else {
-            throw LocalImportTransferContextError.uploadModeUnavailable
-        }
-        guard let sourcePage = MacSourceImportPolicy.exactCanonicalYouTubePage(rawUserInput) else {
-            throw LocalImportTransferContextError.unsupportedSourceLink
-        }
-        let payload = MacSourceImportRequest(
-            sourcePageURL: sourcePage.absoluteString
-        )
-        let body = try JSONEncoder().encode(payload)
-        let endpoint = base.appendingPathComponent("api/v1/admin/source-imports")
-        guard Self.sameOrigin(endpoint, base) else { throw ServerSyncError.crossOriginDownload }
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 600
-        request.httpBody = body
-        request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        setProfileHeader(on: &request, profileID: profileID)
-        applyCurrentClientConfigHeaders(to: &request, base: base, fallbackToken: adminToken)
-        try validateLocalImportTransfer(context)
-        let (data, http) = try await boundedResponseData(for: request, limit: 2 * 1_024 * 1_024)
-        guard http.url.map({ Self.sameOrigin($0, base) }) == true,
-              Self.isJSONResponse(http) else {
-            throw ServerSyncError.invalidResponse
-        }
-        if http.statusCode == 201,
-           let imported = try? JSONDecoder().decode(MacSourceImportResponse.self, from: data),
-           imported.schemaVersion == 1 {
-            return imported.song
-        }
-        if http.statusCode == 409 {
-            if let duplicate = MacSourceImportPolicy.duplicateSong(from: data) {
-                return duplicate
-            }
-        }
-        throw Self.serverError(status: http.statusCode, data: data)
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
@@ -4921,9 +4890,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         guard !token.isEmpty else { throw ServerSyncError.missingToken }
         saveServerURL(base)
         serverToken = token
-        if shouldPersistServerCredentials {
-            Self.saveServerToken(token)
-        }
     }
 
     private func saveServerURL(_ base: URL) {
@@ -5017,19 +4983,27 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         remoteSongs = [song] + remoteSongs.filter { $0.id != song.id }
     }
 
-    private func persistServerCredentialsImmediately() {
-        guard shouldPersistServerCredentials else { return }
+    @discardableResult
+    private func persistServerCredentialsImmediately() -> Bool {
+        guard shouldPersistServerCredentials else { return true }
         defaults.set(serverURLString, forKey: Self.serverURLKey)
+        let succeeded: Bool
         if let accountSession {
-            _ = Self.saveAccountSession(accountSession)
-            Self.saveServerToken("")
-            Self.saveServerToken("", key: Self.adminCredentialKey)
-            return
+            let savedSession = Self.saveAccountSession(accountSession)
+            let deletedClientToken = Self.saveServerToken("")
+            let deletedAdminToken = Self.saveServerToken("", key: Self.adminCredentialKey)
+            succeeded = savedSession && deletedClientToken && deletedAdminToken
+        } else {
+            let token = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            let savedClientToken = Self.saveServerToken(token)
+            let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            let savedAdminToken = Self.saveServerToken(adminToken, key: Self.adminCredentialKey)
+            succeeded = savedClientToken && savedAdminToken
         }
-        let token = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        Self.saveServerToken(token)
-        let adminToken = serverAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        Self.saveServerToken(adminToken, key: Self.adminCredentialKey)
+        if !succeeded, didFinishInitialization {
+            serverMessage = Self.credentialPersistenceFailureMessage
+        }
+        return succeeded
     }
 
     func syncPlaylists() {
@@ -6464,22 +6438,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         return changed
     }
 
-    private func reconcileDownloadedMediaKindsAutomatically() async {
-        guard !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let base = try? normalizedServerURL() else { return }
-        let profileID = syncProfileID
-        let credentialFingerprint = MacClientConfigContext.tokenFingerprint(serverToken)
-        guard let catalog = try? await fetchRemoteCatalog(base: base) else { return }
-        guard profileID == syncProfileID,
-              credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken),
-              let currentBase = try? normalizedServerURL(),
-              Self.serverContextKey(base: currentBase, profileID: profileID)
-                == Self.serverContextKey(base: base, profileID: profileID) else { return }
-        remoteSongs = catalog
-        remoteCatalogIsAuthoritative = true
-        reconcileDownloadedMediaKinds(with: catalog)
-    }
-
     private func authenticatedRequest(
         url: URL,
         profileID: String? = nil,
@@ -6656,7 +6614,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     private static var credentialStoreURL: URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let support = ResonanceApplicationSupport.root()
         return support
             .appendingPathComponent("Resonance", isDirectory: true)
             .appendingPathComponent("server-credentials.json")
@@ -6670,19 +6628,21 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         CredentialStorePolicy.isPreviewBundle(bundleIdentifier: Bundle.main.bundleIdentifier)
     }
 
-    private static func prepareCredentialStore() {
+    private static let credentialPersistenceFailureMessage =
+        "Could not save credentials securely. Check the Resonance Application Support permissions."
+
+    private static func prepareCredentialStore() -> Bool {
         bootstrapCredentialStoreFromEnvironment()
     }
 
-    private static func bootstrapCredentialStoreFromEnvironment() {
-        let environment = ProcessInfo.processInfo.environment
-        guard let client = environment["RESONANCE_CLIENT_TOKEN"],
-              let admin = environment["RESONANCE_ADMIN_TOKEN"],
-              !client.isEmpty, !admin.isEmpty else { return }
-        _ = credentialStore.save(client, key: clientCredentialKey)
-        _ = credentialStore.save(admin, key: adminCredentialKey)
-        unsetenv("RESONANCE_CLIENT_TOKEN")
-        unsetenv("RESONANCE_ADMIN_TOKEN")
+    private static func bootstrapCredentialStoreFromEnvironment() -> Bool {
+        CredentialEnvironmentBootstrap.persist(
+            environment: ProcessInfo.processInfo.environment,
+            store: credentialStore,
+            clientKey: clientCredentialKey,
+            adminKey: adminCredentialKey,
+            unset: { name in _ = unsetenv(name) }
+        )
     }
 
     private static func readServerToken() -> String {
@@ -6695,12 +6655,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         ) ?? ""
     }
 
-    private static func saveServerToken(_ token: String) {
-        _ = credentialStore.save(token, key: clientCredentialKey)
+    @discardableResult
+    private static func saveServerToken(_ token: String) -> Bool {
+        credentialStore.save(token, key: clientCredentialKey)
     }
 
-    private static func saveServerToken(_ token: String, key: String) {
-        _ = credentialStore.save(
+    @discardableResult
+    private static func saveServerToken(_ token: String, key: String) -> Bool {
+        credentialStore.save(
             token,
             key: key == adminCredentialKey ? adminCredentialKey : clientCredentialKey
         )
@@ -6719,8 +6681,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         return credentialStore.save(raw, key: accountSessionCredentialKey)
     }
 
-    private static func deleteAccountSession() {
-        _ = credentialStore.delete(key: accountSessionCredentialKey)
+    @discardableResult
+    private static func deleteAccountSession() -> Bool {
+        credentialStore.delete(key: accountSessionCredentialKey)
     }
 
     private enum PathExtension {

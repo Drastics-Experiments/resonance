@@ -7,13 +7,13 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -38,10 +38,10 @@ import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -67,6 +67,12 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
 import kotlin.math.roundToInt
 
 @Composable
@@ -91,6 +97,14 @@ fun MiniPlayer(
                     actions.seekToFraction(change.position.x / size.width.coerceAtLeast(1))
                 }
             }
+            .semantics {
+                contentDescription = "Playback position"
+                progressBarRangeInfo = ProgressBarRangeInfo(fraction ?: 0f, 0f..1f)
+                setProgress { value ->
+                    actions.seekToFraction(value.coerceIn(0f, 1f))
+                    true
+                }
+            }
     } else {
         Modifier
     }
@@ -98,12 +112,18 @@ fun MiniPlayer(
         modifier = modifier
             .fillMaxWidth()
             .background(palette.panel.copy(alpha = .98f))
-            .clickable(onClick = onOpen)
             .padding(top = 8.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(
+                    role = Role.Button,
+                    onClickLabel = "Open now playing",
+                    onClick = onOpen,
+                )
+                .padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -114,7 +134,7 @@ fun MiniPlayer(
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(track.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(track.artist, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f), maxLines = 1)
+                Text(track.artist, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f), maxLines = 1)
                 CompactPlaybackStatus(state.playbackStatus)
             }
             IconButton(
@@ -162,8 +182,9 @@ fun MiniPlayer(
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(8.dp)
+                .height(48.dp)
                 .then(seekInput)
+                .padding(vertical = 22.dp)
                 .background(Color.White.copy(alpha = .13f)),
             contentAlignment = Alignment.CenterStart,
         ) {
@@ -171,7 +192,7 @@ fun MiniPlayer(
                 Box(
                     Modifier
                         .fillMaxWidth(it)
-                        .height(3.dp)
+                        .fillMaxHeight()
                         .background(MaterialTheme.colorScheme.primary),
                 )
             }
@@ -235,11 +256,10 @@ fun NowPlayingScreen(
                 ) {
                     IconButton(
                         onClick = onDismiss,
-                        modifier = Modifier.size(46.dp).background(Color.White.copy(alpha = .08f), CircleShape),
                     ) { Icon(Icons.Default.KeyboardArrowDown, "Minimize") }
                     Spacer(Modifier.weight(1f))
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Eyebrow("Now Playing")
+                        SectionLabel("Now playing")
                         Text("Resonance", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
                     }
                     Spacer(Modifier.weight(1f))
@@ -257,7 +277,6 @@ fun NowPlayingScreen(
                     Artwork(
                         state.artworkPathsByTrackId[track.id] ?: track.artworkFilename,
                         Modifier.fillMaxWidth().heightIn(max = 360.dp).aspectRatio(1f),
-                        showWaveform = true,
                     )
                 }
             }
@@ -406,7 +425,7 @@ fun NowPlayingScreen(
                         .padding(18.dp),
                     verticalArrangement = Arrangement.spacedBy(11.dp),
                 ) {
-                    Eyebrow("Song Details")
+                    SectionLabel("Song details")
                     DetailRow("Title", track.title)
                     DetailRow("Artist", track.artist)
                     DetailRow("Album", track.album)
@@ -433,58 +452,14 @@ private fun PlayerSeekBar(
     enabled: Boolean,
     onSeek: (Float) -> Unit,
 ) {
-    val palette = LocalResonancePalette.current
-    val clampedFraction = fraction?.coerceIn(0f, 1f) ?: 0f
-    val thumbDiameterPx = with(LocalDensity.current) { 20.dp.toPx() }
-    val seekInput = if (enabled) {
-        Modifier
-            .pointerInput(Unit) {
-                detectTapGestures { offset -> onSeek(offset.x / size.width.coerceAtLeast(1)) }
-            }
-            .pointerInput(Unit) {
-                detectHorizontalDragGestures { change, _ ->
-                    change.consume()
-                    onSeek(change.position.x / size.width.coerceAtLeast(1))
-                }
-            }
-    } else {
-        Modifier
-    }
-    BoxWithConstraints(
+    Slider(
+        value = fraction?.coerceIn(0f, 1f) ?: 0f,
+        onValueChange = onSeek,
+        enabled = enabled,
         modifier = Modifier
             .fillMaxWidth()
-            .height(32.dp)
-            .then(seekInput),
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(4.dp)
-                .clip(CircleShape)
-                .background(Color.White.copy(alpha = .15f)),
-        )
-        Box(
-            Modifier
-                .fillMaxWidth(clampedFraction)
-                .height(4.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary),
-        )
-        if (enabled) {
-            Box(
-                Modifier
-                    .offset {
-                        IntOffset(
-                            x = (clampedFraction * (constraints.maxWidth - thumbDiameterPx)).roundToInt(),
-                            y = 0,
-                        )
-                    }
-                    .size(20.dp)
-                    .background(palette.tertiary, CircleShape),
-            )
-        }
-    }
+            .semantics { contentDescription = "Playback position" },
+    )
 }
 
 @Composable
@@ -492,13 +467,13 @@ private fun CompactPlaybackStatus(status: PlaybackUiStatus) {
     when (status) {
         PlaybackUiStatus.Buffering -> Text(
             "Buffering…",
-            fontSize = 10.sp,
+            fontSize = 12.sp,
             color = MaterialTheme.colorScheme.tertiary,
             maxLines = 1,
         )
         is PlaybackUiStatus.Failed -> Text(
             status.message,
-            fontSize = 10.sp,
+            fontSize = 12.sp,
             color = MaterialTheme.colorScheme.error,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

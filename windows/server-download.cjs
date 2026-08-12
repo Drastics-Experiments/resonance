@@ -2,7 +2,7 @@ const SERVER_DOWNLOAD_ATTEMPTS = 3;
 const SERVER_DOWNLOAD_RETRY_DELAYS_MS = Object.freeze([400, 1_200]);
 const SERVER_DOWNLOAD_PROGRESS_INTERVAL_MS = 100;
 
-function serverDownloadDisplayName(song, _remoteName, preferredTitle) {
+function serverDownloadDisplayName(song, preferredTitle) {
   const preferred = typeof preferredTitle === "string" ? preferredTitle.trim() : "";
   if (preferred) return preferred;
   const title = typeof song?.title === "string" ? song.title.trim() : "";
@@ -25,7 +25,7 @@ function serverDownloadProgressEvent({
   const bytesTotal = Math.max(0, Number(totalBytes) || 0);
   return {
     direction: "download",
-    currentFile: serverDownloadDisplayName(song, null, preferredTitle),
+    currentFile: serverDownloadDisplayName(song, preferredTitle),
     completed: Math.max(0, Math.floor(Number(completedItems) || 0)),
     total: count,
     itemCompleted: Math.min(bytesTotal || Number.MAX_SAFE_INTEGER, Math.max(0, Number(completedBytes) || 0)),

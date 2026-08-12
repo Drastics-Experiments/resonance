@@ -11,6 +11,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -42,6 +45,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
@@ -59,7 +63,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -74,24 +77,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.preferredFrameRate
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -251,7 +254,7 @@ fun ClipEditorDialog(
                 tonalElevation = 8.dp,
             ) {
                 Column(Modifier.fillMaxSize()) {
-                    CinematicClipHeader(
+                    ClipEditorHeader(
                         selectedTrack = selectedTrack,
                         tracks = state.tracks,
                         saveEnabled = selectedTrack?.durationMs?.let { it >= 250 } == true
@@ -263,7 +266,7 @@ fun ClipEditorDialog(
                             onDismiss()
                         },
                         onSave = {
-                            val track = selectedTrack ?: return@CinematicClipHeader
+                            val track = selectedTrack ?: return@ClipEditorHeader
                             focus.clearFocus()
                             stopPreview()
                             if (startMs <= 0L && endMs >= track.durationMs) {
@@ -302,11 +305,10 @@ fun ClipEditorDialog(
                                     fontSize = 13.sp,
                                 )
                             } else {
-                                CinematicClipStage(
+                                ClipPreviewStage(
                                     track = selectedTrack,
                                     artworkPath = state.artworkPathsByTrackId[selectedTrack.id],
                                     player = previewPlayer,
-                                    waveformSamples = waveformSamples,
                                     isPlaying = previewing,
                                     expanded = previewExpanded,
                                     positionMs = previewPositionMs,
@@ -338,7 +340,7 @@ fun ClipEditorDialog(
                                 )
 
                                 if (!previewExpanded) {
-                                    CinematicClipTimeline(
+                                    ClipTimeline(
                                         track = selectedTrack,
                                         waveformSamples = waveformSamples,
                                         videoFrames = videoFrames,
@@ -362,10 +364,10 @@ fun ClipEditorDialog(
                                 }
 
                                 Text(
-                                    saveMessage ?: "Unsaved changes are discarded by Done. The original media file is never changed.",
+                                    saveMessage ?: "Save before closing. The media file is never changed.",
                                     modifier = Modifier.padding(horizontal = 3.dp, vertical = 2.dp),
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .54f),
-                                    fontSize = 10.sp,
+                                    fontSize = 12.sp,
                                 )
                             }
                         }
@@ -374,16 +376,16 @@ fun ClipEditorDialog(
             }
 
             if (settingsOpen && selectedTrack != null) {
-                CinematicClipOverlay(onOutsideClick = { settingsOpen = false }) {
+                ClipEditorOverlay(onOutsideClick = { settingsOpen = false }) {
                     Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
-                        CinematicOverlayHeader("CLIP SETTINGS", "Fine tune your clip") { settingsOpen = false }
-                        CinematicSettingsTrackSummary(
+                        ClipOverlayHeader("Clip settings") { settingsOpen = false }
+                        ClipSettingsTrackSummary(
                             track = selectedTrack,
                             artworkPath = state.artworkPathsByTrackId[selectedTrack.id],
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             ClipTimeField(
-                                "START",
+                                "Start",
                                 startText,
                                 { startText = it },
                                 {
@@ -399,7 +401,7 @@ fun ClipEditorDialog(
                                 Modifier.weight(1f),
                             )
                             ClipTimeField(
-                                "END",
+                                "End",
                                 endText,
                                 { endText = it },
                                 {
@@ -417,7 +419,7 @@ fun ClipEditorDialog(
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column {
-                                Eyebrow("Clip Length")
+                                SectionLabel("Clip length")
                                 Text(clipTime(endMs - startMs), color = palette.tertiary, fontWeight = FontWeight.Bold)
                             }
                             Spacer(Modifier.weight(1f))
@@ -429,23 +431,23 @@ fun ClipEditorDialog(
                                 previewPlayer.seekTo(startMs)
                                 updateTexts()
                                 saveMessage = null
-                            }) { Text("Use Full Song") }
+                            }) { Text("Use full song") }
                         }
                     }
                 }
             }
 
             if (helpOpen) {
-                CinematicClipOverlay(onOutsideClick = { helpOpen = false }) {
+                ClipEditorOverlay(onOutsideClick = { helpOpen = false }) {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        CinematicOverlayHeader("HOW IT WORKS", "Create your perfect clip") { helpOpen = false }
+                        ClipOverlayHeader("How it works") { helpOpen = false }
                         Text(
-                            "Drag the yellow handles to choose a range. Tap the waveform to scrub, then use the center controls to preview exactly what will play.",
+                            "Drag the handles to choose a range, or tap the timeline to seek. Use the playback controls to preview it.",
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
                             fontSize = 13.sp,
                         )
                         Text(
-                            "Save updates playback for the active profile without changing the media file. Done closes the editor and discards anything not saved.",
+                            "Save stores the range for the active profile without editing the media file. Closing discards unsaved changes.",
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
                             fontSize = 13.sp,
                         )
@@ -457,7 +459,7 @@ fun ClipEditorDialog(
 }
 
 @Composable
-private fun CinematicClipHeader(
+private fun ClipEditorHeader(
     selectedTrack: Track?,
     tracks: List<Track>,
     saveEnabled: Boolean,
@@ -522,13 +524,9 @@ private fun CinematicClipHeader(
                 onClick = onSave,
                 enabled = saveEnabled,
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 13.dp, vertical = 0.dp),
-                modifier = Modifier.height(34.dp),
             ) { Text("Save", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
             IconButton(onClick = onHelp) {
-                Surface(shape = RoundedCornerShape(999.dp), color = Color.Transparent, border = BorderStroke(1.5.dp, Color.White.copy(alpha = .9f))) {
-                    Text("?", modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp), color = Color.White, fontWeight = FontWeight.Bold)
-                }
+                Icon(Icons.Default.HelpOutline, contentDescription = "Clip editor help", tint = Color.White)
             }
             IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, contentDescription = "Clip settings", tint = Color.White) }
         }
@@ -536,7 +534,7 @@ private fun CinematicClipHeader(
 }
 
 @Composable
-private fun CinematicSettingsTrackSummary(track: Track, artworkPath: String?) {
+private fun ClipSettingsTrackSummary(track: Track, artworkPath: String?) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = Color.White.copy(alpha = .055f),
@@ -579,11 +577,10 @@ private fun CinematicSettingsTrackSummary(track: Track, artworkPath: String?) {
 }
 
 @Composable
-private fun CinematicClipStage(
+private fun ClipPreviewStage(
     track: Track,
     artworkPath: String?,
     player: ExoPlayer,
-    waveformSamples: List<Float>,
     isPlaying: Boolean,
     expanded: Boolean,
     positionMs: Long,
@@ -603,20 +600,13 @@ private fun CinematicClipStage(
         Column {
             if (isVideoClipTrack(track)) {
                 Box(Modifier.fillMaxWidth().height(if (expanded) 500.dp else 286.dp)) {
-                    ClipVideoPreview(player, isPlaying, track.title)
+                    ClipVideoPreview(player, track.title)
                 }
             } else {
                 Box(
                     modifier = Modifier.fillMaxWidth().height(if (expanded) 500.dp else 286.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    CinematicAndroidVisualizer(
-                        samples = waveformSamples,
-                        isPlaying = isPlaying,
-                        positionMs = positionMs,
-                        durationMs = track.durationMs,
-                        player = player,
-                    )
                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(7.dp)) {
                         Artwork(
                             path = artworkPath,
@@ -631,9 +621,9 @@ private fun CinematicClipStage(
                 modifier = Modifier.fillMaxWidth().height(54.dp).background(palette.raised).padding(horizontal = 14.dp),
             ) {
                 Row(modifier = Modifier.align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
-                    Text(clipTime(positionMs), color = palette.tertiary, fontSize = 11.sp)
-                    Text("  /  ", color = Color.White.copy(alpha = .35f), fontSize = 11.sp)
-                    Text(clipTime(endMs), color = Color.White, fontSize = 11.sp)
+                    Text(clipTime(positionMs), color = palette.tertiary, fontSize = 12.sp)
+                    Text(" / ", color = Color.White.copy(alpha = .5f), fontSize = 12.sp)
+                    Text(clipTime(endMs), color = Color.White, fontSize = 12.sp)
                 }
                 Row(modifier = Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(18.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onSkipStart, enabled = enabled) { Icon(Icons.Default.SkipPrevious, contentDescription = "Go to clip start", tint = Color.White) }
@@ -649,68 +639,7 @@ private fun CinematicClipStage(
 }
 
 @Composable
-private fun CinematicAndroidVisualizer(
-    samples: List<Float>,
-    isPlaying: Boolean,
-    positionMs: Long,
-    durationMs: Long,
-    player: ExoPlayer,
-) {
-    val palette = LocalResonancePalette.current
-    var livePositionMs by remember(player) { mutableLongStateOf(positionMs) }
-
-    LaunchedEffect(isPlaying, player, durationMs) {
-        if (!isPlaying) {
-            livePositionMs = positionMs
-            return@LaunchedEffect
-        }
-        var lastRenderNanos = Long.MIN_VALUE
-        val renderIntervalNanos = 1_000_000_000L / 60L
-        while (true) {
-            withFrameNanos { frameTimeNanos ->
-                if (lastRenderNanos == Long.MIN_VALUE || frameTimeNanos - lastRenderNanos >= renderIntervalNanos) {
-                    livePositionMs = player.currentPosition.coerceIn(0L, durationMs)
-                    lastRenderNanos = frameTimeNanos
-                }
-            }
-        }
-    }
-    LaunchedEffect(positionMs, isPlaying) {
-        if (!isPlaying) livePositionMs = positionMs
-    }
-
-    Canvas(
-        modifier = Modifier
-            .fillMaxSize()
-            .preferredFrameRate(60f)
-            .background(Brush.radialGradient(listOf(palette.secondary.copy(alpha = .62f), palette.background))),
-    ) {
-        val barCount = 96
-        val gap = 1.5.dp.toPx()
-        val width = (size.width - gap * (barCount - 1)) / barCount
-        val renderedPositionMs = if (isPlaying) livePositionMs else positionMs
-        val progress = if (durationMs > 0) renderedPositionMs.toFloat() / durationMs else 0f
-        repeat(barCount) { index ->
-            val barProgress = index.toFloat() / (barCount - 1)
-            val samplePosition = if (isPlaying) {
-                (progress + (barProgress - .3f) * .24f).coerceIn(0f, 1f)
-            } else {
-                barProgress
-            }
-            val level = sampledAndroidClipLevel(samples, samplePosition)
-            val height = (size.height * .72f * level).coerceAtLeast(5f)
-            drawRoundRect(
-                color = palette.accent.copy(alpha = .76f),
-                topLeft = Offset(index * (width + gap), size.height - height),
-                size = androidx.compose.ui.geometry.Size(width.coerceAtLeast(1f), height),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(width / 2),
-            )
-        }
-    }
-}
-
-@Composable
-private fun CinematicClipTimeline(
+private fun ClipTimeline(
     track: Track,
     waveformSamples: List<Float>,
     videoFrames: List<Bitmap>,
@@ -727,9 +656,9 @@ private fun CinematicClipTimeline(
     ) {
         Column {
             Row(Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 7.dp)) {
-                repeat(6) { index ->
-                    Text(clipTime(track.durationMs * index / 5), color = Color.White.copy(alpha = .58f), fontSize = 9.sp)
-                    if (index < 5) Spacer(Modifier.weight(1f))
+                repeat(3) { index ->
+                    Text(clipTime(track.durationMs * index / 2), color = Color.White.copy(alpha = .68f), fontSize = 12.sp)
+                    if (index < 2) Spacer(Modifier.weight(1f))
                 }
             }
             Canvas(Modifier.fillMaxWidth().height(14.dp).padding(horizontal = 8.dp)) {
@@ -738,13 +667,13 @@ private fun CinematicClipTimeline(
                     drawRect(Color.White.copy(alpha = if (index % 6 == 0) .4f else .2f), topLeft = Offset(x, 0f), size = androidx.compose.ui.geometry.Size(1.dp.toPx(), if (index % 6 == 0) size.height else size.height * .58f))
                 }
             }
-            CinematicAndroidWaveform(track, waveformSamples, videoFrames, startMs, endMs, playheadMs, onRangeChange, onSeek)
+            ClipTimelineWaveform(track, waveformSamples, videoFrames, startMs, endMs, playheadMs, onRangeChange, onSeek)
         }
     }
 }
 
 @Composable
-private fun CinematicAndroidWaveform(
+private fun ClipTimelineWaveform(
     track: Track,
     waveformSamples: List<Float>,
     videoFrames: List<Bitmap>,
@@ -769,7 +698,40 @@ private fun CinematicAndroidWaveform(
         modifier = Modifier
             .fillMaxWidth()
             .height(108.dp)
-            .semantics { contentDescription = "Clip waveform with draggable handles" }
+            .semantics {
+                contentDescription = "Clip range"
+                stateDescription = "Start ${clipTime(currentStart)}, end ${clipTime(currentEnd)}"
+                customActions = listOf(
+                    CustomAccessibilityAction("Move start earlier") {
+                        val next = (currentStart - 1_000L).coerceAtLeast(0L)
+                        if (next == currentStart) false else {
+                            currentOnRangeChange(next, currentEnd)
+                            true
+                        }
+                    },
+                    CustomAccessibilityAction("Move start later") {
+                        val next = (currentStart + 1_000L).coerceAtMost(currentEnd - 250L)
+                        if (next == currentStart) false else {
+                            currentOnRangeChange(next, currentEnd)
+                            true
+                        }
+                    },
+                    CustomAccessibilityAction("Move end earlier") {
+                        val next = (currentEnd - 1_000L).coerceAtLeast(currentStart + 250L)
+                        if (next == currentEnd) false else {
+                            currentOnRangeChange(currentStart, next)
+                            true
+                        }
+                    },
+                    CustomAccessibilityAction("Move end later") {
+                        val next = (currentEnd + 1_000L).coerceAtMost(duration)
+                        if (next == currentEnd) false else {
+                            currentOnRangeChange(currentStart, next)
+                            true
+                        }
+                    },
+                )
+            }
             .pointerInput(track.id, duration) {
                 detectTapGestures { offset ->
                     val value = (offset.x / size.width.coerceAtLeast(1) * duration).toLong().coerceIn(currentStart, currentEnd)
@@ -826,8 +788,8 @@ private fun CinematicAndroidWaveform(
         }
         drawRect(palette.tertiary, topLeft = Offset(startX, 0f), size = androidx.compose.ui.geometry.Size((endX - startX).coerceAtLeast(0f), 2.dp.toPx()))
         drawRect(palette.tertiary, topLeft = Offset(startX, size.height - 2.dp.toPx()), size = androidx.compose.ui.geometry.Size((endX - startX).coerceAtLeast(0f), 2.dp.toPx()))
-        drawCinematicHandle(startX, true, palette.tertiary)
-        drawCinematicHandle(endX, false, palette.tertiary)
+        drawClipHandle(startX, true, palette.tertiary)
+        drawClipHandle(endX, false, palette.tertiary)
         val playheadX = size.width * playheadMs.coerceIn(0, duration) / duration.toFloat()
         drawRect(Color.White, topLeft = Offset(playheadX, 0f), size = androidx.compose.ui.geometry.Size(1.5.dp.toPx(), size.height))
     }
@@ -857,7 +819,7 @@ private suspend fun extractAndroidClipVideoFrames(
     }
 }
 
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCinematicHandle(
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawClipHandle(
     x: Float,
     pointsRight: Boolean,
     color: Color,
@@ -887,22 +849,32 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCinematicHandle
 }
 
 @Composable
-private fun CinematicClipOverlay(
+private fun ClipEditorOverlay(
     onOutsideClick: () -> Unit,
     content: @Composable () -> Unit,
 ) {
     Box(
-        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = .52f)).clickable(onClick = onOutsideClick),
-        contentAlignment = Alignment.TopEnd,
+        modifier = Modifier.fillMaxSize(),
     ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = .52f))
+                .clickable(
+                    role = Role.Button,
+                    onClickLabel = "Close overlay",
+                    onClick = onOutsideClick,
+                ),
+        )
         Surface(
             modifier = Modifier
+                .align(Alignment.TopEnd)
                 .padding(horizontal = 18.dp)
                 .padding(top = 58.dp, bottom = 18.dp)
                 .widthIn(max = 430.dp)
                 .fillMaxWidth()
-                .clickable {},
-            color = LocalResonancePalette.current.raised.copy(alpha = .96f),
+                .pointerInput(Unit) { detectTapGestures { } },
+            color = LocalResonancePalette.current.raised,
             shape = RoundedCornerShape(20.dp),
             border = BorderStroke(1.dp, Color.White.copy(alpha = .12f)),
             tonalElevation = 12.dp,
@@ -913,26 +885,11 @@ private fun CinematicClipOverlay(
 }
 
 @Composable
-private fun CinematicOverlayHeader(eyebrow: String, title: String, onClose: () -> Unit) {
-    Row(verticalAlignment = Alignment.Top) {
-        Column {
-            Eyebrow(eyebrow)
-            Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-        }
+private fun ClipOverlayHeader(title: String, onClose: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
         Spacer(Modifier.weight(1f))
         IconButton(onClick = onClose) { Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White) }
-    }
-}
-
-private fun waveformLevels(seedText: String, count: Int): List<Float> {
-    var seed = seedText.hashCode().toLong().and(0xffffffffL).coerceAtLeast(1L)
-    var previous = .58f
-    return List(count) { index ->
-        seed = (seed * 1_664_525 + 1_013_904_223).and(0xffffffffL)
-        val noise = seed.toFloat() / 0xffffffffL.toFloat()
-        previous = previous * .54f + noise * .46f
-        val envelope = .58f + kotlin.math.sin(index * .083f) * .16f + kotlin.math.sin(index * .029f) * .11f
-        (previous * .62f + envelope * .38f).coerceIn(.12f, 1f)
     }
 }
 
@@ -1040,299 +997,11 @@ private suspend fun extractAndroidClipWaveform(path: String, count: Int = 192): 
     }
 }
 
-@Composable
-private fun LegacyClipEditorDialog(
-    state: ResonanceUiState,
-    actions: ResonanceActions,
-    onDismiss: () -> Unit,
-) {
-    val context = LocalContext.current
-    val focus = LocalFocusManager.current
-    var selectedTrackId by remember { mutableStateOf(state.currentTrackId ?: state.tracks.firstOrNull()?.id) }
-    val selectedTrack = state.tracks.firstOrNull { it.id == selectedTrackId }
-    var startMs by remember { mutableLongStateOf(0L) }
-    var endMs by remember { mutableLongStateOf(selectedTrack?.durationMs?.takeIf { it > 0L } ?: 0L) }
-    var startText by remember {
-        mutableStateOf(if ((selectedTrack?.durationMs ?: 0L) > 0L) "0:00" else "--:--")
-    }
-    var endText by remember {
-        mutableStateOf(selectedTrack?.durationMs?.takeIf { it > 0L }?.let(::clipTime) ?: "--:--")
-    }
-    var trackMenu by remember { mutableStateOf(false) }
-    var previewing by remember { mutableStateOf(false) }
-    var previewPositionMs by remember { mutableLongStateOf(0L) }
-    var resumeMainAfterPreview by remember { mutableStateOf(false) }
-    val previewPlayer = remember { ExoPlayer.Builder(context).build() }
-
-    fun updateTexts() {
-        startText = clipTime(startMs)
-        endText = clipTime(endMs)
-    }
-
-    fun resetRange(track: Track?) {
-        if (track == null) return
-        if (track.durationMs <= 0L) {
-            startMs = 0L
-            endMs = 0L
-            previewPositionMs = 0L
-            startText = "--:--"
-            endText = "--:--"
-            return
-        }
-        val saved = state.clipRangesByTrackId[track.id]
-        val defaultStart = if (track.durationMs > 60_000) 15_000L else 0L
-        startMs = saved?.startMs ?: defaultStart
-        endMs = saved?.endMs ?: minOf(track.durationMs, defaultStart + 45_000L)
-        if (endMs - startMs < 250) {
-            startMs = 0
-            endMs = track.durationMs
-        }
-        previewPositionMs = startMs
-        updateTexts()
-    }
-
-    fun stopPreview(resumeMain: Boolean = true) {
-        previewPlayer.pause()
-        previewing = false
-        if (resumeMain && resumeMainAfterPreview) actions.togglePlayPause()
-        resumeMainAfterPreview = false
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            previewPlayer.release()
-            if (resumeMainAfterPreview) actions.togglePlayPause()
-        }
-    }
-    LaunchedEffect(state.volume) {
-        previewPlayer.volume = PlaybackVolumePolicy.gainForSlider(state.volume)
-    }
-    LaunchedEffect(selectedTrackId) {
-        stopPreview()
-        resetRange(selectedTrack)
-        val path = selectedTrack?.let { state.trackFilePathsById[it.id] }
-        if (path != null) {
-            previewPlayer.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(path))))
-            previewPlayer.prepare()
-            previewPlayer.seekTo(startMs)
-        } else {
-            previewPlayer.clearMediaItems()
-        }
-    }
-    LaunchedEffect(previewing, endMs) {
-        while (previewing) {
-            previewPositionMs = previewPlayer.currentPosition.coerceIn(startMs, endMs)
-            if (previewPlayer.playbackState == Player.STATE_ENDED || previewPlayer.currentPosition + 20 >= endMs) {
-                if (previewPlayer.currentPosition + 20 >= endMs) previewPositionMs = endMs
-                stopPreview()
-                break
-            }
-            delay(50)
-        }
-    }
-
-    Dialog(
-        onDismissRequest = {
-            stopPreview()
-            onDismiss()
-        },
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth().fillMaxHeight(.92f).padding(horizontal = 14.dp),
-            color = LocalResonancePalette.current.surface,
-            shape = RoundedCornerShape(22.dp),
-            tonalElevation = 8.dp,
-        ) {
-            Column(Modifier.fillMaxSize()) {
-                ToolHeader("Clip Editor", "Choose the range this profile should play.", onDismiss)
-                Column(
-                    modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(18.dp),
-                ) {
-                    if (selectedTrack == null) {
-                        ToolEmpty("No songs to edit", "Import or download a song, then return to set its playback range.")
-                    } else {
-                        Box {
-                            OutlinedButton(onClick = { trackMenu = true }, modifier = Modifier.fillMaxWidth()) {
-                                Text(selectedTrack.title + " — " + selectedTrack.artist, maxLines = 1)
-                            }
-                            DropdownMenu(expanded = trackMenu, onDismissRequest = { trackMenu = false }) {
-                                state.tracks.forEach { track ->
-                                    DropdownMenuItem(
-                                        text = { Text(track.title + " — " + track.artist) },
-                                        onClick = {
-                                            selectedTrackId = track.id
-                                            trackMenu = false
-                                        },
-                                    )
-                                }
-                            }
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Artwork(
-                                path = state.artworkPathsByTrackId[selectedTrack.id],
-                                modifier = Modifier.size(54.dp),
-                            )
-                            Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                                Text(selectedTrack.title, fontWeight = FontWeight.Bold, maxLines = 1)
-                                Text(
-                                    selectedTrack.artist + " • " + selectedTrack.album,
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
-                                    maxLines = 1,
-                                )
-                            }
-                            Text(selectedTrack.durationText, fontSize = 12.sp)
-                        }
-                        if (selectedTrack.durationMs <= 0L) {
-                            Text(
-                                "Resonance couldn't read this song's duration. Re-import it or repair its metadata before setting a clip range.",
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
-                                fontSize = 13.sp,
-                            )
-                        } else {
-                        if (isVideoClipTrack(selectedTrack)) {
-                            ClipVideoPreview(
-                                player = previewPlayer,
-                                isPlaying = previewing,
-                                title = selectedTrack.title,
-                            )
-                        }
-                        ClipWaveform(
-                            track = selectedTrack,
-                            startMs = startMs,
-                            endMs = endMs,
-                            onRangeChange = { start, end ->
-                                stopPreview()
-                                startMs = start
-                                endMs = end
-                                previewPositionMs = start
-                                previewPlayer.seekTo(start)
-                                updateTexts()
-                            },
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            ClipTimeField(
-                                "START",
-                                startText,
-                                {
-                                    startText = it
-                                },
-                                {
-                                    val parsed = parseClipTime(startText)
-                                    if (parsed != null) {
-                                        stopPreview()
-                                        startMs = parsed.coerceIn(0, endMs - 250)
-                                        previewPositionMs = startMs
-                                        previewPlayer.seekTo(startMs)
-                                    }
-                                    updateTexts()
-                                },
-                                Modifier.weight(1f),
-                            )
-                            Column(
-                                Modifier.weight(1f).padding(top = 8.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                            ) {
-                                Eyebrow("Clip Length")
-                                Text(
-                                    clipTime(endMs - startMs),
-                                    color = MaterialTheme.colorScheme.tertiary,
-                                    fontWeight = FontWeight.Bold,
-                                )
-                            }
-                            ClipTimeField(
-                                "END",
-                                endText,
-                                {
-                                    endText = it
-                                },
-                                {
-                                    val parsed = parseClipTime(endText)
-                                    if (parsed != null) {
-                                        stopPreview()
-                                        endMs = parsed.coerceIn(startMs + 250, selectedTrack.durationMs)
-                                        previewPositionMs = startMs
-                                        previewPlayer.seekTo(startMs)
-                                    }
-                                    updateTexts()
-                                },
-                                Modifier.weight(1f),
-                            )
-                        }
-                        ClipPreviewTransport(
-                            enabled = state.trackFilePathsById[selectedTrack.id] != null,
-                            isPlaying = previewing,
-                            positionMs = previewPositionMs,
-                            startMs = startMs,
-                            endMs = endMs,
-                            onToggle = {
-                                if (previewing) {
-                                    stopPreview()
-                                } else {
-                                    resumeMainAfterPreview = state.isPlaying
-                                    if (state.isPlaying) actions.togglePlayPause()
-                                    if (previewPositionMs !in startMs until endMs) {
-                                        previewPositionMs = startMs
-                                        previewPlayer.seekTo(startMs)
-                                    }
-                                    previewPlayer.play()
-                                    previewing = true
-                                }
-                            },
-                            onSeek = { position ->
-                                previewPositionMs = position
-                                previewPlayer.seekTo(position)
-                            },
-                        )
-                        Text(
-                            "Saved for " + activeSyncProfileName(state) + ". The song file is never changed.",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            if (selectedTrack.id in state.clipRangesByTrackId) {
-                                OutlinedButton(
-                                    onClick = {
-                                        stopPreview()
-                                        actions.clearClipRange(selectedTrack.id)
-                                        startMs = 0
-                                        endMs = selectedTrack.durationMs
-                                        previewPositionMs = startMs
-                                        previewPlayer.seekTo(startMs)
-                                        updateTexts()
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                ) { Text("Use Full Song") }
-                            } else {
-                                Spacer(Modifier.weight(1f))
-                            }
-                            Button(
-                                onClick = {
-                                    focus.clearFocus()
-                                    stopPreview()
-                                    actions.saveClipRange(selectedTrack.id, startMs, endMs)
-                                },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.secondary,
-                                ),
-                                modifier = Modifier.weight(1f),
-                            ) { Text("Save Range") }
-                        }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 @Composable
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 private fun ClipVideoPreview(
     player: ExoPlayer,
-    isPlaying: Boolean,
     title: String,
 ) {
     Box(
@@ -1355,88 +1024,6 @@ private fun ClipVideoPreview(
             update = { it.player = player },
             modifier = Modifier.fillMaxSize(),
         )
-        if (!isPlaying) {
-            Surface(
-                color = Color.Black.copy(alpha = .58f),
-                shape = RoundedCornerShape(999.dp),
-            ) {
-                Icon(
-                    Icons.Default.PlayArrow,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.padding(14.dp).size(26.dp),
-                )
-            }
-        }
-        Surface(
-            modifier = Modifier.align(Alignment.TopStart).padding(10.dp),
-            color = Color.Black.copy(alpha = .65f),
-            shape = RoundedCornerShape(999.dp),
-        ) {
-            Text(
-                "VIDEO PREVIEW",
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                color = Color.White,
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.sp,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ClipPreviewTransport(
-    enabled: Boolean,
-    isPlaying: Boolean,
-    positionMs: Long,
-    startMs: Long,
-    endMs: Long,
-    onToggle: () -> Unit,
-    onSeek: (Long) -> Unit,
-) {
-    val safeEnd = endMs.coerceAtLeast(startMs + 250)
-    Surface(
-        color = Color.White.copy(alpha = .05f),
-        shape = RoundedCornerShape(14.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = .08f)),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            IconButton(onClick = onToggle, enabled = enabled) {
-                Surface(
-                    color = MaterialTheme.colorScheme.secondary,
-                    shape = RoundedCornerShape(999.dp),
-                ) {
-                    Icon(
-                        if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = if (isPlaying) "Pause preview" else "Play preview",
-                        tint = Color.White,
-                        modifier = Modifier.padding(9.dp).size(20.dp),
-                    )
-                }
-            }
-            Text(
-                clipTime(positionMs.coerceIn(startMs, safeEnd)),
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .62f),
-                fontSize = 10.sp,
-            )
-            Slider(
-                value = positionMs.coerceIn(startMs, safeEnd).toFloat(),
-                onValueChange = { onSeek(it.toLong().coerceIn(startMs, safeEnd)) },
-                valueRange = startMs.toFloat()..safeEnd.toFloat(),
-                enabled = enabled,
-                modifier = Modifier.weight(1f).semantics { contentDescription = "Preview position" },
-            )
-            Text(
-                clipTime(endMs),
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .62f),
-                fontSize = 10.sp,
-            )
-        }
     }
 }
 
@@ -1444,100 +1031,6 @@ private fun isVideoClipTrack(track: Track): Boolean = isVideoClipPath(track.rela
 
 internal fun isVideoClipPath(path: String): Boolean =
     path.substringAfterLast('.', "").lowercase() in setOf("mp4", "mov", "m4v", "webm")
-
-@Composable
-private fun ClipWaveform(
-    track: Track,
-    startMs: Long,
-    endMs: Long,
-    onRangeChange: (Long, Long) -> Unit,
-) {
-    var draggingStart by remember { mutableStateOf(true) }
-    val accent = LocalResonancePalette.current.tertiary
-    val duration = track.durationMs.coerceAtLeast(250)
-    val levels = remember(track.id) { waveformLevels(track.id) }
-    val currentStartMs by rememberUpdatedState(startMs)
-    val currentEndMs by rememberUpdatedState(endMs)
-    val currentOnRangeChange by rememberUpdatedState(onRangeChange)
-    Canvas(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(108.dp)
-            .background(Color.White.copy(alpha = .035f), RoundedCornerShape(14.dp))
-            .semantics { contentDescription = "Clip waveform with draggable start and end handles" }
-            .pointerInput(track.id, duration) {
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        val startX = size.width * currentStartMs.toFloat() / duration
-                        val endX = size.width * currentEndMs.toFloat() / duration
-                        draggingStart = kotlin.math.abs(offset.x - startX) <= kotlin.math.abs(offset.x - endX)
-                    },
-                ) { change, _ ->
-                    change.consume()
-                    val value = (change.position.x / size.width.coerceAtLeast(1) * duration)
-                        .toLong().coerceIn(0, duration)
-                    if (draggingStart) {
-                        currentOnRangeChange(value.coerceAtMost(currentEndMs - 250), currentEndMs)
-                    } else {
-                        currentOnRangeChange(currentStartMs, value.coerceAtLeast(currentStartMs + 250))
-                    }
-                }
-            },
-    ) {
-        val gap = 2.dp.toPx()
-        val barWidth = (size.width - gap * (levels.size - 1)) / levels.size
-        levels.forEachIndexed { index, level ->
-            val x = index * (barWidth + gap)
-            val center = (index + .5f) / levels.size
-            val selected = center >= startMs.toFloat() / duration && center <= endMs.toFloat() / duration
-            val height = size.height * (.2f + .65f * level)
-            drawRoundRect(
-                color = if (selected) accent else Color.White.copy(alpha = .16f),
-                topLeft = Offset(x, (size.height - height) / 2),
-                size = androidx.compose.ui.geometry.Size(barWidth.coerceAtLeast(1f), height),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(barWidth / 2),
-            )
-        }
-        val startX = size.width * startMs / duration.toFloat()
-        val endX = size.width * endMs / duration.toFloat()
-        drawHandle(startX, pointsRight = true, color = accent)
-        drawHandle(endX, pointsRight = false, color = accent)
-        drawRoundRect(
-            color = Color.White.copy(alpha = .08f),
-            style = Stroke(1.dp.toPx()),
-            cornerRadius = androidx.compose.ui.geometry.CornerRadius(14.dp.toPx()),
-        )
-    }
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawHandle(
-    x: Float,
-    pointsRight: Boolean,
-    color: Color,
-) {
-    val halfWidth = 11.dp.toPx()
-    val halfHeight = 20.dp.toPx()
-    drawRoundRect(
-        color = color,
-        topLeft = Offset((x - halfWidth).coerceIn(0f, size.width - halfWidth * 2), size.height / 2 - halfHeight),
-        size = androidx.compose.ui.geometry.Size(halfWidth * 2, halfHeight * 2),
-        cornerRadius = androidx.compose.ui.geometry.CornerRadius(halfWidth),
-    )
-    val centerX = x.coerceIn(halfWidth, size.width - halfWidth)
-    val path = Path().apply {
-        if (pointsRight) {
-            moveTo(centerX - 3.dp.toPx(), size.height / 2 - 6.dp.toPx())
-            lineTo(centerX + 4.dp.toPx(), size.height / 2)
-            lineTo(centerX - 3.dp.toPx(), size.height / 2 + 6.dp.toPx())
-        } else {
-            moveTo(centerX + 3.dp.toPx(), size.height / 2 - 6.dp.toPx())
-            lineTo(centerX - 4.dp.toPx(), size.height / 2)
-            lineTo(centerX + 3.dp.toPx(), size.height / 2 + 6.dp.toPx())
-        }
-        close()
-    }
-    drawPath(path, Color.White)
-}
 
 @Composable
 private fun ClipTimeField(
@@ -1580,10 +1073,10 @@ fun LinkImportDialog(
     }
     val modeSubtitle = when (state.serverUploadMode) {
         ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink ->
-            "Resonance downloads the selected $mediaLabel locally first and registers only its preserved source link with the server."
+            "Downloads the selected $mediaLabel to this device, then registers its source link with the server."
         ServerUploadMode.ReviewedMatch ->
-            "For server upload, paste one full Spotify track or individual YouTube video link. Search text and SoundCloud stay device-only."
-        else -> "Search Spotify, SoundCloud, and YouTube, or inspect a supported link directly."
+            "Server uploads require one full Spotify track or YouTube video link. Searches and SoundCloud stay on this device."
+        else -> "Search Spotify, SoundCloud, or YouTube, or paste a supported link."
     }
     val inputLabel = when (state.serverUploadMode) {
         ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink -> "Search or link"
@@ -1621,7 +1114,7 @@ fun LinkImportDialog(
             shape = RoundedCornerShape(22.dp),
         ) {
             Column(Modifier.fillMaxSize()) {
-                ToolHeader("Import from Web", modeSubtitle, close)
+                ToolHeader("Import from web", modeSubtitle, close)
                 Column(
                     modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -1652,7 +1145,7 @@ fun LinkImportDialog(
                         }) { Text("Paste") }
                     }
                     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                        Eyebrow("Download as")
+                        SectionLabel("Download as")
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             LinkImportMediaMode.entries.forEach { mode ->
                                 FilterChip(
@@ -1720,7 +1213,7 @@ fun LinkImportDialog(
                         val playlistProvider = if (resolution.kind == LinkImportKind.SoundCloudPlaylist) "SoundCloud" else "Spotify"
                         Surface(color = Color.White.copy(alpha = .045f), shape = RoundedCornerShape(13.dp)) {
                             Column(Modifier.fillMaxWidth().padding(14.dp)) {
-                                Eyebrow(if (isPlaylist) "$playlistProvider Playlist" else "Matched Track")
+                                SectionLabel(if (isPlaylist) "$playlistProvider playlist" else "Matched track")
                                 Text(resolution.track.title, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                                 Text(
                                     buildList {
@@ -1750,7 +1243,7 @@ fun LinkImportDialog(
                         resolution.playlist?.skippedItems?.takeIf { it.isNotEmpty() }?.let { skippedItems ->
                             Surface(color = Color(0xFFFF9800).copy(alpha = .10f), shape = RoundedCornerShape(13.dp)) {
                                 Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                                    Eyebrow("Skipped by $playlistProvider or Matching")
+                                    SectionLabel("Skipped items")
                                     skippedItems.forEach { skipped ->
                                         Text(
                                             "${skipped.position}. ${skipped.title}${skipped.artist?.let { " — $it" }.orEmpty()}",
@@ -1759,18 +1252,18 @@ fun LinkImportDialog(
                                         )
                                         Text(
                                             skipped.reason,
-                                            fontSize = 11.sp,
+                                            fontSize = 12.sp,
                                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                                         )
                                     }
                                 }
                             }
                         }
-                        Eyebrow(
+                        SectionLabel(
                             when {
-                                reviewedMatchPolicyBound -> "Review-only candidates • explicit choice required"
-                                isPlaylist -> "Tracks to Import"
-                                else -> "${importState.mediaMode.name} Source"
+                                reviewedMatchPolicyBound -> "Choose one candidate"
+                                isPlaylist -> "Tracks to import"
+                                else -> "${importState.mediaMode.name} source"
                             },
                         )
                         resolution.candidates.forEach { candidate ->
@@ -1781,15 +1274,24 @@ fun LinkImportDialog(
                                 candidate.videoID == importState.selectedVideoId
                             }
                             Surface(
-                                onClick = { actions.selectLinkImportCandidate(candidate.videoID) },
                                 color = Color.White.copy(alpha = if (selected) .08f else .035f),
                                 shape = RoundedCornerShape(12.dp),
                             ) {
-                                Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .toggleable(
+                                            value = selected,
+                                            role = if (isPlaylist) Role.Checkbox else Role.RadioButton,
+                                            onValueChange = { actions.selectLinkImportCandidate(candidate.videoID) },
+                                        )
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
                                     if (isPlaylist) {
-                                        Checkbox(checked = selected, onCheckedChange = { actions.selectLinkImportCandidate(candidate.videoID) })
+                                        Checkbox(checked = selected, onCheckedChange = null)
                                     } else {
-                                        RadioButton(selected = selected, onClick = { actions.selectLinkImportCandidate(candidate.videoID) })
+                                        RadioButton(selected = selected, onClick = null)
                                     }
                                     RemoteArtwork(
                                         metadata?.artworkURL ?: candidate.thumbnailURL,
@@ -1821,7 +1323,7 @@ fun LinkImportDialog(
                                             if (existing.isOnDevice || existing.isOnServer) {
                                                 Text(
                                                     linkExistingStatus(existing.isOnDevice, existing.isOnServer),
-                                                    fontSize = 11.sp,
+                                                    fontSize = 12.sp,
                                                     color = LocalResonancePalette.current.success,
                                                 )
                                             }
@@ -1849,7 +1351,7 @@ fun LinkImportDialog(
                             Column(Modifier.fillMaxWidth().padding(14.dp)) {
                                 Text("Import stopped", fontWeight = FontWeight.Bold)
                                 Text(importState.errorMessage)
-                                importState.errorCode?.let { Text(it, fontSize = 11.sp, color = Color.White.copy(alpha = .55f)) }
+                                importState.errorCode?.let { Text(it, fontSize = 12.sp, color = Color.White.copy(alpha = .55f)) }
                             }
                         }
                     }
@@ -1903,9 +1405,12 @@ private fun LinkSearchResults(
     state: ResonanceUiState,
     actions: ResonanceActions,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    Column(
+        modifier = Modifier.selectableGroup(),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Eyebrow("Search Results")
+            SectionLabel("Search results")
             Spacer(Modifier.weight(1f))
             Text(
                 "${response.results.size} ${if (state.linkImport.mediaMode == LinkImportMediaMode.Video) "downloadable" else "previewable"}",
@@ -1918,11 +1423,11 @@ private fun LinkSearchResults(
             val results = response.resultsFor(provider)
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Eyebrow(provider.displayName)
+                    SectionLabel(provider.displayName)
                     Spacer(Modifier.weight(1f))
                     Text(
                         "${results.size} result${if (results.size == 1) "" else "s"}",
-                        fontSize = 11.sp,
+                        fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
                 }
@@ -1955,12 +1460,21 @@ private fun LinkSearchResultRow(
     val candidate = result.candidates.firstOrNull()
     val selected = importState.selectedSearchResultId == result.id
     Surface(
-        onClick = { actions.selectLinkImportSearchResult(result.id) },
         color = Color.White.copy(alpha = if (selected) .08f else .035f),
         shape = RoundedCornerShape(12.dp),
     ) {
-        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            RadioButton(selected = selected, onClick = { actions.selectLinkImportSearchResult(result.id) })
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .selectable(
+                    selected = selected,
+                    role = Role.RadioButton,
+                    onClick = { actions.selectLinkImportSearchResult(result.id) },
+                )
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected = selected, onClick = null)
             RemoteArtwork(
                 result.track.artworkURL ?: candidate?.thumbnailURL,
                 state.serverUrl,
@@ -1995,7 +1509,7 @@ private fun LinkSearchResultRow(
                 if (existing.isOnDevice || existing.isOnServer) {
                     Text(
                         linkExistingStatus(existing.isOnDevice, existing.isOnServer),
-                        fontSize = 11.sp,
+                        fontSize = 12.sp,
                         color = LocalResonancePalette.current.success,
                     )
                 }
@@ -2052,7 +1566,7 @@ private fun LinkStageCard(state: LinkImportUiState) {
                 Text(
                     android.text.format.Formatter.formatFileSize(LocalContext.current, state.completedBytes) + " of " +
                         android.text.format.Formatter.formatFileSize(LocalContext.current, state.totalBytes),
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                 )
             }
             state.completedTrackTitle?.let {
@@ -2103,19 +1617,6 @@ private fun ToolEmpty(title: String, detail: String) {
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
             textAlign = TextAlign.Center,
         )
-    }
-}
-
-private fun waveformLevels(seedValue: String): List<Float> {
-    var seed = seedValue.hashCode().toLong().let { if (it == 0L) 1L else it }
-    var previous = .58f
-    return List(72) { index ->
-        seed = seed * 1_664_525 + 1_013_904_223
-        val noise = (seed and 0xffff).toFloat() / 0xffff
-        previous = previous * .54f + noise * .46f
-        val envelope = .58f + kotlin.math.sin(index * .083).toFloat() * .16f +
-            kotlin.math.sin(index * .029).toFloat() * .11f
-        (previous * .62f + envelope * .38f).coerceIn(.12f, 1f)
     }
 }
 

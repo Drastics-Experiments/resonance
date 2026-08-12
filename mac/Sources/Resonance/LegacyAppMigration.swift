@@ -31,7 +31,7 @@ enum LegacyAppMigration {
         migrateDefaults(defaults)
 
         let support = applicationSupportRoot
-            ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            ?? ResonanceApplicationSupport.root(fileManager: fileManager)
         let legacyRoot = support.appendingPathComponent(
             MacAppCompatibility.legacyApplicationSupportName,
             isDirectory: true

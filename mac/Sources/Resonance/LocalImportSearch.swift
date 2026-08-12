@@ -141,7 +141,11 @@ struct LocalImportSearchEngine: Sendable {
         async let spotifyTask = spotifyTracksIgnoringFailure(query)
         async let soundCloudTask = soundCloudTracksIgnoringFailure(query)
         async let youtubeTask = youtubeCandidatesIgnoringFailure(query)
-        let (spotifyTracks, soundCloudTracks, youtubeCandidates) = await (spotifyTask, soundCloudTask, youtubeTask)
+        let (spotifyTracks, soundCloudTracks, youtubeCandidates) = try await (
+            spotifyTask,
+            soundCloudTask,
+            youtubeTask
+        )
         try Task.checkCancellation()
 
         let spotify = spotifyTracks.compactMap { track -> LocalImportSearchResult? in
@@ -186,23 +190,40 @@ struct LocalImportSearchEngine: Sendable {
         return LocalImportSearchResponse(query: query, results: results)
     }
 
-    private func spotifyTracksIgnoringFailure(_ query: String) async -> [LocalImportSpotifyTrack] {
-        do { return try await spotifyTracks(query) }
-        catch { return [] }
+    private func spotifyTracksIgnoringFailure(_ query: String) async throws -> [LocalImportSpotifyTrack] {
+        do {
+            return try await spotifyTracks(query)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return []
+        }
     }
 
-    private func soundCloudTracksIgnoringFailure(_ query: String) async -> [LocalImportSoundCloudTrack] {
-        do { return try await soundCloudTracks(query) }
-        catch { return [] }
+    private func soundCloudTracksIgnoringFailure(_ query: String) async throws -> [LocalImportSoundCloudTrack] {
+        do {
+            return try await soundCloudTracks(query)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return []
+        }
     }
 
-    private func youtubeCandidatesIgnoringFailure(_ query: String) async -> [LocalImportSearchCandidate] {
-        do { return try await youtubeCandidates(query) }
-        catch { return [] }
+    private func youtubeCandidatesIgnoringFailure(_ query: String) async throws -> [LocalImportSearchCandidate] {
+        do {
+            return try await youtubeCandidates(query)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return []
+        }
     }
 
     private func spotifyTracks(_ query: String) async throws -> [LocalImportSpotifyTrack] {
-        var components = URLComponents(string: "https://debridvault.elfhosted.com/api/search")!
+        guard var components = URLComponents(string: "https://debridvault.elfhosted.com/api/search") else {
+            return []
+        }
         components.queryItems = [
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "provider", value: "spotify"),
@@ -222,7 +243,9 @@ struct LocalImportSearchEngine: Sendable {
     }
 
     private func soundCloudTracks(_ query: String) async throws -> [LocalImportSoundCloudTrack] {
-        var pageComponents = URLComponents(string: "https://soundcloud.com/search/sounds")!
+        guard var pageComponents = URLComponents(string: "https://soundcloud.com/search/sounds") else {
+            return []
+        }
         pageComponents.queryItems = [URLQueryItem(name: "q", value: query)]
         guard let pageURL = pageComponents.url else { return [] }
         let pageData = try await boundedData(
@@ -234,7 +257,9 @@ struct LocalImportSearchEngine: Sendable {
         guard let html = String(data: pageData, encoding: .utf8) else { return [] }
         let hydration = try LocalImportSoundCloudParser.hydration(html)
         guard let clientID = LocalImportSoundCloudParser.clientID(hydration) else { return [] }
-        var apiComponents = URLComponents(string: "https://api-v2.soundcloud.com/search/tracks")!
+        guard var apiComponents = URLComponents(string: "https://api-v2.soundcloud.com/search/tracks") else {
+            return []
+        }
         apiComponents.queryItems = [
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "client_id", value: clientID),
@@ -257,15 +282,17 @@ struct LocalImportSearchEngine: Sendable {
     }
 
     private func youtubeCandidates(_ query: String) async throws -> [LocalImportSearchCandidate] {
-        var musicComponents = URLComponents(string: "https://music.youtube.com/search")!
+        guard var musicComponents = URLComponents(string: "https://music.youtube.com/search"),
+              var webComponents = URLComponents(string: "https://www.youtube.com/results") else {
+            return []
+        }
         musicComponents.queryItems = [URLQueryItem(name: "q", value: query)]
-        var webComponents = URLComponents(string: "https://www.youtube.com/results")!
         webComponents.queryItems = [
             URLQueryItem(name: "search_query", value: query),
             URLQueryItem(name: "sp", value: "EgIQAQ%3D%3D"),
         ]
-        let musicURL = musicComponents.url!
-        let webURL = webComponents.url!
+        guard let musicURL = musicComponents.url,
+              let webURL = webComponents.url else { return [] }
         async let music = optionalYouTubeDocument(musicURL)
         async let web = optionalYouTubeDocument(webURL)
         let documents = await (music, web)

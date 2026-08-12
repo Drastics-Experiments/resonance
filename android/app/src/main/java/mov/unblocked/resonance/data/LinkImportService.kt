@@ -623,7 +623,11 @@ class LinkImportService(context: Context) {
                 256 * 1_024,
                 "application/json",
             ),
-        ) as JsonObject
+        ) as? JsonObject ?: throw LinkImportException(
+            LinkImportStage.ResolvingMetadata,
+            "SPOTIFY_INVALID_PREVIEW",
+            "Spotify returned an invalid track preview.",
+        )
         if (embed.string("provider_name") != "Spotify" || embed.string("type") != "rich") throw LinkImportException(
             LinkImportStage.ResolvingMetadata,
             "SPOTIFY_INVALID_PREVIEW",
@@ -1009,7 +1013,11 @@ class LinkImportService(context: Context) {
                 body,
                 headers,
             ).decodeToString(),
-        ) as JsonObject
+        ) as? JsonObject ?: throw LinkImportException(
+            LinkImportStage.InspectingSource,
+            "YOUTUBE_INVALID_RESPONSE",
+            "YouTube returned invalid playback data.",
+        )
         if (player.obj("playabilityStatus")?.string("status") != "OK") {
             throw LinkImportException(LinkImportStage.InspectingSource, "YOUTUBE_UNAVAILABLE", "YouTube could not provide anonymous playback for this video.")
         }

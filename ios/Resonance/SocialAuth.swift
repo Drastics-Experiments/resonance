@@ -75,7 +75,6 @@ struct ResonanceAccountSession: Codable, Equatable {
         case accountID, profileID, displayName, imageURL
     }
 
-    var isAdmin: Bool { role == "admin" }
     var usesLegacyProductionServer: Bool {
         baseURL.scheme?.lowercased() == "https"
             && baseURL.host?.lowercased() == resonanceLegacyProductionHost

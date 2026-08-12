@@ -297,9 +297,8 @@ struct NowPlayingView: View {
                 Circle().stroke(Color.white.opacity(0.24), lineWidth: 1)
             }
 
-            Text("NOW PLAYING")
+            Text("Now Playing")
                 .font(.system(size: 14, weight: .semibold))
-                .tracking(2.6)
 
             Spacer(minLength: 24)
 
@@ -426,7 +425,6 @@ struct NowPlayingView: View {
                     ? "Local file"
                     : track.album)
                     .font(.system(size: compact ? 14 : 17, weight: .medium))
-                    .tracking(1.2)
                     .foregroundStyle(Color.white.opacity(0.55))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -1644,40 +1642,35 @@ struct AspectFitVideoPlayer: NSViewRepresentable {
 }
 
 final class AspectFitPlayerContainerView: NSView {
+    private let playbackLayer = AVPlayerLayer()
+
     var player: AVPlayer? {
-        get { playerLayer.player }
-        set { playerLayer.player = newValue }
+        get { playbackLayer.player }
+        set { playbackLayer.player = newValue }
     }
 
     var cornerRadius: CGFloat {
-        get { playerLayer.cornerRadius }
+        get { playbackLayer.cornerRadius }
         set {
-            playerLayer.cornerRadius = newValue
-            playerLayer.masksToBounds = newValue > 0
+            playbackLayer.cornerRadius = newValue
+            playbackLayer.masksToBounds = newValue > 0
         }
-    }
-
-    private var playerLayer: AVPlayerLayer {
-        guard let playerLayer = layer as? AVPlayerLayer else {
-            preconditionFailure("AspectFitPlayerContainerView requires an AVPlayerLayer")
-        }
-        return playerLayer
     }
 
     override func makeBackingLayer() -> CALayer {
-        AVPlayerLayer()
+        playbackLayer
     }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        playerLayer.videoGravity = .resizeAspect
-        playerLayer.backgroundColor = NSColor.black.cgColor
+        playbackLayer.videoGravity = .resizeAspect
+        playbackLayer.backgroundColor = NSColor.black.cgColor
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+        return nil
     }
 
     override var intrinsicContentSize: NSSize {

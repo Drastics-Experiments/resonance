@@ -4,28 +4,30 @@ import Foundation
 import Testing
 @testable import Resonance
 
-@Suite("Resonance Preview regressions")
-struct PreviewRegressionTests {
-    @Test
-    func profilePicturesAreScopedToTheCanonicalServerAndProfile() {
-        let defaultScope = ProfilePictureScope.contextKey(
-            serverURL: "https://MUSIC.example/library/",
-            profileID: "  "
-        )
-        #expect(defaultScope == "https://music.example#profile=default")
-        #expect(ProfilePictureScope.contextKey(
-            serverURL: "https://music.example/another-path",
-            profileID: "family"
-        ) == "https://music.example#profile=family")
-        let filename = ProfilePictureScope.filename(
-            serverURL: "https://music.example",
-            profileID: "family"
-        )
-        #expect(filename.count == 68)
-        #expect(filename.hasSuffix(".jpg"))
-        #expect(filename.dropLast(4).allSatisfy { $0.isHexDigit && !$0.isUppercase })
+private final class BootstrapCredentialStore: ServerCredentialStoring {
+    private(set) var values: [String: String] = [:]
+    let failingKey: String?
+
+    init(failingKey: String? = nil) {
+        self.failingKey = failingKey
     }
 
+    func read(key: String) -> String? { values[key] }
+
+    func save(_ token: String, key: String) -> Bool {
+        guard key != failingKey else { return false }
+        values[key] = token
+        return true
+    }
+
+    func delete(key: String) -> Bool {
+        values.removeValue(forKey: key)
+        return true
+    }
+}
+
+@Suite("Resonance Preview regressions")
+struct PreviewRegressionTests {
     @Test
     func nativeMenuCommandsUseStableNotificationRoutes() {
         #expect(Notification.Name.focusMusicSearch.rawValue == "focusMusicSearch")
@@ -130,11 +132,6 @@ struct PreviewRegressionTests {
         #expect(song.isSourceLinkRecord)
         #expect(song.isMetadataLoading)
 
-        let encoded = try JSONEncoder().encode(MacSourceImportRequest(
-            sourcePageURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw"
-        ))
-        let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
-        #expect(Set(object.keys) == ["schema_version", "source_page_url"])
     }
 
     @MainActor
@@ -1110,6 +1107,104 @@ struct PreviewRegressionTests {
         )
         #expect(directoryPermissions.intValue == 0o700)
         #expect(filePermissions.intValue == 0o600)
+    }
+
+    @Test
+    func localCredentialStoreQuarantinesCorruptDataBeforeRecovery() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ResonancePreviewTests-\(UUID().uuidString)", isDirectory: true)
+        let storeURL = directory.appendingPathComponent("server-credentials.json")
+        let corruptData = Data("not valid credential data".utf8)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try corruptData.write(to: storeURL)
+
+        let store = FileServerCredentialStore(storeURL: storeURL)
+        #expect(store.read(key: "music-server-client-token") == nil)
+        #expect(store.save("replacement-token", key: "music-server-client-token"))
+        #expect(store.read(key: "music-server-client-token") == "replacement-token")
+
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        let backup = try #require(files.first {
+            $0.lastPathComponent.hasPrefix("server-credentials.corrupt-")
+                && $0.pathExtension == "json"
+        })
+        #expect(try Data(contentsOf: backup) == corruptData)
+        let backupPermissions = try #require(
+            FileManager.default.attributesOfItem(atPath: backup.path)[.posixPermissions] as? NSNumber
+        )
+        let currentPermissions = try #require(
+            FileManager.default.attributesOfItem(atPath: storeURL.path)[.posixPermissions] as? NSNumber
+        )
+        let directoryPermissions = try #require(
+            FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber
+        )
+        #expect(backupPermissions.intValue == 0o600)
+        #expect(currentPermissions.intValue == 0o600)
+        #expect(directoryPermissions.intValue == 0o700)
+    }
+
+    @Test
+    func localCredentialStorePreservesCorruptDataWhenCredentialsAreCleared() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ResonancePreviewTests-\(UUID().uuidString)", isDirectory: true)
+        let storeURL = directory.appendingPathComponent("server-credentials.json")
+        let corruptData = Data("corrupt credentials".utf8)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try corruptData.write(to: storeURL)
+
+        let store = FileServerCredentialStore(storeURL: storeURL)
+        #expect(store.delete(key: "music-server-client-token"))
+        #expect(!FileManager.default.fileExists(atPath: storeURL.path))
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        let backup = try #require(files.first {
+            $0.lastPathComponent.hasPrefix("server-credentials.corrupt-")
+        })
+        #expect(try Data(contentsOf: backup) == corruptData)
+    }
+
+    @Test
+    func credentialBootstrapUnsetsEnvironmentOnlyAfterBothWritesSucceed() {
+        let environment = [
+            "RESONANCE_CLIENT_TOKEN": "client-token",
+            "RESONANCE_ADMIN_TOKEN": "admin-token",
+        ]
+        let failedStore = BootstrapCredentialStore(failingKey: "admin")
+        var unsetAfterFailure: [String] = []
+        #expect(!CredentialEnvironmentBootstrap.persist(
+            environment: environment,
+            store: failedStore,
+            clientKey: "client",
+            adminKey: "admin",
+            unset: { unsetAfterFailure.append($0) }
+        ))
+        #expect(unsetAfterFailure.isEmpty)
+        #expect(failedStore.values == ["client": "client-token"])
+
+        let successfulStore = BootstrapCredentialStore()
+        var unsetAfterSuccess: [String] = []
+        #expect(CredentialEnvironmentBootstrap.persist(
+            environment: environment,
+            store: successfulStore,
+            clientKey: "client",
+            adminKey: "admin",
+            unset: { unsetAfterSuccess.append($0) }
+        ))
+        #expect(successfulStore.values == [
+            "client": "client-token",
+            "admin": "admin-token",
+        ])
+        #expect(Set(unsetAfterSuccess) == [
+            "RESONANCE_CLIENT_TOKEN",
+            "RESONANCE_ADMIN_TOKEN",
+        ])
     }
 
     @Test

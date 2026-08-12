@@ -18,10 +18,12 @@
 		A10000000000000000000008 /* MobileToolsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* MobileToolsView.swift */; };
 		A1000000000000000000000B /* MobileClientConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* MobileClientConfiguration.swift */; };
 		A1000000000000000000000C /* MobileAuthenticatedStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* MobileAuthenticatedStream.swift */; };
-		A1000000000000000000000D /* MobileProfilePictureStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* MobileProfilePictureStore.swift */; };
 		A1000000000000000000000E /* SocialAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* SocialAuth.swift */; };
 		A10000000000000000000012 /* MobileLegacyAppMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* MobileLegacyAppMigration.swift */; };
 		A10000000000000000000013 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* Theme.swift */; };
+		A10000000000000000000014 /* MobileClipEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* MobileClipEditorView.swift */; };
+		A10000000000000000000015 /* MobileLocalImportViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* MobileLocalImportViewModel.swift */; };
+		A10000000000000000000016 /* MobileFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000016 /* MobileFormatting.swift */; };
 		B10000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift */; };
 		B10000000000000000000002 /* MobileClientConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000003 /* MobileClientConfigurationTests.swift */; };
 		B10000000000000000000003 /* MobileLegacyAppMigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000004 /* MobileLegacyAppMigrationTests.swift */; };
@@ -53,10 +55,12 @@
 		A2000000000000000000000A /* MobileToolsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileToolsView.swift; sourceTree = "<group>"; };
 		A2000000000000000000000D /* MobileClientConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileClientConfiguration.swift; sourceTree = "<group>"; };
 		A2000000000000000000000E /* MobileAuthenticatedStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthenticatedStream.swift; sourceTree = "<group>"; };
-		A2000000000000000000000F /* MobileProfilePictureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileProfilePictureStore.swift; sourceTree = "<group>"; };
 		A20000000000000000000010 /* SocialAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocialAuth.swift; sourceTree = "<group>"; };
 		A20000000000000000000012 /* MobileLegacyAppMigration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileLegacyAppMigration.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		A20000000000000000000014 /* MobileClipEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileClipEditorView.swift; sourceTree = "<group>"; };
+		A20000000000000000000015 /* MobileLocalImportViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileLocalImportViewModel.swift; sourceTree = "<group>"; };
+		A20000000000000000000016 /* MobileFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileFormatting.swift; sourceTree = "<group>"; };
 		B20000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileMissingServerUploadPolicyTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000002 /* ResonanceTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ResonanceTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B20000000000000000000003 /* MobileClientConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileClientConfigurationTests.swift; sourceTree = "<group>"; };
@@ -91,9 +95,11 @@
 				A2000000000000000000000B /* MobileLocalImportSoundCloud.swift */,
 				A2000000000000000000000C /* MobileLocalImportSearch.swift */,
 				A2000000000000000000000A /* MobileToolsView.swift */,
+				A20000000000000000000014 /* MobileClipEditorView.swift */,
+				A20000000000000000000015 /* MobileLocalImportViewModel.swift */,
+				A20000000000000000000016 /* MobileFormatting.swift */,
 				A2000000000000000000000D /* MobileClientConfiguration.swift */,
 				A2000000000000000000000E /* MobileAuthenticatedStream.swift */,
-				A2000000000000000000000F /* MobileProfilePictureStore.swift */,
 				A20000000000000000000010 /* SocialAuth.swift */,
 				A20000000000000000000012 /* MobileLegacyAppMigration.swift */,
 				A20000000000000000000013 /* Theme.swift */,
@@ -207,9 +213,11 @@
 				A10000000000000000000009 /* MobileLocalImportSoundCloud.swift in Sources */,
 				A1000000000000000000000A /* MobileLocalImportSearch.swift in Sources */,
 				A10000000000000000000008 /* MobileToolsView.swift in Sources */,
+				A10000000000000000000014 /* MobileClipEditorView.swift in Sources */,
+				A10000000000000000000015 /* MobileLocalImportViewModel.swift in Sources */,
+				A10000000000000000000016 /* MobileFormatting.swift in Sources */,
 				A1000000000000000000000B /* MobileClientConfiguration.swift in Sources */,
 				A1000000000000000000000C /* MobileAuthenticatedStream.swift in Sources */,
-				A1000000000000000000000D /* MobileProfilePictureStore.swift in Sources */,
 				A1000000000000000000000E /* SocialAuth.swift in Sources */,
 				A10000000000000000000012 /* MobileLegacyAppMigration.swift in Sources */,
 				A10000000000000000000013 /* Theme.swift in Sources */,

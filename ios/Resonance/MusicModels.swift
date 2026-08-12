@@ -828,49 +828,6 @@ struct MobileRemotePlaylistsDocument: Codable, Hashable {
     }
 }
 
-struct MobileSyncProfile: Codable, Hashable, Identifiable {
-    let id: String
-    var name: String
-    let isDefault: Bool
-    let songCount: Int
-    let playlistCount: Int
-    let likedCount: Int
-
-    enum CodingKeys: String, CodingKey {
-        case id, name
-        case isDefault = "is_default"
-        case songCount = "song_count"
-        case playlistCount = "playlist_count"
-        case likedCount = "liked_count"
-    }
-
-    init(
-        id: String,
-        name: String,
-        isDefault: Bool = false,
-        songCount: Int = 0,
-        playlistCount: Int = 0,
-        likedCount: Int = 0
-    ) {
-        self.id = id
-        self.name = name
-        self.isDefault = isDefault
-        self.songCount = songCount
-        self.playlistCount = playlistCount
-        self.likedCount = likedCount
-    }
-}
-
-struct MobileSyncProfilesResponse: Codable {
-    let defaultProfileID: String
-    let profiles: [MobileSyncProfile]
-
-    enum CodingKeys: String, CodingKey {
-        case profiles
-        case defaultProfileID = "default_profile_id"
-    }
-}
-
 struct MobileRemoteSong: Identifiable, Decodable, Hashable, Sendable {
     let id: String
     let filename: String
@@ -1303,7 +1260,6 @@ struct MobilePlaylistPresentationEntry: Identifiable, Hashable {
     let remoteSongID: String?
     let remoteSong: MobileRemoteSong?
 
-    var isDownloaded: Bool { track != nil }
     var title: String { track?.title ?? remoteSong?.title ?? "Unavailable song" }
     var artist: String { track?.artist ?? remoteSong?.artist ?? "Not downloaded on this device" }
     var album: String { track?.album ?? remoteSong?.album ?? "Server playlist" }

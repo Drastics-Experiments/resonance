@@ -666,7 +666,7 @@ final class MobileLibraryNormalizationTests: XCTestCase {
             .remote("remote-missing"),
             .remote("remote-a")
         ])
-        XCTAssertEqual(entries.map(\.isDownloaded), [true, true, false, true])
+        XCTAssertEqual(entries.map { $0.track != nil }, [true, true, false, true])
         XCTAssertEqual(entries[2].title, "Unavailable song")
     }
 

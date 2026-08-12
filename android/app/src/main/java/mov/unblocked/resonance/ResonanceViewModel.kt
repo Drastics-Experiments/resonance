@@ -3,7 +3,6 @@ package mov.unblocked.resonance
 import android.app.Application
 import android.content.ComponentName
 import android.graphics.BitmapFactory
-import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
@@ -35,10 +34,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -124,7 +121,6 @@ import mov.unblocked.resonance.ui.ResonanceThemeChoice
 import mov.unblocked.resonance.ui.LinkImportUiState
 import mov.unblocked.resonance.ui.PlaybackUiStatus
 import mov.unblocked.resonance.ui.invalidatedForSourceEdit
-import mov.unblocked.resonance.ui.activeSyncProfileName
 
 private data class ServerDownloadPolicySnapshot(
     val context: ServerProfileContext,
@@ -664,10 +660,19 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     fun importUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
         viewModelScope.launch {
-            val imported = repository.importAudio(uris)
-            if (imported.isNotEmpty()) {
-                library = normalizeLiked(library.copy(tracks = library.tracks + imported))
+            val result = repository.importAudio(uris)
+            if (result.tracks.isNotEmpty()) {
+                library = normalizeLiked(library.copy(tracks = library.tracks + result.tracks))
                 persistLibrary()
+            }
+            if (result.failedCount > 0) {
+                mutableState.value = mutableState.value.copy(
+                    errorMessage = if (result.tracks.isEmpty()) {
+                        "The selected files could not be imported."
+                    } else {
+                        "Imported ${result.tracks.size} of ${uris.size} selected files."
+                    },
+                )
             }
         }
     }
@@ -2988,22 +2993,22 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     clientConfigStore.cohortKey,
                 )
                 val activeAccount = accountSession
-                val response = if (activeAccount == null) client.fetchProfiles() else null
-                val profile = if (activeAccount?.profileID != null) {
-                    SyncProfile(
-                        id = activeAccount.profileID,
+                val (profile, profiles) = if (activeAccount != null) {
+                    val profileID = requireNotNull(activeAccount.profileID?.takeIf(String::isNotBlank)) {
+                        "Your account session is missing its library profile. Sign in again."
+                    }
+                    val accountProfile = SyncProfile(
+                        id = profileID,
                         name = activeAccount.profileDisplayName,
                         isDefault = true,
                     )
+                    accountProfile to listOf(accountProfile)
                 } else {
-                    response!!.profiles.firstOrNull {
+                    val response = client.fetchProfiles()
+                    val legacyProfile = response.profiles.firstOrNull {
                         it.id == normalizedProfileName || it.name.equals(normalizedProfileName, ignoreCase = true)
                     } ?: client.createProfile(normalizedProfileName)
-                }
-                val profiles = if (activeAccount != null) {
-                    listOf(profile)
-                } else {
-                    (response!!.profiles + profile).distinctBy { it.id }
+                    legacyProfile to (response.profiles + legacyProfile).distinctBy { it.id }
                 }
                 credentials.serverURL = normalized
                 if (accountSession == null) {

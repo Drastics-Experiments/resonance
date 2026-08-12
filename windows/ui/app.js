@@ -820,6 +820,25 @@ function friendlyIPCError(error, fallback) {
   return message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, "");
 }
 
+function logBestEffortFailure(operation) {
+  return (error) => console.warn(`${operation} failed.`, error);
+}
+
+function reportBackgroundPersistenceFailure(error) {
+  // persist() already presents the actionable error; retain a diagnostic for detached callers.
+  console.error("Background library persistence failed.", error);
+}
+
+function reportPlaylistReorderFailure(error) {
+  // persist() already restores an alert for the user before rejecting.
+  console.error("Playlist reorder persistence failed.", error);
+}
+
+function reportRuntimePreferenceFailure(error) {
+  console.error("Runtime preferences could not be applied.", error);
+  showNotice(friendlyIPCError(error, "Your preference was saved, but it could not be applied to this session."));
+}
+
 function dismissNotice() {
   const notice = $("#appNotice");
   if (appNoticeDismissTimer) {
@@ -1238,7 +1257,7 @@ async function loadClipEditorWaveform(track) {
       }
       return Math.sqrt(peak);
     });
-    await context.close().catch(() => {});
+    await context.close().catch(logBestEffortFailure("Audio-analysis context cleanup"));
     if (request !== clipEditorWaveformRequest || clipEditorTrack()?.id !== track.id) return;
     const maximum = Math.max(...levels, .0001);
     renderClipEditorWaveform(levels.map((level) => Math.max(.035, level / maximum)));
@@ -1875,7 +1894,7 @@ function historyDayDetailsMarkup(summary, dayKey) {
     </div>`;
   }).join("");
   return `<header class="history-day-details-header">
-    <div><span class="eyebrow">${hourly ? "HOUR" : "DAY"} BREAKDOWN</span><h3>${escapeHTML(date)}</h3></div>
+    <div><h3>${escapeHTML(date)}</h3><span>${hourly ? "Hourly breakdown" : "Daily breakdown"}</span></div>
     <div class="history-day-details-totals">
       <span><strong>${escapeHTML(historyListenedTime(day.seconds))}</strong><small>Listening time</small></span>
       <span><strong>${day.plays.toLocaleString()}</strong><small>${day.plays === 1 ? "Play" : "Plays"}</small></span>
@@ -2105,7 +2124,6 @@ function renderListeningHistory() {
         <span class="history-top-song-expand" aria-hidden="true">›</span>
       </button>
       <div class="history-top-song-copy">
-        <span class="eyebrow">MOST LISTENED SONG</span>
         <h3 id="historyTopSongTitle">${escapeHTML(topSongTitle)}</h3>
         <p>${escapeHTML(topSongArtist)}${allTimeStats.songRanking[0] ? ` · ${escapeHTML(historyListenedTime(allTimeStats.songRanking[0].seconds))}` : ""}</p>
         <small>${rankedSongs ? "Click the cover to view every song from most to least listened." : "Your song ranking will appear here."}</small>
@@ -2496,7 +2514,7 @@ async function persist({ refreshSidebar = true } = {}) {
 }
 
 function persistInBackground(options) {
-  void persist(options).catch(() => {});
+  void persist(options).catch(reportBackgroundPersistenceFailure);
 }
 
 function normalizedServerKey(value) {
@@ -3354,10 +3372,10 @@ function renderLibrary() {
   const emptyLibraryTitle = hasLibraryFilter ? "No matching songs" : selectedPlaylistID ? "This playlist is empty" : "No songs yet";
   const emptyLibraryHelp = hasLibraryFilter ? "Try another search or filter." : selectedPlaylistID ? "Like songs or add them from your Library." : "Import audio files or connect your music server.";
   const collectionHeader = selectedPlaylistID
-    ? `<div class="hero">${playlistArtworkMarkup(selectedPlaylist, { className: "hero-art" })}<div><span class="eyebrow">PLAYLIST</span><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / ${playableTrackCount} stored locally</p><div class="hero-actions"><button class="primary playlist-play" id="playCollection" ${playableTrackCount ? "" : "disabled"}><span class="button-icon">${collectionPlaying ? playbackPauseIcon : playbackPlayIcon}</span><span>${collectionPlaying ? "Pause" : "Play"}</span></button>${playlistCapsule}</div></div></div>`
+    ? `<div class="hero">${playlistArtworkMarkup(selectedPlaylist, { className: "hero-art" })}<div><h1>${escapeHTML(title)}</h1><p>${tracks.length} tracks / ${playableTrackCount} stored locally</p><div class="hero-actions"><button class="primary playlist-play" id="playCollection" ${playableTrackCount ? "" : "disabled"}><span class="button-icon">${collectionPlaying ? playbackPauseIcon : playbackPlayIcon}</span><span>${collectionPlaying ? "Pause" : "Play"}</span></button>${playlistCapsule}</div></div></div>`
     : libraryFilters;
   content.innerHTML = `<div class="collection-scroll">${collectionHeader}
-    ${recentTracks.length ? `<section class="recently-added" aria-labelledby="recentlyAddedTitle"><div class="section-heading"><div><span class="eyebrow">FRESH TO YOUR LIBRARY</span><h2 id="recentlyAddedTitle">Recently Added</h2></div><span>${recentTracks.length} newest</span></div><div class="recent-track-list">${recentTracks.map(recentTrackItem).join("")}</div></section>` : ""}
+    ${recentTracks.length ? `<section class="recently-added" aria-labelledby="recentlyAddedTitle"><div class="section-heading"><h2 id="recentlyAddedTitle">Recently Added</h2><span>${recentTracks.length} newest</span></div><div class="recent-track-list">${recentTracks.map(recentTrackItem).join("")}</div></section>` : ""}
     ${selectedPlaylistID ? libraryFilters : ""}
     <div class="track-table"><div class="track-header"><span>#</span><span></span><span>Title</span><span>Album</span><span>Time</span><span></span></div>
     ${tracks.length ? tracks.map(trackRow).join("") : `<div class="empty"><b>${emptyLibraryTitle}</b><span>${emptyLibraryHelp}</span></div>`}</div></div>`;
@@ -3419,7 +3437,7 @@ function renderLibrary() {
 function renderPlaylists() {
   updateTopSearch();
   const playlists = filterPlaylists(state.playlists, tracksForActiveProfile(state), playlistQuery);
-  content.innerHTML = `<div class="page"><span class="eyebrow">YOUR COLLECTIONS</span><h1>Playlists</h1><p>Organize your music into collections shared across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10">${playlistArtworkMarkup(playlist)}<div><strong>${escapeHTML(playlist.name)}</strong><small>${tracksForPlaylist(state, playlist.id, serverCatalog).length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
+  content.innerHTML = `<div class="page"><h1>Playlists</h1><p>Create collections and keep them in sync across your Resonance devices.</p><div class="playlist-page-actions"><button class="primary" id="pageNewPlaylist">＋ New Playlist</button><button class="secondary" id="pageSyncPlaylists">Sync Playlists</button></div><div class="playlist-grid">${playlists.map((playlist) => `<button class="playlist-card" data-open-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10">${playlistArtworkMarkup(playlist)}<div><strong>${escapeHTML(playlist.name)}</strong><small>${tracksForPlaylist(state, playlist.id, serverCatalog).length} tracks</small></div><span>›</span></button>`).join("") || `<div class="empty"><b>No matching playlists</b><span>Try a different playlist or song name.</span></div>`}</div></div>`;
   $("#pageNewPlaylist").onclick = () => newPlaylist();
   $("#pageSyncPlaylists").onclick = () => syncPlaylistsNow();
   document.querySelectorAll("[data-open-playlist]").forEach((button) => {
@@ -3553,11 +3571,11 @@ function renderStorage() {
   const storageHasQuery = Boolean(storageQuery.trim());
   const storageEmptyTitle = storageHasQuery ? "No matching songs" : storageScope === "downloads" ? "No server downloads yet" : storageScope === "files" ? "No imported files yet" : "No songs stored yet";
   const storageEmptyHelp = storageHasQuery ? "Try another search." : storageScope === "downloads" ? "Download songs from Music Server to keep them on this device." : "Import audio files to add them to this device.";
-  content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><div><span class="eyebrow">ON THIS DEVICE</span><h1>Song Storage</h1></div><div class="page-title-actions"><div class="storage-import-control" id="storageImportControl"><button class="primary storage-import-trigger" id="storageImportMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="storageImportMenu"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg></span><span>Import</span><svg class="storage-import-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="storage-import-menu" id="storageImportMenu" role="menu" aria-label="Choose an import type" hidden>${localImportAvailable ? '<button class="storage-import-option" type="button" role="menuitem" data-storage-import="link"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span><span><strong>Import from Web</strong><small>Paste a link or search music</small></span></button>' : ""}<button class="storage-import-option" type="button" role="menuitem" data-storage-import="files"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4zM12 10v6m-3-3h6"/></svg></span><span><strong>Import files</strong><small>Choose audio from this device</small></span></button></div></div><button class="secondary" id="storageEdit" ${!storageEditing && !tracks.length ? "disabled" : ""}>${storageEditing ? "Done" : "Edit"}</button></div></div>
+  content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><h1>Song Storage</h1><div class="page-title-actions"><div class="storage-import-control" id="storageImportControl"><button class="primary storage-import-trigger" id="storageImportMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="storageImportMenu"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg></span><span>Import</span><svg class="storage-import-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="storage-import-menu" id="storageImportMenu" role="menu" aria-label="Choose an import type" hidden>${localImportAvailable ? '<button class="storage-import-option" type="button" role="menuitem" data-storage-import="link"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span><span><strong>Import from Web</strong><small>Paste a link or search music</small></span></button>' : ""}<button class="storage-import-option" type="button" role="menuitem" data-storage-import="files"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4zM12 10v6m-3-3h6"/></svg></span><span><strong>Import files</strong><small>Choose audio from this device</small></span></button></div></div><button class="secondary" id="storageEdit" ${!storageEditing && !tracks.length ? "disabled" : ""}>${storageEditing ? "Done" : "Edit"}</button></div></div>
     <div class="storage-summary" id="storageSummary"><div class="storage-ring" id="storageRing" style="--local:${localDegrees}deg"><span>♪</span></div><div class="storage-stat"><small>Local audio</small><strong id="storageLocalBytes">${formatBytes(localBytes)}</strong><span>${localTracks.length} available library ${localTracks.length === 1 ? "file" : "files"}</span></div><div class="storage-stat"><small>Server downloads</small><strong id="storageRemoteBytes">${formatBytes(remoteBytes)}</strong><span>${remoteTracks.length} available library ${remoteTracks.length === 1 ? "file" : "files"}</span></div><div class="storage-stat"><small>Available</small><strong id="storageAvailable">Calculating…</strong><span id="storageFreePercent">Disk space</span></div></div>
     <div class="segmented storage-tabs" role="group" aria-label="Storage scope"><button class="${storageScope === "songs" ? "active" : ""}" data-storage-scope="songs" aria-pressed="${storageScope === "songs"}">Songs</button><button class="${storageScope === "downloads" ? "active" : ""}" data-storage-scope="downloads" aria-pressed="${storageScope === "downloads"}">Downloads</button><button class="${storageScope === "files" ? "active" : ""}" data-storage-scope="files" aria-pressed="${storageScope === "files"}">Files</button></div>
     ${storageEditing ? `<div class="selection-bar"><span>${selectedStorageIDs.size} selected</span><button class="danger" id="deleteSelectedStorage" ${selectedStorageIDs.size ? "" : "disabled"}>Delete selected</button></div>` : ""}
-    <div class="storage-section-heading"><strong>${storageScope === "downloads" ? "DOWNLOADED FROM SERVER" : storageScope === "files" ? "IMPORTED ON THIS PC" : "ALL SONGS"}</strong><span>${tracks.length} songs</span></div>
+    <div class="storage-section-heading"><strong>${storageScope === "downloads" ? "Downloaded from server" : storageScope === "files" ? "Imported on this PC" : "All songs"}</strong><span>${tracks.length} songs</span></div>
     <div class="storage-list redesigned">${tracks.map((track) => {
       const unavailable = track.available === false || track.missing;
       return `<div class="storage-row ${storageEditing ? "selecting" : ""}${unavailable ? " unavailable" : ""}" data-storage-track="${escapeHTML(track.id)}" tabindex="0" aria-keyshortcuts="Enter Space Shift+F10" aria-disabled="${unavailable}"><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${escapeHTML(track.id)}" aria-label="${selectedStorageIDs.has(track.id) ? "Deselect" : "Select"} ${escapeHTML(track.title || "song")}" aria-pressed="${selectedStorageIDs.has(track.id)}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${unavailable ? "File unavailable on this device" : `${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(displayAlbum(track))}`}</small></span><span class="storage-size">${unavailable ? "Missing" : formatBytes(track.size)}</span><button class="row-menu" data-storage-menu="${escapeHTML(track.id)}" title="More options" aria-label="More options for ${escapeHTML(track.title || "song")}">•••</button></div>`;
@@ -3751,11 +3769,16 @@ async function dismissServerUploadManifest(manifestID) {
   state.serverUploadManifests = state.serverUploadManifests.filter((item) => item.id !== manifestID);
   await persist({ refreshSidebar: false });
   if (retryIDs.length) {
-    await api.discardServerUploadRetries({
-      baseURL: state.serverURL,
-      profileID: activeProfileID(),
-      retryIDs,
-    }).catch(() => undefined);
+    try {
+      await api.discardServerUploadRetries({
+        baseURL: state.serverURL,
+        profileID: activeProfileID(),
+        retryIDs,
+      });
+    } catch (error) {
+      console.error("Could not discard persisted upload retries.", error);
+      showNotice(friendlyIPCError(error, "The upload results were dismissed, but their retry records could not be removed."));
+    }
   }
   if (section === "server") renderServer();
 }
@@ -3925,7 +3948,7 @@ function renderServer() {
       <button id="syncSelected" class="${serverSelecting ? "active" : ""}" title="${offlineDownloadAvailable ? selectLabel : downloadLabel}" aria-label="${offlineDownloadAvailable ? selectLabel : downloadLabel}" aria-pressed="${serverSelecting}" ${offlineDownloadAvailable ? "" : "disabled"}>${serverSelecting ? `<b>${selectedRemoteIDs.size}</b>` : serverSelectIcon}</button>
       <button id="syncServerPlaylists" title="Sync playlists" aria-label="Sync playlists">${serverPlaylistIcon}</button>
     </div></div>
-    <div class="server-table-head ${serverSelecting ? "selecting" : ""}">${serverSelecting ? "<span></span>" : ""}<span></span><span>TITLE</span><span>ARTIST</span><span>ALBUM</span><span>DURATION</span><span></span></div>
+    <div class="server-table-head ${serverSelecting ? "selecting" : ""}">${serverSelecting ? "<span></span>" : ""}<span></span><span>Title</span><span>Artist</span><span>Album</span><span>Duration</span><span></span></div>
     <div id="remoteSongs" class="remote-list redesigned server-library">${catalogRows}</div>
   </div>`;
   $("#serverSettings").onclick = openServerSettings;
@@ -4181,7 +4204,7 @@ function renderSettings() {
   }).join("");
   const settingsRoot = $("#settingsDialogContent");
   disposeCustomSelects(settingsRoot);
-  settingsRoot.innerHTML = `<div class="settings-heading"><div><span class="eyebrow">RESONANCE</span><h1 id="settingsDialogTitle">Settings</h1><p>Manage how Resonance behaves on this Windows device.</p></div><button id="closeSettings" class="history-close" type="button" aria-label="Close settings">×</button></div>
+  settingsRoot.innerHTML = `<div class="settings-heading"><div><h1 id="settingsDialogTitle">Settings</h1><p>Preferences for this Windows device.</p></div><button id="closeSettings" class="history-close" type="button" aria-label="Close settings">×</button></div>
     <div class="settings-shell">
       <nav class="settings-nav" aria-label="Settings sections">
         <button class="${settingsPanel === "general" ? "active" : ""}" type="button" data-settings-panel="general" aria-current="${settingsPanel === "general" ? "page" : "false"}">${settingsIcons.general}<span>General</span></button>
@@ -4191,7 +4214,7 @@ function renderSettings() {
       </nav>
       <div class="settings-content">
         <section class="settings-panel" data-settings-content="general" ${settingsPanel === "general" ? "" : "hidden"}>
-          <div class="settings-section-heading"><span>WINDOWS</span><p>Control desktop behavior and connected services.</p></div>
+          <div class="settings-section-heading"><span>Windows</span><p>Desktop behavior and connected services.</p></div>
           <div class="settings-grid">
             <div class="settings-group">
               <label class="settings-row" for="settingsRunInBackground">
@@ -4214,7 +4237,7 @@ function renderSettings() {
                 <input id="settingsCrossfadeSeconds" class="settings-crossfade-slider" type="range" min="1" max="12" step="1" value="${preferences.crossfadeSeconds}" aria-label="Crossfade duration" aria-valuetext="${preferences.crossfadeSeconds} seconds" ${preferences.crossfadeEnabled ? "" : "disabled"}>
               </div>
             </div>
-            <div class="settings-section-heading compact"><span>APP</span><p>Existing Resonance connection and update tools.</p></div>
+            <div class="settings-section-heading compact"><span>App</span><p>Connection and update tools.</p></div>
             <div class="settings-group">
               <div class="settings-row">
                 <span class="settings-row-icon" aria-hidden="true">${serverDeviceIcon}</span>
@@ -4230,7 +4253,7 @@ function renderSettings() {
           </div>
         </section>
         <section class="settings-panel settings-appearance-panel" data-settings-content="appearance" ${settingsPanel === "appearance" ? "" : "hidden"}>
-          <div class="settings-panel-title"><div><span class="eyebrow">THEME</span><h2>Appearance</h2><p>Choose a dark palette for this Windows device. Changes apply immediately.</p></div></div>
+          <div class="settings-panel-title"><div><h2>Appearance</h2><p>Choose a dark palette. Changes apply immediately.</p></div></div>
           <fieldset class="settings-theme-fieldset">
             <legend class="sr-only">Resonance theme</legend>
             <div class="settings-theme-grid">
@@ -4246,7 +4269,7 @@ function renderSettings() {
         </section>
         <section class="settings-panel" data-settings-content="server" ${settingsPanel === "server" ? "" : "hidden"}>
           <form id="serverSettingsForm" class="settings-server-form">
-            <div class="settings-panel-title"><div><span class="eyebrow">ACCOUNT</span><h2>Music Server</h2><p>Clerk securely handles email, Google, Apple, and Discord sign-in for Resonance.</p></div></div>
+            <div class="settings-panel-title"><div><h2>Music Server</h2><p>Sign in with Clerk to connect this device.</p></div></div>
             <div class="settings-server-card">
               <label class="settings-server-field settings-server-field-wide" for="serverURL"><span>Server URL</span><input id="serverURL" autocomplete="url" value="${RESONANCE_ACCOUNT_SERVER_URL}" readonly required></label>
               <div class="settings-account-card settings-server-field-wide">
@@ -4262,7 +4285,7 @@ function renderSettings() {
           </form>
         </section>
         <section class="settings-panel" data-settings-content="keybinds" ${settingsPanel === "keybinds" ? "" : "hidden"}>
-          <div class="settings-panel-title"><div><span class="eyebrow">PLAYBACK</span><h2>Keybinds</h2><p>Choose a shortcut, then press the new key combination. These work while Resonance is focused.</p></div><button id="resetSettingsKeybinds" class="settings-row-action" type="button">Reset defaults</button></div>
+          <div class="settings-panel-title"><div><h2>Keyboard shortcuts</h2><p>Select an action, then press its new shortcut while Resonance is focused.</p></div><button id="resetSettingsKeybinds" class="settings-row-action" type="button">Reset defaults</button></div>
           <div class="settings-group settings-keybinds">${keybindRows}</div>
         </section>
       </div>
@@ -4353,8 +4376,13 @@ function bindServerSettingsControls() {
   });
   const signOut = $("#signOutAccount");
   if (signOut) signOut.onclick = async () => {
-    await api.signOutAccount();
-    await applyAccountSession(null);
+    try {
+      await api.signOutAccount();
+      await applyAccountSession(null);
+    } catch (error) {
+      console.error("Account sign-out cleanup failed.", error);
+      showNotice(friendlyIPCError(error, "Resonance could not remove the saved account session."));
+    }
   };
   const accountEmail = $("#settingsAccountEmail");
   if (accountEmail) accountEmail.onclick = () => {
@@ -4403,7 +4431,11 @@ async function updateAppPreference(key, value) {
   });
   if (key === "theme") state.appPreferences.theme = applyAppTheme(state.appPreferences.theme);
   persistInBackground({ refreshSidebar: false });
-  await api.updateAppPreferences(state.appPreferences).catch(() => undefined);
+  try {
+    await api.updateAppPreferences(state.appPreferences);
+  } catch (error) {
+    reportRuntimePreferenceFailure(error);
+  }
 }
 
 function openSettings(initialPanel = "general") {
@@ -4499,7 +4531,11 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       if (from < 0 || to < 0 || to >= reorderRows.length) return;
       const entryKey = row.dataset.playlistEntry;
       const targetKey = reorderRows[to].dataset.playlistEntry;
-      await commitPlaylistTrackReorder(entryKey, targetKey, event.key === "ArrowDown");
+      try {
+        await commitPlaylistTrackReorder(entryKey, targetKey, event.key === "ArrowDown");
+      } catch (error) {
+        reportPlaylistReorderFailure(error);
+      }
       document.querySelector(`[data-playlist-entry="${CSS.escape(entryKey)}"]`)?.focus();
     };
     if (row.dataset.playlistDraggable === "true") {
@@ -4541,7 +4577,7 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
         if (!drag.active) return;
         event.preventDefault();
         suppressPlaylistRowClickUntil = performance.now() + 300;
-        if (targetID) void commitPlaylistTrackReorder(drag.sourceID, targetID, insertAfter).catch(() => {});
+        if (targetID) void commitPlaylistTrackReorder(drag.sourceID, targetID, insertAfter).catch(reportPlaylistReorderFailure);
       };
       row.onpointercancel = clearPlaylistPointerDrag;
       row.onlostpointercapture = () => {
@@ -5191,7 +5227,7 @@ async function stopLocalImportPreview({ release = false, resumeMain = true, pres
   if (release) {
     localImportPreviewAudio.removeAttribute("src");
     localImportPreviewAudio.load();
-    await api.cancelLocalImportPreview().catch(() => undefined);
+    await api.cancelLocalImportPreview().catch(logBestEffortFailure("Local-import preview cancellation"));
   }
   syncLocalImportPreviewButtons();
   if (resumeMain && interrupted) await resumePlaybackAfterLocalImportPreview();
@@ -8541,7 +8577,11 @@ const libraryLoad = await api.loadLibrary();
 const loadedState = libraryLoad && Object.hasOwn(libraryLoad, "state") ? libraryLoad.state : libraryLoad;
 state = normalizeState(loadedState);
 state.appPreferences.theme = applyAppTheme(state.appPreferences.theme);
-await api.updateAppPreferences(state.appPreferences).catch(() => undefined);
+try {
+  await api.updateAppPreferences(state.appPreferences);
+} catch (error) {
+  reportRuntimePreferenceFailure(error);
+}
 scheduleDiscordPresenceUpdate();
 let closeFlushStarted = false;
 api.onPrepareToClose(async () => {

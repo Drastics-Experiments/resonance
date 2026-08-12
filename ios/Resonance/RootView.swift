@@ -502,7 +502,6 @@ private struct ProfileButton: View {
                 Circle()
                     .stroke(.white.opacity(0.18), lineWidth: 1)
             }
-            .shadow(color: palette.secondary.opacity(0.28), radius: 12, y: 5)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(resolvedDisplayName) account")
@@ -517,7 +516,7 @@ private struct RecentlyAddedSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
-            Text("RECENTLY ADDED").eyebrow()
+            Text("Recently Added").sectionLabel()
 
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: 14) {
@@ -583,6 +582,9 @@ private struct TrackRow: View {
                 )
             }
             .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Play \(track.title) by \(track.artist)")
+            .accessibilityValue(track.durationText)
         }
         .mobileCatalogRow()
         .contentShape(Rectangle())
@@ -1345,7 +1347,7 @@ private struct StorageSummaryCard: View {
                 Label("\(downloadedCount) downloaded", systemImage: "icloud.and.arrow.down")
                 Spacer()
             }
-            .font(.caption2)
+            .font(.caption)
             .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .ignore)
@@ -1524,7 +1526,7 @@ private struct ServerView: View {
                                 "Loading metadata for \(library.pendingRemoteSongMetadataCount) "
                                     + (library.pendingRemoteSongMetadataCount == 1 ? "song" : "songs")
                             )
-                                .font(.caption2.weight(.medium))
+                                .font(.caption.weight(.medium))
                                 .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1623,7 +1625,7 @@ private struct ServerView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Label(isConnected ? "Connected" : "Offline", systemImage: "circle.fill")
-                    .font(.caption2.weight(.semibold))
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(isConnected ? Color.green : .secondary)
                     .padding(.horizontal, 10)
                     .frame(height: 27)
@@ -1778,7 +1780,7 @@ private struct ServerTransferFailuresCard: View {
                             .font(.caption.weight(.semibold))
                             .lineLimit(2)
                         Text(failure.reason)
-                            .font(.caption2)
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                     }
@@ -1967,7 +1969,7 @@ private struct MobileTransferNoticePopup: View {
                 Text(notice.title)
                     .font(.caption.weight(.semibold))
                 Text(notice.detail)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
             }
@@ -1991,30 +1993,6 @@ private struct MobileTransferNoticePopup: View {
                 .allowsHitTesting(false)
         }
         .shadow(color: .black.opacity(0.28), radius: 18, y: 8)
-    }
-}
-
-private struct MobileSongListHeader: View {
-    var trailingTitle = "Time"
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Text("#")
-                .frame(width: 24, alignment: .leading)
-            Text("Title")
-            Spacer()
-            Text(trailingTitle)
-                .frame(width: 44, alignment: .trailing)
-        }
-        .font(.caption2)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 8)
-        .frame(height: 38)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(.white.opacity(0.10))
-                .frame(height: 1)
-        }
     }
 }
 
@@ -2050,22 +2028,23 @@ private struct LocalSongRowContent: View {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 8))
+                        .font(.caption2)
                         .foregroundStyle(Color.green)
                         .fixedSize()
+                        .accessibilityHidden(true)
                 }
                 Text("\(track.artist) / \(track.mediaKindLabel)")
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Text(track.album.isEmpty ? "Unknown Album" : track.album)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
             Text(trailingDetail)
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .lineLimit(1)
@@ -2105,10 +2084,10 @@ private struct UnavailableMobilePlaylistRow: View {
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                 Text("\(entry.artist) / \(mediaKind) / Not downloaded")
-                    .font(.caption2)
+                    .font(.caption)
                     .lineLimit(1)
                 Text(entry.album)
-                    .font(.caption2)
+                    .font(.caption)
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
@@ -2117,7 +2096,7 @@ private struct UnavailableMobilePlaylistRow: View {
                 Text(entry.durationText)
                     .monospacedDigit()
             }
-            .font(.caption2)
+            .font(.caption)
             .frame(width: 44, alignment: .trailing)
         }
         .foregroundStyle(.secondary)
@@ -2238,17 +2217,18 @@ private struct ServerSongRow: View {
                                     .lineLimit(1)
                                 if isSynced {
                                     Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 8))
+                                        .font(.caption2)
                                         .foregroundStyle(Color.green)
+                                        .accessibilityHidden(true)
                                 }
                             }
                             Text("\(displayArtist) / \(mediaKind)")
-                                .font(.caption2)
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                             if !displayAlbum.isEmpty {
                                 Text(displayAlbum)
-                                    .font(.caption2)
+                                    .font(.caption)
                                     .foregroundStyle(.tertiary)
                                     .lineLimit(1)
                             }
@@ -2260,7 +2240,7 @@ private struct ServerSongRow: View {
                             MobileServerMetadataPlaceholder(width: 42, height: 9)
                         } else {
                             Text(trailingDetail)
-                                .font(.caption2)
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
                         }
@@ -2441,14 +2421,8 @@ private struct ServerConnectionSheet: View {
                                     .font(.headline)
                                     .frame(width: 36, height: 36)
                                     .background(.white.opacity(0.16), in: Circle())
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Sign in with Clerk")
-                                        .font(.headline)
-                                    Text("Secure Resonance account access")
-                                        .font(.caption)
-                                        .foregroundStyle(.white.opacity(0.78))
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
+                                Text("Sign in with Clerk")
+                                    .font(.headline)
                                 Spacer(minLength: 8)
                                 if library.isAuthenticatingAccount {
                                     ProgressView()
@@ -2470,7 +2444,6 @@ private struct ServerConnectionSheet: View {
                                 ),
                                 in: RoundedRectangle(cornerRadius: 14, style: .continuous)
                             )
-                            .shadow(color: palette.accent.opacity(0.24), radius: 10, y: 5)
                         }
                         .buttonStyle(.plain)
                         .controlSize(.large)
@@ -2558,83 +2531,6 @@ private struct ServerConnectionSheet: View {
     }
 }
 
-private struct ServerSourceImportSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var library: MusicLibrary
-    @FocusState private var sourceIsFocused: Bool
-    @State private var sourcePage = ""
-    @State private var isSubmitting = false
-    @State private var message: String?
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("YouTube source page") {
-                    TextField("https://www.youtube.com/watch?v=…", text: $sourcePage)
-                        .focused($sourceIsFocused)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .submitLabel(.go)
-                        .onSubmit(submit)
-                    Button("Paste") {
-                        if let pasted = UIPasteboard.general.string {
-                            sourcePage = pasted
-                        }
-                    }
-                }
-
-                Section {
-                    Text("Resonance sends only the canonical page address to your server. The server verifies and ingests the audio into its own R2 storage; provider playback links and credentials are never forwarded.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if let message {
-                    Section("Status") {
-                        Text(message)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                }
-            }
-            .navigationTitle("Import from Web")
-            .navigationBarTitleDisplayMode(.inline)
-            .scrollDismissesKeyboard(.interactively)
-            .onAppear { sourceIsFocused = true }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(isSubmitting ? "Uploading…" : "Upload", action: submit)
-                        .disabled(isSubmitting || sourcePage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("Done") { sourceIsFocused = false }
-                }
-            }
-        }
-    }
-
-    private func submit() {
-        guard !isSubmitting else { return }
-        sourceIsFocused = false
-        isSubmitting = true
-        message = nil
-        Task {
-            let succeeded = await library.importServerSourceLink(sourcePage)
-            isSubmitting = false
-            if succeeded {
-                dismiss()
-            } else {
-                message = library.serverMessage
-            }
-        }
-    }
-}
-
 private struct MobilePlayerBar: View {
     @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
@@ -2653,7 +2549,7 @@ private struct MobilePlayerBar: View {
                             TrackArtwork(track: track).frame(width: 44, height: 44)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(track.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                                Text(track.artist).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                Text(track.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                             }
                             Spacer(minLength: 0)
                         }
@@ -2661,7 +2557,10 @@ private struct MobilePlayerBar: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Open Now Playing for \(track.title)")
-                    Button { library.previous() } label: { Image(systemName: "backward.end.fill") }
+                    Button { library.previous() } label: {
+                        Image(systemName: "backward.end.fill").frame(width: 44, height: 44)
+                    }
+                        .accessibilityLabel("Previous track")
                         .disabled(library.isTransientStreamActive)
                     Button { library.togglePlay() } label: {
                         Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
@@ -2670,9 +2569,13 @@ private struct MobilePlayerBar: View {
                             .background(palette.raisedSurface, in: Circle())
                             .overlay { Circle().stroke(palette.accent.opacity(0.72), lineWidth: 1.5) }
                             .foregroundStyle(.white)
-                            .shadow(color: palette.accent.opacity(0.22), radius: 8)
+                            .frame(width: 44, height: 44)
                     }
-                    Button { library.next() } label: { Image(systemName: "forward.end.fill") }
+                    .accessibilityLabel(library.isPlaying ? "Pause" : "Play")
+                    Button { library.next() } label: {
+                        Image(systemName: "forward.end.fill").frame(width: 44, height: 44)
+                    }
+                        .accessibilityLabel("Next track")
                         .disabled(library.isTransientStreamActive)
                 }
                 GeometryReader { geometry in
@@ -2682,13 +2585,33 @@ private struct MobilePlayerBar: View {
                     }
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0).onChanged { library.seek(to: $0.location.x / max(geometry.size.width, 1)) })
-                }.frame(height: 5)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Playback position")
+                    .accessibilityValue(
+                        "\(formatTime(library.playbackElapsed(for: track))) of \(formatTime(library.playbackDuration(for: track)))"
+                    )
+                    .accessibilityAdjustableAction { adjustPlaybackPosition($0, track: track) }
+                }.frame(height: 44)
             }
         }
         .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 6)
         .background(palette.surface.opacity(0.98))
-        .background(.ultraThinMaterial.opacity(0.08))
         .overlay(alignment: .top) { Divider() }
+    }
+
+    private func adjustPlaybackPosition(
+        _ direction: AccessibilityAdjustmentDirection,
+        track: MobileTrack
+    ) {
+        let delta: TimeInterval
+        switch direction {
+        case .increment: delta = 10
+        case .decrement: delta = -10
+        @unknown default: return
+        }
+        let duration = max(library.playbackDuration(for: track), 1)
+        let nextPosition = min(max(library.playbackElapsed(for: track) + delta, 0), duration)
+        library.seek(to: nextPosition / duration)
     }
 }
 
@@ -2798,11 +2721,10 @@ private struct NowPlayingView: View {
                     .frame(width: 44, height: 44)
                     .background(.white.opacity(0.08), in: Circle())
             }
+            .accessibilityLabel("Close Now Playing")
             Spacer()
-            VStack(spacing: 2) {
-                Text("NOW PLAYING").eyebrow()
-                Text("Resonance").font(.caption).foregroundStyle(.secondary)
-            }
+            Text("Now Playing")
+                .font(.headline)
             Spacer()
             Color.clear.frame(width: 44, height: 44)
         }
@@ -2832,8 +2754,9 @@ private struct NowPlayingView: View {
     private var transportControls: some View {
         HStack(spacing: 44) {
             Button { library.previous() } label: {
-                Image(systemName: "backward.end.fill").font(.title)
+                Image(systemName: "backward.end.fill").font(.title).frame(width: 44, height: 44)
             }
+            .accessibilityLabel("Previous track")
             .disabled(library.isTransientStreamActive)
             Button { library.togglePlay() } label: {
                 Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
@@ -2842,11 +2765,12 @@ private struct NowPlayingView: View {
                     .background(palette.raisedSurface, in: Circle())
                     .overlay { Circle().stroke(palette.accent.opacity(0.72), lineWidth: 2) }
                     .foregroundStyle(.white)
-                    .shadow(color: palette.accent.opacity(0.24), radius: 14)
             }
+            .accessibilityLabel(library.isPlaying ? "Pause" : "Play")
             Button { library.next() } label: {
-                Image(systemName: "forward.end.fill").font(.title)
+                Image(systemName: "forward.end.fill").font(.title).frame(width: 44, height: 44)
             }
+            .accessibilityLabel("Next track")
             .disabled(library.isTransientStreamActive)
         }
         .buttonStyle(.plain)
@@ -2884,7 +2808,7 @@ private struct NowPlayingView: View {
 
     private func trackDetails(_ track: MobileTrack) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("SONG DETAILS").eyebrow()
+            Text("Song Details").sectionLabel()
             detailRow("Title", track.title)
             detailRow("Artist", track.artist)
             detailRow("Album", track.album)
@@ -2917,16 +2841,7 @@ private struct AppBackground: View {
     @Environment(\.resonancePalette) private var palette
 
     var body: some View {
-        ZStack {
-            palette.background
-            RadialGradient(
-                colors: [palette.secondary.opacity(0.16), .clear],
-                center: UnitPoint(x: 0.76, y: 0.04),
-                startRadius: 10,
-                endRadius: 520
-            )
-        }
-        .ignoresSafeArea()
+        palette.background.ignoresSafeArea()
     }
 }
 
@@ -2945,6 +2860,7 @@ private struct SquareArtworkContainer<Content: View>: View {
         }
         .aspectRatio(1, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .accessibilityHidden(true)
     }
 }
 
@@ -3090,7 +3006,10 @@ private struct ServerArtwork: View {
 }
 
 extension Text {
-    func eyebrow() -> some View { font(.caption2.weight(.semibold)).tracking(1.6).foregroundStyle(.secondary) }
+    func sectionLabel() -> some View {
+        font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
+    }
 }
 
 extension View {
@@ -3099,18 +3018,5 @@ extension View {
         frame(width: 42, height: 42)
             .background(active ? activeColor : .white.opacity(0.08), in: Circle())
             .foregroundStyle(.white)
-    }
-    func serverActionButton() -> some View {
-        font(.subheadline.weight(.semibold))
-            .lineLimit(1)
-            .minimumScaleFactor(0.8)
-            .frame(maxWidth: .infinity)
-            .frame(height: 42)
-            .background(.white.opacity(0.07), in: Capsule())
-            .foregroundStyle(.primary)
-    }
-    func fieldCard(symbol: String) -> some View {
-        HStack { Image(systemName: symbol); self }
-            .padding(13).background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
     }
 }

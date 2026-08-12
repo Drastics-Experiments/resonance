@@ -348,8 +348,8 @@ struct LocalImportError: LocalizedError, Hashable, Sendable {
 }
 
 enum LocalImportURL {
-    private static let spotifyID = try! NSRegularExpression(pattern: "^[A-Za-z0-9]{22}$")
-    private static let youtubeID = try! NSRegularExpression(pattern: "^[A-Za-z0-9_-]{11}$")
+    private static let spotifyID = try? NSRegularExpression(pattern: "^[A-Za-z0-9]{22}$")
+    private static let youtubeID = try? NSRegularExpression(pattern: "^[A-Za-z0-9_-]{11}$")
     private static let spotifyHosts = Set(["open.spotify.com", "www.open.spotify.com", "spotify.link", "www.spotify.link"])
     private static let youtubeHosts = Set(["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"])
     private static let youtubeEmbedHosts = Set(["youtube-nocookie.com", "www.youtube-nocookie.com"])
@@ -522,7 +522,8 @@ enum LocalImportURL {
         return true
     }
 
-    private static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
+    private static func matches(_ expression: NSRegularExpression?, _ value: String) -> Bool {
+        guard let expression else { return false }
         let range = NSRange(value.startIndex..<value.endIndex, in: value)
         return expression.firstMatch(in: value, range: range)?.range == range
     }
@@ -940,7 +941,10 @@ enum LocalImportParser {
         ] {
             text = text.replacingOccurrences(of: entity, with: replacement, options: .caseInsensitive)
         }
-        let expression = try! NSRegularExpression(pattern: #"&#(x[0-9a-f]+|[0-9]+);"#, options: .caseInsensitive)
+        guard let expression = try? NSRegularExpression(
+            pattern: #"&#(x[0-9a-f]+|[0-9]+);"#,
+            options: .caseInsensitive
+        ) else { return String(text.prefix(maxLength)) }
         let matches = expression.matches(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text))
         for match in matches.reversed() {
             guard let entityRange = Range(match.range(at: 0), in: text),
@@ -983,16 +987,16 @@ struct LocalImportSearchCandidate: Hashable, Sendable {
 }
 
 enum LocalImportMatcher {
-    private static let versionWords = try! NSRegularExpression(
+    private static let versionWords = try? NSRegularExpression(
         pattern: #"\b(cover|instrumental|karaoke|live|nightcore|remaster(?:ed)?|remix|reverb|slowed|sped up|tribute)\b"#,
         options: .caseInsensitive
     )
-    private static let qualifier = try! NSRegularExpression(pattern: #"(?:\(([^)]{1,120})\)|\[([^\]]{1,120})\])"#)
-    private static let removable = try! NSRegularExpression(
+    private static let qualifier = try? NSRegularExpression(pattern: #"(?:\(([^)]{1,120})\)|\[([^\]]{1,120})\])"#)
+    private static let removable = try? NSRegularExpression(
         pattern: #"\b(official|audio|video|visualizer|lyrics?|hd|hq|topic|provided to youtube by)\b"#,
         options: .caseInsensitive
     )
-    private static let punctuation = try! NSRegularExpression(pattern: #"[^\p{L}\p{N}]+"#)
+    private static let punctuation = try? NSRegularExpression(pattern: #"[^\p{L}\p{N}]+"#)
 
     static func normalize(_ value: String?) -> String {
         var text = (value ?? "").folding(options: .diacriticInsensitive, locale: Locale(identifier: "en_US_POSIX")).lowercased()
@@ -1076,6 +1080,7 @@ enum LocalImportMatcher {
     }
 
     private static func hasUnmatchedQualifier(expected: String, candidate: String) -> Bool {
+        guard let qualifier else { return false }
         let expected = normalize(expected)
         let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
         return qualifier.matches(in: candidate, range: range).contains { match in
@@ -1086,12 +1091,18 @@ enum LocalImportMatcher {
         }
     }
 
-    private static func contains(_ expression: NSRegularExpression, _ value: String) -> Bool {
-        expression.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
+    private static func contains(_ expression: NSRegularExpression?, _ value: String) -> Bool {
+        guard let expression else { return false }
+        return expression.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
     }
 
-    private static func replacing(_ expression: NSRegularExpression, in value: String, with replacement: String) -> String {
-        expression.stringByReplacingMatches(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value), withTemplate: replacement)
+    private static func replacing(_ expression: NSRegularExpression?, in value: String, with replacement: String) -> String {
+        guard let expression else { return value }
+        return expression.stringByReplacingMatches(
+            in: value,
+            range: NSRange(value.startIndex..<value.endIndex, in: value),
+            withTemplate: replacement
+        )
     }
 
     private static func rounded(_ value: Double) -> Double { (value * 10_000).rounded() / 10_000 }

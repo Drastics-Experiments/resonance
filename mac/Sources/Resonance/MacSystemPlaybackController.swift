@@ -322,9 +322,14 @@ final class MacSystemPlaybackController: NSObject, MacSystemPlaybackControlling 
         let gradient = NSGradient(colors: colors) ?? NSGradient(
             starting: NSColor(calibratedRed: 0.20, green: 0.29, blue: 0.79, alpha: 1),
             ending: NSColor(calibratedRed: 0.46, green: 0.28, blue: 1, alpha: 1)
-        )!
+        )
         return NSImage(size: size, flipped: false) { bounds in
-            gradient.draw(in: bounds, angle: -45)
+            if let gradient {
+                gradient.draw(in: bounds, angle: -45)
+            } else {
+                colors.first?.setFill()
+                NSBezierPath(rect: bounds).fill()
+            }
             return true
         }
     }

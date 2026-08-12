@@ -379,7 +379,7 @@ struct MacClipEditorSheet: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(palette.muted)
             }
             .font(.system(size: 18, weight: .semibold))
@@ -558,7 +558,7 @@ struct MacClipEditorSheet: View {
             }
             Spacer()
         }
-        .font(.system(size: 10, weight: .medium))
+        .font(.system(size: 11, weight: .medium))
         .foregroundStyle(errorMessage == nil ? palette.muted : Color(hex: 0xFF7568))
         .lineLimit(1)
         .padding(.horizontal, 4)
@@ -567,7 +567,7 @@ struct MacClipEditorSheet: View {
 
     private var settingsPopover: some View {
         VStack(alignment: .leading, spacing: 14) {
-            popoverHeader(eyebrow: "CLIP SETTINGS", title: "Fine tune your clip") { showsSettings = false }
+            popoverHeader(title: "Clip settings") { showsSettings = false }
             HStack(spacing: 8) {
                 ClipTimeControl(label: "Start", value: $startTime, range: 0...max(endTime - ClipRangePolicy.minimumDuration, 0))
                 ClipTimeControl(label: "End", value: $endTime, range: min(startTime + ClipRangePolicy.minimumDuration, selectedDuration)...selectedDuration)
@@ -575,7 +575,9 @@ struct MacClipEditorSheet: View {
 
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("CLIP LENGTH").font(.system(size: 9, weight: .bold)).tracking(1).foregroundStyle(palette.muted)
+                    Text("Clip length")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(palette.muted)
                     Text(clipTimeText(clipLength)).font(.system(size: 15, weight: .bold, design: .monospaced)).foregroundStyle(palette.tertiary)
                 }
                 Spacer()
@@ -589,7 +591,6 @@ struct MacClipEditorSheet: View {
         }
         .padding(18)
         .frame(width: 390)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .background(palette.raisedSurface.opacity(0.94), in: RoundedRectangle(cornerRadius: 16))
         .overlay { RoundedRectangle(cornerRadius: 16).stroke(palette.divider, lineWidth: 1) }
         .shadow(color: .black.opacity(0.65), radius: 30, y: 14)
@@ -599,7 +600,7 @@ struct MacClipEditorSheet: View {
 
     private var helpPopover: some View {
         VStack(alignment: .leading, spacing: 12) {
-            popoverHeader(eyebrow: "HOW IT WORKS", title: "Create your perfect clip") { showsHelp = false }
+            popoverHeader(title: "How clipping works") { showsHelp = false }
             Text("Drag the yellow handles to choose a range. Click the timeline to scrub, then use the center controls to preview exactly what will play.")
             Text("**Save** updates playback for this profile without changing the media file. **Done** closes the editor and discards anything not saved.")
         }
@@ -608,7 +609,6 @@ struct MacClipEditorSheet: View {
         .lineSpacing(3)
         .padding(18)
         .frame(width: 360)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .background(palette.raisedSurface.opacity(0.94), in: RoundedRectangle(cornerRadius: 16))
         .overlay { RoundedRectangle(cornerRadius: 16).stroke(palette.divider, lineWidth: 1) }
         .shadow(color: .black.opacity(0.65), radius: 30, y: 14)
@@ -616,12 +616,11 @@ struct MacClipEditorSheet: View {
         .padding(.trailing, 20)
     }
 
-    private func popoverHeader(eyebrow: String, title: String, close: @escaping () -> Void) -> some View {
+    private func popoverHeader(title: String, close: @escaping () -> Void) -> some View {
         HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(eyebrow).font(.system(size: 9, weight: .bold)).tracking(1.1).foregroundStyle(palette.muted)
-                Text(title).font(.system(size: 15, weight: .bold)).foregroundStyle(palette.ink)
-            }
+            Text(title)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(palette.ink)
             Spacer()
             Button(action: close) {
                 Image(systemName: "xmark")
@@ -813,7 +812,7 @@ private final class ClipSpectrumVisualizerView: NSView {
     }
 
     required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+        return nil
     }
 
     override var isFlipped: Bool { false }
@@ -1125,7 +1124,7 @@ private struct CinematicClipWaveformSelector: View {
             .frame(width: 28)
             .overlay {
                 Image(systemName: symbol)
-                    .font(.system(size: 9, weight: .black))
+                    .font(.system(size: 10, weight: .black))
                     .foregroundStyle(Color.black.opacity(0.82))
             }
             .shadow(color: Color(hex: 0xFFD329).opacity(0.28), radius: 10)
@@ -1239,105 +1238,6 @@ private struct ClipVideoPlayer: NSViewRepresentable {
     }
 }
 
-private struct ClipWaveformRangeSelector: View {
-    @Environment(\.resonancePalette) private var palette
-    let samples: [Double]
-    let duration: TimeInterval
-    @Binding var startTime: TimeInterval
-    @Binding var endTime: TimeInterval
-    let previewPosition: TimeInterval?
-
-    var body: some View {
-        GeometryReader { proxy in
-            let width = max(proxy.size.width, 1)
-            let height = proxy.size.height
-            let startFraction = duration > 0 ? min(max(startTime / duration, 0), 1) : 0
-            let endFraction = duration > 0 ? min(max(endTime / duration, 0), 1) : 0
-            let startX = width * startFraction
-            let endX = width * endFraction
-
-            ZStack {
-                Canvas { context, size in
-                    let values = samples.isEmpty ? [Double](repeating: 0.24, count: 72) : samples
-                    let spacing: CGFloat = 2
-                    let barWidth = max((size.width - spacing * CGFloat(values.count - 1)) / CGFloat(values.count), 1)
-                    for (index, value) in values.enumerated() {
-                        let x = CGFloat(index) * (barWidth + spacing)
-                        let barHeight = max(4, (size.height - 20) * min(max(value, 0.05), 1))
-                        let centerFraction = (CGFloat(index) + 0.5) / CGFloat(values.count)
-                        let selected = centerFraction >= startFraction && centerFraction <= endFraction
-                        let rect = CGRect(x: x, y: (size.height - barHeight) / 2, width: barWidth, height: barHeight)
-                        context.fill(
-                            Path(roundedRect: rect, cornerRadius: barWidth / 2),
-                            with: .color(selected ? palette.secondary : Color.white.opacity(0.18))
-                        )
-                    }
-                }
-                .padding(.horizontal, 8)
-
-                Rectangle()
-                    .fill(Color.black.opacity(0.42))
-                    .frame(width: startX)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                Rectangle()
-                    .fill(Color.black.opacity(0.42))
-                    .frame(width: max(width - endX, 0))
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-
-                if let previewPosition, duration > 0 {
-                    Rectangle()
-                        .fill(Color(hex: 0xFF7568))
-                        .frame(width: 1.5, height: height - 12)
-                        .position(x: width * min(max(previewPosition / duration, 0), 1), y: height / 2)
-                }
-
-                rangeHandle(symbol: "chevron.right", color: palette.secondary)
-                    .position(x: min(max(startX, 8), width - 8), y: height / 2)
-                    .gesture(
-                        DragGesture(minimumDistance: 0, coordinateSpace: .named("clipWaveform"))
-                            .onChanged { value in
-                                guard duration > 0 else { return }
-                                let proposed = min(max(value.location.x / width * duration, 0), duration)
-                                startTime = max(0, min(proposed, endTime - ClipRangePolicy.minimumDuration))
-                            }
-                    )
-
-                rangeHandle(symbol: "chevron.left", color: palette.secondary)
-                    .position(x: min(max(endX, 8), width - 8), y: height / 2)
-                    .gesture(
-                        DragGesture(minimumDistance: 0, coordinateSpace: .named("clipWaveform"))
-                            .onChanged { value in
-                                guard duration > 0 else { return }
-                                let proposed = min(max(value.location.x / width * duration, 0), duration)
-                                endTime = min(duration, max(proposed, startTime + ClipRangePolicy.minimumDuration))
-                            }
-                    )
-            }
-            .coordinateSpace(name: "clipWaveform")
-            .background(Color.black.opacity(0.24), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Clip range")
-            .accessibilityValue("From \(clipTimeText(startTime)) to \(clipTimeText(endTime))")
-        }
-    }
-
-    private func rangeHandle(symbol: String, color: Color) -> some View {
-        RoundedRectangle(cornerRadius: 5, style: .continuous)
-            .fill(color)
-            .frame(width: 16, height: 34)
-            .overlay {
-                Image(systemName: symbol)
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundStyle(Color.white)
-            }
-            .shadow(color: color.opacity(0.35), radius: 6)
-            .frame(width: 30, height: 54)
-            .contentShape(Rectangle())
-    }
-}
-
 private struct ClipTimeControl: View {
     @Environment(\.resonancePalette) private var palette
     let label: String
@@ -1349,7 +1249,7 @@ private struct ClipTimeControl: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(palette.muted)
 
             TextField("0:00.0", text: $draft)

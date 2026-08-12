@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -51,6 +52,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -82,7 +84,7 @@ fun LibraryScreen(
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.Top,
     ) {
         item {
             Row(
@@ -109,6 +111,7 @@ fun LibraryScreen(
                 )
             }
         }
+        item { Spacer(Modifier.height(16.dp)) }
         item {
             OutlinedTextField(
                 value = state.librarySearch,
@@ -129,6 +132,7 @@ fun LibraryScreen(
         }
         val recentlyAdded = recentlyAddedTracks(state.tracks)
         if (query.isEmpty() && recentlyAdded.isNotEmpty()) {
+            item { Spacer(Modifier.height(16.dp)) }
             item {
                 RecentlyAddedSection(
                     tracks = recentlyAdded,
@@ -138,6 +142,7 @@ fun LibraryScreen(
             }
         }
         if (tracks.isEmpty()) {
+            item { Spacer(Modifier.height(16.dp)) }
             item {
                 Column(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
@@ -158,23 +163,22 @@ fun LibraryScreen(
                 }
             }
         } else {
+            item { Spacer(Modifier.height(16.dp)) }
             item {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("All Songs", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                        Text(
-                            tracks.size.toString(),
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
-                        )
-                    }
-                    tracks.forEachIndexed { index, track ->
-                        TrackRow(track, state, actions, number = index + 1, queue = tracks)
-                    }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("All songs", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text(
+                        tracks.size.toString(),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                    )
                 }
+            }
+            itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
+                TrackRow(track, state, actions, number = index + 1, queue = tracks)
             }
         }
         item { Spacer(Modifier.height(8.dp)) }
@@ -286,7 +290,7 @@ private fun RecentlyAddedSection(
     actions: ResonanceActions,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Eyebrow("Recently Added")
+        SectionLabel("Recently added")
         LazyRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -295,13 +299,16 @@ private fun RecentlyAddedSection(
                 Column(
                     modifier = Modifier
                         .width(132.dp)
-                        .clickable { actions.playTrack(track.id, state.tracks.map(Track::id)) },
+                        .clickable(
+                            role = Role.Button,
+                            onClickLabel = "Play ${track.title}",
+                            onClick = { actions.playTrack(track.id, state.tracks.map(Track::id)) },
+                        ),
                     verticalArrangement = Arrangement.spacedBy(7.dp),
                 ) {
                     Artwork(
                         path = state.artworkPathsByTrackId[track.id] ?: track.artworkFilename,
                         modifier = Modifier.size(132.dp),
-                        showWaveform = state.currentTrackId == track.id && state.isPlaying,
                     )
                     Text(
                         text = track.title,

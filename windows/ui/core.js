@@ -560,7 +560,9 @@ function canonicalServerURL(value) {
     if (url.origin === LEGACY_PRODUCTION_ORIGIN && url.pathname === "/" && !url.search && !url.hash) {
       return PRODUCTION_ORIGIN;
     }
-  } catch {}
+  } catch {
+    return value;
+  }
   return value;
 }
 

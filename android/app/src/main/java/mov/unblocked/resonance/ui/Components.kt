@@ -5,7 +5,9 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -50,6 +52,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
@@ -89,7 +92,6 @@ fun ResonanceBackground(modifier: Modifier = Modifier, content: @Composable () -
 fun Artwork(
     path: String?,
     modifier: Modifier = Modifier,
-    showWaveform: Boolean = false,
 ) {
     val palette = LocalResonancePalette.current
     val bitmap = remember(path) {
@@ -105,13 +107,13 @@ fun Artwork(
         if (bitmap != null) {
             Image(
                 bitmap = bitmap,
-                contentDescription = "Album artwork",
+                contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
             )
         } else {
             Icon(
-                imageVector = if (showWaveform) Icons.Default.MusicNote else Icons.Default.MusicNote,
+                imageVector = Icons.Default.MusicNote,
                 contentDescription = null,
                 tint = Color.White.copy(alpha = .94f),
                 modifier = Modifier.size(28.dp),
@@ -208,10 +210,11 @@ fun RemoteArtwork(
             .background(Brush.linearGradient(palette.artworkStops)),
         contentAlignment = Alignment.Center,
     ) {
-        if (bitmap != null) {
+        val loadedBitmap = bitmap
+        if (loadedBitmap != null) {
             Image(
-                bitmap = bitmap!!.asImageBitmap(),
-                contentDescription = "Album artwork",
+                bitmap = loadedBitmap.asImageBitmap(),
+                contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
             )
@@ -339,13 +342,13 @@ private val REMOTE_ARTWORK_REDIRECT_STATUSES = setOf(
 )
 
 @Composable
-fun Eyebrow(text: String, modifier: Modifier = Modifier) {
+fun SectionLabel(text: String, modifier: Modifier = Modifier) {
     Text(
-        text = text.uppercase(),
+        text = text,
         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
-        fontSize = 11.sp,
+        fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
-        letterSpacing = 1.6.sp,
+        letterSpacing = .2.sp,
         modifier = modifier,
     )
 }
@@ -362,17 +365,22 @@ fun SegmentedControl(
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(Color.White.copy(alpha = .055f))
-            .padding(4.dp),
+            .padding(4.dp)
+            .selectableGroup(),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         labels.forEachIndexed { index, label ->
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .height(40.dp)
+                    .height(48.dp)
                     .clip(RoundedCornerShape(11.dp))
                     .background(if (index == selectedIndex) MaterialTheme.colorScheme.primary else Color.Transparent)
-                    .clickable { onSelected(index) },
+                    .selectable(
+                        selected = index == selectedIndex,
+                        role = Role.RadioButton,
+                        onClick = { onSelected(index) },
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -400,20 +408,20 @@ fun SongListHeader(
             Text(
                 "#",
                 modifier = Modifier.width(24.dp),
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f),
             )
             Text(
                 "Title",
                 modifier = Modifier.weight(1f),
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f),
             )
             Text(
                 trailingTitle,
                 modifier = Modifier.width(44.dp),
                 textAlign = TextAlign.End,
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f),
             )
         }
@@ -442,6 +450,22 @@ fun TrackRow(
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     val displayedNumber = number ?: queue.indexOfFirst { it.id == track.id }.takeIf { it >= 0 }?.plus(1)
+    val interactionModifier = if (showSelection) {
+        Modifier.toggleable(
+            value = selected,
+            enabled = onSelect != null,
+            role = Role.Checkbox,
+            onValueChange = { onSelect?.invoke() },
+        )
+    } else {
+        Modifier.combinedClickable(
+            role = Role.Button,
+            onClickLabel = "Play ${track.title}",
+            onClick = { actions.playTrack(track.id, queue.map { it.id }, playlistId) },
+            onLongClickLabel = if (showMenu) "Show song actions" else null,
+            onLongClick = if (showMenu) ({ menuOpen = true }) else null,
+        )
+    }
     Box(modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -449,13 +473,7 @@ fun TrackRow(
                 .heightIn(min = 76.dp)
                 .clip(RoundedCornerShape(9.dp))
                 .background(if (selected) Color.White.copy(alpha = .05f) else Color.Transparent)
-                .combinedClickable(
-                    onClick = {
-                        if (showSelection) onSelect?.invoke()
-                        else actions.playTrack(track.id, queue.map { it.id }, playlistId)
-                    },
-                    onLongClick = if (!showSelection && showMenu) ({ menuOpen = true }) else null,
-                )
+                .then(interactionModifier)
                 .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -464,7 +482,7 @@ fun TrackRow(
                 if (showSelection) {
                     Icon(
                         if (selected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                        contentDescription = if (selected) "Selected" else "Not selected",
+                        contentDescription = null,
                         modifier = Modifier.size(18.dp),
                         tint = if (selected) {
                             MaterialTheme.colorScheme.tertiary
@@ -483,7 +501,6 @@ fun TrackRow(
             Artwork(
                 path = state.artworkPathsByTrackId[track.id] ?: track.artworkFilename,
                 modifier = Modifier.size(52.dp),
-                showWaveform = state.currentTrackId == track.id && state.isPlaying,
             )
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -497,21 +514,21 @@ fun TrackRow(
                     Icon(
                         Icons.Default.CheckCircle,
                         contentDescription = "Stored on device",
-                        modifier = Modifier.size(9.dp),
+                        modifier = Modifier.size(12.dp),
                         tint = LocalResonancePalette.current.success,
                     )
                 }
                 Text(
                     "${track.artist} / ${track.mediaKindLabel}",
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     track.album.ifBlank { "Unknown Album" },
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .43f),
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -519,7 +536,7 @@ fun TrackRow(
             Text(
                 trailingText,
                 modifier = Modifier.width(44.dp),
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
                 textAlign = TextAlign.End,
                 maxLines = 1,

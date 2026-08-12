@@ -86,7 +86,6 @@ struct ResonanceThemePalette: Equatable, Sendable {
     let gradientStopHexes: [UInt32]
 
     var background: Color { Color(hex: backgroundHex) }
-    var panel: Color { Color(hex: panelHex) }
     var surface: Color { Color(hex: surfaceHex) }
     var raisedSurface: Color { Color(hex: raisedSurfaceHex) }
     var accent: Color { Color(hex: accentHex) }
@@ -95,9 +94,7 @@ struct ResonanceThemePalette: Equatable, Sendable {
     var foregroundAccent: Color { tertiary }
     var gradientStops: [Color] { gradientStopHexes.map { Color(hex: $0) } }
     var ink: Color { Color(hex: 0xF5F5F7) }
-    var muted: Color { Color(hex: 0xA1A1AC) }
     var divider: Color { Color.white.opacity(0.09) }
-    var onAccent: Color { .white }
     var serverActionForeground: Color { Color(hex: 0xB0ADBF) }
 }
 

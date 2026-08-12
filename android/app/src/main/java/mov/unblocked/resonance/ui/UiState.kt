@@ -59,21 +59,21 @@ enum class StorageScope(val label: String) {
 enum class StorageSort(val label: String) {
     Title("Title"),
     Artist("Artist"),
-    RecentlyAdded("Recently Added"),
-    FileSize("File Size"),
+    RecentlyAdded("Recently added"),
+    FileSize("File size"),
 }
 
 enum class ServerScope(val label: String) {
     All("All"),
-    OnDevice("On Device"),
-    NotDownloaded("Not Downloaded"),
+    OnDevice("On device"),
+    NotDownloaded("Not downloaded"),
 }
 
 enum class ServerSort(val label: String) {
     Title("Title"),
     Artist("Artist"),
-    FileSize("File Size"),
-    RecentlyUpdated("Recently Updated"),
+    FileSize("File size"),
+    RecentlyUpdated("Recently updated"),
 }
 
 sealed interface PlaybackUiStatus {

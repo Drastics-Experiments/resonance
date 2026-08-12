@@ -824,7 +824,7 @@ test("bootstraps the cached Windows theme before CSS without trusting arbitrary 
   assert.match(bootstrapSource, /document\.documentElement\.dataset\.theme = theme/);
 });
 
-test("defines complete Windows palettes and routes major chrome through theme tokens", () => {
+test("defines complete restrained Windows palettes and routes major chrome through theme tokens", () => {
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   const shuffleSource = readFileSync(new URL("../ui/shuffle-icon.css", import.meta.url), "utf8");
   const palettes = {
@@ -832,39 +832,40 @@ test("defines complete Windows palettes and routes major chrome through theme to
       ["background", "#020305"], ["base", "#05060a"], ["panel", "#0c0d13"],
       ["surface", "#0b0c12"], ["surface-raised", "#11131c"], ["accent", "#7547ff"],
       ["accent-secondary", "#6540f5"], ["accent-tertiary", "#9b82ff"],
-      ["gradient-accent", "linear-gradient(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%)"],
-      ["action-background", "linear-gradient(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%)"],
-      ["gradient-artwork", "linear-gradient(145deg, #3349c9 0%, #6857ff 52%, #f18cb2 100%)"],
+      ["accent-fill", "#6540f5"], ["action-background", "#6540f5"],
+      ["artwork-fill", "#1a1630"], ["ambient-background", "#020305"],
     ],
     ocean: [
       ["background", "#02070d"], ["panel", "#050d14"], ["surface", "#07121b"],
       ["surface-raised", "#0d1d2a"], ["accent", "#1769c2"], ["accent-secondary", "#0f5caa"],
       ["accent-tertiary", "#55b8ff"],
       ["action-background", "var(--accent-secondary)"],
-      ["gradient-accent", "linear-gradient(135deg, #0f5caa 0%, #218bd6 50%, #62c3ff 100%)"],
+      ["accent-fill", "#0f5caa"], ["artwork-fill", "#0b2638"],
     ],
     forest: [
       ["background", "#020805"], ["panel", "#050d09"], ["surface", "#07120c"],
       ["surface-raised", "#0d1d14"], ["accent", "#198754"], ["accent-secondary", "#126b43"],
       ["accent-tertiary", "#5fd49a"],
       ["action-background", "var(--accent-secondary)"],
-      ["gradient-accent", "linear-gradient(135deg, #126b43 0%, #219c64 50%, #69d89e 100%)"],
+      ["accent-fill", "#126b43"], ["artwork-fill", "#0d2b1d"],
     ],
     sunset: [
       ["background", "#0a0403"], ["panel", "#100706"], ["surface", "#150a07"],
       ["surface-raised", "#21120e"], ["accent", "#c45132"], ["accent-secondary", "#a33a53"],
       ["accent-tertiary", "#ff9a62"],
       ["action-background", "var(--accent-secondary)"],
-      ["gradient-accent", "linear-gradient(135deg, #a33a53 0%, #d25b3f 50%, #ff9a62 100%)"],
+      ["accent-fill", "#a33a53"], ["artwork-fill", "#351812"],
     ],
   };
   for (const [theme, expected] of Object.entries(palettes)) {
-    const block = styleSource.match(new RegExp(`:root\\[data-theme="${theme}"\\]\\s*\\{([\\s\\S]*?)\\n\\}`))?.[1] || "";
+    const selector = theme === "midnight" ? ":root" : `:root\\[data-theme="${theme}"\\]`;
+    const block = styleSource.match(new RegExp(`^${selector}\\s*\\{([\\s\\S]*?)\\n\\}`, "m"))?.[1] || "";
     assert.ok(block, `${theme} theme selector is missing`);
     for (const [token, value] of expected) {
       assert.ok(block.includes(`--${token}: ${value};`), `${theme} is missing --${token}`);
     }
   }
+  assert.doesNotMatch(styleSource, /:root\[data-theme="midnight"\]/);
   const whiteContrast = (hex) => {
     const channels = hex.match(/[0-9a-f]{2}/gi).map((value) => Number.parseInt(value, 16) / 255);
     const linear = channels.map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
@@ -874,9 +875,9 @@ test("defines complete Windows palettes and routes major chrome through theme to
   for (const [theme, actionColor] of Object.entries({ ocean: "#0f5caa", forest: "#126b43", sunset: "#a33a53" })) {
     assert.ok(whiteContrast(actionColor) >= 4.5, `${theme} action background must retain 4.5:1 white-text contrast`);
   }
-  assert.match(styleSource, /@scope \(:root\[data-theme="ocean"\],[\s\S]+:root\[data-theme="sunset"\]\) \{/);
+  assert.match(styleSource, /\/\* Theme-aware component surfaces\. \*\/[\s\S]+\.sidebar \{ background: var\(--sidebar-background\); \}/);
   assert.match(styleSource, /scrollbar-color: #7c57df #11131b/);
-  assert.match(styleSource, /@scope[\s\S]+scrollbar-color: var\(--accent\) var\(--surface-raised\)/);
+  assert.match(styleSource, /scrollbar-color: var\(--accent\) var\(--surface-raised\)/);
   assert.match(styleSource, /outline: 2px solid var\(--accent-tertiary\)/);
   assert.doesNotMatch(styleSource, /outline: 2px solid #b69cff/i);
   assert.match(styleSource, /\.sidebar\s*\{[\s\S]*?background: var\(--sidebar-background\)/);
@@ -884,39 +885,34 @@ test("defines complete Windows palettes and routes major chrome through theme to
   assert.match(shuffleSource, /\.playlist-dialog\s*\{[\s\S]+background: var\(--dialog-background\)/);
   assert.match(shuffleSource, /#installUpdate\s*\{[\s\S]+background: var\(--action-background\)/);
   assert.match(styleSource, /\.add-song-row > button\.added\s*\{[^}]*background: var\(--accent-soft\)/);
-  assert.match(styleSource, /\.local-import-provider-pill button\[aria-pressed="true"\]\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-glow\)/);
+  assert.match(styleSource, /\.local-import-provider-pill button\[aria-pressed="true"\]\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)/);
   assert.match(styleSource, /\.local-import-media-kind input:checked \+ span\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent/);
   assert.match(styleSource, /\.local-import-candidate:has\(input:checked\)\s*\{[^}]*var\(--accent\)/);
   assert.match(styleSource, /\.local-import-sync input:checked \+ \.local-import-sync-toggle\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent\)/);
   assert.match(styleSource, /#confirmLocalImport\s*\{[^}]*background: var\(--action-background\)/);
-  const chromeOverrides = styleSource.slice(styleSource.indexOf("/* Keep every non-content accent surface on the active app theme. */"));
-  assert.match(chromeOverrides, /\.profile-menu-badge\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
-  assert.match(chromeOverrides, /\.player-track:focus-visible\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-soft\)/);
-  assert.match(chromeOverrides, /\.history-mode button\.active\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
-  assert.match(chromeOverrides, /\.history-top-song-cover\[aria-expanded="true"\]\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-soft\)/);
-  assert.match(chromeOverrides, /\.local-import-preview-button\.playing\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--action-background\)[^}]*var\(--accent-glow\)/);
-  assert.match(chromeOverrides, /\.local-import-spark\s*\{[^}]*var\(--accent-soft\)[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-glow\)/);
-  assert.match(chromeOverrides, /\.clip-editor-save\s*\{[^}]*var\(--accent-border\)/);
-  assert.match(styleSource, /\.clip-editor-handle span\s*\{[^}]*background: var\(--accent-secondary\)[^}]*var\(--accent-glow\)/);
-  assert.match(styleSource, /\.clip-editor-handle\.dragging span\s*\{[^}]*background: var\(--accent\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-glow\)/);
+  const themedComponents = styleSource.slice(styleSource.indexOf("/* Theme-aware component surfaces. */"));
+  assert.match(themedComponents, /\.player-track:focus-visible\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-soft\)/);
+  assert.match(themedComponents, /\.history-mode button\.active\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
+  assert.match(themedComponents, /\.history-top-song-cover\[aria-expanded="true"\]\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-soft\)/);
+  assert.match(themedComponents, /\.local-import-preview-button\.playing\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--action-background\)[^}]*var\(--accent-border\)/);
+  assert.match(themedComponents, /\.local-import-spark\s*\{[^}]*var\(--accent-soft\)[^}]*var\(--accent-tertiary\)/);
+  assert.match(themedComponents, /\.clip-editor-save\s*\{[^}]*var\(--accent-border\)/);
+  assert.match(styleSource, /\.clip-editor-handle span\s*\{[^}]*background: #ffca20/);
+  assert.match(styleSource, /\.clip-editor-handle\.dragging span\s*\{[^}]*background: #ffdf4a[^}]*#ffdd3c29/);
   assert.match(styleSource, /\.clip-editor-selection-summary input:focus\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-soft\)/);
   assert.doesNotMatch(styleSource, /#(?:6841f1|7751ff|7654ff2e|8f72ff55|8f72ff|7654ff24|b49eff)/i);
-  assert.match(styleSource, /\.profile-button\s*\{[^}]*border: 1px solid #a58cff52[^}]*linear-gradient\(145deg, #6f3cff, #3a207d\)/);
-  assert.match(styleSource, /\.filters button\.active\s*\{[^}]*background: var\(--gradient-accent\)[^}]*#ad96ff4d/);
-  assert.match(styleSource, /\.settings-nav button\.active svg\s*\{[^}]*#9f82ff[^}]*#805aff/);
+  assert.match(themedComponents, /\.profile-button,[^{]+\{[^}]*background: var\(--control-surface\)/);
+  assert.match(themedComponents, /\.filters button\.active,[^{]+\{[^}]*background: var\(--accent-soft\)/);
+  assert.match(themedComponents, /\.settings-nav button\.active\s*\{[^}]*var\(--accent\)[^}]*var\(--accent-soft\)/);
   assert.match(styleSource, /\.storage-import-option-icon\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
-  assert.match(styleSource, /\.segmented button\.active\s*\{[^}]*#845bff[^}]*#5c2ee8[^}]*color: #fff/);
-  assert.match(styleSource, /\.history-bar\.peak\s*\{[^}]*filter: drop-shadow\([^)]*var\(--history-peak-shadow\)/);
+  assert.match(themedComponents, /\.segmented button\.active[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
+  assert.match(themedComponents, /\.history-bar\.peak\s*\{[^}]*filter: none/);
   assert.match(styleSource, /\.local-import-provider-pill\s*\{[^}]*border: 1px solid var\(--accent-border\)/);
   assert.match(styleSource, /\.clip-editor-selection\s*\{[^}]*background: var\(--clip-selection-background\)/);
   assert.match(styleSource, /--history-bar-start: #9b7aff;[\s\S]+--history-peak-start: #ff806c;[\s\S]+--clip-visualizer-low: #4e1a95/);
   assert.match(styleSource, /\.settings-theme-grid\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(styleSource, /\.settings-theme-card\s*\{[^}]*grid-template-rows: 92px auto/);
-  const alternateChrome = styleSource.slice(styleSource.indexOf("@scope (:root[data-theme=\"ocean\"]"));
-  assert.match(alternateChrome, /\.profile-button,[\s\S]+background: var\(--control-surface\)/);
-  assert.match(alternateChrome, /\.filters button\.active,[\s\S]+background: var\(--accent-soft\)/);
-  assert.match(alternateChrome, /\.settings-nav button\.active\s*\{[^}]*var\(--accent\)[^}]*var\(--accent-glow\)/);
-  assert.match(alternateChrome, /\.segmented button\.active[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
+  assert.doesNotMatch(styleSource, /--accent-glow|@scope/);
   assert.doesNotMatch(styleSource, /#(?:8f72ec40|7651dc35|b79cff|8175ae80|7d47dd|a75bf5|55319d|8c46e845)/i);
 });
 
@@ -1020,7 +1016,7 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   assert.match(htmlSource, /id="closeClipEditor"[^>]*>Done<\/button>[\s\S]+id="saveClipRange"[^>]*>Save<\/button>/);
   assert.match(htmlSource, /id="previewClipRange"[^>]+aria-pressed="false"[^>]+disabled[\s\S]+>Preview</);
   assert.match(htmlSource, /<video id="clipEditorPreview"[^>]+preload="metadata"[^>]+playsinline/);
-  assert.match(htmlSource, /id="clipEditorVideoFrame"[^>]+hidden[\s\S]+VIDEO PREVIEW/);
+  assert.match(htmlSource, /id="clipEditorVideoFrame"[^>]+hidden[\s\S]+Video preview/);
   assert.match(htmlSource, /id="clipEditorVideoFrames"[^>]+hidden/);
   assert.match(htmlSource, /id="clipEditorPreviewCurrent"[\s\S]+id="clipEditorPreviewSeek"[^>]+type="range"[\s\S]+id="clipEditorPreviewEnd"/);
   assert.match(htmlSource, /id="clearClipRange"[^>]*>Use full song/);
@@ -1165,19 +1161,26 @@ test("keeps playlist heroes while the root Library starts with compact filter pi
   assert.match(styleSource, /\.playlist-action-cluster\s*\{/);
   assert.match(styleSource, /\.playlist-menu\s*\{/);
   assert.match(styleSource, /\.add-songs-dialog\s*\{/);
-  assert.match(styleSource, /\.filters\.library-top-filters button\s*\{[\s\S]*?font-size: 10px/);
+  assert.match(styleSource, /\.filters\.library-top-filters button\s*\{[\s\S]*?font-size: 12px/);
   assert.match(styleSource, /\.library-top-filters \+ \.recently-added\s*\{[\s\S]*?border-top: 0/);
 });
 
-test("uses the macOS-inspired ambient, artwork, and action gradients", () => {
+test("uses restrained theme surfaces without ornamental spotlight gradients", () => {
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
-  assert.match(styleSource, /--gradient-accent: linear-gradient\(135deg, #536bff 0%, #7547ff 50%, #8a42eb 100%\)/);
-  assert.match(styleSource, /--gradient-artwork: linear-gradient\(145deg, #3349c9 0%, #6857ff 52%, #f18cb2 100%\)/);
-  assert.match(styleSource, /--gradient-ambient:[\s\S]*?radial-gradient\(circle at 74% 4%, #6540f524[\s\S]*?linear-gradient\(180deg, #080910ad, #020305 76%\)/);
-  assert.match(styleSource, /\.hero\s*\{[\s\S]*?radial-gradient\(circle at 12% 20%, #6540f533[\s\S]*?linear-gradient\(90deg, #08090e, #09080f, #07070b\)/);
-  assert.match(styleSource, /\.hero-art\s*\{[\s\S]*?var\(--gradient-artwork\)/);
-  assert.match(styleSource, /\.primary\s*\{[\s\S]*?background: var\(--gradient-accent\)/);
-  assert.match(styleSource, /\.playerbar\s*\{[\s\S]*?linear-gradient\(180deg, #080910f7, #040509fc\)/);
+  const shuffleSource = readFileSync(new URL("../ui/shuffle-icon.css", import.meta.url), "utf8");
+  assert.match(styleSource, /--accent-fill: #6540f5/);
+  assert.match(styleSource, /--artwork-fill: #1a1630/);
+  assert.match(styleSource, /--ambient-background: #020305/);
+  assert.match(styleSource, /\.hero\s*\{[^}]*background: var\(--panel\)/);
+  assert.match(styleSource, /\.hero-art\s*\{[\s\S]*?var\(--artwork-fill\)/);
+  assert.match(styleSource, /\.primary\s*\{[\s\S]*?background: var\(--accent-fill\)/);
+  assert.match(styleSource, /\.playerbar\s*\{[\s\S]*?background: var\(--player-background\)/);
+  assert.doesNotMatch(styleSource, /radial-gradient/);
+  assert.doesNotMatch(styleSource, /font-size:\s*(?:\.\d+|[0-9](?:\.\d+)?|1[01](?:\.\d+)?)px/);
+  assert.doesNotMatch(shuffleSource, /font-size:\s*(?:\.\d+|[0-9](?:\.\d+)?|1[01](?:\.\d+)?)px/);
+  assert.doesNotMatch(styleSource, /font:\s*[^;]*?(?<![\d.])(?:\.\d+|[0-9](?:\.\d+)?|1[01](?:\.\d+)?)px/);
+  assert.doesNotMatch(shuffleSource, /font:\s*[^;]*?(?<![\d.])(?:\.\d+|[0-9](?:\.\d+)?|1[01](?:\.\d+)?)px/);
+  assert.doesNotMatch(styleSource, /text-transform:\s*uppercase/);
 });
 
 test("opens a synchronized full-screen Now Playing viewer from the mini-player", () => {
@@ -1219,7 +1222,7 @@ test("opens a synchronized full-screen Now Playing viewer from the mini-player",
   assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.full-player-dialog\[open\],[\s\S]*?\.full-player-dialog\[open\]\.closing \{ animation: none; \}/);
   assert.match(styleSource, /\.full-player-backdrop\s*\{[\s\S]*?z-index: 0[\s\S]*?filter: blur\(64px\) saturate\(1\.18\)[\s\S]*?opacity: \.88/);
   assert.match(styleSource, /\.full-player-backdrop img\s*\{[\s\S]*?object-fit: cover/);
-  assert.match(styleSource, /\.full-player-shade\s*\{[\s\S]*?z-index: 1[\s\S]*?linear-gradient\(180deg, #00000075 0%, #07071194 52%, #000000c2 100%\)/);
+  assert.match(styleSource, /\.full-player-shade\s*\{[\s\S]*?z-index: 1[\s\S]*?linear-gradient\(180deg, #0008, #05060bd9 52%, #000d\)/);
   assert.match(styleSource, /\.full-player-layout\s*\{[\s\S]*?z-index: 2/);
   assert.match(styleSource, /\.full-player-layout\s*\{[\s\S]+grid-template-columns/);
   assert.match(styleSource, /\.full-player-artwork\s*\{[\s\S]+aspect-ratio: 1/);
@@ -1381,7 +1384,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(preloadSource, /onLocalImportProgress:[\s\S]+local-import:progress/);
   assert.match(htmlSource, /id="localImportDialog"/);
   assert.match(htmlSource, /id="localImportTitle">Import from Web/);
-  assert.match(styleSource, /\.local-import-panel\s*\{[\s\S]*?border-radius: 29px/);
+  assert.match(styleSource, /\.local-import-panel\s*\{[\s\S]*?border-radius: 15px/);
   assert.match(styleSource, /\.storage-import-menu\s*\{[\s\S]*?overflow: hidden;[\s\S]*?isolation: isolate;[\s\S]*?border-radius: 18px/);
   assert.doesNotMatch(htmlSource, /Spotify tracks are matched against/);
   assert.match(htmlSource, /id="localImportStage"[^>]*hidden/);
@@ -1588,7 +1591,7 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /result\?\.supported === false/);
   assert.match(appSource, /scheduleListeningHistorySync\(\)/);
   assert.match(appSource, /syncListeningHistoryNow\(\{ force: true \}\)/);
-  assert.match(mainSource, /librarySaveQueue[\s\S]+\.catch\(\(\) => \{\}\)[\s\S]+atomicWriteFile/);
+  assert.match(mainSource, /librarySaveQueue[\s\S]+\.catch\(continueAfterQueuedFailure\("Previous library save"\)\)[\s\S]+atomicWriteFile/);
   assert.match(mainSource, /window\.webContents\.send\("app:prepare-close"\)/);
   assert.match(mainSource, /ipcMain\.on\("app:close-ready"/);
   assert.match(mainSource, /app\.on\("before-quit", \(\) => \{[\s\S]+applicationQuitRequested = true;/);
@@ -1624,7 +1627,7 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /return `<text x="10"[\s\S]+text-anchor="start"/);
   assert.match(appSource, /function historyBucketLabel\(summary, date, options = \{\}\)/);
   assert.match(appSource, /summary\.granularity === "hour"[\s\S]+hour: "numeric"/);
-  assert.match(appSource, /\$\{hourly \? "HOUR" : "DAY"\} BREAKDOWN/);
+  assert.match(appSource, /\$\{hourly \? "Hourly breakdown" : "Daily breakdown"\}/);
   assert.doesNotMatch(appSource, /Math\.max\(30, Math\.ceil\(peak \/ 30\) \* 30\)/);
   assert.match(appSource, /function bindListeningHistoryChartInteractions\(summary\)/);
   assert.match(appSource, /addEventListener\("pointermove"/);
@@ -1654,7 +1657,7 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.doesNotMatch(appSource, /class="history-area"/);
   assert.doesNotMatch(appSource, /class="history-line"/);
   assert.match(styleSource, /\.listening-history-stats/);
-  assert.match(styleSource, /\.listening-history-panel\s*\{[\s\S]*?--history-ambient-surface:[\s\S]*?radial-gradient\(circle at 16% 12%, #536bff24[\s\S]*?radial-gradient\(circle at 76% 20%, #7547ff20[\s\S]*?radial-gradient\(circle at 88% 100%, #ff806c10/);
+  assert.match(styleSource, /\.listening-history-panel\s*\{[\s\S]*?--history-ambient-surface: var\(--panel\)/);
   assert.match(styleSource, /\.history-content-toolbar\s*\{[\s\S]*?background: transparent/);
   assert.match(styleSource, /\.listening-history-stats\s*\{[\s\S]*?background: transparent/);
   assert.match(styleSource, /\.listening-history-chart\s*\{[\s\S]*?background: transparent/);
@@ -1697,7 +1700,8 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(styleSource, /\.listening-history-dialog\.day-expanded \.history-day-song-list\s*\{[\s\S]*?max-height: none[\s\S]*?overflow: visible/);
   assert.match(styleSource, /\.history-day-song-list\s*\{[\s\S]*?background: transparent/);
   assert.match(styleSource, /\.history-day-song-header,[\s\S]*?\.history-day-song\s*\{[\s\S]*?grid-template-columns: 28px 46px minmax\(190px, 1fr\) minmax\(110px, \.55fr\) 86px 52px/);
-  assert.match(styleSource, /\.history-day-song-header\s*\{[\s\S]*?text-transform: uppercase/);
+  assert.match(styleSource, /\.history-day-song-header\s*\{[\s\S]*?font-size: 12px/);
+  assert.doesNotMatch(styleSource, /\.history-day-song-header\s*\{[^}]*text-transform: uppercase/);
   assert.match(styleSource, /\.history-day-song\s*\{[\s\S]*?padding: 9px 12px[\s\S]*?border-bottom: 1px solid var\(--line\)[\s\S]*?border-radius: 8px/);
   assert.match(styleSource, /\.history-day-song:hover\s*\{\s*background: #ffffff0a/);
   assert.match(styleSource, /\.history-day-song-copy strong\s*\{[\s\S]*?font-size: 12px/);
@@ -2229,6 +2233,22 @@ test("guards profile transitions, authenticated downloads, persistence, and tran
   assert.match(packageJSON.scripts["package:win"], /electron-builder --dir --win --x64/);
 });
 
+test("reports queued persistence, credential cleanup, and pointer reorder failures", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+
+  assert.doesNotMatch(mainSource, /\.catch\(\(\) => \{\}\)/);
+  assert.doesNotMatch(appSource, /\.catch\(\(\) => \{\}\)/);
+  assert.match(mainSource, /function continueAfterQueuedFailure[\s\S]+console\.error/);
+  assert.match(mainSource, /credentialSaveQueue\s+\.catch\(continueAfterQueuedFailure\("Previous credential save"\)\)/);
+  assert.match(mainSource, /librarySaveQueue\s+\.catch\(continueAfterQueuedFailure\("Previous library save"\)\)/);
+  assert.match(mainSource, /clearPersistedAccountSession[\s\S]+fs\.rm\(paths\.accountSession, \{ force: true \}\)/);
+  assert.match(appSource, /function persistInBackground\(options\)[\s\S]+catch\(reportBackgroundPersistenceFailure\)/);
+  assert.match(appSource, /row\.onpointerup = \(event\) => \{[\s\S]+catch\(reportPlaylistReorderFailure\)/);
+  assert.match(appSource, /signOut\.onclick = async \(\) => \{[\s\S]+Account sign-out cleanup failed[\s\S]+showNotice/);
+  assert.match(appSource, /discardServerUploadRetries\([\s\S]+Could not discard persisted upload retries[\s\S]+showNotice/);
+});
+
 test("retries individual server downloads and reports every song that still fails", async () => {
   let transientAttempts = 0;
   const retried = [];
@@ -2298,11 +2318,11 @@ test("shows catalog song titles instead of internal server download filenames", 
       title: "Actual Song Name",
       name: "Track-0ae24d3e-3e34-4230-9775-39eb40a744d8.mp3",
       filename: "Track-0ae24d3e-3e34-4230-9775-39eb40a744d8.mp3",
-    }, "Track-0ae24d3e-3e34-4230-9775-39eb40a744d8.mp3"),
+    }),
     "Actual Song Name",
   );
-  assert.equal(serverDownloadDisplayName({ title: "  Trimmed Name  " }, "Track-id.mp3"), "Trimmed Name");
-  assert.equal(serverDownloadDisplayName({ name: "Track-id.mp3" }, "Track-id.mp3", "Resolved Legacy Song"), "Resolved Legacy Song");
+  assert.equal(serverDownloadDisplayName({ title: "  Trimmed Name  " }), "Trimmed Name");
+  assert.equal(serverDownloadDisplayName({ name: "Track-id.mp3" }, "Resolved Legacy Song"), "Resolved Legacy Song");
   assert.equal(serverDownloadDisplayName({ name: "Track-id.mp3" }), "Untitled song");
 
   assert.deepEqual(serverDownloadProgressEvent({
@@ -2605,7 +2625,7 @@ test("reserves immutable upload contexts while account sessions replace credenti
   assert.match(saveFormSource, /serverAdminToken = accountSession \? serverToken : ""/);
   assert.doesNotMatch(appSource, /id="serverToken"|id="serverAdminToken"/);
   assert.match(appSource, /data-auth-provider="clerk"/);
-  assert.match(appSource, /email, Google, Apple, and Discord/);
+  assert.match(appSource, /Sign in with Clerk to connect this device/);
   assert.match(localUploadSource, /uploadLocalImportTrack\(track, context\)[\s\S]+requireLocalImportServerContext\(context\)/);
   assert.match(localUploadSource, /baseURL: context\.serverURL[\s\S]+adminToken: context\.adminToken[\s\S]+profileID: context\.profileID/);
   assert.match(localBatchSource, /prepareLocalImportUploadBatch\(tracks, context\)[\s\S]+uploadLocalImportTracks\(tracks, context\)/);

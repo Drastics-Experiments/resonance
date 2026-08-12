@@ -61,7 +61,7 @@ class RemoteSongSerializationTest {
     fun metadataCacheKeepsOnlyFreshMatchingSafeEntries() {
         val now = 1_800_000_000_000L
         val source = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
-        val key = RemoteSongMetadataCachePolicy.key(source, "audio")!!
+        val key = requireNotNull(RemoteSongMetadataCachePolicy.key(source, "audio"))
         val fresh = RemoteSongMetadataCacheEntry(
             sourceURL = source,
             mediaKind = "audio",
@@ -79,7 +79,7 @@ class RemoteSongSerializationTest {
         val normalized = RemoteSongMetadataCachePolicy.normalized(
             mapOf(
                 key to fresh,
-                RemoteSongMetadataCachePolicy.key(staleSource, "audio")!! to stale,
+                requireNotNull(RemoteSongMetadataCachePolicy.key(staleSource, "audio")) to stale,
                 "audio:https://wrong.example/track" to fresh,
             ),
             nowEpochMs = now,

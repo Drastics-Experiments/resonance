@@ -200,7 +200,7 @@ class RemoteIdentityPolicyTest {
             serverURL = "https://music.example",
             syncProfileID = "default",
             dirtyPlaylistIDs = setOf(defaultPlaylist.id),
-            remoteLikedSongIDs = setOf(defaultRemote.remoteID!!),
+            remoteLikedSongIDs = setOf(requireNotNull(defaultRemote.remoteID)),
             dirtyRemoteLikeSongIDs = setOf(defaultRemote.remoteID),
             likesDirty = true,
             clipRanges = mapOf(defaultClipKey to ClipRange(1_000L, 10_000L)),
@@ -218,7 +218,7 @@ class RemoteIdentityPolicyTest {
             playlists = family.playlists + familyPlaylist,
             favorites = family.favorites + familyRemote.id,
             dirtyPlaylistIDs = setOf(familyPlaylist.id),
-            remoteLikedSongIDs = setOf(familyRemote.remoteID!!),
+            remoteLikedSongIDs = setOf(requireNotNull(familyRemote.remoteID)),
             dirtyRemoteLikeSongIDs = setOf(familyRemote.remoteID),
             likesDirty = true,
         )

@@ -66,7 +66,7 @@ final class ClipLiveSpectrumAnalyzer: @unchecked Sendable {
     private static let smoothing = 0.72
 
     private let queue = DispatchQueue(label: "Resonance.ClipLiveSpectrum", qos: .userInteractive)
-    private let transform: vDSP.DiscreteFourierTransform<Float>
+    private let transform: vDSP.DiscreteFourierTransform<Float>?
     private let window: [Float]
     private let levelsLock = NSLock()
     private let pendingSamplesLock = NSLock()
@@ -76,7 +76,7 @@ final class ClipLiveSpectrumAnalyzer: @unchecked Sendable {
     private var isAnalysisScheduled = false
 
     init() {
-        transform = try! vDSP.DiscreteFourierTransform(
+        transform = try? vDSP.DiscreteFourierTransform(
             count: Self.sampleCount,
             direction: .forward,
             transformType: .complexComplex,
@@ -145,6 +145,7 @@ final class ClipLiveSpectrumAnalyzer: @unchecked Sendable {
     }
 
     private func analyze(_ samples: [Float]) {
+        guard let transform else { return }
         var windowed = samples
         for index in windowed.indices { windowed[index] *= window[index] }
         let imaginary = [Float](repeating: 0, count: Self.sampleCount)
@@ -215,12 +216,13 @@ enum ClipWaveformSampler {
                 let byteCount = CMBlockBufferGetDataLength(dataBuffer)
                 guard byteCount >= MemoryLayout<Int16>.size else { continue }
                 var bytes = [UInt8](repeating: 0, count: byteCount)
-                let copyStatus = bytes.withUnsafeMutableBytes { buffer in
-                    CMBlockBufferCopyDataBytes(
+                let copyStatus: OSStatus? = bytes.withUnsafeMutableBytes { buffer in
+                    guard let destination = buffer.baseAddress else { return nil }
+                    return CMBlockBufferCopyDataBytes(
                         dataBuffer,
                         atOffset: 0,
                         dataLength: byteCount,
-                        destination: buffer.baseAddress!
+                        destination: destination
                     )
                 }
                 guard copyStatus == kCMBlockBufferNoErr else { continue }

@@ -23,11 +23,8 @@ import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -45,6 +42,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -83,23 +81,10 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.Top,
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("Settings", fontSize = 28.sp, fontWeight = FontWeight.Bold)
-                    Text(
-                        "Manage how Resonance behaves on this Android device.",
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
-                        fontSize = 11.sp,
-                    )
-                }
+                Text("Settings", fontSize = 28.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
-                IconButton(onClick = onDismiss, modifier = Modifier.size(40.dp)) {
-                    Surface(shape = CircleShape, color = Color.White.copy(alpha = .07f)) {
-                        Icon(
-                            Icons.Default.Close,
-                            contentDescription = "Close settings",
-                            modifier = Modifier.padding(10.dp),
-                        )
-                    }
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Default.Close, contentDescription = "Close settings")
                 }
             }
 
@@ -114,7 +99,7 @@ fun SettingsScreen(
 
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SettingsSectionHeading("PLAYBACK", "Defaults saved on this device.")
+                        SectionLabel("Playback")
                         SettingsCard {
                             VolumeSettings(state, actions)
                             SettingsDivider()
@@ -125,7 +110,7 @@ fun SettingsScreen(
 
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SettingsSectionHeading("APP", "Connection and mobile playback behavior.")
+                        SectionLabel("Application")
                         SettingsCard {
                             SettingsRow(
                                 icon = Icons.Default.Palette,
@@ -137,17 +122,10 @@ fun SettingsScreen(
                             SettingsDivider()
                             SettingsRow(
                                 icon = Icons.Default.Cloud,
-                                title = "Music Server",
+                                title = "Music server",
                                 detail = if (state.isConnected) "Connected as $displayName" else state.serverMessage,
                                 trailing = "Configure",
                                 onClick = { connectionOpen = true },
-                            )
-                            SettingsDivider()
-                            SettingsRow(
-                                icon = Icons.Default.MusicNote,
-                                title = "Background Audio",
-                                detail = "Playback continues while Resonance is in the background.",
-                                trailing = "Enabled",
                             )
                         }
                     }
@@ -155,7 +133,7 @@ fun SettingsScreen(
 
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SettingsSectionHeading("ABOUT", "Installed application information.")
+                        SectionLabel("About")
                         SettingsCard {
                             SettingsRow(
                                 icon = Icons.Default.Info,
@@ -168,21 +146,6 @@ fun SettingsScreen(
                 }
             }
 
-            HorizontalDivider(color = Color.White.copy(alpha = .08f))
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                Button(
-                    onClick = onDismiss,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.secondary,
-                    ),
-                    contentPadding = PaddingValues(horizontal = 24.dp, vertical = 10.dp),
-                ) {
-                    Text("Done", fontWeight = FontWeight.Bold)
-                }
-            }
         }
     }
 
@@ -250,7 +213,7 @@ private fun CrossfadeSettings(state: ResonanceUiState, actions: ResonanceActions
                         "Start the next song early while fading between both."
                     },
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                 )
             }
             Switch(
@@ -314,24 +277,6 @@ private fun SettingsIdentityCard(displayName: String, accountStatus: String) {
 }
 
 @Composable
-private fun SettingsSectionHeading(label: String, detail: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(
-            label,
-            color = MaterialTheme.colorScheme.tertiary,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 1.5.sp,
-        )
-        Text(
-            detail,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .56f),
-            fontSize = 12.sp,
-        )
-    }
-}
-
-@Composable
 private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -367,7 +312,15 @@ private fun SettingsRow(
     trailing: String,
     onClick: (() -> Unit)? = null,
 ) {
-    val interactionModifier = if (onClick == null) Modifier else Modifier.clickable(onClick = onClick)
+    val interactionModifier = if (onClick == null) {
+        Modifier
+    } else {
+        Modifier.clickable(
+            role = Role.Button,
+            onClickLabel = "Open $title settings",
+            onClick = onClick,
+        )
+    }
     Row(
         modifier = interactionModifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -379,7 +332,7 @@ private fun SettingsRow(
             Text(
                 detail,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )

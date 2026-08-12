@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
@@ -66,6 +68,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -207,7 +210,12 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                     Row(
                         modifier = Modifier
                             .weight(1f)
-                            .clickable { connectionOpen = true },
+                            .heightIn(min = 48.dp)
+                            .clickable(
+                                role = Role.Button,
+                                onClickLabel = "Open connection settings",
+                                onClick = { connectionOpen = true },
+                            ),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp),
                     ) {
@@ -262,7 +270,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                     )
                     Text(
                         "Loading metadata for $pendingMetadataCount ${if (pendingMetadataCount == 1) "song" else "songs"}",
-                        fontSize = 11.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
@@ -293,7 +301,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                         modifier = Modifier.size(56.dp).background(Color.White.copy(alpha = .055f), RoundedCornerShape(13.dp)),
                     ) { Icon(Icons.Default.FilterList, "Filter and sort") }
                     DropdownMenu(expanded = filterOpen, onDismissRequest = { filterOpen = false }) {
-                        Eyebrow("Filter", Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
+                        SectionLabel("Filter", Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
                         ServerScope.entries.forEach { option ->
                             DropdownMenuItem(
                                 text = { Text(option.label) },
@@ -301,7 +309,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                                 onClick = { scope = option; filterOpen = false },
                             )
                         }
-                        Eyebrow("Sort by", Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
+                        SectionLabel("Sort by", Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
                         ServerSort.entries.forEach { option ->
                             DropdownMenuItem(
                                 text = { Text(option.label) },
@@ -332,15 +340,13 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                         Modifier.size(44.dp),
                         tint = MaterialTheme.colorScheme.tertiary,
                     )
-                    Text(if (state.remoteSongs.isEmpty()) "No Server Songs" else "No Results", style = MaterialTheme.typography.titleMedium)
+                    Text(if (state.remoteSongs.isEmpty()) "No server songs" else "No results", style = MaterialTheme.typography.titleMedium)
                     Text("Connect and sync to load the server library.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                 }
             }
         } else {
-            visible.forEachIndexed { index, song ->
-                item(key = song.id) {
-                    ServerSongRow(index + 1, song, state, actions, selecting, delete = { deleteCandidate = song })
-                }
+            itemsIndexed(visible, key = { _, song -> song.id }) { index, song ->
+                ServerSongRow(index + 1, song, state, actions, selecting, delete = { deleteCandidate = song })
             }
         }
             item { Spacer(Modifier.height(8.dp)) }
@@ -360,7 +366,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
             text = { Text("This permanently deletes the server copy. A downloaded local copy is not removed.") },
             confirmButton = {
                 TextButton(onClick = { actions.deleteRemoteSong(song.id); deleteCandidate = null }) {
-                    Text("Delete from Server", color = MaterialTheme.colorScheme.error)
+                    Text("Delete from server", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = { TextButton(onClick = { deleteCandidate = null }) { Text("Cancel") } },
@@ -424,7 +430,7 @@ private fun ServerActionBar(
             }
             DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
                 DropdownMenuItem(
-                    text = { Text("Upload Missing Downloads") },
+                    text = { Text("Upload missing downloads") },
                     leadingIcon = { Icon(Icons.Default.CloudUpload, null) },
                     enabled = uploadEnabled && state.serverUploadMode == ServerUploadMode.LocalFile,
                     onClick = { moreOpen = false; onUploadMissing() },
@@ -433,10 +439,10 @@ private fun ServerActionBar(
                     text = {
                         Text(
                             when (state.serverUploadMode) {
-                                ServerUploadMode.ReviewedMatch -> "Review Upload"
+                                ServerUploadMode.ReviewedMatch -> "Review upload"
                                 ServerUploadMode.ServerSourceLink -> "Import from Web"
                                 ServerUploadMode.LocalFile -> "Upload or Import"
-                                null -> "Upload Disabled"
+                                null -> "Upload disabled"
                             },
                         )
                     },
@@ -547,7 +553,7 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
                 Text(title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                 Text(
                     detail,
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -568,7 +574,7 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
                 } else {
                     "${formatBytes(state.downloadBytesTransferred)} downloaded"
                 },
-                fontSize = 10.sp,
+                fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f),
             )
         }
@@ -593,6 +599,33 @@ private fun ServerSongRow(
     val displayArtist = local?.artist?.takeIf { it.isNotBlank() && it != "Unknown Artist" } ?: song.artist
     val displayAlbum = local?.album?.takeIf { it.isNotBlank() && it != "Server Library" } ?: song.album
     val trailingDetail = local?.durationText ?: song.durationText ?: formatBytes(song.size)
+    val interactionModifier = if (selecting) {
+        Modifier.toggleable(
+            value = selected,
+            role = Role.Checkbox,
+            onValueChange = { actions.toggleRemoteSelection(song.id) },
+        )
+    } else {
+        Modifier.combinedClickable(
+            role = Role.Button,
+            onClickLabel = when {
+                local != null -> "Play $displayTitle"
+                state.serverDownloadMode == ServerDownloadMode.StreamOnly && song.isVideoMedia ->
+                    "Show song actions"
+                state.serverDownloadMode == ServerDownloadMode.StreamOnly -> "Stream $displayTitle"
+                else -> "Download $displayTitle"
+            },
+            onClick = {
+                when {
+                    local != null -> actions.playTrack(local.id, state.tracks.map { it.id })
+                    state.serverDownloadMode == ServerDownloadMode.StreamOnly && song.isVideoMedia -> menu = true
+                    else -> actions.downloadRemoteSong(song.id)
+                }
+            },
+            onLongClickLabel = "Show song actions",
+            onLongClick = { menu = true },
+        )
+    }
 
     Box(Modifier.fillMaxWidth()) {
         Row(
@@ -601,16 +634,7 @@ private fun ServerSongRow(
                 .heightIn(min = 76.dp)
                 .clip(RoundedCornerShape(9.dp))
                 .background(if (selected) Color.White.copy(alpha = .05f) else Color.Transparent)
-                .combinedClickable(
-                    onClick = {
-                        when {
-                            selecting -> actions.toggleRemoteSelection(song.id)
-                            local != null -> actions.playTrack(local.id, state.tracks.map { it.id })
-                            else -> actions.downloadRemoteSong(song.id)
-                        }
-                    },
-                    onLongClick = if (selecting) null else ({ menu = true }),
-                )
+                .then(interactionModifier)
                 .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -619,7 +643,7 @@ private fun ServerSongRow(
                 if (selecting) {
                     Icon(
                         if (selected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                        contentDescription = if (selected) "Selected" else "Not selected",
+                        contentDescription = null,
                         modifier = Modifier.size(18.dp),
                         tint = if (selected) {
                             MaterialTheme.colorScheme.tertiary
@@ -628,7 +652,7 @@ private fun ServerSongRow(
                         },
                     )
                 } else {
-                    Text(number.toString(), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f))
+                    Text(number.toString(), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f))
                 }
             }
             if (local != null) {
@@ -671,14 +695,14 @@ private fun ServerSongRow(
                             Icon(
                                 Icons.Default.CheckCircle,
                                 contentDescription = "Downloaded",
-                                modifier = Modifier.size(9.dp),
+                                modifier = Modifier.size(12.dp),
                                 tint = LocalResonancePalette.current.success,
                             )
                         }
                     }
                     Text(
                         "$displayArtist / ${song.mediaKindLabel}",
-                        fontSize = 11.sp,
+                        fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -686,7 +710,7 @@ private fun ServerSongRow(
                     if (displayAlbum.isNotBlank()) {
                         Text(
                             displayAlbum,
-                            fontSize = 11.sp,
+                            fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .43f),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -702,7 +726,7 @@ private fun ServerSongRow(
                 Text(
                     trailingDetail,
                     modifier = Modifier.width(44.dp),
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
                     textAlign = TextAlign.End,
                     maxLines = 1,
@@ -728,7 +752,7 @@ private fun ServerSongRow(
                         onClick = { menu = false; actions.downloadRemoteSong(song.id) },
                     )
                     DropdownMenuItem(
-                        text = { Text("Delete from Server", color = MaterialTheme.colorScheme.error) },
+                        text = { Text("Delete from server", color = MaterialTheme.colorScheme.error) },
                         leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
                         onClick = { menu = false; delete() },
                     )
@@ -756,7 +780,7 @@ private fun ServerSongPlaceholderRow(number: Int) {
             Text(
                 number.toString(),
                 modifier = Modifier.width(24.dp),
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .25f),
             )
             Box(
@@ -847,13 +871,13 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                             ) {
                                 Text(
                                     AccountEmailPrivacy.displayedAddress(state.accountEmail, isEmailRevealed),
-                                    fontSize = 11.sp,
+                                    fontSize = 12.sp,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                                 )
                             }
                             Text(
                                 if (state.accountRole == "admin") "Administrator" else "Member",
-                                fontSize = 11.sp,
+                                fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                             )
                         }
@@ -897,7 +921,7 @@ internal fun ConnectionDialog(state: ResonanceUiState, actions: ResonanceActions
                     }
                     Text(
                         "Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/.",
-                        fontSize = 11.sp,
+                        fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
                 }

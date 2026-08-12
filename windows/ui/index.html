@@ -191,7 +191,6 @@
   </dialog>
   <dialog id="playlistDialog" class="playlist-dialog">
     <form id="playlistForm">
-      <span class="eyebrow">NEW COLLECTION</span>
       <h2>Create playlist</h2>
       <label for="playlistName">Playlist name</label>
       <input id="playlistName" maxlength="80" autocomplete="off" placeholder="My playlist" required>
@@ -234,7 +233,7 @@
           </div>
           <div id="clipEditorVideoFrame" class="clip-editor-video-frame" hidden>
             <video id="clipEditorPreview" preload="metadata" playsinline></video>
-            <span class="clip-editor-video-label" aria-hidden="true">VIDEO PREVIEW</span>
+            <span class="clip-editor-video-label" aria-hidden="true">Video preview</span>
           </div>
           <div class="clip-editor-transport" aria-label="Preview playback controls">
             <span class="clip-editor-transport-time"><time id="clipEditorPreviewCurrent">0:00</time><input id="clipEditorPreviewSeek" class="clip-editor-accessible-seek" type="range" min="0" max="1000" value="0" aria-label="Preview position" aria-valuetext="0:00 of 0:00" disabled><b>/</b><time id="clipEditorPreviewEnd">0:00</time></span>
@@ -260,21 +259,21 @@
       </div>
       <span id="clipEditorStatus" class="clip-editor-status" role="status">The song file is never changed.</span>
       <aside id="clipEditorSettings" class="clip-editor-popover clip-editor-settings" hidden>
-        <header><div><span class="eyebrow">CLIP SETTINGS</span><strong>Fine tune your clip</strong></div><button id="closeClipEditorSettings" type="button" aria-label="Close clip settings">×</button></header>
+        <header><strong>Clip settings</strong><button id="closeClipEditorSettings" type="button" aria-label="Close clip settings">×</button></header>
         <div class="clip-editor-track">
           <span class="clip-editor-settings-artwork" aria-hidden="true">♪</span>
           <span><strong>Playback range</strong><small>Drag the yellow handles or enter exact times.</small></span>
           <time id="clipEditorTrackDuration">0:00</time>
         </div>
         <div class="clip-editor-selection-summary" aria-live="polite">
-          <label for="clipEditorStartInput"><small>START</small><input id="clipEditorStartInput" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="8" value="0:00" aria-label="Clip start time"></label>
-          <span class="clip-editor-selection-length"><small>CLIP LENGTH</small><strong id="clipEditorLengthLabel">0:00</strong></span>
-          <label for="clipEditorEndInput"><small>END</small><input id="clipEditorEndInput" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="8" value="0:00" aria-label="Clip end time"></label>
+          <label for="clipEditorStartInput"><small>Start</small><input id="clipEditorStartInput" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="8" value="0:00" aria-label="Clip start time"></label>
+          <span class="clip-editor-selection-length"><small>Clip length</small><strong id="clipEditorLengthLabel">0:00</strong></span>
+          <label for="clipEditorEndInput"><small>End</small><input id="clipEditorEndInput" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="8" value="0:00" aria-label="Clip end time"></label>
         </div>
         <button id="clearClipRange" class="secondary" type="button" hidden>Use full song</button>
       </aside>
       <aside id="clipEditorHelp" class="clip-editor-popover clip-editor-help" hidden>
-        <header><div><span class="eyebrow">HOW IT WORKS</span><strong>Create your perfect playback range</strong></div><button id="closeClipEditorHelp" type="button" aria-label="Close clip editor help">×</button></header>
+        <header><strong>Clip editor help</strong><button id="closeClipEditorHelp" type="button" aria-label="Close clip editor help">×</button></header>
         <p>Drag the yellow handles to choose a range. Click the waveform to scrub, then use the center controls to preview exactly what will play.</p>
         <p><strong>Save</strong> updates playback for this profile without changing the media file. <strong>Done</strong> closes the editor and discards changes that were not saved.</p>
       </aside>

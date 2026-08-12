@@ -210,7 +210,9 @@ struct LocalImportSearchEngine: Sendable {
     }
 
     private func spotifyTracks(_ query: String) async throws -> [LocalImportSpotifyTrack] {
-        var components = URLComponents(string: "https://debridvault.elfhosted.com/api/search")!
+        guard var components = URLComponents(string: "https://debridvault.elfhosted.com/api/search") else {
+            throw URLError(.badURL)
+        }
         components.queryItems = [
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "provider", value: "spotify"),
@@ -228,7 +230,9 @@ struct LocalImportSearchEngine: Sendable {
     }
 
     private func soundCloudTracks(_ query: String) async throws -> [LocalImportSoundCloudTrack] {
-        var pageComponents = URLComponents(string: "https://soundcloud.com/search/sounds")!
+        guard var pageComponents = URLComponents(string: "https://soundcloud.com/search/sounds") else {
+            throw URLError(.badURL)
+        }
         pageComponents.queryItems = [URLQueryItem(name: "q", value: query)]
         guard let pageURL = pageComponents.url else { return [] }
         let pageData = try await boundedData(
@@ -240,7 +244,9 @@ struct LocalImportSearchEngine: Sendable {
         guard let html = String(data: pageData, encoding: .utf8) else { return [] }
         let hydration = try LocalImportSoundCloudParser.hydration(html)
         guard let clientID = LocalImportSoundCloudParser.clientID(hydration) else { return [] }
-        var apiComponents = URLComponents(string: "https://api-v2.soundcloud.com/search/tracks")!
+        guard var apiComponents = URLComponents(string: "https://api-v2.soundcloud.com/search/tracks") else {
+            throw URLError(.badURL)
+        }
         apiComponents.queryItems = [
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "client_id", value: clientID),
@@ -263,9 +269,13 @@ struct LocalImportSearchEngine: Sendable {
     }
 
     private func youtubeCandidates(_ query: String) async throws -> [LocalImportSearchCandidate] {
-        var musicComponents = URLComponents(string: "https://music.youtube.com/search")!
+        guard var musicComponents = URLComponents(string: "https://music.youtube.com/search") else {
+            throw URLError(.badURL)
+        }
         musicComponents.queryItems = [URLQueryItem(name: "q", value: query)]
-        var webComponents = URLComponents(string: "https://www.youtube.com/results")!
+        guard var webComponents = URLComponents(string: "https://www.youtube.com/results") else {
+            throw URLError(.badURL)
+        }
         webComponents.queryItems = [
             URLQueryItem(name: "search_query", value: query),
             URLQueryItem(name: "sp", value: "EgIQAQ%3D%3D"),

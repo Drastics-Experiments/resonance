@@ -133,36 +133,6 @@ struct TransferResultOverlay: View {
     }
 }
 
-struct TrafficLightDots: View {
-    var body: some View {
-        HStack(spacing: 8) {
-            trafficButton(color: Color(hex: 0xFF6B66), label: "Close") {
-                NSApp.keyWindow?.performClose(nil)
-            }
-            trafficButton(color: Color(hex: 0xF6C851), label: "Minimize") {
-                NSApp.keyWindow?.miniaturize(nil)
-            }
-            trafficButton(color: Color(hex: 0x61D889), label: "Zoom") {
-                NSApp.keyWindow?.zoom(nil)
-            }
-        }
-        .frame(width: 52, height: 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func trafficButton(color: Color, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Circle()
-                .fill(color)
-                .frame(width: 12, height: 12)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .help(label)
-        .accessibilityLabel(label)
-    }
-}
-
 private struct AppKitHoverTrackingArea: NSViewRepresentable {
     let onHover: (Bool) -> Void
 
@@ -491,29 +461,5 @@ struct EqualizerGlyph: View {
         .foregroundStyle(palette.foregroundAccent)
         .frame(width: 14, height: 12)
         .animation(.easeInOut(duration: 0.45).repeatForever(autoreverses: true), value: isAnimating)
-    }
-}
-
-struct HoverSurface<Content: View>: View {
-    var cornerRadius: CGFloat = 8
-    var selected: Bool = false
-    @ViewBuilder var content: () -> Content
-    @State private var isHovering = false
-
-    var body: some View {
-        content()
-            .background((selected || isHovering) ? Color.white.opacity(0.055) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .onHover { isHovering = $0 }
-    }
-}
-
-struct SoftDivider: View {
-    @Environment(\.resonancePalette) private var palette
-
-    var body: some View {
-        Rectangle()
-            .fill(palette.divider)
-            .frame(height: 1)
     }
 }

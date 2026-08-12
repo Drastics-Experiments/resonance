@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,7 +28,6 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
@@ -53,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -125,7 +126,11 @@ private fun PlaylistCollectionScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(Color.White.copy(alpha = .045f), RoundedCornerShape(16.dp))
-                        .clickable { onOpen(playlist.id) }
+                        .clickable(
+                            role = Role.Button,
+                            onClickLabel = "Open ${playlist.name}",
+                            onClick = { onOpen(playlist.id) },
+                        )
                         .padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -151,7 +156,7 @@ private fun PlaylistCollectionScreen(
     if (creating) {
         AlertDialog(
             onDismissRequest = { creating = false },
-            title = { Text("New Playlist") },
+            title = { Text("New playlist") },
             text = {
                 OutlinedTextField(
                     name,
@@ -178,7 +183,7 @@ private fun PlaylistCollectionScreen(
             text = { Text("Songs in this playlist will remain in your music library.") },
             confirmButton = {
                 TextButton(onClick = { actions.deletePlaylist(target.id); deletion = null }) {
-                    Text("Delete Playlist", color = MaterialTheme.colorScheme.error)
+                    Text("Delete playlist", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = { TextButton(onClick = { deletion = null }) { Text("Cancel") } },
@@ -236,7 +241,7 @@ private fun PlaylistDetailScreen(
                     Spacer(Modifier.size(6.dp))
                     Text(
                         if (state.isPlaying && isActivePlaylist) "Pause"
-                        else if (state.shuffleEnabled && !isActivePlaylist) "Shuffle Play"
+                        else if (state.shuffleEnabled && !isActivePlaylist) "Shuffle play"
                         else "Play",
                         fontWeight = FontWeight.Bold,
                     )
@@ -253,7 +258,7 @@ private fun PlaylistDetailScreen(
             }
         }
         if (entries.isEmpty()) {
-            item { EmptyPlaylistMessage("No Songs", if (playlist.isSystem) "Like songs to add them here." else "Add songs from your library.") }
+            item { EmptyPlaylistMessage("No songs", if (playlist.isSystem) "Like songs to add them here." else "Add songs from your library.") }
         } else {
             itemsIndexed(entries, key = { _, entry -> entry.stableID }) { index, entry ->
                 when (entry) {
@@ -300,23 +305,30 @@ private fun PlaylistDetailScreen(
     if (addSongs) {
         AlertDialog(
             onDismissRequest = { addSongs = false },
-            title = { Text("Add Songs") },
+            title = { Text("Add songs") },
             text = {
                 LazyColumn(Modifier.heightIn(max = 440.dp)) {
                     itemsIndexed(state.tracks, key = { _, track -> track.id }) { index, track ->
                         val added = track.id in playlist.trackIDs
                         Row(
-                            Modifier.fillMaxWidth().clickable {
-                                if (added) actions.removeTrackFromPlaylist(playlist.id, track.id)
-                                else actions.addTrackToPlaylist(playlist.id, track.id)
-                            }.padding(horizontal = 8.dp, vertical = 8.dp),
+                            Modifier
+                                .fillMaxWidth()
+                                .toggleable(
+                                    value = added,
+                                    role = Role.Checkbox,
+                                    onValueChange = {
+                                        if (added) actions.removeTrackFromPlaylist(playlist.id, track.id)
+                                        else actions.addTrackToPlaylist(playlist.id, track.id)
+                                    },
+                                )
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             Text(
                                 (index + 1).toString(),
                                 modifier = Modifier.width(24.dp),
-                                fontSize = 11.sp,
+                                fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f),
                             )
                             Artwork(state.artworkPathsByTrackId[track.id] ?: track.artworkFilename, Modifier.size(52.dp))
@@ -324,18 +336,18 @@ private fun PlaylistDetailScreen(
                                 Text(track.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(
                                     "${track.artist} / ${track.mediaKindLabel}",
-                                    fontSize = 11.sp,
+                                    fontSize = 12.sp,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
                                     maxLines = 1,
                                 )
                                 Text(
                                     track.album.ifBlank { "Unknown Album" },
-                                    fontSize = 11.sp,
+                                    fontSize = 12.sp,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .42f),
                                     maxLines = 1,
                                 )
                             }
-                            Text(track.durationText, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                            Text(track.durationText, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                             Icon(
                                 if (added) Icons.Default.Check else Icons.Default.Add,
                                 null,
@@ -355,7 +367,7 @@ private fun PlaylistDetailScreen(
             text = { Text("Songs in this playlist will remain in your music library.") },
             confirmButton = {
                 TextButton(onClick = { actions.deletePlaylist(playlist.id); confirmDelete = false; onBack() }) {
-                    Text("Delete Playlist", color = MaterialTheme.colorScheme.error)
+                    Text("Delete playlist", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
@@ -405,7 +417,7 @@ private fun UnavailablePlaylistSongRow(
         Text(
             number.toString(),
             modifier = Modifier.width(24.dp),
-            fontSize = 11.sp,
+            fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .65f),
         )
         if (song != null) {
@@ -417,14 +429,14 @@ private fun UnavailablePlaylistSongRow(
             Text(title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
                 "$artist / $mediaKind / Not downloaded",
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
                 album,
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -435,7 +447,7 @@ private fun UnavailablePlaylistSongRow(
             Text(
                 song?.durationText ?: "—",
                 modifier = Modifier.width(44.dp),
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 textAlign = TextAlign.End,
                 maxLines = 1,
             )

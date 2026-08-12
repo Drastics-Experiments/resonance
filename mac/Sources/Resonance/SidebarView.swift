@@ -223,14 +223,7 @@ struct MacSettingsSheet: View {
             .background(palette.raisedSurface.opacity(0.55))
         }
         .frame(width: 760, height: 520)
-        .background(
-            RadialGradient(
-                colors: [palette.secondary.opacity(0.14), palette.panel],
-                center: .topTrailing,
-                startRadius: 0,
-                endRadius: 460
-            )
-        )
+        .background(palette.panel)
         .preferredColorScheme(.dark)
         .onDisappear { recorder.cancel() }
         .alert("Sign out and forget this server?", isPresented: $confirmingCredentialRemoval) {
@@ -248,7 +241,7 @@ struct MacSettingsSheet: View {
     private var generalPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                settingsHeading("MAC", detail: "Desktop behavior and connected services.")
+                settingsHeading("Mac", detail: "Desktop behavior and connected services.")
                 VStack(spacing: 0) {
                     settingsToggleRow(
                         symbol: "macwindow.on.rectangle",
@@ -271,11 +264,11 @@ struct MacSettingsSheet: View {
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .overlay { RoundedRectangle(cornerRadius: 15).stroke(palette.divider) }
 
-                settingsHeading("PLAYBACK", detail: "Blend one song smoothly into the next.")
+                settingsHeading("Playback", detail: "Blend one song smoothly into the next.")
                     .padding(.top, 10)
                 crossfadeSettingsRow
 
-                settingsHeading("APP", detail: "Manage this Mac's server connection.")
+                settingsHeading("App", detail: "Manage this Mac's server connection.")
                     .padding(.top, 10)
                 VStack(spacing: 0) {
                     settingsActionRow(
@@ -300,7 +293,7 @@ struct MacSettingsSheet: View {
     private var appearancePanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                settingsHeading("THEME", detail: "Choose a dark palette for this Mac. Changes apply immediately.")
+                settingsHeading("Theme", detail: "Choose a dark palette for this Mac. Changes apply immediately.")
 
                 LazyVGrid(
                     columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
@@ -312,7 +305,7 @@ struct MacSettingsSheet: View {
                 }
 
                 Text("Your selection is stored only on this device.")
-                    .font(.system(size: 9))
+                    .font(.system(size: 11))
                     .foregroundStyle(palette.muted)
             }
             .padding(22)
@@ -374,15 +367,11 @@ struct MacSettingsSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("ACCOUNT")
-                        .font(.system(size: 9, weight: .bold))
-                        .tracking(1.7)
-                        .foregroundStyle(palette.foregroundAccent)
                     Text("Music Server")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                         .foregroundStyle(palette.ink)
                     Text("Your Resonance account session is kept in private app storage on this Mac.")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(palette.muted)
                 }
 
@@ -404,7 +393,7 @@ struct MacSettingsSheet: View {
                                 .buttonStyle(.plain)
                                 .accessibilityLabel(isEmailRevealed ? "Hide email address" : "Reveal email address")
                                 Text(model.accountRole == "admin" ? "Administrator" : "Member")
-                                    .font(.system(size: 9))
+                                    .font(.system(size: 11))
                                     .foregroundStyle(palette.muted)
                             }
                             Spacer()
@@ -414,7 +403,7 @@ struct MacSettingsSheet: View {
                     } else {
                         if !model.serverToken.isEmpty {
                             Label("Legacy connection • sign in to finish upgrading", systemImage: "exclamationmark.triangle")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(palette.muted)
                         }
                         Button {
@@ -434,7 +423,7 @@ struct MacSettingsSheet: View {
                                 Text("Sign in with Clerk")
                                     .font(.system(size: 12, weight: .bold))
                                     .lineLimit(1)
-                                    .minimumScaleFactor(0.82)
+                                    .minimumScaleFactor(0.84)
                                     .layoutPriority(1)
                                 Spacer(minLength: 8)
                                 if model.isAuthenticatingAccount {
@@ -471,7 +460,7 @@ struct MacSettingsSheet: View {
                         .disabled(model.isAuthenticatingAccount)
                         .accessibilityLabel("Sign in with Clerk")
                         Text("Account sign-in always uses https://resonance-core.blithe-haven-9710.chatgpt.site/ in the secure system browser.")
-                            .font(.system(size: 9))
+                            .font(.system(size: 10))
                             .foregroundStyle(palette.muted)
                     }
                 }
@@ -524,7 +513,7 @@ struct MacSettingsSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top) {
-                    settingsHeading("PLAYBACK", detail: "Choose a shortcut, then press its new key combination.")
+                    settingsHeading("Playback", detail: "Choose a shortcut, then press its new key combination.")
                     Spacer()
                     Button("Reset defaults", action: preferences.resetKeybinds)
                         .buttonStyle(.bordered)
@@ -541,7 +530,7 @@ struct MacSettingsSheet: View {
                                 .background(palette.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(action.title).font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.ink)
-                                Text(action.detail).font(.system(size: 9)).foregroundStyle(palette.muted)
+                                Text(action.detail).font(.system(size: 11)).foregroundStyle(palette.muted)
                             }
                             Spacer()
                             Button {
@@ -570,14 +559,13 @@ struct MacSettingsSheet: View {
         .scrollIndicators(.hidden)
     }
 
-    private func settingsHeading(_ eyebrow: String, detail: String) -> some View {
+    private func settingsHeading(_ title: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(eyebrow)
-                .font(.system(size: 9, weight: .bold))
-                .tracking(1.7)
+            Text(title)
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(palette.foregroundAccent)
             Text(detail)
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundStyle(palette.muted)
         }
     }
@@ -597,7 +585,7 @@ struct MacSettingsSheet: View {
                 .background(palette.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.ink)
-                Text(detail).font(.system(size: 9)).foregroundStyle(palette.muted).lineLimit(2)
+                Text(detail).font(.system(size: 10)).foregroundStyle(palette.muted).lineLimit(2)
             }
             Spacer()
             Toggle("", isOn: isOn)
@@ -605,6 +593,7 @@ struct MacSettingsSheet: View {
                 .toggleStyle(.switch)
                 .tint(palette.accent)
                 .disabled(!isEnabled)
+                .accessibilityLabel(title)
         }
         .padding(.horizontal, 14)
         .frame(minHeight: 64)
@@ -621,7 +610,7 @@ struct MacSettingsSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Crossfade").font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.ink)
                     Text(model.crossfadeEnabled ? "Overlap songs by \(Int(model.crossfadeSeconds.rounded())) seconds." : "Start the next song early while fading between both.")
-                        .font(.system(size: 9))
+                        .font(.system(size: 10))
                         .foregroundStyle(palette.muted)
                 }
                 Spacer()
@@ -629,6 +618,7 @@ struct MacSettingsSheet: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .tint(palette.accent)
+                    .accessibilityLabel("Crossfade")
             }
             Slider(value: $model.crossfadeSeconds, in: 1...12, step: 1)
                 .tint(palette.foregroundAccent)
@@ -657,7 +647,7 @@ struct MacSettingsSheet: View {
                 .background(palette.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.ink)
-                Text(detail).font(.system(size: 9)).foregroundStyle(palette.muted).lineLimit(2)
+                Text(detail).font(.system(size: 10)).foregroundStyle(palette.muted).lineLimit(2)
             }
             Spacer()
             Button(actionTitle, action: action)
