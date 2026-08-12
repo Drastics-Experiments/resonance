@@ -113,4 +113,75 @@ final class MobileLegacyAppMigrationTests: XCTestCase {
         XCTAssertNil(store.read(key: "account-session-v1"))
         XCTAssertFalse(fileManager.fileExists(atPath: storeURL.path))
     }
+
+    func testCredentialBatchUpdateReplacesLegacyValuesTogether() throws {
+        let fileManager = FileManager.default
+        let temporaryRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("resonance-mobile-credential-batch-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporaryRoot) }
+
+        let store = MobileFileCredentialStore(
+            storeURL: temporaryRoot.appendingPathComponent("server-credentials.json")
+        )
+        try store.update(values: ["client": "old-client", "admin": "old-admin"])
+        try store.update(
+            values: ["account-session-v1": "new-session"],
+            deleting: ["client", "admin"]
+        )
+
+        XCTAssertEqual(store.read(key: "account-session-v1"), "new-session")
+        XCTAssertNil(store.read(key: "client"))
+        XCTAssertNil(store.read(key: "admin"))
+    }
+
+    func testCredentialMutationQuarantinesCorruptDataBeforeSaving() throws {
+        let fileManager = FileManager.default
+        let temporaryRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("resonance-mobile-credential-recovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporaryRoot) }
+        try fileManager.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+
+        let storeURL = temporaryRoot.appendingPathComponent("server-credentials.json")
+        let corruptData = Data("not valid credential data".utf8)
+        try corruptData.write(to: storeURL)
+        let store = MobileFileCredentialStore(storeURL: storeURL)
+
+        XCTAssertNil(store.read(key: "client"))
+        XCTAssertEqual(try Data(contentsOf: storeURL), corruptData)
+
+        try store.update(values: ["account-session-v1": "new-session"])
+
+        XCTAssertEqual(store.read(key: "account-session-v1"), "new-session")
+        let quarantinedURL = try XCTUnwrap(
+            fileManager.contentsOfDirectory(at: temporaryRoot, includingPropertiesForKeys: nil)
+                .first { $0.lastPathComponent.hasPrefix("server-credentials.corrupt-") }
+        )
+        XCTAssertEqual(try Data(contentsOf: quarantinedURL), corruptData)
+        XCTAssertEqual(
+            (try fileManager.attributesOfItem(atPath: quarantinedURL.path)[.posixPermissions] as? NSNumber)?.intValue,
+            0o600
+        )
+    }
+
+    func testClearingCredentialsPreservesCorruptDataWithoutCreatingAnEmptyStore() throws {
+        let fileManager = FileManager.default
+        let temporaryRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("resonance-mobile-credential-clear-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporaryRoot) }
+        try fileManager.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+
+        let storeURL = temporaryRoot.appendingPathComponent("server-credentials.json")
+        let corruptData = Data("corrupt credentials".utf8)
+        try corruptData.write(to: storeURL)
+        let store = MobileFileCredentialStore(storeURL: storeURL)
+
+        try store.update(deleting: ["account-session-v1", "client", "admin"])
+
+        XCTAssertFalse(fileManager.fileExists(atPath: storeURL.path))
+        let quarantinedURL = try XCTUnwrap(
+            fileManager.contentsOfDirectory(at: temporaryRoot, includingPropertiesForKeys: nil)
+                .first { $0.lastPathComponent.hasPrefix("server-credentials.corrupt-") }
+        )
+        XCTAssertEqual(try Data(contentsOf: quarantinedURL), corruptData)
+    }
 }

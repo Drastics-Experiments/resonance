@@ -35,13 +35,7 @@ struct MainContentView: View {
                 CollectionView()
             }
         }
-        .background {
-            LinearGradient(
-                colors: [palette.panel.opacity(0.68), palette.background],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
+        .background(palette.background)
         .clipped()
         .sheet(item: $clipEditorSelection) { selection in
             MacClipEditorSheet(initialTrackID: selection.trackID)
@@ -143,7 +137,6 @@ private struct ServerLibraryView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     Text("Music Server")
                         .font(.system(size: 48, weight: .bold, design: .rounded))
-                        .tracking(-1.7)
                         .padding(.bottom, 8)
 
                     serverStatusLine
@@ -321,12 +314,38 @@ private struct ServerLibraryView: View {
                 action: model.uploadMissingDownloadedSongs
             )
 
-            MacServerCircleActionButton(
-                symbol: "square.and.arrow.up",
-                label: "Upload mode: \(model.uploadMode.title)",
-                isDisabled: model.selectedUploadActionDisabled,
-                action: model.chooseSongsToUpload
+            Menu {
+                Section("Upload Method") {
+                    ForEach(model.clientConfiguration.permittedUploadModes) { mode in
+                        Button {
+                            model.selectUploadMode(mode)
+                        } label: {
+                            Label(
+                                mode.title,
+                                systemImage: mode == model.uploadMode ? "checkmark" : mode.symbol
+                            )
+                        }
+                    }
+                }
+                Divider()
+                Button("Import with \(model.uploadMode.title)", systemImage: model.uploadMode.symbol) {
+                    model.chooseSongsToUpload()
+                }
+            } label: {
+                MacServerCircleActionSurface(
+                    symbol: model.uploadMode.symbol,
+                    isDisabled: model.selectedUploadActionDisabled
+                )
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(
+                model.serverUploadActionsDisabled
+                    || model.clientConfiguration.permittedUploadModes.isEmpty
             )
+            .help("Upload method: \(model.uploadMode.title)")
+            .accessibilityLabel("Upload method: \(model.uploadMode.title)")
 
             MacServerCircleActionButton(
                 symbol: "square.and.arrow.down",
@@ -454,7 +473,6 @@ private struct MacServerInlineMetric: View {
 }
 
 private struct MacServerCircleActionButton: View {
-    @Environment(\.resonancePalette) private var palette
     let symbol: String
     let label: String
     var valueText: String? = nil
@@ -465,21 +483,12 @@ private struct MacServerCircleActionButton: View {
 
     var body: some View {
         Button(action: action) {
-            Group {
-                if let valueText {
-                    Text(valueText)
-                        .font(.system(size: 13, weight: .bold))
-                        .monospacedDigit()
-                } else {
-                    Image(systemName: symbol)
-                        .font(.system(size: 15, weight: .semibold))
-                        .rotationEffect(.degrees(rotationDegrees))
-                }
-            }
-            .foregroundStyle(palette.foregroundAccent)
-            .frame(width: 42, height: 42)
-            .background(Color.white.opacity(0.045), in: Circle())
-            .overlay { Circle().stroke(Color.white.opacity(0.035)) }
+            MacServerCircleActionSurface(
+                symbol: symbol,
+                valueText: valueText,
+                isDisabled: isDisabled,
+                rotationDegrees: rotationDegrees
+            )
         }
         .buttonStyle(PressableScaleStyle())
         .disabled(isDisabled)
@@ -681,6 +690,12 @@ private struct MacServerSongRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(
+                isSelecting
+                    ? "\(isSelected ? "Deselect" : "Select") \(displayTitle)"
+                    : "\(displayTitle), by \(displayArtist)"
+            )
+            .accessibilityValue(isCurrent ? (model.isPlaying ? "Now playing" : "Selected") : "")
             .clipEditorAccessibilityAction(for: localTrack)
 
             HStack(spacing: 11) {
@@ -879,7 +894,6 @@ private struct PlaylistsOverviewView: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text("Playlists")
                     .font(.system(size: 52, weight: .regular))
-                    .tracking(-2.2)
                 Text("Organize your local music into collections.")
                     .font(.system(size: 12))
                     .foregroundStyle(palette.muted)
@@ -1251,16 +1265,11 @@ private struct ProfileAvatar: View {
     let initial: String
     let size: CGFloat
     let fontSize: CGFloat
-    var imageData: Data? = nil
     var imageURL: URL? = nil
 
     var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [palette.tertiary, palette.secondary],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            palette.secondary
 
             if let imageURL {
                 AsyncImage(url: imageURL) { image in
@@ -1272,23 +1281,18 @@ private struct ProfileAvatar: View {
                         .font(.system(size: fontSize, weight: .bold, design: .rounded))
                         .foregroundStyle(Color.white)
                 }
-            } else if let imageData, let image = NSImage(data: imageData) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
             } else {
                 Text(initial)
                     .font(.system(size: fontSize, weight: .bold, design: .rounded))
                     .foregroundStyle(Color.white)
             }
         }
-            .frame(width: size, height: size)
-            .clipShape(Circle())
-            .overlay {
-                Circle().stroke(Color.white.opacity(0.20), lineWidth: 1)
-            }
-            .shadow(color: palette.secondary.opacity(0.26), radius: 9, y: 4)
-            .contentShape(Circle())
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .overlay {
+            Circle().stroke(Color.white.opacity(0.20), lineWidth: 1)
+        }
+        .contentShape(Circle())
     }
 }
 
@@ -1349,6 +1353,34 @@ private enum ListeningHistoryDateFormatting {
     static func string(from date: Date, format: String) -> String {
         guard let formatter = formatters[format] else { return date.formatted() }
         return formatter.string(from: date)
+    }
+}
+
+private struct MacServerCircleActionSurface: View {
+    @Environment(\.resonancePalette) private var palette
+    let symbol: String
+    var valueText: String? = nil
+    var isDisabled = false
+    var rotationDegrees = 0.0
+
+    var body: some View {
+        Group {
+            if let valueText {
+                Text(valueText)
+                    .font(.system(size: 13, weight: .bold))
+                    .monospacedDigit()
+            } else {
+                Image(systemName: symbol)
+                    .font(.system(size: 15, weight: .semibold))
+                    .rotationEffect(.degrees(rotationDegrees))
+            }
+        }
+        .foregroundStyle(palette.foregroundAccent)
+        .frame(width: 42, height: 42)
+        .background(Color.white.opacity(0.045), in: Circle())
+        .overlay { Circle().stroke(Color.white.opacity(0.035)) }
+        .opacity(isDisabled ? 0.45 : 1)
+        .accessibilityHidden(true)
     }
 }
 
@@ -1898,7 +1930,6 @@ private struct MacListeningHistorySheet: View {
 
                     Text(dayDetailsTitle(day.date))
                         .font(.system(size: 18, weight: .bold))
-                        .tracking(-0.35)
                         .lineLimit(1)
                 }
 
@@ -2202,11 +2233,7 @@ private struct MacListeningHistorySheet: View {
     }
 
     private var historyBackground: some View {
-        LinearGradient(
-            colors: [palette.surface, palette.panel],
-            startPoint: .top,
-            endPoint: .bottom
-        )
+        palette.surface
     }
 
     private var divider: some View {
@@ -2428,16 +2455,7 @@ private struct ListeningHistoryBarChart: View {
     }
 
     private func barStyle(for day: ListeningHistoryDay) -> AnyShapeStyle {
-        let colors = day.id == peakDayID
-            ? [Color(hex: 0xFF806C), palette.secondary]
-            : [palette.tertiary, palette.secondary]
-        return AnyShapeStyle(
-            LinearGradient(
-                colors: colors,
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
+        AnyShapeStyle(day.id == peakDayID ? Color(hex: 0xFF806C) : palette.tertiary)
     }
 
     private func accessibilityLabel(for day: ListeningHistoryDay) -> String {
@@ -2578,7 +2596,6 @@ private struct ListeningHistoryChartTooltip: View {
                 .stroke(palette.tertiary.opacity(0.25), lineWidth: 1)
         }
         .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .shadow(color: Color.black.opacity(0.75), radius: 19, y: 7)
     }
 }
 
@@ -2738,21 +2755,12 @@ private struct LibraryFilterPills: View {
                         .frame(height: isCompact ? 26 : 34)
                         .background {
                             if model.filter == filter {
-                                LinearGradient(
-                    colors: [palette.accent, palette.secondary],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
+                                palette.accent
                             } else {
                                 Color.white.opacity(0.06)
                             }
                         }
                         .clipShape(Capsule())
-                        .shadow(
-                            color: model.filter == filter ? palette.accent.opacity(0.30) : .clear,
-                            radius: isCompact ? 8 : 12,
-                            y: isCompact ? 4 : 6
-                        )
                 }
                 .buttonStyle(PressableScaleStyle())
             }
@@ -2784,7 +2792,6 @@ private struct RecentlyAddedSection: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Recently Added")
                         .font(.system(size: 20, weight: .bold))
-                        .tracking(-0.3)
                         .foregroundStyle(palette.ink)
                 }
 
@@ -2874,13 +2881,11 @@ private struct RecentlyAddedArtworkCard: View {
                                 .foregroundStyle(Color.white)
                                 .frame(width: 54, height: 54)
                                 .background(palette.accent, in: Circle())
-                                .shadow(color: palette.accent.opacity(0.50), radius: 14, y: 6)
                         }
                         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                         .transition(.opacity)
                     }
                 }
-                .shadow(color: Color.black.opacity(0.30), radius: 12, y: 7)
 
                 Text(track.title)
                     .font(.system(size: 11, weight: .semibold))
@@ -2899,7 +2904,6 @@ private struct RecentlyAddedArtworkCard: View {
         }
         .buttonStyle(PressableScaleStyle())
         .onHover { isHovering = $0 }
-        .animation(.easeOut(duration: 0.14), value: isHovering)
         .help("\(playbackActionTitle) \(track.title)")
         .accessibilityLabel("\(playbackActionTitle) \(track.title) by \(track.artist)")
         .clipEditorAccessibilityAction(for: track)
@@ -2936,11 +2940,7 @@ private struct CollectionHeroView: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack {
-                LinearGradient(
-                    colors: [palette.panel, palette.background, palette.surface],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
+                palette.panel
 
                 HStack(spacing: proxy.size.width < 620 ? 24 : 32) {
                     Group {
@@ -2956,8 +2956,7 @@ private struct CollectionHeroView: View {
                                 style: model.collectionArtwork,
                                 symbol: symbol,
                                 symbolSize: proxy.size.width < 550 ? 54 : 70,
-                                cornerRadius: 9,
-                                glow: true
+                                cornerRadius: 9
                             )
                             .aspectRatio(1, contentMode: .fit)
                             .frame(width: proxy.size.width < 550 ? 202 : 232)
@@ -2966,7 +2965,6 @@ private struct CollectionHeroView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         Text(model.collectionTitle)
                             .font(.system(size: model.collectionTitle.count > 13 ? 48 : 58, weight: .regular))
-                            .tracking(-2.2)
                             .lineLimit(1)
                             .minimumScaleFactor(0.68)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2987,7 +2985,6 @@ private struct CollectionHeroView: View {
                                 .frame(width: 128, height: 48)
                                 .background(palette.accent)
                                 .clipShape(Capsule())
-                                .shadow(color: palette.accent.opacity(0.18), radius: 18, y: 9)
                             }
                             .buttonStyle(PressableScaleStyle())
                             .disabled(model.collectionDownloadedTrackCount == 0)
@@ -3763,7 +3760,6 @@ private struct StorageView: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Song Storage")
                         .font(.system(size: 42, weight: .bold, design: .rounded))
-                        .tracking(-1.2)
                     Spacer()
                     Button(isEditing ? "Done" : "Edit") {
                         withAnimation {
@@ -4196,7 +4192,7 @@ private struct MacStorageSummaryCard: View {
         .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 16))
         .overlay {
             RoundedRectangle(cornerRadius: 16)
-                .stroke(LinearGradient(colors: [palette.secondary.opacity(0.8), Color(hex: 0x6C9CD8).opacity(0.55)], startPoint: .leading, endPoint: .trailing))
+                .stroke(palette.divider)
         }
     }
 }
@@ -4380,6 +4376,12 @@ private struct MacStorageTrackRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(
+                isEditing
+                    ? "\(isSelected ? "Deselect" : "Select") \(track.title)"
+                    : "Play \(track.title), by \(track.artist)"
+            )
+            .accessibilityValue(isCurrent ? (model.isPlaying ? "Now playing" : "Selected") : "")
             .clipEditorAccessibilityAction(for: track)
 
         }

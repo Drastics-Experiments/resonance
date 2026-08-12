@@ -135,6 +135,10 @@ class ClientConfigTest {
 
     @Test
     fun modePolicyUsesSafeDefaultsAndFallsBackWhenModesDisappear() {
+        assertEquals(
+            listOf("On-device import", "Server link import", "Reviewed match"),
+            ServerUploadMode.entries.map(ServerUploadMode::label),
+        )
         val safe = EffectiveClientConfig.safeDefaults()
         assertEquals(
             ResolvedServerTransferModes(ServerUploadMode.LocalFile, ServerDownloadMode.VerifiedFileCache),
@@ -169,14 +173,17 @@ class ClientConfigTest {
             remote.availableUploadModes,
         )
         assertEquals(listOf(ServerDownloadMode.StreamOnly), remote.availableDownloadModes)
-        assertEquals(
-            ServerUploadTransport.PreservedSourceLink,
-            ServerUploadTransportPolicy.transportFor(ServerUploadMode.ReviewedMatch),
-        )
-        assertEquals(
-            ServerUploadTransport.PreservedSourceLink,
-            ServerUploadTransportPolicy.transportFor(ServerUploadMode.ServerSourceLink),
-        )
+        remote.availableUploadModes.forEach { mode ->
+            assertEquals(
+                mode,
+                ServerTransferModePolicy.resolve(
+                    remote,
+                    mode,
+                    preferredDownload = null,
+                    now = now,
+                ).uploadMode,
+            )
+        }
         assertTrue(ServerUploadTransportPolicy.allowsLinkDerivedServerUpload(ServerUploadMode.LocalFile))
         assertTrue(ServerUploadTransportPolicy.allowsLinkDerivedServerUpload(ServerUploadMode.ReviewedMatch))
         val reviewedWithoutRawUpload = ClientConfigVerifier.verify(
@@ -227,6 +234,13 @@ class ClientConfigTest {
         assertTrue(CachedClientConfigEnvelope(signedEnvelope(body()), 1_000L).isWithinLocalAge(901_000L))
         assertFalse(CachedClientConfigEnvelope(signedEnvelope(body()), 1_000L).isWithinLocalAge(901_001L))
         assertFalse(CachedClientConfigEnvelope(signedEnvelope(body()), 2_000L).isWithinLocalAge(1_000L))
+    }
+
+    @Test
+    fun uploadModePreferencesAreScopedByServerOriginAndProfile() {
+        val base = ClientConfigStore.transferKey("https://music.example", "default")
+        assertNotEquals(base, ClientConfigStore.transferKey("https://other.example", "default"))
+        assertNotEquals(base, ClientConfigStore.transferKey("https://music.example", "other-profile"))
     }
 
     @Test

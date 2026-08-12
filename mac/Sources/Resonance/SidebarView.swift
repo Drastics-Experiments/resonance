@@ -46,12 +46,13 @@ struct SidebarView: View {
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 10, weight: .bold))
-                        .frame(width: 22, height: 22)
+                        .frame(width: 28, height: 28)
                         .background(Color.white.opacity(0.06))
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .help("New Playlist")
+                .accessibilityLabel("New Playlist")
             }
             .padding(.horizontal, 16)
             .padding(.top, 24)
@@ -78,13 +79,7 @@ struct SidebarView: View {
 
         }
         .padding(.horizontal, 12)
-        .background {
-            LinearGradient(
-                colors: [palette.panel.opacity(0.99), palette.background],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
+        .background(palette.panel)
         .alert("New Playlist", isPresented: $showingNewPlaylist) {
             TextField("Playlist name", text: $newPlaylistName)
             Button("Cancel", role: .cancel) {}
@@ -441,14 +436,7 @@ struct MacSettingsSheet: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 8)
                             .frame(maxWidth: .infinity, minHeight: 46)
-                            .background(
-                                LinearGradient(
-                                    colors: [palette.accent, palette.secondary],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                ),
-                                in: RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            )
+                            .background(palette.accent, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
                             .overlay {
                                 RoundedRectangle(cornerRadius: 13, style: .continuous)
                                     .stroke(Color.white.opacity(0.2))
@@ -706,11 +694,7 @@ private struct SidebarNavigationRow: View {
             .frame(height: 48)
             .background {
                 if isSelected {
-                    LinearGradient(
-                        colors: [palette.secondary.opacity(0.26), palette.secondary.opacity(0.10)],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
+                    palette.secondary.opacity(0.18)
                 } else if isHovering {
                     Color.white.opacity(0.055)
                 }

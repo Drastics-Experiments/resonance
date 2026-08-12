@@ -111,6 +111,7 @@ class ServerClient(
             url = endpoint("/api/v1/songs"),
             token = requireAccessToken(),
             accept = "application/json",
+            maxResponseBytes = MAX_CATALOG_RESPONSE_BYTES,
         )
         requireStatus(response, setOf(HttpURLConnection.HTTP_OK))
         json.decodeFromString<RemoteCatalog>(response.body.toString(Charsets.UTF_8))
@@ -134,6 +135,8 @@ class ServerClient(
                 HttpURLConnection.HTTP_NOT_FOUND, HttpURLConnection.HTTP_BAD_METHOD -> {
                     runCatching {
                         connection.errorStream?.use { readBoundedBytes(it, MAX_ERROR_BYTES) }
+                    }.onFailure { error ->
+                        if (error is CancellationException) throw error
                     }
                     ClientConfigFetchResult.Unsupported
                 }
@@ -163,6 +166,8 @@ class ServerClient(
                 else -> {
                     val errorBody = runCatching {
                         connection.errorStream?.use { readBoundedBytes(it, MAX_ERROR_BYTES) }
+                    }.onFailure { error ->
+                        if (error is CancellationException) throw error
                     }.getOrNull() ?: ByteArray(0)
                     throw serverException(Response(status, errorBody))
                 }
@@ -209,7 +214,7 @@ class ServerClient(
                 if (connection.responseCode !in 200..299) return@runCatching null
                 val contentLength = connection.contentLengthLong
                 if (contentLength > MAX_ARTWORK_BYTES) return@runCatching null
-                connection.inputStream.use(::readArtworkBytes)
+                connection.inputStream.use { input -> readArtworkBytes(input) }
             } finally {
                 connection.disconnect()
             }
@@ -228,20 +233,6 @@ class ServerClient(
         beforeEach: () -> Unit,
     ): ServerDownloadBatchResult = downloadSongs(
         songs = catalog.songs.filter { it.id in selectedIDs },
-        repository = repository,
-        existingRemoteIDs = existingRemoteIDs,
-        onProgress = onProgress,
-        beforeEach = beforeEach,
-    )
-
-    suspend fun downloadAll(
-        catalog: RemoteCatalog,
-        repository: LibraryRepository,
-        existingRemoteIDs: Set<String> = emptySet(),
-        onProgress: (TransferProgress) -> Unit = {},
-        beforeEach: () -> Unit,
-    ): ServerDownloadBatchResult = downloadSongs(
-        songs = catalog.songs,
         repository = repository,
         existingRemoteIDs = existingRemoteIDs,
         onProgress = onProgress,
@@ -302,46 +293,6 @@ class ServerClient(
         }
     }
 
-    suspend fun importSource(
-        sourcePageURL: String,
-        cohortKey: String,
-        authorize: () -> Unit,
-    ): RemoteUpload = withContext(Dispatchers.IO) {
-        val canonicalSource = SourceImportPolicy.canonicalYouTubePageURL(sourcePageURL)
-        val payload = SourceImportRequest(
-            sourcePageURL = canonicalSource,
-        )
-        authorize()
-        val response = request(
-            method = "POST",
-            url = endpoint("/api/v1/admin/source-imports"),
-            token = requireAdminToken(),
-            body = json.encodeToString(payload).toByteArray(Charsets.UTF_8),
-            contentType = "application/json",
-            accept = "application/json",
-            requestHeaders = clientContextHeaders(cohortKey),
-            maxResponseBytes = MAX_SOURCE_IMPORT_RESPONSE_BYTES,
-        )
-        requireStatus(response, setOf(HttpURLConnection.HTTP_CREATED, HttpURLConnection.HTTP_CONFLICT))
-        if (response.status == HttpURLConnection.HTTP_CONFLICT) {
-            val decoded = json.decodeFromString<SourceImportResponse>(response.body.toString(Charsets.UTF_8))
-            if (decoded.schemaVersion != 1 || decoded.status != "duplicate") {
-                throw IOException("The source-import duplicate response is invalid")
-            }
-            decoded.duplicateOf
-                ?.toRemoteUpload()
-                ?: throw IOException("The source-import duplicate response is invalid")
-        } else {
-            val decoded = json.decodeFromString<SourceImportResponse>(response.body.toString(Charsets.UTF_8))
-            if (decoded.schemaVersion != 1 || decoded.status !in setOf("imported", "restored")) {
-                throw IOException("The source-import response is invalid")
-            }
-            decoded.song
-                ?.toRemoteUpload()
-                ?: throw IOException("The source-import response is invalid")
-        }
-    }
-
     suspend fun resolveReviewedMatch(
         source: String,
         cohortKey: String,
@@ -371,6 +322,7 @@ class ServerClient(
             method = "DELETE",
             url = endpoint("/api/v1/admin/songs/${encodePathSegment(songID)}"),
             token = requireAdminToken(),
+            maxResponseBytes = MAX_SMALL_RESPONSE_BYTES,
         )
         requireStatus(
             response,
@@ -384,6 +336,7 @@ class ServerClient(
             url = endpoint("/api/v1/playlists"),
             token = requireAccessToken(),
             accept = "application/json",
+            maxResponseBytes = MAX_PLAYLIST_RESPONSE_BYTES,
         )
         requireStatus(response, setOf(HttpURLConnection.HTTP_OK))
         json.decodeFromString<RemotePlaylistsDocument>(response.body.toString(Charsets.UTF_8))
@@ -396,6 +349,7 @@ class ServerClient(
             token = requireAccessToken(),
             accept = "application/json",
             includeProfile = false,
+            maxResponseBytes = MAX_PROFILE_RESPONSE_BYTES,
         )
         requireStatus(response, setOf(HttpURLConnection.HTTP_OK))
         json.decodeFromString<SyncProfilesResponse>(response.body.toString(Charsets.UTF_8))
@@ -410,6 +364,7 @@ class ServerClient(
             contentType = "application/json",
             accept = "application/json",
             includeProfile = false,
+            maxResponseBytes = MAX_SMALL_RESPONSE_BYTES,
         )
         requireStatus(response, setOf(HttpURLConnection.HTTP_CREATED))
         json.decodeFromString<SyncProfile>(response.body.toString(Charsets.UTF_8))
@@ -424,6 +379,7 @@ class ServerClient(
                 body = json.encodeToString(document).toByteArray(Charsets.UTF_8),
                 contentType = "application/json",
                 accept = "application/json",
+                maxResponseBytes = MAX_PLAYLIST_RESPONSE_BYTES,
             )
             val updated = when (response.status) {
                 HttpURLConnection.HTTP_OK, HttpURLConnection.HTTP_CONFLICT ->
@@ -641,7 +597,7 @@ class ServerClient(
         }
     }
 
-    private fun request(
+    private suspend fun request(
         method: String,
         url: URL,
         token: String,
@@ -650,7 +606,7 @@ class ServerClient(
         accept: String? = null,
         includeProfile: Boolean = true,
         requestHeaders: Map<String, String> = emptyMap(),
-        maxResponseBytes: Int? = null,
+        maxResponseBytes: Int = MAX_SMALL_RESPONSE_BYTES,
     ): Response {
         val connection = open(url, method, token, includeProfile).apply {
             connectTimeout = CONNECT_TIMEOUT_MS
@@ -664,6 +620,7 @@ class ServerClient(
             }
         }
         return try {
+            coroutineContext.ensureActive()
             if (body != null) connection.outputStream.use { it.write(body) }
             connection.response(maxResponseBytes)
         } finally {
@@ -691,7 +648,7 @@ class ServerClient(
         }
     }
 
-    private fun openAuthorizedMediaConnection(
+    private suspend fun openAuthorizedMediaConnection(
         url: URL,
         readTimeoutMs: Int,
     ): HttpURLConnection {
@@ -701,6 +658,7 @@ class ServerClient(
             cleartextDevelopmentEnabled,
         )
         repeat(MAX_MEDIA_REDIRECTS + 1) { redirectCount ->
+            coroutineContext.ensureActive()
             val connection = open(
                 url = currentURL,
                 method = "GET",
@@ -734,13 +692,14 @@ class ServerClient(
         throw IOException("The media download redirected too many times")
     }
 
-    private fun openArtworkConnection(url: URL): HttpURLConnection {
+    private suspend fun openArtworkConnection(url: URL): HttpURLConnection {
         var currentURL = ServerNetworkPolicy.requireArtworkURL(
             baseURL,
             url,
             cleartextDevelopmentEnabled,
         )
         repeat(MAX_MEDIA_REDIRECTS + 1) { redirectCount ->
+            coroutineContext.ensureActive()
             val isServerOrigin = hasSameOrigin(currentURL, URL("$baseURL/"))
             val connection = (currentURL.openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
@@ -778,14 +737,13 @@ class ServerClient(
         throw IOException("The artwork download redirected too many times")
     }
 
-    private fun HttpURLConnection.response(maxBytes: Int? = null): Response {
+    private suspend fun HttpURLConnection.response(maxBytes: Int = MAX_SMALL_RESPONSE_BYTES): Response {
+        coroutineContext.ensureActive()
         val status = responseCode
         val source = if (status in 200..299) inputStream else errorStream
         return Response(
             status,
-            source?.use { input ->
-                if (maxBytes == null) input.readBytes() else readBoundedBytes(input, maxBytes)
-            } ?: ByteArray(0),
+            source?.use { input -> readBoundedBytes(input, maxBytes) } ?: ByteArray(0),
         )
     }
 
@@ -809,11 +767,12 @@ class ServerClient(
             cleartextDevelopmentEnabled,
         )
 
-    private fun readArtworkBytes(input: java.io.InputStream): ByteArray? {
+    private suspend fun readArtworkBytes(input: java.io.InputStream): ByteArray? {
         val output = ByteArrayOutputStream()
         val buffer = ByteArray(BUFFER_SIZE)
         var total = 0L
         while (true) {
+            coroutineContext.ensureActive()
             val read = input.read(buffer)
             if (read < 0) break
             total += read
@@ -859,10 +818,11 @@ class ServerClient(
         clientContextHeaders(cohortKey).forEach(::setRequestProperty)
     }
 
-    private fun readBoundedBytes(input: java.io.InputStream, maximum: Int): ByteArray {
+    private suspend fun readBoundedBytes(input: java.io.InputStream, maximum: Int): ByteArray {
         val output = ByteArrayOutputStream()
         val buffer = ByteArray(BUFFER_SIZE.coerceAtMost(maximum + 1))
         while (true) {
+            coroutineContext.ensureActive()
             val read = input.read(buffer)
             if (read < 0) break
             if (output.size() > maximum - read) {
@@ -892,6 +852,10 @@ class ServerClient(
         private const val DOWNLOAD_TIMEOUT_MS = 120_000
         private const val CLIENT_CONFIG_TIMEOUT_MS = 15_000
         private const val MAX_ERROR_BYTES = 64 * 1_024
+        private const val MAX_SMALL_RESPONSE_BYTES = 256 * 1_024
+        private const val MAX_PROFILE_RESPONSE_BYTES = 1 * 1_024 * 1_024
+        private const val MAX_PLAYLIST_RESPONSE_BYTES = 8 * 1_024 * 1_024
+        private const val MAX_CATALOG_RESPONSE_BYTES = 16 * 1_024 * 1_024
         private const val MAX_SOURCE_IMPORT_RESPONSE_BYTES = 256 * 1_024
         private const val MAX_REVIEWED_MATCH_RESPONSE_BYTES = 512 * 1_024
         private const val MAX_ARTWORK_BYTES = 10L * 1_024L * 1_024L
@@ -1327,34 +1291,6 @@ private fun String?.requireReviewedText(field: String): String = this
     ?.trim()
     ?.takeIf(String::isNotEmpty)
     ?: throw IOException("The reviewed-match response is missing $field")
-
-@Serializable
-private data class SourceImportRequest(
-    @SerialName("schema_version") val schemaVersion: Int = 1,
-    @SerialName("source_page_url") val sourcePageURL: String,
-)
-
-@Serializable
-private data class SourceImportResponse(
-    @SerialName("schema_version") val schemaVersion: Int = 0,
-    val status: String = "",
-    val song: SourceImportSong? = null,
-    @SerialName("duplicate_of") val duplicateOf: SourceImportSong? = null,
-)
-
-@Serializable
-private data class SourceImportSong(
-    val id: String,
-    val filename: String = "",
-    val name: String = "",
-    val size: Long = 0,
-) {
-    fun toRemoteUpload(): RemoteUpload = RemoteUpload(
-        id = id,
-        filename = filename.ifBlank { name },
-        size = size,
-    )
-}
 
 internal object SourceImportPolicy {
     fun canonicalYouTubePageURL(value: String): String {

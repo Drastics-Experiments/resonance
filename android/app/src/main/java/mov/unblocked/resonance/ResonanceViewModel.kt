@@ -100,7 +100,6 @@ import mov.unblocked.resonance.data.SocialAuthClient
 import mov.unblocked.resonance.data.NativeAuthConfiguration
 import mov.unblocked.resonance.data.StoredLibrary
 import mov.unblocked.resonance.data.SyncProfile
-import mov.unblocked.resonance.data.ProfilePictureStore
 import mov.unblocked.resonance.data.Track
 import mov.unblocked.resonance.data.TransferSessionOwnership
 import mov.unblocked.resonance.data.associatedWithLocalSource
@@ -163,7 +162,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private val credentials = CredentialStore(context)
     private var accountSession: AccountSession? = credentials.accountSession
     private val clientConfigStore = ClientConfigStore(context)
-    private val profilePictureStore = ProfilePictureStore(context)
     private val preferences = context.getSharedPreferences("resonance.playback", 0)
     private val appearancePreferences = context.getSharedPreferences("resonance.appearance", 0)
     private val mutableState = MutableStateFlow(
@@ -192,12 +190,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val mutableImportRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val importRequests = mutableImportRequests.asSharedFlow()
-    private val mutableUploadRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
-    val uploadRequests = mutableUploadRequests.asSharedFlow()
-    private val mutableProfilePictureRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
-    val profilePictureRequests = mutableProfilePictureRequests.asSharedFlow()
-    private val mutableAccountBrowserRequests = MutableSharedFlow<String>(extraBufferCapacity = 1)
-    val accountBrowserRequests = mutableAccountBrowserRequests.asSharedFlow()
 
     private var library = StoredLibrary(serverURL = credentials.serverURL)
     private var controllerFuture: Future<MediaController>? = null
@@ -239,23 +231,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         mutableState.value = mutableState.value.copy(errorMessage = null)
     }
 
-    override fun signInWithProvider(provider: String) {
-        if (mutableState.value.isSigningIn) return
-        mutableState.value = mutableState.value.copy(isSigningIn = true, serverMessage = "Opening account sign-in…")
-        viewModelScope.launch {
-            runCatching {
-                val (destination, pending) = SocialAuthClient(ResonanceAccountSignInServerURL).begin(provider)
-                credentials.pendingAccountSignIn = pending
-                mutableAccountBrowserRequests.emit(destination.toString())
-            }.onFailure { error ->
-                mutableState.value = mutableState.value.copy(
-                    isSigningIn = false,
-                    serverMessage = error.message ?: "Account sign-in could not be started.",
-                )
-            }
-        }
-    }
-
     override fun startNativeAccountSignIn() {
         if (mutableState.value.isSigningIn) return
         mutableState.value = mutableState.value.copy(isSigningIn = true, serverMessage = "Preparing secure sign-in…")
@@ -272,6 +247,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     serverMessage = "Choose a sign-in method",
                 )
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 mutableState.value = mutableState.value.copy(
                     isSigningIn = false,
                     isNativeAccountSignInOpen = false,
@@ -306,47 +282,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     acceptAccountSession(session)
                 }
                 .onFailure { error ->
-                    mutableState.value = mutableState.value.copy(
-                        isSigningIn = false,
-                        serverMessage = error.message ?: "Account sign-in could not be completed.",
-                    )
-                }
-        }
-    }
-
-    fun handleAccountCallback(uri: Uri?) {
-        if (uri?.scheme != "resonance" || uri.host != "auth" || uri.path != "/callback") return
-        val pending = credentials.pendingAccountSignIn
-        if (pending == null || uri.getQueryParameter("state") != pending.state) {
-            mutableState.value = mutableState.value.copy(
-                isSigningIn = false,
-                serverMessage = "The account sign-in callback was invalid or expired.",
-            )
-            return
-        }
-        credentials.pendingAccountSignIn = null
-        val providerError = uri.getQueryParameter("error_description") ?: uri.getQueryParameter("error")
-        val code = uri.getQueryParameter("code")
-        if (providerError != null || code.isNullOrBlank()) {
-            mutableState.value = mutableState.value.copy(
-                isSigningIn = false,
-                serverMessage = providerError ?: "The account sign-in callback was invalid or expired.",
-            )
-            return
-        }
-        viewModelScope.launch {
-            runCatching {
-                SocialAuthClient(pending.baseURL).exchange(
-                    code,
-                    pending.state,
-                    pending,
-                    migrationProfileID = library.syncProfileID,
-                )
-            }
-                .onSuccess { session ->
-                    acceptAccountSession(session)
-                }
-                .onFailure { error ->
+                    if (error is CancellationException) throw error
                     mutableState.value = mutableState.value.copy(
                         isSigningIn = false,
                         serverMessage = error.message ?: "Account sign-in could not be completed.",
@@ -361,7 +297,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         accountRefreshJob?.cancel()
         accountRefreshJob = null
         credentials.accountSession = null
-        credentials.pendingAccountSignIn = null
         credentials.clearTokens()
         authoritativeCatalogSnapshot = null
         cancelRemoteSongMetadataHydration()
@@ -384,6 +319,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 runCatching {
                     configureClerk(SocialAuthClient(current.baseURL).nativeConfiguration())
                     Clerk.auth.signOut()
+                }.onFailure { error ->
+                    if (error is CancellationException) throw error
                 }
             } else {
                 SocialAuthClient(current.baseURL).signOut(current)
@@ -422,6 +359,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 refreshClientConfig()
                 scheduleAccountRefresh(refreshed)
             } catch (error: Throwable) {
+                if (error is CancellationException) throw error
                 if (accountSession != current) return@launch
                 if (current.expiresAt <= System.currentTimeMillis()) {
                     signOutAccount()
@@ -534,41 +472,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         return client.accountSession(token, migrationProfileID)
     }
 
-    override fun chooseProfilePicture() {
-        mutableProfilePictureRequests.tryEmit(Unit)
-    }
-
-    fun setProfilePicture(uri: Uri) {
-        val serverURL = library.serverURL
-        val profileID = library.syncProfileID
-        viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    profilePictureStore.save(uri, serverURL, profileID)
-                }
-            }.onSuccess { path ->
-                if (library.serverURL == serverURL && library.syncProfileID == profileID) {
-                    mutableState.value = mutableState.value.copy(profilePicturePath = path)
-                }
-            }.onFailure { error ->
-                mutableState.value = mutableState.value.copy(
-                    errorMessage = error.message ?: "Resonance could not use that profile picture.",
-                )
-            }
-        }
-    }
-
-    override fun removeProfilePicture() {
-        val serverURL = library.serverURL
-        val profileID = library.syncProfileID
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { profilePictureStore.remove(serverURL, profileID) }
-            if (library.serverURL == serverURL && library.syncProfileID == profileID) {
-                mutableState.value = mutableState.value.copy(profilePicturePath = null)
-            }
-        }
-    }
-
     init {
         accountSession?.let {
             credentials.serverURL = it.baseURL
@@ -577,7 +480,16 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         }
         connectController()
         viewModelScope.launch {
-            library = repository.load()
+            library = try {
+                repository.load()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                mutableState.value = mutableState.value.copy(
+                    errorMessage = error.message ?: "The saved library could not be opened safely.",
+                )
+                return@launch
+            }
             library = migrateRemoteTrackContexts(library)
             library = migrateCompoundClipKeys(library)
             library = migrateRemoteLikes(library)
@@ -833,7 +745,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         ) {
             applyLinkUploadModeFailure(
                 current,
-                "Link-derived media requires the Reviewed match mode, or Source link mode for an original YouTube page. Turn off server upload to keep it only on this device.",
+                "Link-derived media requires Reviewed match, or Server link import for an original YouTube page. Turn off server upload to keep it only on this device.",
             )
             return false
         }
@@ -1052,14 +964,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     player.prepareAsync()
                 }
                 .onFailure { error ->
-                    if (error !is CancellationException) {
-                        mutableState.value = mutableState.value.copy(
-                            linkImport = mutableState.value.linkImport.copy(
-                                previewLoadingVideoId = null,
-                                previewError = "Preview unavailable: ${error.message ?: "unknown error"}",
-                            ),
-                        )
-                    }
+                    if (error is CancellationException) throw error
+                    mutableState.value = mutableState.value.copy(
+                        linkImport = mutableState.value.linkImport.copy(
+                            previewLoadingVideoId = null,
+                            previewError = "Preview unavailable: ${error.message ?: "unknown error"}",
+                        ),
+                    )
                 }
             linkPreviewJob = null
         }
@@ -1168,7 +1079,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         transferGeneration,
                     )
                 }
-                    .onFailure { uploadFailure = it }
+                    .onFailure { error ->
+                        if (error is CancellationException) throw error
+                        uploadFailure = error
+                    }
                 updateOwnedLinkImportTransfer(transferGeneration) { state ->
                     state.copy(uploadProgress = 1f)
                 }
@@ -1743,7 +1657,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun applyLinkImportFailure(error: Throwable) {
-        if (error is kotlinx.coroutines.CancellationException) return
+        if (error is CancellationException) throw error
         val failure = error as? LinkImportException
         mutableState.value = mutableState.value.copy(
             linkImport = mutableState.value.linkImport.copy(
@@ -1809,27 +1723,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         check(resolved.uploadMode == snapshot.mode) { "The selected server upload mode changed" }
     }
 
-    override fun uploadAudio() {
-        val state = mutableState.value
-        if (!state.isApplyingServerConnection && !state.isDownloading && !state.isUploading) {
-            when (activeUploadMode()) {
-                ServerUploadMode.LocalFile, ServerUploadMode.ServerSourceLink, ServerUploadMode.ReviewedMatch -> {
-                    mutableState.value = mutableState.value.copy(
-                        errorMessage = "Use Import from Web so Resonance can preserve and register the direct source URL.",
-                    )
-                }
-                null -> mutableState.value = mutableState.value.copy(
-                    errorMessage = "Server uploads are disabled by the current server policy.",
-                )
-            }
-        }
-    }
-
     override fun uploadMissingDownloads() {
         if (mutableState.value.isApplyingServerConnection || mutableState.value.isDownloading || mutableState.value.isUploading) return
         if (activeUploadMode() != ServerUploadMode.LocalFile) {
             mutableState.value = mutableState.value.copy(
-                errorMessage = "Downloaded-song source-link registration requires Preserved source link mode.",
+                errorMessage = "Upload missing downloads is only available with On-device import.",
             )
             return
         }
@@ -1939,6 +1837,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 )
                 syncAfterUpload = true
             } catch (error: Throwable) {
+                if (error is CancellationException) throw error
                 showError(error)
                 mutableState.value = mutableState.value.copy(uploadDetail = "Upload failed: ${error.message ?: "Unknown error"}")
             } finally {
@@ -1949,14 +1848,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 refreshCatalogAfterUpload()
             }
         }
-    }
-
-    fun uploadUris(uris: List<Uri>) {
-        if (uris.isEmpty()) return
-        mutableState.value = mutableState.value.copy(
-            errorMessage = "File uploads are no longer accepted. Download a song from a link first, then upload its preserved source link.",
-            uploadDetail = "Choose a link-downloaded song to upload",
-        )
     }
 
     private fun refreshCatalogAfterUpload() {
@@ -1978,6 +1869,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         authoritativeCatalogSnapshot = snapshot
                         beginRemoteSongMetadataHydration(snapshot.context, client)
                     }
+                }
+                .onFailure { error ->
+                    if (error is CancellationException) throw error
                 }
         }
     }
@@ -2383,6 +2277,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val cohortKey = clientConfigStore.cohortKey
         viewModelScope.launch {
             val fetched = runCatching { client.fetchClientConfig(cohortKey) }
+            fetched.exceptionOrNull()?.let { error ->
+                if (error is CancellationException) throw error
+            }
             if (
                 requestGeneration != clientConfigRequestGeneration ||
                 currentServerProfileContext() != context
@@ -2474,16 +2371,16 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun applyClientConfig(config: EffectiveClientConfig, status: String) {
         val context = currentServerProfileContext()
-        val preferred = context?.let {
-            clientConfigStore.readTransferModes(
+        val preferredUpload = context?.let {
+            clientConfigStore.readUploadMode(
                 ServerClient.canonicalServerOrigin(it.serverURL),
                 it.profileID,
             )
         }
         val resolved = ServerTransferModePolicy.resolve(
             config = config,
-            preferredUpload = preferred?.uploadMode,
-            preferredDownload = preferred?.downloadMode,
+            preferredUpload = preferredUpload,
+            preferredDownload = null,
         )
         if (activeStreamPresentation != null) {
             val now = Instant.now()
@@ -2593,48 +2490,32 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun setServerUploadMode(mode: ServerUploadMode) {
+        expireClientConfigIfNeeded()
         val state = mutableState.value
+        if (
+            state.isDownloading ||
+            state.isUploading ||
+            state.isRefreshingServer ||
+            state.isApplyingServerConnection ||
+            state.isSyncingPlaylists ||
+            state.linkImport.isRunning
+        ) {
+            return
+        }
         val resolved = ServerTransferModePolicy.resolve(
             state.clientConfig,
             mode,
-            state.serverDownloadMode,
+            preferredDownload = null,
         )
-        if (resolved.uploadMode != mode) return
-        if (state.serverUploadMode != mode && state.linkImport.isRunning) {
-            cancelOwnedLinkImportTransfer()
-            linkImportJob?.cancel()
+        if (resolved.uploadMode != mode || state.serverUploadMode == mode) return
+        mutableState.update { current -> current.copy(serverUploadMode = mode) }
+        currentServerProfileContext()?.let { context ->
+            clientConfigStore.writeUploadMode(
+                origin = ServerClient.canonicalServerOrigin(context.serverURL),
+                profileID = context.profileID,
+                uploadMode = mode,
+            )
         }
-        mutableState.value = state.copy(serverUploadMode = mode)
-        persistServerTransferModes()
-    }
-
-    override fun setServerDownloadMode(mode: ServerDownloadMode) {
-        val state = mutableState.value
-        val resolved = ServerTransferModePolicy.resolve(
-            state.clientConfig,
-            state.serverUploadMode,
-            mode,
-        )
-        if (resolved.downloadMode != mode) return
-        if (mode != ServerDownloadMode.StreamOnly && activeStreamPresentation != null) {
-            stopActiveStream("The server stream stopped because the download mode changed.")
-        }
-        if (activeDownloadPolicySnapshot?.mode != null && activeDownloadPolicySnapshot?.mode != mode) {
-            remoteDownloadJob?.cancel()
-        }
-        mutableState.value = mutableState.value.copy(serverDownloadMode = mode)
-        persistServerTransferModes()
-    }
-
-    private fun persistServerTransferModes() {
-        val context = currentServerProfileContext() ?: return
-        val state = mutableState.value
-        clientConfigStore.writeTransferModes(
-            origin = ServerClient.canonicalServerOrigin(context.serverURL),
-            profileID = context.profileID,
-            uploadMode = state.serverUploadMode,
-            downloadMode = state.serverDownloadMode,
-        )
     }
 
     private suspend fun refreshServerNow() {
@@ -2685,6 +2566,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 syncPlaylistsNow()
             }
             .onFailure { error ->
+                if (error is CancellationException) {
+                    mutableState.value = mutableState.value.copy(isRefreshingServer = false)
+                    throw error
+                }
                 if (currentServerProfileContext() != catalogSnapshot.context) return@onFailure
                 val authenticationFailure = ServerRefreshPresentationPolicy.isAuthenticationFailure(error)
                 val preservesSession = ServerRefreshPresentationPolicy.preservesConnectedSession(
@@ -2766,9 +2651,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     val results = coroutineScope {
                         batch.map { request ->
                             async {
-                                val metadata = runCatching {
+                                val metadata = try {
                                     linkImportService.resolveMetadata(request.source)
-                                }.getOrNull()
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (_: Exception) {
+                                    null
+                                }
                                 RemoteSongMetadataResult(request, metadata)
                             }
                         }.awaitAll()
@@ -2910,6 +2799,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
             val repaired = runCatching {
                 client.fetchArtwork(song)?.let { repository.persistArtwork(track, it) }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
             }.getOrNull() ?: track
             updatedTracks += repaired
             changed = changed || repaired != track
@@ -3044,9 +2935,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         remoteSongs = previousRemoteSongs,
                         selectedRemoteSongIds = previousSelection,
                         hasConnectedServerSession = previousConnectedSession,
+                        isApplyingServerConnection = false,
                         serverMessage = "Could not activate profile: ${error.message ?: "Unknown error"}",
                     )
                     resetClientConfigForCurrentContext()
+                    if (error is CancellationException) throw error
                 }
             mutableState.value = mutableState.value.copy(isApplyingServerConnection = false)
         }
@@ -3688,6 +3581,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     )
                 }
                 .onFailure { error ->
+                    if (error is CancellationException) throw error
                     if (error !is StaleServerProfileException) showError(error)
                 }
         }
@@ -3779,9 +3673,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             error("Playlist sync conflicted; try again")
         }.onSuccess { document ->
             mutableState.value = mutableState.value.copy(playlistSyncDetail = "Synced ${document.playlists.size} playlist${if (document.playlists.size == 1) "" else "s"}")
-        }.onFailure {
-            if (it !is StaleServerProfileException) {
-                mutableState.value = mutableState.value.copy(playlistSyncDetail = "Playlist sync failed: ${it.message}")
+        }.onFailure { error ->
+            if (error is CancellationException) {
+                mutableState.value = mutableState.value.copy(isSyncingPlaylists = false)
+                throw error
+            }
+            if (error !is StaleServerProfileException) {
+                mutableState.value = mutableState.value.copy(playlistSyncDetail = "Playlist sync failed: ${error.message}")
             }
         }
         mutableState.value = mutableState.value.copy(isSyncingPlaylists = false)
@@ -4101,10 +3999,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             accountImageURL = accountSession?.imageURL,
             syncProfileId = library.syncProfileID,
             syncProfiles = library.syncProfiles,
-            profilePicturePath = profilePictureStore.existingPath(
-                library.serverURL,
-                library.syncProfileID,
-            ),
         )
     }
 

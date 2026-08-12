@@ -2,4 +2,6 @@
 <full-backup-content>
     <!-- The anonymous cohort is per installation and must never roam to a restore. -->
     <exclude domain="sharedpref" path="resonance.client.config.v1.xml" />
+    <!-- Credentials are encrypted with this installation's Android Keystore key. -->
+    <exclude domain="sharedpref" path="resonance.secure.credentials.xml" />
 </full-backup-content>

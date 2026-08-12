@@ -1,8 +1,5 @@
 package mov.unblocked.resonance.ui
 
-import android.graphics.BitmapFactory
-import java.net.HttpURLConnection
-import java.net.URL
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardActions
@@ -77,10 +74,13 @@ fun LibraryScreen(
     var clipEditorOpen by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val query = state.librarySearch.trim()
-    val tracks = if (query.isEmpty()) state.tracks else state.tracks.filter {
-        it.title.contains(query, true) || it.artist.contains(query, true) ||
-            it.album.contains(query, true) || it.relativePath.contains(query, true)
+    val tracks = remember(state.tracks, query) {
+        if (query.isEmpty()) state.tracks else state.tracks.filter {
+            it.title.contains(query, true) || it.artist.contains(query, true) ||
+                it.album.contains(query, true) || it.relativePath.contains(query, true)
+        }
     }
+    val recentlyAdded = remember(state.tracks) { recentlyAddedTracks(state.tracks) }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
@@ -102,7 +102,7 @@ fun LibraryScreen(
                 }
                 IconButton(
                     onClick = onOpenStorage,
-                    modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
+                    modifier = Modifier.size(48.dp).background(Color.White.copy(alpha = .08f), CircleShape),
                 ) { Icon(Icons.Default.Storage, "Storage") }
                 ProfileButton(
                     state = state,
@@ -130,7 +130,6 @@ fun LibraryScreen(
                 ),
             )
         }
-        val recentlyAdded = recentlyAddedTracks(state.tracks)
         if (query.isEmpty() && recentlyAdded.isNotEmpty()) {
             item { Spacer(Modifier.height(16.dp)) }
             item {
@@ -206,7 +205,7 @@ private fun ProfileButton(
         IconButton(
             onClick = { expanded = true },
             modifier = Modifier
-                .size(44.dp)
+                .size(48.dp)
                 .background(MaterialTheme.colorScheme.secondary, CircleShape)
                 .semantics {
                     contentDescription = "Profile: $profileName. Open profile tools"
@@ -261,23 +260,14 @@ private fun ProfileButton(
 @Composable
 private fun rememberAccountImage(imageURL: String?): androidx.compose.ui.graphics.ImageBitmap? {
     val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, imageURL) {
+        value = null
         value = withContext(Dispatchers.IO) {
-            runCatching {
-                val url = URL(imageURL?.takeIf(String::isNotBlank) ?: return@runCatching null)
-                require(url.protocol.equals("https", ignoreCase = true))
-                val connection = url.openConnection() as HttpURLConnection
-                try {
-                    connection.connectTimeout = 5_000
-                    connection.readTimeout = 5_000
-                    connection.instanceFollowRedirects = true
-                    connection.connect()
-                    require(connection.responseCode in 200..299)
-                    require(connection.contentLengthLong <= 5 * 1024 * 1024 || connection.contentLengthLong < 0)
-                    connection.inputStream.use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
-                } finally {
-                    connection.disconnect()
-                }
-            }.getOrNull()
+            val url = imageURL?.takeIf(String::isNotBlank) ?: return@withContext null
+            loadRemoteArtworkBytes(
+                serverURL = url,
+                url = url,
+                allowCleartextDevelopment = false,
+            )?.let(::decodeArtworkBytes)?.asImageBitmap()
         }
     }
     return bitmap

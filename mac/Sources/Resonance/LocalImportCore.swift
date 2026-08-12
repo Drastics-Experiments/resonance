@@ -46,13 +46,13 @@ enum LocalImportTransferContextError: LocalizedError {
         case .missingUploadConfiguration:
             "Sign in to your Resonance account or configure a legacy admin key before uploading."
         case .uploadModeUnavailable:
-            "The selected upload mode is disabled by the verified server configuration. Choose an available mode and try again."
+            "This upload method is disabled by the verified server configuration."
         case .unsupportedSourceLink:
             "Server source-link upload requires the exact original https://www.youtube.com/watch?v=… page typed into Import from Web. Short links, rewritten links, and discovered matches must use Reviewed match."
         case .sourceLinkRequiresAudio:
             "Server source-link import creates audio only. Choose Audio before uploading this source."
         case .reviewedMatchRequired:
-            "This discovered source can only be uploaded in Reviewed match mode after you select it explicitly."
+            "This discovered source requires Reviewed match, which is disabled by the verified server configuration."
         case .contextChanged:
             "The server or profile changed while the import was running."
         case .remoteAssociationConflict:

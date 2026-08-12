@@ -58,7 +58,13 @@ enum LocalImportCandidateFallbackPolicy {
         maximumAttempts: Int = 3,
         attempt: (Candidate) async throws -> Output
     ) async throws -> Output {
-        precondition(!candidates.isEmpty)
+        guard !candidates.isEmpty else {
+            throw LocalImportError(
+                stage: .inspectingSource,
+                code: "NO_IMPORT_CANDIDATES",
+                message: "No playable source candidates were available for this selection."
+            )
+        }
         var lastError: Error?
         for candidate in candidates.prefix(max(maximumAttempts, 1)) {
             try Task.checkCancellation()
@@ -205,7 +211,10 @@ final class MacLocalImportViewModel: ObservableObject {
             return "Uploads are disabled by the verified server configuration."
         }
         guard model.clientConfiguration.permittedUploadModes.contains(model.uploadMode) else {
-            return "\(model.uploadMode.title) is disabled. Choose an available upload mode in Connection settings."
+            return "Uploads are disabled by the verified server configuration."
+        }
+        if isPlaylist, !model.clientConfiguration.allowsReviewedMatch {
+            return "Playlist upload requires reviewed matching, which is disabled by the verified server configuration."
         }
         guard resolution != nil else { return nil }
         switch model.uploadMode {
@@ -226,7 +235,8 @@ final class MacLocalImportViewModel: ObservableObject {
     }
 
     var syncAvailabilityMessage: String {
-        uploadUnavailableMessage ?? "Upload with \(model.uploadMode.title) after saving on this Mac."
+        let mode: MacUploadMode = isPlaylist ? .reviewedMatch : model.uploadMode
+        return uploadUnavailableMessage ?? "Upload with \(mode.title) after saving on this Mac."
     }
 
     var requiresReviewedMatchForUpload: Bool {
@@ -1170,7 +1180,6 @@ struct MacLocalImportSheet: View {
         .frame(width: 620, height: sheetHeight)
         .background(palette.background)
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .shadow(color: .black.opacity(0.72), radius: 30, y: 18)
         .overlay {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .stroke(Color.white.opacity(0.10))
@@ -1193,7 +1202,6 @@ struct MacLocalImportSheet: View {
                             RoundedRectangle(cornerRadius: 14, style: .continuous)
                                 .stroke(selectedProvider == provider ? palette.secondary.opacity(0.72) : Color.clear)
                         }
-                        .shadow(color: selectedProvider == provider ? palette.secondary.opacity(0.30) : Color.clear, radius: 10)
                 }
                 .buttonStyle(.plain)
                 .help(provider.displayName)
@@ -1208,7 +1216,6 @@ struct MacLocalImportSheet: View {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .stroke(palette.secondary.opacity(0.38))
         }
-        .shadow(color: .black.opacity(0.55), radius: 26, y: 14)
     }
 
     @ViewBuilder
@@ -1700,11 +1707,7 @@ struct MacLocalImportSheet: View {
 
     private var resolvedArtworkFallback: some View {
         ZStack {
-            LinearGradient(
-                colors: [palette.secondary.opacity(0.28), palette.accent.opacity(0.16)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            palette.secondary.opacity(0.22)
             Image(systemName: viewModel.mediaMode == .video ? "film" : "music.note")
                 .font(.system(size: 22, weight: .medium))
                 .foregroundStyle(palette.foregroundAccent)

@@ -1,16 +1,53 @@
 import AppKit
 import SwiftUI
 
-enum ArtworkCropping {
-    private static let imageCache = NSCache<NSData, NSImage>()
+private struct SendableArtworkImage: @unchecked Sendable {
+    let image: NSImage
+}
 
-    static func squareImage(from data: Data) -> NSImage? {
-        let key = data as NSData
-        if let cached = imageCache.object(forKey: key) { return cached }
+private final class ArtworkImageCache: @unchecked Sendable {
+    let storage = NSCache<NSString, NSImage>()
+
+    init() {
+        storage.countLimit = 128
+        storage.totalCostLimit = 64 * 1_024 * 1_024
+    }
+}
+
+enum ArtworkCropping {
+    private static let imageCache = ArtworkImageCache()
+
+    static func squareImage(from data: Data, cacheKey: String) -> NSImage? {
+        let key = cacheKey as NSString
+        if let cached = imageCache.storage.object(forKey: key) { return cached }
+        guard !Task.isCancelled else { return nil }
         guard let source = NSImage(data: data) else { return nil }
+        guard !Task.isCancelled else { return nil }
         let image = squareImage(source)
-        imageCache.setObject(image, forKey: key)
+        guard !Task.isCancelled else { return nil }
+        let cost = image.cgImage(forProposedRect: nil, context: nil, hints: nil).map {
+            $0.bytesPerRow * $0.height
+        } ?? data.count
+        imageCache.storage.setObject(image, forKey: key, cost: cost)
         return image
+    }
+
+    static func cachedSquareImage(for cacheKey: String) -> NSImage? {
+        imageCache.storage.object(forKey: cacheKey as NSString)
+    }
+
+    /// Produces a small, stable identity without hashing the complete image on the main actor.
+    static func cacheKey(ownerID: String, data: Data) -> String {
+        var fingerprint: UInt64 = 0xcbf29ce484222325
+        let sampleCount = min(data.count, 64)
+        for sampleIndex in 0..<sampleCount {
+            let offset = sampleCount == 1
+                ? 0
+                : sampleIndex * (data.count - 1) / (sampleCount - 1)
+            let byte = data[data.index(data.startIndex, offsetBy: offset)]
+            fingerprint = (fingerprint ^ UInt64(byte)) &* 0x100000001b3
+        }
+        return "\(ownerID):\(data.count):\(String(fingerprint, radix: 16))"
     }
 
     static func squareImage(_ image: NSImage) -> NSImage {
@@ -163,27 +200,91 @@ struct CroppedRemoteArtwork<Placeholder: View>: View {
     let url: URL
     @ViewBuilder let placeholder: (_ isLoading: Bool) -> Placeholder
 
-    @State private var image: NSImage?
+    @State private var loadedImage: (url: URL, image: NSImage)?
     @State private var isLoading = true
 
     var body: some View {
         ZStack {
             placeholder(isLoading)
-            if let image {
-                Image(nsImage: image)
+            if let loadedImage, loadedImage.url == url {
+                Image(nsImage: loadedImage.image)
                     .resizable()
                     .scaledToFit()
             }
         }
         .task(id: url) {
-            image = nil
+            loadedImage = nil
             isLoading = true
             defer { isLoading = false }
             guard let (data, response) = try? await URLSession.shared.data(from: url),
                   !Task.isCancelled,
-                  (response as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true,
-                  let cropped = ArtworkCropping.squareImage(from: data) else { return }
-            image = cropped
+                  (response as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true else { return }
+            let cacheKey = ArtworkCropping.cacheKey(ownerID: url.absoluteString, data: data)
+            let decodeTask = Task.detached(priority: .userInitiated) {
+                guard !Task.isCancelled,
+                      let image = ArtworkCropping.squareImage(from: data, cacheKey: cacheKey) else {
+                    return nil as SendableArtworkImage?
+                }
+                return SendableArtworkImage(image: image)
+            }
+            defer { decodeTask.cancel() }
+            let decoded = await withTaskCancellationHandler {
+                await decodeTask.value
+            } onCancel: {
+                decodeTask.cancel()
+            }
+            guard let cropped = decoded, !Task.isCancelled else { return }
+            loadedImage = (url, cropped.image)
         }
+    }
+}
+
+struct LocalArtworkImage: View {
+    let data: Data
+    let cacheKey: String
+    var contentMode: ContentMode = .fit
+
+    @State private var loadedImage: (cacheKey: String, image: NSImage)?
+
+    init(data: Data, cacheKey: String, contentMode: ContentMode = .fit) {
+        self.data = data
+        self.cacheKey = cacheKey
+        self.contentMode = contentMode
+        _loadedImage = State(
+            initialValue: ArtworkCropping.cachedSquareImage(for: cacheKey).map { (cacheKey, $0) }
+        )
+    }
+
+    var body: some View {
+        Group {
+            if let loadedImage, loadedImage.cacheKey == cacheKey {
+                Image(nsImage: loadedImage.image)
+                    .resizable()
+                    .aspectRatio(contentMode: contentMode)
+            }
+        }
+        .task(id: cacheKey) {
+            if let cached = ArtworkCropping.cachedSquareImage(for: cacheKey) {
+                loadedImage = (cacheKey, cached)
+                return
+            }
+            loadedImage = nil
+            let decodeTask = Task.detached(priority: .userInitiated) {
+                guard !Task.isCancelled,
+                      let image = ArtworkCropping.squareImage(from: data, cacheKey: cacheKey) else {
+                    return nil as SendableArtworkImage?
+                }
+                return SendableArtworkImage(image: image)
+            }
+            defer { decodeTask.cancel() }
+            let decoded = await withTaskCancellationHandler {
+                await decodeTask.value
+            } onCancel: {
+                decodeTask.cancel()
+            }
+            guard !Task.isCancelled else { return }
+            loadedImage = decoded.map { (cacheKey, $0.image) }
+        }
+        .accessibilityHidden(true)
     }
 }

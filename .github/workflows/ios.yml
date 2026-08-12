@@ -87,7 +87,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/ResonanceDerivedData
-          key: resonance-ios-derived-data-${{ runner.arch }}-${{ hashFiles('ios/Resonance.xcodeproj/project.pbxproj', 'ios/Resonance/**') }}
+          key: resonance-ios-derived-data-${{ runner.arch }}-${{ hashFiles('ios/Resonance.xcodeproj/project.pbxproj', 'ios/Resonance.xcodeproj/xcshareddata/xcschemes/**', 'ios/Resonance/**', 'ios/Tests/**') }}
           restore-keys: |
             resonance-ios-derived-data-${{ runner.arch }}-
 
@@ -101,6 +101,33 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/ResonanceDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             build
+
+      - name: Run iOS tests
+        shell: bash
+        run: |
+          DESTINATION_ID="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          runtimes = json.load(sys.stdin)["devices"]
+          devices = [
+              device
+              for runtime, runtime_devices in runtimes.items()
+              if "SimRuntime.iOS-" in runtime
+              for device in runtime_devices
+              if device.get("isAvailable", False)
+          ]
+          if not devices:
+              raise SystemExit("No available iOS Simulator was found")
+          print(devices[0]["udid"])
+          ' )"
+          xcodebuild \
+            -project ios/Resonance.xcodeproj \
+            -scheme Resonance \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=$DESTINATION_ID" \
+            -derivedDataPath "$RUNNER_TEMP/ResonanceDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            test
 
       - name: Verify built iOS version
         if: ${{ inputs.release_candidate }}

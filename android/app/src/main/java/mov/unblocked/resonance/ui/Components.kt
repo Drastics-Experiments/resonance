@@ -48,8 +48,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
@@ -76,11 +76,7 @@ fun ResonanceBackground(modifier: Modifier = Modifier, content: @Composable () -
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(
-                Brush.linearGradient(
-                    colors = listOf(palette.panel, palette.background),
-                ),
-            ),
+            .background(palette.background),
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onBackground) {
             content()
@@ -94,14 +90,12 @@ fun Artwork(
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalResonancePalette.current
-    val bitmap = remember(path) {
-        path?.takeIf { it.isNotBlank() }?.let { runCatching { BitmapFactory.decodeFile(it)?.asImageBitmap() }.getOrNull() }
-    }
+    val bitmap = rememberLocalArtwork(path)
     Box(
         modifier = modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(12.dp))
-            .background(Brush.linearGradient(palette.artworkStops)),
+            .background(palette.raised),
         contentAlignment = Alignment.Center,
     ) {
         if (bitmap != null) {
@@ -159,15 +153,9 @@ fun PlaylistArtwork(
 @Composable
 private fun PlaylistArtworkCell(path: String?, modifier: Modifier) {
     val palette = LocalResonancePalette.current
-    val bitmap = remember(path) {
-        path?.takeIf { it.isNotBlank() }?.let {
-            runCatching { BitmapFactory.decodeFile(it)?.asImageBitmap() }.getOrNull()
-        }
-    }
+    val bitmap = rememberLocalArtwork(path)
     Box(
-        modifier = modifier.background(
-            Brush.linearGradient(palette.artworkStops),
-        ),
+        modifier = modifier.background(palette.raised),
         contentAlignment = Alignment.Center,
     ) {
         if (bitmap != null) {
@@ -198,16 +186,27 @@ fun RemoteArtwork(
     val resolvedURL = remember(artworkURL, serverURL) {
         resolveRemoteArtworkURL(serverURL, artworkURL)
     }
-    val bitmap by produceState<Bitmap?>(initialValue = null, key1 = resolvedURL) {
+    val loadedArtwork by produceState<RemoteArtworkLoad?>(
+        initialValue = null,
+        key1 = resolvedURL,
+        key2 = serverURL,
+    ) {
         value = resolvedURL?.let { url ->
-            withContext(Dispatchers.IO) { loadRemoteArtwork(serverURL, url) }
+            RemoteArtworkLoad(
+                serverURL = serverURL,
+                resolvedURL = url,
+                bitmap = withContext(Dispatchers.IO) { loadRemoteArtwork(serverURL, url) },
+            )
         }
     }
+    val bitmap = loadedArtwork
+        ?.takeIf { it.serverURL == serverURL && it.resolvedURL == resolvedURL }
+        ?.bitmap
     Box(
         modifier = modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(12.dp))
-            .background(Brush.linearGradient(palette.artworkStops)),
+            .background(palette.raised),
         contentAlignment = Alignment.Center,
     ) {
         val loadedBitmap = bitmap
@@ -247,8 +246,14 @@ internal fun resolveRemoteArtworkURL(
 
 private fun loadRemoteArtwork(serverURL: String, url: String): Bitmap? =
     loadRemoteArtworkBytes(serverURL, url)?.let { bytes ->
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        decodeArtworkBytes(bytes)
     }
+
+private data class RemoteArtworkLoad(
+    val serverURL: String,
+    val resolvedURL: String,
+    val bitmap: Bitmap?,
+)
 
 /**
  * Fetches public artwork without credentials. Redirects are deliberately handled here so every
@@ -435,10 +440,10 @@ fun TrackRow(
     state: ResonanceUiState,
     actions: ResonanceActions,
     modifier: Modifier = Modifier,
-    number: Int? = null,
+    number: Int,
     queue: List<Track> = state.tracks,
     playlistId: String? = null,
-    playlistsForAdding: List<Playlist> = state.playlists.filterNot { it.isSystem },
+    playlistsForAdding: List<Playlist>? = null,
     trailingText: String = track.durationText,
     showSelection: Boolean = false,
     selected: Boolean = false,
@@ -449,7 +454,9 @@ fun TrackRow(
     showMenu: Boolean = true,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    val displayedNumber = number ?: queue.indexOfFirst { it.id == track.id }.takeIf { it >= 0 }?.plus(1)
+    val addTargets = remember(state.playlists, playlistsForAdding) {
+        playlistsForAdding ?: state.playlists.filterNot(Playlist::isSystem)
+    }
     val interactionModifier = if (showSelection) {
         Modifier.toggleable(
             value = selected,
@@ -492,7 +499,7 @@ fun TrackRow(
                     )
                 } else {
                     Text(
-                        displayedNumber?.toString().orEmpty(),
+                        number.toString(),
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
                     )
@@ -527,7 +534,7 @@ fun TrackRow(
                 )
                 Text(
                     track.album.ifBlank { "Unknown Album" },
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .43f),
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -579,9 +586,9 @@ fun TrackRow(
                             },
                         )
                     }
-                    if (playlistsForAdding.isNotEmpty()) {
+                    if (addTargets.isNotEmpty()) {
                         HorizontalDivider()
-                        playlistsForAdding.forEach { playlist ->
+                        addTargets.forEach { playlist ->
                             val alreadyAdded = track.id in playlist.trackIDs
                             DropdownMenuItem(
                                 text = { Text(if (alreadyAdded) "${playlist.name} ✓" else "Add to ${playlist.name}") },
@@ -611,6 +618,54 @@ fun TrackRow(
         }
     }
 }
+
+@Composable
+private fun rememberLocalArtwork(path: String?): ImageBitmap? {
+    val loadedArtwork by produceState<LocalArtworkLoad?>(initialValue = null, key1 = path) {
+        value = path?.takeIf(String::isNotBlank)?.let { artworkPath ->
+            LocalArtworkLoad(
+                path = artworkPath,
+                bitmap = withContext(Dispatchers.IO) {
+                    decodeLocalArtwork(artworkPath)?.asImageBitmap()
+                },
+            )
+        }
+    }
+    return loadedArtwork?.takeIf { it.path == path }?.bitmap
+}
+
+private data class LocalArtworkLoad(
+    val path: String,
+    val bitmap: ImageBitmap?,
+)
+
+private fun decodeLocalArtwork(path: String): Bitmap? = runCatching {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(path, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = artworkSampleSize(bounds.outWidth, bounds.outHeight)
+    }
+    BitmapFactory.decodeFile(path, options)
+}.getOrNull()
+
+internal fun decodeArtworkBytes(bytes: ByteArray): Bitmap? = runCatching {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = artworkSampleSize(bounds.outWidth, bounds.outHeight)
+    }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+}.getOrNull()
+
+internal fun artworkSampleSize(width: Int, height: Int): Int {
+    var sampleSize = 1
+    while (maxOf(width, height) / sampleSize > MAX_DECODED_ARTWORK_EDGE) sampleSize *= 2
+    return sampleSize
+}
+
+private const val MAX_DECODED_ARTWORK_EDGE = 1_024
 
 internal val Track.mediaKindLabel: String
     get() {

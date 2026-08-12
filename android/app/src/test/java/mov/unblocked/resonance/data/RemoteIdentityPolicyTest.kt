@@ -38,7 +38,7 @@ class RemoteIdentityPolicyTest {
             RemoteTrackIdentityPolicy.identity(active)?.key,
             RemoteTrackIdentityPolicy.identity(otherServer)?.key,
         )
-        assertEquals(3, RemoteTrackIdentityPolicy.deduplicate(listOf(active, otherProfile, otherServer)).size)
+        assertEquals(3, RemoteTrackIdentityPolicy.deduplication(listOf(active, otherProfile, otherServer)).tracks.size)
         assertTrue(RemoteTrackIdentityPolicy.matches(active, "https://MUSIC.example/anything", "default", "song-1"))
         assertFalse(RemoteTrackIdentityPolicy.matches(otherProfile, "https://music.example", "default", "song-1"))
         assertFalse(RemoteTrackIdentityPolicy.matches(otherServer, "https://music.example", "default", "song-1"))

@@ -1,6 +1,5 @@
 import AVFoundation
 import AppKit
-import Combine
 import SwiftUI
 
 struct NowPlayingLayoutMetrics: Equatable {
@@ -40,32 +39,6 @@ enum NowPlayingLayoutPolicy {
             horizontalPadding: horizontalPadding,
             columnSpacing: columnSpacing
         )
-    }
-}
-
-enum NowPlayingMarqueePolicy {
-    static let pointsPerSecond: CGFloat = 28
-    static let minimumTravelDuration: TimeInterval = 8
-    static let initialPauseDuration: TimeInterval = 1
-    static let loopSpacing: CGFloat = 56
-
-    static func travel(contentWidth: CGFloat, availableWidth: CGFloat) -> CGFloat {
-        max(contentWidth - availableWidth, 0)
-    }
-
-    static func duration(for travel: CGFloat) -> TimeInterval {
-        guard travel > 0 else { return 0 }
-        return max(minimumTravelDuration, TimeInterval(travel / pointsPerSecond))
-    }
-
-    static func loopDistance(contentWidth: CGFloat) -> CGFloat {
-        guard contentWidth > 0 else { return 0 }
-        return contentWidth + loopSpacing
-    }
-
-    static func offset(progress: CGFloat, contentWidth: CGFloat) -> CGFloat {
-        let clampedProgress = min(max(progress, 0), 1)
-        return -loopDistance(contentWidth: contentWidth) * clampedProgress
     }
 }
 
@@ -232,9 +205,12 @@ struct NowPlayingView: View {
                 .accessibilityHidden(!isNowPlayingChromeVisible)
 
                 if isQueuePresented {
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture(perform: dismissQueue)
+                    Button(action: dismissQueue) {
+                        Color.clear
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close queue")
 
                     HStack(spacing: 0) {
                         Spacer(minLength: 0)
@@ -408,7 +384,7 @@ struct NowPlayingView: View {
             Spacer().frame(height: flexibleHeight * 0.26)
 
             VStack(spacing: compact ? 8 : 12) {
-                NowPlayingMarqueeTitle(
+                NowPlayingTitle(
                     title: track.title,
                     fontSize: compact ? 36 : 52
                 )
@@ -466,21 +442,10 @@ struct NowPlayingView: View {
                         .foregroundStyle(Color.white)
                         .offset(x: model.isPlaying ? 0 : 2)
                         .frame(width: compact ? 82 : 104, height: compact ? 82 : 104)
-                        .background {
-                            ZStack {
-                                Circle().fill(palette.raisedSurface.opacity(0.92))
-                                RadialGradient(
-                                    colors: [palette.tertiary.opacity(0.42), .clear],
-                                    center: .center,
-                                    startRadius: 0,
-                                    endRadius: compact ? 42 : 54
-                                )
-                            }
-                        }
+                        .background(palette.raisedSurface.opacity(0.92), in: Circle())
                         .overlay {
                             Circle().stroke(palette.tertiary, lineWidth: 2)
                         }
-                        .shadow(color: palette.secondary.opacity(0.36), radius: 22)
                 }
                 .buttonStyle(PressableScaleStyle())
                 .help(model.isPlaying ? "Pause" : "Play")
@@ -588,7 +553,8 @@ struct NowPlayingView: View {
         HStack(spacing: 14) {
             Image(systemName: model.volume <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill")
                 .font(.system(size: 17, weight: .medium))
-            NowPlayingVolumeSlider(value: $model.volume)
+                .accessibilityHidden(true)
+            StableVolumeSlider(value: $model.volume, tint: palette.tertiary)
         }
         .padding(.horizontal, 18)
         .frame(maxWidth: .infinity)
@@ -603,7 +569,7 @@ struct NowPlayingView: View {
 
     private var queueButton: some View {
         Button {
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) {
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
                 isQueuePresented.toggle()
             }
         } label: {
@@ -635,8 +601,7 @@ struct NowPlayingView: View {
                 style: .weightless,
                 symbol: "music.note",
                 symbolSize: 80,
-                cornerRadius: 24,
-                glow: true
+                cornerRadius: 24
             )
             .frame(width: 330, height: 330)
             .opacity(0.72)
@@ -661,51 +626,14 @@ struct NowPlayingView: View {
         ZStack {
             palette.background
 
-            if let track = model.currentTrack,
-               let artworkData = track.artworkData,
-               let image = ArtworkCropping.squareImage(from: artworkData) {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFill()
-                    .saturation(1.18)
-                    .blur(radius: 64, opaque: true)
-                    .scaleEffect(1.14)
-                    .opacity(0.88)
-                    .accessibilityHidden(true)
-            } else if let track = model.currentTrack {
-                LinearGradient(
-                    colors: AppGradient.colors(for: track.artwork).map { $0.opacity(0.58) },
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .blur(radius: 56, opaque: true)
-                .scaleEffect(1.14)
-            }
-
-            LinearGradient(
-                colors: [
-                    Color.black.opacity(0.46),
-                    palette.panel.opacity(0.58),
-                    Color.black.opacity(0.76),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-
-            RadialGradient(
-                colors: [palette.accent.opacity(0.12), .clear],
-                center: UnitPoint(x: 0.56, y: 0.48),
-                startRadius: 20,
-                endRadius: 560
-            )
+            palette.panel.opacity(0.42)
         }
         .clipped()
         .ignoresSafeArea()
     }
 
     private func dismissQueue() {
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
             isQueuePresented = false
         }
     }
@@ -855,19 +783,21 @@ private struct InstalledVideoTransitionArtwork: View {
     let symbolSize: CGFloat
 
     var body: some View {
-        Group {
-            if let artworkData = track.artworkData,
-               let image = ArtworkCropping.squareImage(from: artworkData) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                ArtworkView(
-                    style: track.artwork,
-                    symbol: "music.note",
-                    symbolSize: symbolSize,
-                    cornerRadius: cornerRadius,
-                    glow: true
+        ZStack {
+            ArtworkView(
+                style: track.artwork,
+                symbol: "music.note",
+                symbolSize: symbolSize,
+                cornerRadius: cornerRadius
+            )
+            if let artworkData = track.artworkData {
+                LocalArtworkImage(
+                    data: artworkData,
+                    cacheKey: ArtworkCropping.cacheKey(
+                        ownerID: track.id.uuidString,
+                        data: artworkData
+                    ),
+                    contentMode: .fill
                 )
             }
         }
@@ -911,7 +841,6 @@ private struct InstalledVideoLaunchArtwork: View {
                 )
                 .stroke(palette.accent.opacity(0.42), lineWidth: 1)
             }
-            .shadow(color: palette.accent.opacity(0.24), radius: 34, y: 15)
 
             if hasVideo {
                 let badgeSize = InstalledVideoLaunchBadgePolicy.size(for: artworkSize)
@@ -921,12 +850,10 @@ private struct InstalledVideoLaunchArtwork: View {
                         .foregroundStyle(Color.white)
                         .offset(x: 1)
                         .frame(width: badgeSize, height: badgeSize)
-                        .background(.ultraThinMaterial, in: Circle())
                         .background(Color.black.opacity(0.42), in: Circle())
                         .overlay {
                             Circle().stroke(Color.white.opacity(0.40), lineWidth: 1)
                         }
-                        .shadow(color: Color.black.opacity(0.58), radius: 14, y: 5)
                 }
                 .buttonStyle(PressableScaleStyle())
                 .focused($isVideoButtonFocused)
@@ -977,10 +904,6 @@ private struct InstalledVideoPlayerView: View {
         isExpanded ? Color.white.opacity(0.18) : palette.accent.opacity(0.42)
     }
 
-    private var surfaceShadowColor: Color {
-        isExpanded ? Color.black.opacity(0.72) : palette.accent.opacity(0.24)
-    }
-
     private var playbackDuration: TimeInterval {
         if model.currentTrackID == session.track.id, model.playbackDuration > 0 {
             return model.playbackDuration
@@ -999,23 +922,9 @@ private struct InstalledVideoPlayerView: View {
             palette.background.ignoresSafeArea()
                 .opacity(isExpanded ? 1 : 0)
 
-            RadialGradient(
-                colors: [palette.accent.opacity(0.16), .clear],
-                center: .center,
-                startRadius: 40,
-                endRadius: 720
-            )
-            .ignoresSafeArea()
-            .opacity(isExpanded ? 1 : 0)
-
             ZStack {
                 RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous)
                     .fill(Color.black)
-                    .shadow(
-                        color: surfaceShadowColor,
-                        radius: isExpanded ? 36 : 34,
-                        y: isExpanded ? 18 : 15
-                    )
 
                 AspectFitVideoPlayer(
                     player: session.player,
@@ -1336,7 +1245,6 @@ struct InstalledVideoMiniPlayer: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(Color.white.opacity(0.22), lineWidth: 1)
         }
-        .shadow(color: Color.black.opacity(0.62), radius: 24, y: 12)
         .foregroundStyle(Color.white)
         .onAppear { applyAudioPlaybackState() }
         .onChange(of: model.isPlaying) { _, _ in
@@ -1522,16 +1430,12 @@ private struct InstalledVideoControlsOverlay: View {
                     .font(.system(size: 16, weight: .medium))
                     .frame(width: 21)
                     .accessibilityHidden(true)
-                NowPlayingVolumeSlider(value: $volume)
+                StableVolumeSlider(value: $volume, tint: palette.tertiary)
                     .frame(width: isCompact ? 82 : 118)
             }
             .padding(.horizontal, 14)
             .frame(height: 46)
-            .background {
-                Capsule()
-                    .fill(palette.raisedSurface.opacity(0.72))
-                    .background(.ultraThinMaterial, in: Capsule())
-            }
+            .background(palette.raisedSurface.opacity(0.92), in: Capsule())
             .overlay {
                 Capsule().stroke(Color.white.opacity(0.14), lineWidth: 1)
             }
@@ -1590,15 +1494,10 @@ private struct InstalledVideoTransportButton: View {
                 .foregroundStyle(Color.white)
                 .offset(x: systemImage == "play.fill" ? 1 : 0)
                 .frame(width: size, height: size)
-                .background {
-                    Circle()
-                        .fill(backgroundColor)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
+                .background(backgroundColor, in: Circle())
                 .overlay {
                     Circle().stroke(borderColor, lineWidth: 1)
                 }
-                .shadow(color: Color.black.opacity(0.54), radius: 14, y: 8)
         }
         .buttonStyle(PressableScaleStyle())
         .onHover { isHovering = $0 }
@@ -1738,187 +1637,18 @@ private struct NowPlayingTransportButton: View {
     }
 }
 
-private struct NowPlayingVolumeSlider: View {
-    @Environment(\.resonancePalette) private var palette
-    @Binding var value: Double
-
-    var body: some View {
-        GeometryReader { proxy in
-            let clampedValue = min(max(value, 0), 1)
-            let thumbSize: CGFloat = 14
-            let travel = max(proxy.size.width - thumbSize, 0)
-
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.white.opacity(0.20))
-                    .frame(height: 4)
-                Capsule()
-                    .fill(palette.tertiary)
-                    .frame(width: thumbSize / 2 + travel * clampedValue, height: 4)
-                Circle()
-                    .fill(palette.tertiary)
-                    .frame(width: thumbSize, height: thumbSize)
-                    .shadow(color: palette.accent.opacity(0.4), radius: 4)
-                    .offset(x: travel * clampedValue)
-            }
-            .frame(maxHeight: .infinity)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { gesture in
-                        guard travel > 0 else { return }
-                        value = min(max((gesture.location.x - thumbSize / 2) / travel, 0), 1)
-                    }
-            )
-        }
-        .frame(height: 18)
-        .accessibilityElement()
-        .accessibilityLabel("Volume")
-        .accessibilityValue("\(Int(value * 100)) percent")
-        .accessibilityAdjustableAction { direction in
-            switch direction {
-            case .increment: value = min(value + 0.05, 1)
-            case .decrement: value = max(value - 0.05, 0)
-            @unknown default: break
-            }
-        }
-    }
-}
-
-private struct NowPlayingMarqueeTitle: View {
+private struct NowPlayingTitle: View {
     let title: String
     let fontSize: CGFloat
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.scenePhase) private var scenePhase
-    @State private var applicationIsActive = NSApp.isActive
-    @State private var contentWidth: CGFloat = 0
-    @State private var progress: CGFloat = 0
-
     var body: some View {
-        if reduceMotion {
-            Text(title)
-                .font(.system(size: fontSize, weight: .semibold))
-                .multilineTextAlignment(.center)
-                .lineLimit(2)
-                .minimumScaleFactor(0.62)
-                .frame(maxWidth: .infinity)
-                .accessibilityLabel(title)
-        } else {
-            GeometryReader { proxy in
-                let travel = NowPlayingMarqueePolicy.travel(
-                    contentWidth: contentWidth,
-                    availableWidth: proxy.size.width
-                )
-                let isOverflowing = travel > 1
-                let loopDistance = NowPlayingMarqueePolicy.loopDistance(contentWidth: contentWidth)
-
-                ZStack(alignment: isOverflowing ? .leading : .center) {
-                    if isOverflowing {
-                        HStack(spacing: NowPlayingMarqueePolicy.loopSpacing) {
-                            measuredTitle
-                            marqueeTitle.accessibilityHidden(true)
-                        }
-                        .fixedSize(horizontal: true, vertical: false)
-                        .offset(x: NowPlayingMarqueePolicy.offset(
-                            progress: progress,
-                            contentWidth: contentWidth
-                        ))
-                    } else {
-                        measuredTitle
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
-                .task(id: MarqueeTaskID(
-                    title: title,
-                    travel: travel,
-                    isActive: scenePhase == .active && applicationIsActive
-                )) {
-                    guard scenePhase == .active, applicationIsActive else {
-                        withTransaction(Transaction(animation: nil)) { progress = 0 }
-                        return
-                    }
-                    await animate(loopDistance: loopDistance)
-                }
-            }
-            .onPreferenceChange(NowPlayingMarqueeTextWidthKey.self) { width in
-                contentWidth = width
-            }
-            .onReceive(NotificationCenter.default.publisher(
-                for: NSApplication.didBecomeActiveNotification
-            )) { _ in
-                applicationIsActive = true
-            }
-            .onReceive(NotificationCenter.default.publisher(
-                for: NSApplication.didResignActiveNotification
-            )) { _ in
-                applicationIsActive = false
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(title)
-        }
-    }
-
-    private var marqueeTitle: some View {
         Text(title)
             .font(.system(size: fontSize, weight: .semibold))
-            .lineLimit(1)
-            .fixedSize(horizontal: true, vertical: false)
-    }
-
-    private var measuredTitle: some View {
-        marqueeTitle.background {
-            GeometryReader { textProxy in
-                Color.clear.preference(
-                    key: NowPlayingMarqueeTextWidthKey.self,
-                    value: textProxy.size.width
-                )
-            }
-        }
-    }
-
-    @MainActor
-    private func animate(loopDistance: CGFloat) async {
-        withTransaction(Transaction(animation: nil)) {
-            progress = 0
-        }
-        guard loopDistance > 1 else { return }
-
-        let travelDuration = NowPlayingMarqueePolicy.duration(for: loopDistance)
-        guard await pause(seconds: NowPlayingMarqueePolicy.initialPauseDuration) else { return }
-        withAnimation(.linear(duration: travelDuration).repeatForever(autoreverses: false)) {
-            progress = 1
-        }
-    }
-
-    private func pause(seconds: TimeInterval) async -> Bool {
-        do {
-            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            return !Task.isCancelled
-        } catch {
-            return false
-        }
-    }
-}
-
-private struct MarqueeTaskID: Hashable {
-    let title: String
-    let travel: Int
-    let isActive: Bool
-
-    init(title: String, travel: CGFloat, isActive: Bool) {
-        self.title = title
-        self.travel = Int(travel.rounded())
-        self.isActive = isActive
-    }
-}
-
-private struct NowPlayingMarqueeTextWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+            .minimumScaleFactor(0.62)
+            .frame(maxWidth: .infinity)
+            .accessibilityLabel(title)
     }
 }
 
@@ -1998,14 +1728,12 @@ private struct NowPlayingQueueDrawer: View {
             }
             .scrollIndicators(.hidden)
         }
-        .background(.ultraThinMaterial)
-        .background(palette.surface.opacity(0.91))
+        .background(palette.surface)
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .stroke(palette.tertiary.opacity(0.26), lineWidth: 1)
         }
-        .shadow(color: .black.opacity(0.82), radius: 50, x: -8, y: 20)
     }
 }
 
@@ -2061,6 +1789,8 @@ private struct NowPlayingQueueRow: View {
         }
         .buttonStyle(.plain)
         .disabled(!isAvailableOnDevice)
+        .accessibilityLabel("Play \(track.title), by \(track.artist)")
+        .accessibilityValue(track.id == model.currentTrackID ? (model.isPlaying ? "Now playing" : "Selected") : "")
         .onHover { isHovering = $0 }
     }
 }

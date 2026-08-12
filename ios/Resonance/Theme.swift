@@ -30,8 +30,7 @@ enum ResonanceTheme: String, CaseIterable, Codable, Identifiable, Sendable {
                 raisedSurfaceHex: 0x12131A,
                 accentHex: 0x7547FF,
                 secondaryHex: 0x6540F5,
-                tertiaryHex: 0x9B82FF,
-                gradientStopHexes: [0x6540F5, 0x874BFF, 0xB079FF]
+                tertiaryHex: 0x9B82FF
             )
         case .ocean:
             ResonanceThemePalette(
@@ -41,8 +40,7 @@ enum ResonanceTheme: String, CaseIterable, Codable, Identifiable, Sendable {
                 raisedSurfaceHex: 0x0D1D2A,
                 accentHex: 0x1769C2,
                 secondaryHex: 0x0F5CAA,
-                tertiaryHex: 0x55B8FF,
-                gradientStopHexes: [0x0F5CAA, 0x218BD6, 0x62C3FF]
+                tertiaryHex: 0x55B8FF
             )
         case .forest:
             ResonanceThemePalette(
@@ -52,8 +50,7 @@ enum ResonanceTheme: String, CaseIterable, Codable, Identifiable, Sendable {
                 raisedSurfaceHex: 0x0D1D14,
                 accentHex: 0x198754,
                 secondaryHex: 0x126B43,
-                tertiaryHex: 0x5FD49A,
-                gradientStopHexes: [0x126B43, 0x219C64, 0x69D89E]
+                tertiaryHex: 0x5FD49A
             )
         case .sunset:
             ResonanceThemePalette(
@@ -63,8 +60,7 @@ enum ResonanceTheme: String, CaseIterable, Codable, Identifiable, Sendable {
                 raisedSurfaceHex: 0x21120E,
                 accentHex: 0xC45132,
                 secondaryHex: 0xA33A53,
-                tertiaryHex: 0xFF9A62,
-                gradientStopHexes: [0xA33A53, 0xD25B3F, 0xFF9A62]
+                tertiaryHex: 0xFF9A62
             )
         }
     }
@@ -83,7 +79,6 @@ struct ResonanceThemePalette: Equatable, Sendable {
     let accentHex: UInt32
     let secondaryHex: UInt32
     let tertiaryHex: UInt32
-    let gradientStopHexes: [UInt32]
 
     var background: Color { Color(hex: backgroundHex) }
     var surface: Color { Color(hex: surfaceHex) }
@@ -92,7 +87,6 @@ struct ResonanceThemePalette: Equatable, Sendable {
     var secondary: Color { Color(hex: secondaryHex) }
     var tertiary: Color { Color(hex: tertiaryHex) }
     var foregroundAccent: Color { tertiary }
-    var gradientStops: [Color] { gradientStopHexes.map { Color(hex: $0) } }
     var ink: Color { Color(hex: 0xF5F5F7) }
     var divider: Color { Color.white.opacity(0.09) }
     var serverActionForeground: Color { Color(hex: 0xB0ADBF) }

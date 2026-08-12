@@ -80,7 +80,7 @@ private final class MobileClipPreviewPlayer: ObservableObject {
     }
 
     private func installTimer() {
-        let previewTimer = Timer(timeInterval: 0.05, repeats: true) { [weak self] timer in
+        let previewTimer = Timer(timeInterval: 0.1, repeats: true) { [weak self] timer in
             Task { @MainActor [weak self] in
                 guard let self, let player = self.player else {
                     timer.invalidate()
@@ -100,65 +100,78 @@ private final class MobileClipPreviewPlayer: ObservableObject {
 }
 
 private enum MobileClipWaveformSampler {
-    static func samples(for url: URL, count: Int = 192) async -> [Double] {
+    static func samples(for url: URL, count: Int = 96) async -> [Double] {
+        let worker = Task.detached(priority: .utility) {
+            await Self.generateSamples(for: url, count: count)
+        }
+        return await withTaskCancellationHandler(
+            operation: { await worker.value },
+            onCancel: { worker.cancel() }
+        )
+    }
+
+    private static func generateSamples(for url: URL, count: Int) async -> [Double] {
         guard count > 0 else { return [] }
-        return await Task.detached(priority: .userInitiated) {
-            let asset = AVURLAsset(url: url)
-            guard let duration = try? await asset.load(.duration),
-                  duration.seconds.isFinite,
-                  duration.seconds > 0,
-                  let track = try? await asset.loadTracks(withMediaType: .audio).first,
-                  let reader = try? AVAssetReader(asset: asset) else {
+        let asset = AVURLAsset(url: url)
+        guard !Task.isCancelled,
+              let duration = try? await asset.load(.duration),
+              duration.seconds.isFinite,
+              duration.seconds > 0,
+              let track = try? await asset.loadTracks(withMediaType: .audio).first,
+              let reader = try? AVAssetReader(asset: asset) else {
+            return []
+        }
+        let output = AVAssetReaderTrackOutput(
+            track: track,
+            outputSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+            ]
+        )
+        output.alwaysCopiesSampleData = false
+        guard reader.canAdd(output) else { return [] }
+        reader.add(output)
+        guard reader.startReading() else { return [] }
+
+        var peaks = [Double](repeating: 0, count: count)
+        while reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
+            guard !Task.isCancelled else {
+                reader.cancelReading()
                 return []
             }
-            let output = AVAssetReaderTrackOutput(
-                track: track,
-                outputSettings: [
-                    AVFormatIDKey: kAudioFormatLinearPCM,
-                    AVLinearPCMBitDepthKey: 16,
-                    AVLinearPCMIsBigEndianKey: false,
-                    AVLinearPCMIsFloatKey: false,
-                    AVLinearPCMIsNonInterleaved: false,
-                ]
-            )
-            output.alwaysCopiesSampleData = false
-            guard reader.canAdd(output) else { return [] }
-            reader.add(output)
-            guard reader.startReading() else { return [] }
-
-            var peaks = [Double](repeating: 0, count: count)
-            while reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
-                guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
-                let byteCount = CMBlockBufferGetDataLength(dataBuffer)
-                guard byteCount >= MemoryLayout<Int16>.size else { continue }
-                var bytes = [UInt8](repeating: 0, count: byteCount)
-                let status = bytes.withUnsafeMutableBytes { buffer in
-                    guard let destination = buffer.baseAddress else {
-                        return kCMBlockBufferBadLengthParameterErr
-                    }
-                    CMBlockBufferCopyDataBytes(
-                        dataBuffer,
-                        atOffset: 0,
-                        dataLength: byteCount,
-                        destination: destination
-                    )
+            guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
+            let byteCount = CMBlockBufferGetDataLength(dataBuffer)
+            guard byteCount >= MemoryLayout<Int16>.size else { continue }
+            var bytes = [UInt8](repeating: 0, count: byteCount)
+            let status = bytes.withUnsafeMutableBytes { buffer in
+                guard let destination = buffer.baseAddress else {
+                    return kCMBlockBufferBadLengthParameterErr
                 }
-                guard status == kCMBlockBufferNoErr else { continue }
-                var peak = 0.0
-                bytes.withUnsafeBytes { buffer in
-                    for value in buffer.bindMemory(to: Int16.self) {
-                        peak = max(peak, min(Double(abs(Int(value))) / Double(Int16.max), 1))
-                    }
-                }
-                let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
-                guard timestamp.isFinite else { continue }
-                let index = min(max(Int(timestamp / duration.seconds * Double(count)), 0), count - 1)
-                peaks[index] = max(peaks[index], peak)
+                return CMBlockBufferCopyDataBytes(
+                    dataBuffer,
+                    atOffset: 0,
+                    dataLength: byteCount,
+                    destination: destination
+                )
             }
-            guard let maximum = peaks.max(), maximum > 0 else { return [] }
-            fillEmptySamples(&peaks)
-            return peaks.map { max(0.04, sqrt($0 / maximum)) }
-        }.value
+            guard status == kCMBlockBufferNoErr else { continue }
+            var peak = 0.0
+            bytes.withUnsafeBytes { buffer in
+                for value in buffer.bindMemory(to: Int16.self) {
+                    peak = max(peak, min(Double(abs(Int(value))) / Double(Int16.max), 1))
+                }
+            }
+            let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+            guard timestamp.isFinite else { continue }
+            let index = min(max(Int(timestamp / duration.seconds * Double(count)), 0), count - 1)
+            peaks[index] = max(peaks[index], peak)
+        }
+        guard !Task.isCancelled, let maximum = peaks.max(), maximum > 0 else { return [] }
+        fillEmptySamples(&peaks)
+        return peaks.map { max(0.04, sqrt($0 / maximum)) }
     }
 
     private static func fillEmptySamples(_ samples: inout [Double]) {
@@ -176,24 +189,35 @@ private enum MobileClipWaveformSampler {
 }
 
 private enum MobileClipVideoFrameSampler {
-    static func frames(for url: URL, duration: TimeInterval, count: Int = 12) async -> [UIImage] {
+    static func frameData(for url: URL, duration: TimeInterval, count: Int = 12) async -> [Data] {
+        let worker = Task.detached(priority: .utility) {
+            Self.generateFrameData(for: url, duration: duration, count: count)
+        }
+        return await withTaskCancellationHandler(
+            operation: { await worker.value },
+            onCancel: { worker.cancel() }
+        )
+    }
+
+    private static func generateFrameData(
+        for url: URL,
+        duration: TimeInterval,
+        count: Int
+    ) -> [Data] {
         guard duration.isFinite, duration > 0, count > 0 else { return [] }
-        let encodedFrames = await Task.detached(priority: .userInitiated) { () -> [Data] in
-            let asset = AVURLAsset(url: url)
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: 320, height: 180)
-            generator.requestedTimeToleranceBefore = CMTime(seconds: 0.25, preferredTimescale: 600)
-            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.25, preferredTimescale: 600)
-            return (0..<count).compactMap { index in
-                guard !Task.isCancelled else { return nil }
-                let seconds = duration * (Double(index) + 0.5) / Double(count)
-                let time = CMTime(seconds: seconds, preferredTimescale: 600)
-                guard let image = try? generator.copyCGImage(at: time, actualTime: nil) else { return nil }
-                return UIImage(cgImage: image).jpegData(compressionQuality: 0.72)
-            }
-        }.value
-        return encodedFrames.compactMap(UIImage.init(data:))
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 320, height: 180)
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.25, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.25, preferredTimescale: 600)
+        return (0..<count).compactMap { index in
+            guard !Task.isCancelled else { return nil }
+            let seconds = duration * (Double(index) + 0.5) / Double(count)
+            let time = CMTime(seconds: seconds, preferredTimescale: 600)
+            guard let image = try? generator.copyCGImage(at: time, actualTime: nil) else { return nil }
+            return UIImage(cgImage: image).jpegData(compressionQuality: 0.72)
+        }
     }
 }
 
@@ -237,10 +261,12 @@ struct MobileClipEditorSheet: View {
                         VStack(spacing: 12) {
                             previewStage(track)
                             if !previewExpanded { timeline(track) }
-                            Text(saveConfirmation ?? "Unsaved changes are discarded by Done. The original media file is never changed.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if let saveConfirmation {
+                                Text(saveConfirmation)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
                         .padding(.horizontal, 12)
                         .padding(.bottom, 18)
@@ -343,7 +369,6 @@ struct MobileClipEditorSheet: View {
             HStack(spacing: 5) {
                 Text(selectedTrack?.title ?? "Choose a song")
                     .lineLimit(1)
-                    .minimumScaleFactor(0.72)
                 Image(systemName: "chevron.down")
                     .font(.caption2.bold())
                     .foregroundStyle(.secondary)
@@ -359,46 +384,42 @@ struct MobileClipEditorSheet: View {
 
     private func previewStage(_ track: MobileTrack) -> some View {
         VStack(spacing: 0) {
-            ZStack {
-                if isVideoClipTrack(track) {
-                    MobileClipVideoPlayer(player: preview.player)
-                        .aspectRatio(16 / 9, contentMode: .fit)
-                    if !preview.isPlaying {
-                        Image(systemName: "play.fill")
-                            .font(.title3.bold())
-                            .foregroundStyle(.white)
-                            .frame(width: 52, height: 52)
-                            .background(.black.opacity(0.58), in: Circle())
+            Button(action: togglePreview) {
+                ZStack {
+                    if isVideoClipTrack(track) {
+                        MobileClipVideoPlayer(player: preview.player)
+                            .aspectRatio(16 / 9, contentMode: .fit)
                             .allowsHitTesting(false)
-                    }
-                } else {
-                    MobileClipVisualizer(
-                        samples: waveformSamples,
-                        isPlaying: preview.isPlaying,
-                        position: preview.position,
-                        duration: track.duration
-                    )
-                        .overlay {
-                            VStack(spacing: 7) {
-                                TrackArtwork(track: track, fallbackSymbol: "music.note")
-                                    .frame(width: previewExpanded ? 176 : 116, height: previewExpanded ? 176 : 116)
-                                    .clipShape(RoundedRectangle(cornerRadius: previewExpanded ? 24 : 17, style: .continuous))
-                                    .shadow(color: .black.opacity(0.62), radius: 22, y: 13)
-                                Text(track.title)
-                                    .font((previewExpanded ? Font.title2 : .headline).bold())
-                                    .lineLimit(1)
-                                Text(track.artist)
-                                    .font(previewExpanded ? .headline : .subheadline)
-                                    .foregroundStyle(.white.opacity(0.86))
-                                    .lineLimit(1)
-                            }
-                            .padding(14)
+                        if !preview.isPlaying {
+                            Image(systemName: "play.fill")
+                                .font(.title3.bold())
+                                .foregroundStyle(.white)
+                                .frame(width: 52, height: 52)
+                                .background(.black.opacity(0.58), in: Circle())
+                                .allowsHitTesting(false)
                         }
+                    } else {
+                        palette.surface
+                        VStack(spacing: 7) {
+                            TrackArtwork(track: track, fallbackSymbol: "music.note")
+                                .frame(width: previewExpanded ? 176 : 116, height: previewExpanded ? 176 : 116)
+                                .clipShape(RoundedRectangle(cornerRadius: previewExpanded ? 24 : 17, style: .continuous))
+                            Text(track.title)
+                                .font((previewExpanded ? Font.title2 : .headline).bold())
+                                .lineLimit(1)
+                            Text(track.artist)
+                                .font(previewExpanded ? .headline : .subheadline)
+                                .foregroundStyle(.white.opacity(0.86))
+                                .lineLimit(1)
+                        }
+                        .padding(14)
+                    }
                 }
+                .frame(minHeight: previewExpanded ? 500 : 286)
+                .contentShape(Rectangle())
             }
-            .frame(minHeight: previewExpanded ? 500 : 286)
-            .contentShape(Rectangle())
-            .onTapGesture { togglePreview() }
+            .buttonStyle(.plain)
+            .accessibilityLabel(preview.isPlaying ? "Pause clip preview" : "Play clip preview")
 
             previewTransport(track)
         }
@@ -514,8 +535,8 @@ struct MobileClipEditorSheet: View {
         overlayScrim {
             VStack(alignment: .leading, spacing: 13) {
                 overlayHeader("How It Works") { showsHelp = false }
-                Text("Drag the yellow handles to choose a range. Tap the waveform to scrub, then use the center controls to preview exactly what will play.")
-                Text("**Save** updates playback for the active profile without changing the media file. **Done** closes the editor and discards anything not saved.")
+                Text("Drag the range handles or tap the waveform to set the start and end.")
+                Text("**Save** updates playback without changing the media file. **Done** closes without saving changes.")
             }
             .font(.subheadline)
             .foregroundStyle(.secondary)
@@ -524,7 +545,11 @@ struct MobileClipEditorSheet: View {
 
     private func overlayScrim<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         ZStack {
-            Color.black.opacity(0.5).ignoresSafeArea().onTapGesture { showsSettings = false; showsHelp = false }
+            Button(action: closeOverlay) {
+                Color.black.opacity(0.5).ignoresSafeArea()
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close overlay")
             content()
                 .padding(18)
                 .background(palette.raisedSurface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -534,6 +559,11 @@ struct MobileClipEditorSheet: View {
                 .padding(.top, 56)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }
+    }
+
+    private func closeOverlay() {
+        showsSettings = false
+        showsHelp = false
     }
 
     private func settingsTrackSummary(_ track: MobileTrack) -> some View {
@@ -645,9 +675,9 @@ struct MobileClipEditorSheet: View {
         videoFrames = []
         let url = library.fileURL(for: track)
         if isVideoClipTrack(track) {
-            let frames = await MobileClipVideoFrameSampler.frames(for: url, duration: track.duration)
+            let frameData = await MobileClipVideoFrameSampler.frameData(for: url, duration: track.duration)
             guard !Task.isCancelled, selectedTrackID == trackID else { return }
-            videoFrames = frames
+            videoFrames = frameData.compactMap(UIImage.init(data:))
             return
         }
         let samples = await MobileClipWaveformSampler.samples(for: url)
@@ -697,46 +727,6 @@ struct MobileClipEditorSheet: View {
     }
 }
 
-private struct MobileClipVisualizer: View {
-    @Environment(\.resonancePalette) private var palette
-    let samples: [Double]
-    let isPlaying: Bool
-    let position: TimeInterval
-    let duration: TimeInterval
-
-    var body: some View {
-        GeometryReader { _ in
-            let count = 96
-            let progress = duration > 0 ? min(max(position / duration, 0), 1) : 0
-            Canvas { context, size in
-                let spacing: CGFloat = 1.5
-                let width = max((size.width - spacing * CGFloat(count - 1)) / CGFloat(count), 1)
-                var bars = Path()
-                for index in 0..<count {
-                    let barProgress = Double(index) / Double(count - 1)
-                    let samplePosition = isPlaying
-                        ? min(max(progress + (barProgress - 0.30) * 0.24, 0), 1)
-                        : barProgress
-                    let level = mobileSampledClipLevel(samples, at: samplePosition)
-                    let height = max(4, size.height * 0.72 * level)
-                    let rect = CGRect(
-                        x: CGFloat(index) * (width + spacing),
-                        y: size.height - height,
-                        width: width,
-                        height: height
-                    )
-                    bars.addPath(Path(roundedRect: rect, cornerRadius: width / 2))
-                }
-                context.fill(
-                    bars,
-                    with: .color(palette.secondary)
-                )
-            }
-        }
-        .background(palette.surface)
-    }
-}
-
 private struct MobileClipRuler: View {
     let duration: TimeInterval
     var body: some View {
@@ -779,9 +769,7 @@ private struct MobileClipWaveform: View {
             let endRatio = endSeconds / duration
             let startX = width * startRatio
             let endX = width * endRatio
-            let levels = (0..<92).map { index in
-                mobileSampledClipLevel(samples, at: Double(index) / 91)
-            }
+            let levels = samples.isEmpty ? [Double](repeating: 0.08, count: 96) : samples
             ZStack {
                 if !videoFrames.isEmpty {
                     HStack(spacing: 1) {
@@ -820,10 +808,25 @@ private struct MobileClipWaveform: View {
                     .allowsHitTesting(false)
                 }
 
-                Rectangle().fill(palette.accent).frame(width: max(width * (endRatio - startRatio), 0), height: 2).position(x: width * (startRatio + endRatio) / 2, y: 1)
-                Rectangle().fill(palette.accent).frame(width: max(width * (endRatio - startRatio), 0), height: 2).position(x: width * (startRatio + endRatio) / 2, y: geometry.size.height - 1)
+                Rectangle()
+                    .fill(palette.accent)
+                    .frame(width: max(width * (endRatio - startRatio), 0), height: 2)
+                    .position(x: width * (startRatio + endRatio) / 2, y: 1)
+                Rectangle()
+                    .fill(palette.accent)
+                    .frame(width: max(width * (endRatio - startRatio), 0), height: 2)
+                    .position(
+                        x: width * (startRatio + endRatio) / 2,
+                        y: geometry.size.height - 1
+                    )
 
-                Rectangle().fill(.white).frame(width: 1.5).position(x: width * min(max(playhead / duration, 0), 1), y: geometry.size.height / 2)
+                Rectangle()
+                    .fill(.white)
+                    .frame(width: 1.5)
+                    .position(
+                        x: width * min(max(playhead / duration, 0), 1),
+                        y: geometry.size.height / 2
+                    )
 
                 mobileHandle(
                     symbol: "chevron.right",
@@ -909,15 +912,6 @@ private struct MobileClipWaveform: View {
         endSeconds = max(min(endSeconds + change, duration), startSeconds + 0.25)
         onChange()
     }
-}
-
-private func mobileSampledClipLevel(_ samples: [Double], at normalizedPosition: Double) -> Double {
-    guard !samples.isEmpty else { return 0.08 }
-    let position = min(max(normalizedPosition, 0), 1) * Double(samples.count - 1)
-    let lower = Int(position.rounded(.down))
-    let upper = min(lower + 1, samples.count - 1)
-    let fraction = position - Double(lower)
-    return max(0.04, samples[lower] * (1 - fraction) + samples[upper] * fraction)
 }
 
 private struct MobileClipVideoPlayer: UIViewControllerRepresentable {

@@ -1,6 +1,10 @@
 import AppKit
 import MediaPlayer
 
+private struct SendableNowPlayingArtwork: @unchecked Sendable {
+    let image: NSImage
+}
+
 struct MacNowPlayingSnapshot: Equatable {
     let trackID: UUID
     let contentIdentifier: String
@@ -101,6 +105,12 @@ final class MacSystemPlaybackController: NSObject, MacSystemPlaybackControlling 
     private let infoCenter: MPNowPlayingInfoCenter
     private let commandCenter: MPRemoteCommandCenter
     private var isInvalidated = false
+    private var currentSnapshot: MacNowPlayingSnapshot?
+    private var currentArtworkIdentity: String?
+    private var currentArtworkImage: NSImage?
+    private var currentArtworkIsDecoded = false
+    private var artworkLoadIdentity: String?
+    private var artworkLoadTask: Task<Void, Never>?
 
     override init() {
         infoCenter = .default()
@@ -113,10 +123,49 @@ final class MacSystemPlaybackController: NSObject, MacSystemPlaybackControlling 
     func publish(_ snapshot: MacNowPlayingSnapshot?) {
         guard !isInvalidated else { return }
         guard let snapshot else {
+            resetArtworkState()
             clearNowPlaying()
             return
         }
 
+        currentSnapshot = snapshot
+        let identity = Self.artworkIdentity(for: snapshot)
+        if currentArtworkIdentity != identity {
+            artworkLoadTask?.cancel()
+            artworkLoadTask = nil
+            artworkLoadIdentity = nil
+        }
+        let image: NSImage
+        if currentArtworkIdentity == identity, let currentArtworkImage {
+            image = currentArtworkImage
+        } else if let artworkData = snapshot.artworkData {
+            let cacheKey = ArtworkCropping.cacheKey(
+                ownerID: snapshot.trackID.uuidString,
+                data: artworkData
+            )
+            if let cached = ArtworkCropping.cachedSquareImage(for: cacheKey) {
+                image = cached
+                currentArtworkIsDecoded = true
+            } else {
+                image = Self.fallbackArtworkImage(style: snapshot.artworkStyle)
+                currentArtworkIsDecoded = false
+            }
+            currentArtworkIdentity = identity
+            currentArtworkImage = image
+        } else {
+            image = Self.fallbackArtworkImage(style: snapshot.artworkStyle)
+            currentArtworkIdentity = identity
+            currentArtworkImage = image
+            currentArtworkIsDecoded = true
+        }
+
+        publishInfo(snapshot, artwork: image)
+        if snapshot.artworkData != nil, !currentArtworkIsDecoded {
+            loadArtworkIfNeeded(for: snapshot, identity: identity)
+        }
+    }
+
+    private func publishInfo(_ snapshot: MacNowPlayingSnapshot, artwork image: NSImage) {
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: snapshot.title,
             MPMediaItemPropertyArtist: snapshot.artist,
@@ -138,7 +187,6 @@ final class MacSystemPlaybackController: NSObject, MacSystemPlaybackControlling 
         if let assetURL = snapshot.assetURL {
             info[MPNowPlayingInfoPropertyAssetURL] = assetURL
         }
-        let image = Self.artworkImage(data: snapshot.artworkData, style: snapshot.artworkStyle)
         info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(
             boundsSize: image.size,
             requestHandler: { _ in image }
@@ -152,6 +200,7 @@ final class MacSystemPlaybackController: NSObject, MacSystemPlaybackControlling 
     func invalidate() {
         guard !isInvalidated else { return }
         isInvalidated = true
+        resetArtworkState()
         registeredCommands.forEach { $0.removeTarget(self) }
         handlers = MacSystemPlaybackHandlers()
         clearNowPlaying()
@@ -310,50 +359,86 @@ final class MacSystemPlaybackController: NSObject, MacSystemPlaybackControlling 
         return .success
     }
 
-    private static func artworkImage(data: Data?, style: ArtworkStyle) -> NSImage {
-        if let data,
-           let image = ArtworkCropping.squareImage(from: data),
-           image.size.width > 0,
-           image.size.height > 0 {
-            return image
-        }
-        let size = NSSize(width: 512, height: 512)
-        let colors = fallbackColors(for: style)
-        let gradient = NSGradient(colors: colors) ?? NSGradient(
-            starting: NSColor(calibratedRed: 0.20, green: 0.29, blue: 0.79, alpha: 1),
-            ending: NSColor(calibratedRed: 0.46, green: 0.28, blue: 1, alpha: 1)
-        )
-        return NSImage(size: size, flipped: false) { bounds in
-            if let gradient {
-                gradient.draw(in: bounds, angle: -45)
-            } else {
-                colors.first?.setFill()
-                NSBezierPath(rect: bounds).fill()
+    private func loadArtworkIfNeeded(for snapshot: MacNowPlayingSnapshot, identity: String) {
+        guard artworkLoadIdentity != identity, let data = snapshot.artworkData else { return }
+        artworkLoadTask?.cancel()
+        artworkLoadIdentity = identity
+        let cacheKey = ArtworkCropping.cacheKey(ownerID: snapshot.trackID.uuidString, data: data)
+        artworkLoadTask = Task { @MainActor [weak self] in
+            let decodeTask = Task.detached(priority: .utility) {
+                guard !Task.isCancelled,
+                      let image = ArtworkCropping.squareImage(from: data, cacheKey: cacheKey),
+                      image.size.width > 0,
+                      image.size.height > 0 else {
+                    return nil as SendableNowPlayingArtwork?
+                }
+                return SendableNowPlayingArtwork(image: image)
             }
+            let decoded = await withTaskCancellationHandler {
+                await decodeTask.value
+            } onCancel: {
+                decodeTask.cancel()
+            }
+            guard let self,
+                  !Task.isCancelled,
+                  artworkLoadIdentity == identity else { return }
+            artworkLoadTask = nil
+            artworkLoadIdentity = nil
+            guard let latestSnapshot = currentSnapshot,
+                  Self.artworkIdentity(for: latestSnapshot) == identity else { return }
+            currentArtworkIsDecoded = true
+            guard let decoded else { return }
+            currentArtworkIdentity = identity
+            currentArtworkImage = decoded.image
+            publishInfo(latestSnapshot, artwork: decoded.image)
+        }
+    }
+
+    private func resetArtworkState() {
+        artworkLoadTask?.cancel()
+        artworkLoadTask = nil
+        artworkLoadIdentity = nil
+        currentSnapshot = nil
+        currentArtworkIdentity = nil
+        currentArtworkImage = nil
+        currentArtworkIsDecoded = false
+    }
+
+    private static func artworkIdentity(for snapshot: MacNowPlayingSnapshot) -> String {
+        guard let data = snapshot.artworkData else {
+            return "fallback:\(snapshot.artworkStyle.rawValue)"
+        }
+        return "data:\(ArtworkCropping.cacheKey(ownerID: snapshot.trackID.uuidString, data: data))"
+    }
+
+    private static func fallbackArtworkImage(style: ArtworkStyle) -> NSImage {
+        let size = NSSize(width: 512, height: 512)
+        let color = fallbackColor(for: style)
+        return NSImage(size: size, flipped: false) { bounds in
+            color.setFill()
+            NSBezierPath(rect: bounds).fill()
             return true
         }
     }
 
-    private static func fallbackColors(for style: ArtworkStyle) -> [NSColor] {
-        let hexes: [UInt32]
+    private static func fallbackColor(for style: ArtworkStyle) -> NSColor {
+        let hex: UInt32
         switch style {
-        case .liked, .midnight: hexes = [0x3349C9, 0x6857FF, 0xF18CB2]
-        case .electric: hexes = [0x263857, 0x95B5D6]
-        case .echoes: hexes = [0x5B281E, 0xE76542]
-        case .golden: hexes = [0xF49C44, 0xFFD77A]
-        case .weightless: hexes = [0x151A29, 0x7895AE]
-        case .falling: hexes = [0x42435F, 0xC1A9C6]
-        case .lateNight: hexes = [0x26345A, 0x8AC1DB]
-        case .softFocus: hexes = [0x715A6D, 0xC0A6C5]
-        case .onRepeat: hexes = [0x13233A, 0xCB3877]
+        case .liked, .midnight: hex = 0x3349C9
+        case .electric: hex = 0x263857
+        case .echoes: hex = 0x5B281E
+        case .golden: hex = 0xF49C44
+        case .weightless: hex = 0x151A29
+        case .falling: hex = 0x42435F
+        case .lateNight: hex = 0x26345A
+        case .softFocus: hex = 0x715A6D
+        case .onRepeat: hex = 0x13233A
         }
-        return hexes.map { value in
-            NSColor(
-                calibratedRed: CGFloat((value >> 16) & 0xff) / 255,
-                green: CGFloat((value >> 8) & 0xff) / 255,
-                blue: CGFloat(value & 0xff) / 255,
-                alpha: 1
-            )
-        }
+        return NSColor(
+            calibratedRed: CGFloat((hex >> 16) & 0xff) / 255,
+            green: CGFloat((hex >> 8) & 0xff) / 255,
+            blue: CGFloat(hex & 0xff) / 255,
+            alpha: 1
+        )
     }
 }

@@ -40,7 +40,6 @@ internal data class ResonancePalette(
     val accent: Color,
     val secondary: Color,
     val tertiary: Color,
-    val artworkStops: List<Color>,
     val success: Color = Color(0xFF35D477),
 )
 
@@ -52,7 +51,6 @@ private val MidnightPalette = ResonancePalette(
     accent = Color(0xFF7547FF),
     secondary = Color(0xFF6540F5),
     tertiary = Color(0xFF9B82FF),
-    artworkStops = listOf(Color(0xFF6540F5), Color(0xFF874BFF), Color(0xFFB079FF)),
 )
 
 private val OceanPalette = ResonancePalette(
@@ -63,7 +61,6 @@ private val OceanPalette = ResonancePalette(
     accent = Color(0xFF1769C2),
     secondary = Color(0xFF0F5CAA),
     tertiary = Color(0xFF55B8FF),
-    artworkStops = listOf(Color(0xFF0F5CAA), Color(0xFF218BD6), Color(0xFF62C3FF)),
 )
 
 private val ForestPalette = ResonancePalette(
@@ -74,7 +71,6 @@ private val ForestPalette = ResonancePalette(
     accent = Color(0xFF198754),
     secondary = Color(0xFF126B43),
     tertiary = Color(0xFF5FD49A),
-    artworkStops = listOf(Color(0xFF126B43), Color(0xFF219C64), Color(0xFF69D89E)),
 )
 
 private val SunsetPalette = ResonancePalette(
@@ -85,7 +81,6 @@ private val SunsetPalette = ResonancePalette(
     accent = Color(0xFFC45132),
     secondary = Color(0xFFA33A53),
     tertiary = Color(0xFFFF9A62),
-    artworkStops = listOf(Color(0xFFA33A53), Color(0xFFD25B3F), Color(0xFFFF9A62)),
 )
 
 internal fun paletteForTheme(choice: ResonanceThemeChoice): ResonancePalette = when (choice) {

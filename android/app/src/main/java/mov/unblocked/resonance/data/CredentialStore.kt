@@ -57,15 +57,6 @@ class CredentialStore(context: Context) {
             else writeSecret(ACCOUNT_SESSION, JSON.encodeToString(value))
         }
 
-    var pendingAccountSignIn: PendingAccountSignIn?
-        get() = readSecret(PENDING_ACCOUNT_SIGN_IN)?.let {
-            runCatching { JSON.decodeFromString<PendingAccountSignIn>(it) }.getOrNull()
-        }
-        set(value) {
-            if (value == null) preferences.edit().remove(PENDING_ACCOUNT_SIGN_IN).apply()
-            else writeSecret(PENDING_ACCOUNT_SIGN_IN, JSON.encodeToString(value))
-        }
-
     private fun writeSecret(account: String, value: String) {
         if (value.isEmpty()) {
             preferences.edit().remove(account).apply()
@@ -122,7 +113,6 @@ class CredentialStore(context: Context) {
         const val ADMIN_TOKEN = "admin-token"
         const val SERVER_URL = "server-url"
         const val ACCOUNT_SESSION = "account-session-v1"
-        const val PENDING_ACCOUNT_SIGN_IN = "pending-account-sign-in-v1"
         const val DEFAULT_SERVER_URL = ResonanceProductionServerURL
         val JSON = Json { ignoreUnknownKeys = true }
     }

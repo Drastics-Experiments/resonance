@@ -76,34 +76,46 @@ fun StorageScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     var deleteCandidate by remember { mutableStateOf<Track?>(null) }
 
-    LaunchedEffect(state.tracks.map(Track::id)) {
-        selected = selected.intersect(state.tracks.mapTo(mutableSetOf(), Track::id))
+    val trackIDs = remember(state.tracks) { state.tracks.mapTo(mutableSetOf(), Track::id) }
+    LaunchedEffect(trackIDs) {
+        selected = selected.intersect(trackIDs)
         if (selected.isEmpty() && state.tracks.isEmpty()) editing = false
     }
 
-    val downloaded = state.tracks.filter { it.sourceServer != null || it.remoteID != null }
-    val imported = state.tracks.filter { it.sourceServer == null && it.remoteID == null }
+    val downloaded = remember(state.tracks) {
+        state.tracks.filter { it.sourceServer != null || it.remoteID != null }
+    }
+    val imported = remember(state.tracks) {
+        state.tracks.filter { it.sourceServer == null && it.remoteID == null }
+    }
     val scoped = when (scope) {
         StorageScope.Songs -> state.tracks
         StorageScope.Downloads -> downloaded
         StorageScope.Files -> imported
     }
     val query = search.trim()
-    val visible = scoped.filter {
-        query.isEmpty() || it.title.contains(query, true) || it.artist.contains(query, true) ||
-            it.album.contains(query, true) || it.relativePath.contains(query, true)
-    }.sortedWith { a, b ->
-        when (sort) {
-            StorageSort.Title -> a.title.compareTo(b.title, true)
-            StorageSort.Artist -> a.artist.compareTo(b.artist, true)
-            StorageSort.RecentlyAdded -> b.dateAddedEpochMs.compareTo(a.dateAddedEpochMs)
-            StorageSort.FileSize -> state.trackSizesById.getOrDefault(b.id, 0).compareTo(state.trackSizesById.getOrDefault(a.id, 0))
+    val visible = remember(scoped, query, sort, state.trackSizesById) {
+        scoped.filter {
+            query.isEmpty() || it.title.contains(query, true) || it.artist.contains(query, true) ||
+                it.album.contains(query, true) || it.relativePath.contains(query, true)
+        }.sortedWith { a, b ->
+            when (sort) {
+                StorageSort.Title -> a.title.compareTo(b.title, true)
+                StorageSort.Artist -> a.artist.compareTo(b.artist, true)
+                StorageSort.RecentlyAdded -> b.dateAddedEpochMs.compareTo(a.dateAddedEpochMs)
+                StorageSort.FileSize -> state.trackSizesById.getOrDefault(b.id, 0)
+                    .compareTo(state.trackSizesById.getOrDefault(a.id, 0))
+            }
         }
     }
-    val visibleDownloaded = visible.filter { it.sourceServer != null || it.remoteID != null }
-    val visibleImported = visible.filter { it.sourceServer == null && it.remoteID == null }
-    val downloadedBytes = downloaded.sumOf { state.trackSizesById[it.id] ?: 0 }
-    val importedBytes = imported.sumOf { state.trackSizesById[it.id] ?: 0 }
+    val visibleDownloaded = remember(visible) { visible.filter { it.sourceServer != null || it.remoteID != null } }
+    val visibleImported = remember(visible) { visible.filter { it.sourceServer == null && it.remoteID == null } }
+    val downloadedBytes = remember(downloaded, state.trackSizesById) {
+        downloaded.sumOf { state.trackSizesById[it.id] ?: 0 }
+    }
+    val importedBytes = remember(imported, state.trackSizesById) {
+        imported.sumOf { state.trackSizesById[it.id] ?: 0 }
+    }
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -117,13 +129,13 @@ fun StorageScreen(
             ) {
                 IconButton(
                     onClick = onBack,
-                    modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
+                    modifier = Modifier.size(48.dp).background(Color.White.copy(alpha = .08f), CircleShape),
                 ) { Icon(Icons.Default.ArrowBack, "Back to Library") }
                 Text("Storage", fontSize = 34.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Box {
                     IconButton(
                         onClick = { importMenu = true },
-                        modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
+                        modifier = Modifier.size(48.dp).background(Color.White.copy(alpha = .08f), CircleShape),
                     ) { Icon(Icons.Default.Add, "Import songs") }
                     DropdownMenu(expanded = importMenu, onDismissRequest = { importMenu = false }) {
                         DropdownMenuItem(
@@ -147,7 +159,7 @@ fun StorageScreen(
                 Box {
                     IconButton(
                         onClick = { actionsMenu = true },
-                        modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
+                        modifier = Modifier.size(48.dp).background(Color.White.copy(alpha = .08f), CircleShape),
                     ) { Icon(Icons.Default.MoreVert, "Song storage actions") }
                     DropdownMenu(expanded = actionsMenu, onDismissRequest = { actionsMenu = false }) {
                         DropdownMenuItem(

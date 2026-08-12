@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 func parseTime(_ value: String) -> TimeInterval? {
     let parts = value.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ":", omittingEmptySubsequences: false)
@@ -21,4 +22,11 @@ func formatTime(_ value: TimeInterval) -> String {
         ? "\(whole / 3_600):\(String(format: "%02d", (whole / 60) % 60)):\(String(format: "%02d", whole % 60))"
         : "\(whole / 60):\(String(format: "%02d", whole % 60))"
     return tenth == 0 ? base : "\(base).\(tenth)"
+}
+
+extension Text {
+    func sectionLabel() -> some View {
+        font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
+    }
 }

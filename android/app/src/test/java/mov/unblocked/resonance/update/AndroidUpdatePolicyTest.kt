@@ -51,6 +51,23 @@ class AndroidUpdatePolicyTest {
     }
 
     @Test
+    fun developmentModeStillRejectsNonLocalHttpAndEmbeddedCredentials() {
+        assertThrows(IllegalArgumentException::class.java) {
+            AndroidUpdatePolicy.availableUpdate(
+                manifest(versionCode = 7, apkUrl = "http://example.com/resonance.apk"),
+                6,
+                allowInsecureDownloadUrl = true,
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AndroidUpdatePolicy.availableUpdate(
+                manifest(versionCode = 7, apkUrl = "https://token@example.com/resonance.apk"),
+                6,
+            )
+        }
+    }
+
+    @Test
     fun malformedChecksumIsRejected() {
         assertThrows(IllegalArgumentException::class.java) {
             AndroidUpdatePolicy.availableUpdate(manifest(versionCode = 7, sha256 = "nope"), 6)

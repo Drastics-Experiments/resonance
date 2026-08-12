@@ -113,8 +113,11 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import java.io.File
 import java.nio.ByteOrder
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import mov.unblocked.resonance.data.LinkImportStage
 import mov.unblocked.resonance.data.LinkImportInput
@@ -805,6 +808,7 @@ private suspend fun extractAndroidClipVideoFrames(
     try {
         retriever.setDataSource(path)
         (0 until count).mapNotNull { index ->
+            currentCoroutineContext().ensureActive()
             val timeUs = durationMs * 1_000L * (index * 2L + 1L) / (count * 2L)
             val frame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: return@mapNotNull null
@@ -812,6 +816,8 @@ private suspend fun extractAndroidClipVideoFrames(
             if (scaled !== frame) frame.recycle()
             scaled
         }
+    } catch (error: CancellationException) {
+        throw error
     } catch (_: Exception) {
         emptyList()
     } finally {
@@ -927,6 +933,7 @@ private suspend fun extractAndroidClipWaveform(path: String, count: Int = 192): 
         var outputFinished = false
         var pcmEncoding = AudioFormat.ENCODING_PCM_16BIT
         while (!outputFinished) {
+            currentCoroutineContext().ensureActive()
             if (!inputFinished) {
                 val inputIndex = decoder.dequeueInputBuffer(10_000)
                 if (inputIndex >= 0) {
@@ -988,6 +995,8 @@ private suspend fun extractAndroidClipWaveform(path: String, count: Int = 192): 
         }
         val maximum = peaks.maxOrNull()?.takeIf { it > 0f } ?: return@withContext emptyList()
         peaks.map { kotlin.math.sqrt((it / maximum).coerceIn(0f, 1f)).coerceAtLeast(.04f) }
+    } catch (error: CancellationException) {
+        throw error
     } catch (_: Exception) {
         emptyList()
     } finally {
@@ -1059,7 +1068,7 @@ fun LinkImportDialog(
 ) {
     var source by remember { mutableStateOf(state.linkImport.requestedSource.orEmpty()) }
     val canUploadReviewedLink = state.hasServerUploadCredentials &&
-        state.serverUploadMode != null
+        state.serverUploadMode?.let(state.availableServerUploadModes::contains) == true
     var uploadAfterImport by rememberSaveable { mutableStateOf(false) }
     val focus = LocalFocusManager.current
     val clipboard = LocalClipboardManager.current
@@ -1190,8 +1199,10 @@ fun LinkImportDialog(
                                             ServerUploadMode.ReviewedMatch ->
                                                 "After review, the preserved direct media URL is registered with the active server profile."
                                         }
+                                    } else if (!state.hasServerUploadCredentials) {
+                                        "Connect an account with upload access, or keep this import only on this device."
                                     } else {
-                                        "Choose an enabled upload mode in Server settings, or keep this import only on this device."
+                                        "Open More server actions and choose Upload method, or keep this import only on this device."
                                     },
                                     fontSize = 12.sp,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),

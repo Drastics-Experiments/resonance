@@ -2,7 +2,6 @@ package mov.unblocked.resonance.ui
 
 import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 class ResonanceThemeTest {
@@ -41,7 +40,6 @@ class ResonanceThemeTest {
         assertEquals(Color(0xFF0A0403), sunset.background)
         assertEquals(Color(0xFFC45132), sunset.accent)
         assertEquals(4, setOf(midnight, ocean, forest, sunset).size)
-        assertNotEquals(midnight.artworkStops, ocean.artworkStops)
     }
 
     @Test

@@ -23,49 +23,24 @@ enum MacUploadMode: String, CaseIterable, Codable, Identifiable, Sendable {
     case serverSourceLink = "server_source_link"
     case reviewedMatch = "reviewed_match"
 
-    var id: String { rawValue }
+    var id: Self { self }
 
     var title: String {
         switch self {
-        case .localFile: "Preserved source link"
-        case .serverSourceLink: "Preserved source link"
-        case .reviewedMatch: "Reviewed source link"
+        case .localFile: "On-device import"
+        case .serverSourceLink: "Server link import"
+        case .reviewedMatch: "Reviewed match"
         }
     }
 
-    var detail: String {
+    var symbol: String {
         switch self {
-        case .localFile:
-            "Register the direct source link preserved when this Mac downloaded the song."
-        case .serverSourceLink:
-            "Register the direct source link preserved after downloading the song."
-        case .reviewedMatch:
-            "Review a matched source, save it locally, and register its preserved link."
-        }
-    }
-}
-
-enum MacDownloadMode: String, CaseIterable, Codable, Identifiable, Sendable {
-    case verifiedFileCache = "verified_file_cache"
-    case streamOnly = "stream_only"
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .verifiedFileCache: "Verified file cache"
-        case .streamOnly: "Stream only"
+        case .localFile: "internaldrive"
+        case .serverSourceLink: "link.badge.plus"
+        case .reviewedMatch: "checkmark.bubble"
         }
     }
 
-    var detail: String {
-        switch self {
-        case .verifiedFileCache:
-            "Download from Resonance and verify the file size and SHA-256 before installing it."
-        case .streamOnly:
-            "Play through Resonance without keeping an offline library file on this Mac."
-        }
-    }
 }
 
 enum MacMatcherMode: String, Decodable, Sendable {
@@ -207,11 +182,7 @@ struct MacClientConfigContext: Codable, Equatable, Hashable, Sendable {
         cacheKey + ".highestRevision"
     }
 
-    var transferModeScope: String {
-        Self.transferModeScope(origin: origin, profileID: profileID)
-    }
-
-    static func transferModeScope(origin: String, profileID: String) -> String {
+    static func uploadModePreferenceScope(origin: String, profileID: String) -> String {
         sha256Hex([origin, profileID].joined(separator: "\u{0}"))
     }
 
@@ -450,22 +421,12 @@ struct MacEffectiveClientConfig: Sendable {
         return modes
     }
 
-    var permittedDownloadModes: [MacDownloadMode] {
-        if allowsOfflineDownload { return [.verifiedFileCache] }
-        if allowsStreamOnlyPlayback { return [.streamOnly] }
-        return []
-    }
-
-    func resolvedUploadMode(_ persisted: MacUploadMode?) -> MacUploadMode {
-        if let persisted, permittedUploadModes.contains(persisted) { return persisted }
+    func resolvedUploadMode(_ preferred: MacUploadMode?) -> MacUploadMode {
+        if let preferred, permittedUploadModes.contains(preferred) { return preferred }
         if permittedUploadModes.contains(.localFile) { return .localFile }
         return permittedUploadModes.first ?? .localFile
     }
 
-    func resolvedDownloadMode(_ persisted: MacDownloadMode?) -> MacDownloadMode {
-        if let persisted, permittedDownloadModes.contains(persisted) { return persisted }
-        return permittedDownloadModes.first ?? .verifiedFileCache
-    }
 }
 
 enum MacClientConfigIdentity {

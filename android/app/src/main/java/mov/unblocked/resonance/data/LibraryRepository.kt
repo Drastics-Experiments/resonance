@@ -14,6 +14,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.util.UUID
 
 data class AudioImportBatchResult(
@@ -48,9 +49,10 @@ class LibraryRepository(
             } else {
                 try {
                     json.decodeFromString<StoredLibrary>(stateFile.readText())
-                } catch (_: Throwable) {
+                } catch (decodeError: Exception) {
                     // A corrupt state file cannot safely tell us which media is still owned.
-                    // Keep every file in place so recovery remains possible.
+                    // Preserve the exact source before a later save replaces library.json.
+                    preserveCorruptState(decodeError)
                     return@withLock normalize(StoredLibrary())
                 }
             }
@@ -189,6 +191,21 @@ class LibraryRepository(
             tracks = imported,
             failedCount = failedCount,
         )
+    }
+
+    private fun preserveCorruptState(decodeError: Exception) {
+        val backup = File(rootDirectory, "library.corrupt-${System.currentTimeMillis()}-${UUID.randomUUID()}.json")
+        try {
+            stateFile.copyTo(backup, overwrite = false)
+            check(backup.isFile && backup.length() == stateFile.length()) {
+                "The recovery copy did not match the corrupt library state."
+            }
+        } catch (backupError: Exception) {
+            throw IOException(
+                "The saved library is unreadable and could not be preserved for recovery.",
+                decodeError,
+            ).apply { addSuppressed(backupError) }
+        }
     }
 
     suspend fun registerLocalImport(download: LinkImportDownload): Track =

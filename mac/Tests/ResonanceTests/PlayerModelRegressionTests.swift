@@ -513,6 +513,7 @@ struct PlayerModelRegressionTests {
         await download.value
     }
 
+#if DEBUG
     @Test
     func catalogRefreshLandingPreservesAnUploadThatCompletedWhileItWasInFlight() async throws {
         let (defaults, suiteName) = try isolatedDefaults()
@@ -567,6 +568,7 @@ struct PlayerModelRegressionTests {
         #expect(model.remoteSongs.map(\.id) == ["race-upload"])
         #expect(model.uploadStatus == "Uploaded 1 songs")
     }
+#endif
 
     @Test
     func catalogRefreshRemainsReadOnlyEvenWhenAnAdminKeyIsConfigured() async throws {

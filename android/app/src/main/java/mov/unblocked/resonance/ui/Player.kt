@@ -154,7 +154,7 @@ fun MiniPlayer(
             IconButton(
                 onClick = { actions.togglePlayPause() },
                 modifier = Modifier
-                    .size(44.dp)
+                    .size(48.dp)
                     .background(palette.raised, CircleShape)
                     .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .72f), CircleShape),
             ) {
@@ -260,10 +260,9 @@ fun NowPlayingScreen(
                     Spacer(Modifier.weight(1f))
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         SectionLabel("Now playing")
-                        Text("Resonance", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
                     }
                     Spacer(Modifier.weight(1f))
-                    Spacer(Modifier.size(46.dp))
+                    Spacer(Modifier.size(48.dp))
                 }
             }
             item {

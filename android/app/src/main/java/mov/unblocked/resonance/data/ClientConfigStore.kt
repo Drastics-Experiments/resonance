@@ -68,28 +68,21 @@ class ClientConfigStore(context: Context) {
             .apply()
     }
 
-    fun readTransferModes(origin: String, profileID: String): ResolvedServerTransferModes? {
+    fun readUploadMode(origin: String, profileID: String): ServerUploadMode? {
         val key = transferKey(origin, profileID)
-        val upload = ServerUploadMode.fromWireValue(preferences.getString("$key.upload", null))
-        val download = ServerDownloadMode.fromWireValue(preferences.getString("$key.download", null))
-        return if (upload == null && download == null) null else ResolvedServerTransferModes(
-            uploadMode = upload,
-            downloadMode = download ?: ServerDownloadMode.VerifiedFileCache,
-        )
+        // Download behavior is server-selected now; discard the obsolete user preference on sight.
+        if (preferences.contains("$key.download")) {
+            preferences.edit().remove("$key.download").apply()
+        }
+        return ServerUploadMode.fromWireValue(preferences.getString("$key.upload", null))
     }
 
-    fun writeTransferModes(
-        origin: String,
-        profileID: String,
-        uploadMode: ServerUploadMode?,
-        downloadMode: ServerDownloadMode,
-    ) {
+    fun writeUploadMode(origin: String, profileID: String, uploadMode: ServerUploadMode) {
         val key = transferKey(origin, profileID)
-        preferences.edit().apply {
-            if (uploadMode == null) remove("$key.upload")
-            else putString("$key.upload", uploadMode.wireValue)
-            putString("$key.download", downloadMode.wireValue)
-        }.apply()
+        preferences.edit()
+            .putString("$key.upload", uploadMode.wireValue)
+            .remove("$key.download")
+            .apply()
     }
 
     companion object {

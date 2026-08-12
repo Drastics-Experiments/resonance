@@ -167,35 +167,19 @@ enum AppGradient {
 }
 
 struct ArtworkView: View {
+    @Environment(\.resonancePalette) private var palette
     let style: ArtworkStyle
     var symbol: String = "heart.fill"
     var symbolSize: CGFloat = 48
     var cornerRadius: CGFloat = 8
-    var glow: Bool = false
 
     var body: some View {
-        GeometryReader { proxy in
-            ZStack {
-                LinearGradient(
-                    colors: AppGradient.colors(for: style),
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+        ZStack {
+            AppGradient.colors(for: style).first ?? palette.raisedSurface
 
-                if glow {
-                    RadialGradient(
-                        colors: [Color.white.opacity(0.28), .clear],
-                        center: UnitPoint(x: 0.48, y: 0.46),
-                        startRadius: 0,
-                        endRadius: max(30, proxy.size.width * 0.44)
-                    )
-                }
-
-                Image(systemName: symbol)
-                    .font(.system(size: symbolSize, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.88))
-                    .shadow(color: .white.opacity(glow ? 0.65 : 0.2), radius: glow ? 22 : 5)
-            }
+            Image(systemName: symbol)
+                .font(.system(size: symbolSize, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.88))
         }
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay {
@@ -208,8 +192,6 @@ struct ArtworkView: View {
 struct PressableScaleStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
-            .opacity(configuration.isPressed ? 0.86 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .opacity(configuration.isPressed ? 0.72 : 1)
     }
 }

@@ -196,8 +196,10 @@ struct ResonanceTests {
             _ = try model.beginLocalImportTransfer(reservingUpload: true)
         }
 
+#if DEBUG
         await model.uploadSongsToServer([glass])
         #expect(model.uploadStatus == "Idle")
+#endif
         #expect(await model.selectSyncProfile(matching: "other") == false)
         #expect(model.serverMessage == "Wait for the current server transfer or sync to finish")
 
@@ -228,8 +230,10 @@ struct ResonanceTests {
             _ = try model.beginLocalImportTransfer(reservingUpload: true)
         }
 
+#if DEBUG
         await model.uploadSongsToServer([glass])
         #expect(model.uploadStatus == "Idle")
+#endif
         #expect(await model.selectSyncProfile(matching: "other") == false)
         #expect(model.serverMessage == "Wait for the current server transfer or sync to finish")
         #expect(throws: Never.self) {
@@ -542,6 +546,7 @@ struct ResonanceTests {
         #expect(model.isSyncingPlaylists)
     }
 
+#if DEBUG
     @Test
     func fileUploadRefusesToDuplicateATrackLinkedToAnotherContext() async throws {
         let (defaults, suiteName) = try defaults()
@@ -589,6 +594,7 @@ struct ResonanceTests {
         #expect(model.tracks.first?.syncProfileID == "profile-a")
         #expect(!model.isUploadingServer)
     }
+#endif
 
     @Test
     func clipTimeFieldsParseSecondsMinutesAndHours() throws {

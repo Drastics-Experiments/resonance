@@ -1,8 +1,6 @@
 package mov.unblocked.resonance
 
 import android.Manifest
-import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import java.io.File
@@ -32,12 +30,6 @@ class MainActivity : ComponentActivity() {
     private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         viewModel.importUris(uris)
     }
-    private val uploadLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        viewModel.uploadUris(uris)
-    }
-    private val profilePictureLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let(viewModel::setProfilePicture)
-    }
     private val unknownSourceLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         val file = pendingUpdateFile ?: return@registerForActivityResult
         pendingUpdateFile = null
@@ -64,7 +56,6 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 33) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
         }
-        viewModel.handleAccountCallback(intent?.data)
         setContent {
             val state by viewModel.uiState.collectAsStateWithLifecycle()
             val updateState by updateManager.state.collectAsStateWithLifecycle()
@@ -73,17 +64,6 @@ class MainActivity : ComponentActivity() {
             }
             LaunchedEffect(state.isNativeAccountSignInOpen) {
                 if (state.isNativeAccountSignInOpen) Clerk.attachActivity(this@MainActivity)
-            }
-            LaunchedEffect(Unit) {
-                viewModel.uploadRequests.collect { uploadLauncher.launch(arrayOf("audio/*", "video/*")) }
-            }
-            LaunchedEffect(Unit) {
-                viewModel.profilePictureRequests.collect { profilePictureLauncher.launch(arrayOf("image/*")) }
-            }
-            LaunchedEffect(Unit) {
-                viewModel.accountBrowserRequests.collect { destination ->
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(destination)))
-                }
             }
             ResonanceApp(
                 state = state,
@@ -102,12 +82,6 @@ class MainActivity : ComponentActivity() {
         viewModel.retryRemoteSongMetadataIfNeeded()
         viewModel.syncPlaylistsAutomatically()
         lifecycleScope.launch { updateManager.checkForUpdateIfDue() }
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        viewModel.handleAccountCallback(intent.data)
     }
 
     private fun downloadUpdate(update: AndroidUpdateInfo) {

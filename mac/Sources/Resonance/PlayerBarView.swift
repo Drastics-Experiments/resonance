@@ -42,7 +42,6 @@ struct PlayerBarView: View {
                                 Circle().stroke(palette.accent.opacity(0.72), lineWidth: 1.5)
                             }
                             .clipShape(Circle())
-                            .shadow(color: palette.accent.opacity(0.25), radius: 10)
                     }
                     .buttonStyle(PressableScaleStyle())
                     CircleIconButton(
@@ -78,6 +77,7 @@ struct PlayerBarView: View {
                     playbackSpeedMenu
                     Image(systemName: "speaker.wave.2.fill")
                         .font(.system(size: 11))
+                        .accessibilityHidden(true)
                     StableVolumeSlider(value: $model.volume)
                         .frame(width: 104)
                 }
@@ -87,7 +87,6 @@ struct PlayerBarView: View {
         }
         .padding(.horizontal, 18)
         .background(palette.panel.opacity(0.99))
-        .background(.ultraThinMaterial.opacity(0.08))
     }
 
     private var playbackSpeedMenu: some View {
@@ -188,7 +187,6 @@ struct PlayerBarView: View {
         }
     }
 }
-
 private struct PlayerBarProgressView: View {
     @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var playbackPosition: PlaybackPositionState
@@ -211,94 +209,5 @@ private struct PlayerBarProgressView: View {
         }
         .font(.system(size: 10))
         .foregroundStyle(palette.muted)
-    }
-}
-
-/// A compact volume slider whose appearance stays consistent across macOS
-/// releases. The system slider changed its tint and thumb treatment in macOS
-/// 26, which made this control look disabled even though it was interactive.
-private struct StableVolumeSlider: View {
-    @Environment(\.resonancePalette) private var palette
-    @Binding var value: Double
-    @State private var isDragging = false
-
-    private let thumbWidth: CGFloat = 26
-    private let thumbHeight: CGFloat = 18
-    private let trackHeight: CGFloat = 4
-
-    var body: some View {
-        GeometryReader { proxy in
-            let clampedValue = min(max(value, 0), 1)
-            let travel = max(proxy.size.width - thumbWidth, 0)
-            let thumbOffset = travel * clampedValue
-            let thumbCenter = thumbOffset + thumbWidth / 2
-
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.white.opacity(0.14))
-                    .frame(height: trackHeight)
-
-                Capsule()
-                    .fill(palette.accent)
-                    .frame(width: max(thumbCenter, trackHeight), height: trackHeight)
-
-                volumeThumb
-                    .offset(x: thumbOffset)
-            }
-            .frame(maxHeight: .infinity)
-            .animation(.easeOut(duration: 0.16), value: isDragging)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { gesture in
-                        guard travel > 0 else { return }
-                        isDragging = true
-                        value = min(max((gesture.location.x - thumbWidth / 2) / travel, 0), 1)
-                    }
-                    .onEnded { _ in isDragging = false }
-            )
-        }
-        .frame(height: thumbHeight)
-        .accessibilityElement()
-        .accessibilityLabel("Volume")
-        .accessibilityValue("\(Int(value * 100)) percent")
-        .accessibilityAdjustableAction { direction in
-            switch direction {
-            case .increment: value = min(value + 0.05, 1)
-            case .decrement: value = max(value - 0.05, 0)
-            @unknown default: break
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var volumeThumb: some View {
-#if compiler(>=6.2)
-        if #available(macOS 26.0, *) {
-            Capsule()
-                .fill(isDragging ? Color.clear : palette.tertiary)
-                .frame(width: thumbWidth, height: thumbHeight)
-                .glassEffect(
-                    isDragging ? Glass.clear.interactive() : .identity,
-                    in: .capsule
-                )
-        } else {
-            fallbackVolumeThumb
-        }
-#else
-        fallbackVolumeThumb
-#endif
-    }
-
-    private var fallbackVolumeThumb: some View {
-        ZStack {
-            Capsule()
-                .fill(palette.tertiary.opacity(isDragging ? 0 : 1))
-
-            if isDragging {
-                Capsule().fill(.ultraThinMaterial).opacity(0.55)
-            }
-        }
-        .frame(width: thumbWidth, height: thumbHeight)
     }
 }

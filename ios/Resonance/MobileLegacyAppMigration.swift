@@ -149,22 +149,37 @@ struct MobileFileCredentialStore {
     }
 
     func save(_ value: String, key: String) throws {
-        guard !value.isEmpty else {
+        if value.isEmpty {
             try delete(key: key)
-            return
+        } else {
+            try update(values: [key: value])
         }
-        guard !value.contains("\n"), !value.contains("\r") else {
-            throw CocoaError(.fileWriteInapplicableStringEncoding)
-        }
-        var stored = try load()
-        guard stored.values[key] != value else { return }
-        stored.values[key] = value
-        try persist(stored)
     }
 
     func delete(key: String) throws {
-        var stored = try load()
-        guard stored.values.removeValue(forKey: key) != nil else { return }
+        try update(deleting: [key])
+    }
+
+    func update(
+        values: [String: String] = [:],
+        deleting keys: Set<String> = []
+    ) throws {
+        for value in values.values where value.contains("\n") || value.contains("\r") {
+            throw CocoaError(.fileWriteInapplicableStringEncoding)
+        }
+        var stored = try load(recoveringCorruptFile: true)
+        let previous = stored
+        for key in keys {
+            stored.values.removeValue(forKey: key)
+        }
+        for (key, value) in values {
+            if value.isEmpty {
+                stored.values.removeValue(forKey: key)
+            } else {
+                stored.values[key] = value
+            }
+        }
+        guard stored.values != previous.values else { return }
         if stored.values.isEmpty {
             if FileManager.default.fileExists(atPath: storeURL.path) {
                 try FileManager.default.removeItem(at: storeURL)
@@ -174,13 +189,43 @@ struct MobileFileCredentialStore {
         try persist(stored)
     }
 
-    private func load() throws -> StoredCredentials {
+    private func load(recoveringCorruptFile: Bool = false) throws -> StoredCredentials {
         try hardenExistingPermissions()
         guard FileManager.default.fileExists(atPath: storeURL.path) else {
             return StoredCredentials()
         }
         let data = try Data(contentsOf: storeURL)
-        return try JSONDecoder().decode(StoredCredentials.self, from: data)
+        do {
+            return try JSONDecoder().decode(StoredCredentials.self, from: data)
+        } catch {
+            guard recoveringCorruptFile else { throw error }
+            try quarantineCorruptFile()
+            return StoredCredentials()
+        }
+    }
+
+    private func quarantineCorruptFile() throws {
+        let directory = storeURL.deletingLastPathComponent()
+        let stem = storeURL.deletingPathExtension().lastPathComponent
+        let pathExtension = storeURL.pathExtension
+        let backupName = "\(stem).corrupt-\(UUID().uuidString.lowercased())"
+            + (pathExtension.isEmpty ? "" : ".\(pathExtension)")
+        let backupURL = directory.appendingPathComponent(backupName)
+        try FileManager.default.setAttributes(
+            [
+                .posixPermissions: 0o700,
+                .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
+            ],
+            ofItemAtPath: directory.path
+        )
+        try FileManager.default.setAttributes(
+            [
+                .posixPermissions: 0o600,
+                .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
+            ],
+            ofItemAtPath: storeURL.path
+        )
+        try FileManager.default.moveItem(at: storeURL, to: backupURL)
     }
 
     private func hardenExistingPermissions() throws {

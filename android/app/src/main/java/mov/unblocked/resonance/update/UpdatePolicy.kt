@@ -40,7 +40,7 @@ internal object AndroidUpdatePolicy {
         val versionName = manifest.versionName.trim()
         require(versionName.isNotEmpty()) { "The update version is missing." }
         val apkUrl = manifest.apkUrl.trim()
-        require(isSecureWebUrl(apkUrl) || allowInsecureDownloadUrl && isWebUrl(apkUrl)) {
+        require(isAllowedNetworkURL(apkUrl, allowInsecureDownloadUrl)) {
             "The update download URL is not secure."
         }
         val sha256 = manifest.sha256.trim().lowercase()
@@ -70,13 +70,24 @@ internal object AndroidUpdatePolicy {
         }
     }
 
-    private fun isSecureWebUrl(value: String): Boolean = runCatching {
+    fun isAllowedNetworkURL(value: String, allowLocalDevelopmentHttp: Boolean = false): Boolean = runCatching {
         val uri = URI(value)
-        uri.scheme.equals("https", ignoreCase = true) && !uri.host.isNullOrBlank()
+        val host = uri.host?.lowercase().orEmpty()
+        val commonRequirements = host.isNotBlank() && uri.rawUserInfo == null && uri.rawFragment == null
+        commonRequirements && (
+            uri.scheme.equals("https", ignoreCase = true) ||
+                allowLocalDevelopmentHttp && uri.scheme.equals("http", ignoreCase = true) &&
+                    host in localDevelopmentHosts && uri.port >= 0
+        )
     }.getOrDefault(false)
 
-    private fun isWebUrl(value: String): Boolean = runCatching {
+    fun isLocalDevelopmentURL(value: String): Boolean = runCatching {
         val uri = URI(value)
-        uri.scheme.equals("http", ignoreCase = true) && !uri.host.isNullOrBlank()
+        val host = uri.host?.lowercase().orEmpty()
+        uri.scheme.equals("http", ignoreCase = true) &&
+            host in localDevelopmentHosts &&
+            uri.rawUserInfo == null && uri.rawFragment == null && uri.port >= 0
     }.getOrDefault(false)
+
+    private val localDevelopmentHosts = setOf("10.0.2.2", "127.0.0.1", "localhost")
 }

@@ -120,8 +120,6 @@ object RemoteTrackIdentityPolicy {
         return RemoteTrackDeduplication(retained, replacements)
     }
 
-    fun deduplicate(tracks: List<Track>): List<Track> = deduplication(tracks).tracks
-
     /**
      * Applies duplicate-ID replacements to every persisted profile before a
      * redundant same-context remote record is removed.

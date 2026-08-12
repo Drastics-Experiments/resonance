@@ -521,7 +521,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private static let playbackContextKey = "Resonance.playbackContext.v1"
     private static let shuffleQueueKey = "Resonance.shuffleQueue.v1"
     private static let uploadModeKeyPrefix = "Resonance.transferMode.upload.v1."
-    private static let downloadModeKeyPrefix = "Resonance.transferMode.download.v1."
     private static let remoteSongMetadataCacheKey = "Resonance.remoteSongMetadata.v1"
     private static let remoteSongMetadataCacheLifetime: TimeInterval = 30 * 24 * 60 * 60
     private static let remoteSongMetadataCacheLimit = 2_000
@@ -675,7 +674,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published private(set) var clientConfiguration = MacEffectiveClientConfig.safeDefaults
     @Published private(set) var clientConfigMessage = MacEffectiveClientConfig.safeDefaults.statusText
     @Published private(set) var uploadMode = MacUploadMode.localFile
-    @Published private(set) var downloadMode = MacDownloadMode.verifiedFileCache
 
     var allowsInsecurePreviewLoopback: Bool { Self.isPreviewBundle }
 
@@ -734,6 +732,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         requiresReviewedMatch: Bool = false
     ) throws -> LocalImportTransferContext {
         let baseURL = try? normalizedServerURL()
+        let transferUploadMode: MacUploadMode = reservingUpload && requiresReviewedMatch
+            ? .reviewedMatch
+            : uploadMode
         let context = LocalImportTransferContext(
             id: UUID(),
             baseURL: baseURL,
@@ -742,7 +743,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 : nil,
             profileID: syncProfileID,
             profileName: activeSyncProfileName,
-            uploadMode: uploadMode,
+            uploadMode: transferUploadMode,
             rawSourceInput: rawSourceInput,
             mediaMode: mediaMode,
             requiresReviewedMatch: requiresReviewedMatch,
@@ -758,11 +759,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             throw LocalImportTransferContextError.missingUploadConfiguration
         }
         if reservingUpload,
+           context.requiresReviewedMatch,
+           !clientConfiguration.permittedUploadModes.contains(.reviewedMatch) {
+            throw LocalImportTransferContextError.reviewedMatchRequired
+        }
+        if reservingUpload,
            !clientConfiguration.permittedUploadModes.contains(context.uploadMode) {
             throw LocalImportTransferContextError.uploadModeUnavailable
-        }
-        if reservingUpload, context.requiresReviewedMatch, context.uploadMode != .reviewedMatch {
-            throw LocalImportTransferContextError.reviewedMatchRequired
         }
         activeLocalImportTransferID = context.id
         isUploadingLocalImport = true
@@ -771,8 +774,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     func validateLocalImportTransfer(_ context: LocalImportTransferContext) throws {
         guard context.profileID == syncProfileID,
-              context.baseURL?.absoluteString == (try? normalizedServerURL())?.absoluteString,
-              context.uploadMode == uploadMode else {
+              context.baseURL?.absoluteString == (try? normalizedServerURL())?.absoluteString else {
             throw LocalImportTransferContextError.contextChanged
         }
         guard activeLocalImportTransferID == context.id,
@@ -854,7 +856,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var downloadTask: Task<Void, Never>?
     private var serverDownloadStateGeneration: UInt64 = 0
     private var uploadTask: Task<Void, Never>?
-    private var playlistSyncTask: Task<Void, Never>?
     private var playlistSyncDebounceTask: Task<Void, Never>?
     private var playlistSyncPending = false
     private var playlistMutationGeneration: UInt64 = 0
@@ -1188,7 +1189,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         accountRefreshTask?.cancel()
         serverMetadataHydrationTask?.cancel()
         Self.persistenceCoordinator.flush()
-        playlistSyncTask?.cancel()
         playlistSyncDebounceTask?.cancel()
         listeningHistorySyncDebounceTask?.cancel()
         clientConfigExpiryTask?.cancel()
@@ -1742,14 +1742,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         return Int64((try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
     }
 
-    var localLibraryBytes: Int64 {
-        tracks.reduce(0) { $0 + fileSize(for: $1) }
-    }
-
-    var downloadedTrackCount: Int {
-        tracks.filter { $0.remoteID != nil }.count
-    }
-
     @discardableResult
     func deleteDownloadedCopy(_ track: Track) -> Bool {
         guard track.remoteID != nil, let fileURL = track.fileURL else { return false }
@@ -1838,10 +1830,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             uploadStatus = "Metadata repair failed: \(error.localizedDescription)"
             serverMessage = uploadStatus
         }
-    }
-
-    func connectAndSyncServer() {
-        refreshServerCatalog()
     }
 
     func clearServerCredentials() {
@@ -2031,17 +2019,17 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         if playlistSyncServerURL == oldServerKey {
             playlistSyncServerURL = Self.serverContextKey(base: session.baseURL, profileID: accountProfileID)
         }
-        let oldTransferScope = MacClientConfigContext.transferModeScope(
+        let oldUploadScope = MacClientConfigContext.uploadModePreferenceScope(
             origin: origin,
             profileID: migratedProfileID
         )
-        let newTransferScope = MacClientConfigContext.transferModeScope(
+        let newUploadScope = MacClientConfigContext.uploadModePreferenceScope(
             origin: origin,
             profileID: accountProfileID
         )
-        for prefix in [Self.uploadModeKeyPrefix, Self.downloadModeKeyPrefix]
-        where defaults.object(forKey: prefix + newTransferScope) == nil {
-            defaults.set(defaults.object(forKey: prefix + oldTransferScope), forKey: prefix + newTransferScope)
+        if defaults.object(forKey: Self.uploadModeKeyPrefix + newUploadScope) == nil,
+           let storedMode = defaults.string(forKey: Self.uploadModeKeyPrefix + oldUploadScope) {
+            defaults.set(storedMode, forKey: Self.uploadModeKeyPrefix + newUploadScope)
         }
         cancelRemoteSongMetadataHydration()
         serverCatalogRequestGeneration &+= 1
@@ -2056,23 +2044,17 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func selectUploadMode(_ mode: MacUploadMode) {
+        guard !serverUploadActionsDisabled else {
+            clientConfigMessage = "Wait for the current server transfer or sync to finish"
+            return
+        }
         guard clientConfiguration.permittedUploadModes.contains(mode) else {
-            uploadMode = clientConfiguration.resolvedUploadMode(uploadMode)
+            resolveUploadModeForCurrentConfiguration()
             clientConfigMessage = "\(mode.title) is disabled by the verified server configuration"
             return
         }
         uploadMode = mode
-        persistTransferModesForCurrentContext()
-    }
-
-    func selectDownloadMode(_ mode: MacDownloadMode) {
-        guard clientConfiguration.permittedDownloadModes.contains(mode) else {
-            downloadMode = clientConfiguration.resolvedDownloadMode(downloadMode)
-            clientConfigMessage = "\(mode.title) is disabled by the verified server configuration"
-            return
-        }
-        downloadMode = mode
-        persistTransferModesForCurrentContext()
+        persistUploadModeForCurrentContext()
     }
 
     func refreshClientConfigurationNow() async {
@@ -3043,6 +3025,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         }
     }
 
+#if DEBUG
+    /// Test-only seam for exercising request-time upload authorization and context guards.
     func uploadSongsToServer(_ urls: [URL]) async {
         let capturedUploadMode = MacUploadMode.localFile
         guard !localFileUploadActionsDisabled else {
@@ -3063,7 +3047,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             isUploadingServer = false
             uploadCurrentFile = ""
         }
-
         do {
             let base = try normalizedServerURL()
             let profileID = syncProfileID
@@ -3072,8 +3055,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             var associationConflictCount = 0
             for (index, fileURL) in urls.enumerated() {
                 try Task.checkCancellation()
-                let uploadFilename = ServerUploadNaming.filename(for: fileURL)
-                uploadCurrentFile = uploadFilename
+                uploadCurrentFile = ServerUploadNaming.filename(for: fileURL)
                 uploadStatus = "Uploading \(index + 1) of \(urls.count)"
                 if tracks.contains(where: {
                     Self.sameLocalFile($0.fileURL, fileURL)
@@ -3125,6 +3107,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             uploadStatus = "Upload failed: \(error.localizedDescription)"
         }
     }
+#endif
 
     private func uploadDownloadedSongsMissingFromServer() async {
         let capturedUploadMode = MacUploadMode.localFile
@@ -4784,7 +4767,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         clientConfigExpiryTask = nil
         clientConfiguration = configuration
         clientConfigMessage = configuration.statusText
-        restoreTransferModesForCurrentContext()
+        resolveUploadModeForCurrentConfiguration()
         if let remoteStreamAuthorizationLease {
             let accessToken = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
             let renewed: Bool
@@ -4829,7 +4812,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         guard delay > 0 else {
             clientConfiguration = .safeDefaults
             clientConfigMessage = "Safe defaults • signed configuration expired"
-            restoreTransferModesForCurrentContext()
+            resolveUploadModeForCurrentConfiguration()
             return
         }
         let expectedExpiry = document.expiresAt
@@ -4859,30 +4842,25 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         applyClientConfiguration(.safeDefaults)
     }
 
-    private func transferModeScopeForCurrentContext() -> String? {
+    private func resolveUploadModeForCurrentConfiguration() {
+        let preferred = uploadModePreferenceScopeForCurrentContext()
+            .flatMap { defaults.string(forKey: Self.uploadModeKeyPrefix + $0) }
+            .flatMap(MacUploadMode.init(rawValue:))
+        uploadMode = clientConfiguration.resolvedUploadMode(preferred)
+    }
+
+    private func uploadModePreferenceScopeForCurrentContext() -> String? {
         guard let base = try? normalizedServerURL(),
               let origin = ServerSongIdentity.normalizedOrigin(base) else { return nil }
-        return MacClientConfigContext.transferModeScope(origin: origin, profileID: syncProfileID)
+        return MacClientConfigContext.uploadModePreferenceScope(
+            origin: origin,
+            profileID: syncProfileID
+        )
     }
 
-    private func restoreTransferModesForCurrentContext() {
-        guard let scope = transferModeScopeForCurrentContext() else {
-            uploadMode = .localFile
-            downloadMode = .verifiedFileCache
-            return
-        }
-        let storedUpload = defaults.string(forKey: Self.uploadModeKeyPrefix + scope)
-            .flatMap(MacUploadMode.init(rawValue:))
-        let storedDownload = defaults.string(forKey: Self.downloadModeKeyPrefix + scope)
-            .flatMap(MacDownloadMode.init(rawValue:))
-        uploadMode = clientConfiguration.resolvedUploadMode(storedUpload)
-        downloadMode = clientConfiguration.resolvedDownloadMode(storedDownload)
-    }
-
-    private func persistTransferModesForCurrentContext() {
-        guard let scope = transferModeScopeForCurrentContext() else { return }
+    private func persistUploadModeForCurrentContext() {
+        guard let scope = uploadModePreferenceScopeForCurrentContext() else { return }
         defaults.set(uploadMode.rawValue, forKey: Self.uploadModeKeyPrefix + scope)
-        defaults.set(downloadMode.rawValue, forKey: Self.downloadModeKeyPrefix + scope)
     }
 
     private func saveServerConfiguration(base: URL) throws {
@@ -5004,11 +4982,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             serverMessage = Self.credentialPersistenceFailureMessage
         }
         return succeeded
-    }
-
-    func syncPlaylists() {
-        playlistSyncTask?.cancel()
-        playlistSyncTask = Task { await syncPlaylistsNow() }
     }
 
     func syncPlaylistsAutomatically() async {

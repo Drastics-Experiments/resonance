@@ -125,7 +125,7 @@ private struct LibraryView: View {
                     HStack(alignment: .center, spacing: 10) {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Library")
-                                .font(.system(size: 36, weight: .bold, design: .rounded))
+                                .font(.largeTitle.bold())
                             Text("\(library.tracksForActiveProfile.count) songs on this device")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
@@ -159,8 +159,13 @@ private struct LibraryView: View {
                         RecentlyAddedSection(tracks: recentlyAddedTracks)
                     }
                     if library.filteredTracks.isEmpty {
-                        ContentUnavailableView("No songs yet", systemImage: "music.note", description: Text("Import audio or video, or sync your music server."))
-                            .frame(maxWidth: .infinity).padding(.top, 40)
+                        ContentUnavailableView(
+                            "No songs yet",
+                            systemImage: "music.note",
+                            description: Text("Import audio or video, or sync your music server.")
+                        )
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 40)
                     } else {
                         VStack(spacing: 0) {
                             HStack {
@@ -408,11 +413,11 @@ private struct MobileThemePicker: View {
                     }
                 } label: {
                     VStack(alignment: .leading, spacing: 8) {
-                        LinearGradient(
-                            colors: candidate.gradientStops,
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
+                        HStack(spacing: 0) {
+                            candidate.secondary
+                            candidate.accent
+                            candidate.tertiary
+                        }
                         .frame(height: 58)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
@@ -648,6 +653,10 @@ private struct PlaylistsView: View {
     @FocusState private var nameIsFocused: Bool
 
     var body: some View {
+        let tracksByID = Dictionary(
+            library.tracks.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         ZStack {
             AppBackground()
             List {
@@ -657,7 +666,7 @@ private struct PlaylistsView: View {
                             PlaylistDetailView(playlistID: playlist.id)
                         } label: {
                             HStack(spacing: 12) {
-                                PlaylistArtworkTile(playlist: playlist)
+                                PlaylistArtworkTile(playlist: playlist, tracksByID: tracksByID)
                                     .frame(width: 52, height: 52)
                                     .accessibilityHidden(true)
                                 VStack(alignment: .leading) {
@@ -962,38 +971,24 @@ private struct NativeStorageView: View {
         }
     }
 
-    private var downloadedTracks: [MobileTrack] {
-        visibleTracks.filter { $0.sourceServer != nil || $0.remoteID != nil }
-    }
-
-    private var importedTracks: [MobileTrack] {
-        visibleTracks.filter { $0.sourceServer == nil && $0.remoteID == nil }
-    }
-
-    private var presentedTracks: [MobileTrack] {
-        downloadedTracks + importedTracks
-    }
-
-    private var downloadedBytes: Int64 {
-        library.tracks
-            .filter { $0.sourceServer != nil || $0.remoteID != nil }
-            .reduce(0) { $0 + fileSizes[$1.id, default: 0] }
-    }
-
-    private var importedBytes: Int64 {
-        library.tracks
-            .filter { $0.sourceServer == nil && $0.remoteID == nil }
-            .reduce(0) { $0 + fileSizes[$1.id, default: 0] }
-    }
-
     var body: some View {
+        let allDownloadedTracks = library.tracks.filter { $0.sourceServer != nil || $0.remoteID != nil }
+        let allImportedTracks = library.tracks.filter { $0.sourceServer == nil && $0.remoteID == nil }
+        let displayedTracks = visibleTracks
+        let downloadedTracks = displayedTracks.filter { $0.sourceServer != nil || $0.remoteID != nil }
+        let importedTracks = displayedTracks.filter { $0.sourceServer == nil && $0.remoteID == nil }
+        let trackNumbers = Dictionary(
+            uniqueKeysWithValues: (downloadedTracks + importedTracks).enumerated().map {
+                ($0.element.id, $0.offset + 1)
+            }
+        )
         List(selection: $selectedTrackIDs) {
             Section {
                 StorageSummaryCard(
-                    importedBytes: importedBytes,
-                    importedCount: library.tracks.filter { $0.sourceServer == nil && $0.remoteID == nil }.count,
-                    downloadedBytes: downloadedBytes,
-                    downloadedCount: library.tracks.filter { $0.sourceServer != nil || $0.remoteID != nil }.count,
+                    importedBytes: allImportedTracks.reduce(0) { $0 + fileSizes[$1.id, default: 0] },
+                    importedCount: allImportedTracks.count,
+                    downloadedBytes: allDownloadedTracks.reduce(0) { $0 + fileSizes[$1.id, default: 0] },
+                    downloadedCount: allDownloadedTracks.count,
                     availableBytes: availableBytes
                 )
                 .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 0))
@@ -1010,7 +1005,7 @@ private struct NativeStorageView: View {
                 .accessibilityLabel("Storage filter")
             }
 
-            if visibleTracks.isEmpty {
+            if displayedTracks.isEmpty {
                 Section {
                     ContentUnavailableView(
                         searchText.isEmpty ? scope.emptyTitle : "No Results",
@@ -1027,7 +1022,7 @@ private struct NativeStorageView: View {
                         ForEach(downloadedTracks) { track in
                             NativeStorageTrackRow(
                                 track: track,
-                                number: storageIndex(for: track),
+                                number: trackNumbers[track.id, default: 1],
                                 fileSize: fileSizes[track.id, default: 0],
                                 onDelete: { deletionCandidate = track }
                             )
@@ -1046,7 +1041,7 @@ private struct NativeStorageView: View {
                         ForEach(importedTracks) { track in
                             NativeStorageTrackRow(
                                 track: track,
-                                number: storageIndex(for: track),
+                                number: trackNumbers[track.id, default: 1],
                                 fileSize: fileSizes[track.id, default: 0],
                                 onDelete: { deletionCandidate = track }
                             )
@@ -1127,7 +1122,7 @@ private struct NativeStorageView: View {
             }
         }
         .task(id: library.tracks.map(\.id)) {
-            refreshStorageMetrics()
+            await refreshStorageMetrics()
             selectedTrackIDs.formIntersection(Set(library.tracks.map(\.id)))
         }
         .confirmationDialog(
@@ -1164,18 +1159,17 @@ private struct NativeStorageView: View {
         }
     }
 
-    private func refreshStorageMetrics() {
-        fileSizes = library.tracks.reduce(into: [:]) { result, track in
-            let values = try? library.fileURL(for: track).resourceValues(forKeys: [.fileSizeKey])
-            result[track.id] = Int64(values?.fileSize ?? 0)
+    private func refreshStorageMetrics() async {
+        let files = library.tracks.map {
+            MobileStorageFile(id: $0.id, url: library.fileURL(for: $0))
         }
-        let home = URL(fileURLWithPath: NSHomeDirectory())
-        let values = try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        availableBytes = max(values?.volumeAvailableCapacityForImportantUsage ?? 0, 0)
-    }
-
-    private func storageIndex(for track: MobileTrack) -> Int {
-        (presentedTracks.firstIndex(where: { $0.id == track.id }) ?? 0) + 1
+        let metrics = await MobileStorageMetricsLoader.load(
+            files: files,
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+        )
+        guard !Task.isCancelled else { return }
+        fileSizes = metrics.fileSizes
+        availableBytes = metrics.availableBytes
     }
 }
 
@@ -1367,6 +1361,50 @@ private func formatBytes(_ bytes: Int64) -> String {
     ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
 }
 
+private struct MobileStorageFile: Sendable {
+    let id: UUID
+    let url: URL
+}
+
+private struct MobileStorageMetrics: Sendable {
+    let fileSizes: [UUID: Int64]
+    let availableBytes: Int64
+}
+
+private enum MobileStorageMetricsLoader {
+    static func load(files: [MobileStorageFile], homeDirectory: URL) async -> MobileStorageMetrics {
+        let worker = Task.detached(priority: .utility) {
+            loadSynchronously(files: files, homeDirectory: homeDirectory)
+        }
+        return await withTaskCancellationHandler(
+            operation: { await worker.value },
+            onCancel: { worker.cancel() }
+        )
+    }
+
+    private static func loadSynchronously(
+        files: [MobileStorageFile],
+        homeDirectory: URL
+    ) -> MobileStorageMetrics {
+        var fileSizes: [UUID: Int64] = [:]
+        fileSizes.reserveCapacity(files.count)
+        for file in files {
+            guard !Task.isCancelled else {
+                return MobileStorageMetrics(fileSizes: [:], availableBytes: 0)
+            }
+            let values = try? file.url.resourceValues(forKeys: [.fileSizeKey])
+            fileSizes[file.id] = Int64(values?.fileSize ?? 0)
+        }
+        let values = try? homeDirectory.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        )
+        return MobileStorageMetrics(
+            fileSizes: fileSizes,
+            availableBytes: max(values?.volumeAvailableCapacityForImportantUsage ?? 0, 0)
+        )
+    }
+}
+
 private struct ServerView: View {
     @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
@@ -1439,7 +1477,7 @@ private struct ServerView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     HStack {
                         Text("Server")
-                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                            .font(.largeTitle.bold())
                         Spacer()
                         Button {
                             Task { await library.refreshCatalog() }
@@ -1612,7 +1650,13 @@ private struct ServerView: View {
             case .reviewedImport: MobileLocalImportSheet(reviewedServerMatch: true)
             }
         }
-        .confirmationDialog("Delete this song from the server?", isPresented: Binding(get: { deletionCandidate != nil }, set: { if !$0 { deletionCandidate = nil } })) {
+        .confirmationDialog(
+            "Delete this song from the server?",
+            isPresented: Binding(
+                get: { deletionCandidate != nil },
+                set: { if !$0 { deletionCandidate = nil } }
+            )
+        ) {
             Button("Delete from Server", role: .destructive) {
                 if let song = deletionCandidate { Task { await library.deleteRemoteSong(song) } }
                 deletionCandidate = nil
@@ -1705,7 +1749,28 @@ private struct ServerView: View {
                 }
                 .disabled(library.isUploadTransferBusy || library.activeUploadMode != .localFile)
 
-                Button(uploadModeLabel, systemImage: uploadModeSymbol) {
+                if library.availableUploadModes.count > 1 {
+                    Menu(
+                        "Upload Method: \(library.activeUploadMode?.title ?? "Unavailable")",
+                        systemImage: "arrow.up.circle"
+                    ) {
+                        ForEach(library.availableUploadModes) { mode in
+                            Button {
+                                library.selectUploadMode(mode)
+                            } label: {
+                                Label(
+                                    mode.title,
+                                    systemImage: mode == library.activeUploadMode
+                                        ? "checkmark"
+                                        : uploadModeSelectionSymbol(mode)
+                                )
+                            }
+                        }
+                    }
+                    .disabled(library.isUploadTransferBusy)
+                }
+
+                Button(importActionLabel, systemImage: uploadModeSymbol) {
                     switch library.activeUploadMode {
                     case .localFile, .serverSourceLink:
                         presentedSheet = .linkImport
@@ -1740,12 +1805,11 @@ private struct ServerView: View {
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    private var uploadModeLabel: String {
+    private var importActionLabel: String {
         switch library.activeUploadMode {
-        case .localFile: "Files"
-        case .serverSourceLink: "Link"
-        case .reviewedMatch: "Review"
-        case nil: "Upload"
+        case .localFile, .serverSourceLink: "Import from Web"
+        case .reviewedMatch: "Review a Match"
+        case nil: "Import"
         }
     }
 
@@ -1755,6 +1819,14 @@ private struct ServerView: View {
         case .serverSourceLink: "link.badge.plus"
         case .reviewedMatch: "checkmark.bubble"
         case nil: "nosign"
+        }
+    }
+
+    private func uploadModeSelectionSymbol(_ mode: MobileUploadMode) -> String {
+        switch mode {
+        case .localFile: "iphone.and.arrow.forward"
+        case .serverSourceLink: "link.badge.plus"
+        case .reviewedMatch: "checkmark.bubble"
         }
     }
 }
@@ -1862,7 +1934,6 @@ private struct ServerTextActionButton: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(palette.serverActionForeground)
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity)
                 .frame(height: 58)
                 .contentShape(Rectangle())
@@ -1930,23 +2001,12 @@ private struct ServerTransferPopup: View {
             }
         }
         .padding(13)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(palette.raisedSurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [.white.opacity(0.12), .white.opacity(0.025)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(.white.opacity(0.18), lineWidth: 1)
-            }
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(palette.divider, lineWidth: 1)
             .allowsHitTesting(false)
         }
-        .shadow(color: .black.opacity(0.28), radius: 18, y: 8)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(transfer.kind.title) \(transfer.songTitle), \(transfer.batchPosition)")
         .accessibilityValue(transfer.detail)
@@ -1954,6 +2014,7 @@ private struct ServerTransferPopup: View {
 }
 
 private struct MobileTransferNoticePopup: View {
+    @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     let notice: MobileTransferNotice
 
@@ -1981,18 +2042,18 @@ private struct MobileTransferNoticePopup: View {
                     .font(.caption.weight(.bold))
                     .frame(width: 30, height: 30)
                     .background(.white.opacity(0.07), in: Circle())
+                    .frame(width: 44, height: 44)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Dismiss transfer message")
         }
         .padding(13)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(palette.raisedSurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(.white.opacity(0.18), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(palette.divider, lineWidth: 1)
                 .allowsHitTesting(false)
         }
-        .shadow(color: .black.opacity(0.28), radius: 18, y: 8)
     }
 }
 
@@ -2048,7 +2109,6 @@ private struct LocalSongRowContent: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .lineLimit(1)
-                .minimumScaleFactor(0.75)
                 .frame(width: 44, alignment: .trailing)
         }
         .contentShape(Rectangle())
@@ -2436,14 +2496,7 @@ private struct ServerConnectionSheet: View {
                             .padding(.horizontal, 14)
                             .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
                             .contentShape(Rectangle())
-                            .background(
-                                LinearGradient(
-                                    colors: [palette.secondary, palette.accent],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                ),
-                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            )
+                            .background(palette.secondary, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
                         .buttonStyle(.plain)
                         .controlSize(.large)
@@ -2631,7 +2684,6 @@ private struct NowPlayingView: View {
                         TrackArtwork(track: track, fallbackSymbol: "waveform")
                             .frame(maxWidth: 330)
                             .aspectRatio(1, contentMode: .fit)
-                            .shadow(color: .black.opacity(0.35), radius: 28, y: 18)
 
                         HStack(alignment: .top, spacing: 16) {
                             VStack(alignment: .leading, spacing: 7) {
@@ -2837,185 +2889,16 @@ private struct NowPlayingView: View {
     }
 }
 
-private struct AppBackground: View {
-    @Environment(\.resonancePalette) private var palette
-
-    var body: some View {
-        palette.background.ignoresSafeArea()
-    }
-}
-
-private struct SquareArtworkContainer<Content: View>: View {
-    let content: (CGSize) -> Content
-
-    init(@ViewBuilder content: @escaping (CGSize) -> Content) {
-        self.content = content
-    }
-
-    var body: some View {
-        GeometryReader { geometry in
-            content(geometry.size)
-                .frame(width: geometry.size.width, height: geometry.size.height)
-                .clipped()
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .accessibilityHidden(true)
-    }
-}
-
-private struct ArtworkTile: View {
-    let symbol: String
-    var body: some View {
-        SquareArtworkContainer { _ in
-            ArtworkPlaceholder(symbol: symbol)
-        }
-    }
-}
-
-private struct ArtworkPlaceholder: View {
-    @Environment(\.resonancePalette) private var palette
-    let symbol: String
-    var compact = false
-
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: palette.gradientStops,
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            Image(systemName: symbol)
-                .font(compact ? .caption.weight(.semibold) : .title2.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.9))
-        }
-    }
-}
-
-private struct PlaylistArtworkTile: View {
-    @EnvironmentObject private var library: MusicLibrary
-    let playlist: MobilePlaylist
-
-    private var artworkTracks: [MobileTrack?] {
-        let tracksByID = Dictionary(
-            library.tracks.map { ($0.id, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        let trackIDs = playlist.automaticArtworkTrackIDs
-        return (0..<4).map { index in
-            guard trackIDs.indices.contains(index) else { return nil }
-            return tracksByID[trackIDs[index]]
-        }
-    }
-
-    var body: some View {
-        if playlist.isSystem || playlist.automaticArtworkTrackIDs.isEmpty {
-            ArtworkTile(symbol: playlist.isSystem ? "heart.fill" : "music.note.list")
-        } else {
-            SquareArtworkContainer { size in
-                let cellSize = CGSize(width: size.width / 2, height: size.height / 2)
-                VStack(spacing: 0) {
-                    HStack(spacing: 0) {
-                        artworkCell(artworkTracks[0], size: cellSize)
-                        artworkCell(artworkTracks[1], size: cellSize)
-                    }
-                    HStack(spacing: 0) {
-                        artworkCell(artworkTracks[2], size: cellSize)
-                        artworkCell(artworkTracks[3], size: cellSize)
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func artworkCell(_ track: MobileTrack?, size: CGSize) -> some View {
-        if let track, let artwork = library.artwork(for: track) {
-            Image(uiImage: artwork)
-                .resizable()
-                .scaledToFill()
-                .frame(width: size.width, height: size.height)
-                .clipped()
-        } else {
-            ArtworkPlaceholder(symbol: "music.note", compact: true)
-                .frame(width: size.width, height: size.height)
-                .clipped()
-        }
-    }
-}
-
-struct TrackArtwork: View {
-    @EnvironmentObject private var library: MusicLibrary
-    let track: MobileTrack
-    var fallbackSymbol = "music.note"
-
-    var body: some View {
-        SquareArtworkContainer { size in
-            if let artwork = library.artwork(for: track) {
-                Image(uiImage: artwork)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: size.width, height: size.height)
-            } else {
-                ArtworkTile(symbol: fallbackSymbol)
-            }
-        }
-    }
-}
-
-private struct ServerArtwork: View {
-    let song: MobileRemoteSong
-
-    var body: some View {
-        SquareArtworkContainer { size in
-            if song.isMetadataLoading {
-                ZStack {
-                    ArtworkTile(symbol: "music.note")
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(.white.opacity(0.72))
-                }
-            } else if let artworkURL = song.artworkURL {
-                AsyncImage(url: artworkURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: size.width, height: size.height)
-                            .clipped()
-                    case .empty:
-                        ZStack {
-                            ArtworkTile(symbol: "music.note")
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(.white)
-                        }
-                    case .failure:
-                        ArtworkTile(symbol: "music.note")
-                    @unknown default:
-                        ArtworkTile(symbol: "music.note")
-                    }
-                }
-            } else {
-                ArtworkTile(symbol: "music.note")
-            }
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-extension Text {
-    func sectionLabel() -> some View {
-        font(.subheadline.weight(.semibold))
-            .foregroundStyle(.secondary)
-    }
-}
-
 extension View {
-    func pill(color: Color) -> some View { font(.subheadline.weight(.bold)).padding(.horizontal, 17).frame(height: 42).background(color, in: Capsule()).foregroundStyle(.white) }
+    func pill(color: Color) -> some View {
+        font(.subheadline.weight(.bold))
+            .padding(.horizontal, 17)
+            .frame(height: 44)
+            .background(color, in: Capsule())
+            .foregroundStyle(.white)
+    }
     func roundButton(active: Bool, activeColor: Color) -> some View {
-        frame(width: 42, height: 42)
+        frame(width: 44, height: 44)
             .background(active ? activeColor : .white.opacity(0.08), in: Circle())
             .foregroundStyle(.white)
     }

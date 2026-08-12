@@ -146,7 +146,6 @@ data class ResonanceUiState(
     val playlistSyncDetail: String = "Idle",
     val syncProfileId: String = "default",
     val syncProfiles: List<SyncProfile> = listOf(SyncProfile("default", "Default", true)),
-    val profilePicturePath: String? = null,
     val availableStorageBytes: Long = 0,
     val errorMessage: String? = null,
     val linkImport: LinkImportUiState = LinkImportUiState(),
@@ -168,9 +167,6 @@ data class ResonanceUiState(
 
     val availableServerUploadModes: List<ServerUploadMode>
         get() = clientConfig.availableUploadModes
-
-    val availableServerDownloadModes: List<ServerDownloadMode>
-        get() = clientConfig.availableDownloadModes
 
     val currentClipRange: ClipRange?
         get() = currentTrackId?.let(clipRangesByTrackId::get)

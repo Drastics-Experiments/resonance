@@ -1099,6 +1099,38 @@ final class MobileClientConfigurationTests: XCTestCase {
         ).contains(.reviewedMatch))
     }
 
+    func testEveryEnabledUploadModeCanBeSelectedExplicitly() throws {
+        let verified = try verify(try signedResponse(
+            localFile: true,
+            sourceLink: true,
+            reviewedMatch: true,
+            matcherMode: "review"
+        ))
+        let configuration = MobileClientFeatureConfiguration(verified: verified)
+        let available = MobileTransferModePolicy.availableUploadModes(
+            configuration: configuration,
+            at: now
+        )
+
+        XCTAssertEqual(available, [.localFile, .serverSourceLink, .reviewedMatch])
+        for mode in available {
+            XCTAssertEqual(
+                MobileTransferModePolicy.effectiveUploadMode(
+                    preferred: mode,
+                    configuration: configuration,
+                    at: now
+                ),
+                mode
+            )
+            XCTAssertNotNil(MobileTransferPolicyLeasePolicy.captureUpload(
+                mode,
+                configuration: configuration,
+                preferredMode: mode,
+                at: now
+            ))
+        }
+    }
+
     func testExpiredConfigurationFallsBackToSafeModes() throws {
         let signed = try signedResponse(
             expiresAt: now.addingTimeInterval(10),

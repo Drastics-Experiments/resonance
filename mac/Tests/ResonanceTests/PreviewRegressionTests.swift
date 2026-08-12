@@ -392,22 +392,6 @@ struct PreviewRegressionTests {
     }
 
     @Test
-    func fullScreenTitleMarqueeOnlyMovesByTheRenderedOverflow() {
-        #expect(NowPlayingMarqueePolicy.travel(contentWidth: 420, availableWidth: 500) == 0)
-        #expect(NowPlayingMarqueePolicy.duration(for: 0) == 0)
-
-        let travel = NowPlayingMarqueePolicy.travel(contentWidth: 820, availableWidth: 540)
-        #expect(travel == 280)
-        let loopDistance = NowPlayingMarqueePolicy.loopDistance(contentWidth: 820)
-        #expect(loopDistance == 876)
-        #expect(abs(NowPlayingMarqueePolicy.duration(for: loopDistance) - (876.0 / 28.0)) < 0.001)
-        #expect(NowPlayingMarqueePolicy.duration(for: 28) == 8)
-        #expect(NowPlayingMarqueePolicy.offset(progress: 0, contentWidth: 820) == 0)
-        #expect(NowPlayingMarqueePolicy.offset(progress: 0.5, contentWidth: 820) == -438)
-        #expect(NowPlayingMarqueePolicy.offset(progress: 1, contentWidth: 820) == -876)
-    }
-
-    @Test
     func serverSongDecodesCatalogArtworkAndDuration() throws {
         let song = try JSONDecoder().decode(
             RemoteSong.self,
@@ -658,6 +642,17 @@ struct PreviewRegressionTests {
         }
         #expect(selected == "working-fallback")
         #expect(candidateAttempts == ["broken-primary", "working-fallback"])
+
+        do {
+            _ = try await LocalImportCandidateFallbackPolicy.firstSuccessful(
+                candidates: [String](),
+                attempt: { $0 }
+            )
+            Issue.record("Empty candidate lists must return a domain error")
+        } catch let error as LocalImportError {
+            #expect(error.code == "NO_IMPORT_CANDIDATES")
+            #expect(error.stage == .inspectingSource)
+        }
     }
 
     @Test

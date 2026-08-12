@@ -203,7 +203,7 @@ class LinkImportService(context: Context) {
                         progress(LinkImportProgress(LinkImportStage.SearchingCandidates))
                         var candidates = listOfNotNull(soundCloudTrack.directCandidate())
                         if (candidates.isEmpty()) {
-                            candidates = runCatching { searchYouTube(soundCloudTrack.metadata) }.getOrElse { emptyList() }
+                            candidates = bestEffort { searchYouTube(soundCloudTrack.metadata) }.orEmpty()
                         }
                         if (candidates.isEmpty()) throw LinkImportException(
                             LinkImportStage.SearchingCandidates,
@@ -228,9 +228,9 @@ class LinkImportService(context: Context) {
                             } else {
                                 if (searchedTrackCount > 0) delay(250)
                                 searchedTrackCount += 1
-                                val alternatives = runCatching {
+                                val alternatives = bestEffort {
                                     searchYouTube(soundCloudTrack.metadata, maximumMatches = 4, inspectLimit = 10)
-                                }.getOrElse { emptyList() }.map {
+                                }.orEmpty().map {
                                     it.copy(importTrack = soundCloudTrack.metadata, playlistIndex = position)
                                 }
                                 val primary = alternatives.firstOrNull()
@@ -304,14 +304,14 @@ class LinkImportService(context: Context) {
                     playlist.tracks.forEachIndexed { index, track ->
                         currentCoroutineContext().ensureActive()
                         if (index > 0) delay(250)
-                        var candidates = runCatching {
+                        var candidates = bestEffort {
                             searchYouTube(track, maximumMatches = 4, inspectLimit = 8)
-                        }.getOrElse { emptyList() }
+                        }.orEmpty()
                         if (candidates.isEmpty()) {
                             delay(500)
-                            candidates = runCatching {
+                            candidates = bestEffort {
                                 searchYouTube(track, maximumMatches = 4, inspectLimit = 10)
-                            }.getOrElse { emptyList() }
+                            }.orEmpty()
                         }
                         val position = track.trackNumber ?: index + 1
                         val prepared = candidates.map {
@@ -783,7 +783,7 @@ class LinkImportService(context: Context) {
         val documents = listOf(
             URL("https://music.youtube.com/search?q=" + query),
             URL("https://www.youtube.com/results?search_query=" + query),
-        ).mapNotNull { url -> runCatching { request(url, 6 * 1_024 * 1_024, "text/html") }.getOrNull() }
+        ).mapNotNull { url -> bestEffort { request(url, 6 * 1_024 * 1_024, "text/html") } }
         val ids = documents.asSequence().flatMap { html ->
             Regex("""\"videoId\"\s*:\s*\"([A-Za-z0-9_-]{11})\"""")
                 .findAll(html).map { it.groupValues[1] }
@@ -791,7 +791,7 @@ class LinkImportService(context: Context) {
         val candidates = buildList {
             for (id in ids) {
                 currentCoroutineContext().ensureActive()
-                runCatching { resolveYouTube(id).candidate }.getOrNull()?.let(::add)
+                bestEffort { resolveYouTube(id).candidate }?.let(::add)
             }
         }
         return scoreCandidates(track, candidates).take(maximumMatches)
@@ -1339,7 +1339,7 @@ class LinkImportService(context: Context) {
 
     private suspend fun fetchArtwork(value: String?): ByteArray? {
         val url = value?.takeIf(::isArtwork)?.let(::URL) ?: return null
-        return runCatching { requestBytes(url, 10 * 1_024 * 1_024, "image/*") }.getOrNull()
+        return bestEffort { requestBytes(url, 10 * 1_024 * 1_024, "image/*") }
     }
 
     private suspend fun spotifyURL(value: String): URL? {
@@ -1494,6 +1494,14 @@ class LinkImportService(context: Context) {
         if (tokens.isEmpty()) return 0.0
         val actualTokens = actual.split(' ').toSet()
         return tokens.count(actualTokens::contains).toDouble() / tokens.size
+    }
+
+    private inline fun <T> bestEffort(block: () -> T): T? = try {
+        block()
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
     }
 
     private fun JsonObject.string(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull

@@ -62,7 +62,7 @@ struct MobileLocalImportSheet: View {
                             }
                             .pickerStyle(.segmented)
                             .disabled(viewModel.isRunning)
-                            Text("Video downloads use YouTube results or direct YouTube links. Spotify and SoundCloud links remain audio-only.")
+                            Text("Spotify and SoundCloud links import audio only.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -71,7 +71,7 @@ struct MobileLocalImportSheet: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text("Reviewed server upload")
                                     .font(.subheadline.weight(.semibold))
-                                Text("Select exactly one server-reviewed source. Resonance downloads and verifies the chosen audio or video locally, then registers its preserved source link and media type.")
+                                Text("Choose one reviewed source to download and register with the server.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -84,8 +84,8 @@ struct MobileLocalImportSheet: View {
                                     Text("Upload after downloading")
                                         .font(.subheadline.weight(.semibold))
                                     Text(library.canUploadLocalImports
-                                         ? "Downloads every selected song first, then registers each preserved direct source link with \(library.visibleSyncProfileName)."
-                                         : "Sign in to your Resonance account, or turn this off for a local-only import.")
+                                         ? "Upload imported songs to \(library.visibleSyncProfileName)."
+                                         : "Sign in first, or turn this off for a local-only import.")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -108,10 +108,9 @@ struct MobileLocalImportSheet: View {
 
                         if let error = viewModel.error {
                             VStack(alignment: .leading, spacing: 5) {
-                                Text("Import stopped at \(stageTitle(error.stage, mediaMode: viewModel.mediaMode).lowercased())")
+                                Text("Import failed")
                                     .font(.headline)
                                 Text(error.message).font(.subheadline)
-                                Text(error.code).font(.caption.monospaced()).foregroundStyle(.secondary)
                             }
                             .padding(14)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -152,7 +151,12 @@ struct MobileLocalImportSheet: View {
                                 reviewedServerMatch: reviewedServerMatch
                             ) { dismiss() }
                         }
-                            .disabled(viewModel.isRunning || (viewModel.isPlaylist ? viewModel.selectedPlaylistItems.isEmpty : viewModel.selectedCandidate == nil))
+                            .disabled(
+                                viewModel.isRunning
+                                    || (viewModel.isPlaylist
+                                        ? viewModel.selectedPlaylistItems.isEmpty
+                                        : viewModel.selectedCandidate == nil)
+                            )
                     }
                 }
                 ToolbarItemGroup(placement: .keyboard) {
@@ -185,7 +189,15 @@ struct MobileLocalImportSheet: View {
             if viewModel.totalBytes > 0 {
                 ProgressView(value: Double(viewModel.completedBytes), total: Double(viewModel.totalBytes))
                     .tint(palette.foregroundAccent)
-                Text("\(ByteCountFormatter.string(fromByteCount: viewModel.completedBytes, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: viewModel.totalBytes, countStyle: .file))")
+                let completed = ByteCountFormatter.string(
+                    fromByteCount: viewModel.completedBytes,
+                    countStyle: .file
+                )
+                let total = ByteCountFormatter.string(
+                    fromByteCount: viewModel.totalBytes,
+                    countStyle: .file
+                )
+                Text("\(completed) of \(total)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -299,11 +311,7 @@ struct MobileLocalImportSheet: View {
     private func searchResultArtwork(_ result: LocalImportSearchResult) -> some View {
         let artworkURL = (result.track.artworkURL ?? result.candidates.first?.thumbnailURL).flatMap(URL.init(string:))
         return ZStack {
-            LinearGradient(
-                colors: [palette.secondary.opacity(0.42), palette.tertiary.opacity(0.22)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            palette.secondary.opacity(0.42)
             Image(systemName: viewModel.mediaMode == .video ? "play.rectangle.fill" : "music.note")
                 .foregroundStyle(.white.opacity(0.8))
             if let artworkURL {
@@ -440,7 +448,13 @@ struct MobileLocalImportSheet: View {
                             playlistItemArtwork(item)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(item.track.title).font(.subheadline.weight(.semibold)).lineLimit(2)
-                                Text([item.track.artist, item.track.durationSeconds.map { formatTime(TimeInterval($0)) }].compactMap { $0 }.joined(separator: " • "))
+                                let metadata = [
+                                    item.track.artist,
+                                    item.track.durationSeconds.map { formatTime(TimeInterval($0)) },
+                                ]
+                                    .compactMap { $0 }
+                                    .joined(separator: " • ")
+                                Text(metadata)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 if let status = viewModel.existingStatus(for: item.track, in: library) {
@@ -480,11 +494,7 @@ struct MobileLocalImportSheet: View {
     private func playlistItemArtwork(_ item: LocalImportPlaylistItem) -> some View {
         let artworkURL = (item.track.artworkURL ?? item.candidate.thumbnailURL).flatMap(URL.init(string:))
         return ZStack {
-            LinearGradient(
-                colors: [palette.secondary.opacity(0.42), palette.tertiary.opacity(0.22)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            palette.secondary.opacity(0.42)
             Image(systemName: "music.note")
                 .foregroundStyle(.white.opacity(0.8))
             if let artworkURL {
@@ -526,19 +536,19 @@ private func stageDetail(
     mediaMode: LocalImportMediaMode = .audio
 ) -> String {
     switch stage {
-    case .idle: "Enter text to search Spotify, SoundCloud, and YouTube, or paste a supported link."
-    case .resolvingMetadata: "Reading the track title, artist, artwork, and duration."
+    case .idle: "Search by name or paste a supported link."
+    case .resolvingMetadata: "Reading song details."
     case .searchingCandidates: mediaMode == .video
-        ? "Finding a downloadable YouTube video source."
-        : "Finding direct provider audio or a close alternate source."
-    case .awaitingSelection: "Review the match before saving \(mediaMode.rawValue) on this device."
-    case .inspectingSource: "Verifying direct \(mediaMode.rawValue) streams."
-    case .downloading: "Downloading verified \(mediaMode.rawValue) directly to this device."
+        ? "Finding a downloadable video."
+        : "Finding an audio source."
+    case .awaitingSelection: "Choose the \(mediaMode.rawValue) to import."
+    case .inspectingSource: "Checking the selected source."
+    case .downloading: "Saving \(mediaMode.rawValue) to this device."
     case .processing: mediaMode == .video
-        ? "Combining compatible MP4 video and audio while preserving metadata."
-        : "Preserving metadata and artwork in the local M4A."
-    case .savingLocal: "Adding the finished file to Resonance."
-    case .localComplete, .complete: "The song is stored locally and ready to play."
+        ? "Preparing the video file."
+        : "Adding song details and artwork."
+    case .savingLocal: "Adding the file to Resonance."
+    case .localComplete, .complete: "Ready to play."
     case .syncing: "Uploading the local import to the active profile."
     case .failed: "Review the error below and try another source."
     case .cancelled: "No unfinished import was kept."

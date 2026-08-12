@@ -191,10 +191,13 @@ struct ContentView: View {
         .overlay {
             if showsLocalImport {
                 ZStack {
-                    Color.black.opacity(0.72)
-                        .ignoresSafeArea()
-                        .contentShape(Rectangle())
-                        .onTapGesture { dismissLocalImport() }
+                    Button(action: dismissLocalImport) {
+                        Color.black.opacity(0.72)
+                            .ignoresSafeArea()
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close import")
 
                     MacLocalImportSheet(
                         viewModel: localImportModel,
@@ -210,18 +213,7 @@ struct ContentView: View {
             presentLocalImport()
         }
         .environmentObject(model.playbackPositionState)
-        .background {
-            ZStack {
-                palette.background
-                RadialGradient(
-                    colors: [palette.secondary.opacity(0.14), .clear],
-                    center: UnitPoint(x: 0.72, y: 0.05),
-                    startRadius: 10,
-                    endRadius: 520
-                )
-            }
-            .ignoresSafeArea()
-        }
+        .background(palette.background.ignoresSafeArea())
         .foregroundStyle(palette.ink)
         .preferredColorScheme(.dark)
         .ignoresSafeArea(.container, edges: .top)
@@ -286,7 +278,6 @@ private struct UpdateAvailableAlert: View {
         if #available(macOS 26.0, *) {
             alertContent
                 .glassEffect(.regular, in: .rect(cornerRadius: 16))
-                .shadow(color: Color.black.opacity(0.32), radius: 18, y: 8)
         } else {
             fallbackAlert
         }
@@ -326,11 +317,12 @@ private struct UpdateAvailableAlert: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(palette.muted)
-                    .frame(width: 24, height: 24)
+                    .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Dismiss update alert")
+            .accessibilityLabel("Dismiss update alert")
         }
         .padding(14)
         .frame(width: 300)
@@ -338,12 +330,10 @@ private struct UpdateAvailableAlert: View {
 
     private var fallbackAlert: some View {
         alertContent
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .background(palette.panel.opacity(0.88), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(palette.panel, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(Color.white.opacity(0.10))
         }
-        .shadow(color: Color.black.opacity(0.32), radius: 18, y: 8)
     }
 }

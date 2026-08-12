@@ -92,6 +92,15 @@ private fun PlaylistCollectionScreen(
     var creating by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var deletion by remember { mutableStateOf<Playlist?>(null) }
+    val trackCounts = remember(state.playlists, state.tracks, state.remoteSongs) {
+        state.playlists.associate { playlist ->
+            playlist.id to PlaylistPresentationPolicy.entries(
+                playlist,
+                state.tracks,
+                state.remoteSongs,
+            ).size
+        }
+    }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp),
@@ -109,7 +118,7 @@ private fun PlaylistCollectionScreen(
                 }
                 IconButton(
                     onClick = { creating = true },
-                    modifier = Modifier.size(46.dp).background(MaterialTheme.colorScheme.primary, CircleShape),
+                    modifier = Modifier.size(48.dp).background(MaterialTheme.colorScheme.primary, CircleShape),
                 ) { Icon(Icons.Default.Add, "New playlist") }
             }
         }
@@ -117,11 +126,7 @@ private fun PlaylistCollectionScreen(
             item { EmptyPlaylistMessage("No playlists", "Create a playlist to organize your music.") }
         } else {
             items(state.playlists, key = { it.id }) { playlist ->
-                val trackCount = PlaylistPresentationPolicy.entries(
-                    playlist,
-                    state.tracks,
-                    state.remoteSongs,
-                ).size
+                val trackCount = trackCounts[playlist.id] ?: 0
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -202,8 +207,12 @@ private fun PlaylistDetailScreen(
     var addSongs by remember { mutableStateOf(false) }
     var reorder by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
-    val entries = PlaylistPresentationPolicy.entries(playlist, state.tracks, state.remoteSongs)
-    val tracks = entries.mapNotNull { (it as? PlaylistPresentationEntry.Downloaded)?.track }
+    val entries = remember(playlist, state.tracks, state.remoteSongs) {
+        PlaylistPresentationPolicy.entries(playlist, state.tracks, state.remoteSongs)
+    }
+    val tracks = remember(entries) {
+        entries.mapNotNull { (it as? PlaylistPresentationEntry.Downloaded)?.track }
+    }
     val isActivePlaylist = state.activePlaylistId == playlist.id && state.currentTrackId != null
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -249,7 +258,7 @@ private fun PlaylistDetailScreen(
                 IconButton(
                     enabled = tracks.isNotEmpty() && !state.isTransientPlayback,
                     onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) },
-                    modifier = Modifier.size(46.dp).background(
+                    modifier = Modifier.size(48.dp).background(
                         if (state.shuffleEnabled && !state.isTransientPlayback) MaterialTheme.colorScheme.secondary
                         else Color.White.copy(alpha = .08f),
                         CircleShape,
@@ -343,7 +352,7 @@ private fun PlaylistDetailScreen(
                                 Text(
                                     track.album.ifBlank { "Unknown Album" },
                                     fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .42f),
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                                     maxLines = 1,
                                 )
                             }

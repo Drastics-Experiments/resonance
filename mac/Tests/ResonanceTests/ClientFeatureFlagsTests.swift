@@ -127,7 +127,6 @@ struct ClientFeatureFlagsTests {
         #expect(!policy.allowsServerSourceLink)
         #expect(!policy.allowsReviewedMatch)
         #expect(policy.permittedUploadModes == [.localFile])
-        #expect(policy.permittedDownloadModes == [.verifiedFileCache])
     }
 
     @Test("cache and mode scopes separate profile, version, build, and token")
@@ -169,9 +168,6 @@ struct ClientFeatureFlagsTests {
         #expect(base.cacheKey != otherVersion.cacheKey)
         #expect(base.cacheKey != otherBuild.cacheKey)
         #expect(base.cacheKey != otherCohort.cacheKey)
-        #expect(base.transferModeScope != otherProfile.transferModeScope)
-        #expect(base.transferModeScope == otherToken.transferModeScope)
-        #expect(base.transferModeScope == otherVersion.transferModeScope)
     }
 
     @Test("expired policy reverts to safe modes and future snapshots are rejected")
@@ -249,8 +245,6 @@ struct ClientFeatureFlagsTests {
         #expect(policy.permittedUploadModes == [.serverSourceLink])
         #expect(policy.requestedStreamOnly)
         #expect(policy.allowsStreamOnlyPlayback)
-        #expect(policy.permittedDownloadModes == [.streamOnly])
-        #expect(policy.resolvedDownloadMode(.streamOnly) == .streamOnly)
 
         let reviewedFixture = try makeFixture(
             context: context,
@@ -430,7 +424,7 @@ struct ClientFeatureFlagsTests {
         #expect(importViewModel.canSync)
     }
 
-    @Test("local-import transfer freezes raw input across source-link and reviewed modes")
+    @Test("upload mode selection persists and local-import transfers honor reviewed-match requirements")
     func localImportTransferModePolicy() async throws {
         let suite = "ClientFeatureFlagsTransferPolicy.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
@@ -481,8 +475,13 @@ struct ClientFeatureFlagsTests {
         model.serverToken = token
         model.serverAdminToken = "admin-token"
         await model.refreshClientConfigurationNow()
+        #expect(model.uploadMode == .localFile)
 
         model.selectUploadMode(.serverSourceLink)
+        #expect(model.uploadMode == .serverSourceLink)
+        await model.refreshClientConfigurationNow()
+        #expect(model.uploadMode == .serverSourceLink)
+
         let shortLinkContext = try model.beginLocalImportTransfer(
             reservingUpload: true,
             rawSourceInput: "https://youtu.be/dQw4w9WgXcQ",
@@ -509,28 +508,18 @@ struct ClientFeatureFlagsTests {
         #expect(sourceContext.uploadMode == .serverSourceLink)
         model.endLocalImportTransfer(sourceContext)
 
-        model.selectUploadMode(.localFile)
-        var requiredReview = false
-        do {
-            _ = try model.beginLocalImportTransfer(
-                reservingUpload: true,
-                rawSourceInput: "search words",
-                requiresReviewedMatch: true
-            )
-        } catch LocalImportTransferContextError.reviewedMatchRequired {
-            requiredReview = true
-        }
-        #expect(requiredReview)
-
-        model.selectUploadMode(.reviewedMatch)
         let reviewedContext = try model.beginLocalImportTransfer(
             reservingUpload: true,
-            rawSourceInput: "search words",
+            rawSourceInput: "playlist search",
+            mediaMode: .audio,
             requiresReviewedMatch: true
         )
         #expect(reviewedContext.uploadMode == .reviewedMatch)
         #expect(reviewedContext.requiresReviewedMatch)
         model.endLocalImportTransfer(reviewedContext)
+
+        model.selectUploadMode(.localFile)
+        #expect(model.uploadMode == .localFile)
     }
 
     @Test("editing source invalidates source-link and reviewed selections before import")
@@ -982,8 +971,7 @@ struct ClientFeatureFlagsTests {
         model.serverAdminToken = "admin-token"
         await model.refreshClientConfigurationNow()
         #expect(model.clientConfiguration.allowsLocalFileUpload)
-        model.selectUploadMode(.reviewedMatch)
-        #expect(model.uploadMode == .reviewedMatch)
+        #expect(model.uploadMode == .localFile)
         model.tracks = [Track(
             title: "Managed upload",
             artist: "Artist",
@@ -991,22 +979,26 @@ struct ClientFeatureFlagsTests {
             duration: 1,
             artwork: .liked,
             fileURL: mediaURL,
+            remoteID: "missing-managed-upload",
+            sourceServer: "https://music.example",
+            syncProfileID: "default",
             downloadSourceURL: "https://media.example/managed-upload.m4a"
         )]
         let initialConfigRequestCount = defaults.integer(forKey: "config-request-count")
         defaults.set(true, forKey: "revoke-local-file")
 
-        await model.uploadSongsToServer([mediaURL])
+        model.uploadMissingDownloadedSongs()
+        for _ in 0..<200
+        where defaults.integer(forKey: "config-request-count") <= initialConfigRequestCount
+            || model.isUploadingServer {
+            try await Task.sleep(for: .milliseconds(5))
+        }
 
         #expect(defaults.integer(forKey: "config-request-count") > initialConfigRequestCount)
         #expect(defaults.integer(forKey: "put-request-count") == 0)
         #expect(!model.clientConfiguration.allowsLocalFileUpload)
-        // Reviewed match intentionally depends on the raw-byte gate, so applying the
-        // revocation resolves the picker away from Reviewed match. The important
-        // invariant is that its previously selected value cannot authorize this
-        // generic Local File action.
-        #expect(model.uploadMode != .reviewedMatch)
-        #expect(model.uploadStatus.contains("1 failed"))
+        #expect(model.uploadMode != .localFile)
+        #expect(model.uploadStatus.contains("failed"))
     }
 
     @Test("committed generic upload responses are ignored after credential context changes")
@@ -1061,16 +1053,21 @@ struct ClientFeatureFlagsTests {
                 duration: 1,
                 artwork: .liked,
                 fileURL: mediaURL,
+                remoteID: "missing-committed-id",
+                sourceServer: "https://music.example",
+                syncProfileID: "default",
                 downloadSourceURL: "https://media.example/committed.m4a"
             )]
 
-            let upload = Task { await model.uploadSongsToServer([mediaURL]) }
+            model.uploadMissingDownloadedSongs()
             for _ in 0..<100 where !defaults.bool(forKey: "put-started") {
                 try await Task.sleep(for: .milliseconds(5))
             }
             #expect(defaults.bool(forKey: "put-started"))
             model.clearServerCredentials()
-            await upload.value
+            for _ in 0..<600 where model.isUploadingServer {
+                try await Task.sleep(for: .milliseconds(5))
+            }
 
             #expect(model.remoteSongs.isEmpty)
             #expect(model.serverURLString.isEmpty)

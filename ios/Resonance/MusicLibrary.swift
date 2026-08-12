@@ -2,6 +2,7 @@ import AVFoundation
 import Combine
 import CryptoKit
 import Foundation
+import ImageIO
 import MediaPlayer
 import UIKit
 import UniformTypeIdentifiers
@@ -603,8 +604,6 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published private(set) var isDownloading = false
     @Published private(set) var isUploading = false
     @Published var isRefreshingCatalog = false
-    @Published private(set) var downloadProgress = 0.0
-    @Published private(set) var uploadProgress = 0.0
     @Published private(set) var downloadDetail = "Idle"
     @Published private(set) var uploadDetail = "Idle"
     @Published private(set) var transferDisplay: MobileTransferDisplayState?
@@ -651,6 +650,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         normalizedServer()
     }
 
+    var availableUploadModes: [MobileUploadMode] {
+        MobileTransferModePolicy.availableUploadModes(configuration: clientFeatureConfiguration)
+    }
+
     var activeUploadMode: MobileUploadMode? {
         MobileTransferModePolicy.effectiveUploadMode(
             preferred: selectedUploadMode,
@@ -684,7 +687,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var history: [UUID] = []
     private var playbackQueue: [UUID] = []
     private var playbackPlaylistID: UUID?
-    private var artworkCache: [String: UIImage] = [:]
+    private let artworkCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 160
+        cache.totalCostLimit = 64 * 1_024 * 1_024
+        return cache
+    }()
+    @Published private(set) var artworkVersions: [String: UInt64] = [:]
+    private var artworkLoads: [String: ArtworkLoad] = [:]
+    private var artworkDecodeFailures: Set<String> = []
+    private var nextArtworkVersion: UInt64 = 0
     private var nowPlayingArtworkCacheKey: String?
     private var nowPlayingArtworkCache: MPMediaItemArtwork?
     private var remoteNowPlayingArtworkCache: [String: UIImage] = [:]
@@ -741,9 +753,20 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         var artworkData: Data?
     }
 
+    private struct DecodedArtwork: @unchecked Sendable {
+        let image: CGImage
+        let scale: CGFloat
+        let orientation: UIImage.Orientation
+    }
+
+    private struct ArtworkLoad {
+        let id: UUID
+        let task: Task<DecodedArtwork?, Never>
+    }
+
     override init() {
         let support = MobileApplicationSupport.root()
-        MobileLegacyAppMigration.run(applicationSupportRoot: support)
+        let legacyMigrationSucceeded = MobileLegacyAppMigration.run(applicationSupportRoot: support)
         root = support.appendingPathComponent(MobileLegacyAppMigration.applicationSupportName, isDirectory: true)
         musicDirectory = root.appendingPathComponent("Music", isDirectory: true)
         artworkDirectory = root.appendingPathComponent("Artwork", isDirectory: true)
@@ -751,9 +774,31 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         backupStateURL = root.appendingPathComponent("library.backup.json")
         super.init()
         removeOrphanedTransferArtifacts()
-        try? fileManager.createDirectory(at: musicDirectory, withIntermediateDirectories: true)
-        try? fileManager.createDirectory(at: artworkDirectory, withIntermediateDirectories: true)
+        var startupIssues: [String] = []
+        if !legacyMigrationSucceeded {
+            startupIssues.append("Legacy app data could not be migrated. The original files were left in place.")
+        }
+        do {
+            try fileManager.createDirectory(at: musicDirectory, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: artworkDirectory, withIntermediateDirectories: true)
+        } catch {
+            startupIssues.append("Resonance could not prepare its private media folders: \(error.localizedDescription)")
+        }
         load()
+        if !startupIssues.isEmpty {
+            let startupMessage = startupIssues.joined(separator: " ")
+            if let existing = libraryRecoveryNotice {
+                libraryRecoveryNotice = MobileLibraryRecoveryNotice(
+                    title: existing.title,
+                    message: existing.message + " " + startupMessage
+                )
+            } else {
+                libraryRecoveryNotice = MobileLibraryRecoveryNotice(
+                    title: "Storage setup incomplete",
+                    message: startupMessage
+                )
+            }
+        }
         if UserDefaults.standard.object(forKey: "Resonance.volume") != nil { volume = UserDefaults.standard.double(forKey: "Resonance.volume") }
         if UserDefaults.standard.object(forKey: "Resonance.rate") != nil { playbackRate = Float(UserDefaults.standard.double(forKey: "Resonance.rate")) }
         crossfadeEnabled = UserDefaults.standard.bool(forKey: "Resonance.crossfade.enabled")
@@ -777,8 +822,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             if session.profileID == syncProfileID {
                 syncProfileName = session.profileDisplayName
             }
-            try? Self.storeToken("", key: "client")
-            try? Self.storeToken("", key: "admin")
+            do {
+                try Self.updateStoredTokens(deleting: ["client", "admin"])
+            } catch {
+                serverConfigurationMessage = "The account is available, but old credentials could not be removed: \(error.localizedDescription)"
+            }
             scheduleAccountRefresh(session)
         } else {
             serverToken = Self.readToken(key: "client")
@@ -803,6 +851,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         clientConfigRefreshTask?.cancel()
         accountRefreshTask?.cancel()
         nowPlayingArtworkLoadTask?.cancel()
+        artworkLoads.values.forEach { $0.task.cancel() }
         activeDownloadAuthorizations.values.forEach { $0.revoke() }
         if let streamingEndObserver { NotificationCenter.default.removeObserver(streamingEndObserver) }
         if let streamingFailureObserver { NotificationCenter.default.removeObserver(streamingFailureObserver) }
@@ -833,14 +882,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 migrationProfileID: syncProfileID
             )
             migrateConfirmedLegacyProfile(for: session)
-            try Self.storeAccountSession(session)
+            try Self.storeAccountSession(session, replacingLegacyTokens: true)
             accountSession = session
             accountEmail = session.email
             accountRole = session.role
             accountDisplayName = session.profileDisplayName
             accountImageURL = session.imageURL
-            try? Self.storeToken("", key: "client")
-            try? Self.storeToken("", key: "admin")
             guard applyServerConfiguration(
                 serverURL: session.baseURL.absoluteString,
                 accessToken: session.accessToken,
@@ -860,12 +907,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     func signOutAccount() async {
         let active = accountSession
+        do {
+            try Self.updateStoredTokens(deleting: [Self.accountSessionKey, "client", "admin"])
+        } catch {
+            serverMessage = "Could not sign out securely: \(error.localizedDescription)"
+            serverConfigurationMessage = serverMessage
+            return
+        }
         accountSession = nil
         accountRefreshTask?.cancel()
         accountRefreshTask = nil
-        try? Self.storeToken("", key: Self.accountSessionKey)
-        try? Self.storeToken("", key: "client")
-        try? Self.storeToken("", key: "admin")
         accountEmail = nil
         accountRole = nil
         accountDisplayName = nil
@@ -900,7 +951,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             let refreshed = try await client.refresh(current, migrationProfileID: syncProfileID)
             guard accountSession == current else { return }
             migrateConfirmedLegacyProfile(for: refreshed)
-            try Self.storeAccountSession(refreshed)
+            try Self.storeAccountSession(refreshed, replacingLegacyTokens: true)
             accountSession = refreshed
             accountEmail = refreshed.email
             accountRole = refreshed.role
@@ -1052,6 +1103,15 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         guard track.remoteID != nil else { return true }
         guard let activeServerContext else { return false }
         return track.remoteIdentity()?.context == activeServerContext
+    }
+
+    func selectUploadMode(_ mode: MobileUploadMode) {
+        guard !isUploadTransferBusy,
+              availableUploadModes.contains(mode) else { return }
+        selectedUploadMode = mode
+        if let scope = transferPreferenceScope {
+            UserDefaults.standard.set(mode.rawValue, forKey: scope.uploadKey)
+        }
     }
 
     func refreshClientConfiguration() async {
@@ -1668,151 +1728,96 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         return musicDirectory.appendingPathComponent(track.relativePath)
     }
 
-    func artwork(for track: MobileTrack) -> UIImage? {
+    func cachedArtwork(for track: MobileTrack) -> UIImage? {
         guard let filename = track.artworkFilename else { return nil }
-        if let cached = artworkCache[filename] { return cached }
-        guard let image = UIImage(contentsOfFile: artworkDirectory.appendingPathComponent(filename).path) else { return nil }
-        let squareImage = centerCroppedSquare(image)
-        artworkCache[filename] = squareImage
-        return squareImage
+        return artworkCache.object(forKey: filename as NSString)
     }
 
-    private func centerCroppedSquare(_ image: UIImage) -> UIImage {
-        guard let cgImage = image.cgImage else { return image }
+    func artworkVersion(for track: MobileTrack) -> UInt64 {
+        guard let filename = track.artworkFilename else { return 0 }
+        return artworkVersions[filename, default: 0]
+    }
+
+    func loadArtwork(for track: MobileTrack) async -> UIImage? {
+        guard let filename = track.artworkFilename else { return nil }
+        if let cached = artworkCache.object(forKey: filename as NSString) { return cached }
+        guard !artworkDecodeFailures.contains(filename) else { return nil }
+
+        let load: ArtworkLoad
+        if let existing = artworkLoads[filename] {
+            load = existing
+        } else {
+            let url = artworkDirectory.appendingPathComponent(filename)
+            load = ArtworkLoad(
+                id: UUID(),
+                task: Task.detached(priority: .userInitiated) {
+                    Self.decodeArtwork(at: url)
+                }
+            )
+            artworkLoads[filename] = load
+        }
+
+        let decoded = await load.task.value
+        guard artworkLoads[filename]?.id == load.id else {
+            return artworkCache.object(forKey: filename as NSString)
+        }
+        guard let decoded else {
+            artworkLoads.removeValue(forKey: filename)
+            artworkDecodeFailures.insert(filename)
+            return nil
+        }
+        let callerWasCancelled = Task.isCancelled
+        let image = UIImage(
+            cgImage: decoded.image,
+            scale: decoded.scale,
+            orientation: decoded.orientation
+        )
+        let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
+        artworkCache.setObject(image, forKey: filename as NSString, cost: cost)
+        artworkLoads.removeValue(forKey: filename)
+        artworkDecodeFailures.remove(filename)
+        return callerWasCancelled ? nil : image
+    }
+
+    private func invalidateArtwork(filename: String, retainVersion: Bool = true) {
+        artworkCache.removeObject(forKey: filename as NSString)
+        artworkLoads.removeValue(forKey: filename)?.task.cancel()
+        artworkDecodeFailures.remove(filename)
+        nextArtworkVersion &+= 1
+        if retainVersion {
+            artworkVersions[filename] = nextArtworkVersion
+        } else {
+            artworkVersions.removeValue(forKey: filename)
+        }
+        nowPlayingArtworkCacheKey = nil
+    }
+
+    private nonisolated static func decodeArtwork(at url: URL) -> DecodedArtwork? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1_024,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
         let width = cgImage.width
         let height = cgImage.height
-        let contentBounds = detectedArtworkContentBounds(in: cgImage)
-        let side = min(contentBounds.width, contentBounds.height)
+        let side = min(width, height)
         let cropRect = CGRect(
-            x: contentBounds.midX - side / 2,
-            y: contentBounds.midY - side / 2,
-            width: side,
-            height: side
-        ).integral.intersection(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
-        guard cropRect.width > 0, cropRect.height > 0 else { return image }
-        if cropRect.width == CGFloat(width), cropRect.height == CGFloat(height) { return image }
-        guard let croppedImage = cgImage.cropping(to: cropRect) else { return image }
-        return UIImage(cgImage: croppedImage, scale: image.scale, orientation: image.imageOrientation)
-    }
-
-    private func detectedArtworkContentBounds(in image: CGImage) -> CGRect {
-        let sourceWidth = image.width
-        let sourceHeight = image.height
-        let sampleScale = min(1, 160 / Double(max(sourceWidth, sourceHeight)))
-        let sampleWidth = max(Int((Double(sourceWidth) * sampleScale).rounded()), 1)
-        let sampleHeight = max(Int((Double(sourceHeight) * sampleScale).rounded()), 1)
-        let bytesPerPixel = 4
-        let bytesPerRow = sampleWidth * bytesPerPixel
-        var pixels = [UInt8](repeating: 0, count: sampleHeight * bytesPerRow)
-
-        guard let context = CGContext(
-            data: &pixels,
-            width: sampleWidth,
-            height: sampleHeight,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            return CGRect(x: 0, y: 0, width: CGFloat(sourceWidth), height: CGFloat(sourceHeight))
-        }
-        context.interpolationQuality = .low
-        context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(sampleWidth), height: CGFloat(sampleHeight)))
-
-        struct LineStats {
-            let channels: [Double]
-            let deviation: Double
-        }
-
-        func stats(for offsets: [Int]) -> LineStats {
-            guard !offsets.isEmpty else { return LineStats(channels: [0, 0, 0, 0], deviation: 255) }
-            var totals = [Double](repeating: 0, count: bytesPerPixel)
-            for offset in offsets {
-                for channel in 0..<bytesPerPixel {
-                    totals[channel] += Double(pixels[offset + channel])
-                }
-            }
-            let means = totals.map { $0 / Double(offsets.count) }
-            var totalDeviation = 0.0
-            for offset in offsets {
-                for channel in 0..<bytesPerPixel {
-                    totalDeviation += abs(Double(pixels[offset + channel]) - means[channel])
-                }
-            }
-            return LineStats(
-                channels: means,
-                deviation: totalDeviation / Double(offsets.count * bytesPerPixel)
-            )
-        }
-
-        func rowStats(_ row: Int, xRange: Range<Int>) -> LineStats {
-            stats(for: xRange.map { row * bytesPerRow + $0 * bytesPerPixel })
-        }
-
-        func columnStats(_ column: Int, yRange: Range<Int>) -> LineStats {
-            stats(for: yRange.map { $0 * bytesPerRow + column * bytesPerPixel })
-        }
-
-        func colorDistance(_ lhs: LineStats, _ rhs: LineStats) -> Double {
-            zip(lhs.channels, rhs.channels).reduce(0) { $0 + abs($1.0 - $1.1) } / Double(bytesPerPixel)
-        }
-
-        func borderRun(lineCount: Int, statsAt: (Int) -> LineStats, fromStart: Bool) -> Int {
-            guard lineCount >= 6 else { return 0 }
-            let edgeIndex = fromStart ? 0 : lineCount - 1
-            let reference = statsAt(edgeIndex)
-            guard reference.deviation <= 10 else { return 0 }
-            var count = 0
-            for offset in 0..<(lineCount / 2) {
-                let index = fromStart ? offset : lineCount - 1 - offset
-                let candidate = statsAt(index)
-                guard candidate.deviation <= 13, colorDistance(candidate, reference) <= 18 else { break }
-                count += 1
-            }
-            return count
-        }
-
-        func symmetricInsets(_ first: Int, _ second: Int, length: Int) -> (Int, Int) {
-            guard first >= 2, second >= 2, first + second < length * 3 / 4 else { return (0, 0) }
-            let tolerance = max(2, min(first, second) / 3)
-            guard abs(first - second) <= tolerance else { return (0, 0) }
-            return (first, second)
-        }
-
-        let fullXRange = 0..<sampleWidth
-        let firstRows = borderRun(
-            lineCount: sampleHeight,
-            statsAt: { rowStats($0, xRange: fullXRange) },
-            fromStart: true
+            x: CGFloat(width - side) / 2,
+            y: CGFloat(height - side) / 2,
+            width: CGFloat(side),
+            height: CGFloat(side)
         )
-        let lastRows = borderRun(
-            lineCount: sampleHeight,
-            statsAt: { rowStats($0, xRange: fullXRange) },
-            fromStart: false
+        let squareImage = width == height ? cgImage : (cgImage.cropping(to: cropRect) ?? cgImage)
+        return DecodedArtwork(
+            image: squareImage,
+            scale: 1,
+            orientation: .up
         )
-        let (rowInsetStart, rowInsetEnd) = symmetricInsets(firstRows, lastRows, length: sampleHeight)
-        let contentYRange = rowInsetStart..<(sampleHeight - rowInsetEnd)
-
-        let firstColumns = borderRun(
-            lineCount: sampleWidth,
-            statsAt: { columnStats($0, yRange: contentYRange) },
-            fromStart: true
-        )
-        let lastColumns = borderRun(
-            lineCount: sampleWidth,
-            statsAt: { columnStats($0, yRange: contentYRange) },
-            fromStart: false
-        )
-        let (columnInsetStart, columnInsetEnd) = symmetricInsets(firstColumns, lastColumns, length: sampleWidth)
-
-        let scaleX = CGFloat(sourceWidth) / CGFloat(sampleWidth)
-        let scaleY = CGFloat(sourceHeight) / CGFloat(sampleHeight)
-        return CGRect(
-            x: CGFloat(columnInsetStart) * scaleX,
-            y: CGFloat(rowInsetStart) * scaleY,
-            width: CGFloat(sampleWidth - columnInsetStart - columnInsetEnd) * scaleX,
-            height: CGFloat(sampleHeight - rowInsetStart - rowInsetEnd) * scaleY
-        ).integral.intersection(CGRect(x: 0, y: 0, width: CGFloat(sourceWidth), height: CGFloat(sourceHeight)))
     }
 
     func importFiles(_ urls: [URL]) async {
@@ -2405,7 +2410,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func tracks(in playlist: MobilePlaylist) -> [MobileTrack] {
-        playlist.trackIDs.compactMap { id in tracks.first { $0.id == id } }
+        let tracksByID = Dictionary(
+            tracks.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return playlist.trackIDs.compactMap { tracksByID[$0] }
     }
 
     func playlistEntries(in playlist: MobilePlaylist) -> [MobilePlaylistPresentationEntry] {
@@ -2456,7 +2465,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         try? fileManager.removeItem(at: fileURL(for: track))
         if let artworkFilename = track.artworkFilename {
             try? fileManager.removeItem(at: artworkDirectory.appendingPathComponent(artworkFilename))
-            artworkCache.removeValue(forKey: artworkFilename)
+            invalidateArtwork(filename: artworkFilename, retainVersion: false)
         }
         tracks.removeAll { $0.id == track.id }
         playbackQueue.removeAll { $0 == track.id }
@@ -3627,7 +3636,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         let filename = trackID.uuidString + ".artwork"
         do {
             try data.write(to: artworkDirectory.appendingPathComponent(filename), options: .atomic)
-            artworkCache.removeValue(forKey: filename)
+            invalidateArtwork(filename: filename)
             return filename
         } catch {
             return nil
@@ -3644,14 +3653,15 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         var changed = false
         let context = MobileServerEndpointPolicy.context(serverURL: baseURL, profileID: syncProfileID)
 
-        for index in tracks.indices {
-            let track = tracks[index]
+        for track in tracks {
             guard let remoteID = track.remoteID,
                   let context,
                   track.remoteIdentity() == MobileRemoteIdentity(context: context, remoteID: remoteID),
                   let song = songsByID[remoteID],
-                  artwork(for: track) == nil,
+                  await loadArtwork(for: track) == nil,
                   let data = await remoteArtworkData(for: song, baseURL: baseURL),
+                  let index = tracks.firstIndex(where: { $0.id == track.id }),
+                  tracks[index].remoteIdentity() == MobileRemoteIdentity(context: context, remoteID: remoteID),
                   let filename = saveArtwork(data, for: track.id) else { continue }
 
             tracks[index].artworkFilename = filename
@@ -4195,7 +4205,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     func uploadFiles(_ urls: [URL]) async {
         guard !urls.isEmpty else { return }
         guard activeUploadMode == .localFile else {
-            uploadDetail = "Choose Preserved source link upload mode first"
+            uploadDetail = "Switch to On-device import first"
             return
         }
         guard !isUploadTransferBusy else { return }
@@ -4332,21 +4342,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
         let accessToken = rawAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
         let adminToken = rawAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        let previousAccessToken = serverToken
-        let previousAdminToken = serverAdminToken
         do {
             if accountSession?.accessToken == accessToken {
-                try Self.storeToken("", key: "client")
-                try Self.storeToken("", key: "admin")
+                try Self.updateStoredTokens(deleting: ["client", "admin"])
             } else {
-                try Self.storeToken(accessToken, key: "client")
-                try Self.storeToken(adminToken, key: "admin")
+                try Self.updateStoredTokens(values: [
+                    "client": accessToken,
+                    "admin": adminToken,
+                ])
             }
         } catch {
-            try? Self.storeToken(previousAccessToken, key: "client")
-            try? Self.storeToken(previousAdminToken, key: "admin")
-            serverToken = previousAccessToken
-            serverAdminToken = previousAdminToken
             serverConfigurationMessage = "Could not save the account session securely: \(error.localizedDescription)"
             return false
         }
@@ -4628,12 +4633,6 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private func publishTransfer(_ display: MobileTransferDisplayState) {
         transferDisplay = display
-        switch display.kind {
-        case .download:
-            downloadProgress = display.progress ?? 0
-        case .upload:
-            uploadProgress = display.progress ?? 0
-        }
     }
 
     func dismissTransferNotice() {
@@ -4646,7 +4645,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private func uploadDownloadedSongsMissingFromServer(trackIDs: Set<UUID>?) async {
         guard activeUploadMode == .localFile else {
-            uploadDetail = "Choose Preserved source link upload mode first"
+            uploadDetail = "Switch to On-device import first"
             serverMessage = uploadDetail
             return
         }
@@ -5740,7 +5739,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                     let artworkURL = artworkDirectory.appendingPathComponent(artworkFilename)
                     if isDescendant(artworkURL, of: artworkDirectory) {
                         try? fileManager.removeItem(at: artworkURL)
-                        artworkCache.removeValue(forKey: artworkFilename)
+                        invalidateArtwork(filename: artworkFilename, retainVersion: false)
                     }
                 }
                 changed = true
@@ -5952,7 +5951,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             try? markServerDownloadExcludedFromBackup(at: fileURL(for: track))
         }
         if normalization.repairCount > 0 {
-            let repairMessage = "Resonance repaired \(normalization.repairCount) duplicate identifier or remote-association conflict\(normalization.repairCount == 1 ? "" : "s") without deleting audio files."
+            let conflictSuffix = normalization.repairCount == 1 ? "" : "s"
+            let repairMessage = "Resonance repaired \(normalization.repairCount) "
+                + "duplicate identifier or remote-association conflict\(conflictSuffix) "
+                + "without deleting audio files."
             if let existing = libraryRecoveryNotice {
                 libraryRecoveryNotice = MobileLibraryRecoveryNotice(
                     title: existing.title,
@@ -6378,10 +6380,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func nowPlayingArtwork(for track: MobileTrack) -> MPMediaItemArtwork {
+        let localArtwork = cachedArtwork(for: track)
         let remoteArtwork = track.remoteID.flatMap { remoteNowPlayingArtworkCache[$0] }
-        let sourceArtwork = artwork(for: track) ?? remoteArtwork
-        let sourceKey = track.artworkFilename
-            ?? (remoteArtwork == nil ? "fallback" : "remote:\(track.remoteID ?? "")")
+        let sourceArtwork = localArtwork ?? remoteArtwork
+        let sourceKey: String
+        if localArtwork != nil {
+            sourceKey = "local:\(track.artworkFilename ?? "")"
+        } else if remoteArtwork != nil {
+            sourceKey = "remote:\(track.remoteID ?? "")"
+        } else {
+            sourceKey = "fallback"
+        }
         let cacheKey = "\(track.id.uuidString)|\(sourceKey)"
         if cacheKey == nowPlayingArtworkCacheKey, let nowPlayingArtworkCache {
             return nowPlayingArtworkCache
@@ -6398,46 +6407,87 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func scheduleNowPlayingArtworkLoad(for track: MobileTrack) {
-        guard artwork(for: track) == nil,
-              let remoteID = track.remoteID,
-              remoteNowPlayingArtworkCache[remoteID] == nil,
-              let song = remoteSongs.first(where: { $0.id == remoteID }),
-              song.artworkURL != nil,
-              let baseURL = normalizedServer() else {
-            if nowPlayingArtworkLoadRemoteID != track.remoteID {
+        guard cachedArtwork(for: track) == nil else {
+            nowPlayingArtworkLoadTask?.cancel()
+            nowPlayingArtworkLoadTask = nil
+            nowPlayingArtworkLoadRemoteID = nil
+            return
+        }
+        if track.artworkFilename != nil {
+            if let filename = track.artworkFilename,
+               artworkDecodeFailures.contains(filename),
+               track.remoteID.flatMap({ remoteNowPlayingArtworkCache[$0] }) != nil {
                 nowPlayingArtworkLoadTask?.cancel()
                 nowPlayingArtworkLoadTask = nil
                 nowPlayingArtworkLoadRemoteID = nil
+                return
+            }
+            let loadID = "local:\(track.id.uuidString)"
+            guard nowPlayingArtworkLoadRemoteID != loadID else { return }
+            nowPlayingArtworkLoadTask?.cancel()
+            nowPlayingArtworkLoadRemoteID = loadID
+            nowPlayingArtworkLoadTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer {
+                    if self.nowPlayingArtworkLoadRemoteID == loadID {
+                        self.nowPlayingArtworkLoadRemoteID = nil
+                        self.nowPlayingArtworkLoadTask = nil
+                    }
+                }
+                let localArtwork = await self.loadArtwork(for: track)
+                guard !Task.isCancelled, self.currentTrackID == track.id else { return }
+                if localArtwork != nil {
+                    self.nowPlayingArtworkCacheKey = nil
+                    self.updateNowPlaying()
+                } else {
+                    await self.loadRemoteNowPlayingArtwork(for: track)
+                }
             }
             return
         }
-        guard nowPlayingArtworkLoadRemoteID != remoteID else { return }
+        guard let remoteID = track.remoteID,
+              remoteNowPlayingArtworkCache[remoteID] == nil,
+              let song = remoteSongs.first(where: { $0.id == remoteID }),
+              song.artworkURL != nil,
+              normalizedServer() != nil else {
+            nowPlayingArtworkLoadTask?.cancel()
+            nowPlayingArtworkLoadTask = nil
+            nowPlayingArtworkLoadRemoteID = nil
+            return
+        }
+        let loadID = "remote:\(remoteID)"
+        guard nowPlayingArtworkLoadRemoteID != loadID else { return }
 
         nowPlayingArtworkLoadTask?.cancel()
-        nowPlayingArtworkLoadRemoteID = remoteID
+        nowPlayingArtworkLoadRemoteID = loadID
         nowPlayingArtworkLoadTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                if self.nowPlayingArtworkLoadRemoteID == remoteID {
+                if self.nowPlayingArtworkLoadRemoteID == loadID {
                     self.nowPlayingArtworkLoadRemoteID = nil
                     self.nowPlayingArtworkLoadTask = nil
                 }
             }
-            do {
-                guard let data = await self.remoteArtworkData(for: song, baseURL: baseURL) else {
-                    return
-                }
-                try Task.checkCancellation()
-                guard let image = UIImage(data: data),
-                      self.currentTrack?.remoteID == remoteID else { return }
-                self.remoteNowPlayingArtworkCache = [remoteID: image]
-                self.nowPlayingArtworkCacheKey = nil
-                self.nowPlayingArtworkCache = nil
-                self.updateNowPlaying()
-            } catch {
-                return
-            }
+            await self.loadRemoteNowPlayingArtwork(for: track)
         }
+    }
+
+    private func loadRemoteNowPlayingArtwork(for track: MobileTrack) async {
+        guard !Task.isCancelled,
+              currentTrackID == track.id,
+              let remoteID = track.remoteID,
+              remoteNowPlayingArtworkCache[remoteID] == nil,
+              let song = remoteSongs.first(where: { $0.id == remoteID }),
+              song.artworkURL != nil,
+              let baseURL = normalizedServer(),
+              let data = await remoteArtworkData(for: song, baseURL: baseURL),
+              !Task.isCancelled,
+              let image = UIImage(data: data),
+              currentTrackID == track.id else { return }
+        remoteNowPlayingArtworkCache = [remoteID: image]
+        nowPlayingArtworkCacheKey = nil
+        nowPlayingArtworkCache = nil
+        updateNowPlaying()
     }
 
     private func renderedNowPlayingArtwork(from source: UIImage?) -> UIImage {
@@ -6522,16 +6572,25 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         return try? JSONDecoder().decode(ResonanceAccountSession.self, from: data)
     }
 
-    private static func storeAccountSession(_ session: ResonanceAccountSession) throws {
+    private static func storeAccountSession(
+        _ session: ResonanceAccountSession,
+        replacingLegacyTokens: Bool = false
+    ) throws {
         let data = try JSONEncoder().encode(session)
         guard let raw = String(data: data, encoding: .utf8) else {
             throw ResonanceSocialAuthError.invalidConfiguration
         }
-        try storeToken(raw, key: accountSessionKey)
+        try updateStoredTokens(
+            values: [accountSessionKey: raw],
+            deleting: replacingLegacyTokens ? ["client", "admin"] : []
+        )
     }
 
-    private static func storeToken(_ token: String, key: String) throws {
-        try credentialStore.save(token, key: key)
+    private static func updateStoredTokens(
+        values: [String: String] = [:],
+        deleting keys: Set<String> = []
+    ) throws {
+        try credentialStore.update(values: values, deleting: keys)
     }
 
     private static func readToken(key: String) -> String {

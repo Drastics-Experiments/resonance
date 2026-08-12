@@ -3,6 +3,20 @@ import XCTest
 @testable import Resonance
 
 final class ArtworkCroppingTests: XCTestCase {
+    func testCacheKeyUsesOwnerAndBoundedArtworkFingerprint() {
+        let artwork = Data(0..<64)
+        let sameKey = ArtworkCropping.cacheKey(ownerID: "track-a", data: artwork)
+        var changedArtwork = artwork
+        changedArtwork[changedArtwork.index(changedArtwork.startIndex, offsetBy: 32)] = 255
+
+        XCTAssertEqual(sameKey, ArtworkCropping.cacheKey(ownerID: "track-a", data: artwork))
+        XCTAssertNotEqual(sameKey, ArtworkCropping.cacheKey(ownerID: "track-b", data: artwork))
+        XCTAssertNotEqual(
+            sameKey,
+            ArtworkCropping.cacheKey(ownerID: "track-a", data: changedArtwork)
+        )
+    }
+
     func testSquareArtworkIsLeftUnchanged() throws {
         let image = try makeArtwork(width: 320, height: 320)
         XCTAssertEqual(

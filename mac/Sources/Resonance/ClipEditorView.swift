@@ -1,7 +1,6 @@
 import AppKit
 import AVFoundation
 import AVKit
-import QuartzCore
 import SwiftUI
 
 @MainActor
@@ -9,7 +8,6 @@ final class ClipPreviewController: ObservableObject {
     @Published private(set) var isPlaying = false
     @Published private(set) var position: TimeInterval = 0
     @Published private(set) var player: AVPlayer?
-    let spectrumAnalyzer = ClipLiveSpectrumAnalyzer()
 
     private let audioEngine = AVAudioEngine()
     private let audioNode = AVAudioPlayerNode()
@@ -26,14 +24,6 @@ final class ClipPreviewController: ObservableObject {
     init() {
         audioEngine.attach(audioNode)
         audioEngine.connect(audioNode, to: audioEngine.mainMixerNode, format: nil)
-        let analyzer = spectrumAnalyzer
-        audioEngine.mainMixerNode.installTap(
-            onBus: 0,
-            bufferSize: 512,
-            format: nil
-        ) { buffer, _ in
-            analyzer.consume(buffer)
-        }
     }
 
     func prepare(
@@ -154,7 +144,6 @@ final class ClipPreviewController: ObservableObject {
         rangeStart = 0
         rangeEnd = 0
         audioAnchorPosition = 0
-        spectrumAnalyzer.reset()
         isPlaying = false
     }
 
@@ -343,6 +332,7 @@ struct MacClipEditorSheet: View {
                             .overlay(Circle().stroke(palette.ink.opacity(0.9), lineWidth: 1.4))
                     }
                     .help("Clip editor help")
+                    .accessibilityLabel("Clip editor help")
 
                     Button {
                         showsSettings.toggle()
@@ -353,6 +343,7 @@ struct MacClipEditorSheet: View {
                             .frame(width: 32, height: 32)
                     }
                     .help("Clip settings")
+                    .accessibilityLabel("Clip settings")
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(palette.ink)
@@ -432,23 +423,25 @@ struct MacClipEditorSheet: View {
 
     private var previewStage: some View {
         VStack(spacing: 0) {
-            ZStack {
-                if selectedTrack?.kind == .video {
-                    ClipVideoPlayer(player: preview.player).background(Color.black)
-                    if !preview.isPlaying {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 22, weight: .bold))
-                            .foregroundStyle(Color.white)
-                            .frame(width: 54, height: 54)
-                            .background(Color.black.opacity(0.58), in: Circle())
-                            .allowsHitTesting(false)
+            Button(action: togglePreview) {
+                ZStack {
+                    if selectedTrack?.kind == .video {
+                        ClipVideoPlayer(player: preview.player).background(Color.black)
+                        if !preview.isPlaying {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 22, weight: .bold))
+                                .foregroundStyle(Color.white)
+                                .frame(width: 54, height: 54)
+                                .background(Color.black.opacity(0.58), in: Circle())
+                                .allowsHitTesting(false)
+                        }
+                    } else {
+                        audioPreview
                     }
-                } else {
-                    audioPreview
                 }
             }
-            .contentShape(Rectangle())
-            .onTapGesture(perform: togglePreview)
+            .buttonStyle(.plain)
+            .accessibilityLabel(preview.isPlaying ? "Pause preview" : "Play preview")
 
             previewTransport
         }
@@ -459,17 +452,11 @@ struct MacClipEditorSheet: View {
 
     private var audioPreview: some View {
         ZStack {
-            CinematicClipVisualizer(
-                samples: waveformSamples,
-                spectrumAnalyzer: preview.spectrumAnalyzer,
-                isPlaying: preview.isPlaying,
-                gradientColors: palette.gradientStops
-            )
+            ClipPreviewWaveform(samples: waveformSamples)
             if let selectedTrack {
                 VStack(spacing: 9) {
                     TrackArtworkView(track: selectedTrack, symbolSize: 34, cornerRadius: 22)
                         .frame(width: 156, height: 156)
-                        .shadow(color: .black.opacity(0.62), radius: 24, y: 16)
                     Text(selectedTrack.title)
                         .font(.system(size: 28, weight: .bold))
                         .foregroundStyle(palette.ink)
@@ -498,6 +485,7 @@ struct MacClipEditorSheet: View {
                         .frame(width: 30, height: 30)
                 }
                 .help(previewExpanded ? "Show timeline" : "Expand preview")
+                .accessibilityLabel(previewExpanded ? "Show timeline" : "Expand preview")
             }
             .font(.system(size: 12, weight: .medium, design: .monospaced))
 
@@ -526,9 +514,9 @@ struct MacClipEditorSheet: View {
 
     private var timeline: some View {
         VStack(spacing: 0) {
-            CinematicClipRuler(duration: selectedDuration).frame(height: 40)
+            ClipRuler(duration: selectedDuration).frame(height: 40)
             ZStack {
-                CinematicClipWaveformSelector(
+                ClipWaveformSelector(
                     samples: waveformSamples,
                     videoFrames: videoFrames,
                     duration: selectedDuration,
@@ -593,7 +581,6 @@ struct MacClipEditorSheet: View {
         .frame(width: 390)
         .background(palette.raisedSurface.opacity(0.94), in: RoundedRectangle(cornerRadius: 16))
         .overlay { RoundedRectangle(cornerRadius: 16).stroke(palette.divider, lineWidth: 1) }
-        .shadow(color: .black.opacity(0.65), radius: 30, y: 14)
         .padding(.top, 58)
         .padding(.trailing, 20)
     }
@@ -611,7 +598,6 @@ struct MacClipEditorSheet: View {
         .frame(width: 360)
         .background(palette.raisedSurface.opacity(0.94), in: RoundedRectangle(cornerRadius: 16))
         .overlay { RoundedRectangle(cornerRadius: 16).stroke(palette.divider, lineWidth: 1) }
-        .shadow(color: .black.opacity(0.65), radius: 30, y: 14)
         .padding(.top, 58)
         .padding(.trailing, 20)
     }
@@ -625,10 +611,12 @@ struct MacClipEditorSheet: View {
             Button(action: close) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
-                    .frame(width: 26, height: 26)
+                    .frame(width: 28, height: 28)
                     .background(Color.white.opacity(0.07), in: Circle())
             }
             .buttonStyle(.plain)
+            .help("Close \(title.lowercased())")
+            .accessibilityLabel("Close \(title.lowercased())")
         }
     }
 
@@ -750,225 +738,38 @@ struct MacClipEditorSheet: View {
     }
 }
 
-private struct CinematicClipVisualizer: NSViewRepresentable {
+private struct ClipPreviewWaveform: View {
+    @Environment(\.resonancePalette) private var palette
     let samples: [Double]
-    let spectrumAnalyzer: ClipLiveSpectrumAnalyzer
-    let isPlaying: Bool
-    let gradientColors: [Color]
 
-    func makeNSView(context: Context) -> ClipSpectrumVisualizerView {
-        let view = ClipSpectrumVisualizerView()
-        view.update(
-            samples: samples,
-            spectrumAnalyzer: spectrumAnalyzer,
-            isPlaying: isPlaying,
-            gradientColors: gradientColors
-        )
-        return view
-    }
-
-    func updateNSView(_ nsView: ClipSpectrumVisualizerView, context: Context) {
-        nsView.update(
-            samples: samples,
-            spectrumAnalyzer: spectrumAnalyzer,
-            isPlaying: isPlaying,
-            gradientColors: gradientColors
-        )
-    }
-
-    static func dismantleNSView(_ nsView: ClipSpectrumVisualizerView, coordinator: ()) {
-        nsView.stop()
-    }
-}
-
-@MainActor
-private final class ClipSpectrumVisualizerView: NSView {
-    static let frameRate: Float = 60
-    private static let horizontalInset: CGFloat = 4
-    private static let topInsetFraction: CGFloat = 0.12
-    private static let spacing: CGFloat = 2
-
-    private let gradientLayer = CAGradientLayer()
-    private let barsLayer = CAShapeLayer()
-    private var displayLink: CADisplayLink?
-    private var spectrumAnalyzer: ClipLiveSpectrumAnalyzer?
-    private var sourceSamples: [Double] = []
-    private var staticLevels = [Double](repeating: 0.08, count: ClipLiveSpectrumAnalyzer.barCount)
-    private var displayedLevels = [Double](repeating: 0, count: ClipLiveSpectrumAnalyzer.barCount)
-    private var isPlaying = false
-    private var previousFrameTimestamp: CFTimeInterval?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer = gradientLayer
-        gradientLayer.colors = []
-        gradientLayer.locations = [0, 0.72, 1]
-        gradientLayer.startPoint = CGPoint(x: 0.5, y: 1)
-        gradientLayer.endPoint = CGPoint(x: 0.5, y: 0)
-        gradientLayer.opacity = 0.92
-        gradientLayer.mask = barsLayer
-        barsLayer.fillColor = NSColor.black.cgColor
-    }
-
-    required init?(coder: NSCoder) {
-        return nil
-    }
-
-    override var isFlipped: Bool { false }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func layout() {
-        super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        barsLayer.frame = bounds
-        renderBars()
-        CATransaction.commit()
-    }
-
-    func update(
-        samples: [Double],
-        spectrumAnalyzer: ClipLiveSpectrumAnalyzer,
-        isPlaying: Bool,
-        gradientColors: [Color]
-    ) {
-        gradientLayer.colors = gradientColors.map { NSColor($0).cgColor }
-        self.spectrumAnalyzer = spectrumAnalyzer
-        if sourceSamples != samples {
-            sourceSamples = samples
-            staticLevels = resampledLevels(from: samples)
-        }
-
-        if self.isPlaying != isPlaying {
-            self.isPlaying = isPlaying
-            previousFrameTimestamp = nil
-            displayedLevels = isPlaying ? spectrumAnalyzer.snapshot() : staticLevels
-        } else if !isPlaying {
-            displayedLevels = staticLevels
-        }
-
-        displayLink?.isPaused = !isPlaying
-        renderBarsWithoutAnimation()
-        if window != nil { startIfNeeded() }
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        guard window != nil else {
-            stop()
-            return
-        }
-        startIfNeeded()
-    }
-
-    func stop() {
-        displayLink?.invalidate()
-        displayLink = nil
-        previousFrameTimestamp = nil
-    }
-
-    private func startIfNeeded() {
-        guard displayLink == nil else { return }
-        let displayLink = displayLink(target: self, selector: #selector(renderFrame(_:)))
-        displayLink.preferredFrameRateRange = CAFrameRateRange(
-            minimum: Self.frameRate,
-            maximum: Self.frameRate,
-            preferred: Self.frameRate
-        )
-        displayLink.isPaused = !isPlaying
-        displayLink.add(to: .main, forMode: .common)
-        self.displayLink = displayLink
-    }
-
-    @objc private func renderFrame(_ displayLink: CADisplayLink) {
-        guard isPlaying, let spectrumAnalyzer else { return }
-        let timestamp = displayLink.timestamp
-        let elapsed = previousFrameTimestamp.map { timestamp - $0 } ?? (1 / Double(Self.frameRate))
-        previousFrameTimestamp = timestamp
-        let frameDuration = min(max(elapsed, 1 / 240), 1 / 15)
-        let targetLevels = spectrumAnalyzer.snapshot()
-
-        for index in displayedLevels.indices {
-            let target = index < targetLevels.count ? targetLevels[index] : 0
-            let responseTime = target >= displayedLevels[index] ? 0.015 : 0.07
-            let blend = 1 - exp(-frameDuration / responseTime)
-            displayedLevels[index] += (target - displayedLevels[index]) * blend
-        }
-        renderBarsWithoutAnimation()
-    }
-
-    private func resampledLevels(from samples: [Double]) -> [Double] {
-        guard !samples.isEmpty else {
-            return [Double](repeating: 0.08, count: ClipLiveSpectrumAnalyzer.barCount)
-        }
-        return (0..<ClipLiveSpectrumAnalyzer.barCount).map { index in
-            let progress = Double(index) / Double(max(ClipLiveSpectrumAnalyzer.barCount - 1, 1))
-            let position = progress * Double(samples.count - 1)
-            let lower = Int(position.rounded(.down))
-            let upper = min(lower + 1, samples.count - 1)
-            let fraction = position - Double(lower)
-            return max(0, min(1, samples[lower] * (1 - fraction) + samples[upper] * fraction))
-        }
-    }
-
-    private func renderBarsWithoutAnimation() {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        renderBars()
-        CATransaction.commit()
-    }
-
-    private func renderBars() {
-        guard bounds.width > 0, bounds.height > 0 else { return }
-        let barCount = ClipLiveSpectrumAnalyzer.barCount
-        let contentWidth = max(bounds.width - Self.horizontalInset * 2, 1)
-        let barWidth = max(
-            (contentWidth - Self.spacing * CGFloat(barCount - 1)) / CGFloat(barCount),
-            2
-        )
-        let drawableHeight = bounds.height * (1 - Self.topInsetFraction)
-        let path = CGMutablePath()
-
-        for index in 0..<barCount {
-            let level = index < displayedLevels.count ? displayedLevels[index] : 0
-            let percentage = isPlaying
-                ? max(5, min(100, 7 + level * 93))
-                : 10 + Double(Int((max(0.04, min(1, level)) * 86).rounded()))
-            let height = drawableHeight * percentage / 100
-            let rect = CGRect(
-                x: Self.horizontalInset + CGFloat(index) * (barWidth + Self.spacing),
-                y: 0,
-                width: barWidth,
-                height: height
+    var body: some View {
+        Canvas { context, size in
+            let values = samples.isEmpty ? [Double](repeating: 0.08, count: 96) : samples
+            let spacing: CGFloat = 2
+            let barWidth = max(
+                (size.width - spacing * CGFloat(values.count - 1)) / CGFloat(values.count),
+                1
             )
-            path.addPath(topRoundedBarPath(in: rect, radius: barWidth / 2))
+            for (index, value) in values.enumerated() {
+                let barHeight = max(4, size.height * min(max(value, 0.04), 1))
+                let rect = CGRect(
+                    x: CGFloat(index) * (barWidth + spacing),
+                    y: (size.height - barHeight) / 2,
+                    width: barWidth,
+                    height: barHeight
+                )
+                context.fill(
+                    Path(roundedRect: rect, cornerRadius: barWidth / 2),
+                    with: .color(palette.tertiary.opacity(0.58))
+                )
+            }
         }
-        barsLayer.path = path
-    }
-
-    private func topRoundedBarPath(in rect: CGRect, radius: CGFloat) -> CGPath {
-        let radius = min(radius, rect.width / 2, rect.height / 2)
-        let path = CGMutablePath()
-        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - radius))
-        path.addQuadCurve(
-            to: CGPoint(x: rect.maxX - radius, y: rect.maxY),
-            control: CGPoint(x: rect.maxX, y: rect.maxY)
-        )
-        path.addLine(to: CGPoint(x: rect.minX + radius, y: rect.maxY))
-        path.addQuadCurve(
-            to: CGPoint(x: rect.minX, y: rect.maxY - radius),
-            control: CGPoint(x: rect.minX, y: rect.maxY)
-        )
-        path.closeSubpath()
-        return path
+        .padding(.horizontal, 4)
+        .accessibilityHidden(true)
     }
 }
 
-private struct CinematicClipRuler: View {
+private struct ClipRuler: View {
     @Environment(\.resonancePalette) private var palette
     let duration: TimeInterval
     private let divisions = 6
@@ -1001,7 +802,7 @@ private struct CinematicClipRuler: View {
     }
 }
 
-private struct CinematicClipWaveformSelector: View {
+private struct ClipWaveformSelector: View {
     @Environment(\.resonancePalette) private var palette
     let samples: [Double]
     let videoFrames: [NSImage]
@@ -1024,7 +825,7 @@ private struct CinematicClipWaveformSelector: View {
                 Color.clear
                     .contentShape(Rectangle())
                     .gesture(
-                        DragGesture(minimumDistance: 0, coordinateSpace: .named("cinematicClipWaveform"))
+                        DragGesture(minimumDistance: 0, coordinateSpace: .named("clipWaveform"))
                             .onChanged { value in
                                 guard duration > 0 else { return }
                                 let proposed = min(max(value.location.x / width * duration, startTime), endTime)
@@ -1092,7 +893,7 @@ private struct CinematicClipWaveformSelector: View {
                 rangeHandle(symbol: "chevron.right")
                     .position(x: min(max(startX, 14), width - 14), y: height / 2)
                     .gesture(
-                        DragGesture(minimumDistance: 0, coordinateSpace: .named("cinematicClipWaveform"))
+                        DragGesture(minimumDistance: 0, coordinateSpace: .named("clipWaveform"))
                             .onChanged { value in
                                 guard duration > 0 else { return }
                                 let proposed = min(max(value.location.x / width * duration, 0), duration)
@@ -1103,7 +904,7 @@ private struct CinematicClipWaveformSelector: View {
                 rangeHandle(symbol: "chevron.left")
                     .position(x: min(max(endX, 14), width - 14), y: height / 2)
                     .gesture(
-                        DragGesture(minimumDistance: 0, coordinateSpace: .named("cinematicClipWaveform"))
+                        DragGesture(minimumDistance: 0, coordinateSpace: .named("clipWaveform"))
                             .onChanged { value in
                                 guard duration > 0 else { return }
                                 let proposed = min(max(value.location.x / width * duration, 0), duration)
@@ -1111,7 +912,7 @@ private struct CinematicClipWaveformSelector: View {
                             }
                     )
             }
-            .coordinateSpace(name: "cinematicClipWaveform")
+            .coordinateSpace(name: "clipWaveform")
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(videoFrames.isEmpty ? "Clip waveform" : "Video frame timeline")
             .accessibilityValue("From \(clipTimeText(startTime)) to \(clipTimeText(endTime))")
@@ -1120,14 +921,13 @@ private struct CinematicClipWaveformSelector: View {
 
     private func rangeHandle(symbol: String) -> some View {
         RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(LinearGradient(colors: [Color(hex: 0xFFC91D), Color(hex: 0xFFE044)], startPoint: .leading, endPoint: .trailing))
+            .fill(Color(hex: 0xFFD329))
             .frame(width: 28)
             .overlay {
                 Image(systemName: symbol)
                     .font(.system(size: 10, weight: .black))
                     .foregroundStyle(Color.black.opacity(0.82))
             }
-            .shadow(color: Color(hex: 0xFFD329).opacity(0.28), radius: 10)
             .frame(width: 38)
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())

@@ -1,13 +1,15 @@
 package mov.unblocked.resonance.data
 
-import android.net.Uri
 import android.util.Base64
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import java.security.MessageDigest
-import java.security.SecureRandom
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -81,14 +83,6 @@ data class NativeAuthConfiguration(
 )
 
 @Serializable
-data class PendingAccountSignIn(
-    val baseURL: String,
-    val verifier: String,
-    val state: String,
-    val startedAt: Long,
-)
-
-@Serializable
 private data class AuthConfigurationPayload(
     val version: Int,
     val issuer: String,
@@ -105,13 +99,9 @@ private data class AuthConfigurationPayload(
 )
 
 private data class AuthConfiguration(
-    val issuer: String,
-    val authorizationEndpoint: URL,
     val tokenEndpoint: URL,
     val logoutEndpoint: URL,
     val clientID: String,
-    val scope: String,
-    val providers: Set<String>,
     val native: NativeAuthConfiguration?,
 )
 
@@ -141,27 +131,6 @@ private val authJSON = Json { ignoreUnknownKeys = true }
 
 class SocialAuthClient(private val baseURL: String) {
     private val origin = canonicalHTTPSOrigin(baseURL)
-
-    suspend fun begin(provider: String): Pair<Uri, PendingAccountSignIn> = withContext(Dispatchers.IO) {
-        val configuration = configuration()
-        require(provider in configuration.providers) { "This sign-in provider is not enabled by the server." }
-        val verifierBytes = ByteArray(48).also(SecureRandom()::nextBytes)
-        val verifier = verifierBytes.base64URL()
-        val state = ByteArray(32).also(SecureRandom()::nextBytes).base64URL()
-        val challenge = MessageDigest.getInstance("SHA-256")
-            .digest(verifier.toByteArray(Charsets.US_ASCII))
-            .base64URL()
-        val destination = Uri.parse(configuration.authorizationEndpoint.toString()).buildUpon()
-            .appendQueryParameter("client_id", configuration.clientID)
-            .appendQueryParameter("response_type", "code")
-            .appendQueryParameter("redirect_uri", ResonanceAuthCallback)
-            .appendQueryParameter("scope", configuration.scope)
-            .appendQueryParameter("code_challenge", challenge)
-            .appendQueryParameter("code_challenge_method", "S256")
-            .appendQueryParameter("state", state)
-            .build()
-        destination to PendingAccountSignIn(origin, verifier, state, System.currentTimeMillis())
-    }
 
     suspend fun nativeConfiguration(): NativeAuthConfiguration = withContext(Dispatchers.IO) {
         configuration().native ?: error("This Resonance server has not enabled native account sign-in.")
@@ -199,37 +168,6 @@ class SocialAuthClient(private val baseURL: String) {
             displayName = displayName,
             imageURL = account.imageURL,
             migratedProfileID = account.migratedProfileID,
-        )
-    }
-
-    suspend fun exchange(
-        code: String,
-        state: String?,
-        pending: PendingAccountSignIn,
-        migrationProfileID: String? = null,
-    ): AccountSession = withContext(Dispatchers.IO) {
-        require(
-            canonicalHTTPSOrigin(pending.baseURL) == origin && state == pending.state &&
-                System.currentTimeMillis() - pending.startedAt <= 10 * 60_000
-        ) {
-            "The sign-in request expired. Please try again."
-        }
-        val configuration = configuration()
-        val token = tokenRequest(
-            configuration,
-            mapOf(
-                "grant_type" to "authorization_code",
-                "client_id" to configuration.clientID,
-                "redirect_uri" to ResonanceAuthCallback,
-                "code" to bounded(code, "authorization code"),
-                "code_verifier" to pending.verifier,
-            ),
-        )
-        session(
-            token,
-            account(token.idToken, migrationProfileID),
-            origin,
-            requestedLegacyProfileID = migrationProfileID,
         )
     }
 
@@ -271,11 +209,13 @@ class SocialAuthClient(private val baseURL: String) {
                 ),
                 authJSON.encodeToString(mapOf("refresh_token" to current.refreshToken)),
             )
+        }.onFailure { error ->
+            if (error is CancellationException) throw error
         }
         Unit
     }
 
-    private fun configuration(): AuthConfiguration {
+    private suspend fun configuration(): AuthConfiguration {
         val response = request(URL(origin + "/api/v1/auth/config"), "GET", mapOf("Accept" to "application/json"))
         require(response.code in 200..299) { "Account sign-in is unavailable (HTTP ${response.code})." }
         val payload = authJSON.decodeFromString<AuthConfigurationPayload>(response.body)
@@ -311,18 +251,14 @@ class SocialAuthClient(private val baseURL: String) {
             null
         }
         return AuthConfiguration(
-            issuer,
-            authorization,
             token,
             logout,
             bounded(payload.clientID, "Clerk client ID"),
-            payload.scope,
-            providers,
             native,
         )
     }
 
-    private fun tokenRequest(configuration: AuthConfiguration, fields: Map<String, String>): TokenPayload {
+    private suspend fun tokenRequest(configuration: AuthConfiguration, fields: Map<String, String>): TokenPayload {
         val response = request(
             configuration.tokenEndpoint,
             "POST",
@@ -341,7 +277,7 @@ class SocialAuthClient(private val baseURL: String) {
         return payload
     }
 
-    private fun account(accessToken: String, migrationProfileID: String? = null): AccountPayload {
+    private suspend fun account(accessToken: String, migrationProfileID: String? = null): AccountPayload {
         val headers = mutableMapOf(
             "Accept" to "application/json",
             "Authorization" to "Bearer ${bounded(accessToken, "access token")}",
@@ -413,7 +349,8 @@ class SocialAuthClient(private val baseURL: String) {
 
     private data class Response(val code: Int, val body: String)
 
-    private fun request(url: URL, method: String, headers: Map<String, String>, body: String? = null): Response {
+    private suspend fun request(url: URL, method: String, headers: Map<String, String>, body: String? = null): Response {
+        currentCoroutineContext().ensureActive()
         val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 15_000
@@ -426,13 +363,35 @@ class SocialAuthClient(private val baseURL: String) {
             }
         }
         return try {
-            val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
-            Response(connection.responseCode, stream?.bufferedReader()?.use { it.readText() }.orEmpty())
+            val code = connection.responseCode
+            currentCoroutineContext().ensureActive()
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            Response(code, readBoundedAuthBody(stream))
         } finally {
             connection.disconnect()
         }
     }
 }
+
+private suspend fun readBoundedAuthBody(stream: InputStream?): String {
+    if (stream == null) return ""
+    val output = ByteArrayOutputStream()
+    val buffer = ByteArray(8 * 1_024)
+    stream.use { input ->
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val count = input.read(buffer)
+            if (count < 0) break
+            require(output.size() <= MAX_AUTH_RESPONSE_BYTES - count) {
+                "The account server returned an oversized response."
+            }
+            output.write(buffer, 0, count)
+        }
+    }
+    return output.toString(Charsets.UTF_8.name())
+}
+
+private const val MAX_AUTH_RESPONSE_BYTES = 512 * 1_024
 
 private fun validPublishableKey(key: String, issuer: String): Boolean {
     val encoded = when {
@@ -468,8 +427,3 @@ private fun bounded(value: String, label: String): String {
     }
     return text
 }
-
-private fun ByteArray.base64URL(): String = Base64.encodeToString(
-    this,
-    Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
-)

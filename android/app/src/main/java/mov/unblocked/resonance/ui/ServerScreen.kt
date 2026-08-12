@@ -5,7 +5,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.selection.toggleable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -65,7 +64,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
@@ -81,6 +79,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.clerk.ui.auth.AuthView
 import mov.unblocked.resonance.data.RemoteSong
+import mov.unblocked.resonance.data.Track
 import mov.unblocked.resonance.data.ServerDownloadMode
 import mov.unblocked.resonance.data.ServerUploadMode
 import mov.unblocked.resonance.data.AccountEmailPrivacy
@@ -139,7 +138,18 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
             }
         }
     }
-    val syncedCount = state.remoteSongs.count { it.id in state.downloadedRemoteSongIds }
+    val syncedCount = remember(state.remoteSongs, state.downloadedRemoteSongIds) {
+        state.remoteSongs.count { it.id in state.downloadedRemoteSongIds }
+    }
+    val localTracksByRemoteID = remember(state.tracks) {
+        buildMap {
+            state.tracks.forEach { track ->
+                val remoteID = track.remoteID ?: return@forEach
+                if (remoteID !in this) put(remoteID, track)
+            }
+        }
+    }
+    val localQueueTrackIDs = remember(state.tracks) { state.tracks.map { it.id } }
     val host = remember(state.serverUrl) { runCatching { URI(state.serverUrl).host }.getOrNull() ?: state.serverUrl }
     val focusManager = LocalFocusManager.current
     val refreshEnabled = state.serverToken.isNotBlank() &&
@@ -183,7 +193,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                                 focusManager.clearFocus(force = true)
                                 actions.refreshServer()
                             },
-                            modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
+                            modifier = Modifier.size(48.dp).background(Color.White.copy(alpha = .08f), CircleShape),
                         ) { Icon(Icons.Default.Refresh, "Refresh server") }
                     }
                 }
@@ -226,7 +236,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Icon(Icons.Default.Settings, "Connection settings", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                        Icon(Icons.Default.Settings, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                     }
                 }
                 Text(
@@ -250,6 +260,7 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                     linkImportOpen = true
                 },
                 onUploadMissing = actions::uploadMissingDownloads,
+                onUploadModeSelected = actions::setServerUploadMode,
                 onConnection = { connectionOpen = true },
                 onToggleSelection = {
                     selecting = !selecting
@@ -322,9 +333,17 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
             }
         }
         if (visible.isEmpty() && state.remoteSongs.isEmpty() && state.isRefreshingServer) {
-            repeat(7) { index ->
-                item(key = "server-placeholder-$index") {
-                    ServerSongPlaceholderRow(index + 1)
+            item {
+                Column(
+                    Modifier.fillMaxWidth().padding(vertical = 42.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
+                    Text(
+                        "Loading server library",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
+                    )
                 }
             }
         } else if (visible.isEmpty()) {
@@ -346,7 +365,16 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
             }
         } else {
             itemsIndexed(visible, key = { _, song -> song.id }) { index, song ->
-                ServerSongRow(index + 1, song, state, actions, selecting, delete = { deleteCandidate = song })
+                ServerSongRow(
+                    number = index + 1,
+                    song = song,
+                    state = state,
+                    actions = actions,
+                    selecting = selecting,
+                    localTracksByRemoteID = localTracksByRemoteID,
+                    localQueueTrackIDs = localQueueTrackIDs,
+                    delete = { deleteCandidate = song },
+                )
             }
         }
             item { Spacer(Modifier.height(8.dp)) }
@@ -381,10 +409,12 @@ private fun ServerActionBar(
     onDownload: () -> Unit,
     onUpload: () -> Unit,
     onUploadMissing: () -> Unit,
+    onUploadModeSelected: (ServerUploadMode) -> Unit,
     onConnection: () -> Unit,
     onToggleSelection: () -> Unit,
 ) {
     var moreOpen by remember { mutableStateOf(false) }
+    var uploadModesOpen by remember { mutableStateOf(false) }
     val enabled = !state.isDownloading && !state.isUploading &&
         !state.isRefreshingServer && !state.isApplyingServerConnection && !state.isSyncingPlaylists
     val uploadEnabled = canStartServerUpload(state)
@@ -425,7 +455,13 @@ private fun ServerActionBar(
         )
         ActionDivider()
         Box {
-            IconButton(onClick = { moreOpen = true }, modifier = Modifier.width(53.dp)) {
+            IconButton(
+                onClick = {
+                    uploadModesOpen = false
+                    moreOpen = true
+                },
+                modifier = Modifier.width(53.dp),
+            ) {
                 Icon(Icons.Default.MoreVert, "More server actions")
             }
             DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
@@ -450,11 +486,38 @@ private fun ServerActionBar(
                     enabled = uploadEnabled,
                     onClick = { moreOpen = false; onUpload() },
                 )
+                if (state.availableServerUploadModes.size > 1) {
+                    DropdownMenuItem(
+                        text = { Text("Upload method: ${state.serverUploadMode?.label ?: "Disabled"}") },
+                        leadingIcon = { Icon(Icons.Default.Settings, null) },
+                        enabled = enabled && !state.linkImport.isRunning,
+                        onClick = {
+                            moreOpen = false
+                            uploadModesOpen = true
+                        },
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("Account & Connection") },
                     leadingIcon = { Icon(Icons.Default.Settings, null) },
                     onClick = { moreOpen = false; onConnection() },
                 )
+            }
+            DropdownMenu(expanded = uploadModesOpen, onDismissRequest = { uploadModesOpen = false }) {
+                SectionLabel("Upload method", Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
+                state.availableServerUploadModes.forEach { mode ->
+                    DropdownMenuItem(
+                        text = { Text(mode.label) },
+                        leadingIcon = {
+                            if (state.serverUploadMode == mode) Icon(Icons.Default.Check, null)
+                        },
+                        enabled = enabled && !state.linkImport.isRunning,
+                        onClick = {
+                            uploadModesOpen = false
+                            onUploadModeSelected(mode)
+                        },
+                    )
+                }
             }
         }
     }
@@ -471,41 +534,29 @@ internal fun canStartServerUpload(state: ResonanceUiState): Boolean =
 @Composable
 private fun ServerAction(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String?,
+    label: String,
     enabled: Boolean,
     onClick: () -> Unit,
     modifier: Modifier,
     iconModifier: Modifier = Modifier,
 ) {
-    val interaction = remember { MutableInteractionSource() }
-    Row(
-        modifier = modifier
-            .clickable(
-                enabled = enabled,
-                interactionSource = interaction,
-                indication = null,
-                onClick = onClick,
-            )
-            .padding(horizontal = 7.dp, vertical = 13.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier.heightIn(min = 48.dp),
+        contentPadding = PaddingValues(horizontal = 7.dp),
+        colors = ButtonDefaults.textButtonColors(
+            contentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .72f),
+            disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .32f),
+        ),
     ) {
         Icon(
             icon,
-            contentDescription = label ?: "Server action",
+            contentDescription = null,
             modifier = iconModifier.size(21.dp),
-            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) .72f else .32f),
         )
-        if (label != null) {
-            Spacer(Modifier.width(6.dp))
-            Text(
-                label,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) .72f else .32f),
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-            )
-        }
+        Spacer(Modifier.width(6.dp))
+        Text(label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
     }
 }
 
@@ -533,7 +584,6 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .shadow(18.dp, RoundedCornerShape(20.dp))
             .background(LocalResonancePalette.current.panel.copy(alpha = .92f), RoundedCornerShape(20.dp))
             .border(1.dp, Color.White.copy(alpha = .15f), RoundedCornerShape(20.dp))
             .padding(horizontal = 16.dp, vertical = 14.dp),
@@ -588,12 +638,14 @@ private fun ServerSongRow(
     state: ResonanceUiState,
     actions: ResonanceActions,
     selecting: Boolean,
+    localTracksByRemoteID: Map<String, Track>,
+    localQueueTrackIDs: List<String>,
     delete: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
     val synced = song.id in state.downloadedRemoteSongIds
     val selected = song.id in state.selectedRemoteSongIds
-    val local = state.tracks.firstOrNull { it.remoteID == song.id }
+    val local = localTracksByRemoteID[song.id]
     val metadataLoading = song.isMetadataLoading && local == null
     val displayTitle = local?.title?.takeIf(String::isNotBlank) ?: song.title
     val displayArtist = local?.artist?.takeIf { it.isNotBlank() && it != "Unknown Artist" } ?: song.artist
@@ -617,7 +669,7 @@ private fun ServerSongRow(
             },
             onClick = {
                 when {
-                    local != null -> actions.playTrack(local.id, state.tracks.map { it.id })
+                    local != null -> actions.playTrack(local.id, localQueueTrackIDs)
                     state.serverDownloadMode == ServerDownloadMode.StreamOnly && song.isVideoMedia -> menu = true
                     else -> actions.downloadRemoteSong(song.id)
                 }
@@ -711,7 +763,7 @@ private fun ServerSongRow(
                         Text(
                             displayAlbum,
                             fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .43f),
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -763,49 +815,6 @@ private fun ServerSongRow(
             modifier = Modifier.align(Alignment.BottomCenter),
             color = Color.White.copy(alpha = .10f),
         )
-    }
-}
-
-@Composable
-private fun ServerSongPlaceholderRow(number: Int) {
-    Column {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 76.dp)
-                .padding(horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Text(
-                number.toString(),
-                modifier = Modifier.width(24.dp),
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .25f),
-            )
-            Box(
-                Modifier
-                    .size(52.dp)
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(Color.White.copy(alpha = .07f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    strokeWidth = 2.dp,
-                    color = Color.White.copy(alpha = .58f),
-                )
-            }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                ServerMetadataPlaceholder(148.dp, 11.dp)
-                ServerMetadataPlaceholder(96.dp, 8.dp)
-                ServerMetadataPlaceholder(88.dp, 9.dp)
-            }
-            Box(Modifier.width(44.dp), contentAlignment = Alignment.CenterEnd) {
-                ServerMetadataPlaceholder(42.dp, 9.dp)
-            }
-        }
-        androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = .10f))
     }
 }
 

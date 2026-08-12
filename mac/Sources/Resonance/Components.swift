@@ -78,7 +78,6 @@ struct TransferProgressOverlay: View {
             RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .stroke(Color.white.opacity(0.055))
         }
-        .shadow(color: .black.opacity(0.34), radius: 22, y: 10)
         .accessibilityElement(children: .contain)
     }
 }
@@ -128,58 +127,7 @@ struct TransferResultOverlay: View {
             RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .stroke(color.opacity(0.24))
         }
-        .shadow(color: .black.opacity(0.34), radius: 22, y: 10)
         .accessibilityElement(children: .contain)
-    }
-}
-
-private struct AppKitHoverTrackingArea: NSViewRepresentable {
-    let onHover: (Bool) -> Void
-
-    func makeNSView(context: Context) -> HoverTrackingNSView {
-        let view = HoverTrackingNSView()
-        view.onHover = onHover
-        return view
-    }
-
-    func updateNSView(_ nsView: HoverTrackingNSView, context: Context) {
-        nsView.onHover = onHover
-    }
-
-    static func dismantleNSView(_ nsView: HoverTrackingNSView, coordinator: ()) {
-        nsView.onHover = nil
-    }
-}
-
-private final class HoverTrackingNSView: NSView {
-    var onHover: ((Bool) -> Void)?
-    private var hoverTrackingArea: NSTrackingArea?
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let hoverTrackingArea {
-            removeTrackingArea(hoverTrackingArea)
-        }
-        let area = NSTrackingArea(
-            rect: .zero,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        hoverTrackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        onHover?(true)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        onHover?(false)
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
     }
 }
 
@@ -203,10 +151,7 @@ struct HoverCircleIconSurface: View {
             .background(circleBackground)
             .clipShape(Circle())
             .contentShape(Circle())
-            .background {
-                AppKitHoverTrackingArea { isHovering = $0 }
-            }
-            .animation(.easeOut(duration: 0.12), value: isHovering)
+            .onHover { isHovering = $0 }
             .accessibilityLabel(label)
     }
 
@@ -264,8 +209,7 @@ struct MiniArtwork: View {
             style: style,
             symbol: symbol,
             symbolSize: max(9, size * 0.28),
-            cornerRadius: cornerRadius,
-            glow: false
+            cornerRadius: cornerRadius
         )
         .frame(width: size, height: size)
     }
@@ -296,8 +240,7 @@ struct PlaylistArtworkView: View {
                     style: playlist.artwork,
                     symbol: playlist.isSystem ? "heart.fill" : "music.note",
                     symbolSize: max(9, size * 0.28),
-                    cornerRadius: cornerRadius,
-                    glow: false
+                    cornerRadius: cornerRadius
                 )
             } else {
                 GeometryReader { proxy in
@@ -334,8 +277,7 @@ struct PlaylistArtworkView: View {
                 style: playlist.artwork,
                 symbol: "music.note",
                 symbolSize: max(7, size.width * 0.28),
-                cornerRadius: 0,
-                glow: false
+                cornerRadius: 0
             )
             .frame(width: size.width, height: size.height)
             .clipped()
@@ -348,22 +290,23 @@ struct TrackArtworkView: View {
     var symbol: String = "music.note"
     var symbolSize: CGFloat = 36
     var cornerRadius: CGFloat = 8
-    var glow: Bool = false
     var size: CGFloat? = nil
 
     var body: some View {
-        Group {
-            if let artworkData = track.artworkData, let image = ArtworkCropping.squareImage(from: artworkData) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-            } else {
-                ArtworkView(
-                    style: track.artwork,
-                    symbol: symbol,
-                    symbolSize: symbolSize,
-                    cornerRadius: cornerRadius,
-                    glow: glow
+        ZStack {
+            ArtworkView(
+                style: track.artwork,
+                symbol: symbol,
+                symbolSize: symbolSize,
+                cornerRadius: cornerRadius
+            )
+            if let artworkData = track.artworkData {
+                LocalArtworkImage(
+                    data: artworkData,
+                    cacheKey: ArtworkCropping.cacheKey(
+                        ownerID: track.id.uuidString,
+                        data: artworkData
+                    )
                 )
             }
         }
@@ -411,12 +354,9 @@ struct ClickableProgress: View {
                     Circle()
                         .fill(resolvedActiveColor)
                         .frame(width: hoverThumbSize, height: hoverThumbSize)
-                        .shadow(color: resolvedActiveColor.opacity(0.35), radius: 3)
                         .offset(x: thumbOffset)
-                        .transition(.scale(scale: 0.65).combined(with: .opacity))
                 }
             }
-            .animation(.easeOut(duration: 0.12), value: isHovering)
             .padding(.vertical, hitSlop)
             .contentShape(Rectangle())
             .onHover { isHovering = $0 }
@@ -448,18 +388,82 @@ struct ClickableProgress: View {
     }
 }
 
+/// SwiftUI's native slider can render with disabled-looking chrome on macOS 26.
+/// This compact control keeps volume visibly interactive without OS-version effects.
+struct StableVolumeSlider: View {
+    @Environment(\.resonancePalette) private var palette
+    @Binding var value: Double
+    var tint: Color? = nil
+
+    private let thumbSize: CGFloat = 14
+    private let trackHeight: CGFloat = 4
+
+    private var resolvedTint: Color { tint ?? palette.accent }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let clampedValue = min(max(value, 0), 1)
+            let travel = max(proxy.size.width - thumbSize, 0)
+            let thumbOffset = travel * clampedValue
+            let thumbCenter = thumbOffset + thumbSize / 2
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.18))
+                    .frame(height: trackHeight)
+                Capsule()
+                    .fill(resolvedTint)
+                    .frame(width: max(thumbCenter, trackHeight), height: trackHeight)
+                Circle()
+                    .fill(resolvedTint)
+                    .frame(width: thumbSize, height: thumbSize)
+                    .overlay { Circle().stroke(Color.white.opacity(0.28), lineWidth: 1) }
+                    .offset(x: thumbOffset)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        guard travel > 0 else { return }
+                        value = min(max((gesture.location.x - thumbSize / 2) / travel, 0), 1)
+                    }
+            )
+        }
+        .frame(height: 28)
+        .focusable()
+        .onMoveCommand { direction in
+            switch direction {
+            case .left, .down:
+                value = max(value - 0.05, 0)
+            case .right, .up:
+                value = min(value + 0.05, 1)
+            default:
+                break
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Volume")
+        .accessibilityValue("\(Int((min(max(value, 0), 1) * 100).rounded())) percent")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: value = min(value + 0.05, 1)
+            case .decrement: value = max(value - 0.05, 0)
+            @unknown default: break
+            }
+        }
+    }
+}
+
 struct EqualizerGlyph: View {
     @Environment(\.resonancePalette) private var palette
     var isAnimating: Bool
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 1.5) {
-            RoundedRectangle(cornerRadius: 1).frame(width: 2, height: isAnimating ? 8 : 4)
-            RoundedRectangle(cornerRadius: 1).frame(width: 2, height: isAnimating ? 5 : 4)
-            RoundedRectangle(cornerRadius: 1).frame(width: 2, height: isAnimating ? 10 : 4)
-        }
-        .foregroundStyle(palette.foregroundAccent)
-        .frame(width: 14, height: 12)
-        .animation(.easeInOut(duration: 0.45).repeatForever(autoreverses: true), value: isAnimating)
+        Image(systemName: isAnimating ? "speaker.wave.2.fill" : "speaker.fill")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(palette.foregroundAccent)
+            .frame(width: 14, height: 12)
+            .accessibilityHidden(true)
     }
 }

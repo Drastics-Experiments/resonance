@@ -39,9 +39,9 @@ object ClientContextHeaderPolicy {
 }
 
 enum class ServerUploadMode(val wireValue: String, val label: String) {
-    LocalFile("local_file", "Preserved source link"),
-    ServerSourceLink("server_source_link", "Preserved source link"),
-    ReviewedMatch("reviewed_match", "Reviewed source link"),
+    LocalFile("local_file", "On-device import"),
+    ServerSourceLink("server_source_link", "Server link import"),
+    ReviewedMatch("reviewed_match", "Reviewed match"),
     ;
 
     companion object {
@@ -63,16 +63,7 @@ enum class ServerDownloadMode(val wireValue: String, val label: String) {
     }
 }
 
-enum class ServerUploadTransport { PreservedSourceLink }
-
 object ServerUploadTransportPolicy {
-    fun transportFor(mode: ServerUploadMode): ServerUploadTransport = when (mode) {
-        ServerUploadMode.LocalFile,
-        ServerUploadMode.ServerSourceLink,
-        ServerUploadMode.ReviewedMatch,
-        -> ServerUploadTransport.PreservedSourceLink
-    }
-
     fun allowsLinkDerivedServerUpload(mode: ServerUploadMode): Boolean =
         mode in ServerUploadMode.entries
 }
@@ -215,8 +206,6 @@ data class EffectiveClientConfig(
 
     fun isActive(at: Instant): Boolean = source == ClientConfigSource.SafeDefaults ||
         notBefore?.let { !at.isBefore(it) } == true && expiresAt?.let(at::isBefore) == true
-
-    fun withSource(source: ClientConfigSource): EffectiveClientConfig = copy(source = source)
 
     companion object {
         fun safeDefaults(): EffectiveClientConfig = EffectiveClientConfig(
