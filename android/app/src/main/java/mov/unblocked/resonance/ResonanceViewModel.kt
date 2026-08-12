@@ -15,6 +15,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.clerk.api.Clerk
@@ -172,6 +173,7 @@ private const val STREAM_ARTWORK_URL_EXTRA = "resonance.stream.artwork_url"
 private const val MAX_PUBLISHED_ARTWORK_EDGE = 512
 private const val MAX_PUBLISHED_ARTWORK_BYTES = 256 * 1_024
 
+@androidx.annotation.OptIn(UnstableApi::class)
 class ResonanceViewModel(application: Application) : AndroidViewModel(application), ResonanceActions {
     private val context = application.applicationContext
     private val repository = LibraryRepository(context)

@@ -702,7 +702,7 @@ struct PlayerModelRegressionTests {
                     trackNumber: 1,
                     durationSeconds: 180,
                     artworkURL: nil,
-                    embedURL: nil,
+                    embedURL: "",
                     sourceURL: source
                 )
             },
