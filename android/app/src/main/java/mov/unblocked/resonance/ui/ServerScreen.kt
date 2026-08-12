@@ -151,13 +151,14 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
     PullToRefreshBox(
         isRefreshing = state.isRefreshingServer,
         onRefresh = {
-            // Material's pull refresh participates in the LazyColumn nested-scroll chain, so it
-            // does not compete with Android's horizontal back gesture. Clearing focus first also
-            // prevents an active search field/IME from consuming the initial drag.
-            focusManager.clearFocus(force = true)
-            actions.refreshServer()
+            if (refreshEnabled) {
+                // Material's pull refresh participates in the LazyColumn nested-scroll chain, so it
+                // does not compete with Android's horizontal back gesture. Clearing focus first also
+                // prevents an active search field/IME from consuming the initial drag.
+                focusManager.clearFocus(force = true)
+                actions.refreshServer()
+            }
         },
-        enabled = refreshEnabled,
         modifier = modifier.fillMaxSize(),
     ) {
         LazyColumn(

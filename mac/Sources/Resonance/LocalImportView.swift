@@ -1066,7 +1066,7 @@ enum LocalImportPresentationPolicy {
     ) -> Bool {
         if stage == .syncing { return true }
         guard downloadStarted else { return false }
-        switch stage {
+        return switch stage {
         case .inspectingSource, .downloading, .processing, .savingLocal, .localComplete:
             true
         default:

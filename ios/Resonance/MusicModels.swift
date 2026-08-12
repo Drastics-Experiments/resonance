@@ -1865,7 +1865,7 @@ enum MobilePlaylistPresentationPolicy {
             previous: previousKeys,
             ordered: orderedKeys,
             preserving: preservedKeys
-        ).compactMap { key in
+        ).compactMap { key -> MobilePlaylistPresentationEntry? in
             switch key {
             case .local(let trackID):
                 guard let track = tracksByID[trackID] else { return nil }

@@ -2805,7 +2805,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private func pendingLoadedCatalogSongs(
         requestedSongIDs: Set<String>?
     ) -> [MobileRemoteSong] {
-        let syncedSongIDs = Set(remoteSongs.lazy.filter { isSynced($0) }.map(\.id))
+        let syncedSongIDs = Set(remoteSongs.lazy.filter { self.isSynced($0) }.map(\.id))
         return MobileLoadedCatalogDownloadPolicy.pendingSongs(
             from: remoteSongs,
             requestedSongIDs: requestedSongIDs,
@@ -4251,7 +4251,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         uploadDetail = "Sending source page to \(baseURL.host ?? "server")"
         guard let transferSessionID = beginTransferSession(with: MobileTransferDisplayState(
             kind: .upload,
-            itemID: sourcePageURL.absoluteString,
+            itemID: sourcePageURL,
             songTitle: "Import from Web",
             detail: "Sending source page",
             currentItem: 1,
@@ -4280,7 +4280,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 presentTransfer(
                     sessionID: transferSessionID,
                     kind: .upload,
-                    itemID: sourcePageURL.absoluteString,
+                    itemID: sourcePageURL,
                     songTitle: duplicate.duplicateOf.title,
                     detail: uploadDetail,
                     currentItem: 1,
@@ -4307,7 +4307,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             presentTransfer(
                 sessionID: transferSessionID,
                 kind: .upload,
-                itemID: sourcePageURL.absoluteString,
+                itemID: sourcePageURL,
                 songTitle: imported.song.title,
                 detail: uploadDetail,
                 currentItem: 1,
