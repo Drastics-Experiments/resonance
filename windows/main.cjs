@@ -38,7 +38,11 @@ const {
   SERVER_DOWNLOAD_ATTEMPTS,
   createServerDownloadProgressPublisher,
   retryServerDownload,
-  serverDownloadDisplayName,
+  serverDownloadImportedMetadata,
+  serverDownloadMetadata,
+  serverDownloadMetadataContextMatches,
+  serverDownloadMetadataIsResolved,
+  serverDownloadMetadataSnapshot,
   serverDownloadProgressEvent,
 } = require("./server-download.cjs");
 const {
@@ -61,6 +65,7 @@ const {
   artworkFileDataURL,
   fetchArtwork,
   importConfirmedSource,
+  resolveLocalImportDownloadSource,
   resolveLocalImportMetadata,
   resolveLocalImportSource,
   safeArtworkURL,
@@ -3187,18 +3192,29 @@ async function downloadSavedSourceSong(song, options) {
   const sourceURL = preservedMediaSourceURL(song?.source_url);
   if (!sourceURL) throw new Error("The server returned an invalid saved source link.");
   const mediaKind = song?.media_kind === "video" ? "video" : "audio";
-  const resolution = await resolveLocalImportSource(sourceURL, options.signal, options.onProgress, {
-    searchYouTubeAudioSources,
-  }, { mediaKind });
+  const preparationContext = JSON.stringify({
+    serverOrigin: new URL(options.serverOrigin).origin,
+    profileID: String(options.profileID || "default"),
+    songID: String(song?.id || ""),
+  });
+  const resolution = options.metadataIsResolved
+    ? await resolveLocalImportDownloadSource(sourceURL, options.metadata, options.signal, options.onProgress, {
+      searchYouTubeAudioSources,
+    }, { mediaKind, preparationContext })
+    : await resolveLocalImportSource(sourceURL, options.signal, options.onProgress, {
+      searchYouTubeAudioSources,
+    }, { mediaKind });
   if (resolution?.track?.type === "playlist") {
     throw new Error("A saved song link resolved to a playlist instead of one song.");
   }
   const candidate = resolution?.candidates?.[0];
   if (!candidate?.sourceURL) throw new Error("No downloadable source matched this saved song link.");
-  const metadata = {
-    ...(candidate.importMetadata || resolution.track || {}),
+  const metadata = serverDownloadImportedMetadata(
+    resolution.track || candidate.importMetadata,
+    options.metadata,
+    options.metadataIsResolved,
     sourceURL,
-  };
+  );
   const imported = await importConfirmedSource({
     sourceURL: candidate.sourceURL,
     sourceIdentity: normalizeSourceIdentity(candidate.sourceIdentity, {
@@ -3208,6 +3224,8 @@ async function downloadSavedSourceSong(song, options) {
     }),
     mediaKind,
     metadata,
+    preparedSoundCloudAudio: candidate.preparedSoundCloudAudio,
+    preparationContext,
     existing: options.existing,
     destinationDirectory: options.destinationDirectory,
     temporaryRoot: app.getPath("temp"),
@@ -3246,6 +3264,7 @@ ipcMain.handle("server:sync", async (event, {
   existing = [],
   songIDs = null,
   songTitles = {},
+  songMetadata = {},
 }) => {
   token = canonicalCredentialToken(token);
   if (!token) throw new Error("Sign in to your Resonance account.");
@@ -3295,12 +3314,33 @@ ipcMain.handle("server:sync", async (event, {
     const displayTitle = typeof title === "string" ? title.trim().slice(0, 500) : "";
     return songID && songID.length <= 256 && displayTitle ? [[songID, displayTitle]] : [];
   }));
+  const preferredMetadata = new Map(Object.entries(
+    songMetadata && typeof songMetadata === "object" && !Array.isArray(songMetadata) ? songMetadata : {},
+  ).slice(0, 2_000).flatMap(([id, metadata]) => {
+    const songID = String(id || "").trim();
+    const snapshot = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? serverDownloadMetadataSnapshot(metadata)
+      : null;
+    return songID && songID.length <= 256 && snapshot
+      ? [[songID, snapshot]]
+      : [];
+  }));
   const songs = (catalog.songs || []).filter((song) => !requested || requested.has(song.id));
   const pendingDownloads = [];
   for (const song of songs) {
     signal.throwIfAborted();
     const remoteName = song.filename || song.name || `Track-${song.id}.mp3`;
-    const displayName = serverDownloadDisplayName(song, remoteName, preferredTitles.get(String(song.id)));
+    const metadataSnapshot = preferredMetadata.get(String(song.id));
+    const metadataContextMatches = serverDownloadMetadataContextMatches(song, metadataSnapshot);
+    const displayMetadata = serverDownloadMetadata(song, metadataContextMatches ? {
+      ...metadataSnapshot,
+      title: metadataSnapshot?.title || preferredTitles.get(String(song.id)),
+    } : {});
+    const metadataIsResolved = serverDownloadMetadataIsResolved(
+      song,
+      metadataSnapshot,
+    );
+    const displayName = displayMetadata.title;
     const remoteModified = song.modified_at || song.modified_utc || null;
     const expectedSize = Number(song.size);
     const expectedSHA256 = catalogSHA256(song);
@@ -3342,6 +3382,8 @@ ipcMain.handle("server:sync", async (event, {
       savedSourceURL,
       mediaLocation,
       matching,
+      displayMetadata,
+      metadataIsResolved,
     });
   }
 
@@ -3358,6 +3400,8 @@ ipcMain.handle("server:sync", async (event, {
       savedSourceURL,
       mediaLocation,
       matching,
+      displayMetadata,
+      metadataIsResolved,
     } = pending;
     const itemIndex = pendingIndex + 1;
     const itemCount = pendingDownloads.length;
@@ -3387,6 +3431,8 @@ ipcMain.handle("server:sync", async (event, {
           destinationDirectory: paths.remote,
           serverOrigin: base.origin,
           profileID: profileID || "default",
+          metadata: displayMetadata,
+          metadataIsResolved,
           onProgress: (progress) => {
             if (progress?.stage === "downloading") {
               itemCompletedBytes = Math.max(0, Number(progress.completed) || 0);
@@ -3499,10 +3545,10 @@ ipcMain.handle("server:sync", async (event, {
       if (matching?.id) replacedTrackIDs.push(matching.id);
       downloaded.push(await enrichedTrack(destination, {
         id: matching?.id,
-        title: song.title || path.basename(remoteName, path.extname(remoteName)),
-        artist: song.artist || "Unknown Artist",
-        album: song.album || "Server Library",
-        artworkURL: song.artwork_url || song.artworkURL || null,
+        title: displayMetadata.title,
+        artist: displayMetadata.artist,
+        album: displayMetadata.album,
+        artworkURL: displayMetadata.artworkURL,
         remoteID: song.id,
         sourceServer: base.origin,
         syncProfileID: profileID || "default",

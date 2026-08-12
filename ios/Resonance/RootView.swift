@@ -1922,7 +1922,7 @@ private struct ServerTransferPopup: View {
             }
 
             if let progress = transfer.progress {
-                Text("\(Int(progress * 100))%")
+                Text(MobileTransferDisplayPolicy.percentageLabel(progress))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }

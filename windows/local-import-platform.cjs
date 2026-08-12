@@ -26,12 +26,16 @@ const {
 } = require("./local-youtube.cjs");
 const {
   directSoundCloudCandidate,
+  downloadResolvedSoundCloudAudio,
   downloadSoundCloudAudio,
   isSoundCloudURL,
+  resolveSoundCloudAudio,
   resolveSoundCloudSource,
+  soundCloudSourceURL,
 } = require("./local-soundcloud.cjs");
 
 const MAX_ARTWORK_BYTES = 10 * 1024 * 1024;
+const PREPARED_SOUNDCLOUD_AUDIO_TTL_MS = 30_000;
 const ARTWORK_CONTENT_TYPES = new Map([
   ["image/jpeg", ".jpg"],
   ["image/png", ".png"],
@@ -46,6 +50,75 @@ function localImportError(stage, code, message) {
 
 function normalizedMediaKind(value) {
   return value === "video" ? "video" : "audio";
+}
+
+function normalizedSoundCloudPreparationSource(value) {
+  const url = soundCloudSourceURL(value);
+  url.hash = "";
+  return url.toString();
+}
+
+function normalizedPreparationMediaKind(value) {
+  return value === "audio" || value === "video" ? value : null;
+}
+
+function normalizedPreparationContext(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 2_048 && !/[\u0000-\u001f]/.test(value)
+    ? value
+    : null;
+}
+
+// A prepared SoundCloud rendition belongs to one saved-song import only. Keep
+// it in the resolution object instead of a process-global cache so it cannot
+// cross server/profile operations, and invalidate it after a short window.
+function createPreparedSoundCloudAudioHandoff(resolved, {
+  source,
+  mediaKind,
+  preparationContext,
+  nowMilliseconds = Date.now(),
+} = {}) {
+  const sourceKey = normalizedSoundCloudPreparationSource(source);
+  const mediaKey = normalizedPreparationMediaKind(mediaKind);
+  const contextKey = normalizedPreparationContext(preparationContext);
+  if (!mediaKey || !contextKey) {
+    throw localImportError("inspecting_source", "INVALID_PREPARATION_CONTEXT", "The prepared SoundCloud download context is invalid.");
+  }
+  const createdAt = Number.isFinite(nowMilliseconds) ? nowMilliseconds : Date.now();
+  const expiresAt = createdAt + PREPARED_SOUNDCLOUD_AUDIO_TTL_MS;
+  let prepared = resolved;
+  return Object.freeze({
+    consume(request = {}) {
+      if (!prepared) return null;
+      const value = prepared;
+      prepared = null;
+      let requestedSource;
+      try { requestedSource = normalizedSoundCloudPreparationSource(request.source); }
+      catch { return null; }
+      const requestedAt = Number.isFinite(request.nowMilliseconds) ? request.nowMilliseconds : Date.now();
+      if (
+        requestedAt > expiresAt
+        || requestedSource !== sourceKey
+        || normalizedPreparationMediaKind(request.mediaKind) !== mediaKey
+        || normalizedPreparationContext(request.preparationContext) !== contextKey
+      ) return null;
+      return value;
+    },
+  });
+}
+
+function completedSoundCloudDownload(resolved, download) {
+  return {
+    preview: {
+      videoID: `soundcloud:${resolved.track.trackID}`,
+      title: resolved.track.title,
+      author: resolved.track.artist,
+      durationSeconds: resolved.track.durationSeconds,
+      thumbnailURL: resolved.track.artworkURL,
+      sourceURL: resolved.track.sourceURL,
+    },
+    mediaSourceURL: resolved.streamingURL,
+    download,
+  };
 }
 
 function abortError(signal) {
@@ -567,6 +640,141 @@ async function resolveLocalImportSource(source, signal, onStage = () => {}, adap
   };
 }
 
+// A server catalog row has already been through metadata hydration before the
+// user can choose it. Reuse that trusted display metadata while preparing a
+// saved-link download so providers do not repeat the metadata request.
+// Short-lived SoundCloud renditions are prepared here and handed directly to
+// the immediately following import, while other provider stream discovery
+// still happens at the byte-transfer step.
+async function resolveLocalImportDownloadSource(
+  source,
+  knownMetadata,
+  signal,
+  onStage = () => {},
+  adapters = {},
+  options = {},
+) {
+  const mediaKind = normalizedMediaKind(options.mediaKind);
+  assertNotAborted(signal);
+  const metadata = normalizedMetadata(knownMetadata, { sourceURL: source });
+
+  if (isSoundCloudURL(source)) {
+    if (mediaKind === "video") {
+      throw localImportError("inspecting_source", "SOUNDCLOUD_AUDIO_ONLY", "SoundCloud links can only be imported as audio.");
+    }
+    onStage({ stage: "inspecting_source" });
+    const audioResolve = adapters.resolveSoundCloudAudio || resolveSoundCloudAudio;
+    const preparedAudio = await audioResolve(source, signal);
+    assertNotAborted(signal);
+    const durationSeconds = Number(knownMetadata?.durationSeconds || knownMetadata?.duration);
+    const track = {
+      ...preparedAudio.track,
+      provider: "soundcloud",
+      type: "track",
+      title: metadata.title,
+      artist: metadata.artist,
+      album: metadata.album,
+      trackNumber: null,
+      durationSeconds: Number.isFinite(durationSeconds) && durationSeconds > 0
+        ? durationSeconds
+        : preparedAudio.track.durationSeconds,
+      artworkURL: metadata.artworkURL,
+      embedURL: "",
+      sourceURL: normalizedSoundCloudPreparationSource(source),
+      directlyImportable: true,
+    };
+    return {
+      kind: "soundcloud",
+      mediaKind: "audio",
+      track,
+      candidates: [{
+        ...directSoundCloudCandidate(track),
+        preparedSoundCloudAudio: createPreparedSoundCloudAudioHandoff(preparedAudio, {
+          source: track.sourceURL,
+          mediaKind: "audio",
+          preparationContext: options.preparationContext,
+        }),
+      }],
+    };
+  }
+
+  if (isSpotifyURL(source)) {
+    if (mediaKind === "video") {
+      throw localImportError("resolving_metadata", "YOUTUBE_VIDEO_REQUIRED", "Video downloads require a direct YouTube video URL. Spotify links can only be imported as audio.");
+    }
+    if (spotifyPlaylistURL(source)) {
+      throw localImportError("resolving_metadata", "PLAYLIST_METADATA_UNSUPPORTED", "A saved server song must identify one track, not a playlist.");
+    }
+    const track = {
+      provider: "spotify",
+      type: "track",
+      trackID: cleanMetadata(knownMetadata?.trackID, ""),
+      title: metadata.title,
+      artist: metadata.artist,
+      album: metadata.album,
+      trackNumber: null,
+      durationSeconds: Number(knownMetadata?.durationSeconds || knownMetadata?.duration) || null,
+      artworkURL: metadata.artworkURL,
+      embedURL: null,
+      sourceURL: source,
+    };
+    onStage({ stage: "searching_candidates", track });
+    const candidateSearch = adapters.searchYouTubeAudioSources || searchYouTubeAudioSources;
+    const candidates = await candidateSearch(track, signal);
+    if (!candidates.length) {
+      throw localImportError("searching_candidates", "NO_AUDIO_MATCH", "No file-backed audio source matched this Spotify track. Try a direct YouTube URL instead.");
+    }
+    return { kind: "spotify", mediaKind: "audio", track, candidates };
+  }
+
+  if (youtubePlaylistID(source)) {
+    throw localImportError("resolving_metadata", "PLAYLIST_METADATA_UNSUPPORTED", "A saved server song must identify one track, not a playlist.");
+  }
+  const videoID = youtubeVideoID(source);
+  if (!videoID) {
+    throw localImportError("resolving_metadata", "UNSUPPORTED_SOURCE", "Enter a Spotify, SoundCloud, or supported YouTube track URL.");
+  }
+  const track = {
+    provider: "youtube",
+    type: "track",
+    trackID: videoID,
+    title: metadata.title,
+    artist: metadata.artist,
+    album: metadata.album,
+    trackNumber: null,
+    durationSeconds: Number(knownMetadata?.durationSeconds || knownMetadata?.duration) || null,
+    artworkURL: metadata.artworkURL,
+    embedURL: null,
+    sourceURL: source,
+  };
+  onStage({ stage: "inspecting_source", track });
+  return {
+    kind: "youtube",
+    mediaKind,
+    track,
+    candidates: [{
+      videoID,
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      durationSeconds: track.durationSeconds,
+      thumbnailURL: track.artworkURL,
+      sourceProvider: "youtube",
+      officialArtist: false,
+      sourceURL: source,
+      contentType: mediaKind === "video" ? "video/mp4" : "audio/mp4",
+      qualityLabel: null,
+      quality: mediaKind === "video" ? "MP4" : null,
+      width: null,
+      height: null,
+      fps: null,
+      score: 1,
+      confidence: "high",
+      match: { title: 1, artist: 1, album: null, duration: 1, durationDeltaSeconds: 0 },
+    }],
+  };
+}
+
 async function importConfirmedSource(input, signal, onStage = () => {}, adapters = {}) {
   const mediaKind = normalizedMediaKind(input.mediaKind);
   const soundCloudSource = isSoundCloudURL(input.sourceURL);
@@ -583,6 +791,7 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
     ? adapters.downloadYouTubeVideo || downloadYouTubeVideo
     : adapters.downloadYouTubeAudio || downloadYouTubeAudio;
   const soundCloudDownload = adapters.downloadSoundCloudAudio || downloadSoundCloudAudio;
+  const soundCloudResolvedDownload = adapters.downloadResolvedSoundCloudAudio || downloadResolvedSoundCloudAudio;
   const artworkFetch = adapters.fetchArtwork || fetchArtwork;
   const m4aTag = adapters.tagM4A || tagM4A;
   const fileHash = adapters.hashFile || hashFile;
@@ -599,12 +808,30 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
       if (!videoID) throw localImportError("inspecting_source", "INVALID_YOUTUBE_VIDEO", "The selected source is not a supported YouTube video.");
     }
     onStage({ stage: "inspecting_source", selected: input.sourceURL });
-    const result = await (soundCloudSource ? soundCloudDownload : youtubeDownload)(
-      input.sourceURL,
-      sourcePath,
-      signal,
-      (completed, total) => onStage({ stage: "downloading", completed, total }),
-    );
+    const downloadProgress = (completed, total) => onStage({ stage: "downloading", completed, total });
+    let result;
+    if (soundCloudSource) {
+      assertNotAborted(signal);
+      const preparedAudio = input.preparedSoundCloudAudio?.consume?.({
+        source: input.sourceURL,
+        mediaKind,
+        preparationContext: input.preparationContext,
+      }) || null;
+      assertNotAborted(signal);
+      if (preparedAudio) {
+        const download = await soundCloudResolvedDownload(
+          preparedAudio,
+          sourcePath,
+          signal,
+          downloadProgress,
+        );
+        result = completedSoundCloudDownload(preparedAudio, download);
+      } else {
+        result = await soundCloudDownload(input.sourceURL, sourcePath, signal, downloadProgress);
+      }
+    } else {
+      result = await youtubeDownload(input.sourceURL, sourcePath, signal, downloadProgress);
+    }
     const metadata = normalizedMetadata(input.metadata, {
       title: result.preview.title,
       artist: result.preview.author || "Unknown uploader",
@@ -700,13 +927,16 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
 }
 
 module.exports = {
+  PREPARED_SOUNDCLOUD_AUDIO_TTL_MS,
   artworkFileDataURL,
+  createPreparedSoundCloudAudioHandoff,
   duplicateTrack,
   fetchArtwork,
   importConfirmedSource,
   m4aTagArguments,
   mp4MuxArguments,
   normalizedMetadata,
+  resolveLocalImportDownloadSource,
   resolveLocalImportMetadata,
   resolveLocalImportSource,
   runFFmpeg,

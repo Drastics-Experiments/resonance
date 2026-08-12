@@ -103,6 +103,84 @@ enum MacServerDownloadProgressPolicy {
         guard total > 0 else { return nil }
         return "\(min(max(position, 1), total))/\(total)"
     }
+
+    static func presentationFraction(completedBytes: Int64, totalBytes: Int64) -> Double? {
+        guard completedBytes > 0, totalBytes > 0 else { return nil }
+        return fraction(completedBytes: completedBytes, totalBytes: totalBytes)
+    }
+
+    static func percentageLabel(_ fraction: Double) -> String {
+        let clamped = min(max(fraction, 0), 1)
+        return clamped > 0 && clamped < 0.01
+            ? "<1%"
+            : "\(Int(clamped * 100))%"
+    }
+}
+
+enum MacServerDownloadMetadataPolicy {
+    static func reusingKnownMetadata(
+        in fetchedSongs: [RemoteSong],
+        knownSongs: [RemoteSong],
+        catalogIsAuthoritative: Bool
+    ) -> [RemoteSong] {
+        guard catalogIsAuthoritative else { return fetchedSongs }
+        let knownByID = knownSongs.reduce(into: [String: RemoteSong]()) { result, song in
+            guard !song.isMetadataLoading else { return }
+            result[song.id] = song
+        }
+        return fetchedSongs.map { song in
+            guard song.isMetadataLoading,
+                  let known = knownByID[song.id],
+                  known.sourceURL == song.sourceURL,
+                  known.mediaKind == song.mediaKind else { return song }
+            var updated = song
+            updated.title = known.title
+            updated.artist = known.artist
+            updated.album = known.album
+            updated.durationSeconds = known.durationSeconds
+            updated.artworkURL = known.artworkURL
+            updated.isMetadataLoading = false
+            return updated
+        }
+    }
+}
+
+struct MacRemoteSourceResolutionCacheKey: Hashable {
+    let serverContext: String
+    let source: String
+    let mediaMode: LocalImportMediaMode
+}
+
+enum MacRemoteSourceResolutionCachePolicy {
+    static func key(
+        serverContext: String,
+        source: String,
+        mediaMode: LocalImportMediaMode
+    ) -> MacRemoteSourceResolutionCacheKey {
+        MacRemoteSourceResolutionCacheKey(
+            serverContext: serverContext,
+            source: source,
+            mediaMode: mediaMode
+        )
+    }
+
+    static func isReusable(
+        _ resolution: LocalImportResolution,
+        key: MacRemoteSourceResolutionCacheKey,
+        serverContext: String,
+        song: RemoteSong,
+        mediaMode: LocalImportMediaMode
+    ) -> Bool {
+        guard let songSource = song.sourceURL else { return false }
+        let expectedMode: LocalImportMediaMode = song.mediaKind == "video" ? .video : .audio
+        return key.serverContext == serverContext
+            && key.source == songSource
+            && key.mediaMode == mediaMode
+            && mediaMode == expectedMode
+            && resolution.track.sourceURL == songSource
+            && resolution.track.title == song.title
+            && resolution.track.artist == song.artist
+    }
 }
 
 enum MacServerDownloadStatePolicy {
@@ -650,7 +728,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published var isUploadingServer = false
     @Published private(set) var isRepairingServerMetadata = false
     @Published private(set) var isUploadingLocalImport = false
-    @Published var downloadProgress = 0.0
+    @Published var downloadProgress: Double? = nil
     @Published private(set) var downloadBatchPosition = 0
     @Published private(set) var downloadBatchTotal = 0
     @Published var uploadProgress = 0.0
@@ -803,7 +881,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private let serverLinkImportService: LocalDeviceImportService
     private let remoteSongMetadataResolver: RemoteSongMetadataResolver
     private let remoteSongMetadataRetryDelays: [Duration]
-    private var remoteSourceResolutions: [String: LocalImportResolution] = [:]
+    private var remoteSourceResolutions: [MacRemoteSourceResolutionCacheKey: LocalImportResolution] = [:]
     private var remoteSongMetadataCache: [String: CachedRemoteSongMetadata]
     private let serverCacheRoot: URL?
     private let shouldPersistServerCredentials: Bool
@@ -2740,7 +2818,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             return
         }
         downloadStatus = "Preparing download…"
-        downloadProgress = 0
+        downloadProgress = nil
         downloadBatchPosition = 0
         downloadBatchTotal = 0
         do {
@@ -2765,7 +2843,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             if await repairLegacyRemoteSourceLinks(in: fetchedCatalog, base: base) {
                 fetchedCatalog = try await fetchRemoteCatalog(base: base)
             }
-            let catalogSongs = await resolveRemoteSongMetadata(in: fetchedCatalog)
+            let catalogSongs = await resolveRemoteSongMetadata(
+                in: applyingCurrentRemoteSongMetadata(to: fetchedCatalog)
+            )
             guard catalogProfileID == syncProfileID,
                   credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken),
                   let currentBase = try? normalizedServerURL(),
@@ -2850,7 +2930,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     downloadBatchPosition = pendingPosition
                     downloadCurrentFile = remote.title
                     downloadStatus = "Downloading \(pendingPosition) of \(pendingSongIDs.count)"
-                    downloadProgress = 0
+                    downloadProgress = nil
                 }
                 var stagingURL: URL?
                 do {
@@ -2866,7 +2946,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                             if isPendingDownload { downloadProgress = 1 }
                             continue
                         }
-                        _ = try await importSavedRemoteSource(remote, base: base)
+                        _ = try await importSavedRemoteSource(
+                            remote,
+                            base: base,
+                            profileID: catalogProfileID
+                        )
                         changedCount += 1
                         if isPendingDownload { downloadProgress = 1 }
                         continue
@@ -2921,7 +3005,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                             authorizationLease: lease,
                             session: networkSession,
                             progress: { [weak self] completedBytes, totalBytes in
-                                self?.downloadProgress = MacServerDownloadProgressPolicy.fraction(
+                                self?.downloadProgress = MacServerDownloadProgressPolicy.presentationFraction(
                                     completedBytes: completedBytes,
                                     totalBytes: totalBytes
                                 )
@@ -5818,16 +5902,76 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         return repairedAny
     }
 
-    private func remoteSourceResolution(for song: RemoteSong) async throws -> LocalImportResolution {
+    private func remoteSourceResolution(
+        for song: RemoteSong,
+        base: URL,
+        profileID: String
+    ) async throws -> LocalImportResolution {
         guard let source = song.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
               !source.isEmpty else { throw ServerSyncError.missingSourceLink }
         let mediaMode: LocalImportMediaMode = song.mediaKind == "video" ? .video : .audio
-        let key = "\(mediaMode.rawValue):\(source)"
-        if let cached = remoteSourceResolutions[key] { return cached }
-        let resolution = try await serverLinkImportService.resolve(
+        let serverContext = Self.serverContextKey(base: base, profileID: profileID)
+        let key = MacRemoteSourceResolutionCachePolicy.key(
+            serverContext: serverContext,
             source: source,
             mediaMode: mediaMode
-        ) { _ in }
+        )
+        if let cached = remoteSourceResolutions[key],
+           MacRemoteSourceResolutionCachePolicy.isReusable(
+            cached,
+            key: key,
+            serverContext: serverContext,
+            song: song,
+            mediaMode: mediaMode
+           ) {
+            return cached
+        }
+        remoteSourceResolutions.removeValue(forKey: key)
+        let provider: String
+        let providerID: String
+        if LocalImportURL.isSpotify(source) {
+            provider = "spotify"
+            providerID = (try? LocalImportURL.spotifyTrack(source)?.trackID) ?? song.id
+        } else if LocalImportURL.isSoundCloud(source) {
+            provider = "soundcloud"
+            providerID = song.id
+        } else {
+            provider = "youtube"
+            providerID = (try? LocalImportURL.youtubeVideoID(source)) ?? song.id
+        }
+        let knownMetadata = LocalImportSpotifyTrack(
+            provider: provider,
+            type: "track",
+            trackID: providerID,
+            title: song.title,
+            artist: song.artist,
+            album: song.album,
+            trackNumber: nil,
+            durationSeconds: song.durationSeconds.map { Int($0.rounded()) },
+            artworkURL: song.artworkURL,
+            embedURL: "",
+            sourceURL: source
+        )
+        let progress: LocalImportProgressHandler = { [weak self] _ in
+            self?.downloadStatus = "Preparing \(song.title)"
+            self?.downloadProgress = nil
+        }
+        let resolution: LocalImportResolution
+        if song.isMetadataLoading {
+            resolution = try await serverLinkImportService.resolve(
+                source: source,
+                mediaMode: mediaMode,
+                progress: progress
+            )
+        } else {
+            resolution = try await serverLinkImportService.resolveSavedDownload(
+                source: source,
+                metadata: knownMetadata,
+                mediaMode: mediaMode,
+                preparationContext: serverContext,
+                progress: progress
+            )
+        }
         guard resolution.playlist == nil else { throw ServerSyncError.invalidMedia }
         remoteSourceResolutions[key] = resolution
         return resolution
@@ -5982,9 +6126,33 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                cached.cachedAt >= Date().addingTimeInterval(-Self.remoteSongMetadataCacheLifetime) {
                 return Self.applying(cached.metadata, to: song)
             }
-            guard let resolution = remoteSourceResolutions[cacheKey] else { return song }
+            guard let source = song.sourceURL,
+                  let base = try? normalizedServerURL() else { return song }
+            let mediaMode: LocalImportMediaMode = song.mediaKind == "video" ? .video : .audio
+            let serverContext = Self.serverContextKey(base: base, profileID: syncProfileID)
+            let resolutionKey = MacRemoteSourceResolutionCachePolicy.key(
+                serverContext: serverContext,
+                source: source,
+                mediaMode: mediaMode
+            )
+            guard let resolution = remoteSourceResolutions[resolutionKey],
+                  MacRemoteSourceResolutionCachePolicy.isReusable(
+                    resolution,
+                    key: resolutionKey,
+                    serverContext: serverContext,
+                    song: song,
+                    mediaMode: mediaMode
+                  ) else { return song }
             return Self.applying(resolution.track, to: song)
         }
+    }
+
+    private func applyingCurrentRemoteSongMetadata(to songs: [RemoteSong]) -> [RemoteSong] {
+        MacServerDownloadMetadataPolicy.reusingKnownMetadata(
+            in: songs,
+            knownSongs: remoteSongs,
+            catalogIsAuthoritative: remoteCatalogIsAuthoritative
+        )
     }
 
     private func remoteSongMetadataRequests(for songs: [RemoteSong]) -> [RemoteSongMetadataRequest] {
@@ -6109,8 +6277,16 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     @discardableResult
-    private func importSavedRemoteSource(_ remote: RemoteSong, base: URL) async throws -> Track {
-        let resolution = try await remoteSourceResolution(for: remote)
+    private func importSavedRemoteSource(
+        _ remote: RemoteSong,
+        base: URL,
+        profileID: String
+    ) async throws -> Track {
+        let resolution = try await remoteSourceResolution(
+            for: remote,
+            base: base,
+            profileID: profileID
+        )
         guard let candidate = resolution.candidates.first,
               let source = remote.sourceURL else { throw ServerSyncError.invalidMedia }
         let metadata = LocalImportMetadata(
@@ -6121,17 +6297,19 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             sourceURL: source
         )
         let mediaMode: LocalImportMediaMode = remote.mediaKind == "video" ? .video : .audio
+        let preparationContext = Self.serverContextKey(base: base, profileID: profileID)
         let outcome = try await serverLinkImportService.importCandidate(
             candidate,
             metadata: metadata,
             existingTracks: tracks,
-            mediaMode: mediaMode
+            mediaMode: mediaMode,
+            preparationContext: preparationContext
         ) { [weak self] progress in
             self?.downloadStatus = progress.stage == .downloading
                 ? "Downloading \(remote.title)"
                 : "Resolving \(remote.title)"
             if progress.stage == .downloading {
-                self?.downloadProgress = MacServerDownloadProgressPolicy.fraction(
+                self?.downloadProgress = MacServerDownloadProgressPolicy.presentationFraction(
                     completedBytes: progress.completed,
                     totalBytes: progress.total
                 )
@@ -6151,7 +6329,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             trackID: track.id,
             remoteID: remote.id,
             sourceServer: ServerSongIdentity.normalizedOrigin(base),
-            profileID: syncProfileID
+            profileID: profileID
         )
         return tracks.first(where: { $0.id == track.id }) ?? track
     }

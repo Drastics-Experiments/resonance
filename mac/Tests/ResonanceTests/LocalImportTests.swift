@@ -388,6 +388,60 @@ struct LocalImportTests {
     }
 
     @Test
+    @MainActor
+    func savedYouTubeDownloadReusesCatalogMetadataBeforeStreamResolution() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("resonance-known-download-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            session.invalidateAndCancel()
+            LocalImportMockURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+        }
+        LocalImportMockURLProtocol.reset()
+        LocalImportMockURLProtocol.handler = { request in
+            Issue.record("Known YouTube metadata unexpectedly made a request to \(String(describing: request.url))")
+            throw URLError(.unsupportedURL)
+        }
+
+        let source = "https://youtu.be/\(videoID)"
+        let metadata = LocalImportSpotifyTrack(
+            provider: "youtube",
+            type: "track",
+            trackID: videoID,
+            title: "Already hydrated",
+            artist: "Catalog artist",
+            album: "Catalog album",
+            trackNumber: nil,
+            durationSeconds: 123,
+            artworkURL: "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg",
+            embedURL: "",
+            sourceURL: source
+        )
+        var stages: [LocalImportStage] = []
+        let service = LocalDeviceImportService(
+            sessions: .testing(session),
+            localRoot: root.appendingPathComponent("library", isDirectory: true),
+            temporaryRoot: root.appendingPathComponent("temporary", isDirectory: true)
+        )
+        let resolution = try await service.resolveSavedDownload(
+            source: source,
+            metadata: metadata,
+            mediaMode: .audio,
+            preparationContext: "https://music.test#profile=default"
+        ) { progress in
+            stages.append(progress.stage)
+        }
+
+        #expect(resolution.track.title == "Already hydrated")
+        #expect(resolution.candidates.first?.sourceURL == source)
+        #expect(stages == [.inspectingSource])
+        #expect(LocalImportMockURLProtocol.hosts().isEmpty)
+    }
+
+    @Test
     func parsesOnlyValidatedDebridVaultReleaseSources() throws {
         let infoHash = String(repeating: "a", count: 40)
         let payload: [String: Any] = [

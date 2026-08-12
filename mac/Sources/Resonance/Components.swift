@@ -37,7 +37,7 @@ struct TransferProgressOverlay: View {
                             .monospacedDigit()
                     }
                     if let clampedProgress {
-                        Text("\(Int(clampedProgress * 100))%")
+                        Text(MacServerDownloadProgressPolicy.percentageLabel(clampedProgress))
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(palette.muted)
                             .monospacedDigit()

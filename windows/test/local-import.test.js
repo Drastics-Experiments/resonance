@@ -30,8 +30,11 @@ const {
   spotifyPlaylistURL,
 } = core;
 const {
+  PREPARED_SOUNDCLOUD_AUDIO_TTL_MS,
+  createPreparedSoundCloudAudioHandoff,
   duplicateTrack,
   importConfirmedSource,
+  resolveLocalImportDownloadSource,
   resolveLocalImportMetadata,
   resolveLocalImportSource,
   safeArtworkURL,
@@ -463,6 +466,237 @@ test("resolves server catalog metadata without preparing import candidates", asy
   );
   assert.deepEqual(metadata, expected);
   assert.equal(candidateSearches, 0);
+});
+
+test("saved-link downloads reuse hydrated metadata instead of resolving it again", async () => {
+  const metadata = {
+    title: "Hydrated song",
+    artist: "Hydrated artist",
+    album: "Hydrated album",
+    durationSeconds: 123,
+    artworkURL: "https://i.scdn.co/image/current",
+  };
+  let metadataRequests = 0;
+  let candidateSearches = 0;
+  const spotify = await resolveLocalImportDownloadSource(
+    `https://open.spotify.com/track/${spotifyTrackID}`,
+    metadata,
+    new AbortController().signal,
+    () => {},
+    {
+      resolveSpotifyTrack: async () => {
+        metadataRequests += 1;
+        throw new Error("metadata should be reused");
+      },
+      searchYouTubeAudioSources: async (track) => {
+        candidateSearches += 1;
+        assert.equal(track.title, metadata.title);
+        return [{ videoID: "jNQXAC9IVRw", sourceURL: "https://youtu.be/jNQXAC9IVRw" }];
+      },
+    },
+  );
+  assert.equal(spotify.track.title, metadata.title);
+  assert.equal(spotify.candidates.length, 1);
+  assert.equal(metadataRequests, 0);
+  assert.equal(candidateSearches, 1);
+
+  let inspections = 0;
+  const youtube = await resolveLocalImportDownloadSource(
+    "https://youtu.be/jNQXAC9IVRw",
+    metadata,
+    new AbortController().signal,
+    () => {},
+    {
+      inspectYouTubeAudio: async () => {
+        inspections += 1;
+        throw new Error("stream inspection belongs to the byte-transfer step");
+      },
+    },
+  );
+  assert.equal(youtube.track.title, metadata.title);
+  assert.equal(youtube.candidates[0].sourceURL, "https://youtu.be/jNQXAC9IVRw");
+  assert.equal(inspections, 0);
+});
+
+test("hydrated SoundCloud downloads resolve the rendition once and hand it directly to import", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "resonance-prepared-soundcloud-test-"));
+  const library = path.join(root, "library");
+  const sourceURL = "https://soundcloud.com/resonance/hydrated-song";
+  const preparationContext = JSON.stringify({
+    serverOrigin: "https://music.example",
+    profileID: "profile-a",
+    songID: "song-a",
+  });
+  const bytes = Buffer.from("prepared SoundCloud audio bytes");
+  const sourceSha256 = createHash("sha256").update(bytes).digest("hex");
+  const preparedAudio = {
+    track: {
+      provider: "soundcloud",
+      type: "track",
+      trackID: "12345",
+      title: "Stale provider title",
+      artist: "Stale provider artist",
+      album: null,
+      durationSeconds: 90,
+      artworkURL: null,
+      sourceURL,
+    },
+    streamingURL: "https://cf-media.sndcdn.com/prepared.mp3",
+    contentLength: bytes.length,
+    contentType: "audio/mpeg",
+    durationSeconds: 90,
+    sourceURL,
+  };
+  let metadataResolutions = 0;
+  let audioResolutions = 0;
+  let preparedDownloads = 0;
+  let fallbackDownloads = 0;
+  try {
+    const resolution = await resolveLocalImportDownloadSource(
+      sourceURL,
+      {
+        title: "Hydrated title",
+        artist: "Hydrated artist",
+        album: "Hydrated album",
+        durationSeconds: 123,
+        artworkURL: null,
+      },
+      new AbortController().signal,
+      () => {},
+      {
+        resolveSoundCloudSource: async () => {
+          metadataResolutions += 1;
+          throw new Error("catalog metadata must be reused");
+        },
+        resolveSoundCloudAudio: async () => {
+          audioResolutions += 1;
+          return preparedAudio;
+        },
+      },
+      { mediaKind: "audio", preparationContext },
+    );
+    assert.equal(resolution.track.title, "Hydrated title");
+    assert.equal(resolution.track.artist, "Hydrated artist");
+    assert.equal(resolution.track.durationSeconds, 123);
+    assert.equal(metadataResolutions, 0);
+    assert.equal(audioResolutions, 1);
+
+    const candidate = resolution.candidates[0];
+    const imported = await importConfirmedSource({
+      sourceURL: candidate.sourceURL,
+      mediaKind: "audio",
+      metadata: resolution.track,
+      preparedSoundCloudAudio: candidate.preparedSoundCloudAudio,
+      preparationContext,
+      existing: [],
+      destinationDirectory: library,
+      temporaryRoot: root,
+    }, new AbortController().signal, () => {}, {
+      downloadSoundCloudAudio: async () => {
+        fallbackDownloads += 1;
+        audioResolutions += 1;
+        throw new Error("the prepared rendition should be reused");
+      },
+      downloadResolvedSoundCloudAudio: async (resolved, destination) => {
+        preparedDownloads += 1;
+        assert.equal(resolved, preparedAudio);
+        await fs.writeFile(destination, bytes);
+        return { sha256: sourceSha256, bytesWritten: bytes.length };
+      },
+      fetchArtwork: async () => null,
+      tagM4A: async (source, destination) => fs.copyFile(source, destination),
+    });
+    assert.equal(imported.kind, "created");
+    assert.equal(imported.metadata.title, "Hydrated title");
+    assert.equal(metadataResolutions, 0);
+    assert.equal(audioResolutions, 1);
+    assert.equal(preparedDownloads, 1);
+    assert.equal(fallbackDownloads, 0);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("prepared SoundCloud audio is context-bound, single-use, and expires", () => {
+  const resolved = { streamingURL: "https://cf-media.sndcdn.com/prepared.mp3" };
+  const source = "https://soundcloud.com/resonance/prepared";
+  const context = "server/profile/song";
+  const singleUse = createPreparedSoundCloudAudioHandoff(resolved, {
+    source,
+    mediaKind: "audio",
+    preparationContext: context,
+    nowMilliseconds: 10,
+  });
+  assert.equal(singleUse.consume({
+    source,
+    mediaKind: "audio",
+    preparationContext: context,
+    nowMilliseconds: 11,
+  }), resolved);
+  assert.equal(singleUse.consume({
+    source,
+    mediaKind: "audio",
+    preparationContext: context,
+    nowMilliseconds: 12,
+  }), null);
+
+  const wrongContext = createPreparedSoundCloudAudioHandoff(resolved, {
+    source,
+    mediaKind: "audio",
+    preparationContext: context,
+    nowMilliseconds: 10,
+  });
+  assert.equal(wrongContext.consume({
+    source,
+    mediaKind: "audio",
+    preparationContext: "another-profile",
+    nowMilliseconds: 11,
+  }), null);
+  assert.equal(wrongContext.consume({
+    source,
+    mediaKind: "audio",
+    preparationContext: context,
+    nowMilliseconds: 12,
+  }), null);
+
+  const wrongSource = createPreparedSoundCloudAudioHandoff(resolved, {
+    source,
+    mediaKind: "audio",
+    preparationContext: context,
+    nowMilliseconds: 10,
+  });
+  assert.equal(wrongSource.consume({
+    source: "https://soundcloud.com/resonance/different",
+    mediaKind: "audio",
+    preparationContext: context,
+    nowMilliseconds: 11,
+  }), null);
+
+  const wrongMediaKind = createPreparedSoundCloudAudioHandoff(resolved, {
+    source,
+    mediaKind: "audio",
+    preparationContext: context,
+    nowMilliseconds: 10,
+  });
+  assert.equal(wrongMediaKind.consume({
+    source,
+    mediaKind: "video",
+    preparationContext: context,
+    nowMilliseconds: 11,
+  }), null);
+
+  const expired = createPreparedSoundCloudAudioHandoff(resolved, {
+    source,
+    mediaKind: "audio",
+    preparationContext: context,
+    nowMilliseconds: 10,
+  });
+  assert.equal(expired.consume({
+    source,
+    mediaKind: "audio",
+    preparationContext: context,
+    nowMilliseconds: 10 + PREPARED_SOUNDCLOUD_AUDIO_TTL_MS + 1,
+  }), null);
 });
 
 test("resolves YouTube catalog metadata with one bounded oEmbed request", async () => {

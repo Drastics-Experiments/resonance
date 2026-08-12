@@ -315,10 +315,8 @@ final class MobileBoundedDownloadOperation: NSObject, URLSessionDataDelegate, @u
         }
         receivedResponse = true
         expectedByteCount = max(response.expectedContentLength, 0)
-        let expectedByteCount = self.expectedByteCount
         lock.unlock()
         completionHandler(.allow)
-        progress(MobileTransferByteProgress(completed: 0, total: expectedByteCount))
     }
 
     func urlSession(
@@ -354,8 +352,11 @@ final class MobileBoundedDownloadOperation: NSObject, URLSessionDataDelegate, @u
             hasher.update(data: data)
             byteCount = nextByteCount
             let expectedByteCount = self.expectedByteCount
-            let shouldReportProgress = nextByteCount - lastReportedByteCount >= 256 * 1_024
-                || (expectedByteCount > 0 && nextByteCount >= expectedByteCount)
+            let shouldReportProgress = MobileTransferByteProgressPolicy.shouldReport(
+                completedBytes: nextByteCount,
+                lastReportedBytes: lastReportedByteCount,
+                totalBytes: expectedByteCount
+            )
             if shouldReportProgress {
                 lastReportedByteCount = nextByteCount
             }
@@ -715,7 +716,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private let fileManager = FileManager.default
     private let serverLinkImportService = LocalDeviceImportService()
-    private var remoteSourceResolutions: [String: LocalImportResolution] = [:]
+    private var remoteSourceResolutions: [MobileRemoteSourceResolutionCacheKey: LocalImportResolution] = [:]
     private var remoteSongMetadataCache: [String: MobileRemoteSongMetadataCacheEntry] = [:]
     private let uploadSerialGate = MobileAsyncSerialGate()
     private let downloadSerialGate = MobileAsyncSerialGate()
@@ -909,6 +910,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     func signOutAccount() async {
         let active = accountSession
         accountSession = nil
+        remoteSourceResolutions.removeAll()
         accountRefreshTask?.cancel()
         accountRefreshTask = nil
         try? Self.storeToken("", key: Self.accountSessionKey)
@@ -2737,15 +2739,39 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private func remoteSourceResolution(for song: MobileRemoteSong) async throws -> LocalImportResolution {
         guard let source = song.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
               !source.isEmpty else { throw SourceLinkRequiredError() }
-        let key = "\(song.mediaKind):\(source)"
-        if let cached = remoteSourceResolutions[key] { return cached }
         let mediaMode = LocalImportMediaMode(rawValue: song.mediaKind) ?? .audio
-        let resolution = try await serverLinkImportService.resolve(
-            source: source,
-            mediaMode: mediaMode
-        ) { _ in }
+        let knownCatalogMetadata = MobileRemoteSourceMetadataReusePolicy.knownTrack(for: song)
+        guard let cacheKey = MobileRemoteSourceResolutionCachePolicy.key(
+            context: activeServerContext,
+            accountScope: accountSession?.accountID,
+            mediaKind: song.mediaKind,
+            sourceURL: source
+        ) else { throw URLError(.unsupportedURL) }
+        if let cached = remoteSourceResolutions[cacheKey],
+           MobileRemoteSourceResolutionCachePolicy.canReuse(
+            cached,
+            cachedKey: cacheKey,
+            expectedKey: cacheKey,
+            knownCatalogMetadata: knownCatalogMetadata
+           ) {
+            return cached
+        }
+        remoteSourceResolutions.removeValue(forKey: cacheKey)
+        let resolution: LocalImportResolution
+        if let knownCatalogMetadata {
+            resolution = try await serverLinkImportService.resolveUsingCatalogMetadata(
+                source: source,
+                metadata: knownCatalogMetadata,
+                mediaMode: mediaMode
+            ) { _ in }
+        } else {
+            resolution = try await serverLinkImportService.resolve(
+                source: source,
+                mediaMode: mediaMode
+            ) { _ in }
+        }
         guard resolution.playlist == nil else { throw URLError(.cannotParseResponse) }
-        remoteSourceResolutions[key] = resolution
+        remoteSourceResolutions[cacheKey] = resolution
         return resolution
     }
 
@@ -2775,7 +2801,18 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             if let cached = remoteSongMetadataCache[cacheKey] {
                 return Self.applying(cached.metadata, to: song)
             }
-            guard let resolution = remoteSourceResolutions[cacheKey] else { return song }
+            guard let resolutionKey = MobileRemoteSourceResolutionCachePolicy.key(
+                context: activeServerContext,
+                accountScope: accountSession?.accountID,
+                mediaKind: song.mediaKind,
+                sourceURL: song.sourceURL
+            ), let resolution = remoteSourceResolutions[resolutionKey],
+               MobileRemoteSourceResolutionCachePolicy.canReuse(
+                resolution,
+                cachedKey: resolutionKey,
+                expectedKey: resolutionKey,
+                knownCatalogMetadata: nil
+               ) else { return song }
             return Self.applying(resolution.track, to: song)
         }
     }
@@ -3069,14 +3106,14 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             ) else { return }
             self.downloadDetail = progress.stage == .downloading
                 ? "Downloading \(song.title)"
-                : "Resolving \(song.title)"
+                : "Preparing \(song.title)"
             self.presentTransfer(
                 sessionID: transferSessionID,
                 operationID: operationID,
                 kind: .download,
                 itemID: song.id,
                 songTitle: song.title,
-                detail: progress.stage == .downloading ? "Downloading song" : "Resolving source",
+                detail: progress.stage == .downloading ? "Downloading song" : "Preparing audio source",
                 currentItem: currentItem,
                 totalItems: totalItems,
                 completedBytes: progress.completed,
@@ -3151,17 +3188,23 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 operationID: operationID
             )
         }
-        downloadDetail = "Downloading \(song.title)"
+        downloadDetail = song.isSourceLinkRecord
+            ? "Preparing \(song.title)"
+            : "Downloading \(song.title)"
         presentTransfer(
             sessionID: transferSessionID,
             operationID: operationID,
             kind: .download,
             itemID: song.id,
             songTitle: song.title,
-            detail: song.isSourceLinkRecord ? "Resolving source" : "Downloading song",
+            detail: song.isSourceLinkRecord ? "Preparing audio source" : "Connecting",
             currentItem: currentItem,
             totalItems: totalItems,
-            totalBytes: song.isSourceLinkRecord ? 0 : song.size
+            // The catalog size is validation metadata, not evidence that the
+            // transfer has begun. The downloader supplies the response's byte
+            // total alongside the first received chunk, which moves the popup
+            // into determinate progress.
+            totalBytes: 0
         )
 
         if song.isSourceLinkRecord {
@@ -4604,6 +4647,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         serverToken = accessToken
         serverAdminToken = adminToken
         let nextContext = activeServerContext
+        if previousContext != nextContext || previousAccessToken != accessToken {
+            remoteSourceResolutions.removeAll()
+        }
         if previousContext != nextContext {
             restoreActiveProfileState()
             if let currentTrack,
@@ -5866,6 +5912,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             return
         }
         playlistSyncTask?.cancel()
+        remoteSourceResolutions.removeAll()
         clientConfigRequestGeneration &+= 1
         captureActiveProfileState()
         syncProfileID = id

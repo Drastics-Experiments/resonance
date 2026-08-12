@@ -78,6 +78,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.clerk.ui.auth.AuthView
 import mov.unblocked.resonance.data.RemoteSong
+import mov.unblocked.resonance.data.DownloadProgressDisplayMode
+import mov.unblocked.resonance.data.DownloadProgressDisplayPolicy
 import mov.unblocked.resonance.data.ServerDownloadMode
 import mov.unblocked.resonance.data.ServerUploadMode
 import mov.unblocked.resonance.data.AccountEmailPrivacy
@@ -513,12 +515,21 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
     val isUploading = state.isUploading
     val progress = (if (isUploading) state.uploadProgress else state.downloadProgress)
         .coerceIn(0f, 1f)
+    val downloadDisplayMode = DownloadProgressDisplayPolicy.mode(
+        bytesTransferred = state.downloadBytesTransferred,
+        totalBytes = state.downloadTotalBytes,
+    )
     val counter = if (
         !isUploading && state.downloadCurrentItem > 0 && state.downloadTotalItems > 0
     ) {
         "${state.downloadCurrentItem}/${state.downloadTotalItems}"
     } else null
-    val title = if (isUploading) "Uploading" else listOfNotNull("Downloading", counter).joinToString(" • ")
+    val transferVerb = when {
+        isUploading -> "Uploading"
+        downloadDisplayMode == DownloadProgressDisplayMode.Preparing -> "Preparing download"
+        else -> "Downloading"
+    }
+    val title = listOfNotNull(transferVerb, counter).joinToString(" • ")
     val detail = if (isUploading) {
         state.uploadDetail
     } else {
@@ -553,17 +564,36 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            Text("${(progress * 100).toInt()}%", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f))
+            Text(
+                when {
+                    isUploading -> "${(progress * 100).toInt()}%"
+                    downloadDisplayMode == DownloadProgressDisplayMode.Preparing -> "Preparing…"
+                    downloadDisplayMode == DownloadProgressDisplayMode.IndeterminateTransfer ->
+                        formatBytes(state.downloadBytesTransferred)
+                    else -> DownloadProgressDisplayPolicy.percentageLabel(progress)
+                },
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f),
+            )
         }
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier.fillMaxWidth(),
-            color = MaterialTheme.colorScheme.secondary,
-        )
+        if (isUploading || downloadDisplayMode == DownloadProgressDisplayMode.DeterminateTransfer) {
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.secondary,
+            )
+        } else {
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.secondary,
+            )
+        }
         if (!isUploading) {
             val totalBytes = state.downloadTotalBytes?.takeIf { it > 0L }
             Text(
-                if (totalBytes != null) {
+                if (downloadDisplayMode == DownloadProgressDisplayMode.Preparing) {
+                    "Starting the media transfer…"
+                } else if (totalBytes != null) {
                     "${formatBytes(state.downloadBytesTransferred)} / ${formatBytes(totalBytes)}"
                 } else {
                     "${formatBytes(state.downloadBytesTransferred)} downloaded"

@@ -87,6 +87,11 @@ const {
   createServerDownloadProgressPublisher,
   retryServerDownload,
   serverDownloadDisplayName,
+  serverDownloadImportedMetadata,
+  serverDownloadMetadata,
+  serverDownloadMetadataContextMatches,
+  serverDownloadMetadataIsResolved,
+  serverDownloadMetadataSnapshot,
   serverDownloadProgressEvent,
 } = serverDownload;
 const { discordArtworkURL, sanitizeDiscordActivity } = discordRPC;
@@ -2334,16 +2339,118 @@ test("shows catalog song titles instead of internal server download filenames", 
       itemIndex: 3,
       itemCount: 10,
     }),
-    { ratio: 0.42, counter: "3/10", label: "42% · 3/10" },
+    { ratio: 0.42, counter: "3/10", determinate: true, label: "42% · 3/10" },
   );
-  assert.equal(serverTransferProgressPresentation({
+  assert.deepEqual(serverTransferProgressPresentation({
     completed: 7,
     total: 10,
     itemCompleted: 0,
     itemTotal: 100,
     itemIndex: 4,
     itemCount: 10,
-  }).ratio, 0);
+  }), {
+    ratio: null,
+    counter: "4/10",
+    determinate: false,
+    label: "Preparing · 4/10",
+  });
+  assert.equal(serverTransferProgressPresentation({
+    itemCompleted: 1,
+    itemTotal: 10_000,
+    itemIndex: 1,
+    itemCount: 1,
+  }).label, "<1% · 1/1");
+});
+
+test("server downloads prefer already-hydrated catalog metadata", () => {
+  const sourceURL = "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8";
+  assert.deepEqual(serverDownloadMetadata({
+    title: "Catalog placeholder",
+    artist: "Automatic lookup",
+    album: "Link only",
+    duration_seconds: 10,
+    artwork_url: "https://server.example/old.jpg",
+    source_url: sourceURL,
+  }, {
+    title: "Hydrated title",
+    artist: "Hydrated artist",
+    album: "Hydrated album",
+    duration: 42,
+    artworkURL: "https://i.scdn.co/image/current",
+  }), {
+    title: "Hydrated title",
+    artist: "Hydrated artist",
+    album: "Hydrated album",
+    durationSeconds: 42,
+    artworkURL: "https://i.scdn.co/image/current",
+    sourceURL,
+  });
+  const snapshot = serverDownloadMetadataSnapshot({
+    title: "Hydrated title",
+    artist: "Hydrated artist",
+    resolved: true,
+    sourceURL,
+    mediaKind: "audio",
+  });
+  const freshSong = { source_url: sourceURL, media_kind: "audio" };
+  assert.equal(serverDownloadMetadataContextMatches(freshSong, snapshot), true);
+  assert.equal(serverDownloadMetadataIsResolved(freshSong, snapshot), true);
+  assert.equal(serverDownloadMetadataIsResolved(freshSong, {
+    ...snapshot,
+    sourceURL: "https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl",
+  }), false);
+  assert.equal(serverDownloadMetadataIsResolved(freshSong, {
+    ...snapshot,
+    mediaKind: "video",
+  }), false);
+  assert.equal(serverDownloadMetadataIsResolved(freshSong, serverDownloadMetadataSnapshot({
+    title: "Resolving metadata…",
+    artist: "Automatic lookup",
+    resolved: false,
+    sourceURL,
+    mediaKind: "audio",
+  })), false);
+});
+
+test("server SoundCloud downloads carry their prepared rendition into the exact import context", () => {
+  const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
+  const start = mainSource.indexOf("async function downloadSavedSourceSong");
+  const end = mainSource.indexOf('ipcMain.handle("server:sync"', start);
+  const downloadSource = mainSource.slice(start, end);
+  assert.match(downloadSource, /preparationContext = JSON\.stringify\(\{[\s\S]+serverOrigin:[\s\S]+profileID:[\s\S]+songID:/);
+  assert.match(downloadSource, /resolveLocalImportDownloadSource\([\s\S]+\{ mediaKind, preparationContext \}\)/);
+  assert.match(downloadSource, /preparedSoundCloudAudio: candidate\.preparedSoundCloudAudio/);
+  assert.match(downloadSource, /preparationContext,[\s\S]+existing: options\.existing/);
+});
+
+test("unresolved fallback metadata cannot be overwritten by stale display metadata", () => {
+  const resolved = {
+    title: "Fresh resolver title",
+    artist: "Fresh resolver artist",
+    album: "Fresh resolver album",
+    durationSeconds: 210,
+  };
+  const stale = {
+    title: "Resolving metadata…",
+    artist: "Automatic lookup",
+    album: "Link only",
+  };
+  assert.deepEqual(
+    serverDownloadImportedMetadata(resolved, stale, false, "https://youtu.be/jNQXAC9IVRw"),
+    { ...resolved, sourceURL: "https://youtu.be/jNQXAC9IVRw" },
+  );
+  assert.deepEqual(
+    serverDownloadImportedMetadata(resolved, {
+      title: "Hydrated title",
+      artist: "Hydrated artist",
+    }, true, "https://youtu.be/jNQXAC9IVRw"),
+    {
+      ...resolved,
+      title: "Hydrated title",
+      artist: "Hydrated artist",
+      sourceURL: "https://youtu.be/jNQXAC9IVRw",
+    },
+  );
 });
 
 test("throttles current-song progress while always publishing its initial and final values", () => {

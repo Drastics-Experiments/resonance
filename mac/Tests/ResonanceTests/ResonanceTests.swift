@@ -1103,8 +1103,155 @@ struct ResonanceTests {
         #expect(MacServerDownloadProgressPolicy.fraction(completedBytes: 42, totalBytes: 100) == 0.42)
         #expect(MacServerDownloadProgressPolicy.fraction(completedBytes: 0, totalBytes: 100) == 0)
         #expect(MacServerDownloadProgressPolicy.fraction(completedBytes: 120, totalBytes: 100) == 1)
+        #expect(MacServerDownloadProgressPolicy.presentationFraction(completedBytes: 0, totalBytes: 100) == nil)
+        #expect(MacServerDownloadProgressPolicy.presentationFraction(completedBytes: 42, totalBytes: 100) == 0.42)
+        #expect(MacServerDownloadProgressPolicy.percentageLabel(0.001) == "<1%")
+        #expect(MacServerDownloadProgressPolicy.percentageLabel(0.42) == "42%")
         #expect(MacServerDownloadProgressPolicy.batchCounter(position: 3, total: 10) == "3/10")
         #expect(MacServerDownloadProgressPolicy.batchCounter(position: 0, total: 0) == nil)
+    }
+
+    @Test
+    func serverDownloadReusesHydratedMetadataOnlyForTheAuthoritativeMatchingSong() throws {
+        let source = "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8"
+        let fetched = try JSONDecoder().decode(RemoteSong.self, from: Data(
+            """
+            {
+              "id": "server-song",
+              "source_url": "\(source)",
+              "media_kind": "audio",
+              "size": 0,
+              "download_url": "/api/v1/songs/server-song/file",
+              "stream_url": "/api/v1/songs/server-song/stream"
+            }
+            """.utf8
+        ))
+        let known = try JSONDecoder().decode(RemoteSong.self, from: Data(
+            """
+            {
+              "id": "server-song",
+              "source_url": "\(source)",
+              "media_kind": "audio",
+              "size": 0,
+              "title": "Already hydrated",
+              "artist": "Catalog artist",
+              "album": "Catalog album",
+              "duration_seconds": 123,
+              "artwork_url": "https://i.scdn.co/image/current",
+              "download_url": "/api/v1/songs/server-song/file",
+              "stream_url": "/api/v1/songs/server-song/stream"
+            }
+            """.utf8
+        ))
+
+        let reused = try #require(MacServerDownloadMetadataPolicy.reusingKnownMetadata(
+            in: [fetched],
+            knownSongs: [known],
+            catalogIsAuthoritative: true
+        ).first)
+        #expect(reused.title == "Already hydrated")
+        #expect(reused.artist == "Catalog artist")
+        #expect(reused.isMetadataLoading == false)
+
+        let untrusted = try #require(MacServerDownloadMetadataPolicy.reusingKnownMetadata(
+            in: [fetched],
+            knownSongs: [known],
+            catalogIsAuthoritative: false
+        ).first)
+        #expect(untrusted.isMetadataLoading)
+    }
+
+    @Test
+    func savedSourceResolutionCacheIsProfileScopedAndRejectsCorrectedMetadata() throws {
+        let source = "https://youtu.be/jNQXAC9IVRw"
+        let song = try JSONDecoder().decode(RemoteSong.self, from: Data(
+            """
+            {
+              "id": "server-song",
+              "source_url": "\(source)",
+              "media_kind": "audio",
+              "size": 0,
+              "title": "Original title",
+              "artist": "Original artist",
+              "download_url": "/api/v1/songs/server-song/file",
+              "stream_url": "/api/v1/songs/server-song/stream"
+            }
+            """.utf8
+        ))
+        let resolution = LocalImportResolution(
+            kind: .youtube,
+            track: LocalImportSpotifyTrack(
+                provider: "youtube",
+                type: "track",
+                trackID: "jNQXAC9IVRw",
+                title: "Original title",
+                artist: "Original artist",
+                album: "Catalog album",
+                trackNumber: nil,
+                durationSeconds: 123,
+                artworkURL: nil,
+                embedURL: "",
+                sourceURL: source
+            ),
+            candidates: [],
+            releases: []
+        )
+        let profileA = "https://music.test|profile-a"
+        let profileB = "https://music.test|profile-b"
+        let keyA = MacRemoteSourceResolutionCachePolicy.key(
+            serverContext: profileA,
+            source: source,
+            mediaMode: .audio
+        )
+        let keyB = MacRemoteSourceResolutionCachePolicy.key(
+            serverContext: profileB,
+            source: source,
+            mediaMode: .audio
+        )
+        #expect(keyA != keyB)
+        #expect(MacRemoteSourceResolutionCachePolicy.isReusable(
+            resolution,
+            key: keyA,
+            serverContext: profileA,
+            song: song,
+            mediaMode: .audio
+        ))
+        #expect(!MacRemoteSourceResolutionCachePolicy.isReusable(
+            resolution,
+            key: keyA,
+            serverContext: profileB,
+            song: song,
+            mediaMode: .audio
+        ))
+        #expect(!MacRemoteSourceResolutionCachePolicy.isReusable(
+            resolution,
+            key: keyA,
+            serverContext: profileA,
+            song: song,
+            mediaMode: .video
+        ))
+
+        let correctedSong = try JSONDecoder().decode(RemoteSong.self, from: Data(
+            """
+            {
+              "id": "server-song",
+              "source_url": "\(source)",
+              "media_kind": "audio",
+              "size": 0,
+              "title": "Corrected title",
+              "artist": "Corrected artist",
+              "download_url": "/api/v1/songs/server-song/file",
+              "stream_url": "/api/v1/songs/server-song/stream"
+            }
+            """.utf8
+        ))
+        #expect(!MacRemoteSourceResolutionCachePolicy.isReusable(
+            resolution,
+            key: keyA,
+            serverContext: profileA,
+            song: correctedSong,
+            mediaMode: .audio
+        ))
     }
 
     @Test

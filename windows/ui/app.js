@@ -6249,7 +6249,9 @@ function updateServerTransfer({
   $("#serverTransferIcon").innerHTML = direction === "upload" ? serverUploadIcon : serverDownloadIcon;
   $("#serverTransferTitle").textContent = title || (direction === "upload" ? "Uploading" : "Downloading");
   $("#serverTransferDetail").textContent = currentFile || "Preparing transfer…";
-  $("#serverTransferProgress").value = presentation.ratio;
+  const progress = $("#serverTransferProgress");
+  if (presentation.determinate) progress.value = presentation.ratio;
+  else progress.removeAttribute("value");
   $("#serverTransferPercent").textContent = presentation.label;
   if (autoHide && total > 0 && completed >= total) hideServerTransfer(owner);
 }
@@ -6367,6 +6369,18 @@ async function serverAction(mode) {
       const songTitles = Object.fromEntries(serverCatalog
         .filter((song) => !selectedSongIDs || selectedSongIDs.has(song.id))
         .map((song) => [song.id, song.title || "Untitled song"]));
+      const songMetadata = Object.fromEntries(serverCatalog
+        .filter((song) => !selectedSongIDs || selectedSongIDs.has(song.id))
+        .map((song) => [song.id, {
+          title: song.title || "Untitled song",
+          artist: song.artist || "Unknown Artist",
+          album: song.album || "Server Library",
+          duration: Number(song.duration) > 0 ? Number(song.duration) : null,
+          artworkURL: song.metadataArtworkURL || song.artwork_url || null,
+          resolved: !song.metadataLoading,
+          sourceURL: typeof song.source_url === "string" ? song.source_url : null,
+          mediaKind: song.media_kind === "video" ? "video" : "audio",
+        }]));
       const result = await api.syncServer({
         baseURL: context.serverURL,
         token: context.token,
@@ -6374,6 +6388,7 @@ async function serverAction(mode) {
         existing: state.tracks,
         songIDs,
         songTitles,
+        songMetadata,
       });
       if (!profileContextIsCurrent(context)) return;
       catalog = result.catalog;

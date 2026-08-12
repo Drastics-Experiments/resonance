@@ -55,6 +55,20 @@ enum LocalImportBoundedDataError: Error {
     case tooLarge
 }
 
+enum LocalImportRangeProgressPolicy {
+    static func absoluteCompleted(
+        completedBeforeRange: Int64,
+        receivedInRange: Int64,
+        total: Int64
+    ) -> Int64 {
+        guard total > 0 else { return 0 }
+        let base = max(completedBeforeRange, 0)
+        let received = max(receivedInRange, 0)
+        let sum = base.addingReportingOverflow(received)
+        return min(sum.overflow ? total : sum.partialValue, total)
+    }
+}
+
 /// Receives URLSession body chunks directly instead of iterating AsyncBytes one
 /// byte at a time. Each operation is still strictly bounded before data is
 /// accumulated, and it inherits the caller's ephemeral/test configuration.
@@ -62,8 +76,10 @@ final class LocalImportBoundedDataOperation: NSObject, URLSessionDataDelegate, @
     private let configuration: URLSessionConfiguration
     private let maximumSize: Int
     private let redirectValidator: @Sendable (URL) -> Bool
+    private let progress: @Sendable (Int64) -> Void
     private let lock = NSLock()
     private var data = Data()
+    private var lastReportedByteCount: Int64 = 0
     private var response: HTTPURLResponse?
     private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
     private var session: URLSession?
@@ -73,11 +89,13 @@ final class LocalImportBoundedDataOperation: NSObject, URLSessionDataDelegate, @
     init(
         session: URLSession,
         maximumSize: Int,
-        redirectValidator: @escaping @Sendable (URL) -> Bool
+        redirectValidator: @escaping @Sendable (URL) -> Bool,
+        progress: @escaping @Sendable (Int64) -> Void = { _ in }
     ) {
         configuration = session.configuration
         self.maximumSize = maximumSize
         self.redirectValidator = redirectValidator
+        self.progress = progress
         super.init()
     }
 
@@ -168,7 +186,19 @@ final class LocalImportBoundedDataOperation: NSObject, URLSessionDataDelegate, @
             return
         }
         data.append(incoming)
+        let completedByteCount = Int64(data.count)
+        let shouldReportProgress = MobileTransferByteProgressPolicy.shouldReport(
+            completedBytes: completedByteCount,
+            lastReportedBytes: lastReportedByteCount,
+            totalBytes: Int64(maximumSize)
+        )
+        if shouldReportProgress {
+            lastReportedByteCount = completedByteCount
+        }
         lock.unlock()
+        if shouldReportProgress {
+            progress(completedByteCount)
+        }
     }
 
     func urlSession(
@@ -206,8 +236,21 @@ final class LocalImportBoundedDataOperation: NSObject, URLSessionDataDelegate, @
         let session = self.session
         self.session = nil
         self.task = nil
+        let finalProgress: Int64?
+        switch result {
+        case .success(let completedResult):
+            finalProgress = Int64(completedResult.0.count)
+            lastReportedByteCount = Int64(completedResult.0.count)
+        case .failure:
+            finalProgress = nil
+        }
         lock.unlock()
 
+        // Publish the exact final range count before resuming run(), even if
+        // the last data callback happened to land on a throttle boundary.
+        if let finalProgress {
+            progress(finalProgress)
+        }
         switch result {
         case .success:
             session?.finishTasksAndInvalidate()
@@ -414,6 +457,146 @@ actor LocalDeviceImportService {
             )
         }
         return try await resolveYouTubeMetadata(videoID: videoID)
+    }
+
+    /// Prepares a downloadable source from metadata that already came from
+    /// the server catalog. Saved-link downloads still need a fresh media URL,
+    /// but they must not repeat the provider metadata request first.
+    func resolveUsingCatalogMetadata(
+        source: String,
+        metadata: LocalImportSpotifyTrack,
+        mediaMode: LocalImportMediaMode = .audio,
+        progress: LocalImportProgressHandler
+    ) async throws -> LocalImportResolution {
+        try Task.checkCancellation()
+
+        if LocalImportURL.isSoundCloud(source) {
+            guard mediaMode == .audio else {
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "SOUNDCLOUD_AUDIO_ONLY",
+                    message: "SoundCloud links can only be imported as audio."
+                )
+            }
+            await progress(.init(stage: .inspectingSource))
+            let candidate = LocalImportAudioSourceMatch(
+                videoID: metadata.trackID,
+                title: metadata.title,
+                artist: metadata.artist,
+                album: metadata.album,
+                durationSeconds: metadata.durationSeconds,
+                thumbnailURL: metadata.artworkURL,
+                sourceProvider: .soundcloud,
+                officialArtist: false,
+                sourceURL: source,
+                score: 1,
+                confidence: "catalog",
+                match: .init(
+                    title: 1,
+                    artist: 1,
+                    album: metadata.album == nil ? nil : 1,
+                    duration: metadata.durationSeconds == nil ? nil : 1,
+                    durationDeltaSeconds: metadata.durationSeconds == nil ? nil : 0
+                )
+            )
+            return LocalImportResolution(
+                kind: .soundCloud,
+                track: metadata,
+                candidates: [candidate]
+            )
+        }
+
+        if LocalImportURL.isSpotify(source) {
+            guard mediaMode == .audio else {
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "SPOTIFY_VIDEO_UNSUPPORTED",
+                    message: "Video downloads require a direct YouTube video URL."
+                )
+            }
+            let canonicalSource = try await canonicalSpotifySource(source)
+            guard let spotifyTrack = try LocalImportURL.spotifyTrack(canonicalSource.absoluteString) else {
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "PLAYLIST_METADATA_UNSUPPORTED",
+                    message: "A saved server song must identify one track, not a playlist."
+                )
+            }
+            let catalogTrack = LocalImportSpotifyTrack(
+                provider: "spotify",
+                type: "track",
+                trackID: spotifyTrack.trackID,
+                title: metadata.title,
+                artist: metadata.artist,
+                album: metadata.album,
+                trackNumber: metadata.trackNumber,
+                durationSeconds: metadata.durationSeconds,
+                artworkURL: metadata.artworkURL,
+                embedURL: metadata.embedURL,
+                sourceURL: spotifyTrack.url.absoluteString
+            )
+            await progress(.init(stage: .searchingCandidates))
+            let candidates = try await searchCandidates(for: catalogTrack)
+            guard !candidates.isEmpty else {
+                throw LocalImportError(
+                    stage: .searchingCandidates,
+                    code: "NO_AUDIO_MATCH",
+                    message: "No sufficiently close YouTube audio match was found. Try a YouTube URL instead."
+                )
+            }
+            return LocalImportResolution(
+                kind: .spotify,
+                track: catalogTrack,
+                candidates: candidates
+            )
+        }
+
+        guard let videoID = try LocalImportURL.youtubeVideoID(source) else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "UNSUPPORTED_SOURCE",
+                message: "Enter a Spotify, SoundCloud, or supported YouTube track URL."
+            )
+        }
+        await progress(.init(stage: .inspectingSource))
+        let catalogTrack = LocalImportSpotifyTrack(
+            provider: "youtube",
+            type: "track",
+            trackID: videoID,
+            title: metadata.title,
+            artist: metadata.artist,
+            album: metadata.album,
+            trackNumber: metadata.trackNumber,
+            durationSeconds: metadata.durationSeconds,
+            artworkURL: metadata.artworkURL,
+            embedURL: metadata.embedURL,
+            sourceURL: source
+        )
+        let candidate = LocalImportAudioSourceMatch(
+            videoID: videoID,
+            title: metadata.title,
+            artist: metadata.artist,
+            album: metadata.album,
+            durationSeconds: metadata.durationSeconds,
+            thumbnailURL: metadata.artworkURL,
+            sourceProvider: .youtube,
+            officialArtist: false,
+            sourceURL: source,
+            score: 1,
+            confidence: "catalog",
+            match: .init(
+                title: 1,
+                artist: 1,
+                album: metadata.album == nil ? nil : 1,
+                duration: metadata.durationSeconds == nil ? nil : 1,
+                durationDeltaSeconds: metadata.durationSeconds == nil ? nil : 0
+            )
+        )
+        return LocalImportResolution(
+            kind: .youtube,
+            track: catalogTrack,
+            candidates: [candidate]
+        )
     }
 
     func resolve(
@@ -1643,7 +1826,7 @@ actor LocalDeviceImportService {
         to destination: URL,
         completedOffset: Int64,
         total: Int64,
-        progress: LocalImportProgressHandler
+        progress: @escaping LocalImportProgressHandler
     ) async throws -> String {
         let mediaLabel = stream.mediaMode.rawValue
         guard fileManager.createFile(atPath: destination.path, contents: nil),
@@ -1662,21 +1845,57 @@ actor LocalDeviceImportService {
                 stream.streamingHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
                 request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
                 request.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+                let (rangeProgressStream, rangeProgressContinuation) = AsyncStream<Int64>.makeStream(
+                    bufferingPolicy: .bufferingNewest(64)
+                )
+                let completedBeforeRange = LocalImportRangeProgressPolicy.absoluteCompleted(
+                    completedBeforeRange: completedOffset,
+                    receivedInRange: completed,
+                    total: total
+                )
+                let rangeProgressTask = Task { @MainActor in
+                    for await receivedInRange in rangeProgressStream {
+                        guard !Task.isCancelled else { break }
+                        progress(.init(
+                            stage: .downloading,
+                            completed: LocalImportRangeProgressPolicy.absoluteCompleted(
+                                completedBeforeRange: completedBeforeRange,
+                                receivedInRange: receivedInRange,
+                                total: total
+                            ),
+                            total: total
+                        ))
+                    }
+                }
                 let operation = LocalImportBoundedDataOperation(
                     session: sessions.googleVideo,
                     maximumSize: Int(end - start + 1),
-                    redirectValidator: { url in LocalImportURL.isGoogleVideo(url) }
+                    redirectValidator: { url in LocalImportURL.isGoogleVideo(url) },
+                    progress: { completedInRange in
+                        _ = rangeProgressContinuation.yield(completedInRange)
+                    }
                 )
                 let body: Data
                 let response: HTTPURLResponse
                 do {
                     (body, response) = try await operation.run(request: request)
-                } catch LocalImportBoundedDataError.tooLarge {
-                    throw LocalImportError(
-                        stage: .downloading,
-                        code: "YOUTUBE_RANGE_OVERFLOW",
-                        message: "YouTube returned more \(mediaLabel) data than requested."
-                    )
+                    rangeProgressContinuation.finish()
+                    await rangeProgressTask.value
+                } catch {
+                    rangeProgressContinuation.finish()
+                    rangeProgressTask.cancel()
+                    await rangeProgressTask.value
+                    guard !(error is LocalImportBoundedDataError) else {
+                        throw LocalImportError(
+                            stage: .downloading,
+                            code: "YOUTUBE_RANGE_OVERFLOW",
+                            message: "YouTube returned more \(mediaLabel) data than requested."
+                        )
+                    }
+                    throw error
+                }
+                if Task.isCancelled {
+                    throw CancellationError()
                 }
                 guard response.url.map(LocalImportURL.isGoogleVideo) == true else {
                     throw LocalImportError(stage: .downloading, code: "YOUTUBE_UNSAFE_REDIRECT", message: "YouTube returned an unsafe \(mediaLabel) redirect.")
@@ -1713,7 +1932,15 @@ actor LocalDeviceImportService {
                 try file.write(contentsOf: body)
                 hasher.update(data: body)
                 completed += received
-                await progress(.init(stage: .downloading, completed: completedOffset + completed, total: total))
+                await progress(.init(
+                    stage: .downloading,
+                    completed: LocalImportRangeProgressPolicy.absoluteCompleted(
+                        completedBeforeRange: completedOffset,
+                        receivedInRange: completed,
+                        total: total
+                    ),
+                    total: total
+                ))
                 start = end + 1
             }
             guard completed == stream.contentLength else {

@@ -34,6 +34,23 @@ private final class SoundCloudMockURLProtocol: URLProtocol {
     }
 }
 
+private final class SoundCloudOperationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+}
+
 @MainActor
 @Suite(.serialized)
 struct SoundCloudImportTests {
@@ -174,6 +191,186 @@ struct SoundCloudImportTests {
         ) { _ in }
         #expect(try Data(contentsOf: destination) == audio)
         #expect(hash == SHA256.hash(data: audio).map { String(format: "%02x", $0) }.joined())
+    }
+
+    @Test
+    func savedDownloadUsesCatalogMetadataAndPreparedAudioExactlyOnce() async throws {
+        let session = mockSession()
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SoundCloudPreparedDownloadTests-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            SoundCloudMockURLProtocol.reset()
+            session.invalidateAndCancel()
+            try? FileManager.default.removeItem(at: temporary)
+        }
+        SoundCloudMockURLProtocol.handler = { _ in
+            throw URLError(.cannotLoadFromNetwork)
+        }
+
+        let source = "https://soundcloud.com/artist/direct-song"
+        let metadata = LocalImportSpotifyTrack(
+            provider: "soundcloud",
+            type: "track",
+            trackID: "101",
+            title: "Catalog title",
+            artist: "Catalog artist",
+            album: "Catalog album",
+            trackNumber: nil,
+            durationSeconds: 123,
+            artworkURL: nil,
+            embedURL: "",
+            sourceURL: source
+        )
+        let preparedStream = LocalImportSoundCloudAudioStream(
+            track: metadata,
+            streamingURL: URL(string: "https://cf-media.sndcdn.com/direct-song.mp3")!,
+            contentLength: 8
+        )
+        let metadataCalls = SoundCloudOperationCounter()
+        let audioCalls = SoundCloudOperationCounter()
+        let operations = LocalImportSoundCloudOperations(
+            resolveSource: { _, _ in
+                metadataCalls.increment()
+                throw URLError(.unsupportedURL)
+            },
+            resolveAudio: { _, _ in
+                audioCalls.increment()
+                return preparedStream
+            }
+        )
+        let service = LocalDeviceImportService(
+            sessions: .testing(session),
+            localRoot: temporary.appendingPathComponent("library", isDirectory: true),
+            temporaryRoot: temporary.appendingPathComponent("temporary", isDirectory: true),
+            soundCloudOperations: operations
+        )
+        let context = "https://music.test#profile=listener"
+        let resolution = try await service.resolveSavedDownload(
+            source: source,
+            metadata: metadata,
+            mediaMode: .audio,
+            preparationContext: context
+        ) { _ in }
+
+        #expect(resolution.track == metadata)
+        #expect(resolution.candidates.first?.sourceProvider == .soundcloud)
+        #expect(metadataCalls.value == 0)
+        #expect(audioCalls.value == 1)
+
+        let candidate = try #require(resolution.candidates.first)
+        do {
+            _ = try await service.importCandidate(
+                candidate,
+                metadata: LocalImportMetadata(
+                    title: metadata.title,
+                    artist: metadata.artist,
+                    album: metadata.album,
+                    artworkURL: nil,
+                    sourceURL: source
+                ),
+                existingTracks: [],
+                mediaMode: .audio,
+                preparationContext: context
+            ) { _ in }
+            Issue.record("The intentionally unavailable mock stream should stop the import")
+        } catch {
+            // The transfer request is intentionally unavailable. Reaching it
+            // proves import consumed the prepared stream without resolving it.
+        }
+
+        #expect(metadataCalls.value == 0)
+        #expect(audioCalls.value == 1)
+    }
+
+    @Test
+    func preparedAudioHandoffIsBoundedScopedSingleUseAndExpires() throws {
+        let source = "https://soundcloud.com/artist/direct-song"
+        let secondSource = "https://soundcloud.com/artist/second-song"
+        let thirdSource = "https://soundcloud.com/artist/third-song"
+        let metadata = LocalImportSpotifyTrack(
+            provider: "soundcloud",
+            type: "track",
+            trackID: "101",
+            title: "Prepared song",
+            artist: "Prepared artist",
+            album: nil,
+            trackNumber: nil,
+            durationSeconds: 123,
+            artworkURL: nil,
+            embedURL: "",
+            sourceURL: source
+        )
+        let stream = LocalImportSoundCloudAudioStream(
+            track: metadata,
+            streamingURL: URL(string: "https://cf-media.sndcdn.com/direct-song.mp3")!,
+            contentLength: 8
+        )
+        let now = Date(timeIntervalSince1970: 1_000)
+        let context = "https://music.test#profile=listener"
+        var cache = LocalImportPreparedSoundCloudStreamCache(maximumCount: 2, lifetime: 5)
+        #expect(throws: LocalImportError.self) {
+            try cache.store(
+                stream,
+                source: source,
+                mediaMode: .audio,
+                preparationContext: "https://music.test#profile=listener\nAuthorization: Bearer secret",
+                now: now
+            )
+        }
+        #expect(throws: LocalImportError.self) {
+            try cache.store(
+                stream,
+                source: source,
+                mediaMode: .audio,
+                preparationContext: "https://music.test#profile=listener&token=secret",
+                now: now
+            )
+        }
+        try cache.store(stream, source: source, mediaMode: .audio, preparationContext: context, now: now)
+
+        #expect(cache.take(
+            source: source,
+            mediaMode: .audio,
+            preparationContext: "https://music.test#profile=someone-else",
+            now: now
+        ) == nil)
+        #expect(cache.take(
+            source: secondSource,
+            mediaMode: .audio,
+            preparationContext: context,
+            now: now
+        ) == nil)
+        #expect(cache.take(
+            source: source,
+            mediaMode: .video,
+            preparationContext: context,
+            now: now
+        ) == nil)
+        #expect(cache.take(
+            source: source,
+            mediaMode: .audio,
+            preparationContext: context,
+            now: now
+        ) == stream)
+        #expect(cache.take(
+            source: source,
+            mediaMode: .audio,
+            preparationContext: context,
+            now: now
+        ) == nil)
+
+        try cache.store(stream, source: source, mediaMode: .audio, preparationContext: context, now: now)
+        #expect(cache.take(
+            source: source,
+            mediaMode: .audio,
+            preparationContext: context,
+            now: now.addingTimeInterval(5)
+        ) == nil)
+
+        try cache.store(stream, source: source, mediaMode: .audio, preparationContext: context, now: now)
+        try cache.store(stream, source: secondSource, mediaMode: .audio, preparationContext: context, now: now)
+        try cache.store(stream, source: thirdSource, mediaMode: .audio, preparationContext: context, now: now)
+        #expect(cache.cachedCount(now: now) == 2)
     }
 
     private func soundCloudTrack(id: Int, title: String, permalink: String) -> [String: Any] {

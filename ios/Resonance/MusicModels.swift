@@ -1263,11 +1263,145 @@ enum MobileTransferDisplayPolicy {
         totalBytes: Int64,
         fallbackProgress: Double?
     ) -> Double? {
-        if totalBytes > 0 {
+        // A known catalog or response size is not progress by itself. Keep
+        // connection setup and source preparation indeterminate until the
+        // downloader has actually received bytes.
+        if completedBytes > 0, totalBytes > 0 {
             return min(max(Double(max(completedBytes, 0)) / Double(totalBytes), 0), 1)
         }
         guard let fallbackProgress, fallbackProgress.isFinite else { return nil }
         return min(max(fallbackProgress, 0), 1)
+    }
+
+    static func percentageLabel(_ progress: Double) -> String {
+        let clamped = min(max(progress, 0), 1)
+        return clamped > 0 && clamped < 0.01
+            ? "<1%"
+            : "\(Int(clamped * 100))%"
+    }
+}
+
+enum MobileTransferByteProgressPolicy {
+    static let minimumUpdateDelta: Int64 = 256 * 1_024
+
+    static func shouldReport(
+        completedBytes: Int64,
+        lastReportedBytes: Int64,
+        totalBytes: Int64
+    ) -> Bool {
+        guard completedBytes > lastReportedBytes else { return false }
+        let delta = completedBytes.subtractingReportingOverflow(lastReportedBytes)
+        return lastReportedBytes == 0
+            || delta.overflow
+            || delta.partialValue >= minimumUpdateDelta
+            || (totalBytes > 0 && completedBytes >= totalBytes)
+    }
+}
+
+enum MobileRemoteSourceMetadataReusePolicy {
+    static func canReuseCatalogMetadata(
+        isMetadataLoading: Bool,
+        title: String,
+        artist: String
+    ) -> Bool {
+        guard !isMetadataLoading else { return false }
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !cleanTitle.isEmpty
+            && !cleanArtist.isEmpty
+            && cleanTitle.utf8.count <= 512
+            && cleanArtist.utf8.count <= 512
+    }
+
+    static func knownTrack(for song: MobileRemoteSong) -> LocalImportSpotifyTrack? {
+        guard canReuseCatalogMetadata(
+            isMetadataLoading: song.isMetadataLoading,
+            title: song.title,
+            artist: song.artist
+        ), let source = song.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !source.isEmpty else { return nil }
+        let durationSeconds = song.duration.flatMap { duration -> Int? in
+            guard duration.isFinite,
+                  duration > 0,
+                  duration < Double(Int.max) else { return nil }
+            return Int(duration.rounded())
+        }
+        let album = song.album.trimmingCharacters(in: .whitespacesAndNewlines)
+        return LocalImportSpotifyTrack(
+            provider: "server",
+            type: "track",
+            trackID: song.id,
+            title: song.title,
+            artist: song.artist,
+            album: album.isEmpty || album.utf8.count > 512 ? nil : album,
+            trackNumber: nil,
+            durationSeconds: durationSeconds,
+            artworkURL: song.artworkURL?.absoluteString,
+            embedURL: "",
+            sourceURL: source
+        )
+    }
+}
+
+struct MobileRemoteSourceResolutionCacheKey: Hashable, Sendable {
+    let context: MobileServerContext
+    let accountScope: String?
+    let mediaMode: LocalImportMediaMode
+    let sourceURL: String
+}
+
+enum MobileRemoteSourceResolutionCachePolicy {
+    static func key(
+        context: MobileServerContext?,
+        accountScope: String?,
+        mediaKind: String,
+        sourceURL: String?
+    ) -> MobileRemoteSourceResolutionCacheKey? {
+        guard let context,
+              !context.profileID.isEmpty,
+              let originURL = URL(string: context.origin),
+              originURL.user == nil,
+              originURL.password == nil,
+              MobileServerEndpointPolicy.normalizedOrigin(of: originURL) != nil,
+              let source = sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !source.isEmpty,
+              source.utf8.count <= 8_192,
+              let url = URL(string: source),
+              url.scheme?.lowercased() == "https",
+              url.host != nil,
+              url.user == nil,
+              url.password == nil else { return nil }
+        let scope = accountScope?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return MobileRemoteSourceResolutionCacheKey(
+            context: MobileServerEndpointPolicy.canonicalContext(context),
+            accountScope: scope.flatMap { $0.isEmpty ? nil : $0 },
+            mediaMode: LocalImportMediaMode(rawValue: mediaKind) ?? .audio,
+            sourceURL: source
+        )
+    }
+
+    static func canReuse(
+        _ resolution: LocalImportResolution,
+        cachedKey: MobileRemoteSourceResolutionCacheKey,
+        expectedKey: MobileRemoteSourceResolutionCacheKey,
+        knownCatalogMetadata: LocalImportSpotifyTrack?
+    ) -> Bool {
+        guard cachedKey == expectedKey,
+              resolution.playlist == nil,
+              !resolution.candidates.isEmpty else { return false }
+        switch resolution.kind {
+        case .spotifyPlaylist, .soundCloudPlaylist:
+            return false
+        case .spotify, .soundCloud, .youtube:
+            break
+        }
+        guard let knownCatalogMetadata else { return true }
+        guard knownCatalogMetadata.sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            == expectedKey.sourceURL else { return false }
+        return resolution.track.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            == knownCatalogMetadata.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            && resolution.track.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+            == knownCatalogMetadata.artist.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

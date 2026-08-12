@@ -189,14 +189,21 @@ export function serverTransferProgressPresentation(value = {}) {
     || Object.hasOwn(value, "itemCount");
   const completed = Math.max(0, Number(usesItemProgress ? value.itemCompleted : value.completed) || 0);
   const total = Math.max(0, Number(usesItemProgress ? value.itemTotal : value.total) || 0);
-  const ratio = total > 0 ? Math.min(1, completed / total) : 0;
+  const determinate = total > 0 && completed > 0;
+  const ratio = determinate ? Math.min(1, completed / total) : null;
   const itemCount = Math.max(0, Math.floor(Number(value.itemCount) || 0));
   const itemIndex = Math.min(itemCount, Math.max(itemCount ? 1 : 0, Math.floor(Number(value.itemIndex) || 0)));
   const counter = itemCount ? `${itemIndex}/${itemCount}` : "";
+  const percentage = ratio !== null && ratio > 0 && ratio < 0.01
+    ? "<1%"
+    : `${Math.round((ratio || 0) * 100)}%`;
   return {
     ratio,
     counter,
-    label: `${Math.round(ratio * 100)}%${counter ? ` · ${counter}` : ""}`,
+    determinate,
+    label: determinate
+      ? `${percentage}${counter ? ` \u00b7 ${counter}` : ""}`
+      : `Preparing${counter ? ` \u00b7 ${counter}` : "\u2026"}`,
   };
 }
 

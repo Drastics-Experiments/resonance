@@ -80,6 +80,9 @@ import mov.unblocked.resonance.data.PlaylistLocalDeletionPolicy
 import mov.unblocked.resonance.data.PlaylistOrderPolicy
 import mov.unblocked.resonance.data.PlaylistSyncMutationPolicy
 import mov.unblocked.resonance.data.PendingDownloadBatchPolicy
+import mov.unblocked.resonance.data.RemoteSongDownloadMetadataPolicy
+import mov.unblocked.resonance.data.RemoteSourceResolutionCacheKey
+import mov.unblocked.resonance.data.RemoteSourceResolutionCachePolicy
 import mov.unblocked.resonance.data.ProfileLibraryStatePolicy
 import mov.unblocked.resonance.data.ProfileLibraryState
 import mov.unblocked.resonance.data.RemotePlaylist
@@ -163,7 +166,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private val context = application.applicationContext
     private val repository = LibraryRepository(context)
     private val linkImportService = LinkImportService(context)
-    private val remoteSourceResolutions = mutableMapOf<String, LinkImportResolution>()
+    private val remoteSourceResolutions = mutableMapOf<RemoteSourceResolutionCacheKey, LinkImportResolution>()
     private val credentials = CredentialStore(context)
     private var accountSession: AccountSession? = credentials.accountSession
     private val clientConfigStore = ClientConfigStore(context)
@@ -362,6 +365,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     override fun signOutAccount() {
         val current = accountSession
         accountSession = null
+        remoteSourceResolutions.clear()
         accountRefreshJob?.cancel()
         accountRefreshJob = null
         credentials.accountSession = null
@@ -2734,8 +2738,24 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             library.remoteSongMetadataCache[key]?.let { cached ->
                 return@map applyRemoteSongMetadata(song, cached)
             }
-            remoteSourceResolutions[key]
-                ?.takeIf { it.kind == LinkImportKind.Track }
+            val resolutionKey = currentServerProfileContext()?.let { context ->
+                RemoteSourceResolutionCachePolicy.key(
+                    context = context,
+                    mediaMode = if (song.isVideoMedia) LinkImportMediaMode.Video else LinkImportMediaMode.Audio,
+                    sourceURL = song.sourceURL,
+                    accountScope = accountSession?.accountID,
+                )
+            }
+            resolutionKey
+                ?.let(remoteSourceResolutions::get)
+                ?.takeIf { resolution ->
+                    RemoteSourceResolutionCachePolicy.canReuse(
+                        resolution = resolution,
+                        cachedKey = resolutionKey,
+                        expectedKey = resolutionKey,
+                        knownCatalogMetadata = null,
+                    )
+                }
                 ?.track
                 ?.let { return@map applyRemoteSongMetadata(song, it) }
             song
@@ -2936,6 +2956,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val previousSelection = state.selectedRemoteSongIds
         val previousConnectedSession = state.hasConnectedServerSession
         connectionGeneration += 1
+        remoteSourceResolutions.clear()
         authoritativeCatalogSnapshot = null
         resetClientConfigForCurrentContext("Safe defaults • connection changed")
         library = ProfileLibraryStatePolicy.captureActive(library)
@@ -3057,6 +3078,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             RemoteTrackIdentityPolicy.normalizedOrigin(serverURL) && profileId == library.syncProfileID
         if (sameContext) return
         connectionGeneration += 1
+        remoteSourceResolutions.clear()
         authoritativeCatalogSnapshot = null
         val captured = if (currentAlreadyCaptured) library else ProfileLibraryStatePolicy.captureActive(library)
         library = normalizeLiked(ProfileLibraryStatePolicy.restoreContext(captured, serverURL, profileId))
@@ -3194,10 +3216,29 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                                 } else {
                                     LinkImportMediaMode.Audio
                                 }
-                                val key = "${song.mediaKind}:$source"
-                                val resolution = remoteSourceResolutions[key]
-                                    ?: linkImportService.resolve(source, mediaMode) { }
-                                        .also { remoteSourceResolutions[key] = it }
+                                val knownCatalogMetadata = RemoteSongDownloadMetadataPolicy.knownTrack(song)
+                                val resolutionKey = requireNotNull(
+                                    RemoteSourceResolutionCachePolicy.key(
+                                        context = snapshot.context,
+                                        mediaMode = mediaMode,
+                                        sourceURL = source,
+                                        accountScope = accountSession?.accountID,
+                                    ),
+                                ) { "The saved song source is not a valid HTTPS track URL." }
+                                val cachedResolution = remoteSourceResolutions[resolutionKey]
+                                val resolution = cachedResolution?.takeIf { cached ->
+                                    RemoteSourceResolutionCachePolicy.canReuse(
+                                        resolution = cached,
+                                        cachedKey = resolutionKey,
+                                        expectedKey = resolutionKey,
+                                        knownCatalogMetadata = knownCatalogMetadata,
+                                    )
+                                } ?: linkImportService.resolveForDownload(
+                                        source = source,
+                                        mediaMode = mediaMode,
+                                        knownTrackMetadata = knownCatalogMetadata,
+                                    ) { }
+                                        .also { remoteSourceResolutions[resolutionKey] = it }
                                 check(resolution.kind == LinkImportKind.Track) {
                                     "A saved song link resolved to a playlist instead of one song."
                                 }

@@ -607,6 +607,11 @@ final class MobileLocalTrackRemovalPlaylistPolicyTests: XCTestCase {
 }
 
 final class MobileTransferDisplayPolicyTests: XCTestCase {
+    func testSubOnePercentProgressNeverDisplaysAsZero() {
+        XCTAssertEqual(MobileTransferDisplayPolicy.percentageLabel(0.001), "<1%")
+        XCTAssertEqual(MobileTransferDisplayPolicy.percentageLabel(0.42), "42%")
+    }
+
     func testCurrentSongBytesAndBatchPositionAreIndependent() {
         let state = MobileTransferDisplayState(
             kind: .download,
@@ -648,6 +653,11 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
             totalBytes: 0,
             fallbackProgress: nil
         ))
+        XCTAssertNil(MobileTransferDisplayPolicy.progress(
+            completedBytes: 0,
+            totalBytes: 100,
+            fallbackProgress: nil
+        ), "A catalog or response size must not render as a stalled zero-percent download")
         XCTAssertEqual(MobileTransferDisplayPolicy.progress(
             completedBytes: 500,
             totalBytes: 100,
@@ -658,6 +668,243 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
             totalBytes: 0,
             fallbackProgress: -1
         ), 0)
+    }
+
+    func testLoadedCatalogMetadataIsReusedForSavedLinkDownloads() {
+        XCTAssertTrue(MobileRemoteSourceMetadataReusePolicy.canReuseCatalogMetadata(
+            isMetadataLoading: false,
+            title: "Catalog Title",
+            artist: "Catalog Artist"
+        ))
+        XCTAssertFalse(MobileRemoteSourceMetadataReusePolicy.canReuseCatalogMetadata(
+            isMetadataLoading: true,
+            title: "Resolving metadata…",
+            artist: "On-device lookup"
+        ))
+        XCTAssertFalse(MobileRemoteSourceMetadataReusePolicy.canReuseCatalogMetadata(
+            isMetadataLoading: false,
+            title: " ",
+            artist: "Catalog Artist"
+        ))
+        XCTAssertFalse(MobileRemoteSourceMetadataReusePolicy.canReuseCatalogMetadata(
+            isMetadataLoading: false,
+            title: String(repeating: "x", count: 513),
+            artist: "Catalog Artist"
+        ))
+    }
+
+    func testSourceResolutionKeysAreScopedToCanonicalServerProfileAndAccount() throws {
+        let source = "https://www.youtube.com/watch?v=abcdefghijk"
+        let context = MobileServerContext(
+            origin: "https://Music.Example/library",
+            profileID: "profile-a"
+        )
+        let key = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: context,
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+        let sameCanonicalContext = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: MobileServerContext(
+                origin: "https://music.example:443/other-path",
+                profileID: "profile-a"
+            ),
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+
+        let otherProfileKey = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: MobileServerContext(origin: context.origin, profileID: "profile-b"),
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+        let otherAccountKey = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: context,
+            accountScope: "account-b",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+        let otherServerKey = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: MobileServerContext(origin: "https://other.example", profileID: "profile-a"),
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+        let videoKey = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: context,
+            accountScope: "account-a",
+            mediaKind: "video",
+            sourceURL: source
+        ))
+
+        XCTAssertEqual(key, sameCanonicalContext)
+        XCTAssertNotEqual(key, otherProfileKey)
+        XCTAssertNotEqual(key, otherAccountKey)
+        XCTAssertNotEqual(key, otherServerKey)
+        XCTAssertNotEqual(key, videoKey)
+        XCTAssertNil(MobileRemoteSourceResolutionCachePolicy.key(
+            context: context,
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: "https://user:secret@www.youtube.com/watch?v=abcdefghijk"
+        ))
+    }
+
+    func testCorrectedCatalogMetadataInvalidatesSameSourceResolution() throws {
+        let source = "https://www.youtube.com/watch?v=abcdefghijk"
+        let context = MobileServerContext(origin: "https://music.example", profileID: "profile-a")
+        let key = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: context,
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+        let metadata = LocalImportSpotifyTrack(
+            provider: "server",
+            type: "track",
+            trackID: "server-song",
+            title: "Original title",
+            artist: "Artist",
+            album: nil,
+            trackNumber: nil,
+            durationSeconds: nil,
+            artworkURL: nil,
+            embedURL: "",
+            sourceURL: source
+        )
+        let resolution = LocalImportResolution(
+            kind: .youtube,
+            track: metadata,
+            candidates: [LocalImportAudioSourceMatch(
+                videoID: "abcdefghijk",
+                title: metadata.title,
+                artist: metadata.artist,
+                album: nil,
+                durationSeconds: nil,
+                thumbnailURL: nil,
+                sourceProvider: .youtube,
+                officialArtist: false,
+                sourceURL: source,
+                score: 1,
+                confidence: "catalog",
+                match: .init(
+                    title: 1,
+                    artist: 1,
+                    album: nil,
+                    duration: nil,
+                    durationDeltaSeconds: nil
+                )
+            )]
+        )
+
+        XCTAssertTrue(MobileRemoteSourceResolutionCachePolicy.canReuse(
+            resolution,
+            cachedKey: key,
+            expectedKey: key,
+            knownCatalogMetadata: metadata
+        ))
+        let corrected = LocalImportSpotifyTrack(
+            provider: metadata.provider,
+            type: metadata.type,
+            trackID: metadata.trackID,
+            title: "Corrected title",
+            artist: metadata.artist,
+            album: metadata.album,
+            trackNumber: metadata.trackNumber,
+            durationSeconds: metadata.durationSeconds,
+            artworkURL: metadata.artworkURL,
+            embedURL: metadata.embedURL,
+            sourceURL: metadata.sourceURL
+        )
+        XCTAssertFalse(MobileRemoteSourceResolutionCachePolicy.canReuse(
+            resolution,
+            cachedKey: key,
+            expectedKey: key,
+            knownCatalogMetadata: corrected
+        ))
+        let otherProfileKey = try XCTUnwrap(MobileRemoteSourceResolutionCachePolicy.key(
+            context: MobileServerContext(origin: context.origin, profileID: "profile-b"),
+            accountScope: "account-a",
+            mediaKind: "audio",
+            sourceURL: source
+        ))
+        XCTAssertFalse(MobileRemoteSourceResolutionCachePolicy.canReuse(
+            resolution,
+            cachedKey: key,
+            expectedKey: otherProfileKey,
+            knownCatalogMetadata: metadata
+        ))
+    }
+
+    func testFirstReceivedBytesPublishProgressImmediatelyThenThrottle() {
+        XCTAssertTrue(MobileTransferByteProgressPolicy.shouldReport(
+            completedBytes: 16 * 1_024,
+            lastReportedBytes: 0,
+            totalBytes: 1_024 * 1_024
+        ))
+        XCTAssertFalse(MobileTransferByteProgressPolicy.shouldReport(
+            completedBytes: 32 * 1_024,
+            lastReportedBytes: 16 * 1_024,
+            totalBytes: 1_024 * 1_024
+        ))
+        XCTAssertTrue(MobileTransferByteProgressPolicy.shouldReport(
+            completedBytes: 272 * 1_024,
+            lastReportedBytes: 16 * 1_024,
+            totalBytes: 1_024 * 1_024
+        ))
+    }
+
+    func testRangeProgressIsAbsoluteAndClampedAcrossChunks() {
+        XCTAssertEqual(LocalImportRangeProgressPolicy.absoluteCompleted(
+            completedBeforeRange: 10 * 1_024 * 1_024,
+            receivedInRange: 256 * 1_024,
+            total: 25 * 1_024 * 1_024
+        ), 10 * 1_024 * 1_024 + 256 * 1_024)
+        XCTAssertEqual(LocalImportRangeProgressPolicy.absoluteCompleted(
+            completedBeforeRange: 24 * 1_024 * 1_024,
+            receivedInRange: 2 * 1_024 * 1_024,
+            total: 25 * 1_024 * 1_024
+        ), 25 * 1_024 * 1_024)
+        XCTAssertEqual(LocalImportRangeProgressPolicy.absoluteCompleted(
+            completedBeforeRange: Int64.max,
+            receivedInRange: Int64.max,
+            total: 100
+        ), 100)
+    }
+
+    func testYouTubeDownloadPreparationBuildsFromCatalogMetadata() async throws {
+        let source = "https://www.youtube.com/watch?v=abcdefghijk"
+        let metadata = LocalImportSpotifyTrack(
+            provider: "server",
+            type: "track",
+            trackID: "server-song",
+            title: "Already Loaded Title",
+            artist: "Already Loaded Artist",
+            album: "Already Loaded Album",
+            trackNumber: nil,
+            durationSeconds: 181,
+            artworkURL: nil,
+            embedURL: "",
+            sourceURL: source
+        )
+        let service = LocalDeviceImportService(
+            localRoot: FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        )
+
+        let resolution = try await service.resolveUsingCatalogMetadata(
+            source: source,
+            metadata: metadata
+        ) { _ in }
+
+        XCTAssertEqual(resolution.track.title, metadata.title)
+        XCTAssertEqual(resolution.track.artist, metadata.artist)
+        XCTAssertEqual(resolution.candidates.count, 1)
+        XCTAssertEqual(resolution.candidates.first?.videoID, "abcdefghijk")
+        XCTAssertEqual(resolution.candidates.first?.sourceURL, source)
     }
 
     func testOnlyActiveTransferSessionCanPublishOrClearTheOverlay() {
@@ -1524,10 +1771,12 @@ final class MobileClientConfigurationTests: XCTestCase {
         MobileChunkedDownloadProtocol.state.configure(onFirstChunk: {}, onStop: {})
         let session = URLSession(configuration: chunkedSessionConfiguration())
         defer { session.invalidateAndCancel() }
+        let progress = LocalImportByteProgressRecorder()
         let operation = LocalImportBoundedDataOperation(
             session: session,
             maximumSize: 8,
-            redirectValidator: { _ in true }
+            redirectValidator: { _ in true },
+            progress: { progress.record($0) }
         )
 
         let (data, response) = try await operation.run(
@@ -1536,6 +1785,52 @@ final class MobileClientConfigurationTests: XCTestCase {
 
         XCTAssertEqual(response.statusCode, 200)
         XCTAssertEqual(data, Data("aaaabbbb".utf8))
+        let updates = progress.values
+        XCTAssertEqual(updates.first, 4, "The first nonzero URLSession chunk must publish immediately")
+        XCTAssertEqual(updates.last, 8, "A final exact range-byte event must always publish")
+        XCTAssertTrue(updates.allSatisfy { $0 > 0 })
+        XCTAssertEqual(updates, updates.sorted())
+    }
+
+    func testCancelledLocalImportRangeCannotPublishDelayedChunks() async throws {
+        let firstProgress = expectation(description: "first local-import range progress")
+        let stopped = expectation(description: "local-import range stopped")
+        MobileChunkedDownloadProtocol.state.configure(
+            onFirstChunk: {},
+            onStop: { stopped.fulfill() }
+        )
+        let session = URLSession(configuration: chunkedSessionConfiguration())
+        defer { session.invalidateAndCancel() }
+        let progress = LocalImportByteProgressRecorder()
+        let operation = LocalImportBoundedDataOperation(
+            session: session,
+            maximumSize: 8,
+            redirectValidator: { _ in true },
+            progress: {
+                progress.record($0)
+                if $0 == 4 { firstProgress.fulfill() }
+            }
+        )
+        let task = Task {
+            try await operation.run(
+                request: URLRequest(url: URL(string: "https://music.example/audio")!)
+            )
+        }
+
+        await fulfillment(of: [firstProgress], timeout: 2)
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled range must not complete")
+        } catch {
+            XCTAssertTrue(
+                error is CancellationError || (error as? URLError)?.code == .cancelled
+            )
+        }
+        await fulfillment(of: [stopped], timeout: 2)
+
+        XCTAssertFalse(MobileChunkedDownloadProtocol.state.secondChunkWasDelivered)
+        XCTAssertEqual(progress.values.last, 4)
     }
 
     func testLocalImportRangeDownloadRejectsDeclaredOverflow() async throws {
@@ -2237,6 +2532,23 @@ private final class MobileMetadataURLProtocol: URLProtocol, @unchecked Sendable 
     }
 
     override func stopLoading() {}
+}
+
+private final class LocalImportByteProgressRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedValues: [Int64] = []
+
+    var values: [Int64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedValues
+    }
+
+    func record(_ value: Int64) {
+        lock.lock()
+        recordedValues.append(value)
+        lock.unlock()
+    }
 }
 
 private final class MobileChunkedDownloadProtocolState: @unchecked Sendable {
