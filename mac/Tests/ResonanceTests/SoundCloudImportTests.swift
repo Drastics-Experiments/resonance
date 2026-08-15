@@ -172,7 +172,22 @@ struct SoundCloudImportTests {
                 return Self.response(url: url, data: streamPayload, contentType: "application/json")
             }
             if url.host == "cf-media.sndcdn.com" {
-                let body = request.httpMethod == "HEAD" ? Data() : audio
+                if request.value(forHTTPHeaderField: "Range") == "bytes=0-0" {
+                    return (
+                        HTTPURLResponse(
+                            url: url,
+                            statusCode: 206,
+                            httpVersion: nil,
+                            headerFields: [
+                                "Content-Type": "audio/mpeg",
+                                "Content-Length": "1",
+                                "Content-Range": "bytes 0-0/\(audio.count)",
+                            ]
+                        )!,
+                        Data(audio.prefix(1))
+                    )
+                }
+                let body = audio
                 return Self.response(url: url, data: body, contentType: "audio/mpeg", contentLength: audio.count)
             }
             throw URLError(.unsupportedURL)

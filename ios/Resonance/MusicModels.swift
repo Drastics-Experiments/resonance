@@ -1,5 +1,26 @@
 import Foundation
 
+enum MobilePlayableMediaDurationPolicy {
+    private static let maximumRemoteDuration: TimeInterval = 24 * 60 * 60
+
+    static func preferred(
+        storedDuration: TimeInterval?,
+        playableDurations: [TimeInterval?]
+    ) -> TimeInterval? {
+        let playable = playableDurations.compactMap(validDuration)
+        return playable.min() ?? storedDuration.flatMap { validDuration($0) }
+    }
+
+    static func remoteDuration(_ value: TimeInterval?) -> TimeInterval? {
+        value.flatMap { validDuration($0) }.flatMap { $0 <= maximumRemoteDuration ? $0 : nil }
+    }
+
+    private static func validDuration(_ value: TimeInterval?) -> TimeInterval? {
+        guard let value, value.isFinite, value > 0 else { return nil }
+        return value
+    }
+}
+
 struct MobileServerContext: Codable, Hashable, Sendable {
     let origin: String
     let profileID: String
@@ -955,9 +976,7 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable, Sendable {
         streamURL = try values.decode(String.self, forKey: .streamURL)
         let decodedDuration = try values.decodeIfPresent(Double.self, forKey: .durationSeconds)
             ?? values.decodeIfPresent(Double.self, forKey: .duration)
-        duration = decodedDuration.flatMap { value in
-            value.isFinite && value > 0 ? value : nil
-        }
+        duration = MobilePlayableMediaDurationPolicy.remoteDuration(decodedDuration)
         let decodedArtworkURL = try values.decodeIfPresent(String.self, forKey: .artworkURL)
             ?? values.decodeIfPresent(String.self, forKey: .artwork)
         artworkURL = decodedArtworkURL.flatMap { value in
@@ -1297,6 +1316,10 @@ enum MobileDownloadTransferPresentationPolicy {
 
     static func shouldEndBytePresentation(for stage: LocalImportStage) -> Bool {
         stage != .downloading
+    }
+
+    static func shouldPreserveBetweenItems(currentItem: Int, totalItems: Int) -> Bool {
+        currentItem > 0 && currentItem < totalItems
     }
 }
 

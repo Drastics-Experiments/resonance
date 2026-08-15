@@ -636,7 +636,15 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
         ))
         XCTAssertTrue(MobileDownloadTransferPresentationPolicy.shouldEndBytePresentation(
             for: .processing
-        ), "Local validation and tagging must not leave a completed byte bar on screen")
+        ), "Local validation ends the current item's byte operation")
+        XCTAssertTrue(MobileDownloadTransferPresentationPolicy.shouldPreserveBetweenItems(
+            currentItem: 1,
+            totalItems: 2
+        ))
+        XCTAssertFalse(MobileDownloadTransferPresentationPolicy.shouldPreserveBetweenItems(
+            currentItem: 2,
+            totalItems: 2
+        ))
     }
 
     func testLoadedCatalogSnapshotPlansUnhydratedSongsWithoutARefresh() throws {
@@ -1113,6 +1121,25 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
 }
 
 final class MobileClientConfigurationTests: XCTestCase {
+    func testPlayableDurationOverridesStaleStoredAndMismatchedVideoTimelines() {
+        XCTAssertEqual(
+            MobilePlayableMediaDurationPolicy.preferred(
+                storedDuration: 7_200,
+                playableDurations: [217.4, 216.9]
+            ),
+            216.9
+        )
+        XCTAssertEqual(
+            MobilePlayableMediaDurationPolicy.preferred(
+                storedDuration: 245,
+                playableDurations: [.nan, nil]
+            ),
+            245
+        )
+        XCTAssertNil(MobilePlayableMediaDurationPolicy.remoteDuration(172_000))
+        XCTAssertEqual(MobilePlayableMediaDurationPolicy.remoteDuration(1_686), 1_686)
+    }
+
     private let token = "test-access-token"
     private let cohortKey = "AAECAwQFBgcICQoLDA0ODw"
     private let now = Date(timeIntervalSince1970: 1_800_000_000)

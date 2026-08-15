@@ -1,6 +1,8 @@
 package mov.unblocked.resonance.data
 
 import android.content.Context
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.StatFs
@@ -49,8 +51,9 @@ class LibraryRepository(
                 }
             }
             val migration = migrateUnlinkedDownloads(decoded)
-            normalize(migration.library).also { library ->
-                if (migration.changed) writeState(library)
+            val durationMigration = migratePlayableDurations(migration.library)
+            normalize(durationMigration.library).also { library ->
+                if (migration.changed || durationMigration.changed) writeState(library)
                 cleanupUnreferencedAppOwnedFiles(library)
             }
         }
@@ -79,6 +82,27 @@ class LibraryRepository(
         val library: StoredLibrary,
         val changed: Boolean,
     )
+
+    private fun migratePlayableDurations(library: StoredLibrary): LibraryMigration {
+        if (PlayableDurationMigrationPolicy.Identifier in library.completedMigrations) {
+            return LibraryMigration(library, changed = false)
+        }
+        val tracks = library.tracks.map { track ->
+            val measured = fileForTrack(track).takeIf(File::isFile)?.let(::readPlayableDurationMs)
+            if (measured != null && kotlin.math.abs(track.durationMs - measured) > 250L) {
+                track.copy(durationMs = measured)
+            } else {
+                track
+            }
+        }
+        return LibraryMigration(
+            library.copy(
+                tracks = tracks,
+                completedMigrations = library.completedMigrations + PlayableDurationMigrationPolicy.Identifier,
+            ),
+            changed = true,
+        )
+    }
 
     private fun migrateUnlinkedDownloads(library: StoredLibrary): LibraryMigration {
         if (UnlinkedDownloadMigrationPolicy.Identifier in library.completedMigrations) {
@@ -462,16 +486,19 @@ class LibraryRepository(
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(file.absolutePath)
+            val containerDurationMs = retriever
+                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()
+                ?.coerceAtLeast(0L)
             ImportedMetadata(
                 title = retriever.metadata(MediaMetadataRetriever.METADATA_KEY_TITLE),
                 artist = retriever.metadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
                     ?: retriever.metadata(MediaMetadataRetriever.METADATA_KEY_AUTHOR),
                 album = retriever.metadata(MediaMetadataRetriever.METADATA_KEY_ALBUM),
-                durationMs = retriever
-                    .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                    ?.toLongOrNull()
-                    ?.coerceAtLeast(0L)
-                    ?: 0L,
+                durationMs = MediaDurationPolicy.preferredMilliseconds(
+                    stored = containerDurationMs,
+                    playable = listOf(readPlayableDurationMs(file)),
+                ) ?: 0L,
                 artwork = retriever.embeddedPicture,
             )
         } catch (_: RuntimeException) {
@@ -483,6 +510,26 @@ class LibraryRepository(
 
     private fun MediaMetadataRetriever.metadata(key: Int): String? =
         extractMetadata(key)?.trim()?.takeIf { it.isNotEmpty() }
+
+    private fun readPlayableDurationMs(file: File): Long? {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(file.absolutePath)
+            (0 until extractor.trackCount).mapNotNull { index ->
+                val format = extractor.getTrackFormat(index)
+                val mime = format.getString(MediaFormat.KEY_MIME).orEmpty()
+                if (!mime.startsWith("audio/") && !mime.startsWith("video/")) return@mapNotNull null
+                if (!format.containsKey(MediaFormat.KEY_DURATION)) return@mapNotNull null
+                format.getLong(MediaFormat.KEY_DURATION)
+                    .takeIf { it > 0L }
+                    ?.div(1_000L)
+            }.minOrNull()
+        } catch (_: RuntimeException) {
+            null
+        } finally {
+            runCatching { extractor.release() }
+        }
+    }
 
     private fun displayName(uri: Uri): String? {
         if (uri.scheme == "file") return uri.lastPathSegment

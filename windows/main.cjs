@@ -3517,11 +3517,10 @@ ipcMain.handle("server:sync", async (event, {
       completedItems: completed,
       ...overrides,
     });
-    const dismissItemTransfer = () => {
+    const resetItemTransfer = () => {
       if (itemTransferStarted && serverTransferIsActive(event, controller, transferGeneration)) {
         event.sender.send("server:transfer-progress", {
-          direction: "download",
-          dismiss: true,
+          ...progressEvent({ completedBytes: 0, totalBytes: itemTotalBytes }),
           autoHide: false,
         });
       }
@@ -3553,7 +3552,7 @@ ipcMain.handle("server:sync", async (event, {
                   completedBytes: itemCompletedBytes,
                   totalBytes: itemTotalBytes,
                 });
-                transferEnd.autoHide = true;
+                transferEnd.autoHide = itemIndex >= itemCount;
                 publishProgress(transferEnd, { force: true });
               }
               return;
@@ -3563,7 +3562,7 @@ ipcMain.handle("server:sync", async (event, {
             if (itemCompletedBytes <= 0) return;
             itemTransferStarted = true;
             const event = progressEvent();
-            event.autoHide = itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;
+            event.autoHide = itemIndex >= itemCount && itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;
             publishProgress(event);
           },
         });
@@ -3579,7 +3578,7 @@ ipcMain.handle("server:sync", async (event, {
           totalBytes: itemTotalBytes || itemCompletedBytes,
           completedItems: completed,
         });
-        completionEvent.autoHide = true;
+        completionEvent.autoHide = itemIndex >= itemCount;
         publishProgress(completionEvent, { force: true });
         continue;
       }
@@ -3622,7 +3621,7 @@ ipcMain.handle("server:sync", async (event, {
                 const isFirstAttemptByte = !itemTransferStarted;
                 itemTransferStarted = true;
                 const event = progressEvent();
-                event.autoHide = itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;
+                event.autoHide = itemIndex >= itemCount && itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;
                 publishProgress(event, { force: isFirstAttemptByte });
               },
             });
@@ -3639,7 +3638,7 @@ ipcMain.handle("server:sync", async (event, {
           }
       }, {
         signal: policyLease.signal,
-        onRetry: dismissItemTransfer,
+        onRetry: resetItemTransfer,
       });
       if (matching?.id) replacedTrackIDs.push(matching.id);
       downloaded.push(await enrichedTrack(destination, {
@@ -3665,7 +3664,7 @@ ipcMain.handle("server:sync", async (event, {
     } catch (error) {
       // A failed final attempt owns no terminal progress. Scrub its partial bytes
       // before retry reconciliation, the next item, or cancellation can proceed.
-      dismissItemTransfer();
+      resetItemTransfer();
       if (error?.name === "AbortError") throw error;
       if (error instanceof OfflineDownloadPolicyError) throw error;
       failed.push({
@@ -3684,7 +3683,7 @@ ipcMain.handle("server:sync", async (event, {
         totalBytes: itemTotalBytes || itemCompletedBytes,
         completedItems: completed,
       });
-      completionEvent.autoHide = true;
+      completionEvent.autoHide = itemIndex >= itemCount;
       publishProgress(completionEvent, { force: true });
     }
   }

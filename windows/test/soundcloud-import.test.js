@@ -183,8 +183,15 @@ test("resolves and verifies a bounded progressive SoundCloud audio download", as
       assert.equal(url.searchParams.get("track_authorization"), "authorization-293");
       return new Response(JSON.stringify({ url: mediaURL }), { status: 200 });
     }
-    if (options.method === "HEAD") {
-      return new Response(null, { status: 200, headers: { "content-type": "audio/mpeg", "content-length": String(audio.length) } });
+    if (options.headers?.Range === "bytes=0-0") {
+      return new Response(audio.subarray(0, 1), {
+        status: 206,
+        headers: {
+          "content-range": `bytes 0-0/${audio.length}`,
+          "content-type": "audio/mpeg",
+          "content-length": "1",
+        },
+      });
     }
     return new Response(audio, { status: 200, headers: { "content-type": "audio/mpeg", "content-length": String(audio.length) } });
   };
@@ -202,7 +209,7 @@ test("resolves and verifies a bounded progressive SoundCloud audio download", as
   assert.deepEqual(requests, [
     "GET soundcloud.com",
     "GET api-v2.soundcloud.com",
-    "HEAD cf-media.sndcdn.com",
+    "GET cf-media.sndcdn.com",
     "GET cf-media.sndcdn.com",
   ]);
   assert.equal(download.sha256, createHash("sha256").update(audio).digest("hex"));

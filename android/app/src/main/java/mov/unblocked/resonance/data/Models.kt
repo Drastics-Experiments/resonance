@@ -20,6 +20,17 @@ import kotlinx.serialization.json.longOrNull
 import java.net.URI
 import java.util.UUID
 
+object MediaDurationPolicy {
+    private const val MaximumRemoteDurationSeconds = 24.0 * 60.0 * 60.0
+
+    fun preferredMilliseconds(stored: Long?, playable: List<Long?>): Long? =
+        playable.mapNotNull { it?.takeIf { value -> value > 0L } }.minOrNull()
+            ?: stored?.takeIf { it > 0L }
+
+    fun remoteSeconds(value: Double?): Double? =
+        value?.takeIf { it.isFinite() && it > 0.0 && it <= MaximumRemoteDurationSeconds }
+}
+
 @Serializable
 data class Track(
     val id: String = UUID.randomUUID().toString(),
@@ -72,6 +83,10 @@ object UnlinkedDownloadMigrationPolicy {
                 !hasSourceLink && migrated.preservesUnlinkedImport != true,
         )
     }
+}
+
+object PlayableDurationMigrationPolicy {
+    const val Identifier = "playable-media-duration-v1"
 }
 
 @Serializable
@@ -360,8 +375,9 @@ internal object RemoteSongSerializer : KSerializer<RemoteSong> {
                 ?: error("Remote song is missing download_url"),
             streamURL = string("stream_url")
                 ?: error("Remote song is missing stream_url"),
-            durationSeconds = (double("duration_seconds") ?: double("duration"))
-                ?.takeIf { it.isFinite() && it > 0.0 },
+            durationSeconds = MediaDurationPolicy.remoteSeconds(
+                double("duration_seconds") ?: double("duration"),
+            ),
             artworkURL = (string("artwork_url") ?: string("artwork"))
                 ?.trim()
                 ?.takeIf(String::isNotEmpty),

@@ -63,6 +63,19 @@ private final class RecordingMacSystemPlaybackController: MacSystemPlaybackContr
 @MainActor
 @Suite(.serialized)
 struct ResonanceTests {
+    @Test func playableDurationOverridesStaleStoredAndMismatchedVideoTimelines() {
+        #expect(MacPlayableMediaDurationPolicy.preferred(
+            storedDuration: 7_200,
+            playableDurations: [217.4, 216.9]
+        ) == 216.9)
+        #expect(MacPlayableMediaDurationPolicy.preferred(
+            storedDuration: 245,
+            playableDurations: [.nan, nil]
+        ) == 245)
+        #expect(MacPlayableMediaDurationPolicy.remoteDuration(172_000) == nil)
+        #expect(MacPlayableMediaDurationPolicy.remoteDuration(1_686) == 1_686)
+    }
+
     @Test
     func accountEmailIsCensoredUntilExplicitlyRevealed() {
         let email = "private@example.com"
@@ -1111,6 +1124,9 @@ struct ResonanceTests {
         #expect(MacServerDownloadProgressPolicy.percentageLabel(0.42) == "42%")
         #expect(MacServerDownloadProgressPolicy.batchCounter(position: 3, total: 10) == "3/10")
         #expect(MacServerDownloadProgressPolicy.batchCounter(position: 0, total: 0) == nil)
+        #expect(MacServerDownloadProgressPolicy.retainsPopupBetweenItems(hasStarted: true, position: 1, total: 2))
+        #expect(!MacServerDownloadProgressPolicy.retainsPopupBetweenItems(hasStarted: true, position: 2, total: 2))
+        #expect(!MacServerDownloadProgressPolicy.retainsPopupBetweenItems(hasStarted: false, position: 1, total: 2))
     }
 
     @Test

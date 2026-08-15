@@ -113,6 +113,10 @@ enum MacServerDownloadProgressPolicy {
         return fraction(completedBytes: completedBytes, totalBytes: totalBytes)
     }
 
+    static func retainsPopupBetweenItems(hasStarted: Bool, position: Int, total: Int) -> Bool {
+        hasStarted && position > 0 && position < total
+    }
+
     static func percentageLabel(_ fraction: Double) -> String {
         let clamped = min(max(fraction, 0), 1)
         return clamped > 0 && clamped < 0.01
@@ -1302,6 +1306,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
         if loadPersistedLibrary {
             Task { @MainActor [weak self] in
+                await self?.reconcileLocalPlayableDurations()
                 await self?.reconcileCachedUploadedLocalTracks()
             }
         }
@@ -2775,7 +2780,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         ) else { throw CancellationError() }
         serverDownloadTransferGeneration &+= 1
         let transferGeneration = serverDownloadTransferGeneration
-        isServerDownloadTransferVisible = false
         downloadProgress = nil
         return transferGeneration
     }
@@ -2811,7 +2815,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             transferGeneration: transferGeneration,
             currentTransferGeneration: serverDownloadTransferGeneration
         ) else { return }
-        isServerDownloadTransferVisible = false
+        if !MacServerDownloadProgressPolicy.retainsPopupBetweenItems(
+            hasStarted: isServerDownloadTransferVisible,
+            position: downloadBatchPosition,
+            total: downloadBatchTotal
+        ) {
+            isServerDownloadTransferVisible = false
+        }
         downloadProgress = nil
     }
 
@@ -3090,7 +3100,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     downloadBatchPosition = pendingPosition
                     downloadCurrentFile = remote.title
                     downloadStatus = "Downloading \(pendingPosition) of \(pendingSongIDs.count)"
-                    isServerDownloadTransferVisible = false
                     downloadProgress = nil
                 }
                 var stagingURL: URL?
@@ -3925,6 +3934,31 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         reconcileShuffleOrderIfNeeded()
     }
 
+    private func reconcileLocalPlayableDurations() async {
+        let candidates = tracks.compactMap { track -> (UUID, URL)? in
+            guard let fileURL = track.fileURL else { return nil }
+            return (track.id, fileURL)
+        }
+        let measurements = await Task.detached(priority: .utility) {
+            candidates.compactMap { id, fileURL -> (UUID, TimeInterval)? in
+                guard let player = try? AVAudioPlayer(contentsOf: fileURL),
+                      let duration = MacPlayableMediaDurationPolicy.preferred(
+                        storedDuration: nil,
+                        playableDurations: [player.duration]
+                      ) else { return nil }
+                return (id, duration)
+            }
+        }.value
+        var changed = false
+        for (id, duration) in measurements {
+            guard let index = tracks.firstIndex(where: { $0.id == id }),
+                  abs(tracks[index].duration - duration) > 0.25 else { continue }
+            tracks[index].duration = duration
+            changed = true
+        }
+        if changed { persistLibrary() }
+    }
+
     @discardableResult
     func associateLocalImportSource(
         trackID: UUID,
@@ -4307,10 +4341,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     private func synchronizePlaybackDuration(for track: Track, playerDuration: TimeInterval?) {
-        let measuredDuration = playerDuration.flatMap { duration in
-            duration.isFinite && duration > 0 ? duration : nil
-        }
-        let resolvedDuration = measuredDuration ?? max(track.duration, 0)
+        let measuredDuration = MacPlayableMediaDurationPolicy.preferred(
+            storedDuration: nil,
+            playableDurations: [playerDuration]
+        )
+        let resolvedDuration = MacPlayableMediaDurationPolicy.preferred(
+            storedDuration: track.duration,
+            playableDurations: [measuredDuration]
+        ) ?? 0
         playbackDuration = resolvedDuration
 
         guard measuredDuration != nil,

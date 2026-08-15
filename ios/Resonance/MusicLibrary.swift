@@ -2258,6 +2258,13 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             next.volume = PlaybackVolumePolicy.gain(for: volume)
             next.rate = playbackRate
             next.prepareToPlay()
+            if let measuredDuration = MobilePlayableMediaDurationPolicy.preferred(
+                storedDuration: track.duration,
+                playableDurations: [next.duration]
+            ), let trackIndex = tracks.firstIndex(where: { $0.id == track.id }),
+               abs(tracks[trackIndex].duration - measuredDuration) > 0.25 {
+                tracks[trackIndex].duration = measuredDuration
+            }
             let bounds = playbackBounds(for: track, duration: next.duration)
             let clampedPosition = min(max(requestedPosition, bounds.start), bounds.end)
             let resumePosition = clampedPosition >= bounds.end ? bounds.start : clampedPosition
@@ -3309,7 +3316,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 tracks[index].album = album
                 changed = true
             }
-            if let duration = metadata.durationSeconds.map(TimeInterval.init),
+            if tracks[index].duration <= 0,
+               let duration = metadata.durationSeconds.map(TimeInterval.init),
                abs(tracks[index].duration - duration) > 0.5 {
                 tracks[index].duration = duration
                 changed = true
@@ -3461,7 +3469,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 if self.transferDisplay?.itemID == song.id {
                     self.endNativeDownloadBytePresentation(
                         sessionID: transferSessionID,
-                        operationID: operationID
+                        operationID: operationID,
+                        preserveForNextItem: MobileDownloadTransferPresentationPolicy.shouldPreserveBetweenItems(
+                            currentItem: currentItem,
+                            totalItems: totalItems
+                        )
                     )
                 }
                 return
@@ -3624,12 +3636,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                     currentItem: currentItem,
                     totalItems: totalItems
                 )
-                // The source importer may still be validating or tagging the
-                // completed local file. The transfer card represents network
-                // bytes only, so it must not linger at 100% for that work.
+                // Keep a multi-song batch card mounted while this item is
+                // validated and the next one is prepared. A final item can
+                // still retire byte progress before its local processing.
                 endNativeDownloadBytePresentation(
                     sessionID: transferSessionID,
-                    operationID: operationID
+                    operationID: operationID,
+                    preserveForNextItem: MobileDownloadTransferPresentationPolicy.shouldPreserveBetweenItems(
+                        currentItem: currentItem,
+                        totalItems: totalItems
+                    )
                 )
                 return .downloaded(songID: song.id)
             } catch is MobileTransferPolicyChangedError {
@@ -3714,12 +3730,15 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 }
             )
             let downloaded = try await boundedDownload.run(request: request)
-            // Network acquisition is finished. Hide byte progress before local
-            // integrity checks, media inspection, artwork reads, or tagging so
-            // those steps cannot masquerade as a stalled 100% transfer.
+            // Keep a multi-song batch card mounted between items; only the
+            // final item retires byte progress before its local validation.
             endNativeDownloadBytePresentation(
                 sessionID: transferSessionID,
-                operationID: operationID
+                operationID: operationID,
+                preserveForNextItem: MobileDownloadTransferPresentationPolicy.shouldPreserveBetweenItems(
+                    currentItem: currentItem,
+                    totalItems: totalItems
+                )
             )
             let temporaryURL = downloaded.temporaryURL
             defer { try? fileManager.removeItem(at: temporaryURL) }
@@ -3790,7 +3809,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 title: metadata.title ?? catalogSong.title,
                 artist: metadata.artist ?? usefulFallback(catalogSong.artist, default: "Unknown Artist"),
                 album: metadata.album ?? usefulFallback(catalogSong.album, default: "Server Library"),
-                duration: metadata.duration ?? catalogSong.duration ?? mediaDuration,
+                duration: MobilePlayableMediaDurationPolicy.preferred(
+                    storedDuration: metadata.duration ?? catalogSong.duration,
+                    playableDurations: [mediaDuration]
+                ) ?? mediaDuration,
                 relativePath: filename,
                 remoteID: song.id,
                 sourceServer: baseURL.absoluteString,
@@ -3989,8 +4011,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         var changed = false
         for index in tracks.indices {
             let track = tracks[index]
+            let mediaURL = fileURL(for: track)
+            if let playableDuration = (try? AVAudioPlayer(contentsOf: mediaURL))?.duration,
+               let resolvedDuration = MobilePlayableMediaDurationPolicy.preferred(
+                    storedDuration: track.duration,
+                    playableDurations: [playableDuration]
+               ), abs(resolvedDuration - tracks[index].duration) > 0.25 {
+                tracks[index].duration = resolvedDuration
+                changed = true
+            }
             guard needsMetadataRefresh(track) else { continue }
-            let metadata = await embeddedMetadata(at: fileURL(for: track))
+            let metadata = await embeddedMetadata(at: mediaURL)
             if let title = metadata.title, title != tracks[index].title {
                 tracks[index].title = title
                 changed = true
@@ -4027,6 +4058,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         let asset = AVURLAsset(url: url)
         let items = (try? await asset.load(.commonMetadata)) ?? []
         let duration = try? await asset.load(.duration)
+        let playableDuration = (try? AVAudioPlayer(contentsOf: url))?.duration
         let title = await metadataString(.commonKeyTitle, in: items)
         let artist = await metadataString(.commonKeyArtist, in: items)
         let author = await metadataString(.commonKeyAuthor, in: items)
@@ -4036,7 +4068,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             title: title,
             artist: artist ?? author,
             album: album,
-            duration: duration.map(CMTimeGetSeconds),
+            duration: MobilePlayableMediaDurationPolicy.preferred(
+                storedDuration: duration.map(CMTimeGetSeconds),
+                playableDurations: [playableDuration]
+            ),
             artworkData: artwork
         )
     }
@@ -5148,10 +5183,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
     }
 
-    private func endNativeDownloadBytePresentation(sessionID: UUID, operationID: UUID) {
+    private func endNativeDownloadBytePresentation(
+        sessionID: UUID,
+        operationID: UUID,
+        preserveForNextItem: Bool = false
+    ) {
         guard ownsNativeDownloadOperation(sessionID: sessionID, operationID: operationID) else { return }
         activeNativeDownloadPresentationOperationID = nil
-        hideTransferPresentation(sessionID: sessionID)
+        if !preserveForNextItem {
+            hideTransferPresentation(sessionID: sessionID)
+        }
     }
 
     private func hideTransferPresentation(sessionID: UUID) {

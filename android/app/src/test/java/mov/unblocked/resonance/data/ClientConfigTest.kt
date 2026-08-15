@@ -26,6 +26,20 @@ class ClientConfigTest {
     private val now = Instant.parse("2026-08-06T17:05:00Z")
 
     @Test
+    fun playableDurationOverridesStaleContainerMetadataAndBoundsRemoteValues() {
+        assertEquals(
+            216_900L,
+            MediaDurationPolicy.preferredMilliseconds(
+                stored = 7_200_000L,
+                playable = listOf(217_400L, 216_900L),
+            ),
+        )
+        assertEquals(245_000L, MediaDurationPolicy.preferredMilliseconds(245_000L, listOf(null)))
+        assertEquals(null, MediaDurationPolicy.remoteSeconds(172_000.0))
+        assertEquals(1_686.0, MediaDurationPolicy.remoteSeconds(1_686.0))
+    }
+
+    @Test
     fun verifiesCanonicalFixtureAndIgnoresAdditionalProperties() {
         val verified = ClientConfigVerifier.verify(
             signedEnvelope(body(extra = ",\"future_property\":true")),
