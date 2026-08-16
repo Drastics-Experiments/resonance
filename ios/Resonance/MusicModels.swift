@@ -1262,6 +1262,12 @@ struct MobileTransferDisplayState: Equatable, Sendable {
     let totalBytes: Int64
     let fallbackProgress: Double?
 
+    var displayTitle: String {
+        kind == .download && detail == "Preparing download"
+            ? "Preparing download"
+            : kind.title
+    }
+
     var progress: Double? {
         MobileTransferDisplayPolicy.progress(
             completedBytes: completedBytes,

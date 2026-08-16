@@ -705,6 +705,7 @@ fun TransferPopup(state: ResonanceUiState, modifier: Modifier = Modifier) {
     } else null
     val transferVerb = when {
         isUploading -> "Uploading"
+        state.downloadDetail == "Preparing download" -> "Preparing download"
         else -> "Downloading"
     }
     val title = listOfNotNull(transferVerb, counter).joinToString(" • ")
