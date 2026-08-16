@@ -710,6 +710,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
     }
     @Published var searchText = ""
+    @Published private(set) var isRefreshingDownloadedMetadata = false
+    @Published private(set) var downloadedMetadataRefreshDetail = "Refresh titles, artists, albums, and artwork from saved source links."
     @Published private(set) var serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site"
     @Published private(set) var serverToken = ""
     @Published private(set) var serverAdminToken = ""
@@ -4383,6 +4385,95 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             save()
             updateNowPlaying()
         }
+    }
+
+    func refreshDownloadedSongMetadata() async {
+        guard !isRefreshingDownloadedMetadata else { return }
+        let candidates = tracks.compactMap { track -> (track: MobileTrack, fileURL: URL, source: String?)? in
+            let mediaURL = fileURL(for: track)
+            guard fileManager.fileExists(atPath: mediaURL.path) else { return nil }
+            return (
+                track,
+                mediaURL,
+                MobileDownloadedSongMetadataRefreshPolicy.sourceURL(for: track, fileExists: true)
+            )
+        }
+        guard !candidates.isEmpty else {
+            downloadedMetadataRefreshDetail = "No downloaded songs are available to refresh."
+            return
+        }
+
+        isRefreshingDownloadedMetadata = true
+        downloadedMetadataRefreshDetail = "Preparing " + String(candidates.count)
+            + " song" + (candidates.count == 1 ? "" : "s") + "…"
+        defer { isRefreshingDownloadedMetadata = false }
+
+        var sourceFailures = 0
+        for (offset, candidate) in candidates.enumerated() {
+            downloadedMetadataRefreshDetail = "Refreshing " + String(offset + 1)
+                + " of " + String(candidates.count) + " • " + candidate.track.title
+            let embedded = await embeddedMetadata(at: candidate.fileURL)
+            guard let currentIndex = tracks.firstIndex(where: { $0.id == candidate.track.id }) else { continue }
+
+            if let title = embedded.title { tracks[currentIndex].title = title }
+            if let artist = embedded.artist { tracks[currentIndex].artist = artist }
+            if let album = embedded.album { tracks[currentIndex].album = album }
+            if let duration = embedded.duration,
+               duration.isFinite,
+               duration > 0 {
+                tracks[currentIndex].duration = duration
+            }
+            if let artworkData = embedded.artworkData,
+               let filename = saveArtwork(artworkData, for: tracks[currentIndex].id) {
+                tracks[currentIndex].artworkFilename = filename
+                tracks[currentIndex].artworkScanComplete = true
+            }
+
+            guard let source = candidate.source else { continue }
+            do {
+                let metadata = try await serverLinkImportService.resolveMetadata(source: source)
+                let artworkData = await serverLinkImportService.artworkData(for: metadata.artworkURL)
+                guard let refreshedIndex = tracks.firstIndex(where: { $0.id == candidate.track.id }) else { continue }
+                let artworkFilename = artworkData.flatMap { saveArtwork($0, for: tracks[refreshedIndex].id) }
+                tracks[refreshedIndex] = MobileDownloadedSongMetadataRefreshPolicy.applying(
+                    metadata,
+                    artworkFilename: artworkFilename,
+                    to: tracks[refreshedIndex]
+                )
+                let videoExtensions = Set(["mp4", "mov", "m4v", "webm"])
+                let mediaKind = videoExtensions.contains(candidate.fileURL.pathExtension.lowercased()) ? "video" : "audio"
+                if let cacheKey = MobileRemoteSongMetadataCachePolicy.key(
+                    sourceURL: source,
+                    mediaKind: mediaKind
+                ) {
+                    remoteSongMetadataCache[cacheKey] = MobileRemoteSongMetadataCacheEntry(
+                        sourceURL: source,
+                        mediaKind: mediaKind,
+                        metadata: metadata,
+                        cachedAt: Date()
+                    )
+                }
+                if let remoteID = tracks[refreshedIndex].remoteID,
+                   let remoteIndex = remoteSongs.firstIndex(where: { $0.id == remoteID }) {
+                    remoteSongs[remoteIndex] = Self.applying(metadata, to: remoteSongs[remoteIndex])
+                }
+            } catch {
+                sourceFailures += 1
+            }
+        }
+
+        normalizeSystemPlaylist()
+        nowPlayingArtworkCache = nil
+        nowPlayingArtworkCacheKey = nil
+        save()
+        updateNowPlaying()
+        downloadedMetadataRefreshDetail = sourceFailures == 0
+            ? "Re-cached metadata for " + String(candidates.count)
+                + " song" + (candidates.count == 1 ? "" : "s") + "."
+            : "Re-cached " + String(candidates.count)
+                + " song" + (candidates.count == 1 ? "" : "s") + " • "
+                + String(sourceFailures) + " source refresh"
+                + (sourceFailures == 1 ? "" : "es") + " failed."
     }
 
     private func embeddedMetadata(at url: URL) async -> EmbeddedMetadata {

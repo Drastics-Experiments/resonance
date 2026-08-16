@@ -2224,6 +2224,26 @@ ipcMain.handle("library:save", async (_event, state) => {
   return true;
 });
 
+ipcMain.handle("library:refresh-metadata", async (_event, value) => {
+  const paths = await ensureDirectories();
+  const managedRoots = [paths.local, paths.remote];
+  const requested = Array.isArray(value) ? value.slice(0, 5_000) : [];
+  const results = [];
+  for (const item of requested) {
+    const id = boundedText(item?.id, 200);
+    const filePath = typeof item?.filePath === "string" ? path.resolve(item.filePath) : "";
+    if (!id || !filePath || !isManagedLibraryFile(filePath, managedRoots)) continue;
+    try {
+      const information = await fs.stat(filePath);
+      if (!information.isFile()) continue;
+      results.push({ id, metadata: await readAudioMetadata(filePath) });
+    } catch {
+      // A missing or unreadable file does not prevent the remaining library from refreshing.
+    }
+  }
+  return results;
+});
+
 ipcMain.handle("library:video-frames", async (_event, value = {}) => {
   const filePath = path.resolve(String(value.filePath || ""));
   const duration = Math.max(0, Math.min(Number(value.duration) || 0, 7 * 24 * 60 * 60));

@@ -1637,6 +1637,10 @@ class LinkImportService(context: Context) {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
+    suspend fun artworkData(value: String?): ByteArray? = withContext(Dispatchers.IO) {
+        fetchArtwork(value)
+    }
+
     private suspend fun fetchArtwork(value: String?): ByteArray? {
         val url = value?.takeIf(::isArtwork)?.let(::URL) ?: return null
         return runCatching { requestBytes(url, 10 * 1_024 * 1_024, "image/*") }.getOrNull()

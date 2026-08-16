@@ -325,6 +325,35 @@ private struct MobileSettingsSheet: View {
                     } label: {
                         Label("Background Audio", systemImage: "waveform")
                     }
+
+                    Button {
+                        Task { await library.refreshDownloadedSongMetadata() }
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "arrow.clockwise")
+                                .foregroundStyle(palette.foregroundAccent)
+                                .frame(width: 24)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Refresh song metadata")
+                                    .foregroundStyle(.primary)
+                                Text(library.downloadedMetadataRefreshDetail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            Spacer()
+                            if library.isRefreshingDownloadedMetadata {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Text("Refresh")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(palette.foregroundAccent)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(library.isRefreshingDownloadedMetadata)
                 }
 
                 Section("About") {

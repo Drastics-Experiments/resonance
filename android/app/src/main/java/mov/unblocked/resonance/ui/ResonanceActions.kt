@@ -20,6 +20,7 @@ interface ResonanceActions {
     fun setCrossfadeEnabled(enabled: Boolean)
     fun setCrossfadeSeconds(seconds: Float)
     fun setThemeChoice(choice: ResonanceThemeChoice)
+    fun refreshDownloadedSongMetadata()
     fun toggleFavorite(trackId: String)
     fun deleteTracksFromDevice(trackIds: Set<String>)
     fun saveClipRange(trackId: String, startMs: Long, endMs: Long)

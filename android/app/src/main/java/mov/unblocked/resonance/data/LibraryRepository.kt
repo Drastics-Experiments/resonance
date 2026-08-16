@@ -323,6 +323,24 @@ class LibraryRepository(
             track.copy(artworkFilename = filename, artworkScanComplete = true)
         }
 
+    suspend fun refreshEmbeddedMetadata(track: Track): Track = withContext(Dispatchers.IO) {
+        val file = fileForTrack(track)
+        if (!file.isFile) return@withContext track
+        val metadata = readMetadata(file)
+        var refreshed = track.copy(
+            title = metadata.title ?: track.title,
+            artist = metadata.artist ?: track.artist,
+            album = metadata.album ?: track.album,
+            durationMs = metadata.durationMs.takeIf { it > 0L } ?: track.durationMs,
+        )
+        metadata.artwork?.let { artwork ->
+            writeArtwork(track.id, artwork)?.let { filename ->
+                refreshed = refreshed.copy(artworkFilename = filename, artworkScanComplete = true)
+            }
+        }
+        refreshed
+    }
+
     internal fun newDownloadFile(preferredFilename: String): File = File(
         musicDirectory,
         RepositoryFilePolicy.newDownloadFilename(

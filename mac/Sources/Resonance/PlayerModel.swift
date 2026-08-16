@@ -717,6 +717,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
     @Published var favorites: Set<UUID>
     @Published private(set) var listeningHistoryEntries: [ListeningHistoryEntry] = []
+    @Published private(set) var isRefreshingDownloadedMetadata = false
+    @Published private(set) var downloadedMetadataRefreshDetail = "Refresh titles, artists, albums, and artwork from saved source links."
     @Published var searchText = ""
     @Published var filter: SongFilter = .all
     @Published var queueTab: QueueTab = .upNext
@@ -3888,6 +3890,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         remoteID: remote.id,
                         sourceServer: ServerSongIdentity.normalizedOrigin(base),
                         syncProfileID: syncProfileID,
+                        sourceURL: remote.sourceURL ?? existingIndex.flatMap { tracks[$0].sourceURL },
                         downloadSourceURL: remote.sourceURL ?? existingIndex.flatMap { tracks[$0].downloadSourceURL },
                         contentSHA256: resolvedContentSHA256,
                         preservesUnlinkedImport: existingIndex.flatMap { tracks[$0].preservesUnlinkedImport } ?? false,
@@ -4622,6 +4625,87 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             changed = true
         }
         if changed { persistLibrary() }
+    }
+
+    func refreshDownloadedSongMetadata() async {
+        guard !isRefreshingDownloadedMetadata else { return }
+        let candidates = tracks.compactMap { track -> (track: Track, fileURL: URL, source: String?)? in
+            guard let fileURL = track.fileURL,
+                  fileURL.isFileURL,
+                  FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+            return (
+                track,
+                fileURL,
+                DownloadedSongMetadataRefreshPolicy.sourceURL(for: track, fileExists: true)
+            )
+        }
+        guard !candidates.isEmpty else {
+            downloadedMetadataRefreshDetail = "No downloaded songs are available to refresh."
+            return
+        }
+
+        isRefreshingDownloadedMetadata = true
+        downloadedMetadataRefreshDetail = "Preparing " + String(candidates.count)
+            + " song" + (candidates.count == 1 ? "" : "s") + "…"
+        defer { isRefreshingDownloadedMetadata = false }
+
+        var sourceFailures = 0
+        for (offset, candidate) in candidates.enumerated() {
+            downloadedMetadataRefreshDetail = "Refreshing " + String(offset + 1)
+                + " of " + String(candidates.count) + " • " + candidate.track.title
+            let embedded = await Self.metadata(for: candidate.fileURL)
+            guard let currentIndex = tracks.firstIndex(where: { $0.id == candidate.track.id }) else { continue }
+
+            let fallbackStem = candidate.fileURL.deletingPathExtension().lastPathComponent
+            if embedded.title != fallbackStem { tracks[currentIndex].title = embedded.title }
+            if embedded.artist != "Unknown Artist" { tracks[currentIndex].artist = embedded.artist }
+            if embedded.album != "Unknown Album" { tracks[currentIndex].album = embedded.album }
+            if let artworkData = embedded.artworkData, !artworkData.isEmpty {
+                tracks[currentIndex].artworkData = artworkData
+            }
+            if let playableDuration = (try? AVAudioPlayer(contentsOf: candidate.fileURL))?.duration,
+               let duration = MacPlayableMediaDurationPolicy.preferred(
+                storedDuration: tracks[currentIndex].duration,
+                playableDurations: [playableDuration]
+               ) {
+                tracks[currentIndex].duration = duration
+            }
+
+            guard let source = candidate.source else { continue }
+            do {
+                let mediaMode: LocalImportMediaMode = tracks[currentIndex].kind == .video ? .video : .audio
+                let metadata = try await remoteSongMetadataResolver(source, mediaMode)
+                let artworkData = await serverLinkImportService.artworkData(for: metadata.artworkURL)
+                guard let refreshedIndex = tracks.firstIndex(where: { $0.id == candidate.track.id }) else { continue }
+                tracks[refreshedIndex] = DownloadedSongMetadataRefreshPolicy.applying(
+                    metadata,
+                    artworkData: artworkData,
+                    to: tracks[refreshedIndex]
+                )
+                let cacheKey = "\(mediaMode.rawValue):\(source)"
+                remoteSongMetadataCache[cacheKey] = CachedRemoteSongMetadata(
+                    metadata: metadata,
+                    cachedAt: Date()
+                )
+                if let remoteID = tracks[refreshedIndex].remoteID,
+                   let remoteIndex = remoteSongs.firstIndex(where: { $0.id == remoteID }) {
+                    remoteSongs[remoteIndex] = Self.applying(metadata, to: remoteSongs[remoteIndex])
+                }
+            } catch {
+                sourceFailures += 1
+            }
+        }
+
+        persistLibrary()
+        persistRemoteSongMetadataCache()
+        publishSystemPlayback()
+        downloadedMetadataRefreshDetail = sourceFailures == 0
+            ? "Re-cached metadata for " + String(candidates.count)
+                + " song" + (candidates.count == 1 ? "" : "s") + "."
+            : "Re-cached " + String(candidates.count)
+                + " song" + (candidates.count == 1 ? "" : "s") + " • "
+                + String(sourceFailures) + " source refresh"
+                + (sourceFailures == 1 ? "" : "es") + " failed."
     }
 
     @discardableResult
