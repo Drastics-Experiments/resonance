@@ -656,8 +656,18 @@ function parseDuration(value) {
 
 function safeThumbnail(value) {
   if (!isRecord(value) || !Array.isArray(value.thumbnails)) return null;
-  return value.thumbnails.slice().reverse().map((thumbnail) =>
-    isRecord(thumbnail) ? cleanText(thumbnail.url, 2_048) : null).find((candidate) => {
+  return value.thumbnails.map((thumbnail, index) => ({ thumbnail, index }))
+    .sort((left, right) => {
+      const leftWidth = isRecord(left.thumbnail) ? Math.min(safeNumber(left.thumbnail.width) || 0, 1_000_000) : 0;
+      const leftHeight = isRecord(left.thumbnail) ? Math.min(safeNumber(left.thumbnail.height) || 0, 1_000_000) : 0;
+      const rightWidth = isRecord(right.thumbnail) ? Math.min(safeNumber(right.thumbnail.width) || 0, 1_000_000) : 0;
+      const rightHeight = isRecord(right.thumbnail) ? Math.min(safeNumber(right.thumbnail.height) || 0, 1_000_000) : 0;
+      const areaDifference = (rightWidth * rightHeight) - (leftWidth * leftHeight);
+      if (areaDifference) return areaDifference;
+      const edgeDifference = Math.max(rightWidth, rightHeight) - Math.max(leftWidth, leftHeight);
+      return edgeDifference || right.index - left.index;
+    })
+    .map(({ thumbnail }) => isRecord(thumbnail) ? cleanText(thumbnail.url, 2_048) : null).find((candidate) => {
       if (!candidate) return false;
       try {
         const url = new URL(candidate);

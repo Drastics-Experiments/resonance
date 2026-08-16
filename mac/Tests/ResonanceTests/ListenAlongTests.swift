@@ -130,6 +130,52 @@ struct ListenAlongTests {
     }
 
     @Test
+    func undownloadedCatalogSongsFallBackToTheSharedProviderSource() {
+        #expect(
+            !MacListenAlongPlaybackPolicy.shouldUseServerStream(
+                hasCatalogMatch: true,
+                streamOnlyEnabled: false,
+                hasPlayableServerBytes: true
+            )
+        )
+        #expect(
+            !MacListenAlongPlaybackPolicy.shouldUseServerStream(
+                hasCatalogMatch: true,
+                streamOnlyEnabled: true,
+                hasPlayableServerBytes: false
+            )
+        )
+        #expect(
+            MacListenAlongPlaybackPolicy.shouldUseServerStream(
+                hasCatalogMatch: true,
+                streamOnlyEnabled: true,
+                hasPlayableServerBytes: true
+            )
+        )
+    }
+
+    @Test
+    func youtubeListenAlongUsesAnExplicitRangeLoader() throws {
+        let source = try #require(URL(string: "https://r1---sn.example.googlevideo.com/videoplayback?id=public"))
+        let asset = try MacYouTubeStreamResourceLoader.assetURL(for: source)
+        #expect(asset.scheme == "resonance-youtube")
+        #expect(asset.host == source.host)
+        #expect(throws: MacAuthenticatedStreamError.self) {
+            _ = try MacYouTubeStreamResourceLoader.assetURL(
+                for: #require(URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
+            )
+        }
+        #expect(throws: MacAuthenticatedStreamError.self) {
+            _ = try MacYouTubeStreamResourceLoader(
+                sourceURL: source,
+                headers: ["Authorization": "Bearer must-not-leak"],
+                contentLength: 100,
+                contentType: "audio/mp4"
+            )
+        }
+    }
+
+    @Test
     func hostLifecycleUsesExactEndpointsHeadersAndRevision() async throws {
         let requests = LockedListenAlongRequests()
         ListenAlongURLProtocol.handler = { request in

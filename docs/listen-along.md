@@ -33,10 +33,14 @@ Snapshots contain only:
 }
 ```
 
-Core adds `updated_at`, `expires_at`, and `server_time`. A participant projects a
+Core adds `updated_at`, `expires_at`, `server_time`, and `participant_count`. A participant projects a
 playing position as `position_seconds + (now - updated_at)`, adjusted by the
 observed server clock offset. A client ignores older revisions and corrects drift
 only when it exceeds the platform's tolerance.
+
+`participant_count` is the number of installation cohorts that have contacted the
+room during the last ten seconds, including the host. Core stores only a SHA-256
+digest of the existing anonymous cohort key and removes stale presence rows.
 
 The host token is random, kept only in client memory, and stored by Core as a
 SHA-256 hash. Join codes carry no account credential. Creating a new session ends
@@ -54,6 +58,8 @@ eight hours.
 - Participants first reuse a local or server-cached track with the same canonical
   source URL. Otherwise they resolve the source through the existing platform link
   importer and play the resulting transient stream with provider-required headers.
+- YouTube transient playback uses explicit verified GoogleVideo byte ranges so
+  AVFoundation and Media3 retain the provider headers on every seek/read request.
 - Resolved provider artwork stays local to each participant and is shown in the
   player when the library does not already contain artwork for that source.
 - Healthy participant sessions poll about every 250 milliseconds. Failed requests

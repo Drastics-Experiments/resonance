@@ -2812,6 +2812,10 @@ function listenAlongSnapshotForTrack(track = currentTrack()) {
 
 function listenAlongRenderStatus(status = listenAlongStatus, error = null) {
   listenAlongStatus = status || "idle";
+  const dialog = $("#listenAlongDialog");
+  const hasSession = Boolean(listenAlongSession);
+  const isWorking = ["starting", "joining", "reconnecting", "resolving", "stale"].includes(listenAlongStatus);
+  const hasError = listenAlongStatus === "error";
   const statusElement = $("#listenAlongStatus");
   if (statusElement) {
     const labels = {
@@ -2828,6 +2832,13 @@ function listenAlongRenderStatus(status = listenAlongStatus, error = null) {
     };
     statusElement.textContent = error ? `${labels[listenAlongStatus] || listenAlongStatus}: ${error.message || error}` : (labels[listenAlongStatus] || listenAlongStatus);
   }
+  if (dialog) dialog.dataset.state = hasError ? "error" : isWorking ? "working" : hasSession ? "active" : "idle";
+  const connectionStatus = $("#listenAlongConnectionStatus");
+  if (connectionStatus) connectionStatus.hidden = !hasSession && !isWorking && !hasError;
+  const setup = $("#listenAlongSetup");
+  const room = $("#listenAlongRoom");
+  if (setup) setup.hidden = hasSession;
+  if (room) room.hidden = !hasSession;
   const codeElement = $("#listenAlongCode");
   const roomCode = listenAlongSession?.code || "";
   if (codeElement) codeElement.textContent = roomCode || "—";
@@ -2847,16 +2858,25 @@ function listenAlongRenderStatus(status = listenAlongStatus, error = null) {
   }
   if (copyFeedback && !roomCode) copyFeedback.textContent = "";
   const roleElement = $("#listenAlongRole");
-  if (roleElement) roleElement.textContent = listenAlongSession?.role === "host" ? "Host controls playback" : listenAlongSession?.role === "guest" ? "Host controls playback" : "Create a room or join one";
+  if (roleElement) roleElement.textContent = listenAlongSession?.role === "host"
+    ? "You’re hosting. Share the room code with a friend."
+    : listenAlongSession?.role === "guest"
+      ? "You joined as a listener."
+      : "Listen together, with one person in control.";
   const startButton = $("#startListenAlong");
   const joinButton = $("#joinListenAlong");
+  const joinInput = $("#listenAlongJoinCode");
   const leaveButton = $("#leaveListenAlong");
   if (startButton) {
-    startButton.disabled = Boolean(listenAlongSession);
-    startButton.textContent = "Start hosting";
+    startButton.disabled = hasSession || isWorking;
+    startButton.textContent = listenAlongStatus === "starting" ? "Starting…" : "Start room";
   }
-  if (joinButton) joinButton.disabled = Boolean(listenAlongSession);
-  if (leaveButton) leaveButton.hidden = !listenAlongSession;
+  if (joinButton) {
+    joinButton.disabled = hasSession || isWorking;
+    joinButton.textContent = listenAlongStatus === "joining" ? "Joining…" : "Join";
+  }
+  if (joinInput) joinInput.disabled = hasSession || isWorking;
+  if (leaveButton) leaveButton.hidden = !hasSession;
   const playerButton = $("#openListenAlong");
   if (playerButton) {
     const active = Boolean(listenAlongSession);

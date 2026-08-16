@@ -96,6 +96,7 @@ data class ListenAlongUiState(
     val role: ListenAlongRole? = null,
     val snapshot: ListenAlongSnapshot? = null,
     val revision: Long = 0L,
+    val participantCount: Int? = null,
     val message: String = "",
     val errorMessage: String? = null,
 ) {
@@ -112,6 +113,9 @@ data class ListenAlongUiState(
 
     val isHost: Boolean
         get() = isActive && role == ListenAlongRole.Host
+
+    val showsParticipantPlaybackIndicator: Boolean
+        get() = isGuest
 }
 
 /** A complete, render-only snapshot of Resonance. The ViewModel owns this state. */

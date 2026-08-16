@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -79,7 +80,7 @@ fun MiniPlayer(
     val track = state.currentTrack ?: return
     val palette = LocalResonancePalette.current
     val singletonStream = state.isTransientPlayback
-    val listenAlongGuest = state.listenAlong.isGuest
+    val listenAlongGuest = state.listenAlong.showsParticipantPlaybackIndicator
     val transportLocked = singletonStream || listenAlongGuest
     val fraction = state.playbackProgressFraction
     val seekInput = if (state.canSeekPlayback && !listenAlongGuest) {
@@ -119,47 +120,53 @@ fun MiniPlayer(
                 Text(track.artist, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f), maxLines = 1)
                 CompactPlaybackStatus(state.playbackStatus)
             }
-            IconButton(
-                onClick = { actions.playPrevious() },
-                enabled = !transportLocked,
-            ) {
-                Icon(
-                    Icons.Default.SkipPrevious,
-                    "Previous",
-                    tint = if (singletonStream) {
-                        Color.White.copy(alpha = .24f)
-                    } else {
-                        MaterialTheme.colorScheme.tertiary
-                    },
+            if (listenAlongGuest) {
+                ListenAlongParticipantIndicator(
+                    count = state.listenAlong.participantCount,
+                    compact = true,
                 )
-            }
-            IconButton(
-                onClick = { actions.togglePlayPause() },
-                enabled = !listenAlongGuest,
-                modifier = Modifier
-                    .size(44.dp)
-                    .background(palette.raised, CircleShape)
-                    .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .72f), CircleShape),
-            ) {
-                if (state.playbackStatus == PlaybackUiStatus.Buffering) {
-                    CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
-                } else {
-                    Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "Pause" else "Play", tint = Color.White)
+            } else {
+                IconButton(
+                    onClick = { actions.playPrevious() },
+                    enabled = !transportLocked,
+                ) {
+                    Icon(
+                        Icons.Default.SkipPrevious,
+                        "Previous",
+                        tint = if (singletonStream) {
+                            Color.White.copy(alpha = .24f)
+                        } else {
+                            MaterialTheme.colorScheme.tertiary
+                        },
+                    )
                 }
-            }
-            IconButton(
-                onClick = { actions.playNext() },
-                enabled = !transportLocked,
-            ) {
-                Icon(
-                    Icons.Default.SkipNext,
-                    "Next",
-                    tint = if (singletonStream) {
-                        Color.White.copy(alpha = .24f)
+                IconButton(
+                    onClick = { actions.togglePlayPause() },
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(palette.raised, CircleShape)
+                        .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .72f), CircleShape),
+                ) {
+                    if (state.playbackStatus == PlaybackUiStatus.Buffering) {
+                        CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
                     } else {
-                        MaterialTheme.colorScheme.tertiary
-                    },
-                )
+                        Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "Pause" else "Play", tint = Color.White)
+                    }
+                }
+                IconButton(
+                    onClick = { actions.playNext() },
+                    enabled = !transportLocked,
+                ) {
+                    Icon(
+                        Icons.Default.SkipNext,
+                        "Next",
+                        tint = if (singletonStream) {
+                            Color.White.copy(alpha = .24f)
+                        } else {
+                            MaterialTheme.colorScheme.tertiary
+                        },
+                    )
+                }
             }
         }
         Box(
@@ -192,7 +199,7 @@ fun NowPlayingScreen(
     val track = state.currentTrack ?: return
     val palette = LocalResonancePalette.current
     val isServerStream = state.transientCurrentTrack?.id == track.id
-    val listenAlongGuest = state.listenAlong.isGuest
+    val listenAlongGuest = state.listenAlong.showsParticipantPlaybackIndicator
     val transportLocked = isServerStream || listenAlongGuest
     var dragOffset by remember { mutableFloatStateOf(0f) }
     var speedMenu by remember { mutableStateOf(false) }
@@ -317,96 +324,105 @@ fun NowPlayingScreen(
                     )
                 }
             }
-            item {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                ) {
-                    IconButton(
-                        onClick = actions::playPrevious,
-                        enabled = !transportLocked,
-                        modifier = Modifier.size(60.dp),
-                    ) {
-                        Icon(Icons.Default.SkipPrevious, "Previous", Modifier.size(35.dp))
+            if (listenAlongGuest) {
+                item {
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        ListenAlongParticipantIndicator(
+                            count = state.listenAlong.participantCount,
+                            compact = false,
+                        )
                     }
-                    IconButton(
-                        onClick = actions::togglePlayPause,
-                        enabled = !listenAlongGuest,
-                        modifier = Modifier
-                            .size(76.dp)
-                            .background(palette.raised, CircleShape)
-                            .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = .72f), CircleShape),
+                }
+            } else {
+                item {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceEvenly,
                     ) {
-                        if (state.playbackStatus == PlaybackUiStatus.Buffering) {
-                            CircularProgressIndicator(Modifier.size(30.dp), color = Color.White, strokeWidth = 3.dp)
-                        } else {
-                            Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "Pause" else "Play", tint = Color.White, modifier = Modifier.size(38.dp))
+                        IconButton(
+                            onClick = actions::playPrevious,
+                            enabled = !transportLocked,
+                            modifier = Modifier.size(60.dp),
+                        ) {
+                            Icon(Icons.Default.SkipPrevious, "Previous", Modifier.size(35.dp))
                         }
-                    }
-                    IconButton(
-                        onClick = actions::playNext,
-                        enabled = !transportLocked,
-                        modifier = Modifier.size(60.dp),
-                    ) {
-                        Icon(Icons.Default.SkipNext, "Next", Modifier.size(35.dp))
+                        IconButton(
+                            onClick = actions::togglePlayPause,
+                            modifier = Modifier
+                                .size(76.dp)
+                                .background(palette.raised, CircleShape)
+                                .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = .72f), CircleShape),
+                        ) {
+                            if (state.playbackStatus == PlaybackUiStatus.Buffering) {
+                                CircularProgressIndicator(Modifier.size(30.dp), color = Color.White, strokeWidth = 3.dp)
+                            } else {
+                                Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "Pause" else "Play", tint = Color.White, modifier = Modifier.size(38.dp))
+                            }
+                        }
+                        IconButton(
+                            onClick = actions::playNext,
+                            enabled = !transportLocked,
+                            modifier = Modifier.size(60.dp),
+                        ) {
+                            Icon(Icons.Default.SkipNext, "Next", Modifier.size(35.dp))
+                        }
                     }
                 }
             }
-            item {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceAround,
-                ) {
-                    IconButton(
-                        onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) },
-                        enabled = !transportLocked,
+            if (!listenAlongGuest) {
+                item {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceAround,
                     ) {
-                        Icon(
-                            Icons.Default.Shuffle,
-                            "Shuffle",
-                            tint = when {
-                                transportLocked -> MaterialTheme.colorScheme.onSurface.copy(alpha = .24f)
-                                state.shuffleEnabled -> MaterialTheme.colorScheme.tertiary
-                                else -> MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
-                            },
-                        )
-                    }
-                    Box {
-                        IconButton(onClick = { speedMenu = true }, enabled = !listenAlongGuest) {
+                        IconButton(
+                            onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) },
+                            enabled = !transportLocked,
+                        ) {
                             Icon(
-                                Icons.Default.Speed,
-                                "Playback speed",
-                                tint = if (state.playbackSpeed != 1f) {
+                                Icons.Default.Shuffle,
+                                "Shuffle",
+                                tint = when {
+                                    transportLocked -> MaterialTheme.colorScheme.onSurface.copy(alpha = .24f)
+                                    state.shuffleEnabled -> MaterialTheme.colorScheme.tertiary
+                                    else -> MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
+                                },
+                            )
+                        }
+                        Box {
+                            IconButton(onClick = { speedMenu = true }) {
+                                Icon(
+                                    Icons.Default.Speed,
+                                    "Playback speed",
+                                    tint = if (state.playbackSpeed != 1f) {
+                                        MaterialTheme.colorScheme.tertiary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
+                                    },
+                                )
+                            }
+                            DropdownMenu(expanded = speedMenu, onDismissRequest = { speedMenu = false }) {
+                                listOf(.75f, 1f, 1.25f, 1.5f, 2f).forEach { speed ->
+                                    DropdownMenuItem(
+                                        text = { Text("${speed}×") },
+                                        onClick = { actions.setPlaybackSpeed(speed); speedMenu = false },
+                                    )
+                                }
+                            }
+                        }
+                        IconButton(onClick = { actions.setRepeatEnabled(!state.repeatEnabled) }) {
+                            Icon(
+                                Icons.Default.Repeat,
+                                "Repeat",
+                                tint = if (state.repeatEnabled) {
                                     MaterialTheme.colorScheme.tertiary
                                 } else {
                                     MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
                                 },
                             )
                         }
-                        DropdownMenu(expanded = speedMenu, onDismissRequest = { speedMenu = false }) {
-                            listOf(.75f, 1f, 1.25f, 1.5f, 2f).forEach { speed ->
-                                DropdownMenuItem(
-                                    text = { Text("${speed}×") },
-                                    onClick = { actions.setPlaybackSpeed(speed); speedMenu = false },
-                                )
-                            }
-                        }
-                    }
-                    IconButton(
-                        onClick = { actions.setRepeatEnabled(!state.repeatEnabled) },
-                        enabled = !listenAlongGuest,
-                    ) {
-                        Icon(
-                            Icons.Default.Repeat,
-                            "Repeat",
-                            tint = if (state.repeatEnabled) {
-                                MaterialTheme.colorScheme.tertiary
-                            } else {
-                                MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
-                            },
-                        )
                     }
                 }
             }
@@ -437,6 +453,44 @@ fun NowPlayingScreen(
                 }
             }
             item { Spacer(Modifier.height(22.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun ListenAlongParticipantIndicator(count: Int?, compact: Boolean) {
+    val palette = LocalResonancePalette.current
+    val height = if (compact) 44.dp else 76.dp
+    Row(
+        modifier = Modifier
+            .height(height)
+            .background(palette.raised, CircleShape)
+            .border(
+                width = if (compact) 1.dp else 2.dp,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = .72f),
+                shape = CircleShape,
+            )
+            .padding(horizontal = if (compact) 13.dp else 22.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 7.dp else 10.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Default.Groups,
+            contentDescription = if (count == null) {
+                "Listening Along; playback is controlled by the session host"
+            } else {
+                "Listening Along with $count people; playback is controlled by the session host"
+            },
+            tint = Color.White,
+            modifier = Modifier.size(if (compact) 22.dp else 34.dp),
+        )
+        count?.let {
+            Text(
+                text = it.toString(),
+                color = Color.White,
+                fontSize = if (compact) 14.sp else 20.sp,
+                fontWeight = FontWeight.Bold,
+            )
         }
     }
 }

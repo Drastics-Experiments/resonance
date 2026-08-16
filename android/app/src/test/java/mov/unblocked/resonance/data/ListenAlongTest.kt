@@ -21,7 +21,7 @@ class ListenAlongTest {
     @Test
     fun envelopeAcceptsFormattedCodeAndNestedSnapshot() {
         val envelope = json.decodeFromString<ListenAlongEnvelope>(
-            """{"schema_version":1,"formatted_code":"ABCD-EFGH","revision":4,"snapshot":{"source_url":"https://soundcloud.com/example/track","media_kind":"audio","position_seconds":12.5,"is_playing":true},"server_time":"10000","role":"host","host_token":"opaque-host-token"}""",
+            """{"schema_version":1,"formatted_code":"ABCD-EFGH","revision":4,"snapshot":{"source_url":"https://soundcloud.com/example/track","media_kind":"audio","position_seconds":12.5,"is_playing":true},"server_time":"10000","role":"host","host_token":"opaque-host-token","participant_count":3}""",
         )
 
         assertEquals("ABCD-EFGH", envelope.inviteCode)
@@ -29,6 +29,7 @@ class ListenAlongTest {
         assertEquals("https://soundcloud.com/example/track", envelope.normalizedSnapshot.sourceURL)
         assertEquals(ListenAlongRole.Host, envelope.normalizedRole)
         assertEquals("opaque-host-token", envelope.hostToken)
+        assertEquals(3, envelope.normalizedParticipantCount)
     }
 
     @Test

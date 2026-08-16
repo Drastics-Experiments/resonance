@@ -4068,6 +4068,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     role = ListenAlongRole.Host,
                     hostToken = hostToken,
                 )
+                startListenAlongPolling(context, code)
             }
                 .onFailure { error ->
                     if (error !is CancellationException) {
@@ -4164,18 +4165,19 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         listenAlongPollJob = viewModelScope.launch {
             var delayMillis = LISTEN_ALONG_INITIAL_POLL_MS
             while (isActive && listenAlongContext == context && listenAlongCode == code &&
-                listenAlongRole == ListenAlongRole.Guest
+                listenAlongRole != null
             ) {
                 delay(delayMillis)
                 try {
                     val envelope = serverClient(context).fetchListenAlong(code)
                     if (listenAlongContext != context || listenAlongCode != code) break
                     if (envelope.revision >= listenAlongRevision) {
+                        val currentRole = listenAlongRole ?: break
                         adoptListenAlongEnvelope(
                             envelope = envelope,
                             context = context,
-                            role = ListenAlongRole.Guest,
-                            hostToken = null,
+                            role = currentRole,
+                            hostToken = listenAlongHostToken,
                         )
                     }
                     delayMillis = LISTEN_ALONG_INITIAL_POLL_MS
@@ -4242,6 +4244,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     role = role,
                     snapshot = snapshot,
                     revision = listenAlongRevision,
+                    participantCount = envelope.normalizedParticipantCount,
                     message = if (role == ListenAlongRole.Host) {
                         "Share this code with your listeners"
                     } else {
@@ -4377,6 +4380,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             )
         }
 
+        // A remote catalog match supplies presentation metadata only. Without
+        // a downloaded local file, Listen Along always resolves the host's
+        // shared source into a transient provider stream.
         val remote = mutableState.value.remoteSongs.firstOrNull { song ->
             sourceMatches(sourceURL, song.sourceURL)
         }

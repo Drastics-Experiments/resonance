@@ -44,10 +44,32 @@ const {
   chooseMP4VideoOnlyFormat,
   downloadResolvedAudio,
   downloadResolvedVideo,
+  highestQualityThumbnailURL,
+  preferredYouTubeArtworkURL,
   resolveYouTubeMetadata,
   resolveYouTubeAudio,
   verifiedContentRange,
 } = youtube;
+
+test("selects the largest YouTube artwork regardless of provider array order", () => {
+  const highest = "https://i.ytimg.com/vi/jNQXAC9IVRw/maxresdefault.jpg";
+  assert.equal(highestQualityThumbnailURL([
+    { url: highest, width: 1280, height: 720 },
+    { url: "https://i.ytimg.com/vi/jNQXAC9IVRw/default.jpg", width: 120, height: 90 },
+    { url: "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg", width: 480, height: 360 },
+  ]), highest);
+  assert.equal(
+    preferredYouTubeArtworkURL(
+      "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg",
+      highest,
+    ),
+    highest,
+  );
+  assert.equal(
+    preferredYouTubeArtworkURL("https://i.scdn.co/image/album", highest),
+    "https://i.scdn.co/image/album",
+  );
+});
 const { importFileBackedSource, searchFileBackedSources } = debrid;
 
 const spotifyTrackID = "4PTG3Z6ehGkBFwjybzWkR8";
@@ -616,6 +638,62 @@ test("hydrated SoundCloud downloads resolve the rendition once and hand it direc
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test("saved SoundCloud songs without a direct rendition fall back to a matched YouTube source", async () => {
+  const sourceURL = "https://soundcloud.com/the-weeknd/save-your-tears";
+  const alternate = {
+    videoID: "LIIDh-qI9oI",
+    title: "The Weeknd - Save Your Tears (Official Audio)",
+    artist: "The Weeknd",
+    album: "After Hours",
+    durationSeconds: 216,
+    thumbnailURL: "https://i.ytimg.com/vi/LIIDh-qI9oI/maxresdefault.jpg",
+    sourceProvider: "youtube",
+    officialArtist: true,
+    sourceURL: "https://www.youtube.com/watch?v=LIIDh-qI9oI",
+    score: 0.99,
+    confidence: "high",
+    match: { title: 1, artist: 1, album: 1, duration: 1, durationDeltaSeconds: 0 },
+  };
+  let searches = 0;
+  const stages = [];
+
+  const resolution = await resolveLocalImportDownloadSource(
+    sourceURL,
+    {
+      trackID: "saved-soundcloud-track",
+      title: "Save Your Tears",
+      artist: "The Weeknd",
+      album: "After Hours",
+      durationSeconds: 216,
+      artworkURL: null,
+    },
+    new AbortController().signal,
+    (event) => stages.push(event.stage),
+    {
+      resolveSoundCloudAudio: async () => {
+        throw new LocalImportError(
+          "inspecting_source",
+          "SOUNDCLOUD_STREAM_UNAVAILABLE",
+          "No direct rendition",
+        );
+      },
+      searchYouTubeAudioSources: async (track) => {
+        searches += 1;
+        assert.equal(track.title, "Save Your Tears");
+        assert.equal(track.artist, "The Weeknd");
+        return [alternate];
+      },
+    },
+    { mediaKind: "audio", preparationContext: "saved-song" },
+  );
+
+  assert.equal(searches, 1);
+  assert.deepEqual(stages, ["inspecting_source", "searching_candidates"]);
+  assert.equal(resolution.kind, "soundcloud");
+  assert.equal(resolution.track.sourceURL, sourceURL);
+  assert.deepEqual(resolution.candidates, [alternate]);
 });
 
 test("prepared SoundCloud audio is context-bound, single-use, and expires", () => {

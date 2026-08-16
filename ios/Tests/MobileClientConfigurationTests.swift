@@ -1348,6 +1348,61 @@ final class MobileClientConfigurationTests: XCTestCase {
         )
     }
 
+    func testSavedSoundCloudSongWithoutDirectRenditionFallsBackToMatchedYouTubeAudio() async throws {
+        let source = "https://soundcloud.com/the-weeknd/save-your-tears"
+        let metadata = LocalImportSpotifyTrack(
+            provider: "soundcloud",
+            type: "track",
+            trackID: "saved-soundcloud-track",
+            title: "Save Your Tears",
+            artist: "The Weeknd",
+            album: "After Hours",
+            trackNumber: nil,
+            durationSeconds: 216,
+            artworkURL: nil,
+            embedURL: "",
+            sourceURL: source
+        )
+        let alternate = LocalImportAudioSourceMatch(
+            videoID: "LIIDh-qI9oI",
+            title: "The Weeknd - Save Your Tears (Official Audio)",
+            artist: "The Weeknd",
+            album: "After Hours",
+            durationSeconds: 216,
+            thumbnailURL: "https://i.ytimg.com/vi/LIIDh-qI9oI/maxresdefault.jpg",
+            sourceProvider: .youtube,
+            officialArtist: true,
+            sourceURL: "https://www.youtube.com/watch?v=LIIDh-qI9oI",
+            score: 0.99,
+            confidence: "high",
+            match: .init(title: 1, artist: 1, album: 1, duration: 1, durationDeltaSeconds: 0)
+        )
+        let service = LocalDeviceImportService(
+            soundCloudOperations: LocalImportSoundCloudOperations(
+                resolveAudio: { _, _ in
+                    throw LocalImportError(
+                        stage: .inspectingSource,
+                        code: "SOUNDCLOUD_STREAM_UNAVAILABLE",
+                        message: "No direct rendition"
+                    )
+                }
+            ),
+            candidateSearch: { track in
+                guard track.title == metadata.title, track.artist == metadata.artist else { return [] }
+                return [alternate]
+            }
+        )
+
+        let resolution = try await service.resolveUsingCatalogMetadata(
+            source: source,
+            metadata: metadata
+        ) { _ in }
+
+        XCTAssertEqual(resolution.kind, .soundCloud)
+        XCTAssertEqual(resolution.track, metadata)
+        XCTAssertEqual(resolution.candidates, [alternate])
+    }
+
     func testVerifierAcceptsExactDigestSignatureAndAudience() throws {
         let signed = try signedResponse()
         let result = try MobileClientConfigVerifier.verify(
