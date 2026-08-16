@@ -45,6 +45,7 @@ const {
   downloadResolvedAudio,
   downloadResolvedVideo,
   resolveYouTubeMetadata,
+  resolveYouTubeAudio,
   verifiedContentRange,
 } = youtube;
 const { importFileBackedSource, searchFileBackedSources } = debrid;
@@ -728,6 +729,54 @@ test("resolves YouTube catalog metadata with one bounded oEmbed request", async 
   assert.equal(metadata.artist, "jawed");
   assert.equal(metadata.durationSeconds, null);
   assert.equal(metadata.sourceURL, "https://www.youtube.com/watch?v=jNQXAC9IVRw");
+});
+
+test("falls back when a YouTube player returns a media URL that requires playback verification", async () => {
+  const playerClients = [];
+  const probes = [];
+  const videoID = "jNQXAC9IVRw";
+  const contentLength = 1234;
+  const resolved = await resolveYouTubeAudio(videoID, new AbortController().signal, async (input, options = {}) => {
+    const url = new URL(input);
+    if (url.hostname.endsWith("youtube.com") && (url.pathname === "/watch" || url.pathname.startsWith("/embed/"))) {
+      return new Response('<script>ytcfg.set({"VISITOR_DATA":"visitor_123"});</script>', { status: 200 });
+    }
+    if (url.pathname === "/youtubei/v1/player") {
+      const client = options.headers["X-YouTube-Client-Name"];
+      playerClients.push(client);
+      const body = JSON.parse(options.body);
+      assert.equal(body.context.client.visitorData, "visitor_123");
+      const streamName = client === "101" ? "vision" : "android";
+      return new Response(JSON.stringify({
+        playabilityStatus: { status: "OK" },
+        videoDetails: { videoId: videoID, title: "Fallback", author: "Resonance", lengthSeconds: "10" },
+        streamingData: { adaptiveFormats: [{
+          itag: 140,
+          url: `https://rr1.example.googlevideo.com/${streamName}`,
+          mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+          bitrate: 128000,
+          contentLength: String(contentLength),
+        }] },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.hostname.endsWith("googlevideo.com")) {
+      probes.push(url.pathname);
+      if (url.pathname === "/vision") return new Response("forbidden", { status: 403 });
+      return new Response(Uint8Array.of(1), {
+        status: 206,
+        headers: {
+          "content-range": `bytes 0-0/${contentLength}`,
+          "content-length": "1",
+          "content-type": "audio/mp4",
+        },
+      });
+    }
+    throw new Error(`Unexpected YouTube request: ${url}`);
+  });
+  assert.deepEqual(playerClients, ["101", "28"]);
+  assert.deepEqual(probes, ["/vision", "/android"]);
+  assert.equal(new URL(resolved.streamingURL).pathname, "/android");
+  assert.match(resolved.streamingHeaders["User-Agent"], /youtube\.vr\.oculus/);
 });
 
 test("returns an ordered selectable batch for Spotify playlists", async () => {

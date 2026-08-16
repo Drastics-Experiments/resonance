@@ -1026,16 +1026,20 @@ struct LocalImportTests {
                 return (HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: ["Content-Type": "text/plain"])!, Data("unavailable".utf8))
             }
             if url.host?.hasSuffix("googlevideo.com") == true {
-                #expect(request.value(forHTTPHeaderField: "Range") == "bytes=0-\(fixture.count - 1)")
+                let isProbe = request.value(forHTTPHeaderField: "Range") == "bytes=0-0"
+                let end = isProbe ? 0 : fixture.count - 1
+                #expect(request.value(forHTTPHeaderField: "Range") == "bytes=0-\(end)")
+                let body = isProbe ? Data(fixture.prefix(1)) : fixture
                 return (HTTPURLResponse(
                     url: url,
                     statusCode: 206,
                     httpVersion: nil,
                     headerFields: [
-                        "Content-Range": "bytes 0-\(fixture.count - 1)/\(fixture.count)",
-                        "Content-Length": String(fixture.count),
+                        "Content-Range": "bytes 0-\(end)/\(fixture.count)",
+                        "Content-Length": String(body.count),
+                        "Content-Type": "audio/mp4",
                     ]
-                )!, fixture)
+                )!, body)
             }
             throw URLError(.unsupportedURL)
         }
@@ -1182,16 +1186,20 @@ struct LocalImportTests {
                 return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!, data)
             }
             if url.host?.hasSuffix("googlevideo.com") == true {
-                #expect(request.value(forHTTPHeaderField: "Range") == "bytes=0-\(fixture.count - 1)")
+                let isProbe = request.value(forHTTPHeaderField: "Range") == "bytes=0-0"
+                let end = isProbe ? 0 : fixture.count - 1
+                #expect(request.value(forHTTPHeaderField: "Range") == "bytes=0-\(end)")
+                let body = isProbe ? Data(fixture.prefix(1)) : fixture
                 return (HTTPURLResponse(
                     url: url,
                     statusCode: 206,
                     httpVersion: nil,
                     headerFields: [
-                        "Content-Range": "bytes 0-\(fixture.count - 1)/\(fixture.count)",
-                        "Content-Length": String(fixture.count),
+                        "Content-Range": "bytes 0-\(end)/\(fixture.count)",
+                        "Content-Length": String(body.count),
+                        "Content-Type": "video/mp4",
                     ]
-                )!, fixture)
+                )!, body)
             }
             throw URLError(.unsupportedURL)
         }
@@ -1308,16 +1316,20 @@ struct LocalImportTests {
             }
             if url.host?.hasSuffix("googlevideo.com") == true {
                 let fixture = url.path == "/audio-only" ? audioFixture : videoFixture
-                #expect(request.value(forHTTPHeaderField: "Range") == "bytes=0-\(fixture.count - 1)")
+                let isProbe = request.value(forHTTPHeaderField: "Range") == "bytes=0-0"
+                let end = isProbe ? 0 : fixture.count - 1
+                #expect(request.value(forHTTPHeaderField: "Range") == "bytes=0-\(end)")
+                let body = isProbe ? Data(fixture.prefix(1)) : fixture
                 return (HTTPURLResponse(
                     url: url,
                     statusCode: 206,
                     httpVersion: nil,
                     headerFields: [
-                        "Content-Range": "bytes 0-\(fixture.count - 1)/\(fixture.count)",
-                        "Content-Length": String(fixture.count),
+                        "Content-Range": "bytes 0-\(end)/\(fixture.count)",
+                        "Content-Length": String(body.count),
+                        "Content-Type": url.path == "/audio-only" ? "audio/mp4" : "video/mp4",
                     ]
-                )!, fixture)
+                )!, body)
             }
             throw URLError(.unsupportedURL)
         }

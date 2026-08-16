@@ -36,6 +36,7 @@ import {
   normalizedRemoteSongMetadataCache,
   normalizedVolume,
   playbackGainForVolume,
+  playableMediaDuration,
   normalizeState,
   playbackRangeForTrack,
   planMissingDownloadedUploads,
@@ -44,6 +45,7 @@ import {
   preservedUploadSourceURL,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
+  remoteMediaDuration,
   remoteSongMetadataCacheKey,
   serverSongMetadataMatches,
   serverCatalogAuthorityIsCurrent,
@@ -101,6 +103,15 @@ test("playlist artwork uses only the first four custom-playlist songs", () => {
   const trackIDs = ["one", "two", "three", "four", "five"];
   assert.deepEqual(playlistArtworkTrackIDs({ trackIDs, isSystem: false }), trackIDs.slice(0, 4));
   assert.deepEqual(playlistArtworkTrackIDs({ trackIDs, isSystem: true }), []);
+});
+
+test("playable media duration overrides stale stored and mismatched video timelines", () => {
+  assert.equal(playableMediaDuration({ storedDuration: 7_200, audioDuration: 217.4 }), 217.4);
+  assert.equal(playableMediaDuration({ storedDuration: 7_200, audioDuration: 217.4, videoDuration: 216.9 }), 216.9);
+  assert.equal(playableMediaDuration({ storedDuration: 245, audioDuration: Number.NaN }), 245);
+  assert.equal(playableMediaDuration({ storedDuration: -1 }), 0);
+  assert.equal(remoteMediaDuration(1_686), 1_686);
+  assert.equal(remoteMediaDuration(172_000), null);
 });
 
 test("migrates the legacy production server without losing saved profile state", () => {
@@ -1238,8 +1249,8 @@ test("opens a synchronized full-screen Now Playing viewer from the mini-player",
   assert.match(styleSource, /full-player-title-marquee[^;]+linear 1s infinite/);
   assert.doesNotMatch(styleSource, /full-player-title-marquee[^;]+alternate/);
   assert.match(styleSource, /@keyframes full-player-title-marquee\s*\{[\s\S]+from[^}]+translateX\(0\)[\s\S]+to[^}]+calc\(-1 \* var\(--full-player-title-cycle\)\)/);
-  assert.match(appSource, /function currentPlaybackDuration\([^]*?audioMetadataTrackID !== track\.id[^]*?isInstalledVideoTrack\(track\)/);
-  assert.match(appSource, /media\.onloadedmetadata = async \(\) => \{[^]*?audioSourceTrackID[^]*?!isInstalledVideoTrack\(track\)/);
+  assert.match(appSource, /function currentPlaybackDuration\([^]*?audioMetadataTrackID !== track\.id[^]*?playableMediaDuration\(\{ storedDuration, audioDuration: audio\.duration \}\)/);
+  assert.match(appSource, /media\.onloadedmetadata = async \(\) => \{[^]*?audioSourceTrackID[^]*?playableMediaDuration\(\{ audioDuration: audio\.duration \}\)[^]*?track\.duration = measuredDuration/);
   assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]+#fullPlayerTitle\.overflowing #fullPlayerTitleTrack/);
   assert.match(styleSource, /\.full-player-transport \.full-player-play\s*\{/);
   assert.match(styleSource, /\.full-player-queue-panel\s*\{/);

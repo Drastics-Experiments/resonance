@@ -268,6 +268,11 @@ enum LocalImportSoundCloud {
     private static let maxAudioBytes: Int64 = 256 * 1_024 * 1_024
     private static let maxPlaylistItems = 500
     private static let webUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+    static let streamHeaders = [
+        "Accept": "audio/mpeg,*/*;q=0.5",
+        "Accept-Encoding": "identity",
+        "User-Agent": webUserAgent,
+    ]
 
     static func resolve(source: String, session: URLSession) async throws -> LocalImportSoundCloudSource {
         let page = try await loadPage(source: source, session: session)
@@ -370,24 +375,34 @@ enum LocalImportSoundCloud {
               let mediaURL = URL(string: rawMediaURL),
               LocalImportURL.isSoundCloudMedia(mediaURL) else { throw unsafeStreamError() }
 
-        var head = URLRequest(url: mediaURL)
-        head.httpMethod = "HEAD"
-        head.setValue("audio/mpeg,*/*;q=0.5", forHTTPHeaderField: "Accept")
-        head.setValue(webUserAgent, forHTTPHeaderField: "User-Agent")
-        let (_, headResponse) = try await boundedResponse(session: session, request: head, limit: 1_024)
-        guard (200..<300).contains(headResponse.statusCode),
-              headResponse.url.map(LocalImportURL.isSoundCloudMedia) == true else {
-            throw providerFailure(headResponse, resource: "audio stream", stage: .inspectingSource)
+        var probe = URLRequest(url: mediaURL)
+        streamHeaders.forEach { probe.setValue($1, forHTTPHeaderField: $0) }
+        probe.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        let (bytes, rawProbeResponse) = try await session.bytes(for: probe)
+        guard let probeResponse = rawProbeResponse as? HTTPURLResponse,
+              probeResponse.url.map(LocalImportURL.isSoundCloudMedia) == true else {
+            throw unsafeStreamError()
         }
-        guard let contentLength = headResponse.value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init),
-              contentLength > 0, contentLength <= maxAudioBytes else {
+        if probeResponse.statusCode == 403 {
             throw LocalImportError(
                 stage: .inspectingSource,
-                code: "SOUNDCLOUD_AUDIO_TOO_LARGE",
-                message: "The selected SoundCloud audio is too large to import on this device."
+                code: "SOUNDCLOUD_STREAM_EXPIRED",
+                message: "SoundCloud rejected this audio rendition. Refresh the source and try again."
             )
         }
-        let contentType = headResponse.value(forHTTPHeaderField: "Content-Type")?
+        if probeResponse.statusCode == 429 {
+            throw providerFailure(probeResponse, resource: "audio stream", stage: .inspectingSource)
+        }
+        guard probeResponse.statusCode == 206,
+              probeResponse.value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init) == 1,
+              let contentLength = probeContentLength(probeResponse.value(forHTTPHeaderField: "Content-Range")) else {
+            throw LocalImportError(
+                stage: .inspectingSource,
+                code: "SOUNDCLOUD_INVALID_STREAM",
+                message: "SoundCloud returned an unverifiable audio stream."
+            )
+        }
+        let contentType = probeResponse.value(forHTTPHeaderField: "Content-Type")?
             .split(separator: ";", maxSplits: 1).first.map(String.init)?.lowercased()
         guard contentType == nil || contentType == "audio/mpeg" || contentType == "application/octet-stream" else {
             throw LocalImportError(
@@ -396,9 +411,17 @@ enum LocalImportSoundCloud {
                 message: "SoundCloud returned an invalid audio stream."
             )
         }
+        var iterator = bytes.makeAsyncIterator()
+        guard try await iterator.next() != nil, try await iterator.next() == nil else {
+            throw LocalImportError(
+                stage: .inspectingSource,
+                code: "SOUNDCLOUD_INVALID_STREAM",
+                message: "SoundCloud returned an unverifiable audio stream."
+            )
+        }
         return LocalImportSoundCloudAudioStream(
             track: track.metadata,
-            streamingURL: headResponse.url ?? mediaURL,
+            streamingURL: probeResponse.url ?? mediaURL,
             contentLength: contentLength
         )
     }
@@ -411,8 +434,7 @@ enum LocalImportSoundCloud {
         progress: LocalImportProgressHandler
     ) async throws -> String {
         var request = URLRequest(url: stream.streamingURL)
-        request.setValue("audio/mpeg,*/*;q=0.5", forHTTPHeaderField: "Accept")
-        request.setValue(webUserAgent, forHTTPHeaderField: "User-Agent")
+        streamHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         let (bytes, rawResponse) = try await session.bytes(for: request)
         guard let response = rawResponse as? HTTPURLResponse,
               response.url.map(LocalImportURL.isSoundCloudMedia) == true,
@@ -484,6 +506,17 @@ enum LocalImportSoundCloud {
             if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw CancellationError() }
             throw error
         }
+    }
+
+    private static func probeContentLength(_ value: String?) -> Int64? {
+        guard let value else { return nil }
+        let expression = try! NSRegularExpression(pattern: #"^bytes\s+0-0/(\d+)$"#, options: .caseInsensitive)
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        guard let match = expression.firstMatch(in: value, range: range),
+              let totalRange = Range(match.range(at: 1), in: value),
+              let total = Int64(value[totalRange]),
+              total > 0, total <= maxAudioBytes else { return nil }
+        return total
     }
 
     private static func loadPage(source: String, session: URLSession) async throws -> (hydration: [String: Any], response: HTTPURLResponse) {

@@ -15,6 +15,20 @@ export function normalizedAppTheme(value) {
   return typeof value === "string" && APP_THEME_IDS.has(value) ? value : DEFAULT_APP_THEME;
 }
 
+export function playableMediaDuration({ storedDuration, audioDuration, videoDuration } = {}) {
+  const positive = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : null;
+  };
+  const playable = [positive(audioDuration), positive(videoDuration)].filter((value) => value !== null);
+  return playable.length ? Math.min(...playable) : positive(storedDuration) || 0;
+}
+
+export function remoteMediaDuration(value) {
+  const duration = Number(value);
+  return Number.isFinite(duration) && duration > 0 && duration <= 24 * 60 * 60 ? duration : null;
+}
+
 export function createEmptyState() {
   return {
     tracks: [],

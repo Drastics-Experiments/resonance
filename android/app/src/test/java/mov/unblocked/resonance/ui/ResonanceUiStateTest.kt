@@ -108,6 +108,13 @@ class ResonanceUiStateTest {
             downloadBytesTransferred = 0L,
             downloadTotalBytes = null,
         )))
+        assertTrue(shouldShowTransferPopup(ResonanceUiState(
+            isDownloading = true,
+            downloadCurrentItem = 2,
+            downloadTotalItems = 3,
+            downloadBytesTransferred = 0L,
+            downloadTotalBytes = null,
+        )))
         assertTrue(shouldShowTransferPopup(ResonanceUiState(isUploading = true)))
     }
 

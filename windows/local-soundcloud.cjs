@@ -19,6 +19,11 @@ const MAX_PLAYLIST_ITEMS = 500;
 const WEB_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
+const STREAM_HEADERS = Object.freeze({
+  Accept: "audio/mpeg,*/*;q=0.5",
+  "Accept-Encoding": "identity",
+  "User-Agent": WEB_USER_AGENT,
+});
 
 function soundCloudError(code, message, options = {}) {
   return new LocalImportError(options.stage || "resolving_metadata", code, message, options);
@@ -164,6 +169,13 @@ function providerFailure(response, resource = "source", stage = "resolving_metad
     });
   }
   return soundCloudError("SOUNDCLOUD_PROVIDER_FAILED", `SoundCloud could not load that ${resource}.`, { stage });
+}
+
+function soundCloudProbeTotal(value) {
+  const match = typeof value === "string" ? /^bytes\s+0-0\/(\d+)$/i.exec(value.trim()) : null;
+  if (!match) return null;
+  const total = Number(match[1]);
+  return Number.isSafeInteger(total) && total > 0 && total <= MAX_AUDIO_BYTES ? total : null;
 }
 
 function balancedJSONArray(source, start) {
@@ -430,24 +442,42 @@ async function resolveSoundCloudAudio(source, signal, fetchImpl = fetch) {
   if (!safeMediaURL(payload?.url)) {
     throw soundCloudError("SOUNDCLOUD_UNSAFE_STREAM", "SoundCloud returned an unsafe audio stream.", { stage: "inspecting_source" });
   }
-  const head = await fetchWithValidatedRedirects(payload.url, {
-    method: "HEAD",
-    headers: { Accept: "audio/mpeg,*/*;q=0.5", "User-Agent": WEB_USER_AGENT },
+  const probe = await fetchWithValidatedRedirects(payload.url, {
+    headers: { ...STREAM_HEADERS, Range: "bytes=0-0" },
     signal,
   }, safeMediaURL, fetchImpl, "inspecting_source");
-  if (!head.ok || !safeMediaURL(head.url || payload.url)) throw providerFailure(head, "audio stream", "inspecting_source");
-  const contentLength = Number(head.headers.get("content-length") || 0);
-  const contentType = (head.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
-  await head.body?.cancel().catch(() => undefined);
-  if (!Number.isSafeInteger(contentLength) || contentLength <= 0 || contentLength > MAX_AUDIO_BYTES) {
-    throw soundCloudError("SOUNDCLOUD_AUDIO_TOO_LARGE", "The selected SoundCloud audio is too large to import on this device.", { stage: "inspecting_source" });
+  if (probe.status === 403) {
+    await probe.body?.cancel().catch(() => undefined);
+    throw soundCloudError("SOUNDCLOUD_STREAM_EXPIRED", "SoundCloud rejected this audio rendition. Refresh the source and try again.", { stage: "inspecting_source" });
+  }
+  if (probe.status === 429) {
+    await probe.body?.cancel().catch(() => undefined);
+    throw providerFailure(probe, "audio stream", "inspecting_source");
+  }
+  const contentLength = soundCloudProbeTotal(probe.headers.get("content-range"));
+  const responseLength = Number(probe.headers.get("content-length") || 0);
+  const contentType = (probe.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
+  if (probe.status !== 206 || !safeMediaURL(probe.url || payload.url) || responseLength !== 1 || !contentLength) {
+    await probe.body?.cancel().catch(() => undefined);
+    throw soundCloudError("SOUNDCLOUD_INVALID_STREAM", "SoundCloud returned an unverifiable audio stream.", { stage: "inspecting_source" });
   }
   if (contentType && contentType !== "audio/mpeg" && contentType !== "application/octet-stream") {
+    await probe.body?.cancel().catch(() => undefined);
     throw soundCloudError("SOUNDCLOUD_INVALID_STREAM", "SoundCloud returned an invalid audio stream.", { stage: "inspecting_source" });
+  }
+  const reader = probe.body?.getReader();
+  if (!reader) {
+    throw soundCloudError("SOUNDCLOUD_INVALID_STREAM", "SoundCloud returned no audio stream data.", { stage: "inspecting_source" });
+  }
+  const first = await reader.read();
+  const second = await reader.read();
+  if (first.done || first.value?.byteLength !== 1 || !second.done) {
+    await reader.cancel().catch(() => undefined);
+    throw soundCloudError("SOUNDCLOUD_INVALID_STREAM", "SoundCloud returned an unverifiable audio stream.", { stage: "inspecting_source" });
   }
   return {
     track,
-    streamingURL: head.url || payload.url,
+    streamingURL: probe.url || payload.url,
     contentLength,
     contentType: "audio/mpeg",
     durationSeconds: track.durationSeconds,
@@ -468,7 +498,7 @@ async function writeAll(file, bytes) {
 
 async function downloadResolvedSoundCloudAudio(resolved, destination, signal, onProgress = () => {}, fetchImpl = fetch) {
   const response = await fetchWithValidatedRedirects(resolved.streamingURL, {
-    headers: { Accept: "audio/mpeg,*/*;q=0.5", "User-Agent": WEB_USER_AGENT },
+    headers: STREAM_HEADERS,
     signal,
   }, safeMediaURL, fetchImpl, "downloading");
   if (!response.ok || !safeMediaURL(response.url || resolved.streamingURL) || !response.body) {
