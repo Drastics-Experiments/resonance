@@ -215,6 +215,7 @@ internal object SoundCloudImport {
         val finalURL: URL,
         val contentType: String?,
         val contentLength: Long,
+        val contentRange: String?,
         val retryAfter: String?,
         val body: ByteArray,
     )
@@ -288,25 +289,34 @@ internal object SoundCloudImport {
         val mediaValue = runCatching { (json.parseToJsonElement(payload.body.decodeToString()) as? JsonObject)?.string("url") }.getOrNull()
         val mediaURL = mediaValue?.let { runCatching { URL(it) }.getOrNull() }
         if (mediaURL == null || !SoundCloudImportUrls.isMedia(mediaURL)) unsafeStream()
-        val head = responseBytes(
-            mediaURL, "HEAD", 1_024, "audio/mpeg,*/*;q=0.5", SoundCloudImportUrls::isMedia,
+        val probe = responseBytes(
+            mediaURL, "GET", 1, "audio/mpeg,*/*;q=0.5", SoundCloudImportUrls::isMedia,
             LinkImportStage.InspectingSource,
+            mapOf("Range" to "bytes=0-0"),
         )
-        if (head.status !in 200..299 || !SoundCloudImportUrls.isMedia(head.finalURL)) {
-            providerFailure(head, "audio stream", LinkImportStage.InspectingSource)
+        if (probe.status == 403) throw LinkImportException(
+            LinkImportStage.InspectingSource,
+            "SOUNDCLOUD_STREAM_EXPIRED",
+            "SoundCloud rejected this audio rendition. Refresh the source and try again.",
+        )
+        if (probe.status == 429) providerFailure(probe, "audio stream", LinkImportStage.InspectingSource)
+        val contentLength = probeContentLength(probe.contentRange)
+        if (probe.status != 206 || !SoundCloudImportUrls.isMedia(probe.finalURL) ||
+            probe.contentLength != 1L || probe.body.size != 1 || contentLength == null
+        ) {
+            throw LinkImportException(
+                LinkImportStage.InspectingSource,
+                "SOUNDCLOUD_INVALID_STREAM",
+                "SoundCloud returned an unverifiable audio stream.",
+            )
         }
-        if (head.contentLength !in 1..MAX_AUDIO_BYTES) throw LinkImportException(
-            LinkImportStage.InspectingSource,
-            "SOUNDCLOUD_AUDIO_TOO_LARGE",
-            "The selected SoundCloud audio is too large to import on this device.",
-        )
-        val type = head.contentType?.substringBefore(';')?.trim()?.lowercase()
+        val type = probe.contentType?.substringBefore(';')?.trim()?.lowercase()
         if (type != null && type !in setOf("audio/mpeg", "application/octet-stream")) throw LinkImportException(
             LinkImportStage.InspectingSource,
             "SOUNDCLOUD_INVALID_STREAM",
             "SoundCloud returned an invalid audio stream.",
         )
-        return SoundCloudAudio(track.metadata, head.finalURL, head.contentLength)
+        return SoundCloudAudio(track.metadata, probe.finalURL, contentLength)
     }
 
     suspend fun download(
@@ -397,6 +407,7 @@ internal object SoundCloudImport {
         accept: String,
         validator: (URL) -> Boolean,
         stage: LinkImportStage,
+        extraHeaders: Map<String, String> = emptyMap(),
     ): Response {
         var url = initialURL
         var method = initialMethod
@@ -409,7 +420,7 @@ internal object SoundCloudImport {
                 "Accept-Encoding" to "identity",
                 "Accept-Language" to "en-US,en;q=0.8",
                 "User-Agent" to WEB_AGENT,
-            ))
+            ) + extraHeaders)
             try {
                 val status = connection.responseCode
                 if (status in setOf(301, 302, 303, 307, 308)) {
@@ -446,6 +457,7 @@ internal object SoundCloudImport {
                     finalURL = connection.url,
                     contentType = connection.contentType,
                     contentLength = connection.contentLengthLong,
+                    contentRange = connection.getHeaderField("Content-Range"),
                     retryAfter = connection.getHeaderField("Retry-After"),
                     body = bytes,
                 )
@@ -493,6 +505,12 @@ internal object SoundCloudImport {
             429 -> throw LinkImportException(stage, "SOUNDCLOUD_RATE_LIMITED", "SoundCloud rate-limited this request. Try again shortly.")
             else -> throw LinkImportException(stage, "SOUNDCLOUD_PROVIDER_FAILED", "SoundCloud could not load that $resource.")
         }
+    }
+
+    private fun probeContentLength(value: String?): Long? {
+        val total = value?.trim()?.let { Regex("^bytes\\s+0-0/(\\d+)$", RegexOption.IGNORE_CASE).matchEntire(it) }
+            ?.groupValues?.getOrNull(1)?.toLongOrNull()
+        return total?.takeIf { it in 1..MAX_AUDIO_BYTES }
     }
 
     private fun unsupportedResource(): Nothing = throw LinkImportException(

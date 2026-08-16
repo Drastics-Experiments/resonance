@@ -1225,7 +1225,7 @@ actor LocalDeviceImportService {
                 )
             }
             let stream = try await soundCloudOperations.resolveAudio(candidate.sourceURL, sessions.soundcloud)
-            return LocalImportPreviewStream(url: stream.streamingURL, httpHeaders: [:])
+            return LocalImportPreviewStream(url: stream.streamingURL, httpHeaders: LocalImportSoundCloud.streamHeaders)
         }
         guard let videoID = try LocalImportURL.youtubeVideoID(candidate.sourceURL) else {
             throw LocalImportError(
@@ -1892,19 +1892,19 @@ actor LocalDeviceImportService {
         let clients = [
             YouTubePlayerClient(
                 client: [
-                    "clientName": "ANDROID_VR", "clientVersion": "1.65.10", "deviceMake": "Oculus",
-                    "deviceModel": "Quest 3", "androidSdkVersion": "32", "userAgent": Self.androidVRUserAgent,
-                    "osName": "Android", "osVersion": "12L", "hl": "en", "timeZone": "UTC", "utcOffsetMinutes": "0",
-                ],
-                clientNumber: "28", userAgent: Self.androidVRUserAgent, origin: "https://www.youtube.com"
-            ),
-            YouTubePlayerClient(
-                client: [
                     "clientName": "VISIONOS", "clientVersion": "1.02", "deviceMake": "Apple",
                     "deviceModel": "RealityDevice17,1", "userAgent": Self.visionOSUserAgent,
                     "osName": "visionOS", "osVersion": "26.5.23O471", "hl": "en", "timeZone": "UTC", "utcOffsetMinutes": "0",
                 ],
                 clientNumber: "101", userAgent: Self.visionOSUserAgent, origin: "https://www.youtube.com"
+            ),
+            YouTubePlayerClient(
+                client: [
+                    "clientName": "ANDROID_VR", "clientVersion": "1.65.10", "deviceMake": "Oculus",
+                    "deviceModel": "Quest 3", "androidSdkVersion": "32", "userAgent": Self.androidVRUserAgent,
+                    "osName": "Android", "osVersion": "12L", "hl": "en", "timeZone": "UTC", "utcOffsetMinutes": "0",
+                ],
+                clientNumber: "28", userAgent: Self.androidVRUserAgent, origin: "https://www.youtube.com"
             ),
         ]
         var verificationError: LocalImportError?
@@ -1912,12 +1912,14 @@ actor LocalDeviceImportService {
         for client in clients {
             do {
                 let player = try await fetchYouTubePlayer(videoID: videoID, visitor: session, client: client)
-                return try resolvedYouTubeMedia(
+                let resolved = try resolvedYouTubeMedia(
                     videoID: videoID,
                     player: player,
                     client: client,
                     mediaMode: mediaMode
                 )
+                try await verifyYouTubeMedia(resolved)
+                return resolved
             } catch let error as LocalImportError {
                 if error.code == "YOUTUBE_PLAYBACK_VERIFICATION_REQUIRED" { verificationError = error }
                 else { lastError = error }
@@ -1994,6 +1996,7 @@ actor LocalDeviceImportService {
             for key in ["androidSdkVersion", "utcOffsetMinutes"] {
                 if let string = clientObject[key] as? String, let number = Int(string) { clientObject[key] = number }
             }
+            clientObject["visitorData"] = visitor.visitorData
             let payload: [String: Any] = [
                 "context": ["client": clientObject],
                 "videoId": videoID,
@@ -2188,6 +2191,65 @@ actor LocalDeviceImportService {
             primaryStream: primaryStream,
             companionAudioStream: companionAudioStream
         )
+    }
+
+    private func verifyYouTubeMedia(_ media: ResolvedYouTubeMedia) async throws {
+        try await verifyYouTubeStream(media.primaryStream)
+        if let companion = media.companionAudioStream {
+            try await verifyYouTubeStream(companion)
+        }
+    }
+
+    private func verifyYouTubeStream(_ stream: ResolvedYouTubeStream) async throws {
+        let mediaLabel = stream.mediaMode.rawValue
+        var request = URLRequest(url: stream.streamingURL)
+        stream.streamingHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        let (bytes, rawResponse) = try await sessions.googleVideo.bytes(for: request)
+        guard let response = rawResponse as? HTTPURLResponse,
+              response.url.map(LocalImportURL.isGoogleVideo) == true else {
+            throw LocalImportError(stage: .inspectingSource, code: "YOUTUBE_UNSAFE_REDIRECT", message: "YouTube returned an unsafe \(mediaLabel) redirect.")
+        }
+        if response.statusCode == 403 {
+            throw LocalImportError(
+                stage: .inspectingSource,
+                code: "YOUTUBE_PLAYBACK_VERIFICATION_REQUIRED",
+                message: "YouTube requires playback verification for this stream. Trying another playback client."
+            )
+        }
+        if response.statusCode == 429 {
+            throw LocalImportError(
+                stage: .inspectingSource,
+                code: "YOUTUBE_RATE_LIMITED",
+                message: "YouTube rate-limited the \(mediaLabel) stream probe.",
+                retryAfter: response.value(forHTTPHeaderField: "Retry-After")
+            )
+        }
+        let expected = try LocalImportRangeVerifier.expectedLength(
+            response.value(forHTTPHeaderField: "Content-Range"),
+            start: 0,
+            end: 0,
+            total: stream.contentLength
+        )
+        let responseType = response.value(forHTTPHeaderField: "Content-Type")?
+            .split(separator: ";", maxSplits: 1).first.map(String.init)?.lowercased()
+        guard response.statusCode == 206,
+              expected == 1,
+              response.value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init) == 1,
+              responseType == stream.contentType.lowercased() else {
+            throw LocalImportError(stage: .inspectingSource, code: "YOUTUBE_STREAM_UNAVAILABLE", message: "YouTube returned an unverifiable \(mediaLabel) stream.")
+        }
+        var received = 0
+        for try await _ in bytes {
+            received += 1
+            guard received <= 1 else {
+                throw LocalImportError(stage: .inspectingSource, code: "YOUTUBE_STREAM_UNAVAILABLE", message: "YouTube returned an unverifiable \(mediaLabel) stream body.")
+            }
+        }
+        guard received == 1 else {
+            throw LocalImportError(stage: .inspectingSource, code: "YOUTUBE_STREAM_UNAVAILABLE", message: "YouTube returned no \(mediaLabel) stream data.")
+        }
     }
 
     private func download(

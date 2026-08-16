@@ -1,5 +1,26 @@
 import Foundation
 
+enum MacPlayableMediaDurationPolicy {
+    private static let maximumRemoteDuration: TimeInterval = 24 * 60 * 60
+
+    static func preferred(
+        storedDuration: TimeInterval?,
+        playableDurations: [TimeInterval?]
+    ) -> TimeInterval? {
+        let playable = playableDurations.compactMap(validDuration)
+        return playable.min() ?? storedDuration.flatMap { validDuration($0) }
+    }
+
+    static func remoteDuration(_ value: TimeInterval?) -> TimeInterval? {
+        value.flatMap { validDuration($0) }.flatMap { $0 <= maximumRemoteDuration ? $0 : nil }
+    }
+
+    private static func validDuration(_ value: TimeInterval?) -> TimeInterval? {
+        guard let value, value.isFinite, value > 0 else { return nil }
+        return value
+    }
+}
+
 enum AppSection: String, CaseIterable, Identifiable {
     case library = "Library"
     case playlists = "Playlists"
@@ -1188,8 +1209,10 @@ struct RemoteSong: Identifiable, Hashable, Decodable, Sendable {
             || (declaredMediaKind == nil && MediaKindClassifier.kind(contentType: contentType, filename: filename) == .video)
             ? "video"
             : "audio"
-        durationSeconds = try values.decodeIfPresent(TimeInterval.self, forKey: .durationSeconds)
-            ?? values.decodeIfPresent(TimeInterval.self, forKey: .duration)
+        durationSeconds = MacPlayableMediaDurationPolicy.remoteDuration(
+            try values.decodeIfPresent(TimeInterval.self, forKey: .durationSeconds)
+                ?? values.decodeIfPresent(TimeInterval.self, forKey: .duration)
+        )
         artworkURL = try values.decodeIfPresent(String.self, forKey: .artworkURL)
             ?? values.decodeIfPresent(String.self, forKey: .artwork)
         downloadURL = try values.decode(String.self, forKey: .downloadURL)

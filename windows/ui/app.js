@@ -35,6 +35,7 @@ import {
   normalizedRemoteSongMetadataCache,
   normalizedVolume,
   playbackGainForVolume,
+  playableMediaDuration,
   normalizeState,
   playbackRangeForTrack,
   persistentPlaybackIDs,
@@ -46,6 +47,7 @@ import {
   preservedUploadSourceURL,
   remoteAssociationConflictFilePaths,
   remoteAssociationConflictMessage,
+  remoteMediaDuration,
   remoteSongMetadataCacheKey,
   reconcileUploadedTrack,
   reorderPlaylistEntries,
@@ -2720,7 +2722,7 @@ async function playRemoteStream(song) {
       return;
     }
     const previousStream = activeServerStream;
-    const duration = Number(song.duration_seconds ?? song.duration) || 0;
+    const duration = remoteMediaDuration(song.duration_seconds ?? song.duration) || 0;
     const track = Object.freeze({
       id: `stream:${crypto.randomUUID()}`,
       remoteID: song.id,
@@ -3399,7 +3401,7 @@ function applyServerSongMetadata(song, metadata) {
   song.name = metadata?.title || song.name;
   song.artist = metadata?.artist || song.artist;
   song.album = metadata?.album || "Imported";
-  song.duration = Number(metadata?.duration) > 0 ? Number(metadata.duration) : song.duration;
+  song.duration = remoteMediaDuration(metadata?.duration) ?? song.duration;
   song.metadataLoading = false;
   song.metadataArtworkURL = metadata?.artworkURL || null;
   const cachedArtwork = serverArtworkCache.get(serverArtworkKey(song));
@@ -3584,7 +3586,9 @@ function replaceServerCatalog(songs) {
       title: local?.title || song?.title || fallbackTitle,
       artist: local?.artist || song?.artist || (song?.source_url ? sourceFallback.artist : "Unknown Artist"),
       album: local?.album || song?.album || (song?.source_url ? sourceFallback.album : "Server Library"),
-      duration: Number(local?.duration) > 0 ? Number(local.duration) : Number(song?.duration) || null,
+      duration: Number(local?.duration) > 0
+        ? Number(local.duration)
+        : remoteMediaDuration(song?.duration_seconds ?? song?.duration),
       artwork: local?.artwork || song?.artwork || null,
       metadataLoading: false,
       metadataArtworkLoading: false,
@@ -7653,8 +7657,7 @@ function setAudioSource(track) {
 function currentPlaybackDuration(track = currentTrack()) {
   const storedDuration = Number(track?.duration) || 0;
   if (!track || audioMetadataTrackID !== track.id) return storedDuration;
-  if (isInstalledVideoTrack(track) && storedDuration > 0) return storedDuration;
-  return Number(audio.duration) || storedDuration;
+  return playableMediaDuration({ storedDuration, audioDuration: audio.duration });
 }
 
 function syncFullPlayerTitleMarquee() {
@@ -7811,11 +7814,17 @@ function installedVideoTrack() {
 
 function installedVideoBounds(track = installedVideoTrack()) {
   const storedDuration = Number(track?.duration) || 0;
-  const duration = storedDuration || Number(installedVideoPlayer.duration) || 0;
+  const duration = playableMediaDuration({
+    storedDuration,
+    audioDuration: audioMetadataTrackID === track?.id ? audio.duration : null,
+    videoDuration: installedVideoPlayer.duration,
+  });
   const range = track ? playbackRangeForTrack(state, track) : null;
+  const start = Math.min(range?.startSeconds ?? 0, duration);
+  const end = Math.min(range?.endSeconds ?? duration, duration);
   return {
-    start: range?.startSeconds ?? 0,
-    end: range?.endSeconds ?? duration,
+    start,
+    end: Math.max(start, end),
     duration,
   };
 }
@@ -7947,6 +7956,15 @@ function configureInstalledVideoSource(track, startTime) {
   syncInstalledVideoVolume();
   installedVideoPlayer.onloadedmetadata = () => {
     if (installedVideoSession?.trackID !== track.id) return;
+    const measuredDuration = playableMediaDuration({
+      audioDuration: audioMetadataTrackID === track.id ? audio.duration : null,
+      videoDuration: installedVideoPlayer.duration,
+    });
+    if (!track.transientStream && measuredDuration > 0 && Math.abs(Number(track.duration) - measuredDuration) > 0.25) {
+      track.duration = measuredDuration;
+      void persist();
+      renderQueue();
+    }
     const { start, end, duration } = installedVideoBounds(track);
     const requested = Number.isFinite(Number(startTime)) ? Number(startTime) : start;
     installedVideoPlayer.currentTime = Math.max(start, Math.min(requested, Math.max((end || duration) - 0.05, start)));
@@ -9167,14 +9185,17 @@ function bindPrimaryAudioEvents(media) {
       }
       pendingRestorePosition = null;
     }
-    if (!track.transientStream && !isInstalledVideoTrack(track) && audio.duration && track.duration !== audio.duration) {
-      track.duration = audio.duration;
+    const measuredDuration = playableMediaDuration({ audioDuration: audio.duration });
+    if (!track.transientStream && measuredDuration > 0 && Math.abs(Number(track.duration) - measuredDuration) > 0.25) {
+      track.duration = measuredDuration;
       await persist();
       renderQueue();
-    } else if (track.transientStream && audio.duration && track.duration !== audio.duration) {
-      if (activeServerStream?.track.id === track.id) activeServerStream.track = Object.freeze({ ...track, duration: audio.duration });
+    } else if (track.transientStream && measuredDuration > 0 && Math.abs(Number(track.duration) - measuredDuration) > 0.25) {
+      if (activeServerStream?.track.id === track.id) {
+        activeServerStream.track = Object.freeze({ ...track, duration: measuredDuration });
+      }
       if (activeListenAlongStream?.track.id === track.id) {
-        activeListenAlongStream.track = Object.freeze({ ...track, duration: audio.duration });
+        activeListenAlongStream.track = Object.freeze({ ...track, duration: measuredDuration });
       }
       renderQueue();
     }

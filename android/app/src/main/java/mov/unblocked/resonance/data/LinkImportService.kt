@@ -144,6 +144,7 @@ class LinkImportService(context: Context) {
         val contentLength: Long,
         val contentType: String,
         val itag: Int?,
+        val headers: Map<String, String>,
     )
     private data class ResolvedMedia(
         val mediaMode: LinkImportMediaMode,
@@ -159,6 +160,15 @@ class LinkImportService(context: Context) {
         val audio: SoundCloudAudio,
         val preparedAtNanos: Long,
     )
+    private data class YouTubePlayerClient(
+        val context: JsonObject,
+        val clientNumber: String,
+        val clientVersion: String,
+        val userAgent: String,
+    ) {
+        val streamHeaders: Map<String, String>
+            get() = mapOf("User-Agent" to userAgent, "Origin" to "https://www.youtube.com")
+    }
 
     private val appContext = context.applicationContext
     private val json = Json { ignoreUnknownKeys = true }
@@ -168,6 +178,9 @@ class LinkImportService(context: Context) {
     private val maxVideoBytes = 1_024L * 1_024 * 1_024
     private val webAgent = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36"
     private val playerAgent = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L) gzip"
+    private val visionPlayerAgent =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) " +
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
     private val preparedMedia = linkedMapOf<String, PreparedMedia>()
     private val preparedSoundCloudAudio = linkedMapOf<String, PreparedSoundCloudAudio>()
     private val preparedMediaLock = Any()
@@ -565,17 +578,18 @@ class LinkImportService(context: Context) {
                 .also(::rememberPreparedSoundCloudAudio)
             return@withContext LinkImportPreview(
                 url = stream.url.toString(),
-                headers = mapOf("User-Agent" to webAgent),
+                headers = mapOf(
+                    "Accept" to "audio/mpeg,*/*;q=0.5",
+                    "Accept-Encoding" to "identity",
+                    "User-Agent" to webAgent,
+                ),
             )
         }
         val resolved = resolveYouTube(candidate.videoID, LinkImportMediaMode.Audio)
             .also(::rememberPreparedMedia)
         LinkImportPreview(
             url = resolved.primary.url.toString(),
-            headers = mapOf(
-                "User-Agent" to playerAgent,
-                "Origin" to "https://www.youtube.com",
-            ),
+            headers = resolved.primary.headers,
         )
     }
 
@@ -1049,18 +1063,26 @@ class LinkImportService(context: Context) {
         videoID: String,
         mediaMode: LinkImportMediaMode = LinkImportMediaMode.Audio,
     ): ResolvedMedia {
-        val watch = request(
-            URL("https://www.youtube.com/watch?v=" + videoID + "&bpctr=9999999999&has_verified=1"),
-            6 * 1_024 * 1_024,
-            "text/html",
-        )
-        val visitor = capture(watch, Regex("""\"(?:VISITOR_DATA|visitorData)\"\s*:\s*\"((?:\\.|[^\"\\]){1,1000})\""""))
-        val body = buildJsonObject {
-            put("videoId", videoID)
-            put("contentCheckOk", true)
-            put("racyCheckOk", true)
-            put("context", buildJsonObject {
-                put("client", buildJsonObject {
+        val clients = listOf(
+            YouTubePlayerClient(
+                context = buildJsonObject {
+                    put("clientName", "VISIONOS")
+                    put("clientVersion", "1.02")
+                    put("deviceMake", "Apple")
+                    put("deviceModel", "RealityDevice17,1")
+                    put("osName", "visionOS")
+                    put("osVersion", "26.5.23O471")
+                    put("hl", "en")
+                    put("timeZone", "UTC")
+                    put("utcOffsetMinutes", 0)
+                    put("userAgent", visionPlayerAgent)
+                },
+                clientNumber = "101",
+                clientVersion = "1.02",
+                userAgent = visionPlayerAgent,
+            ),
+            YouTubePlayerClient(
+                context = buildJsonObject {
                     put("clientName", "ANDROID_VR")
                     put("clientVersion", "1.65.10")
                     put("deviceMake", "Oculus")
@@ -1072,15 +1094,67 @@ class LinkImportService(context: Context) {
                     put("timeZone", "UTC")
                     put("utcOffsetMinutes", 0)
                     put("userAgent", playerAgent)
+                },
+                clientNumber = "28",
+                clientVersion = "1.65.10",
+                userAgent = playerAgent,
+            ),
+        )
+        var verificationError: LinkImportException? = null
+        var lastError: LinkImportException? = null
+        for (client in clients) {
+            try {
+                val resolved = resolveYouTubeWithClient(videoID, mediaMode, client)
+                verifyYouTubeMedia(resolved)
+                return resolved
+            } catch (error: LinkImportException) {
+                if (error.code == "YOUTUBE_PLAYBACK_VERIFICATION_REQUIRED") verificationError = error
+                else lastError = error
+            }
+        }
+        throw verificationError ?: lastError ?: LinkImportException(
+            LinkImportStage.InspectingSource,
+            "YOUTUBE_UNAVAILABLE",
+            "YouTube could not provide anonymous playback for this video.",
+        )
+    }
+
+    private suspend fun resolveYouTubeWithClient(
+        videoID: String,
+        mediaMode: LinkImportMediaMode,
+        client: YouTubePlayerClient,
+    ): ResolvedMedia {
+        val watch = request(
+            URL("https://www.youtube.com/watch?v=" + videoID + "&bpctr=9999999999&has_verified=1"),
+            6 * 1_024 * 1_024,
+            "text/html",
+        )
+        val visitor = capture(watch, Regex("""\"(?:VISITOR_DATA|visitorData)\"\s*:\s*\"((?:\\.|[^\"\\]){1,1000})\""""))
+            ?.let { encoded ->
+                runCatching { json.parseToJsonElement("\"$encoded\"").jsonPrimitive.content }.getOrNull()
+            }
+        val body = buildJsonObject {
+            put("videoId", videoID)
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+            put("context", buildJsonObject {
+                put("client", buildJsonObject {
+                    client.context.forEach { (key, value) -> put(key, value) }
+                    if (!visitor.isNullOrBlank()) put("visitorData", visitor)
+                })
+            })
+            put("playbackContext", buildJsonObject {
+                put("contentPlaybackContext", buildJsonObject {
+                    put("html5Preference", "HTML5_PREF_WANTS")
                 })
             })
         }.toString().toByteArray()
         val headers = mutableMapOf(
             "Content-Type" to "application/json",
-            "X-YouTube-Client-Name" to "28",
-            "X-YouTube-Client-Version" to "1.65.10",
+            "X-YouTube-Client-Name" to client.clientNumber,
+            "X-YouTube-Client-Version" to client.clientVersion,
             "Origin" to "https://www.youtube.com",
-            "User-Agent" to playerAgent,
+            "User-Agent" to client.userAgent,
         )
         if (!visitor.isNullOrBlank()) headers["X-Goog-Visitor-Id"] = visitor
         val player = json.parseToJsonElement(
@@ -1127,7 +1201,7 @@ class LinkImportService(context: Context) {
                 "YOUTUBE_NO_VERIFIED_M4A",
                 "YouTube did not provide a direct, verifiable M4A audio stream for this video.",
             )
-            return ResolvedMedia(mediaMode, candidate, verifiedStream(format, maxAudioBytes, "audio"))
+            return ResolvedMedia(mediaMode, candidate, verifiedStream(format, maxAudioBytes, "audio", client.streamHeaders))
         }
 
         val progressive = formats
@@ -1149,8 +1223,8 @@ class LinkImportService(context: Context) {
         if (useAdaptive) {
             val video = requireNotNull(adaptive)
             val audio = requireNotNull(audioFormat)
-            val primary = verifiedStream(video, maxVideoBytes, "video")
-            val companion = verifiedStream(audio, maxAudioBytes, "audio")
+            val primary = verifiedStream(video, maxVideoBytes, "video", client.streamHeaders)
+            val companion = verifiedStream(audio, maxAudioBytes, "audio", client.streamHeaders)
             return ResolvedMedia(mediaMode, candidate, primary, companion)
         }
         val format = progressive ?: throw LinkImportException(
@@ -1158,7 +1232,54 @@ class LinkImportService(context: Context) {
             "YOUTUBE_NO_VERIFIED_MP4",
             "YouTube did not provide a direct, verifiable MP4 video for this result.",
         )
-        return ResolvedMedia(mediaMode, candidate, verifiedStream(format, maxVideoBytes, "video"))
+        return ResolvedMedia(mediaMode, candidate, verifiedStream(format, maxVideoBytes, "video", client.streamHeaders))
+    }
+
+    private suspend fun verifyYouTubeMedia(media: ResolvedMedia) {
+        verifyYouTubeStream(media.primary)
+        media.companionAudio?.let { verifyYouTubeStream(it) }
+    }
+
+    private suspend fun verifyYouTubeStream(stream: ResolvedStream) {
+        val connection = open(
+            stream.url,
+            "GET",
+            stream.headers + mapOf("Range" to "bytes=0-0", "Accept-Encoding" to "identity"),
+        )
+        try {
+            val status = connection.responseCode
+            if (!isGoogleVideo(connection.url)) throw LinkImportException(
+                LinkImportStage.InspectingSource,
+                "YOUTUBE_UNSAFE_REDIRECT",
+                "YouTube returned an unsafe stream redirect.",
+            )
+            if (status == 403) throw LinkImportException(
+                LinkImportStage.InspectingSource,
+                "YOUTUBE_PLAYBACK_VERIFICATION_REQUIRED",
+                "YouTube requires playback verification for this stream. Trying another playback client.",
+            )
+            if (status == 429) throw LinkImportException(
+                LinkImportStage.InspectingSource,
+                "YOUTUBE_RATE_LIMITED",
+                "YouTube rate-limited the stream probe.",
+            )
+            val responseType = connection.contentType?.substringBefore(';')?.trim()?.lowercase()
+            if (status != 206 || connection.contentLengthLong != 1L || responseType != stream.contentType ||
+                expectedRangeLength(connection.getHeaderField("Content-Range"), 0, 0, stream.contentLength) != 1L
+            ) throw LinkImportException(
+                LinkImportStage.InspectingSource,
+                "YOUTUBE_STREAM_UNAVAILABLE",
+                "YouTube returned an unverifiable media stream.",
+            )
+            val body = connection.inputStream.use { input -> input.read() to input.read() }
+            if (body.first < 0 || body.second >= 0) throw LinkImportException(
+                LinkImportStage.InspectingSource,
+                "YOUTUBE_STREAM_UNAVAILABLE",
+                "YouTube returned an unverifiable media stream body.",
+            )
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun rememberPreparedMedia(media: ResolvedMedia) {
@@ -1241,7 +1362,12 @@ class LinkImportService(context: Context) {
     private fun formatBitrate(format: JsonObject): Long =
         format.long("averageBitrate").takeIf { it > 0 } ?: format.long("bitrate")
 
-    private fun verifiedStream(format: JsonObject, maximumBytes: Long, kind: String): ResolvedStream {
+    private fun verifiedStream(
+        format: JsonObject,
+        maximumBytes: Long,
+        kind: String,
+        headers: Map<String, String>,
+    ): ResolvedStream {
         val url = runCatching { URL(requireNotNull(format.string("url"))) }.getOrNull()
             ?: throw LinkImportException(LinkImportStage.InspectingSource, "YOUTUBE_UNSAFE_STREAM", "YouTube returned an invalid $kind stream.")
         if (!isGoogleVideo(url)) throw LinkImportException(
@@ -1261,7 +1387,13 @@ class LinkImportService(context: Context) {
             "YOUTUBE_UNSUPPORTED_FORMAT",
             "YouTube returned an unsupported $kind format.",
         )
-        return ResolvedStream(url, length, requireNotNull(contentType), format.long("itag").toInt().takeIf { it > 0 })
+        return ResolvedStream(
+            url,
+            length,
+            requireNotNull(contentType),
+            format.long("itag").toInt().takeIf { it > 0 },
+            headers,
+        )
     }
 
     private suspend fun downloadRanges(
@@ -1278,11 +1410,9 @@ class LinkImportService(context: Context) {
                 val connection = open(
                     stream.url,
                     "GET",
-                    mapOf(
+                    stream.headers + mapOf(
                         "Range" to "bytes=" + completed + "-" + end,
                         "Accept-Encoding" to "identity",
-                        "User-Agent" to playerAgent,
-                        "Origin" to "https://www.youtube.com",
                     ),
                 )
                 try {

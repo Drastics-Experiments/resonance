@@ -333,19 +333,22 @@ async function fetchDirectPlayer(videoID, client, session, signal, fetchImpl) {
   throw lastError || youtubeError("YOUTUBE_RESOLVE_FAILED", "YouTube could not resolve this video.");
 }
 
-async function fetchYouTubePlayer(videoID, signal, fetchImpl) {
+async function fetchYouTubePlayer(videoID, signal, fetchImpl, validatePlayer = async () => {}) {
   const session = await fetchVisitorSession(videoID, signal, fetchImpl);
   const clients = [
-    { client: ANDROID_VR_CLIENT, clientNumber: "28", userAgent: ANDROID_VR_USER_AGENT, origin: "https://www.youtube.com" },
     { client: VISIONOS_CLIENT, clientNumber: "101", userAgent: VISIONOS_USER_AGENT, origin: "https://www.youtube.com" },
+    { client: ANDROID_VR_CLIENT, clientNumber: "28", userAgent: ANDROID_VR_USER_AGENT, origin: "https://www.youtube.com" },
   ];
   let verificationError = null;
   let lastError = null;
   for (const client of clients) {
     try {
+      const player = await fetchDirectPlayer(videoID, client, session, signal, fetchImpl);
+      const streamingHeaders = { "User-Agent": client.userAgent, Origin: client.origin };
+      await validatePlayer(player, streamingHeaders);
       return {
-        player: await fetchDirectPlayer(videoID, client, session, signal, fetchImpl),
-        streamingHeaders: { "User-Agent": client.userAgent, Origin: client.origin },
+        player,
+        streamingHeaders,
       };
     } catch (error) {
       if (!(error instanceof LocalImportError)) throw error;
@@ -411,6 +414,64 @@ function chooseMP4VideoOnlyFormat(player) {
     const frameRate = numericValue(right.fps) - numericValue(left.fps);
     return height || frameRate || numericValue(right.bitrate) - numericValue(left.bitrate);
   })[0] || null;
+}
+
+function chooseMP4VideoStreams(player) {
+  const combinedFormat = chooseMP4VideoFormat(player);
+  const adaptiveFormat = chooseMP4VideoOnlyFormat(player);
+  const useAdaptive = Boolean(adaptiveFormat
+    && (!combinedFormat || numericValue(adaptiveFormat.height) > numericValue(combinedFormat.height)));
+  return {
+    format: useAdaptive ? adaptiveFormat : combinedFormat,
+    audioFormat: useAdaptive ? chooseM4AFormat(player) : null,
+    useAdaptive,
+  };
+}
+
+async function probeResolvedStream(stream, signal, fetchImpl, mediaKind = "audio") {
+  const media = mediaKind === "video" ? "video" : "audio";
+  let response;
+  try {
+    response = await fetchWithValidatedRedirects(safeStreamingURL(stream.streamingURL, media), {
+      headers: { ...stream.streamingHeaders, "Accept-Encoding": "identity", Range: "bytes=0-0" },
+      signal,
+      stage: "inspecting_source",
+    }, (value) => {
+      try { safeStreamingURL(value, media); return true; } catch { return false; }
+    }, fetchImpl, `YouTube returned an unsafe ${media} redirect.`);
+  } catch (error) {
+    if (error?.name === "AbortError" || error instanceof LocalImportError) throw error;
+    throw youtubeError("YOUTUBE_STREAM_UNAVAILABLE", `The YouTube ${media} stream could not be verified.`);
+  }
+  if (response.status === 403) {
+    await response.body?.cancel().catch(() => undefined);
+    throw youtubeError(
+      "YOUTUBE_PLAYBACK_VERIFICATION_REQUIRED",
+      "YouTube requires playback verification for this stream. Trying another playback client.",
+    );
+  }
+  if (response.status === 429) {
+    await response.body?.cancel().catch(() => undefined);
+    throw youtubeError("YOUTUBE_RATE_LIMITED", `YouTube rate-limited the ${media} stream probe.`, {
+      retryAfter: response.headers.get("retry-after"),
+    });
+  }
+  if (response.status !== 206
+      || verifiedContentRangeForKind(response.headers.get("content-range"), 0, 0, stream.contentLength, media) !== 1
+      || Number(response.headers.get("content-length")) !== 1
+      || String(response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase()
+        !== stream.contentType.toLowerCase()) {
+    await response.body?.cancel().catch(() => undefined);
+    throw youtubeError("YOUTUBE_STREAM_UNAVAILABLE", `YouTube returned an unverifiable ${media} stream.`);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw youtubeError("YOUTUBE_STREAM_UNAVAILABLE", `YouTube returned no ${media} stream data.`);
+  const first = await reader.read();
+  const second = await reader.read();
+  if (first.done || first.value?.byteLength !== 1 || !second.done) {
+    await reader.cancel().catch(() => undefined);
+    throw youtubeError("YOUTUBE_STREAM_UNAVAILABLE", `YouTube returned an unverifiable ${media} stream body.`);
+  }
 }
 
 function safeThumbnailURL(value) {
@@ -488,13 +549,24 @@ async function resolveYouTubeMetadata(source, signal, fetchImpl = fetch) {
 async function resolveYouTubeAudio(source, signal, fetchImpl = fetch) {
   const videoID = YOUTUBE_VIDEO_ID.test(source) ? source : youtubeVideoID(source);
   if (!videoID) throw youtubeError("INVALID_YOUTUBE_VIDEO", "Enter a supported YouTube video URL.");
-  const { player, streamingHeaders } = await fetchYouTubePlayer(videoID, signal, fetchImpl);
+  let format = null;
+  const { player, streamingHeaders } = await fetchYouTubePlayer(videoID, signal, fetchImpl, async (candidatePlayer, headers) => {
+    format = chooseM4AFormat(candidatePlayer);
+    if (!format) {
+      throw youtubeError("YOUTUBE_NO_VERIFIED_M4A", "YouTube did not provide a direct, verifiable M4A audio stream for this video.");
+    }
+    await probeResolvedStream({
+      streamingURL: safeStreamingURL(format.url),
+      streamingHeaders: headers,
+      contentLength: numericValue(format.contentLength),
+      contentType: AUDIO_CONTENT_TYPE,
+    }, signal, fetchImpl);
+  });
   const details = player.videoDetails;
   if (details?.videoId && details.videoId !== videoID) throw youtubeError("YOUTUBE_MISMATCH", "YouTube returned the wrong video.");
   if (details?.isLive || details?.isLiveContent || details?.isUpcoming) {
     throw youtubeError("YOUTUBE_LIVE_UNSUPPORTED", "Live and upcoming YouTube videos are not supported.");
   }
-  const format = chooseM4AFormat(player);
   if (!format) {
     throw youtubeError("YOUTUBE_NO_VERIFIED_M4A", "YouTube did not provide a direct, verifiable M4A audio stream for this video.");
   }
@@ -525,17 +597,33 @@ async function resolveYouTubeAudio(source, signal, fetchImpl = fetch) {
 async function resolveYouTubeVideo(source, signal, fetchImpl = fetch) {
   const videoID = YOUTUBE_VIDEO_ID.test(source) ? source : youtubeVideoID(source);
   if (!videoID) throw youtubeError("INVALID_YOUTUBE_VIDEO", "Enter a supported YouTube video URL.");
-  const { player, streamingHeaders } = await fetchYouTubePlayer(videoID, signal, fetchImpl);
+  let selected = null;
+  const { player, streamingHeaders } = await fetchYouTubePlayer(videoID, signal, fetchImpl, async (candidatePlayer, headers) => {
+    selected = chooseMP4VideoStreams(candidatePlayer);
+    if (!selected.format || (selected.useAdaptive && !selected.audioFormat)) {
+      throw youtubeError("YOUTUBE_NO_VERIFIED_MP4", "YouTube did not provide verifiable MP4 video and M4A audio streams for this video.");
+    }
+    await probeResolvedStream({
+      streamingURL: safeStreamingURL(selected.format.url, "video"),
+      streamingHeaders: headers,
+      contentLength: numericValue(selected.format.contentLength),
+      contentType: VIDEO_CONTENT_TYPE,
+    }, signal, fetchImpl, "video");
+    if (selected.audioFormat) {
+      await probeResolvedStream({
+        streamingURL: safeStreamingURL(selected.audioFormat.url),
+        streamingHeaders: headers,
+        contentLength: numericValue(selected.audioFormat.contentLength),
+        contentType: AUDIO_CONTENT_TYPE,
+      }, signal, fetchImpl);
+    }
+  });
   const details = player.videoDetails;
   if (details?.videoId && details.videoId !== videoID) throw youtubeError("YOUTUBE_MISMATCH", "YouTube returned the wrong video.");
   if (details?.isLive || details?.isLiveContent || details?.isUpcoming) {
     throw youtubeError("YOUTUBE_LIVE_UNSUPPORTED", "Live and upcoming YouTube videos are not supported.");
   }
-  const combinedFormat = chooseMP4VideoFormat(player);
-  const adaptiveFormat = chooseMP4VideoOnlyFormat(player);
-  const useAdaptive = adaptiveFormat && (!combinedFormat || numericValue(adaptiveFormat.height) > numericValue(combinedFormat.height));
-  const format = useAdaptive ? adaptiveFormat : combinedFormat;
-  const audioFormat = useAdaptive ? chooseM4AFormat(player) : null;
+  const { format, audioFormat, useAdaptive } = selected || {};
   if (!format || (useAdaptive && !audioFormat)) {
     throw youtubeError("YOUTUBE_NO_VERIFIED_MP4", "YouTube did not provide verifiable MP4 video and M4A audio streams for this video.");
   }
