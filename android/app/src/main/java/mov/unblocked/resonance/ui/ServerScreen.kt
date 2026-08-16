@@ -1,5 +1,6 @@
 package mov.unblocked.resonance.ui
 
+import android.content.ClipData
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Lock
@@ -59,6 +61,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,6 +69,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -77,7 +82,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.clerk.ui.auth.AuthView
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import mov.unblocked.resonance.data.RemoteSong
+import mov.unblocked.resonance.data.ListenAlongRole
 import mov.unblocked.resonance.data.DownloadProgressDisplayMode
 import mov.unblocked.resonance.data.DownloadProgressDisplayPolicy
 import mov.unblocked.resonance.data.ServerDownloadMode
@@ -97,6 +105,8 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
     var selecting by remember { mutableStateOf(false) }
     var deleteCandidate by remember { mutableStateOf<RemoteSong?>(null) }
     var linkImportOpen by remember { mutableStateOf(false) }
+    var listenAlongJoinOpen by remember { mutableStateOf(false) }
+    var listenAlongCode by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) { actions.onServerScreenOpened() }
 
@@ -252,6 +262,14 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
                 },
             )
         }
+        item {
+            ListenAlongCard(
+                state = state,
+                actions = actions,
+                enabled = !state.isApplyingServerConnection && !state.isRefreshingServer,
+                onJoin = { listenAlongJoinOpen = true },
+            )
+        }
         if (pendingMetadataCount > 0) {
             item {
                 Row(
@@ -356,6 +374,31 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
     if (linkImportOpen) {
         LinkImportDialog(state, actions) { linkImportOpen = false }
     }
+    if (listenAlongJoinOpen) {
+        AlertDialog(
+            onDismissRequest = { listenAlongJoinOpen = false },
+            title = { Text("Join Listen Along") },
+            text = {
+                OutlinedTextField(
+                    value = listenAlongCode,
+                    onValueChange = { listenAlongCode = it },
+                    label = { Text("Room code") },
+                    placeholder = { Text("ABCD-EFGH") },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = listenAlongCode.isNotBlank(),
+                    onClick = {
+                        actions.joinListenAlong(listenAlongCode)
+                        listenAlongJoinOpen = false
+                    },
+                ) { Text("Join") }
+            },
+            dismissButton = { TextButton(onClick = { listenAlongJoinOpen = false }) { Text("Cancel") } },
+        )
+    }
     deleteCandidate?.let { song ->
         AlertDialog(
             onDismissRequest = { deleteCandidate = null },
@@ -368,6 +411,121 @@ fun ServerScreen(state: ResonanceUiState, actions: ResonanceActions, modifier: M
             },
             dismissButton = { TextButton(onClick = { deleteCandidate = null }) { Text("Cancel") } },
         )
+    }
+}
+
+@Composable
+private fun ListenAlongCard(
+    state: ResonanceUiState,
+    actions: ResonanceActions,
+    enabled: Boolean,
+    onJoin: () -> Unit,
+) {
+    val listen = state.listenAlong
+    val clipboard = LocalClipboard.current
+    val clipboardScope = rememberCoroutineScope()
+    var roomCodeCopied by remember(listen.code, listen.role) { mutableStateOf(false) }
+    LaunchedEffect(roomCodeCopied) {
+        if (roomCodeCopied) {
+            delay(1_800)
+            roomCodeCopied = false
+        }
+    }
+    val roomCode = listen.code?.takeIf {
+        listen.status == ListenAlongConnectionStatus.Active ||
+            listen.status == ListenAlongConnectionStatus.Reconnecting
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(LocalResonancePalette.current.raised, RoundedCornerShape(18.dp))
+            .border(1.dp, Color.White.copy(alpha = .085f), RoundedCornerShape(18.dp))
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Listen Along", fontWeight = FontWeight.Bold)
+                if (roomCode != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            if (listen.role == ListenAlongRole.Host) {
+                                "Hosting"
+                            } else {
+                                "Following the host"
+                            },
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                        )
+                        Text(
+                            roomCode,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .8f),
+                            maxLines = 1,
+                        )
+                        IconButton(
+                            onClick = {
+                                clipboardScope.launch {
+                                    clipboard.setClipEntry(
+                                        ClipEntry(ClipData.newPlainText("Listen Along room code", roomCode)),
+                                    )
+                                }
+                                roomCodeCopied = true
+                            },
+                            enabled = enabled,
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(
+                                if (roomCodeCopied) Icons.Default.Check else Icons.Default.ContentCopy,
+                                contentDescription = if (roomCodeCopied) {
+                                    "Room code copied"
+                                } else {
+                                    "Copy room code"
+                                },
+                                modifier = Modifier.size(17.dp),
+                            )
+                        }
+                    }
+                } else {
+                    Text(
+                        when {
+                            listen.status == ListenAlongConnectionStatus.Connecting -> listen.message
+                            else -> "Share one queue with friends"
+                        },
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
+                    )
+                }
+            }
+            if (listen.isActive || listen.status == ListenAlongConnectionStatus.Reconnecting) {
+                TextButton(onClick = actions::leaveListenAlong, enabled = enabled) { Text("Leave") }
+            }
+        }
+        if (listen.errorMessage != null) {
+            Text(
+                listen.errorMessage,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (!listen.isActive && listen.status != ListenAlongConnectionStatus.Connecting) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = actions::createListenAlong,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Start") }
+                TextButton(
+                    onClick = onJoin,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Join room") }
+            }
+        }
     }
 }
 

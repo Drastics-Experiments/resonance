@@ -1459,6 +1459,9 @@ private struct ServerView: View {
                     serverStatusLine
                         .padding(.bottom, 24)
 
+                    MobileListenAlongCard()
+                        .padding(.bottom, 12)
+
                     serverActions
                         .padding(.bottom, 12)
 
@@ -2662,7 +2665,7 @@ private struct MobilePlayerBar: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("Open Now Playing for \(track.title)")
                     Button { library.previous() } label: { Image(systemName: "backward.end.fill") }
-                        .disabled(library.isTransientStreamActive)
+                        .disabled(library.isTransientStreamActive || library.isListenAlongPlaybackLocked)
                     Button { library.togglePlay() } label: {
                         Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
                             .font(.title3)
@@ -2672,8 +2675,9 @@ private struct MobilePlayerBar: View {
                             .foregroundStyle(.white)
                             .shadow(color: palette.accent.opacity(0.22), radius: 8)
                     }
+                    .disabled(library.isListenAlongPlaybackLocked)
                     Button { library.next() } label: { Image(systemName: "forward.end.fill") }
-                        .disabled(library.isTransientStreamActive)
+                        .disabled(library.isTransientStreamActive || library.isListenAlongPlaybackLocked)
                 }
                 GeometryReader { geometry in
                     ZStack(alignment: .leading) {
@@ -2681,7 +2685,10 @@ private struct MobilePlayerBar: View {
                         Capsule().fill(palette.accent).frame(width: geometry.size.width * library.playbackProgress(for: track), height: 3)
                     }
                     .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { library.seek(to: $0.location.x / max(geometry.size.width, 1)) })
+                    .gesture(DragGesture(minimumDistance: 0).onChanged {
+                        guard !library.isListenAlongPlaybackLocked else { return }
+                        library.seek(to: $0.location.x / max(geometry.size.width, 1))
+                    })
                 }.frame(height: 5)
             }
         }
@@ -2819,6 +2826,7 @@ private struct NowPlayingView: View {
                 in: 0...1
             )
             .tint(palette.accent)
+            .disabled(library.isListenAlongPlaybackLocked)
             HStack {
                 Text(timeText(library.playbackElapsed(for: track)))
                 Spacer()
@@ -2834,7 +2842,7 @@ private struct NowPlayingView: View {
             Button { library.previous() } label: {
                 Image(systemName: "backward.end.fill").font(.title)
             }
-            .disabled(library.isTransientStreamActive)
+            .disabled(library.isTransientStreamActive || library.isListenAlongPlaybackLocked)
             Button { library.togglePlay() } label: {
                 Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 30, weight: .bold))
@@ -2844,10 +2852,11 @@ private struct NowPlayingView: View {
                     .foregroundStyle(.white)
                     .shadow(color: palette.accent.opacity(0.24), radius: 14)
             }
+            .disabled(library.isListenAlongPlaybackLocked)
             Button { library.next() } label: {
                 Image(systemName: "forward.end.fill").font(.title)
             }
-            .disabled(library.isTransientStreamActive)
+            .disabled(library.isTransientStreamActive || library.isListenAlongPlaybackLocked)
         }
         .buttonStyle(.plain)
     }
@@ -2862,7 +2871,7 @@ private struct NowPlayingView: View {
                             : AnyShapeStyle(library.shuffleEnabled ? palette.accent : .secondary)
                     )
             }
-            .disabled(library.isTransientStreamActive)
+            .disabled(library.isTransientStreamActive || library.isListenAlongPlaybackLocked)
             Spacer()
             Menu {
                 ForEach([0.75, 1, 1.25, 1.5, 2], id: \.self) { rate in
@@ -2871,11 +2880,13 @@ private struct NowPlayingView: View {
             } label: {
                 Label("\(Double(library.playbackRate), specifier: "%g")×", systemImage: "speedometer")
             }
+            .disabled(library.isListenAlongPlaybackLocked)
             Spacer()
             Button { library.repeatEnabled.toggle() } label: {
                 Label("Repeat", systemImage: "repeat")
                     .foregroundStyle(library.repeatEnabled ? palette.accent : .secondary)
             }
+            .disabled(library.isListenAlongPlaybackLocked)
         }
         .font(.subheadline.weight(.semibold))
         .labelStyle(.iconOnly)
@@ -3040,6 +3051,28 @@ struct TrackArtwork: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: size.width, height: size.height)
+            } else if let artworkURL = library.listenAlongArtworkURL(for: track) {
+                AsyncImage(url: artworkURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: size.width, height: size.height)
+                            .clipped()
+                    case .empty:
+                        ZStack {
+                            ArtworkTile(symbol: fallbackSymbol)
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white.opacity(0.82))
+                        }
+                    case .failure:
+                        ArtworkTile(symbol: fallbackSymbol)
+                    @unknown default:
+                        ArtworkTile(symbol: fallbackSymbol)
+                    }
+                }
             } else {
                 ArtworkTile(symbol: fallbackSymbol)
             }

@@ -739,6 +739,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             }
             persistServerCredentialsImmediately()
             if didFinishInitialization, serverContextChanged {
+                terminateListenAlongForContextChange("Listen Along ended because the server changed")
                 resetClientConfigurationForCurrentContext()
             }
         }
@@ -755,6 +756,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 remoteCatalogIsAuthoritative = false
             }
             if didFinishInitialization, identityChanged {
+                terminateListenAlongForContextChange("Listen Along ended because the account changed")
                 resetClientConfigurationForCurrentContext()
             }
         }
@@ -772,6 +774,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 remoteCatalogIsAuthoritative = false
             }
             if didFinishInitialization, identityChanged {
+                terminateListenAlongForContextChange("Listen Along ended because the account changed")
                 resetClientConfigurationForCurrentContext()
             }
         }
@@ -809,8 +812,15 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     @Published private(set) var clientConfigMessage = MacEffectiveClientConfig.safeDefaults.statusText
     @Published private(set) var uploadMode = MacUploadMode.localFile
     @Published private(set) var downloadMode = MacDownloadMode.verifiedFileCache
+    @Published private(set) var listenAlongRole: MacListenAlongRole?
+    @Published private(set) var listenAlongCode: String?
+    @Published private(set) var listenAlongStatus = "Not connected"
+    @Published private(set) var listenAlongError: String?
 
     var allowsInsecurePreviewLoopback: Bool { Self.isPreviewBundle }
+
+    var isListenAlongHost: Bool { listenAlongRole == .host }
+    var isListenAlongGuest: Bool { listenAlongRole == .guest }
 
     var downloadBatchCounter: String? {
         MacServerDownloadProgressPolicy.batchCounter(
@@ -950,6 +960,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private let shouldPersistServerCredentials: Bool
     nonisolated private static let persistenceCoordinator = PersistenceCoordinator()
     private let systemPlaybackController: (any MacSystemPlaybackControlling)?
+    private var listenAlongController: MacListenAlongController?
+    private var listenAlongOperationTask: Task<Void, Never>?
+    private var listenAlongPlaybackTask: Task<Void, Never>?
+    private var listenAlongPlaybackGeneration: UInt64 = 0
+    private var listenAlongActiveSourceURL: String?
     private var audioPlayer: AVAudioPlayer?
     private var loadedAudioTrackID: UUID?
     private var crossfadePlayer: AVAudioPlayer?
@@ -958,6 +973,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var remoteStreamPlayer: AVPlayer?
     private var remoteStreamTrack: Track?
     private var remoteStreamSongID: String?
+    private var remoteStreamDirectURL: URL?
+    private var remoteStreamDirectHeaders: [String: String] = [:]
     private var remoteStreamLoader: MacAuthenticatedStreamResourceLoader?
     private var remoteStreamAuthorizationLease: MacAuthenticatedStreamAuthorizationLease?
     private var offlineDownloadAuthorizationLease: MacAuthenticatedStreamAuthorizationLease?
@@ -1049,6 +1066,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         self.serverCacheRoot = serverCacheRoot
         self.shouldPersistServerCredentials = persistServerCredentials
         self.systemPlaybackController = systemPlaybackController
+        self.listenAlongController = nil
         if persistServerCredentials {
             Self.prepareCredentialStore()
         }
@@ -1228,6 +1246,34 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
         super.init()
 
+        self.listenAlongController = MacListenAlongController(
+            networkSession: networkSession,
+            requestBuilder: { [weak self] url, method, body, extraHeaders in
+                guard let self,
+                      !self.serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      let base = try? self.normalizedServerURL(),
+                      Self.sameOrigin(url, base) else {
+                    throw MacListenAlongError.invalidContext
+                }
+                var request = self.authenticatedRequest(url: url)
+                request.httpMethod = method
+                request.httpBody = body
+                for (name, value) in extraHeaders {
+                    request.setValue(value, forHTTPHeaderField: name)
+                }
+                return request
+            }
+        )
+        listenAlongController?.onSnapshot = { [weak self] snapshot, role in
+            self?.receiveListenAlongSnapshot(snapshot, role: role)
+        }
+        listenAlongController?.onStatus = { [weak self] status in
+            self?.listenAlongStatus = status
+        }
+        listenAlongController?.onEnded = { [weak self] message in
+            self?.listenAlongSessionEnded(message)
+        }
+
         if defaults.object(forKey: Self.volumeKey) != nil { volume = defaults.double(forKey: Self.volumeKey) }
         if defaults.object(forKey: Self.playbackRateKey) != nil { playbackRate = Float(defaults.double(forKey: Self.playbackRateKey)) }
         crossfadeEnabled = defaults.bool(forKey: Self.crossfadeEnabledKey)
@@ -1325,6 +1371,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         playlistSyncDebounceTask?.cancel()
         listeningHistorySyncDebounceTask?.cancel()
         clientConfigExpiryTask?.cancel()
+        listenAlongOperationTask?.cancel()
+        listenAlongPlaybackTask?.cancel()
         MainActor.assumeIsolated {
             systemPlaybackController?.invalidate()
         }
@@ -2331,14 +2379,358 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         downloadTask = Task { await syncServerLibrary(songIDs: [song.id], reconcile: false) }
     }
 
+    func startListenAlongHost() async {
+        listenAlongError = nil
+        guard let controller = listenAlongController,
+              !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let base = try? normalizedServerURL() else {
+            listenAlongError = MacListenAlongError.invalidContext.localizedDescription
+            return
+        }
+        guard let track = currentTrack,
+              let sourceURL = listenAlongSourceURL(for: track) else {
+            listenAlongError = MacListenAlongError.invalidSource.localizedDescription
+            listenAlongStatus = "Choose a song with a supported source link first"
+            return
+        }
+        let mediaKind: MacListenAlongMediaKind = track.kind == .video ? .video : .audio
+        listenAlongStatus = "Starting Listen Along…"
+        do {
+            _ = try await controller.startHost(
+                baseURL: base,
+                sourceURL: sourceURL,
+                mediaKind: mediaKind,
+                positionSeconds: position,
+                isPlaying: isPlaying
+            )
+        } catch {
+            listenAlongError = error.localizedDescription
+            listenAlongStatus = "Not connected"
+        }
+    }
+
+    func joinListenAlong(code: String) async {
+        listenAlongError = nil
+        guard let controller = listenAlongController,
+              !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let base = try? normalizedServerURL() else {
+            listenAlongError = MacListenAlongError.invalidContext.localizedDescription
+            return
+        }
+        listenAlongStatus = "Joining Listen Along…"
+        do {
+            _ = try await controller.joinGuest(baseURL: base, code: code)
+        } catch {
+            listenAlongError = error.localizedDescription
+            listenAlongStatus = "Not connected"
+        }
+    }
+
+    func leaveListenAlong() async {
+        listenAlongError = nil
+        guard let controller = listenAlongController else { return }
+        if listenAlongRole == .host {
+            await controller.endHost()
+        } else {
+            controller.leaveGuest()
+        }
+    }
+
+    private func listenAlongSourceURL(for track: Track?) -> String? {
+        if let source = track?.sourceURL,
+           let canonical = MacListenAlongSourcePolicy.canonical(source) {
+            return canonical
+        }
+        if let remoteID = remoteStreamSongID,
+           let source = remoteSongs.first(where: { $0.id == remoteID })?.sourceURL {
+            return MacListenAlongSourcePolicy.canonical(source)
+        }
+        return nil
+    }
+
+    private func publishListenAlongHostState() {
+        guard listenAlongRole == .host,
+              let controller = listenAlongController,
+              let track = currentTrack else { return }
+        guard let sourceURL = listenAlongSourceURL(for: track) else {
+            listenAlongError = MacListenAlongError.invalidSource.localizedDescription
+            listenAlongStatus = "Ending Listen Along…"
+            listenAlongOperationTask?.cancel()
+            listenAlongOperationTask = Task { @MainActor [weak self] in
+                await controller.endHost()
+                guard let self, self.listenAlongRole == .host else { return }
+                self.listenAlongSessionEnded(
+                    "Listen Along ended: the selected song has no source link"
+                )
+            }
+            return
+        }
+        controller.enqueueHostUpdate(
+            sourceURL: sourceURL,
+            mediaKind: track.kind == .video ? .video : .audio,
+            positionSeconds: position,
+            isPlaying: isPlaying
+        )
+    }
+
+    private func receiveListenAlongSnapshot(
+        _ snapshot: MacListenAlongSnapshot,
+        role: MacListenAlongRole
+    ) {
+        listenAlongRole = role
+        listenAlongCode = snapshot.code
+        listenAlongError = nil
+        listenAlongStatus = role == .host
+            ? "Hosting \(snapshot.code)"
+            : "Following \(snapshot.code)"
+        guard role == .guest else { return }
+        applyListenAlongGuestSnapshot(snapshot)
+    }
+
+    private func listenAlongSessionEnded(_ message: String) {
+        let wasGuest = listenAlongRole == .guest
+        let existingError = listenAlongError
+        listenAlongRole = nil
+        listenAlongCode = nil
+        listenAlongActiveSourceURL = nil
+        listenAlongStatus = message
+        if existingError == nil {
+            listenAlongError = nil
+        }
+        listenAlongOperationTask = nil
+        listenAlongPlaybackTask?.cancel()
+        listenAlongPlaybackTask = nil
+        listenAlongPlaybackGeneration &+= 1
+        if wasGuest {
+            stopCurrentPlayback()
+            currentTrackID = tracks.first?.id
+            playbackDuration = currentTrack?.duration ?? 0
+            position = 0
+            publishSystemPlayback()
+        }
+    }
+
+    private func terminateListenAlongForContextChange(_ message: String) {
+        guard listenAlongRole != nil else { return }
+        listenAlongController?.resetLocalState()
+        listenAlongSessionEnded(message)
+    }
+
+    private func applyListenAlongGuestSnapshot(_ snapshot: MacListenAlongSnapshot) {
+        guard let sourceURL = snapshot.sourceURL.flatMap(MacListenAlongSourcePolicy.canonical) else {
+            listenAlongError = MacListenAlongError.invalidSource.localizedDescription
+            listenAlongStatus = "Host has no supported source link"
+            return
+        }
+        let desiredPosition = MacListenAlongPositionProjection.position(for: snapshot)
+        let sourceChanged = listenAlongActiveSourceURL != sourceURL
+            || currentTrack == nil
+            || listenAlongSourceURL(for: currentTrack) != sourceURL
+        if sourceChanged {
+            listenAlongActiveSourceURL = sourceURL
+            listenAlongPlaybackGeneration &+= 1
+            let generation = listenAlongPlaybackGeneration
+            listenAlongPlaybackTask?.cancel()
+            listenAlongPlaybackTask = Task { @MainActor [weak self] in
+                await self?.prepareListenAlongGuestSource(
+                    sourceURL: sourceURL,
+                    mediaKind: snapshot.mediaKind,
+                    position: desiredPosition,
+                    isPlaying: snapshot.isPlaying,
+                    generation: generation
+                )
+            }
+            return
+        }
+        synchronizeListenAlongPlayback(
+            position: desiredPosition,
+            isPlaying: snapshot.isPlaying
+        )
+    }
+
+    private func prepareListenAlongGuestSource(
+        sourceURL: String,
+        mediaKind: MacListenAlongMediaKind,
+        position desiredPosition: TimeInterval,
+        isPlaying desiredPlaying: Bool,
+        generation: UInt64
+    ) async {
+        guard generation == listenAlongPlaybackGeneration,
+              listenAlongRole == .guest else { return }
+        if let local = tracks.first(where: {
+            listenAlongSourceURL(for: $0) == sourceURL
+                && $0.fileURL != nil
+        }) {
+            loadListenAlongLocalTrack(
+                local,
+                position: desiredPosition,
+                isPlaying: desiredPlaying,
+                generation: generation
+            )
+            return
+        }
+        if let remote = remoteSongs.first(where: {
+            MacListenAlongSourcePolicy.canonical($0.sourceURL) == sourceURL
+        }) {
+            startRemoteSong(
+                remote,
+                preservingShuffleQueue: true,
+                recordingHistory: false,
+                listenAlongPosition: desiredPosition,
+                listenAlongIsPlaying: desiredPlaying,
+                listenAlongGeneration: generation
+            )
+            return
+        }
+        do {
+            let mode: LocalImportMediaMode = mediaKind == .video ? .video : .audio
+            let resolution = try await serverLinkImportService.resolve(
+                source: sourceURL,
+                mediaMode: mode,
+                serverConfiguration: nil
+            ) { _ in }
+            guard let candidate = resolution.candidates.first else {
+                throw LocalImportError(
+                    stage: .inspectingSource,
+                    code: "LISTEN_ALONG_NO_PREVIEW",
+                    message: "This source did not provide a playable preview on this Mac."
+                )
+            }
+            let preview = try await serverLinkImportService.previewStream(
+                for: candidate,
+                mediaMode: mode
+            )
+            guard generation == listenAlongPlaybackGeneration,
+                  listenAlongRole == .guest else { return }
+            let track = Track(
+                title: resolution.track.title,
+                artist: resolution.track.artist,
+                album: resolution.track.album ?? "Listen Along",
+                duration: resolution.track.durationSeconds.map(Double.init) ?? 0,
+                kind: mode == .video ? .video : .audio,
+                artwork: .midnight,
+                artworkURL: resolution.track.artworkURL ?? candidate.thumbnailURL,
+                sourceURL: sourceURL
+            )
+            startDirectListenAlongStream(
+                track: track,
+                preview: preview,
+                position: desiredPosition,
+                isPlaying: desiredPlaying,
+                generation: generation
+            )
+        } catch is CancellationError {
+            return
+        } catch {
+            guard generation == listenAlongPlaybackGeneration else { return }
+            listenAlongError = error.localizedDescription
+            listenAlongStatus = "Unable to resolve host song"
+        }
+    }
+
+    private func loadListenAlongLocalTrack(
+        _ track: Track,
+        position desiredPosition: TimeInterval,
+        isPlaying desiredPlaying: Bool,
+        generation: UInt64
+    ) {
+        guard generation == listenAlongPlaybackGeneration,
+              listenAlongRole == .guest,
+              let fileURL = track.fileURL,
+              let player = try? AVAudioPlayer(contentsOf: fileURL) else {
+            listenAlongError = "The matching local song is unavailable on this Mac"
+            return
+        }
+        stopCurrentPlayback()
+        currentTrackID = track.id
+        remoteStreamTrack = nil
+        remoteStreamDirectURL = nil
+        remoteStreamDirectHeaders = [:]
+        loadedAudioTrackID = track.id
+        player.delegate = self
+        player.volume = PlaybackVolumePolicy.gain(for: volume)
+        player.enableRate = true
+        player.rate = playbackRate
+        player.prepareToPlay()
+        audioPlayer = player
+        synchronizePlaybackDuration(for: track, playerDuration: player.duration)
+        let bounds = playbackBounds(for: track, duration: playbackDuration)
+        position = desiredPosition.clamped(to: bounds.start...bounds.end)
+        player.currentTime = position
+        isPlaying = desiredPlaying && player.play()
+        if isPlaying {
+            beginListeningSession(for: track)
+            startPlaybackTimer()
+        } else {
+            stopPlaybackTimer()
+        }
+        publishSystemPlayback()
+    }
+
+    private func synchronizeListenAlongPlayback(
+        position desiredPosition: TimeInterval,
+        isPlaying desiredPlaying: Bool
+    ) {
+        guard let track = currentTrack else { return }
+        let bounds = playbackBounds(for: track, duration: playbackDuration)
+        let safePosition = desiredPosition.clamped(to: bounds.start...bounds.end)
+        if abs(position - safePosition) > 0.75 {
+            applyListenAlongPosition(safePosition)
+        }
+        if desiredPlaying != isPlaying {
+            if desiredPlaying {
+                resumeListenAlongPlayback()
+            } else {
+                pausePlayback(allowListenAlongGuest: true)
+            }
+        }
+    }
+
+    private func applyListenAlongPosition(_ desiredPosition: TimeInterval) {
+        position = desiredPosition
+        if loadedAudioTrackID == currentTrackID {
+            audioPlayer?.currentTime = desiredPosition
+        }
+        if remoteStreamTrack?.id == currentTrackID {
+            remoteStreamPlayer?.seek(
+                to: CMTime(seconds: desiredPosition, preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+        }
+        playbackDiscontinuities.send(desiredPosition)
+        publishSystemPlayback()
+    }
+
+    private func resumeListenAlongPlayback() {
+        guard let track = currentTrack else { return }
+        if remoteStreamTrack?.id == track.id, let remoteStreamPlayer {
+            remoteStreamPlayer.playImmediately(atRate: playbackRate)
+        } else if loadedAudioTrackID == track.id {
+            _ = audioPlayer?.play()
+        }
+        isPlaying = true
+        beginListeningSession(for: track)
+        startPlaybackTimer()
+        publishSystemPlayback()
+    }
+
     func playRemoteSong(_ song: RemoteSong) {
+        guard !isListenAlongGuest else {
+            listenAlongStatus = "Only the host can change the song"
+            return
+        }
         startRemoteSong(song, preservingShuffleQueue: false, recordingHistory: true)
+        publishListenAlongHostState()
     }
 
     private func startRemoteSong(
         _ song: RemoteSong,
         preservingShuffleQueue: Bool,
-        recordingHistory: Bool
+        recordingHistory: Bool,
+        listenAlongPosition: TimeInterval? = nil,
+        listenAlongIsPlaying: Bool? = nil,
+        listenAlongGeneration: UInt64? = nil
     ) {
         guard clientConfiguration.allowsStreamOnlyPlayback else {
             downloadStatus = offlineDownloadUnavailableMessage
@@ -2406,7 +2798,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             artworkURL: song.artworkURL,
             remoteID: song.id,
             sourceServer: ServerSongIdentity.normalizedOrigin(base),
-            syncProfileID: syncProfileID
+            syncProfileID: syncProfileID,
+            sourceURL: song.sourceURL
         )
         remoteStreamTrack = track
         remoteStreamSongID = song.id
@@ -2432,7 +2825,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 expectedOrigin: origin,
                 expectedProfileID: profileID,
                 authorizationLease: authorizationLease,
-                generation: generation
+                generation: generation,
+                listenAlongPosition: listenAlongPosition,
+                listenAlongIsPlaying: listenAlongIsPlaying,
+                listenAlongGeneration: listenAlongGeneration
             )
         }
     }
@@ -2446,7 +2842,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         expectedOrigin: String?,
         expectedProfileID: String,
         authorizationLease: MacAuthenticatedStreamAuthorizationLease,
-        generation: UInt64
+        generation: UInt64,
+        listenAlongPosition: TimeInterval? = nil,
+        listenAlongIsPlaying: Bool? = nil,
+        listenAlongGeneration: UInt64? = nil
     ) async {
         do {
             let loader = MacAuthenticatedStreamResourceLoader(
@@ -2481,7 +2880,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                   serverToken.trimmingCharacters(in: .whitespacesAndNewlines) == expectedToken,
                   syncProfileID == expectedProfileID,
                   let currentBase = try? normalizedServerURL(),
-                  ServerSongIdentity.normalizedOrigin(currentBase) == expectedOrigin else { return }
+                  ServerSongIdentity.normalizedOrigin(currentBase) == expectedOrigin,
+                  listenAlongGeneration == nil
+                    || (listenAlongRole == .guest
+                        && listenAlongPlaybackGeneration == listenAlongGeneration) else { return }
 
             let item = AVPlayerItem(asset: asset)
             let player = AVPlayer(playerItem: item)
@@ -2524,17 +2926,29 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             }
             remoteStreamPreparationTask = nil
             let bounds = playbackBounds(for: track, duration: playbackDuration)
+            if let listenAlongPosition {
+                position = listenAlongPosition.clamped(to: bounds.start...bounds.end)
+            }
             position = min(max(position, bounds.start), bounds.end)
             await player.seek(
                 to: CMTime(seconds: position, preferredTimescale: 600),
                 toleranceBefore: .zero,
                 toleranceAfter: .zero
             )
-            player.playImmediately(atRate: playbackRate)
-            isPlaying = true
-            beginListeningSession(for: track)
-            startPlaybackTimer()
-            serverMessage = "Streaming • \(song.title)"
+            let shouldPlay = listenAlongIsPlaying ?? true
+            if shouldPlay {
+                player.playImmediately(atRate: playbackRate)
+                isPlaying = true
+                beginListeningSession(for: track)
+                startPlaybackTimer()
+            } else {
+                player.pause()
+                isPlaying = false
+                stopPlaybackTimer()
+            }
+            serverMessage = listenAlongGeneration == nil
+                ? "Streaming • \(song.title)"
+                : "Following host • \(song.title)"
             publishSystemPlayback()
         } catch is CancellationError {
             return
@@ -2571,9 +2985,184 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         }
     }
 
+    private func startDirectListenAlongStream(
+        track: Track,
+        preview: LocalImportPreviewStream,
+        position desiredPosition: TimeInterval,
+        isPlaying desiredPlaying: Bool,
+        generation: UInt64
+    ) {
+        guard listenAlongRole == .guest,
+              generation == listenAlongPlaybackGeneration,
+              let components = URLComponents(
+                url: preview.url,
+                resolvingAgainstBaseURL: false
+              ),
+              components.scheme?.lowercased() == "https",
+              components.user == nil,
+              components.password == nil,
+              components.host?.isEmpty == false else {
+            listenAlongError = "The host source returned an unsafe preview URL"
+            return
+        }
+        stopCurrentPlayback()
+        remoteStreamTrack = track
+        remoteStreamSongID = nil
+        remoteStreamDirectURL = preview.url
+        remoteStreamDirectHeaders = preview.httpHeaders.filter {
+            $0.key.caseInsensitiveCompare("Authorization") != .orderedSame
+        }
+        currentTrackID = track.id
+        position = max(desiredPosition, 0)
+        playbackDuration = max(track.duration, 0)
+        serverMessage = "Preparing host preview • \(track.title)"
+        remoteStreamPreparationTask = Task { @MainActor [weak self] in
+            await self?.prepareDirectListenAlongStream(
+                track: track,
+                sourceURL: preview.url,
+                headers: preview.httpHeaders,
+                position: desiredPosition,
+                isPlaying: desiredPlaying,
+                generation: generation
+            )
+        }
+    }
+
+    private func prepareDirectListenAlongStream(
+        track: Track,
+        sourceURL: URL,
+        headers: [String: String],
+        position desiredPosition: TimeInterval,
+        isPlaying desiredPlaying: Bool,
+        generation: UInt64
+    ) async {
+        do {
+            let asset = AVURLAsset(
+                url: sourceURL,
+                options: [
+                    "AVURLAssetHTTPHeaderFieldsKey": headers.filter {
+                        $0.key.caseInsensitiveCompare("Authorization") != .orderedSame
+                    }
+                ]
+            )
+            guard try await asset.load(.isPlayable) else {
+                throw MacListenAlongError.invalidResponse
+            }
+            let measuredDuration = try? await asset.load(.duration).seconds
+            try Task.checkCancellation()
+            guard generation == listenAlongPlaybackGeneration,
+                  listenAlongRole == .guest,
+                  remoteStreamTrack?.id == track.id,
+                  remoteStreamDirectURL == sourceURL else { return }
+            let item = AVPlayerItem(asset: asset)
+            let player = AVPlayer(playerItem: item)
+            player.volume = PlaybackVolumePolicy.gain(for: volume)
+            player.defaultRate = playbackRate
+            player.automaticallyWaitsToMinimizeStalling = true
+            remoteStreamPlayer = player
+            if let measuredDuration,
+               measuredDuration.isFinite,
+               measuredDuration > 0 {
+                playbackDuration = measuredDuration
+                remoteStreamTrack?.duration = measuredDuration
+            }
+            remoteStreamEndObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self, weak item] _ in
+                Task { @MainActor [weak self, weak item] in
+                    guard let self, let item else { return }
+                    self.remoteStreamDidFinish(item: item, generation: self.remoteStreamLoadGeneration)
+                }
+            }
+            remoteStreamFailureObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemFailedToPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self, weak item] notification in
+                let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+                Task { @MainActor [weak self, weak item] in
+                    guard let self, let item else { return }
+                    self.remoteStreamDidFail(
+                        item: item,
+                        generation: self.remoteStreamLoadGeneration,
+                        error: error
+                    )
+                }
+            }
+            remoteStreamStatusObservation = item.observe(\.status, options: [.new]) { [weak self, weak item] _, _ in
+                Task { @MainActor [weak self, weak item] in
+                    guard let self, let item, item.status == .failed else { return }
+                    self.remoteStreamDidFail(
+                        item: item,
+                        generation: self.remoteStreamLoadGeneration,
+                        error: item.error
+                    )
+                }
+            }
+            remoteStreamPreparationTask = nil
+            let bounds = playbackBounds(for: track, duration: playbackDuration)
+            position = desiredPosition.clamped(to: bounds.start...bounds.end)
+            await player.seek(
+                to: CMTime(seconds: position, preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+            if desiredPlaying {
+                player.playImmediately(atRate: playbackRate)
+                isPlaying = true
+                beginListeningSession(for: track)
+                startPlaybackTimer()
+            } else {
+                player.pause()
+                isPlaying = false
+                stopPlaybackTimer()
+            }
+            serverMessage = "Following host • \(track.title)"
+            publishSystemPlayback()
+        } catch is CancellationError {
+            return
+        } catch {
+            guard generation == listenAlongPlaybackGeneration else { return }
+            remoteStreamPreparationTask = nil
+            if let remoteStreamEndObserver {
+                NotificationCenter.default.removeObserver(remoteStreamEndObserver)
+                self.remoteStreamEndObserver = nil
+            }
+            if let remoteStreamFailureObserver {
+                NotificationCenter.default.removeObserver(remoteStreamFailureObserver)
+                self.remoteStreamFailureObserver = nil
+            }
+            remoteStreamStatusObservation?.invalidate()
+            remoteStreamStatusObservation = nil
+            remoteStreamPlayer?.pause()
+            remoteStreamPlayer = nil
+            remoteStreamDirectURL = nil
+            remoteStreamDirectHeaders = [:]
+            remoteStreamTrack = nil
+            if currentTrackID == track.id {
+                currentTrackID = tracks.first?.id
+                playbackDuration = currentTrack?.duration ?? 0
+                position = 0
+            }
+            isPlaying = false
+            stopPlaybackTimer()
+            listenAlongError = error.localizedDescription
+            listenAlongStatus = "Unable to play host preview"
+            publishSystemPlayback()
+        }
+    }
+
     private func remoteStreamDidFinish(item: AVPlayerItem, generation: UInt64) {
         guard generation == remoteStreamLoadGeneration,
               remoteStreamPlayer?.currentItem === item else { return }
+        if listenAlongRole == .guest {
+            isPlaying = false
+            stopPlaybackTimer()
+            publishSystemPlayback()
+            return
+        }
         finishCurrentPlaybackRange()
     }
 
@@ -3602,11 +4191,21 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func selectAndPlay(_ track: Track) {
+        guard !isListenAlongGuest else {
+            listenAlongStatus = "Only the host can change the song"
+            return
+        }
         setPlaybackContext(playbackTracks, ensuring: track.id)
         startTrack(track.id, preservingShuffleQueue: false)
+        publishListenAlongHostState()
     }
 
     func togglePlay() {
+        guard !isListenAlongGuest else {
+            listenAlongStatus = "Only the host can control playback"
+            return
+        }
+        defer { publishListenAlongHostState() }
         if isPlaying {
             pausePlayback()
             return
@@ -3639,6 +4238,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func toggleCollectionPlayback() {
+        guard !isListenAlongGuest else {
+            listenAlongStatus = "Only the host can control playback"
+            return
+        }
         let context = playbackTracks
         guard !context.isEmpty else { return }
         let currentInContext = currentTrack.flatMap { current in
@@ -3657,6 +4260,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func next() {
+        guard !isListenAlongGuest else {
+            listenAlongStatus = "Only the host can skip songs"
+            return
+        }
+        defer { publishListenAlongHostState() }
         if let remoteStreamSongID {
             let playableSongs = streamableRemoteSongs
             guard !playableSongs.isEmpty else {
@@ -3718,6 +4326,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func previous() {
+        guard !isListenAlongGuest else {
+            listenAlongStatus = "Only the host can skip songs"
+            return
+        }
+        defer { publishListenAlongHostState() }
         if let remoteStreamSongID {
             let playableSongs = streamableRemoteSongs
             guard !playableSongs.isEmpty else {
@@ -3814,6 +4427,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func toggleShuffle() {
+        guard !isListenAlongGuest else {
+            listenAlongStatus = "Only the host can change playback options"
+            return
+        }
         shuffleEnabled.toggle()
         if let remoteStreamSongID {
             remoteHistorySongIDs.removeAll()
@@ -3829,15 +4446,25 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             persistShuffleQueue()
         }
         publishSystemPlayback()
+        publishListenAlongHostState()
     }
 
     func toggleRepeat() {
+        guard !isListenAlongGuest else {
+            listenAlongStatus = "Only the host can change playback options"
+            return
+        }
         repeatEnabled.toggle()
         audioPlayer?.numberOfLoops = 0
         publishSystemPlayback()
+        publishListenAlongHostState()
     }
 
     func setPlaybackRate(_ rate: Float) {
+        guard !isListenAlongGuest else {
+            listenAlongStatus = "Only the host can change playback options"
+            return
+        }
         playbackRate = rate
         audioPlayer?.enableRate = true
         audioPlayer?.rate = rate
@@ -3847,6 +4474,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             remoteStreamPlayer?.rate = rate
         }
         publishSystemPlayback()
+        publishListenAlongHostState()
     }
 
     func seek(to fraction: Double) {
@@ -3859,6 +4487,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
 
     func seekToTime(_ requestedTime: TimeInterval) {
+        guard !isListenAlongGuest else {
+            listenAlongStatus = "Only the host can seek"
+            return
+        }
         cancelCrossfade()
         guard let track = currentTrack else { return }
         updateListeningSession()
@@ -3880,6 +4512,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         lastListeningPosition = position
         persistPlaybackPosition()
         publishSystemPlayback()
+        publishListenAlongHostState()
     }
 
     func importLocalFiles() {
@@ -4320,7 +4953,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         persistLibrary()
     }
 
-    private func pausePlayback() {
+    private func pausePlayback(allowListenAlongGuest: Bool = false) {
+        guard allowListenAlongGuest || !isListenAlongGuest else {
+            listenAlongStatus = "Only the host can control playback"
+            return
+        }
         cancelCrossfade()
         updateListeningSession(flush: true)
         if remoteStreamTrack?.id == currentTrackID, let remoteStreamPlayer {
@@ -4337,6 +4974,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         scheduleListeningHistorySync()
         persistPlaybackPosition()
         publishSystemPlayback()
+        publishListenAlongHostState()
     }
 
     private func stopCurrentPlayback(preservingRemoteNavigation: Bool = false) {
@@ -4361,6 +4999,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         remoteStreamLoader = nil
         remoteStreamAuthorizationLease?.invalidate()
         remoteStreamAuthorizationLease = nil
+        remoteStreamDirectURL = nil
+        remoteStreamDirectHeaders = [:]
         remoteStreamTrack = nil
         remoteStreamSongID = nil
         if !preservingRemoteNavigation {
@@ -4380,6 +5020,15 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         let bounds = playbackBounds(for: track, duration: playbackDuration)
         updateListeningSession(flush: true)
         position = bounds.end
+
+        if isListenAlongGuest {
+            remoteStreamPlayer?.pause()
+            audioPlayer?.pause()
+            isPlaying = false
+            stopPlaybackTimer()
+            publishSystemPlayback()
+            return
+        }
 
         if repeatEnabled {
             endListeningSession()
@@ -4850,6 +5499,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             return
         }
 
+        terminateListenAlongForContextChange("Listen Along ended because the profile changed")
         endListeningSession()
         let oldProfileID = syncProfileID
         let currentTrackBelongsToOldProfile = currentTrack.map {

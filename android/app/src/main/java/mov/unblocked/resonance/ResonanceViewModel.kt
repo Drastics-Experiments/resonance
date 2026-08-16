@@ -24,9 +24,11 @@ import com.clerk.api.network.serialization.ClerkResult
 import com.clerk.api.session.GetTokenOptions
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.net.URI
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.Future
+import kotlin.math.abs
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
@@ -72,6 +74,14 @@ import mov.unblocked.resonance.data.LinkImportKind
 import mov.unblocked.resonance.data.LinkImportMediaMode
 import mov.unblocked.resonance.data.LinkImportInput
 import mov.unblocked.resonance.data.LinkImportResolution
+import mov.unblocked.resonance.data.ListenAlongEnvelope
+import mov.unblocked.resonance.data.ListenAlongRole
+import mov.unblocked.resonance.data.ListenAlongSnapshot
+import mov.unblocked.resonance.data.ListenAlongSnapshotPolicy
+import mov.unblocked.resonance.data.ListenAlongPollPolicy
+import mov.unblocked.resonance.data.ListenAlongArtworkPolicy
+import mov.unblocked.resonance.data.ListenAlongPlaybackPolicy
+import mov.unblocked.resonance.data.ListenAlongRevisionConflictException
 import mov.unblocked.resonance.data.LatestValuePersistenceGate
 import mov.unblocked.resonance.data.ReviewedMatchResolutionPolicy
 import mov.unblocked.resonance.data.LibraryRepository
@@ -99,6 +109,7 @@ import mov.unblocked.resonance.data.RemoteSongMetadataCachePolicy
 import mov.unblocked.resonance.data.RemoteSongMetadataRetryPolicy
 import mov.unblocked.resonance.data.ResonanceAccountSignInServerURL
 import mov.unblocked.resonance.data.ServerClient
+import mov.unblocked.resonance.data.ServerException
 import mov.unblocked.resonance.data.ServerProfileContext
 import mov.unblocked.resonance.data.ServerRefreshPresentationPolicy
 import mov.unblocked.resonance.data.RemoteTrackIdentityPolicy
@@ -125,12 +136,16 @@ import mov.unblocked.resonance.playback.QueuePolicy
 import mov.unblocked.resonance.playback.UploadMissingPolicy
 import mov.unblocked.resonance.playback.AuthenticatedStreamHandle
 import mov.unblocked.resonance.playback.AuthenticatedStreamRegistry
+import mov.unblocked.resonance.playback.ListenAlongProviderStreamHandle
+import mov.unblocked.resonance.playback.ListenAlongProviderStreamPolicy
 import mov.unblocked.resonance.playback.StreamLeaseUpdatePolicy
 import mov.unblocked.resonance.ui.ResonanceActions
 import mov.unblocked.resonance.ui.ResonanceUiState
 import mov.unblocked.resonance.ui.ResonanceThemeChoice
 import mov.unblocked.resonance.ui.LinkImportUiState
 import mov.unblocked.resonance.ui.PlaybackUiStatus
+import mov.unblocked.resonance.ui.ListenAlongConnectionStatus
+import mov.unblocked.resonance.ui.ListenAlongUiState
 import mov.unblocked.resonance.ui.invalidatedForSourceEdit
 import mov.unblocked.resonance.ui.activeSyncProfileName
 
@@ -172,6 +187,14 @@ private data class RemoteSongMetadataTaskKey(
 private const val STREAM_ARTWORK_URL_EXTRA = "resonance.stream.artwork_url"
 private const val MAX_PUBLISHED_ARTWORK_EDGE = 512
 private const val MAX_PUBLISHED_ARTWORK_BYTES = 256 * 1_024
+// Keep healthy guests close to real time while retaining exponential backoff for
+// unavailable servers. A 250 ms cadence keeps host actions below a second in
+// normal conditions without introducing a second realtime transport.
+private const val LISTEN_ALONG_INITIAL_POLL_MS = ListenAlongPollPolicy.HealthyIntervalMillis
+private const val LISTEN_ALONG_MAX_POLL_MS = ListenAlongPollPolicy.MaxBackoffMillis
+private const val LISTEN_ALONG_SEEK_TOLERANCE_MS = 750L
+private const val LISTEN_ALONG_PROVIDER_REFRESH_MS = 3 * 60_000L
+private const val LISTEN_ALONG_PUBLISH_DEBOUNCE_MS = 25L
 
 @androidx.annotation.OptIn(UnstableApi::class)
 class ResonanceViewModel(application: Application) : AndroidViewModel(application), ResonanceActions {
@@ -248,10 +271,26 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private var activeStreamHandle: AuthenticatedStreamHandle? = null
     private var activeStreamPresentation: Track? = null
     private var activeStreamPolicyContext: ServerProfileContext? = null
+    private var activeStreamSourceURL: String? = null
     private var streamArtworkJob: Job? = null
     private var streamConfigRenewalJob: Job? = null
     private var streamLeaseExpiryJob: Job? = null
     private var pendingStreamRenewalMinimumExpiry: Instant? = null
+    private var listenAlongContext: ServerProfileContext? = null
+    private var listenAlongCode: String? = null
+    private var listenAlongRole: ListenAlongRole? = null
+    private var listenAlongHostToken: String? = null
+    private var listenAlongRevision: Long = 0L
+    private var listenAlongSnapshot: ListenAlongSnapshot = ListenAlongSnapshot()
+    private var listenAlongPendingSnapshot: ListenAlongSnapshot? = null
+    private var listenAlongPollJob: Job? = null
+    private var listenAlongPublishJob: Job? = null
+    private var listenAlongArtworkJob: Job? = null
+    private var listenAlongPlaybackJob: Job? = null
+    private var listenAlongProviderRefreshJob: Job? = null
+    private var listenAlongProviderHandle: ListenAlongProviderStreamHandle? = null
+    private var listenAlongPlaybackSourceURL: String? = null
+    private var listenAlongPlaybackMediaKind: String = "audio"
     private var libraryLoaded = false
     private var accountRefreshJob: Job? = null
     private var isRefreshingAccountSession = false
@@ -379,6 +418,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun signOutAccount() {
         val current = accountSession
+        clearListenAlongSession(stopPlayback = true)
         RemoteDownloadContextChangePolicy.mutateAfterInvalidation(
             invalidateDownload = {
                 invalidateActiveRemoteDownload("Download stopped because the account signed out")
@@ -682,7 +722,28 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 mediaController.setPlaybackSpeed(mutableState.value.playbackSpeed)
                 mediaController.volume = PlaybackVolumePolicy.gainForSlider(mutableState.value.volume)
                 mediaController.addListener(object : Player.Listener {
-                    override fun onEvents(player: Player, events: Player.Events) = refreshPlaybackState()
+                    override fun onEvents(player: Player, events: Player.Events) {
+                        refreshPlaybackState()
+                        if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
+                            publishListenAlongSnapshot()
+                        }
+                    }
+
+                    override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        publishListenAlongSnapshot()
+                    }
+
+                    override fun onPositionDiscontinuity(
+                        oldPosition: Player.PositionInfo,
+                        newPosition: Player.PositionInfo,
+                        reason: Int,
+                    ) {
+                        if (reason == Player.DISCONTINUITY_REASON_SEEK ||
+                            reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION
+                        ) {
+                            publishListenAlongSnapshot()
+                        }
+                    }
                 })
                 rebuildPlaybackQueueForActiveContext()
                 refreshPlaybackState()
@@ -693,6 +754,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     override fun onCleared() {
         stopLinkImportPreview()
         remoteSongMetadataHydrationJob?.cancel()
+        clearListenAlongSession(stopPlayback = false)
         controller?.release()
         controller = null
         controllerFuture?.cancel(true)
@@ -2132,6 +2194,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun playTrack(trackId: String, queueTrackIds: List<String>?, playlistId: String?) {
+        if (mutableState.value.listenAlong.isGuest) return
         val player = controller ?: return
         val visibleTracks = library.tracks.filter(::trackBelongsToActiveContext)
         val byID = QueuePolicy.indexByMediaID(visibleTracks, Track::id)
@@ -2148,9 +2211,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         player.prepare()
         player.play()
         refreshPlaybackState()
+        publishListenAlongSnapshot()
     }
 
     override fun togglePlayPause() {
+        if (mutableState.value.listenAlong.isGuest) return
         val player = controller ?: return
         if (player.mediaItemCount == 0) {
             library.tracks.firstOrNull(::trackBelongsToActiveContext)?.let { playTrack(it.id) }
@@ -2165,23 +2230,27 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             if (player.playerError != null || player.playbackState == Player.STATE_IDLE) player.prepare()
             player.play()
         }
+        publishListenAlongSnapshot()
     }
 
     override fun playNext() {
-        if (activeStreamPresentation != null) return
+        if (activeStreamPresentation != null || mutableState.value.listenAlong.isGuest) return
         controller?.seekToNextMediaItem()
+        publishListenAlongSnapshot()
     }
 
     override fun playPrevious() {
-        if (activeStreamPresentation != null) return
+        if (activeStreamPresentation != null || mutableState.value.listenAlong.isGuest) return
         controller?.let { player ->
             val track = player.currentMediaItem?.mediaId?.let { id -> library.tracks.firstOrNull { it.id == id } }
             val start = track?.let(::playbackRange)?.startMs ?: 0L
             if (player.currentPosition > start + 3_000) player.seekTo(start) else player.seekToPreviousMediaItem()
         }
+        publishListenAlongSnapshot()
     }
 
     override fun seekToFraction(fraction: Float) {
+        if (mutableState.value.listenAlong.isGuest) return
         controller?.let { player ->
             val currentID = player.currentMediaItem?.mediaId ?: return
             val track = library.tracks.firstOrNull { it.id == currentID }
@@ -2197,16 +2266,18 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 ?: return
             player.seekTo(range.startMs + (range.durationMs * fraction.coerceIn(0f, 1f)).toLong())
         }
+        publishListenAlongSnapshot()
     }
 
     override fun setShuffleEnabled(enabled: Boolean) {
-        if (activeStreamPresentation != null) return
+        if (activeStreamPresentation != null || mutableState.value.listenAlong.isGuest) return
         controller?.shuffleModeEnabled = enabled
         mutableState.value = mutableState.value.copy(shuffleEnabled = enabled)
         preferences.edit().putBoolean("shuffle", enabled).apply()
     }
 
     override fun setRepeatEnabled(enabled: Boolean) {
+        if (mutableState.value.listenAlong.isGuest) return
         controller?.repeatMode = repeatModeFor(enabled)
         mutableState.value = mutableState.value.copy(repeatEnabled = enabled)
         preferences.edit().putBoolean("repeat", enabled).apply()
@@ -3131,6 +3202,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val previousSelection = state.selectedRemoteSongIds
         val previousConnectedSession = state.hasConnectedServerSession
         invalidateActiveRemoteDownload("Download stopped because the server connection changed")
+        clearListenAlongSession(stopPlayback = true)
         connectionGeneration += 1
         remoteSourceResolutions.clear()
         authoritativeCatalogSnapshot = null
@@ -3258,6 +3330,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 invalidateActiveRemoteDownload("Download stopped because the server profile changed")
             },
             mutation = {
+                clearListenAlongSession(stopPlayback = true)
                 cancelRemoteSongMetadataHydration()
                 connectionGeneration += 1
                 remoteSourceResolutions.clear()
@@ -3713,6 +3786,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         activeStreamHandle = handle
         activeStreamPresentation = presentation
         activeStreamPolicyContext = streamContext
+        activeStreamSourceURL = song.sourceURL
         val metadataExtras = Bundle().apply {
             song.artworkURL?.takeIf(String::isNotBlank)?.let {
                 putString(STREAM_ARTWORK_URL_EXTRA, it)
@@ -3775,7 +3849,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 player.currentMediaItem?.mediaId != presentation.id
             ) return@launch
             val extras = Bundle().apply {
-                song.artworkURL?.takeIf(String::isNotBlank)?.let {
+                song.artworkURL.takeIf(String::isNotBlank)?.let {
                     putString(STREAM_ARTWORK_URL_EXTRA, it)
                 }
             }
@@ -3853,6 +3927,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         activeStreamHandle = null
         activeStreamPresentation = null
         activeStreamPolicyContext = null
+        activeStreamSourceURL = null
         if (
             mutableState.value.transientCurrentTrack != null ||
             mutableState.value.transientArtworkURL != null
@@ -3935,6 +4010,767 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         // Rebind restored playback to a currently verified same-context policy.
         // The existing lease remains the hard read deadline while this request runs.
         refreshClientConfig()
+    }
+
+    override fun createListenAlong() {
+        val context = currentServerProfileContext() ?: run {
+            mutableState.update { it.copy(errorMessage = "Connect to Resonance before starting Listen Along.") }
+            return
+        }
+        if (activeAccessToken().isBlank()) {
+            mutableState.update { it.copy(errorMessage = "Sign in before starting Listen Along.") }
+            return
+        }
+        val initial = runCatching { listenAlongSnapshotFromPlayer() }.getOrElse { error ->
+            val message = error.message ?: "The current track cannot be shared."
+            mutableState.update { state ->
+                state.copy(
+                    listenAlong = state.listenAlong.copy(errorMessage = message),
+                    errorMessage = message,
+                )
+            }
+            return
+        }
+        if (initial.sourceURL.isNullOrBlank()) {
+            val message = "Play a track with a shareable source link before starting Listen Along."
+            mutableState.update { state ->
+                state.copy(
+                    listenAlong = state.listenAlong.copy(errorMessage = message),
+                    errorMessage = message,
+                )
+            }
+            return
+        }
+        clearListenAlongSession(stopPlayback = false)
+        val client = serverClient(context)
+        mutableState.update { state ->
+            state.copy(
+                listenAlong = ListenAlongUiState(
+                    status = ListenAlongConnectionStatus.Connecting,
+                    message = "Starting a Listen Along room…",
+                ),
+                errorMessage = null,
+            )
+        }
+        viewModelScope.launch {
+            runCatching {
+                val envelope = client.createListenAlong(initial)
+                val code = envelope.inviteCode
+                    ?: throw IllegalStateException("The server did not return a Listen Along code.")
+                val hostToken = envelope.hostToken
+                    ?: throw IllegalStateException("The server did not return a Listen Along host token.")
+                require(code.isNotBlank() && hostToken.isNotBlank()) {
+                    "The server did not return a Listen Along host token."
+                }
+                adoptListenAlongEnvelope(
+                    envelope = envelope,
+                    context = context,
+                    role = ListenAlongRole.Host,
+                    hostToken = hostToken,
+                )
+            }
+                .onFailure { error ->
+                    if (error !is CancellationException) {
+                        mutableState.update { state ->
+                            state.copy(
+                                listenAlong = ListenAlongUiState(
+                                    status = ListenAlongConnectionStatus.Failed,
+                                    message = "Listen Along could not start",
+                                    errorMessage = error.message ?: "The server rejected the room.",
+                                ),
+                                errorMessage = error.message ?: "Listen Along could not start.",
+                            )
+                        }
+                    }
+                }
+        }
+    }
+
+    override fun joinListenAlong(code: String) {
+        val normalizedCode = code.trim()
+        if (normalizedCode.isBlank()) {
+            mutableState.update { it.copy(errorMessage = "Enter the Listen Along code.") }
+            return
+        }
+        val context = currentServerProfileContext() ?: run {
+            mutableState.update { it.copy(errorMessage = "Connect to Resonance before joining Listen Along.") }
+            return
+        }
+        if (activeAccessToken().isBlank()) {
+            mutableState.update { it.copy(errorMessage = "Sign in before joining Listen Along.") }
+            return
+        }
+        clearListenAlongSession(stopPlayback = true)
+        mutableState.update { state ->
+            state.copy(
+                listenAlong = ListenAlongUiState(
+                    status = ListenAlongConnectionStatus.Connecting,
+                    code = normalizedCode,
+                    role = ListenAlongRole.Guest,
+                    message = "Joining Listen Along…",
+                ),
+                errorMessage = null,
+            )
+        }
+        val client = serverClient(context)
+        viewModelScope.launch {
+            runCatching {
+                val envelope = client.fetchListenAlong(normalizedCode)
+                require(envelope.inviteCode?.equals(normalizedCode, ignoreCase = true) != false) {
+                    "The server returned a different Listen Along room."
+                }
+                adoptListenAlongEnvelope(
+                    envelope = envelope,
+                    context = context,
+                    role = ListenAlongRole.Guest,
+                    hostToken = null,
+                )
+                startListenAlongPolling(context, normalizedCode)
+            }
+                .onFailure { error ->
+                    if (error !is CancellationException) {
+                        mutableState.update { state ->
+                            state.copy(
+                                listenAlong = state.listenAlong.copy(
+                                    status = ListenAlongConnectionStatus.Failed,
+                                    message = "Listen Along could not be joined",
+                                    errorMessage = error.message ?: "The room is unavailable.",
+                                ),
+                                errorMessage = error.message ?: "Listen Along could not be joined.",
+                            )
+                        }
+                    }
+                }
+        }
+    }
+
+    override fun leaveListenAlong() {
+        val code = listenAlongCode
+        val role = listenAlongRole
+        val hostToken = listenAlongHostToken
+        val context = listenAlongContext
+        if (code != null && role == ListenAlongRole.Host && !hostToken.isNullOrBlank() && context != null) {
+            viewModelScope.launch {
+                runCatching { serverClient(context).endListenAlong(code, hostToken) }
+                clearListenAlongSession(stopPlayback = true)
+            }
+        } else {
+            clearListenAlongSession(stopPlayback = true)
+        }
+    }
+
+    private fun startListenAlongPolling(context: ServerProfileContext, code: String) {
+        listenAlongPollJob?.cancel()
+        listenAlongPollJob = viewModelScope.launch {
+            var delayMillis = LISTEN_ALONG_INITIAL_POLL_MS
+            while (isActive && listenAlongContext == context && listenAlongCode == code &&
+                listenAlongRole == ListenAlongRole.Guest
+            ) {
+                delay(delayMillis)
+                try {
+                    val envelope = serverClient(context).fetchListenAlong(code)
+                    if (listenAlongContext != context || listenAlongCode != code) break
+                    if (envelope.revision >= listenAlongRevision) {
+                        adoptListenAlongEnvelope(
+                            envelope = envelope,
+                            context = context,
+                            role = ListenAlongRole.Guest,
+                            hostToken = null,
+                        )
+                    }
+                    delayMillis = LISTEN_ALONG_INITIAL_POLL_MS
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: ServerException) {
+                    if (error.status == 404 || error.status == 410) {
+                        val ended = mutableState.value.listenAlong.copy(
+                            status = ListenAlongConnectionStatus.Ended,
+                            message = "Listen Along room ended",
+                            errorMessage = error.serverMessage ?: "The room has expired.",
+                        )
+                        clearListenAlongSession(stopPlayback = true)
+                        mutableState.update { it.copy(listenAlong = ended) }
+                        break
+                    }
+                    delayMillis = ListenAlongPollPolicy.nextFailureDelay(delayMillis)
+                    mutableState.update { state ->
+                        state.copy(listenAlong = state.listenAlong.copy(
+                            status = ListenAlongConnectionStatus.Reconnecting,
+                            message = "Reconnecting to Listen Along…",
+                            errorMessage = error.message,
+                        ))
+                    }
+                } catch (error: Throwable) {
+                    delayMillis = ListenAlongPollPolicy.nextFailureDelay(delayMillis)
+                    mutableState.update { state ->
+                        if (state.listenAlong.isActive) {
+                            state.copy(
+                                listenAlong = state.listenAlong.copy(
+                                    status = ListenAlongConnectionStatus.Reconnecting,
+                                    message = "Reconnecting to Listen Along…",
+                                    errorMessage = error.message,
+                                ),
+                            )
+                        } else state
+                    }
+                    if (delayMillis >= LISTEN_ALONG_MAX_POLL_MS) delay(LISTEN_ALONG_MAX_POLL_MS)
+                }
+            }
+        }
+    }
+
+    private fun adoptListenAlongEnvelope(
+        envelope: ListenAlongEnvelope,
+        context: ServerProfileContext,
+        role: ListenAlongRole,
+        hostToken: String?,
+    ) {
+        val code = envelope.inviteCode ?: listenAlongCode ?: return
+        if (envelope.revision < listenAlongRevision && listenAlongCode == code) return
+        val snapshot = envelope.normalizedSnapshot
+        listenAlongContext = context
+        listenAlongCode = code
+        listenAlongRole = role
+        listenAlongHostToken = hostToken ?: listenAlongHostToken
+        listenAlongRevision = envelope.revision.coerceAtLeast(listenAlongRevision)
+        listenAlongSnapshot = snapshot
+        mutableState.update { state ->
+            state.copy(
+                listenAlong = ListenAlongUiState(
+                    status = ListenAlongConnectionStatus.Active,
+                    code = code,
+                    role = role,
+                    snapshot = snapshot,
+                    revision = listenAlongRevision,
+                    message = if (role == ListenAlongRole.Host) {
+                        "Share this code with your listeners"
+                    } else {
+                        "Following the host"
+                    },
+                ),
+                errorMessage = null,
+            )
+        }
+        if (role == ListenAlongRole.Guest) {
+            applyListenAlongSnapshot(
+                snapshot = snapshot,
+                updatedAt = envelope.updatedAt,
+                serverTime = envelope.serverTime,
+            )
+        }
+    }
+
+    private fun applyListenAlongSnapshot(
+        snapshot: ListenAlongSnapshot,
+        updatedAt: String?,
+        serverTime: String?,
+    ) {
+        if (listenAlongRole != ListenAlongRole.Guest) return
+        val normalized = runCatching { ListenAlongSnapshotPolicy.normalized(snapshot) }
+            .getOrElse { error ->
+                mutableState.update { state ->
+                    state.copy(listenAlong = state.listenAlong.copy(
+                        message = "The host sent an invalid track link.",
+                        errorMessage = error.message,
+                    ))
+                }
+                return
+        }
+        val desiredPositionMs = (ListenAlongSnapshotPolicy.projectedPositionSeconds(
+            snapshot = normalized,
+            updatedAtMillis = parseListenAlongTimeMillis(updatedAt),
+            serverTimeMillis = parseListenAlongTimeMillis(serverTime),
+            nowMillis = System.currentTimeMillis(),
+        ) * 1_000.0).toLong().coerceAtLeast(0L)
+        val currentSource = listenAlongPlaybackSourceURL
+        val mediaKind = normalized.normalizedMediaKind
+        val player = controller ?: return
+        if (normalized.sourceURL.isNullOrBlank()) {
+            listenAlongPlaybackJob?.cancel()
+            stopListenAlongProviderPlayback()
+            player.stop()
+            player.clearMediaItems()
+            listenAlongPlaybackSourceURL = null
+            mutableState.update { state ->
+                state.copy(listenAlong = state.listenAlong.copy(
+                    message = "The host is listening to a source that is unavailable on this device.",
+                    errorMessage = "This track has no source link to stream.",
+                ))
+            }
+            return
+        }
+        val reusesCurrentPlayback = ListenAlongPlaybackPolicy.shouldReuse(
+            currentSourceURL = currentSource,
+            nextSourceURL = normalized.sourceURL,
+            currentMediaKind = listenAlongPlaybackMediaKind,
+            nextMediaKind = mediaKind,
+            mediaItemCount = player.mediaItemCount,
+        )
+        if (!reusesCurrentPlayback) {
+            val expectedCode = listenAlongCode
+            val expectedRevision = listenAlongRevision
+            listenAlongPlaybackJob?.cancel()
+            listenAlongPlaybackJob = viewModelScope.launch {
+                val prepared = runCatching {
+                    prepareListenAlongPlayback(
+                        sourceURL = normalized.sourceURL,
+                        mediaKind = mediaKind,
+                        code = expectedCode ?: "room",
+                        revision = expectedRevision,
+                    )
+                }.getOrElse { error ->
+                    if (error !is CancellationException) {
+                        mutableState.update { state ->
+                            if (state.listenAlong.isGuest) state.copy(
+                                listenAlong = state.listenAlong.copy(
+                                    message = "This track could not be resolved on this device.",
+                                    errorMessage = error.message ?: "The source link could not be played.",
+                                ),
+                            ) else state
+                        }
+                    }
+                    return@launch
+                }
+                if (listenAlongCode != expectedCode || listenAlongRole != ListenAlongRole.Guest ||
+                    listenAlongRevision != expectedRevision
+                ) return@launch
+                installListenAlongPlayback(prepared, desiredPositionMs, normalized.isPlaying)
+            }
+        } else {
+            val delta = abs(player.currentPosition - desiredPositionMs)
+            if (delta > LISTEN_ALONG_SEEK_TOLERANCE_MS) player.seekTo(desiredPositionMs)
+            if (normalized.isPlaying) {
+                if (!player.isPlaying) player.play()
+            } else if (player.isPlaying) {
+                player.pause()
+            }
+        }
+    }
+
+    private data class PreparedListenAlongPlayback(
+        val item: MediaItem,
+        val localTrack: Track? = null,
+        val presentation: Track? = null,
+        val artworkURL: String? = null,
+        val providerHandle: ListenAlongProviderStreamHandle? = null,
+        val sourceURL: String,
+        val mediaKind: String,
+    )
+
+    private suspend fun prepareListenAlongPlayback(
+        sourceURL: String,
+        mediaKind: String,
+        code: String,
+        revision: Long,
+    ): PreparedListenAlongPlayback {
+        val local = library.tracks.firstOrNull { track ->
+            trackBelongsToActiveContext(track) &&
+                sourceMatches(sourceURL, track.sourceURL ?: track.downloadSourceURL) &&
+                repository.fileForTrack(track).isFile
+        }
+        if (local != null) {
+            return PreparedListenAlongPlayback(
+                item = requireNotNull(mediaItem(local)),
+                localTrack = local,
+                sourceURL = sourceURL,
+                mediaKind = mediaKind,
+            )
+        }
+
+        val remote = mutableState.value.remoteSongs.firstOrNull { song ->
+            sourceMatches(sourceURL, song.sourceURL)
+        }
+        val requestedMode = if (mediaKind == "video") LinkImportMediaMode.Video else LinkImportMediaMode.Audio
+        val directHandle = runCatching {
+            ListenAlongProviderStreamPolicy.register(sourceURL, emptyMap())
+        }.getOrNull()
+        val candidateAndMetadata = if (directHandle == null) {
+            val resolution = linkImportService.resolve(sourceURL, requestedMode) { }
+            val candidate = resolution.candidates.firstOrNull()
+                ?: throw LinkImportException(
+                    LinkImportStage.InspectingSource,
+                    "LISTEN_ALONG_NO_STREAM",
+                    "No playable rendition was found for this source link.",
+                )
+            val preview = linkImportService.preview(candidate)
+            Triple(preview, resolution.track, candidate)
+        } else null
+        val providerHandle = directHandle ?: ListenAlongProviderStreamPolicy.register(
+            url = requireNotNull(candidateAndMetadata).first.url,
+            headers = candidateAndMetadata.first.headers,
+        )
+        val metadata = candidateAndMetadata?.second ?: LinkImportTrack(
+            title = remote?.title ?: "Listen Along",
+            artist = remote?.artist ?: "Resonance",
+            album = remote?.album,
+            durationSeconds = remote?.durationSeconds?.toInt(),
+            artworkURL = remote?.artworkURL,
+            sourceURL = sourceURL,
+        )
+        // A resolver may return the thumbnail on the selected candidate even when
+        // its normalized track metadata has no artwork field. Keep that fallback
+        // on the transient presentation so connected clients get the same cover.
+        val artworkURL = ListenAlongArtworkPolicy.preferredURL(
+            metadata.artworkURL,
+            candidateAndMetadata?.third?.thumbnailURL,
+            remote?.artworkURL,
+        )
+        val presentation = Track(
+            id = "listen-along:$code:$revision:${providerHandle.id}",
+            title = metadata.title,
+            artist = metadata.artist,
+            album = metadata.album ?: "Listen Along",
+            durationMs = metadata.durationSeconds?.toLong()?.times(1_000L) ?: 0L,
+            relativePath = "",
+        )
+        val extras = Bundle().apply {
+            artworkURL?.takeIf(String::isNotBlank)?.let {
+                putString(STREAM_ARTWORK_URL_EXTRA, it)
+            }
+        }
+        val item = MediaItem.Builder()
+            .setMediaId(presentation.id)
+            .setUri(providerHandle.playbackURI)
+            .setMediaMetadata(
+                publishedMediaMetadata(
+                    title = presentation.title,
+                    artist = presentation.artist,
+                    album = presentation.album,
+                    durationMs = presentation.durationMs,
+                    extras = extras,
+                ),
+            )
+            .build()
+        return PreparedListenAlongPlayback(
+            item = item,
+            presentation = presentation,
+            artworkURL = artworkURL,
+            providerHandle = providerHandle,
+            sourceURL = sourceURL,
+            mediaKind = mediaKind,
+        )
+    }
+
+    private fun installListenAlongPlayback(
+        prepared: PreparedListenAlongPlayback,
+        positionMs: Long,
+        isPlaying: Boolean,
+    ) {
+        val player = controller ?: return
+        stopListenAlongProviderPlayback()
+        clearActiveStreamPresentation()
+        listenAlongProviderHandle = prepared.providerHandle
+        listenAlongPlaybackSourceURL = prepared.sourceURL
+        listenAlongPlaybackMediaKind = prepared.mediaKind
+        activeQueue = listOf(prepared.item.mediaId)
+        activePlaylistId = null
+        val localTrack = prepared.localTrack
+        mutableState.update { state ->
+            state.copy(
+                tracks = library.tracks.filter(::trackBelongsToActiveContext),
+                currentTrackId = prepared.item.mediaId,
+                transientCurrentTrack = prepared.presentation,
+                transientArtworkURL = prepared.artworkURL,
+                activePlaylistId = null,
+                errorMessage = null,
+                listenAlong = state.listenAlong.copy(
+                    message = if (localTrack != null) "Playing the local copy with the host" else "Resolving the host's source",
+                    errorMessage = null,
+                ),
+            )
+        }
+        player.setMediaItem(prepared.item)
+        player.shuffleModeEnabled = false
+        player.repeatMode = Player.REPEAT_MODE_OFF
+        player.prepare()
+        player.seekTo(positionMs.coerceAtLeast(0L))
+        if (isPlaying) player.play() else player.pause()
+        scheduleListenAlongArtwork(prepared)
+        scheduleListenAlongProviderRefresh(prepared.providerHandle)
+        refreshPlaybackState()
+    }
+
+    /**
+     * Compose can load the transient artwork URL directly, but Media3's session and
+     * Android's notification surfaces need bounded artwork bytes on the MediaItem.
+     * Fetch it after playback is installed so artwork latency never delays audio.
+     */
+    private fun scheduleListenAlongArtwork(prepared: PreparedListenAlongPlayback) {
+        listenAlongArtworkJob?.cancel()
+        listenAlongArtworkJob = null
+        val artworkURL = prepared.artworkURL?.trim()?.takeIf(String::isNotEmpty) ?: return
+        val presentation = prepared.presentation ?: return
+        val context = listenAlongContext ?: return
+        val expectedCode = listenAlongCode ?: return
+        val expectedMediaID = prepared.item.mediaId
+        listenAlongArtworkJob = viewModelScope.launch {
+            val artwork = serverClient(context).fetchArtworkURL(artworkURL) ?: return@launch
+            val publishable = withContext(Dispatchers.Default) {
+                prepareArtworkForSystemPublication(artwork)
+            } ?: return@launch
+            if (
+                listenAlongCode != expectedCode ||
+                listenAlongRole != ListenAlongRole.Guest ||
+                listenAlongPlaybackSourceURL != prepared.sourceURL
+            ) return@launch
+            val player = controller ?: return@launch
+            val currentIndex = player.currentMediaItemIndex
+            if (
+                currentIndex == C.INDEX_UNSET ||
+                player.currentMediaItem?.mediaId != expectedMediaID
+            ) return@launch
+            val metadata = publishedMediaMetadata(
+                title = presentation.title,
+                artist = presentation.artist,
+                album = presentation.album,
+                durationMs = presentation.durationMs,
+                extras = player.currentMediaItem?.mediaMetadata?.extras ?: Bundle(),
+                artworkData = publishable,
+            )
+            player.replaceMediaItem(
+                currentIndex,
+                player.currentMediaItem!!.buildUpon()
+                    .setMediaMetadata(metadata)
+                    .build(),
+            )
+        }
+    }
+
+    private fun stopListenAlongProviderPlayback() {
+        listenAlongArtworkJob?.cancel()
+        listenAlongArtworkJob = null
+        listenAlongProviderRefreshJob?.cancel()
+        listenAlongProviderRefreshJob = null
+        ListenAlongProviderStreamPolicy.remove(listenAlongProviderHandle?.id)
+        listenAlongProviderHandle = null
+        listenAlongPlaybackSourceURL = null
+    }
+
+    private fun scheduleListenAlongProviderRefresh(handle: ListenAlongProviderStreamHandle?) {
+        listenAlongProviderRefreshJob?.cancel()
+        if (handle == null) return
+        val sourceURL = listenAlongPlaybackSourceURL ?: return
+        val mediaKind = listenAlongPlaybackMediaKind
+        val expectedCode = listenAlongCode ?: return
+        val expectedRevision = listenAlongRevision
+        listenAlongProviderRefreshJob = viewModelScope.launch {
+            delay(LISTEN_ALONG_PROVIDER_REFRESH_MS)
+            if (listenAlongProviderHandle?.id != handle.id || listenAlongRole != ListenAlongRole.Guest ||
+                listenAlongCode != expectedCode || listenAlongRevision != expectedRevision ||
+                listenAlongPlaybackSourceURL != sourceURL
+            ) return@launch
+            val player = controller ?: return@launch
+            val positionMs = player.currentPosition.coerceAtLeast(0L)
+            val isPlaying = player.isPlaying
+            val replacement = runCatching {
+                prepareListenAlongPlayback(sourceURL, mediaKind, expectedCode, expectedRevision)
+            }.getOrNull() ?: return@launch
+            if (listenAlongProviderHandle?.id != handle.id || listenAlongRole != ListenAlongRole.Guest ||
+                listenAlongCode != expectedCode || listenAlongRevision != expectedRevision
+            ) return@launch
+            installListenAlongPlayback(replacement, positionMs, isPlaying)
+        }
+    }
+
+    private fun clearListenAlongSession(stopPlayback: Boolean) {
+        listenAlongPollJob?.cancel()
+        listenAlongPollJob = null
+        listenAlongPendingSnapshot = null
+        listenAlongPublishJob?.cancel()
+        listenAlongPublishJob = null
+        listenAlongPlaybackJob?.cancel()
+        listenAlongPlaybackJob = null
+        val currentID = controller?.currentMediaItem?.mediaId.orEmpty()
+        val wasListenPlayback = currentID.startsWith("listen-along:") ||
+            listenAlongPlaybackSourceURL != null
+        stopListenAlongProviderPlayback()
+        if (stopPlayback && wasListenPlayback) {
+            controller?.stop()
+            controller?.clearMediaItems()
+            activeQueue = emptyList()
+            activePlaylistId = null
+            rebuildPlaybackQueueForActiveContext()
+        }
+        listenAlongContext = null
+        listenAlongCode = null
+        listenAlongRole = null
+        listenAlongHostToken = null
+        listenAlongRevision = 0L
+        listenAlongSnapshot = ListenAlongSnapshot()
+        mutableState.update { state ->
+            state.copy(
+                transientCurrentTrack = if (wasListenPlayback) null else state.transientCurrentTrack,
+                transientArtworkURL = if (wasListenPlayback) null else state.transientArtworkURL,
+                listenAlong = ListenAlongUiState(),
+            )
+        }
+    }
+
+    private fun listenAlongSnapshotFromPlayer(): ListenAlongSnapshot {
+        val player = controller
+        val currentID = player?.currentMediaItem?.mediaId
+        val track = currentID?.let { id -> library.tracks.firstOrNull { it.id == id } }
+        val remote = track?.remoteID?.let { id -> mutableState.value.remoteSongs.firstOrNull { it.id == id } }
+        val source = activeStreamSourceURL ?: track?.sourceURL ?: track?.downloadSourceURL ?: remote?.sourceURL
+        val mediaKind = when {
+            remote?.isVideoMedia == true -> "video"
+            track?.relativePath?.substringAfterLast('.', "")?.lowercase() in
+                setOf("mp4", "mov", "m4v", "webm") -> "video"
+            else -> "audio"
+        }
+        return ListenAlongSnapshot(
+            sourceURL = source,
+            mediaKind = mediaKind,
+            positionSeconds = (player?.currentPosition ?: 0L).coerceAtLeast(0L) / 1_000.0,
+            isPlaying = player?.isPlaying == true,
+        ).let(ListenAlongSnapshotPolicy::normalized)
+    }
+
+    private fun endListenAlongForMissingSource(
+        context: ServerProfileContext,
+        code: String,
+        hostToken: String,
+    ) {
+        val state = mutableState.value.listenAlong
+        if (state.message.startsWith("Ending Listen Along")) return
+        mutableState.update {
+            it.copy(listenAlong = state.copy(
+                message = "Ending Listen Along…",
+                errorMessage = "This track has no shareable source link; the room will be ended.",
+            ))
+        }
+        listenAlongPublishJob?.cancel()
+        listenAlongPublishJob = viewModelScope.launch {
+            runCatching { serverClient(context).endListenAlong(code, hostToken) }
+            clearListenAlongSession(stopPlayback = false)
+            mutableState.update {
+                it.copy(errorMessage = "Listen Along ended because the current track has no shareable source link.")
+            }
+        }
+    }
+
+    private fun publishListenAlongSnapshot() {
+        if (listenAlongRole != ListenAlongRole.Host) return
+        val code = listenAlongCode ?: return
+        val hostToken = listenAlongHostToken ?: return
+        val context = listenAlongContext ?: return
+        val snapshot = runCatching { listenAlongSnapshotFromPlayer() }.getOrNull() ?: return
+        if (snapshot.sourceURL.isNullOrBlank()) {
+            endListenAlongForMissingSource(context, code, hostToken)
+            return
+        }
+        listenAlongSnapshot = snapshot
+        mutableState.update { state ->
+            state.copy(listenAlong = state.listenAlong.copy(snapshot = snapshot))
+        }
+        // Keep one request in flight at a time. Cancelling every previous coroutine
+        // can cancel its HTTP request after the server has accepted it, leaving the
+        // next action with a stale revision and forcing a slow conflict recovery.
+        // A conflated pending value preserves ordering while always sending the
+        // newest host action as soon as the current request completes.
+        listenAlongPendingSnapshot = snapshot
+        if (listenAlongPublishJob?.isActive == true) return
+        listenAlongPublishJob = viewModelScope.launch {
+            delay(LISTEN_ALONG_PUBLISH_DEBOUNCE_MS)
+            while (isActive && listenAlongCode == code && listenAlongRole == ListenAlongRole.Host) {
+                val pending = listenAlongPendingSnapshot ?: break
+                listenAlongPendingSnapshot = null
+                runCatching {
+                    sendListenAlongHostUpdate(
+                        context = context,
+                        code = code,
+                        hostToken = hostToken,
+                        snapshot = pending,
+                    )
+                }.onSuccess { envelope ->
+                    if (listenAlongCode != code || listenAlongRole != ListenAlongRole.Host) return@onSuccess
+                    listenAlongRevision = maxOf(listenAlongRevision, envelope.revision)
+                    listenAlongSnapshot = envelope.normalizedSnapshot
+                    mutableState.update { state ->
+                        state.copy(listenAlong = state.listenAlong.copy(
+                            status = ListenAlongConnectionStatus.Active,
+                            snapshot = listenAlongPendingSnapshot ?: listenAlongSnapshot,
+                            revision = listenAlongRevision,
+                            errorMessage = null,
+                        ))
+                    }
+                }.onFailure { error ->
+                    if (error !is CancellationException && listenAlongCode == code) {
+                        if (error.message?.contains("no shareable source", ignoreCase = true) == true) {
+                            endListenAlongForMissingSource(context, code, hostToken)
+                        } else {
+                            mutableState.update { state ->
+                                state.copy(listenAlong = state.listenAlong.copy(
+                                    message = "Listen Along update failed",
+                                    errorMessage = error.message,
+                                ))
+                            }
+                        }
+                    }
+                }
+                // If another action arrived while the request was in flight, send
+                // that latest snapshot immediately using the newly advanced revision.
+                if (listenAlongPendingSnapshot == null) break
+            }
+        }
+    }
+
+    private suspend fun sendListenAlongHostUpdate(
+        context: ServerProfileContext,
+        code: String,
+        hostToken: String,
+        snapshot: ListenAlongSnapshot,
+    ): ListenAlongEnvelope {
+        var revision = listenAlongRevision
+        var pending = snapshot
+        var recovered = false
+        while (true) {
+            try {
+                return serverClient(context).updateListenAlong(
+                    code = code,
+                    revision = revision,
+                    snapshot = pending,
+                    hostToken = hostToken,
+                )
+            } catch (conflict: ListenAlongRevisionConflictException) {
+                val current = conflict.current
+                if (recovered || current == null) throw conflict
+                val currentCode = current.inviteCode
+                if (currentCode != null && !currentCode.equals(code, ignoreCase = true)) throw conflict
+                adoptListenAlongEnvelope(
+                    envelope = current,
+                    context = context,
+                    role = ListenAlongRole.Host,
+                    hostToken = hostToken,
+                )
+                revision = maxOf(revision, current.revision, listenAlongRevision)
+                pending = runCatching { listenAlongSnapshotFromPlayer() }.getOrElse { current.normalizedSnapshot }
+                if (pending.sourceURL.isNullOrBlank()) throw IllegalStateException(
+                    "This track has no shareable source link; the Listen Along room must end.",
+                )
+                recovered = true
+            }
+        }
+    }
+
+    private fun parseListenAlongTimeMillis(value: String?): Long? = value?.let {
+        it.toLongOrNull() ?: runCatching { Instant.parse(it).toEpochMilli() }.getOrNull()
+    }
+
+    private fun sourceMatches(first: String?, second: String?): Boolean {
+        val left = first?.trim()?.takeIf(String::isNotEmpty) ?: return false
+        val right = second?.trim()?.takeIf(String::isNotEmpty) ?: return false
+        val normalizedLeft = runCatching {
+            URI(left).let { uri ->
+                "${uri.scheme?.lowercase()}://${uri.host?.lowercase()}${uri.rawPath.orEmpty()}?${uri.rawQuery.orEmpty()}"
+            }
+        }.getOrElse { left.trimEnd('/') }
+        val normalizedRight = runCatching {
+            URI(right).let { uri ->
+                "${uri.scheme?.lowercase()}://${uri.host?.lowercase()}${uri.rawPath.orEmpty()}?${uri.rawQuery.orEmpty()}"
+            }
+        }.getOrElse { right.trimEnd('/') }
+        return normalizedLeft.trimEnd('?').trimEnd('/') == normalizedRight.trimEnd('?').trimEnd('/')
     }
 
     override fun toggleRemoteSelection(songId: String) {

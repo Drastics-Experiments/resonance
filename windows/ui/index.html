@@ -40,6 +40,11 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v5h5"/><path d="M5.5 8.5A8 8 0 1 1 4 13"/><path d="M12 7v5l3 2"/></svg>
               <span>Listening History</span>
             </button>
+            <button id="profileListenAlong" class="profile-menu-item" type="button" role="menuitem">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="12" r="4"/><circle cx="16" cy="12" r="4"/><path d="M8 8V5m8 14v-3M12 9v6"/></svg>
+              <span>Listen Along</span>
+              <span id="listenAlongMiniStatus" class="profile-menu-badge" hidden></span>
+            </button>
             <button id="profileClipEditor" class="profile-menu-item" type="button" role="menuitem">
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="7" r="3"/><circle cx="6" cy="17" r="3"/><path d="m8.5 8.5 11 7.5M8.5 15.5 19.5 8"/></svg>
               <span>Clip Editor</span>
@@ -73,7 +78,7 @@
 
     <footer class="playerbar">
       <div class="player-track"><button id="openNowPlaying" class="player-track-summary" type="button" aria-label="Open Now Playing" disabled><span class="mini-art" aria-hidden="true">♪</span><span><strong id="bottomTitle">Nothing playing</strong><small id="bottomMeta">Local library</small></span></button><button id="favoriteCurrent" title="Add to Liked Songs" aria-label="Add current song to Liked Songs" aria-pressed="false">♡</button></div>
-      <div class="transport"><div><button id="shuffle" title="Shuffle" aria-label="Shuffle" aria-pressed="false"><svg class="shuffle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h2.5a5 5 0 0 1 4 2l5 7a5 5 0 0 0 4 2H21"/><path d="m17 13 4 4-4 4"/><path d="M3 18h2.5a5 5 0 0 0 4-2l5-7a5 5 0 0 1 4-2H21"/><path d="m17 3 4 4-4 4"/></svg></button><button data-action="previous" title="Previous" aria-label="Previous"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14"/><path class="icon-fill" d="m18 6-9 6 9 6z"/></svg></button><button class="play-main" data-action="toggle" title="Play" aria-label="Play"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="M8 5v14l11-7z"/></svg></button><button data-action="next" title="Next" aria-label="Next"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="m6 6 9 6-9 6z"/><path d="M18 5v14"/></svg></button><button id="repeat" title="Repeat current song" aria-label="Repeat current song" aria-pressed="false"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="m7 22-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg></button></div><div class="timeline"><span id="elapsed">0:00</span><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Playback position" aria-valuetext="0:00 of 0:00"><span id="duration">0:00</span></div></div>
+      <div class="transport"><div><button id="openListenAlong" class="listen-along-player-button" type="button" title="Start or join Listen Along" aria-label="Start or join Listen Along" aria-pressed="false"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="12" r="4"/><circle cx="16" cy="12" r="4"/><path d="M8 8V5m8 14v-3M12 9v6"/></svg></button><button id="shuffle" title="Shuffle" aria-label="Shuffle" aria-pressed="false"><svg class="shuffle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h2.5a5 5 0 0 1 4 2l5 7a5 5 0 0 0 4 2H21"/><path d="m17 13 4 4-4 4"/><path d="M3 18h2.5a5 5 0 0 0 4-2l5-7a5 5 0 0 1 4-2H21"/><path d="m17 3 4 4-4 4"/></svg></button><button data-action="previous" title="Previous" aria-label="Previous"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14"/><path class="icon-fill" d="m18 6-9 6 9 6z"/></svg></button><button class="play-main" data-action="toggle" title="Play" aria-label="Play"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="M8 5v14l11-7z"/></svg></button><button data-action="next" title="Next" aria-label="Next"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="m6 6 9 6-9 6z"/><path d="M18 5v14"/></svg></button><button id="repeat" title="Repeat current song" aria-label="Repeat current song" aria-pressed="false"><svg class="transport-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="m7 22-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg></button></div><div class="timeline"><span id="elapsed">0:00</span><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Playback position" aria-valuetext="0:00 of 0:00"><span id="duration">0:00</span></div></div>
       <div class="volume"><div id="speed" data-custom-select data-value="1" data-custom-select-width="154" aria-label="Playback speed"></div><span aria-hidden="true">🔊</span><input id="volume" type="range" min="0" max="1" step="0.01" value="0.78" aria-label="Volume" aria-valuetext="78 percent"></div>
     </footer>
   </div>
@@ -315,6 +320,29 @@
         <div id="listeningHistoryChart"></div>
       </section>
       <section id="listeningHistoryDayDetails" class="listening-history-day-details" aria-live="polite" hidden></section>
+    </section>
+  </dialog>
+  <dialog id="listenAlongDialog" class="listen-along-dialog" aria-labelledby="listenAlongTitle">
+    <section class="listen-along-panel">
+      <header class="listen-along-header">
+        <div><span class="eyebrow">SHARED PLAYBACK</span><h2 id="listenAlongTitle">Listen Along</h2><p id="listenAlongRole">Create a room or join one</p></div>
+        <button id="closeListenAlong" class="history-close" type="button" aria-label="Close Listen Along">×</button>
+      </header>
+      <div class="listen-along-room-card" aria-live="polite">
+        <span class="listen-along-room-label">ROOM CODE</span>
+        <div class="listen-along-room-code-row">
+          <strong id="listenAlongCode">—</strong>
+          <button id="copyListenAlongCode" class="secondary listen-along-copy" type="button" disabled aria-label="Copy room code">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+            <span>Copy code</span>
+          </button>
+        </div>
+        <span id="listenAlongCopyFeedback" class="listen-along-copy-feedback" role="status" aria-live="polite"></span>
+        <span id="listenAlongStatus">Not connected</span>
+      </div>
+      <div class="listen-along-join-row"><label for="listenAlongJoinCode">Join a room</label><div><input id="listenAlongJoinCode" inputmode="text" autocomplete="off" maxlength="64" placeholder="Enter code"><button id="joinListenAlong" class="secondary" type="button">Join</button></div></div>
+      <p class="listen-along-help">The host controls the song, play/pause, seeking, and skips. Your volume stays local.</p>
+      <footer class="dialog-actions"><button id="leaveListenAlong" class="secondary" type="button" hidden>Leave room</button><button id="startListenAlong" class="primary" type="button">Start hosting</button></footer>
     </section>
   </dialog>
   <dialog id="localImportDialog" class="local-import-dialog" aria-labelledby="localImportTitle">

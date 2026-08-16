@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, shell, Tray } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, protocol, shell, Tray, webContents } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { spawn } = require("node:child_process");
 const { createHash, createHmac, randomBytes, randomUUID } = require("node:crypto");
@@ -58,6 +58,15 @@ const {
   supportedMediaSize,
   validateStreamResponse,
 } = require("./server-stream.cjs");
+const {
+  ListenAlongValidationError,
+  canonicalListenAlongCode,
+  canonicalListenAlongMediaKind,
+  canonicalListenAlongRevision,
+  canonicalListenAlongSnapshot,
+  normalizeListenAlongResponse,
+  publicListenAlongEvent,
+} = require("./listen-along.cjs");
 const { catalogSHA256, normalizeServerBaseURL } = require("./server-policy.cjs");
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
 const { LocalImportError, isSpotifyURL, searchYouTubeAudioSources, youtubeVideoID } = require("./local-import-core.cjs");
@@ -157,6 +166,16 @@ const MAX_SERVER_STREAM_CATALOG_BYTES = 8 * 1024 * 1024;
 const SERVER_STREAM_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const SERVER_STREAM_REQUEST_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const SERVER_STREAM_IDLE_TIMEOUT_MS = 45 * 1000;
+const MAX_LISTEN_ALONG_MEDIA_SESSIONS_PER_SESSION = 2;
+const MAX_LISTEN_ALONG_JSON_BYTES = 512 * 1024;
+// Listen Along has no socket endpoint in the current Core contract, so the
+// desktop clients use bounded polling. Keep the healthy-room cadence short
+// enough that a host action feels immediate; failures still use the existing
+// exponential backoff below.
+const LISTEN_ALONG_POLL_INTERVAL_MS = 250;
+const LISTEN_ALONG_POLL_MAX_BACKOFF_MS = 30_000;
+const LISTEN_ALONG_REQUEST_TIMEOUT_MS = 15_000;
+const LISTEN_ALONG_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const WINDOWS_APP_BUILD = Number(windowsPackage.resonanceBuild);
 if (!Number.isSafeInteger(WINDOWS_APP_BUILD) || WINDOWS_APP_BUILD < 1) {
   throw new Error("windows/package.json must contain a positive resonanceBuild for client-config audience targeting.");
@@ -191,6 +210,9 @@ let clientConfigMutationQueue = Promise.resolve();
 let clientConfigState = null;
 const serverUploadRetries = new Map();
 const serverStreamSessions = new Map();
+const listenAlongSessions = new Map();
+const listenAlongMediaSessions = new Map();
+const listenAlongMediaPending = new Map();
 const serverCatalogSnapshots = createServerCatalogSnapshotStore();
 const rendererCredentialFingerprints = new Map();
 const rendererCredentialEpochs = new Map();
@@ -1205,6 +1227,560 @@ async function serverResponseError(response) {
   return new Error(`Server returned HTTP ${response.status}${message ? `: ${message}` : ""}`);
 }
 
+function listenAlongTrustedRenderer(owner) {
+  const trustedRendererURL = pathToFileURL(path.join(__dirname, "ui", "index.html")).href;
+  if (!owner || owner.isDestroyed() || owner.getURL() !== trustedRendererURL) {
+    throw new Error("Listen Along is unavailable in this window.");
+  }
+  return owner;
+}
+
+function listenAlongSourceKey(sourceURL) {
+  return createHash("sha256").update(String(sourceURL || ""), "utf8").digest("hex");
+}
+
+function listenAlongHostToken(value) {
+  const token = typeof value === "string" ? value.trim() : "";
+  if (!token || token.length > 4_096 || /[\u0000-\u001f\u007f]/.test(token)) {
+    throw new ListenAlongValidationError("INVALID_HOST_TOKEN", "The server returned an invalid Listen Along host token.", 502);
+  }
+  return token;
+}
+
+function listenAlongRendererEvent(session, payload) {
+  const normalized = normalizeListenAlongResponse(payload, {
+    role: session.role,
+    fallbackCode: session.code,
+    fallbackRevision: session.revision,
+  });
+  const sourceURL = normalized.snapshot.source_url;
+  return Object.freeze({
+    ...publicListenAlongEvent({ ...payload, role: session.role }, session.id),
+    // The renderer only receives an opaque source key.  The canonical source
+    // stays in this main-process session and is used by the resolver below.
+    source_key: sourceURL ? listenAlongSourceKey(sourceURL) : null,
+    snapshot: Object.freeze({ ...normalized.snapshot, source_url: null }),
+  });
+}
+
+function listenAlongSessionForOwner(event, sessionID) {
+  const id = boundedText(sessionID, 128);
+  const session = id ? listenAlongSessions.get(id) : null;
+  if (!session || session.ownerWebContentsID !== event.sender.id || session.stopped) {
+    throw new Error("The Listen Along session is no longer active.");
+  }
+  if ((rendererCredentialEpochs.get(event.sender.id) || 0) !== session.credentialEpoch) {
+    throw new Error("Listen Along stopped because the server credentials changed.");
+  }
+  return session;
+}
+
+function sendListenAlongStatus(session, state, error = null) {
+  const owner = session?.ownerWebContentsID ? webContents.fromId(session.ownerWebContentsID) : null;
+  if (!owner || owner.isDestroyed()) return;
+  owner.send("listen-along:status", {
+    session_id: session.id,
+    code: session.code,
+    role: session.role,
+    state,
+    error: error ? String(error.message || error).slice(0, 500) : null,
+  });
+}
+
+function sendListenAlongEvent(session, payload) {
+  const owner = session?.ownerWebContentsID ? webContents.fromId(session.ownerWebContentsID) : null;
+  if (!owner || owner.isDestroyed()) return;
+  try {
+    owner.send("listen-along:event", listenAlongRendererEvent(session, payload));
+  } catch (error) {
+    sendListenAlongStatus(session, "error", error);
+  }
+}
+
+function listenAlongRequestSignal(session) {
+  const timeout = AbortSignal.timeout(LISTEN_ALONG_REQUEST_TIMEOUT_MS);
+  return AbortSignal.any([session.controller.signal, timeout]);
+}
+
+async function listenAlongRequestJSON(session, { method = "GET", pathname, body = null, hostToken = null } = {}) {
+  const headers = {
+    ...profileHeaders(session.token, session.profileID),
+    ...(session.clientHeaders || {}),
+    Accept: "application/json",
+    ...(body === null ? {} : { "Content-Type": "application/json" }),
+    ...(hostToken ? { "X-Resonance-Listen-Host": hostToken } : {}),
+  };
+  let response;
+  try {
+    response = await fetch(new URL(pathname, session.base), {
+      method,
+      headers,
+      ...(body === null ? {} : { body: JSON.stringify(body) }),
+      redirect: "manual",
+      signal: listenAlongRequestSignal(session),
+    });
+  } catch (error) {
+    throw error;
+  }
+  if (!response.ok) {
+    const error = await serverResponseError(response);
+    error.status = response.status;
+    throw error;
+  }
+  const rawBody = await boundedResponseBody(response, MAX_LISTEN_ALONG_JSON_BYTES, "Listen Along response");
+  if (!rawBody.length) return {};
+  try { return JSON.parse(rawBody.toString("utf8")); }
+  catch { throw new ListenAlongValidationError("INVALID_RESPONSE", "The server returned invalid Listen Along JSON.", 502); }
+}
+
+function clearListenAlongPoll(session) {
+  if (session.pollTimer) clearTimeout(session.pollTimer);
+  session.pollTimer = null;
+}
+
+async function releaseListenAlongMediaSession(capabilityID) {
+  const media = listenAlongMediaSessions.get(capabilityID);
+  if (!media) return false;
+  if (Number(media.leases) > 1) {
+    media.leases -= 1;
+    return true;
+  }
+  listenAlongMediaSessions.delete(capabilityID);
+  await fs.rm(media.directory, { recursive: true, force: true }).catch(() => undefined);
+  return true;
+}
+
+async function forceReleaseListenAlongMediaSession(capabilityID) {
+  const media = listenAlongMediaSessions.get(capabilityID);
+  if (!media) return false;
+  listenAlongMediaSessions.delete(capabilityID);
+  await fs.rm(media.directory, { recursive: true, force: true }).catch(() => undefined);
+  return true;
+}
+
+function stopListenAlongSession(sessionID, { state = "left", error = null } = {}) {
+  const session = listenAlongSessions.get(sessionID);
+  if (!session) return false;
+  session.stopped = true;
+  clearListenAlongPoll(session);
+  if (session.expirationTimer) clearTimeout(session.expirationTimer);
+  session.controller.abort();
+  for (const [capabilityID, media] of listenAlongMediaSessions) {
+    if (media.sessionID === session.id) void forceReleaseListenAlongMediaSession(capabilityID);
+  }
+  listenAlongSessions.delete(session.id);
+  sendListenAlongStatus(session, state, error);
+  return true;
+}
+
+function stopListenAlongForOwner(ownerWebContentsID, reason = "left") {
+  for (const [sessionID, session] of listenAlongSessions) {
+    if (session.ownerWebContentsID === ownerWebContentsID) stopListenAlongSession(sessionID, { state: reason });
+  }
+  for (const [capabilityID, media] of listenAlongMediaSessions) {
+    if (media.ownerWebContentsID === ownerWebContentsID) void forceReleaseListenAlongMediaSession(capabilityID);
+  }
+}
+
+function stopAllListenAlong(reason = "left") {
+  for (const sessionID of [...listenAlongSessions.keys()]) stopListenAlongSession(sessionID, { state: reason });
+  for (const capabilityID of [...listenAlongMediaSessions.keys()]) void forceReleaseListenAlongMediaSession(capabilityID);
+}
+
+function scheduleListenAlongPoll(session, delay = LISTEN_ALONG_POLL_INTERVAL_MS) {
+  clearListenAlongPoll(session);
+  // The host already receives the authoritative response from every PUT. A
+  // background GET would only duplicate traffic; guests are the readers that
+  // need the short healthy-room cadence.
+  if (session.stopped || session.role !== "guest") return;
+  session.pollTimer = setTimeout(() => {
+    session.pollTimer = null;
+    void pollListenAlongSession(session);
+  }, Math.max(250, delay));
+  session.pollTimer.unref?.();
+}
+
+async function refreshListenAlongSession(session, { emit = true } = {}) {
+  const payload = await listenAlongRequestJSON(session, {
+    pathname: `api/v1/listen-along/${encodeURIComponent(session.code)}`,
+  });
+  const normalized = normalizeListenAlongResponse(payload, {
+    role: session.role,
+    fallbackCode: session.code,
+    fallbackRevision: session.revision,
+  });
+  if (normalized.code !== session.code) {
+    throw new ListenAlongValidationError("CODE_MISMATCH", "The server returned a different Listen Along room.", 502);
+  }
+  const adopted = normalized.revision > session.revision || !session.hasEmittedSnapshot;
+  if (adopted) {
+    session.revision = normalized.revision;
+    session.snapshot = normalized.snapshot;
+    session.hasEmittedSnapshot = true;
+    if (emit) sendListenAlongEvent(session, payload);
+  }
+  return { payload, normalized, adopted };
+}
+
+function staleListenAlongUpdateResult(session, payload = null) {
+  const result = { ok: false, stale: true, revision: session.revision };
+  if (!payload) return result;
+  try { return { ...result, ...listenAlongRendererEvent(session, payload) }; }
+  catch { return result; }
+}
+
+async function pollListenAlongSession(session) {
+  if (session.stopped || session.pollInFlight) return;
+  session.pollInFlight = true;
+  try {
+    await refreshListenAlongSession(session);
+    session.pollBackoff = LISTEN_ALONG_POLL_INTERVAL_MS;
+    sendListenAlongStatus(session, "active");
+    scheduleListenAlongPoll(session, LISTEN_ALONG_POLL_INTERVAL_MS);
+  } catch (error) {
+    if (session.stopped) return;
+    if (error?.status === 404 || error?.status === 410) {
+      stopListenAlongSession(session.id, { state: "ended", error: new Error("The Listen Along room has ended.") });
+    } else {
+      session.pollBackoff = Math.min(
+        LISTEN_ALONG_POLL_MAX_BACKOFF_MS,
+        Math.max(LISTEN_ALONG_POLL_INTERVAL_MS, session.pollBackoff * 2),
+      );
+      sendListenAlongStatus(session, "reconnecting", error);
+      scheduleListenAlongPoll(session, session.pollBackoff);
+    }
+  } finally {
+    session.pollInFlight = false;
+  }
+}
+
+async function resolveListenAlongEphemeralSource(session, sourceURL, mediaKind) {
+  if (!localImportEnabled()) throw new Error("Listen Along source playback is disabled in this build.");
+  const controller = new AbortController();
+  const signal = AbortSignal.any([session.controller.signal, controller.signal, AbortSignal.timeout(5 * 60 * 1000)]);
+  const temporaryDirectory = await fs.mkdtemp(path.join(app.getPath("temp"), "resonance-listen-along-"));
+  try {
+    let metadata = { sourceURL };
+    try {
+      metadata = await resolveLocalImportMetadata(sourceURL, signal, {}, { mediaKind });
+    } catch (error) {
+      if (/spotify\.com$/i.test(new URL(sourceURL).hostname)) throw error;
+    }
+    const preparationContext = JSON.stringify({ listenAlong: session.id, sourceKey: listenAlongSourceKey(sourceURL) });
+    const resolution = await resolveLocalImportDownloadSource(
+      sourceURL,
+      metadata,
+      signal,
+      () => undefined,
+      { searchYouTubeAudioSources },
+      { mediaKind, preparationContext },
+    );
+    const candidate = resolution?.candidates?.[0];
+    if (!candidate?.sourceURL) throw new Error("No playable source matched this Listen Along track.");
+    const imported = await importConfirmedSource({
+      sourceURL: candidate.sourceURL,
+      sourceIdentity: candidate.sourceIdentity,
+      mediaKind,
+      metadata: {
+        ...(resolution.track || {}),
+        ...(metadata || {}),
+        sourceURL,
+      },
+      preparedSoundCloudAudio: candidate.preparedSoundCloudAudio,
+      preparationContext,
+      existing: [],
+      destinationDirectory: temporaryDirectory,
+      temporaryRoot: app.getPath("temp"),
+    }, signal);
+    if (imported.kind !== "created" || !imported.filePath) throw new Error("The Listen Along source did not produce playable media.");
+    const info = await fs.stat(imported.filePath);
+    return {
+      directory: temporaryDirectory,
+      filePath: imported.filePath,
+      fileUrl: pathToFileURL(imported.filePath).href,
+      size: Number(info.size) || 0,
+      title: boundedText(imported.metadata?.title || metadata?.title || resolution.track?.title, 500) || "Untitled",
+      artist: boundedText(imported.metadata?.artist || metadata?.artist || resolution.track?.artist, 500) || "Unknown Artist",
+      album: boundedText(imported.metadata?.album || metadata?.album || resolution.track?.album, 500) || "Listen Along",
+      duration: Number(imported.metadata?.durationSeconds || metadata?.durationSeconds || resolution.track?.durationSeconds) || 0,
+      artworkURL: safeArtworkURL(imported.metadata?.artworkURL || metadata?.artworkURL || resolution.track?.artworkURL)?.href || null,
+    };
+  } catch (error) {
+    await fs.rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  } finally {
+    controller.abort();
+  }
+}
+
+async function createListenAlongSession(event, settings, role) {
+  const owner = listenAlongTrustedRenderer(event.sender);
+  const token = canonicalStreamCredential(settings.token);
+  const profileID = canonicalStreamProfileID(settings.profileID);
+  const base = canonicalStreamBaseURL(settings.baseURL);
+  const credentialEpoch = rendererCredentialEpochs.get(owner.id) || 0;
+  stopListenAlongForOwner(owner.id, "replaced");
+  const session = {
+    id: randomUUID(),
+    ownerWebContentsID: owner.id,
+    role,
+    base,
+    token,
+    profileID,
+    credentialEpoch,
+    code: null,
+    hostToken: null,
+    revision: 0,
+    snapshot: null,
+    clientHeaders: {},
+    controller: new AbortController(),
+    pollTimer: null,
+    pollBackoff: LISTEN_ALONG_POLL_INTERVAL_MS,
+    pollInFlight: false,
+    hasEmittedSnapshot: false,
+    stopped: false,
+    createdAt: Date.now(),
+    expirationTimer: null,
+  };
+  session.clientHeaders = (await clientConfigContext(base.href, profileID)).expected.request_headers;
+  let payload;
+  if (role === "host") {
+    const snapshot = canonicalListenAlongSnapshot(settings.snapshot || settings, { sourceRequired: true });
+    payload = await listenAlongRequestJSON(session, {
+      method: "POST",
+      pathname: "api/v1/listen-along",
+      body: {
+        source_url: snapshot.source_url,
+        media_kind: snapshot.media_kind,
+        position_seconds: snapshot.position_seconds,
+        is_playing: snapshot.is_playing,
+      },
+    });
+  } else {
+    const code = canonicalListenAlongCode(settings.code);
+    session.code = code;
+    payload = await listenAlongRequestJSON(session, { pathname: `api/v1/listen-along/${encodeURIComponent(code)}` });
+  }
+  const normalized = normalizeListenAlongResponse(payload, {
+    role,
+    fallbackCode: session.code,
+    fallbackRevision: 0,
+  });
+  if (normalized.role !== role) {
+    throw new ListenAlongValidationError("ROLE_MISMATCH", "The server returned an invalid Listen Along role.", 502);
+  }
+  if (role === "host") session.hostToken = listenAlongHostToken(payload.host_token ?? payload.hostToken);
+  session.code = normalized.code;
+  session.revision = normalized.revision;
+  session.snapshot = normalized.snapshot;
+  session.hasEmittedSnapshot = true;
+  session.expirationTimer = setTimeout(() => stopListenAlongSession(session.id, {
+    state: "ended",
+    error: new Error("The Listen Along room expired."),
+  }), LISTEN_ALONG_SESSION_TTL_MS);
+  session.expirationTimer.unref?.();
+  listenAlongSessions.set(session.id, session);
+  sendListenAlongEvent(session, payload);
+  sendListenAlongStatus(session, "active");
+  scheduleListenAlongPoll(session);
+  return listenAlongRendererEvent(session, payload);
+}
+
+ipcMain.handle("listen-along:create", async (event, settings = {}) => createListenAlongSession(event, settings, "host"));
+ipcMain.handle("listen-along:join", async (event, settings = {}) => createListenAlongSession(event, settings, "guest"));
+
+ipcMain.handle("listen-along:update", async (event, settings = {}) => {
+  const session = listenAlongSessionForOwner(event, settings.sessionID);
+  if (session.role !== "host" || !session.hostToken) throw new Error("Only the Listen Along host can update playback.");
+  const requestedRevision = canonicalListenAlongRevision(settings.revision, { fallback: session.revision });
+  if (requestedRevision !== session.revision) {
+    let refreshed = null;
+    try {
+      refreshed = await refreshListenAlongSession(session);
+    } catch (error) {
+      sendListenAlongStatus(session, "reconnecting", error);
+      scheduleListenAlongPoll(session, 0);
+    }
+    sendListenAlongStatus(session, "stale", new Error("Listen Along changed elsewhere; refreshing the current room."));
+    return staleListenAlongUpdateResult(session, refreshed?.payload);
+  }
+  const snapshot = canonicalListenAlongSnapshot(settings.snapshot || settings, { sourceRequired: false });
+  let payload = null;
+  let putRevision = requestedRevision;
+  let conflictRetry = false;
+  while (!payload) {
+    try {
+      payload = await listenAlongRequestJSON(session, {
+        method: "PUT",
+        pathname: `api/v1/listen-along/${encodeURIComponent(session.code)}`,
+        hostToken: session.hostToken,
+        body: { revision: putRevision, ...snapshot },
+      });
+    } catch (error) {
+      if (error?.status !== 409 || conflictRetry) {
+        if (error?.status === 409) {
+          let refreshed = null;
+          try { refreshed = await refreshListenAlongSession(session); }
+          catch (refreshError) {
+            sendListenAlongStatus(session, "reconnecting", refreshError);
+            scheduleListenAlongPoll(session, 0);
+          }
+          sendListenAlongStatus(session, "stale", new Error("Listen Along changed elsewhere; refreshing the current room."));
+          return staleListenAlongUpdateResult(session, refreshed?.payload);
+        }
+        throw error;
+      }
+      conflictRetry = true;
+      let refreshed;
+      try {
+        refreshed = await refreshListenAlongSession(session);
+      } catch (refreshError) {
+        sendListenAlongStatus(session, "reconnecting", refreshError);
+        scheduleListenAlongPoll(session, 0);
+        sendListenAlongStatus(session, "stale", new Error("Listen Along changed elsewhere; refreshing the current room."));
+        return staleListenAlongUpdateResult(session);
+      }
+      if (!refreshed.adopted) {
+        sendListenAlongStatus(session, "stale", new Error("Listen Along changed elsewhere; refreshing the current room."));
+        return staleListenAlongUpdateResult(session, refreshed.payload);
+      }
+      putRevision = session.revision;
+    }
+  }
+  const normalized = normalizeListenAlongResponse(payload, {
+    role: "host",
+    fallbackCode: session.code,
+    fallbackRevision: requestedRevision + 1,
+  });
+  session.revision = normalized.revision;
+  session.snapshot = normalized.snapshot;
+  sendListenAlongEvent(session, payload);
+  return { ok: true, ...listenAlongRendererEvent(session, payload) };
+});
+
+ipcMain.handle("listen-along:leave", async (event, settings = {}) => {
+  const session = listenAlongSessionForOwner(event, settings.sessionID);
+  let error = null;
+  if (session.role === "host" && session.hostToken) {
+    try {
+      await listenAlongRequestJSON(session, {
+        method: "DELETE",
+        pathname: `api/v1/listen-along/${encodeURIComponent(session.code)}`,
+        hostToken: session.hostToken,
+      });
+    } catch (requestError) {
+      error = requestError;
+    }
+  }
+  stopListenAlongSession(session.id, { state: "left", error });
+  if (error && error.status !== 404 && error.status !== 410) throw error;
+  return true;
+});
+
+ipcMain.handle("listen-along:source:create", async (event, settings = {}) => {
+  const session = listenAlongSessionForOwner(event, settings.sessionID);
+  if (session.role !== "guest") throw new Error("Only a Listen Along guest needs a source capability.");
+  const sourceURL = session.snapshot?.source_url;
+  const sourceKey = boundedText(settings.sourceKey, 128);
+  if (!sourceURL || !sourceKey || sourceKey !== listenAlongSourceKey(sourceURL)) {
+    throw new Error("The Listen Along source is no longer current.");
+  }
+  const mediaKind = canonicalListenAlongMediaKind(settings.mediaKind || session.snapshot.media_kind);
+  if (mediaKind !== session.snapshot.media_kind) throw new Error("The Listen Along media kind changed.");
+  for (const media of listenAlongMediaSessions.values()) {
+    if (media.sessionID === session.id && media.sourceKey === sourceKey) {
+      // Each IPC caller receives one lease. This matters when a newer host
+      // revision arrives while an older apply is still awaiting the same
+      // provider resolution: the older apply may release its lease without
+      // deleting the file owned by the newer apply.
+      media.leases = Number(media.leases) > 0 ? media.leases + 1 : 1;
+      return {
+        url: media.fileUrl,
+        capabilityID: media.capabilityID,
+        title: media.title,
+        artist: media.artist,
+        album: media.album,
+        duration: media.duration,
+        artworkURL: media.artworkURL,
+        mediaKind,
+      };
+    }
+  }
+  // A pause, seek, or play update can arrive while a new source is still
+  // being prepared. Reuse the in-flight capability instead of starting a
+  // second provider resolution/download for the same source.
+  const pendingKey = `${session.id}:${sourceKey}`;
+  const pending = listenAlongMediaPending.get(pendingKey);
+  if (pending) {
+    // Reserve the second lease before the shared operation can resolve. The
+    // older renderer apply is then free to release its lease without racing
+    // the newer apply's first use of the same capability file.
+    pending.waiters += 1;
+    return pending.promise;
+  }
+  const pendingRecord = { promise: null, waiters: 0 };
+  const operation = (async () => {
+    sendListenAlongStatus(session, "resolving");
+    const resolved = await resolveListenAlongEphemeralSource(session, sourceURL, mediaKind);
+    if (session.stopped) {
+      await fs.rm(resolved.directory, { recursive: true, force: true }).catch(() => undefined);
+      throw new Error("The Listen Along session is no longer active.");
+    }
+    const ownedMedia = [...listenAlongMediaSessions.entries()]
+      .filter(([, media]) => media.sessionID === session.id)
+      .sort((left, right) => left[1].createdAt - right[1].createdAt);
+    while (ownedMedia.length >= MAX_LISTEN_ALONG_MEDIA_SESSIONS_PER_SESSION) {
+      const oldest = ownedMedia.shift();
+      if (oldest) await releaseListenAlongMediaSession(oldest[0]);
+    }
+    const capabilityID = randomBytes(32).toString("hex");
+    const media = {
+      capabilityID,
+      sessionID: session.id,
+      ownerWebContentsID: event.sender.id,
+      sourceKey,
+      mediaKind,
+      leases: 1 + pendingRecord.waiters,
+      createdAt: Date.now(),
+      ...resolved,
+      fileUrl: resolved.fileUrl,
+    };
+    listenAlongMediaSessions.set(capabilityID, media);
+    sendListenAlongStatus(session, "active");
+    return {
+      url: resolved.fileUrl,
+      capabilityID,
+      mediaKind,
+      title: media.title,
+      artist: media.artist,
+      album: media.album,
+      duration: media.duration,
+      artworkURL: media.artworkURL,
+    };
+  })();
+  pendingRecord.promise = operation;
+  listenAlongMediaPending.set(pendingKey, pendingRecord);
+  try {
+    return await operation;
+  } finally {
+    if (listenAlongMediaPending.get(pendingKey) === pendingRecord) listenAlongMediaPending.delete(pendingKey);
+  }
+});
+
+ipcMain.handle("listen-along:source:release", async (event, value) => {
+  const capabilityID = boundedText(value?.capabilityID, 128);
+  const media = capabilityID ? listenAlongMediaSessions.get(capabilityID) : null;
+  if (!media || media.ownerWebContentsID !== event.sender.id) return false;
+  return releaseListenAlongMediaSession(capabilityID);
+});
+
+ipcMain.handle("listen-along:copy-code", (event, value) => {
+  listenAlongTrustedRenderer(event.sender);
+  const code = canonicalListenAlongCode(value);
+  clipboard.writeText(code);
+  return { copied: true };
+});
+
 async function responseBytesWithLimit(response, limit) {
   const reader = response.body?.getReader();
   if (!reader) return Buffer.alloc(0);
@@ -1257,6 +1833,7 @@ function createWindow() {
   const windowWebContentsID = window.webContents.id;
   window.webContents.once("destroyed", () => {
     revokeServerStreamsForOwner(windowWebContentsID);
+    stopListenAlongForOwner(windowWebContentsID, "window_closed");
     serverCatalogSnapshots.clear(windowWebContentsID);
     rendererCredentialFingerprints.delete(windowWebContentsID);
     rendererCredentialEpochs.delete(windowWebContentsID);
@@ -1473,6 +2050,10 @@ app.whenReady().then(async () => {
 // only window should terminate the preview instead of leaving a hidden process
 // that can recreate the window on activation.
 app.on("window-all-closed", () => app.quit());
+app.on("before-quit", () => {
+  applicationQuitRequested = true;
+  stopAllListenAlong("app_closed");
+});
 
 ipcMain.handle("update:check", async () => {
   if (!app.isPackaged) return { supported: false };
@@ -1726,6 +2307,7 @@ ipcMain.handle("server:credentials:save", async (event, value) => {
   if (previousFingerprint !== nextFingerprint) {
     rendererCredentialEpochs.set(event.sender.id, (rendererCredentialEpochs.get(event.sender.id) || 0) + 1);
     revokeServerStreamsForOwner(event.sender.id);
+    stopListenAlongForOwner(event.sender.id, "credentials_changed");
     serverCatalogSnapshots.clear(event.sender.id);
   }
   rendererCredentialFingerprints.set(event.sender.id, nextFingerprint);
@@ -1778,6 +2360,7 @@ ipcMain.handle("account:sign-in", async (_event, value) => {
 ipcMain.handle("account:session:refresh", async () => refreshCurrentAccountSession());
 
 ipcMain.handle("account:sign-out", async () => {
+  stopAllListenAlong("signed_out");
   const active = accountSession || await readAccountSession();
   if (active) {
     const configuration = await fetchAuthConfiguration(active.baseURL).catch(() => null);

@@ -65,6 +65,7 @@ class MainActivity : ComponentActivity() {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
         }
         viewModel.handleAccountCallback(intent?.data)
+        handleListenAlongIntent(intent)
         setContent {
             val state by viewModel.uiState.collectAsStateWithLifecycle()
             val updateState by updateManager.state.collectAsStateWithLifecycle()
@@ -108,6 +109,18 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         viewModel.handleAccountCallback(intent.data)
+        handleListenAlongIntent(intent)
+    }
+
+    private fun handleListenAlongIntent(intent: Intent?) {
+        val uri = intent?.data ?: return
+        if (uri.scheme != "resonance") return
+        val code = when {
+            uri.host == "listen" && uri.path == "/join" -> uri.getQueryParameter("code")
+            uri.host == "listen-along" -> uri.pathSegments.lastOrNull()
+            else -> null
+        }
+        code?.takeIf(String::isNotBlank)?.let(viewModel::joinListenAlong)
     }
 
     private fun downloadUpdate(update: AndroidUpdateInfo) {

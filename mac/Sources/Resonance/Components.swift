@@ -387,6 +387,25 @@ struct TrackArtworkView: View {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
+            } else if let artworkURL = track.artworkURL.flatMap(URL.init(string:)),
+                      artworkURL.scheme?.lowercased() == "https",
+                      artworkURL.host?.isEmpty == false {
+                CroppedRemoteArtwork(url: artworkURL) { isLoading in
+                    ZStack {
+                        ArtworkView(
+                            style: track.artwork,
+                            symbol: symbol,
+                            symbolSize: symbolSize,
+                            cornerRadius: cornerRadius,
+                            glow: glow
+                        )
+                        if isLoading {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white.opacity(0.78))
+                        }
+                    }
+                }
             } else {
                 ArtworkView(
                     style: track.artwork,
