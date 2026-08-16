@@ -1091,9 +1091,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         case .corrupt(let data):
             stored = nil
             libraryWasCorrupt = true
-            // Preserve the undecodable bytes before the user makes any new library changes.
-            // This keeps manual recovery possible without boot-looping the app.
-            defaults.set(data, forKey: Self.libraryRecoveryKey)
+            // Preserve only a sanitized recovery copy. Provider rendition URLs
+            // are expiring capabilities and must not become a durable backup.
+            if let sanitized = MacPersistentMediaURLPolicy.sanitizedRecoveryData(data) {
+                defaults.set(sanitized, forKey: Self.libraryRecoveryKey)
+            } else {
+                defaults.removeObject(forKey: Self.libraryRecoveryKey)
+            }
         }
         let restoredSyncProfileID = stored?.syncProfileID ?? "default"
         let restoredSyncProfileName = stored?.syncProfileName
@@ -1121,8 +1125,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         // A file can be temporarily unavailable when an external or network volume is
         // disconnected. Keep its library record and let playback surface availability.
         var migratedPersistedFileURLs = false
+        var migratedPersistedMediaURLs = false
         let existingTracks = (stored?.tracks ?? []).map { track in
-            var migrated = track
+            var migrated = MacPersistentMediaURLPolicy.sanitized(track)
+            if migrated.sourceURL != track.sourceURL || migrated.downloadSourceURL != track.downloadSourceURL {
+                migratedPersistedMediaURLs = true
+            }
             if let fileURL = migrated.fileURL,
                let migratedURL = legacyApplicationSupportMigration?.migratedFileURL(fileURL) {
                 migrated.fileURL = migratedURL
@@ -1206,7 +1214,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         accountEmail = restoredAccountSession?.email
         accountRole = restoredAccountSession?.role
         accountDisplayName = restoredAccountSession?.profileDisplayName
-        accountImageURL = restoredAccountSession?.imageURL
+        accountImageURL = restoredAccountSession?.imageURL.flatMap(MacArtworkURLPolicy.allowedPublicURL)
         if restoredAccountSession != nil {
             Self.saveServerToken("")
             Self.saveServerToken("", key: Self.adminCredentialKey)
@@ -1362,7 +1370,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
         if loadPersistedLibrary, stored == nil, !libraryWasCorrupt {
             migrateLegacyLibraryIfNeeded()
-        } else if migratedPersistedFileURLs || didMigrateUnlinkedDownloads {
+        } else if migratedPersistedFileURLs || migratedPersistedMediaURLs || didMigrateUnlinkedDownloads {
             persistLibrary()
         }
         didFinishInitialization = true
@@ -2084,7 +2092,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         accountEmail = session.email
         accountRole = session.role
         accountDisplayName = session.profileDisplayName
-        accountImageURL = session.imageURL
+        accountImageURL = session.imageURL.flatMap(MacArtworkURLPolicy.allowedPublicURL)
         serverURLString = session.baseURL.absoluteString
         serverToken = session.accessToken
         serverAdminToken = session.accessToken
@@ -2136,7 +2144,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             accountEmail = refreshed.email
             accountRole = refreshed.role
             accountDisplayName = refreshed.profileDisplayName
-            accountImageURL = refreshed.imageURL
+            accountImageURL = refreshed.imageURL.flatMap(MacArtworkURLPolicy.allowedPublicURL)
             serverURLString = refreshed.baseURL.absoluteString
             serverToken = refreshed.accessToken
             serverAdminToken = refreshed.accessToken
@@ -3266,18 +3274,22 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 let profileID = syncProfileID
                 let songID = try Self.validatedRemoteSongIdentifier(song.id)
                 let endpoint = base.appendingPathComponent("api/v1/admin/songs", isDirectory: true)
-                var request = URLRequest(url: endpoint.appendingPathComponent(songID, isDirectory: false))
+                let requestURL = endpoint.appendingPathComponent(songID, isDirectory: false)
+                guard Self.sameOrigin(requestURL, base) else { throw ServerSyncError.invalidURL }
+                var request = URLRequest(url: requestURL)
                 request.httpMethod = "DELETE"
                 request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
                 setProfileHeader(on: &request, profileID: profileID)
-                let (_, response) = try await networkSession.data(for: request)
-                if let http = response as? HTTPURLResponse {
-                    invalidateRemoteCatalogAuthorityAfterCommittedMutation(
-                        base: base,
-                        profileID: profileID,
-                        statusCode: http.statusCode
-                    )
-                }
+                let (_, response) = try await MacBoundedResponse.data(
+                    for: networkSession,
+                    request: request,
+                    limit: 64 * 1_024
+                )
+                invalidateRemoteCatalogAuthorityAfterCommittedMutation(
+                    base: base,
+                    profileID: profileID,
+                    statusCode: response.statusCode
+                )
                 try Self.validate(response)
                 remoteSongs.removeAll { $0.id == song.id }
                 selectedRemoteSongIDs.remove(song.id)
@@ -3892,8 +3904,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         remoteID: remote.id,
                         sourceServer: ServerSongIdentity.normalizedOrigin(base),
                         syncProfileID: syncProfileID,
-                        sourceURL: remote.sourceURL ?? existingIndex.flatMap { tracks[$0].sourceURL },
-                        downloadSourceURL: remote.sourceURL ?? existingIndex.flatMap { tracks[$0].downloadSourceURL },
+                        sourceURL: MacPersistentMediaURLPolicy.persistentString(
+                            remote.sourceURL ?? existingIndex.flatMap { tracks[$0].sourceURL }
+                        ),
+                        downloadSourceURL: MacPersistentMediaURLPolicy.persistentString(
+                            remote.sourceURL ?? existingIndex.flatMap { tracks[$0].downloadSourceURL }
+                        ),
                         contentSHA256: resolvedContentSHA256,
                         preservesUnlinkedImport: existingIndex.flatMap { tracks[$0].preservesUnlinkedImport } ?? false,
                         dateAdded: existingIndex.map { tracks[$0].dateAdded } ?? .now
@@ -4189,9 +4205,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         setProfileHeader(on: &request, profileID: profileID)
         applyCurrentClientConfigHeaders(to: &request, base: base, fallbackToken: adminToken)
-        var (data, response) = try await networkSession.data(
-            for: request,
-            delegate: MacRejectRedirectDelegate()
+        var (data, response) = try await MacBoundedResponse.data(
+            for: networkSession,
+            request: request,
+            limit: 2 * 1_024 * 1_024
         )
         if track.kind != .video,
            Self.requiresLegacySourceLinkSchema(response: response, data: data) {
@@ -4205,18 +4222,17 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 mediaKind: "audio",
                 schemaVersion: 2
             ))
-            (data, response) = try await networkSession.data(
-                for: request,
-                delegate: MacRejectRedirectDelegate()
+            (data, response) = try await MacBoundedResponse.data(
+                for: networkSession,
+                request: request,
+                limit: 2 * 1_024 * 1_024
             )
         }
-        if let http = response as? HTTPURLResponse {
-            invalidateRemoteCatalogAuthorityAfterCommittedMutation(
-                base: base,
-                profileID: profileID,
-                statusCode: http.statusCode
-            )
-        }
+        invalidateRemoteCatalogAuthorityAfterCommittedMutation(
+            base: base,
+            profileID: profileID,
+            statusCode: response.statusCode
+        )
         guard matchesGenericFileUploadContext(
             base: base,
             profileID: profileID,
@@ -4720,14 +4736,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     ) -> Track? {
         guard let index = tracks.firstIndex(where: { $0.id == trackID }),
               tracks[index].fileURL != nil else { return nil }
-        let sourceURL = source.sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let downloadSourceURL = source.downloadSourceURL?.absoluteString
+        let sourceURL = MacPersistentMediaURLPolicy.persistentString(source.sourceURL) ?? ""
+        let downloadSourceURL = MacPersistentMediaURLPolicy.persistentString(source.downloadSourceURL)
         var changed = false
         if !sourceURL.isEmpty, tracks[index].sourceURL != sourceURL {
             tracks[index].sourceURL = sourceURL
             changed = true
         }
-        if let downloadSourceURL, tracks[index].downloadSourceURL != downloadSourceURL {
+        if tracks[index].downloadSourceURL != downloadSourceURL {
             tracks[index].downloadSourceURL = downloadSourceURL
             changed = true
         }
@@ -4768,8 +4784,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             remoteID: nil,
             sourceServer: nil,
             syncProfileID: nil,
-            sourceURL: imported.metadata.sourceURL,
-            downloadSourceURL: imported.downloadSourceURL?.absoluteString,
+            sourceURL: MacPersistentMediaURLPolicy.persistentString(imported.metadata.sourceURL),
+            downloadSourceURL: MacPersistentMediaURLPolicy.persistentString(imported.downloadSourceURL),
             sourceSHA256: imported.sourceSHA256,
             contentSHA256: imported.contentSHA256,
             preservesUnlinkedImport: true,
@@ -5539,7 +5555,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private func persistLibrary() {
         let stored = StoredLibrary(
-            tracks: tracks,
+            tracks: tracks.map { MacPersistentMediaURLPolicy.sanitized($0) },
             playlists: playlists,
             favorites: favorites,
             playlistRevision: playlistRevision,
@@ -5607,7 +5623,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 url: base.appendingPathComponent("api/v1/profiles"),
                 includeProfile: false
             )
-            let (data, response) = try await networkSession.data(for: request)
+            let (data, response) = try await MacBoundedResponse.data(
+                for: networkSession,
+                request: request,
+                limit: 512 * 1_024
+            )
             try Self.validate(response)
             let payload = try JSONDecoder().decode(SyncProfilesResponse.self, from: data)
             let requestedProfile = Self.syncProfile(matching: trimmed, in: payload.profiles)
@@ -5755,7 +5775,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
             setProfileHeader(on: &request)
 
-            let (data, response) = try await networkSession.data(for: request)
+            let (data, response) = try await MacBoundedResponse.data(
+                for: networkSession,
+                request: request,
+                limit: 128 * 1_024
+            )
             try Task.checkCancellation()
             try Self.validate(response)
             let result = try JSONDecoder().decode(RemoteMetadataBackfill.self, from: data)
@@ -5823,34 +5847,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         for request: URLRequest,
         limit: Int
     ) async throws -> (Data, HTTPURLResponse) {
-        do {
-            let (bytes, rawResponse) = try await networkSession.bytes(
-                for: request,
-                delegate: MacRejectRedirectDelegate()
-            )
-            guard let response = rawResponse as? HTTPURLResponse else {
-                throw MacBoundedResponseError.invalidResponse
-            }
-            if let declared = response.value(forHTTPHeaderField: "Content-Length").flatMap(Int.init),
-               declared > limit {
-                throw MacBoundedResponseError.responseTooLarge
-            }
-            var data = Data()
-            data.reserveCapacity(min(limit, 64 * 1_024))
-            for try await byte in bytes {
-                try Task.checkCancellation()
-                guard data.count < limit else {
-                    throw MacBoundedResponseError.responseTooLarge
-                }
-                data.append(byte)
-            }
-            return (data, response)
-        } catch {
-            if Task.isCancelled || (error as? URLError)?.code == .cancelled {
-                throw CancellationError()
-            }
-            throw error
-        }
+        try await MacBoundedResponse.data(
+            for: networkSession,
+            request: request,
+            limit: limit
+        )
     }
 
     private static func isJSONResponse(_ response: HTTPURLResponse) -> Bool {
@@ -6335,13 +6336,14 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(ListeningHistoryUploadDocument(entries: entries))
-        let (data, response) = try await networkSession.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw ServerSyncError.invalidResponse
-        }
-        if http.statusCode == 404 || http.statusCode == 405 { return false }
-        guard (200..<300).contains(http.statusCode) else {
-            throw Self.serverError(status: http.statusCode, data: data)
+        let (data, response) = try await MacBoundedResponse.data(
+            for: networkSession,
+            request: request,
+            limit: 128 * 1_024
+        )
+        if response.statusCode == 404 || response.statusCode == 405 { return false }
+        guard (200..<300).contains(response.statusCode) else {
+            throw Self.serverError(status: response.statusCode, data: data)
         }
         return true
     }
@@ -6356,16 +6358,17 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         )
         components?.queryItems = [URLQueryItem(name: "limit", value: "2000")]
         guard let url = components?.url else { throw ServerSyncError.invalidURL }
-        let (data, response) = try await networkSession.data(for: authenticatedRequest(
-            url: url,
-            profileID: profileID
-        ))
-        guard let http = response as? HTTPURLResponse else {
-            throw ServerSyncError.invalidResponse
-        }
-        if http.statusCode == 404 || http.statusCode == 405 { return nil }
-        guard (200..<300).contains(http.statusCode) else {
-            throw Self.serverError(status: http.statusCode, data: data)
+        let (data, response) = try await MacBoundedResponse.data(
+            for: networkSession,
+            request: authenticatedRequest(
+                url: url,
+                profileID: profileID
+            ),
+            limit: 2 * 1_024 * 1_024
+        )
+        if response.statusCode == 404 || response.statusCode == 405 { return nil }
+        guard (200..<300).contains(response.statusCode) else {
+            throw Self.serverError(status: response.statusCode, data: data)
         }
         return try JSONDecoder().decode(RemoteListeningHistoryDocument.self, from: data)
     }
@@ -6608,10 +6611,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private func fetchRemotePlaylists(base: URL) async throws -> RemotePlaylistsDocument {
         let url = base.appendingPathComponent("api/v1/playlists")
-        let (data, response) = try await networkSession.data(for: authenticatedRequest(url: url))
-        guard let status = (response as? HTTPURLResponse)?.statusCode else {
-            throw ServerSyncError.invalidResponse
-        }
+        let (data, response) = try await MacBoundedResponse.data(
+            for: networkSession,
+            request: authenticatedRequest(url: url),
+            limit: 2 * 1_024 * 1_024
+        )
+        let status = response.statusCode
         guard status == 200 else { throw Self.serverError(status: status, data: data) }
         return try JSONDecoder().decode(RemotePlaylistsDocument.self, from: data)
     }
@@ -6624,10 +6629,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(document)
-        let (data, response) = try await networkSession.data(for: request)
-        guard let status = (response as? HTTPURLResponse)?.statusCode else {
-            throw ServerSyncError.invalidResponse
-        }
+        let (data, response) = try await MacBoundedResponse.data(
+            for: networkSession,
+            request: request,
+            limit: 2 * 1_024 * 1_024
+        )
+        let status = response.statusCode
         if status == 200 {
             return .updated(try JSONDecoder().decode(RemotePlaylistsDocument.self, from: data))
         }
@@ -6894,7 +6901,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private func fetchRemoteCatalog(base: URL) async throws -> [RemoteSong] {
         let url = base.appendingPathComponent("api/v1/songs")
-        let (data, response) = try await networkSession.data(for: authenticatedRequest(url: url))
+        let (data, response) = try await MacBoundedResponse.data(
+            for: networkSession,
+            request: authenticatedRequest(url: url),
+            limit: 16 * 1_024 * 1_024
+        )
         try Self.validate(response)
         return try JSONDecoder().decode(RemoteCatalog.self, from: data).songs
     }
@@ -6930,6 +6941,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 let endpoint = base
                     .appendingPathComponent("api/v1/admin/songs", isDirectory: true)
                     .appendingPathComponent(songID, isDirectory: false)
+                guard Self.sameOrigin(endpoint, base) else { throw ServerSyncError.invalidURL }
                 var request = URLRequest(url: endpoint)
                 request.httpMethod = "PATCH"
                 request.httpBody = try JSONEncoder().encode(SourceLinkUploadDocument(
@@ -6941,7 +6953,11 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 request.setValue("application/json", forHTTPHeaderField: "Accept")
                 setProfileHeader(on: &request, profileID: profileID)
                 applyCurrentClientConfigHeaders(to: &request, base: base, fallbackToken: adminToken)
-                let (_, response) = try await networkSession.data(for: request)
+                let (_, response) = try await MacBoundedResponse.data(
+                    for: networkSession,
+                    request: request,
+                    limit: 64 * 1_024
+                )
                 try Self.validate(response)
                 repairedAny = true
             } catch {
@@ -8148,6 +8164,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         let cutoff = now.addingTimeInterval(-remoteSongMetadataCacheLifetime)
         let freshest = cache
             .filter { $0.value.cachedAt >= cutoff }
+            .filter { !MacPersistentMediaURLPolicy.isShortLivedProviderMedia($0.value.metadata.sourceURL) }
             .sorted { $0.value.cachedAt > $1.value.cachedAt }
             .prefix(remoteSongMetadataCacheLimit)
         return Dictionary(uniqueKeysWithValues: freshest.map { ($0.key, $0.value) })

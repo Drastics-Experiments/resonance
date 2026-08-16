@@ -93,17 +93,6 @@ private enum MobileBoundedDownloadError: LocalizedError {
     }
 }
 
-private enum MobileBoundedResponseError: LocalizedError {
-    case tooLarge(limit: Int)
-
-    var errorDescription: String? {
-        switch self {
-        case .tooLarge(let limit):
-            "The server response exceeded the \(limit)-byte safety limit."
-        }
-    }
-}
-
 private actor MobileRemoteMetadataResolutionBroker {
     private struct Key: Hashable, Sendable {
         let scope: UInt64
@@ -219,24 +208,6 @@ struct MobileRawUploadLease: Equatable, Sendable {
     let profileID: String
     let adminTokenFingerprint: String
     let requestContext: MobileClientRequestContext
-}
-
-private final class MobileSameOriginRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    let origin: URL
-
-    init(origin: URL) {
-        self.origin = origin
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        completionHandler(MobileSameOriginPolicy.matches(request.url, origin) ? request : nil)
-    }
 }
 
 final class MobileBoundedDownloadOperation: NSObject, URLSessionDataDelegate, @unchecked Sendable {
@@ -1204,9 +1175,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         let resolved = value.scheme == nil
             ? URL(string: value.relativeString, relativeTo: baseURL)?.absoluteURL
             : value
-        guard resolved?.scheme?.lowercased() == "https",
-              resolved?.host?.isEmpty == false else { return nil }
-        return resolved
+        guard let resolved else { return nil }
+        return MobileArtworkURLPolicy.validated(resolved, allowedOrigin: baseURL)
+            ?? MobileArtworkURLPolicy.validated(resolved)
     }
 
     private func removeOrphanedTransferArtifacts() {
@@ -1229,11 +1200,13 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     var listenAlongCurrentSourceURL: String? {
         guard let track = currentTrack else { return nil }
         if let sourceURL = track.sourceURL,
-           !sourceURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return sourceURL
+           let canonical = MobileTrackPersistencePolicy.canonicalSourceURL(sourceURL) {
+            return canonical
         }
         guard let remoteID = track.remoteID else { return nil }
-        return remoteSongs.first(where: { $0.id == remoteID })?.sourceURL
+        return remoteSongs.first(where: { $0.id == remoteID })?.sourceURL.flatMap {
+            MobileTrackPersistencePolicy.canonicalSourceURL($0)
+        }
     }
 
     var listenAlongCurrentMediaKind: String {
@@ -1445,7 +1418,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 UserDefaults.standard.set(encoded, forKey: cacheScope.storageKey)
             }
             adoptClientConfiguration(verified, status: "Feature policy revision \(verified.payload.revision)")
-        } catch is MobileBoundedResponseError {
+        } catch is MobileSensitiveResponseError {
             guard isCurrentClientConfigRequest(
                 generation: requestGeneration,
                 origin: origin,
@@ -1542,59 +1515,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         origin: URL,
         maximumBytes: Int = MobileBoundedResponsePolicy.clientConfigMaximumBytes
     ) async throws -> (Data, URLResponse) {
-        guard MobileSameOriginPolicy.matches(request.url, origin) else {
-            throw URLError(.dataNotAllowed)
-        }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        configuration.urlCache = nil
-        let delegate = MobileSameOriginRedirectDelegate(origin: origin)
-        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
-        let (bytes, response) = try await session.bytes(for: request)
-        guard MobileSameOriginPolicy.matches(response.url, origin) else {
-            throw URLError(.dataNotAllowed)
-        }
-        if response.expectedContentLength > 0,
-           response.expectedContentLength > Int64(maximumBytes) {
-            throw MobileBoundedResponseError.tooLarge(limit: maximumBytes)
-        }
-        var data = Data()
-        if response.expectedContentLength > 0 {
-            data.reserveCapacity(min(Int(response.expectedContentLength), maximumBytes))
-        }
-        for try await byte in bytes {
-            guard MobileBoundedResponsePolicy.accepts(
-                currentCount: data.count,
-                adding: 1,
-                maximum: maximumBytes
-            ) else {
-                throw MobileBoundedResponseError.tooLarge(limit: maximumBytes)
-            }
-            data.append(byte)
-        }
+        let (data, response) = try await MobileSensitiveNetworkPolicy.data(
+            for: request,
+            origin: origin,
+            maximumBytes: maximumBytes
+        )
         return (data, response)
-    }
-
-    private func sameOriginUpload(
-        for request: URLRequest,
-        fromFile source: URL,
-        origin: URL
-    ) async throws -> (Data, URLResponse) {
-        guard MobileSameOriginPolicy.matches(request.url, origin) else {
-            throw URLError(.dataNotAllowed)
-        }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        configuration.urlCache = nil
-        let delegate = MobileSameOriginRedirectDelegate(origin: origin)
-        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
-        let result = try await session.upload(for: request, fromFile: source)
-        guard MobileSameOriginPolicy.matches(result.1.url, origin) else {
-            throw URLError(.dataNotAllowed)
-        }
-        return result
     }
 
     private func isCurrentClientConfigRequest(
@@ -1911,7 +1837,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             throw MobileTransferPolicyChangedError.changed
         }
         let source = rawSource.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !source.isEmpty, source.utf8.count <= 8_192 else {
+        guard !source.isEmpty, source.count <= MobileDurableURLPolicy.maximumCharacters else {
             throw LocalImportError(
                 stage: .resolvingMetadata,
                 code: "INVALID_REVIEW_SOURCE",
@@ -2159,10 +2085,19 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     ) -> MobileTrack? {
         guard let index = tracks.firstIndex(where: { $0.id == trackID }),
               !tracks[index].relativePath.isEmpty else { return nil }
-        let sourceURL = source.sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let downloadSourceURL = source.downloadSourceURL?.absoluteString
+        let sanitizedTrack = MobileTrackPersistencePolicy.sanitized(tracks[index])
         var changed = false
-        if !sourceURL.isEmpty, tracks[index].sourceURL != sourceURL {
+        if sanitizedTrack != tracks[index] {
+            tracks[index] = sanitizedTrack
+            changed = true
+        }
+        let sourceURL = MobileTrackPersistencePolicy.canonicalSourceURL(source.sourceURL)
+        let legitimateServerOrigin = tracks[index].sourceServer.flatMap(URL.init(string:))
+        let downloadSourceURL = MobileTrackPersistencePolicy.persistedDownloadSourceURL(
+            source.downloadSourceURL,
+            legitimateServerOrigin: legitimateServerOrigin
+        )
+        if let sourceURL, tracks[index].sourceURL != sourceURL {
             tracks[index].sourceURL = sourceURL
             changed = true
         }
@@ -2201,6 +2136,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         do {
             try fileManager.moveItem(at: imported.fileURL, to: destination)
             let id = UUID()
+            let sourceURL = MobileTrackPersistencePolicy.canonicalSourceURL(imported.metadata.sourceURL)
+            let downloadSourceURL = MobileTrackPersistencePolicy.persistedDownloadSourceURL(
+                imported.downloadSourceURL
+            )
             let track = MobileTrack(
                 id: id,
                 title: imported.metadata.title,
@@ -2208,8 +2147,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 album: imported.metadata.album ?? "Imported",
                 duration: imported.duration,
                 relativePath: filename,
-                sourceURL: imported.metadata.sourceURL,
-                downloadSourceURL: imported.downloadSourceURL?.absoluteString,
+                sourceURL: sourceURL,
+                downloadSourceURL: downloadSourceURL,
                 artworkFilename: saveArtwork(imported.artworkData, for: id),
                 artworkScanComplete: true,
                 sourceSHA256: imported.sourceSHA256,
@@ -3830,7 +3769,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         updated.artist = metadata.artist
         updated.album = metadata.album ?? "Imported"
         updated.duration = metadata.durationSeconds.map(TimeInterval.init)
-        updated.artworkURL = metadata.artworkURL.flatMap(URL.init(string:))
+        updated.artworkURL = metadata.artworkURL
+            .flatMap(URL.init(string:))
+            .flatMap { MobileArtworkURLPolicy.validated($0) }
         updated.isMetadataLoading = false
         return updated
     }
@@ -4250,6 +4191,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             }
             let catalogSong = remoteSongs.first(where: { $0.id == song.id }) ?? song
             let trackID = UUID()
+            let persistedSourceURL = MobileTrackPersistencePolicy.canonicalSourceURL(song.sourceURL)
+            let persistedDownloadSourceURL = MobileTrackPersistencePolicy.persistedDownloadSourceURL(
+                song.sourceURL.flatMap(URL.init(string:)),
+                legitimateServerOrigin: baseURL
+            )
             tracks.append(MobileTrack(
                 id: trackID,
                 title: metadata.title ?? catalogSong.title,
@@ -4263,8 +4209,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 remoteID: song.id,
                 sourceServer: baseURL.absoluteString,
                 syncProfileID: profileID,
-                sourceURL: song.sourceURL,
-                downloadSourceURL: song.sourceURL,
+                sourceURL: persistedSourceURL,
+                downloadSourceURL: persistedDownloadSourceURL,
                 artworkFilename: saveArtwork(artworkData, for: trackID),
                 artworkScanComplete: artworkData != nil,
                 contentSHA256: downloaded.sha256,
@@ -4364,7 +4310,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             var catalogRequest = URLRequest(url: baseURL.appendingPathComponent("api/v1/songs"))
             catalogRequest.setValue("Bearer \(requestAccessToken)", forHTTPHeaderField: "Authorization")
             setProfileHeader(on: &catalogRequest)
-            let (catalogData, response) = try await URLSession.shared.data(for: catalogRequest)
+            let (catalogData, response) = try await sameOriginData(
+                for: catalogRequest,
+                origin: baseURL,
+                maximumBytes: MobileBoundedResponsePolicy.catalogMaximumBytes
+            )
             guard let catalogStatus = (response as? HTTPURLResponse)?.statusCode else {
                 throw URLError(.badServerResponse)
             }
@@ -4624,10 +4574,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func saveArtwork(_ data: Data?, for trackID: UUID) -> String? {
-        guard let data, UIImage(data: data) != nil else { return nil }
+        guard let data,
+              let safeData = MobileArtworkImagePolicy.jpegData(from: data) else { return nil }
         let filename = trackID.uuidString + ".artwork"
         do {
-            try data.write(to: artworkDirectory.appendingPathComponent(filename), options: .atomic)
+            try safeData.write(to: artworkDirectory.appendingPathComponent(filename), options: .atomic)
             artworkCache.removeValue(forKey: filename)
             return filename
         } catch {
@@ -4689,12 +4640,23 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response): (Data, URLResponse)
+            if sameOrigin(artworkURL, baseURL) {
+                (data, response) = try await sameOriginData(
+                    for: request,
+                    origin: baseURL,
+                    maximumBytes: MobileBoundedResponsePolicy.artworkMaximumBytes
+                )
+            } else {
+                (data, response) = try await MobileArtworkURLPolicy.data(
+                    for: request,
+                    maximumBytes: MobileBoundedResponsePolicy.artworkMaximumBytes
+                )
+            }
             guard let response = response as? HTTPURLResponse,
                   (200...299).contains(response.statusCode),
-                  data.count <= 10 * 1_024 * 1_024,
-                  UIImage(data: data) != nil else { return nil }
-            return data
+                  let safeArtwork = MobileArtworkImagePolicy.jpegData(from: data) else { return nil }
+            return safeArtwork
         } catch {
             return nil
         }
@@ -6232,7 +6194,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         request.setValue("Bearer \(serverAdminToken)", forHTTPHeaderField: "Authorization")
         setProfileHeader(on: &request)
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await sameOriginData(
+                for: request,
+                origin: baseURL,
+                maximumBytes: MobileBoundedResponsePolicy.profileMaximumBytes
+            )
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             guard status == 204 else {
                 let detail = (try? JSONDecoder().decode(ServerErrorPayload.self, from: data).error)
@@ -6384,7 +6350,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
         setProfileHeader(on: &request)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await sameOriginData(
+            for: request,
+            origin: baseURL,
+            maximumBytes: MobileBoundedResponsePolicy.playlistMaximumBytes
+        )
         guard let status = (response as? HTTPURLResponse)?.statusCode else {
             throw URLError(.badServerResponse)
         }
@@ -6403,7 +6373,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONEncoder().encode(document)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await sameOriginData(
+            for: request,
+            origin: baseURL,
+            maximumBytes: MobileBoundedResponsePolicy.playlistMaximumBytes
+        )
         guard let status = (response as? HTTPURLResponse)?.statusCode else {
             throw URLError(.badServerResponse)
         }
@@ -6701,7 +6675,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             knownRemotePlaylistIDs: knownRemotePlaylistIDs,
             dirtyPlaylistIDs: dirtyPlaylistIDs,
             deletedPlaylistIDs: deletedPlaylistIDs,
-            playlistSyncServerURL: playlistSyncServerURL,
+            playlistSyncServerURL: MobileServerEndpointPolicy.canonicalStoredServerKey(playlistSyncServerURL),
             remoteLikedSongIDs: remoteLikedSongIDs,
             dirtyRemoteLikeSongIDs: dirtyRemoteLikeSongIDs,
             likesDirty: likesDirty
@@ -6736,7 +6710,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         knownRemotePlaylistIDs = state.knownRemotePlaylistIDs
         dirtyPlaylistIDs = state.dirtyPlaylistIDs
         deletedPlaylistIDs = state.deletedPlaylistIDs
-        playlistSyncServerURL = state.playlistSyncServerURL
+        playlistSyncServerURL = MobileServerEndpointPolicy.canonicalStoredServerKey(state.playlistSyncServerURL)
         remoteLikedSongIDs = state.remoteLikedSongIDs
         dirtyRemoteLikeSongIDs = state.dirtyRemoteLikeSongIDs
         likesDirty = state.likesDirty || !dirtyRemoteLikeSongIDs.isEmpty
@@ -6771,7 +6745,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         do {
             var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/profiles"))
             request.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await sameOriginData(
+                for: request,
+                origin: baseURL,
+                maximumBytes: MobileBoundedResponsePolicy.profileMaximumBytes
+            )
             guard let status = (response as? HTTPURLResponse)?.statusCode, status == 200 else {
                 throw URLError(.badServerResponse)
             }
@@ -6788,7 +6766,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             createRequest.setValue("Bearer \(serverToken)", forHTTPHeaderField: "Authorization")
             createRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
             createRequest.httpBody = try JSONEncoder().encode(["name": name])
-            let (createdData, createResponse) = try await URLSession.shared.data(for: createRequest)
+            let (createdData, createResponse) = try await sameOriginData(
+                for: createRequest,
+                origin: baseURL,
+                maximumBytes: MobileBoundedResponsePolicy.profileMaximumBytes
+            )
             guard let createStatus = (createResponse as? HTTPURLResponse)?.statusCode,
                   createStatus == 201 else {
                 let message = try? JSONDecoder().decode(ServerErrorPayload.self, from: createdData).error
@@ -6921,15 +6903,15 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             history: historyReferences
         )
         let stored = MobileStoredLibrary(
-            tracks: tracks,
+            tracks: tracks.map(MobileTrackPersistencePolicy.sanitized),
             playlists: playlists,
             favorites: favorites,
-            serverURL: serverURL,
+            serverURL: MobileServerEndpointPolicy.canonicalStoredServerURL(serverURL) ?? "",
             playlistRevision: playlistRevision,
             knownRemotePlaylistIDs: knownRemotePlaylistIDs,
             dirtyPlaylistIDs: dirtyPlaylistIDs,
             deletedPlaylistIDs: deletedPlaylistIDs,
-            playlistSyncServerURL: playlistSyncServerURL,
+            playlistSyncServerURL: MobileServerEndpointPolicy.canonicalStoredServerKey(playlistSyncServerURL),
             syncProfileID: syncProfileID,
             syncProfileName: syncProfileName,
             remoteLikedSongIDs: remoteLikedSongIDs,
@@ -7067,6 +7049,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             return
         }
 
+        let sanitizedTracks = stored.tracks.map(MobileTrackPersistencePolicy.sanitized)
+        let didSanitizePersistedMediaLinks = sanitizedTracks != stored.tracks
+        stored.tracks = sanitizedTracks
+
         remoteSongMetadataCache = MobileRemoteSongMetadataCachePolicy.normalized(
             stored.remoteSongMetadataCache ?? [:]
         )
@@ -7163,11 +7149,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         migrateLegacyClipRangeKeys(fallbackServerURL: fallbackServerURL)
         let storedProfileStates = stored.profileStates ?? [:]
         profileSyncStates = storedProfileStates.filter { context, _ in
-            MobileServerEndpointPolicy.canonicalContext(context) == context
+            MobileServerEndpointPolicy.isCanonicalContext(context)
         }
         for (context, state) in storedProfileStates {
             let canonicalContext = MobileServerEndpointPolicy.canonicalContext(context)
-            if profileSyncStates[canonicalContext] == nil {
+            if MobileServerEndpointPolicy.isCanonicalContext(canonicalContext),
+               profileSyncStates[canonicalContext] == nil {
                 profileSyncStates[canonicalContext] = state
             }
         }
@@ -7224,7 +7211,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             }
             dirtyPlaylistIDs.formUnion(playlists.filter { !$0.isSystem }.map(\.id))
             save()
-        } else if didMigrateUnlinkedDownloads {
+        } else if didMigrateUnlinkedDownloads || didSanitizePersistedMediaLinks {
             save()
         }
     }
@@ -7696,7 +7683,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                     return
                 }
                 try Task.checkCancellation()
-                guard let image = UIImage(data: data),
+                guard let image = MobileArtworkImagePolicy.image(from: data),
                       self.currentTrack?.remoteID == remoteID else { return }
                 self.remoteNowPlayingArtworkCache = [remoteID: image]
                 self.nowPlayingArtworkCacheKey = nil

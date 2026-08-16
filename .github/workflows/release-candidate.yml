@@ -29,14 +29,14 @@ jobs:
       source_sha: ${{ steps.source.outputs.sha }}
       source_tree: ${{ steps.source.outputs.tree }}
       desktop_signing: ${{ steps.release.outputs.desktop_signing }}
-      unsigned_desktop: ${{ steps.release.outputs.unsigned_desktop }}
 
     steps:
       - name: Check out candidate source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Validate source and version
         id: release
@@ -54,9 +54,9 @@ jobs:
           [[ "$POLICY_SCHEMA" == "1" ]]
           [[ "$POLICY_VERSION" == "$VERSION" ]]
           [[ "$POLICY_BUILD" == "$BUILD" ]]
-          [[ "$DESKTOP_SIGNING" == "production" || "$DESKTOP_SIGNING" == "unsigned" ]]
-          echo "desktop_signing=$DESKTOP_SIGNING" >> "$GITHUB_OUTPUT"
-          [[ "$DESKTOP_SIGNING" == "unsigned" ]] && echo "unsigned_desktop=true" >> "$GITHUB_OUTPUT" || echo "unsigned_desktop=false" >> "$GITHUB_OUTPUT"
+          [[ "$DESKTOP_SIGNING" == "production" ]]
+          # pull_request candidates are deliberately unsigned and never receive signing secrets
+          echo "desktop_signing=unsigned" >> "$GITHUB_OUTPUT"
           read -r BASE_VERSION BASE_BUILD < <(git show "${BASE_SHA}:release/version.json" | node -e 'let text = ""; process.stdin.on("data", value => text += value); process.stdin.on("end", () => { const value = JSON.parse(text); console.log(value.version, value.build); });')
           node -e '
             const [current, previous] = process.argv.slice(1).map(value => value.split(".").map(Number));
@@ -83,9 +83,9 @@ jobs:
     name: Android candidate
     needs: prepare
     uses: ./.github/workflows/android.yml
-    secrets: inherit
     with:
       release_candidate: true
+      production_signing: false
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
       source_ref: ${{ needs.prepare.outputs.source_sha }}
@@ -104,37 +104,23 @@ jobs:
     name: macOS candidate
     needs: prepare
     uses: ./.github/workflows/macos.yml
-    secrets:
-      RESONANCE_MACOS_APP_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_MACOS_APP_CERTIFICATE_BASE64 }}
-      RESONANCE_MACOS_APP_CERTIFICATE_PASSWORD: ${{ secrets.RESONANCE_MACOS_APP_CERTIFICATE_PASSWORD }}
-      RESONANCE_MACOS_APP_IDENTITY: ${{ secrets.RESONANCE_MACOS_APP_IDENTITY }}
-      RESONANCE_MACOS_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_MACOS_INSTALLER_CERTIFICATE_BASE64 }}
-      RESONANCE_MACOS_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.RESONANCE_MACOS_INSTALLER_CERTIFICATE_PASSWORD }}
-      RESONANCE_MACOS_INSTALLER_IDENTITY: ${{ secrets.RESONANCE_MACOS_INSTALLER_IDENTITY }}
-      RESONANCE_MACOS_NOTARY_KEY_BASE64: ${{ secrets.RESONANCE_MACOS_NOTARY_KEY_BASE64 }}
-      RESONANCE_MACOS_NOTARY_KEY_ID: ${{ secrets.RESONANCE_MACOS_NOTARY_KEY_ID }}
-      RESONANCE_MACOS_NOTARY_ISSUER_ID: ${{ secrets.RESONANCE_MACOS_NOTARY_ISSUER_ID }}
     with:
       release_candidate: true
+      production_signing: false
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
       source_ref: ${{ needs.prepare.outputs.source_sha }}
-      unsigned_desktop: ${{ needs.prepare.outputs.unsigned_desktop == 'true' }}
 
   windows:
     name: Windows candidate
     needs: prepare
     uses: ./.github/workflows/windows.yml
-    secrets:
-      RESONANCE_WINDOWS_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_BASE64 }}
-      RESONANCE_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_PASSWORD }}
-      RESONANCE_WINDOWS_CERTIFICATE_SHA1: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_SHA1 }}
     with:
       release_candidate: true
+      production_signing: false
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
       source_ref: ${{ needs.prepare.outputs.source_sha }}
-      unsigned_desktop: ${{ needs.prepare.outputs.unsigned_desktop == 'true' }}
 
   bundle:
     name: Bundle release candidate
@@ -148,34 +134,19 @@ jobs:
 
     steps:
       - name: Check out candidate tooling
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
 
       - name: Download platform assets
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: release-assets-*
           path: candidate/assets
           merge-multiple: true
 
-      - name: Download desktop signing evidence
-        if: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
-        uses: actions/download-artifact@v7
-        with:
-          pattern: release-signing-*
-          path: candidate/signing
-          merge-multiple: true
-
-      - name: Validate signed complete asset set
-        if: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
-        run: >-
-          node scripts/validate-release-assets.mjs
-          candidate/assets "${{ needs.prepare.outputs.version }}"
-          --signing-evidence candidate/signing
-
-      - name: Validate explicit unsigned-desktop asset set
-        if: ${{ needs.prepare.outputs.unsigned_desktop == 'true' }}
+      - name: Validate unsigned pull request asset set
         run: >-
           node scripts/validate-release-assets.mjs
           candidate/assets "${{ needs.prepare.outputs.version }}"
@@ -207,12 +178,11 @@ jobs:
           '
 
       - name: Upload validated candidate provenance
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-provenance-${{ needs.prepare.outputs.tag }}-${{ needs.prepare.outputs.source_sha }}
           path: |
             candidate/candidate.json
-            candidate/signing/*.json
           if-no-files-found: error
           retention-days: 14
           overwrite: true

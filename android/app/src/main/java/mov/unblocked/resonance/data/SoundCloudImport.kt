@@ -24,12 +24,13 @@ internal object SoundCloudImportUrls {
     private val sourceHosts = setOf("soundcloud.com", "www.soundcloud.com", "m.soundcloud.com", "on.soundcloud.com")
 
     fun source(value: String): URL? = runCatching {
-        if (value.length > 8_192) return null
-        val uri = URI(value.trim())
-        val host = uri.host?.lowercase() ?: return null
-        if (uri.scheme?.lowercase() != "https" || uri.userInfo != null || host !in sourceHosts) return null
+        val trimmed = value.trim()
+        if (trimmed.length > RemoteURLPolicy.MAX_URL_LENGTH) return null
+        val uri = URI(trimmed)
+        val url = uri.toURL()
+        if (!RemoteURLPolicy.isSafeURL(url, approvedHost = sourceHosts::contains)) return null
         if (uri.path.split('/').none(String::isNotBlank)) return null
-        uri.toURL()
+        url
     }.getOrNull()
 
     fun isPage(url: URL): Boolean = safeHTTPS(url) && url.host.lowercase() in sourceHosts
@@ -52,7 +53,10 @@ internal object SoundCloudImportUrls {
     }
 
     private fun safeHTTPS(url: URL): Boolean =
-        url.protocol.equals("https", true) && url.userInfo == null && url.host.isNotBlank()
+        RemoteURLPolicy.isSafeURL(url, approvedHost = { host ->
+            host in sourceHosts || host == "api-v2.soundcloud.com" ||
+                host == "sndcdn.com" || host.endsWith(".sndcdn.com")
+        })
 }
 
 internal data class SoundCloudTrack(

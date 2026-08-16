@@ -22,6 +22,11 @@ on:
         required: false
         type: boolean
         default: false
+      production_signing:
+        description: Permit production signing only from the protected direct-release workflow.
+        required: false
+        type: boolean
+        default: false
       version:
         required: false
         type: string
@@ -41,13 +46,13 @@ on:
         default: ""
     secrets:
       RESONANCE_ANDROID_KEYSTORE_BASE64:
-        required: true
+        required: false
       RESONANCE_ANDROID_KEYSTORE_PASSWORD:
-        required: true
+        required: false
       RESONANCE_ANDROID_KEY_ALIAS:
-        required: true
+        required: false
       RESONANCE_ANDROID_KEY_PASSWORD:
-        required: true
+        required: false
   workflow_dispatch:
 
 permissions:
@@ -57,15 +62,17 @@ jobs:
   build:
     if: ${{ inputs.release_candidate || github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release/') }}
     runs-on: ubuntu-latest
+    environment: ${{ inputs.production_signing && 'production-release' || '' }}
     defaults:
       run:
         working-directory: android
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
       - name: Apply direct candidate version
         if: ${{ inputs.release_candidate && inputs.version_override }}
@@ -90,18 +97,18 @@ jobs:
           [[ "$BUILD" == "$EXPECTED_BUILD" ]]
 
       - name: Set up Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
       - name: Validate Android release-signing secrets
-        if: ${{ inputs.release_candidate }}
+        if: ${{ inputs.release_candidate && inputs.production_signing }}
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.RESONANCE_ANDROID_KEYSTORE_BASE64 }}
@@ -115,7 +122,7 @@ jobs:
           fi
 
       - name: Decode Android release keystore
-        if: ${{ inputs.release_candidate }}
+        if: ${{ inputs.release_candidate && inputs.production_signing }}
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.RESONANCE_ANDROID_KEYSTORE_BASE64 }}
@@ -128,7 +135,7 @@ jobs:
         run: ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug
 
       - name: Validate and build signed Android release
-        if: ${{ inputs.release_candidate }}
+        if: ${{ inputs.release_candidate && inputs.production_signing }}
         env:
           RESONANCE_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/resonance-release.jks
           RESONANCE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RESONANCE_ANDROID_KEYSTORE_PASSWORD }}
@@ -136,19 +143,24 @@ jobs:
           RESONANCE_ANDROID_KEY_PASSWORD: ${{ secrets.RESONANCE_ANDROID_KEY_PASSWORD }}
         run: ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug assembleRelease
 
+      - name: Validate and build unsigned Android release candidate
+        if: ${{ inputs.release_candidate && !inputs.production_signing }}
+        run: ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug assembleRelease
+
       - name: Upload debug APK
         if: ${{ !inputs.release_candidate }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Resonance-Android-Debug-${{ github.sha }}
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
-      - name: Package signed Android release candidate
+      - name: Package Android release candidate
         if: ${{ inputs.release_candidate }}
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
+          PRODUCTION_SIGNING: ${{ inputs.production_signing }}
         run: |
           METADATA="app/build/outputs/apk/release/output-metadata.json"
           APK="app/build/outputs/apk/release/app-release.apk"
@@ -158,12 +170,14 @@ jobs:
             echo "::error::Candidate version $VERSION does not match Android versionName $VERSION_NAME."
             exit 1
           fi
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
-          if [[ -z "$APKSIGNER" ]]; then
-            echo "::error::Android apksigner was not found."
-            exit 1
+          if [[ "$PRODUCTION_SIGNING" == "true" ]]; then
+            APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
+            if [[ -z "$APKSIGNER" ]]; then
+              echo "::error::Android apksigner was not found."
+              exit 1
+            fi
+            "$APKSIGNER" verify --verbose "$APK"
           fi
-          "$APKSIGNER" verify --verbose "$APK"
           mkdir -p ../installers/android/dist
           RELEASE_APK="Resonance-Android-${VERSION}.apk"
           cp "$APK" "../installers/android/dist/$RELEASE_APK"
@@ -181,9 +195,9 @@ jobs:
 
       - name: Upload Android release candidate
         if: ${{ inputs.release_candidate }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-assets-android
+          name: release-assets-android-${{ inputs.production_signing && 'production' || 'pr' }}
           path: |
             installers/android/dist/Resonance-Android-${{ inputs.version }}.apk
             installers/android/dist/Resonance-Android-${{ inputs.version }}.apk.sha256

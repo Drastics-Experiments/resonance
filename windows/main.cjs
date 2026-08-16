@@ -32,7 +32,15 @@ const {
   migrateUnlinkedDownloads,
 } = require("./library-update-migration.cjs");
 const { readAudioMetadata } = require("./metadata.cjs");
-const { normalizeSourceIdentities, normalizeSourceIdentity } = require("./provenance.cjs");
+const {
+  normalizeSourceIdentities,
+  normalizeSourceIdentity,
+  preservedMediaSourceURL,
+  sanitizePersistedJSON,
+  sanitizePersistedSourceIdentities,
+  sanitizePersistedSourceIdentity,
+} = require("./provenance.cjs");
+const { readResponseJSON, readResponseText } = require("./response-body.cjs");
 const { createRenewablePolicyLease } = require("./policy-lease.cjs");
 const {
   SERVER_DOWNLOAD_ATTEMPTS,
@@ -46,6 +54,7 @@ const {
   serverDownloadMetadataSnapshot,
   serverDownloadProgressEvent,
 } = require("./server-download.cjs");
+const { fetchSameOrigin } = require("./server-request.cjs");
 const {
   SERVER_STREAM_SCHEME,
   ServerStreamValidationError,
@@ -69,6 +78,9 @@ const {
 } = require("./listen-along.cjs");
 const { catalogSHA256, normalizeServerBaseURL } = require("./server-policy.cjs");
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
+const {
+  verifyDownloadedWindowsUpdate,
+} = require("./updater-auth.cjs");
 const { LocalImportError, isSpotifyURL, searchYouTubeAudioSources, youtubeVideoID } = require("./local-import-core.cjs");
 const { importFileBackedSource, searchFileBackedSources } = require("./local-debrid.cjs");
 const {
@@ -95,6 +107,11 @@ const {
   refreshAuthSession,
   revokeAuthSession,
 } = require("./social-auth.cjs");
+const {
+  allowedAccountAvatarURL,
+  fetchAccountAvatar,
+  isSafeAccountAvatarDataURL,
+} = require("./account-avatar.cjs");
 const windowsPackage = require("./package.json");
 
 function developmentInstanceMetadata() {
@@ -163,6 +180,9 @@ const MAX_SERVER_STREAM_SESSIONS_PER_OWNER = 2;
 const MAX_SERVER_STREAM_REQUESTS_PER_SESSION = 4;
 const MAX_ACTIVE_SERVER_STREAM_REQUESTS = 32;
 const MAX_SERVER_STREAM_CATALOG_BYTES = 8 * 1024 * 1024;
+const MAX_SERVER_JSON_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_SERVER_ERROR_RESPONSE_BYTES = 64 * 1024;
+const MAX_SOURCE_IMPORT_RESPONSE_BYTES = 512 * 1024;
 const SERVER_STREAM_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const SERVER_STREAM_REQUEST_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const SERVER_STREAM_IDLE_TIMEOUT_MS = 45 * 1000;
@@ -219,6 +239,8 @@ const rendererCredentialEpochs = new Map();
 const credentialFingerprintKey = randomBytes(32);
 let currentWindowsUpdateStatus = { type: "idle" };
 let windowsUpdateCheckPromise = null;
+let verifiedWindowsUpdate = null;
+let windowsUpdateVerificationPromise = null;
 let automaticUpdateCheckTimer = null;
 let automaticUpdateCheckInterval = null;
 
@@ -384,6 +406,36 @@ function previewAccountSessionPath() {
   return path.join(app.getPath("userData"), "account-session.json");
 }
 
+function decodeAccountAvatar(bytes) {
+  let image;
+  try {
+    image = nativeImage.createFromBuffer(bytes);
+  } catch {
+    return null;
+  }
+  if (!image || image.isEmpty?.()) return null;
+  const size = image.getSize?.();
+  if (!size || !Number.isSafeInteger(size.width) || !Number.isSafeInteger(size.height)) return null;
+  let png;
+  try {
+    png = image.toPNG();
+  } catch {
+    return null;
+  }
+  if (!Buffer.isBuffer(png) || !png.length) return null;
+  return {
+    width: size.width,
+    height: size.height,
+    dataURL: `data:image/png;base64,${png.toString("base64")}`,
+  };
+}
+
+async function hydrateAccountSessionAvatar(session) {
+  if (!session?.imageURL || isSafeAccountAvatarDataURL(session.imageURL)) return session;
+  const imageURL = await fetchAccountAvatar(session.imageURL, { decodeImage: decodeAccountAvatar });
+  return Object.freeze({ ...session, imageURL });
+}
+
 function canonicalStoredAccountSession(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const accessToken = canonicalCredentialToken(value.accessToken);
@@ -398,9 +450,12 @@ function canonicalStoredAccountSession(value) {
   const displayName = String(value.displayName || "").trim() || null;
   let imageURL = null;
   if (value.imageURL) {
-    const candidate = new URL(value.imageURL);
-    if (candidate.protocol !== "https:" || candidate.username || candidate.password) return null;
-    imageURL = candidate.href;
+    imageURL = isSafeAccountAvatarDataURL(value.imageURL);
+    if (!imageURL) {
+      const candidate = allowedAccountAvatarURL(value.imageURL);
+      if (!candidate) return null;
+      imageURL = candidate.href;
+    }
   }
   return { accessToken, refreshToken, email, role, expiresAt, baseURL, accountID, profileID, displayName, imageURL };
 }
@@ -427,7 +482,9 @@ async function readAccountSession() {
 
 async function persistAccountSession(value) {
   const session = canonicalStoredAccountSession(value);
-  if (!session) throw new Error("The account session is invalid.");
+  if (!session || (session.imageURL && !isSafeAccountAvatarDataURL(session.imageURL))) {
+    throw new Error("The account session is invalid or its avatar was not validated.");
+  }
   const save = accountSessionSaveQueue
     .catch(() => {})
     .then(async () => {
@@ -514,10 +571,11 @@ async function refreshCurrentAccountSession(migrationProfileID = null) {
   const generation = accountSessionGeneration;
   const refresh = (async () => {
     const configuration = await fetchAuthConfiguration(active.baseURL);
-    const refreshed = await refreshAuthSession(configuration, active, fetch, migrationProfileID);
+    let refreshed = await refreshAuthSession(configuration, active, fetch, migrationProfileID);
     if (accountSessionGeneration !== generation || accountSession !== active) {
       return publicSession(accountSession);
     }
+    refreshed = await hydrateAccountSessionAvatar(refreshed);
     await persistAccountSession(refreshed);
     if (accountSessionGeneration !== generation || accountSession !== active) {
       return publicSession(accountSession);
@@ -561,14 +619,14 @@ async function handleAccountAuthCallback(value) {
   const providerError = callback.searchParams.get("error_description") || callback.searchParams.get("error");
   if (providerError) throw new Error(providerError);
   const code = callback.searchParams.get("code");
-  accountSession = await exchangeAuthCode(
+  accountSession = await hydrateAccountSessionAvatar(await exchangeAuthCode(
     pending.configuration,
     pending.baseURL,
     code,
     pending.verifier,
     fetch,
     pending.migrationProfileID,
-  );
+  ));
   await persistAccountSession(accountSession);
   await purgeLegacyServerCredentials();
   scheduleAccountSessionRefresh();
@@ -647,7 +705,9 @@ function finishServerTransfer(event, controller) {
 // EPIPE after that parent process exits. Status is surfaced through IPC instead.
 autoUpdater.logger = null;
 autoUpdater.autoDownload = true;
-autoUpdater.autoInstallOnAppQuit = true;
+// Never let electron-updater install a downloaded NSIS package before the
+// Authenticode publisher check below has completed and the user has opted in.
+autoUpdater.autoInstallOnAppQuit = false;
 
 function publishUpdateStatus(type, details = {}) {
   const previousVersion = currentWindowsUpdateStatus.version;
@@ -660,11 +720,38 @@ function publishUpdateStatus(type, details = {}) {
 }
 
 autoUpdater.on("checking-for-update", () => publishUpdateStatus("checking"));
-autoUpdater.on("update-available", (information) => publishUpdateStatus("available", { version: information.version }));
+autoUpdater.on("update-available", (information) => {
+  verifiedWindowsUpdate = null;
+  publishUpdateStatus("available", { version: information.version });
+});
 autoUpdater.on("update-not-available", () => publishUpdateStatus("current"));
 autoUpdater.on("download-progress", (progress) => publishUpdateStatus("downloading", { percent: Math.round(progress.percent || 0) }));
-autoUpdater.on("update-downloaded", (information) => publishUpdateStatus("ready", { version: information.version }));
-autoUpdater.on("error", (error) => publishUpdateStatus("error", { message: conciseUpdaterError(error) }));
+autoUpdater.on("update-downloaded", (information) => {
+  windowsUpdateVerificationPromise = (async () => {
+    const verification = await verifyDownloadedWindowsUpdate({
+      downloadedFile: information?.downloadedFile,
+      currentExecutable: process.execPath,
+      packaged: app.isPackaged,
+    });
+    verifiedWindowsUpdate = Object.freeze({
+      version: String(information?.version || ""),
+      downloadedFile: String(information?.downloadedFile || ""),
+      verification,
+    });
+    publishUpdateStatus("ready", { version: information.version });
+    return verifiedWindowsUpdate;
+  })();
+  windowsUpdateVerificationPromise.catch((error) => {
+    verifiedWindowsUpdate = null;
+    publishUpdateStatus("error", { message: conciseUpdaterError(error) });
+  }).finally(() => {
+    windowsUpdateVerificationPromise = null;
+  });
+});
+autoUpdater.on("error", (error) => {
+  verifiedWindowsUpdate = null;
+  publishUpdateStatus("error", { message: conciseUpdaterError(error) });
+});
 
 async function checkForWindowsUpdates() {
   if (windowsUpdateCheckPromise) return windowsUpdateCheckPromise;
@@ -854,20 +941,8 @@ function safeServerUploadRetryRecord(value) {
   };
 }
 
-function preservedMediaSourceURL(value) {
-  const source = typeof value === "string" ? value.trim() : "";
-  if (!source || source.length > 8192) return null;
-  try {
-    const url = new URL(source);
-    if (url.protocol !== "https:" || url.username || url.password || url.hash) return null;
-    return url.href;
-  } catch {
-    return null;
-  }
-}
-
 function sourceLinkRegistrationBody(item, { schemaVersion = 3 } = {}) {
-  const sourceURL = preservedMediaSourceURL(item.mediaSourceURL);
+  const sourceURL = transientMediaSourceURL(item.mediaSourceURL);
   if (!sourceURL) {
     throw new Error("Only songs downloaded from a preserved source link can be uploaded. Download this song from its link again first.");
   }
@@ -884,7 +959,22 @@ function sourceLinkRegistrationBody(item, { schemaVersion = 3 } = {}) {
   });
 }
 
-async function putSourceLinkRegistration({ url, headers, item, signal }) {
+// A resolved provider stream is intentionally usable for the current upload
+// request. It is never a durable source of truth and must be removed before a
+// retry record, library file, or backup is written.
+function transientMediaSourceURL(value) {
+  const source = typeof value === "string" ? value.trim() : "";
+  if (!source || source.length > 8_192) return null;
+  try {
+    const url = new URL(source);
+    if (url.protocol !== "https:" || url.username || url.password || url.hash) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+async function putSourceLinkRegistration({ base, url, headers, item, signal }) {
   const options = (body) => ({
     method: "PUT",
     headers,
@@ -892,12 +982,13 @@ async function putSourceLinkRegistration({ url, headers, item, signal }) {
     redirect: "manual",
     signal,
   });
-  let response = await fetch(url, options(sourceLinkRegistrationBody(item)));
+  let response = await fetchSameOrigin(base, url, options(sourceLinkRegistrationBody(item)));
   if (item.mediaKind !== "video" && response.status === 400) {
-    const payload = await response.clone().json().catch(() => null);
+    const payload = await readResponseJSON(response.clone(), MAX_SOURCE_IMPORT_RESPONSE_BYTES, "Source-link error")
+      .catch(() => null);
     if (payload?.error === "Unsupported source-link schema_version") {
       await response.body?.cancel?.().catch(() => undefined);
-      response = await fetch(url, options(sourceLinkRegistrationBody(item, { schemaVersion: 2 })));
+      response = await fetchSameOrigin(base, url, options(sourceLinkRegistrationBody(item, { schemaVersion: 2 })));
     }
   }
   return response;
@@ -1201,16 +1292,20 @@ function matchesServerOrigin(value, expectedOrigin) {
 }
 
 async function authenticatedJSON(url, token, signal) {
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal });
+  const response = await fetchSameOrigin(url, url, { headers: { Authorization: `Bearer ${token}` }, signal });
   if (!response.ok) throw await serverResponseError(response);
-  return response.json();
+  return readResponseJSON(response, MAX_SERVER_JSON_RESPONSE_BYTES, "Authenticated server response");
 }
 
 async function serverResponseError(response) {
   let message = "";
   let body = "";
   const contentType = response.headers.get("content-type")?.toLowerCase() || "";
-  try { body = await response.text(); } catch { /* no response body */ }
+  try {
+    body = await readResponseText(response, MAX_SERVER_ERROR_RESPONSE_BYTES, "Server error response");
+  } catch {
+    // A malformed or oversized error body must not replace the useful status.
+  }
   if (contentType.includes("json")) {
     try {
       const payload = JSON.parse(body);
@@ -1312,7 +1407,7 @@ async function listenAlongRequestJSON(session, { method = "GET", pathname, body 
   };
   let response;
   try {
-    response = await fetch(new URL(pathname, session.base), {
+    response = await fetchSameOrigin(session.base, new URL(pathname, session.base), {
       method,
       headers,
       ...(body === null ? {} : { body: JSON.stringify(body) }),
@@ -2065,6 +2160,7 @@ ipcMain.handle("update:state", () => currentWindowsUpdateStatus);
 
 ipcMain.handle("update:install", () => {
   if (!app.isPackaged) return false;
+  if (!verifiedWindowsUpdate || windowsUpdateVerificationPromise) return false;
   // The assisted NSIS UI is useful for a first install, but an update already
   // knows the existing install directory. Apply it silently and relaunch the
   // app so upgrading never sends the user back through setup.
@@ -2136,7 +2232,18 @@ ipcMain.handle("library:load", async () => {
         });
       }
     }));
-    stored.tracks = tracks;
+    stored.tracks = tracks.map((track) => {
+      const sourceIdentity = sanitizePersistedSourceIdentity(track.sourceIdentity, { sourcePageURL: track.sourceURL });
+      const sourceIdentities = sanitizePersistedSourceIdentities(track.sourceIdentities, sourceIdentity
+        ? [sourceIdentity, ...(sourceIdentity.aliases || [])]
+        : []);
+      return {
+        ...track,
+        sourceURL: sourceIdentity?.sourcePageURL || null,
+        sourceIdentity,
+        sourceIdentities,
+      };
+    });
     sanitizePersistentPlaybackReferences(stored, new Set(tracks.map((track) => track.id).filter(Boolean)));
     stored.serverUploadManifests = safeServerUploadManifests(stored.serverUploadManifests);
     stored.serverTransferPreferences = safeServerTransferPreferences(stored.serverTransferPreferences);
@@ -2152,10 +2259,14 @@ ipcMain.handle("library:load", async () => {
     }
     const backup = `${state}.corrupt-${Date.now()}`;
     let warning = "Resonance could not read your saved library. A new empty library was opened.";
+    let backupWritten = false;
     try {
-      await fs.copyFile(state, backup);
-      warning += ` The unreadable file was preserved as ${path.basename(backup)}.`;
+      const rawBackup = JSON.parse(await fs.readFile(state, "utf8"));
+      await atomicWriteFile(backup, JSON.stringify(sanitizePersistedJSON(rawBackup), null, 2), "utf8");
+      backupWritten = true;
     } catch { /* the original read error remains the useful failure */ }
+    if (backupWritten) warning += ` The unreadable file was preserved as ${path.basename(backup)} after removing short-lived provider URLs.`;
+    else warning += " The unreadable file was not copied because it may contain short-lived provider URLs.";
     return { state: null, warning };
   }
 });
@@ -2166,8 +2277,8 @@ ipcMain.handle("library:save", async (_event, state) => {
   const persistentTrackIDs = new Set(tracks.map((track) => track.id).filter(Boolean));
   const safeState = {
     tracks: tracks.map(({ fileUrl, transientStream, ...track }) => {
-      const sourceIdentity = normalizeSourceIdentity(track.sourceIdentity, { sourcePageURL: track.sourceURL });
-      const sourceIdentities = normalizeSourceIdentities(track.sourceIdentities, sourceIdentity
+      const sourceIdentity = sanitizePersistedSourceIdentity(track.sourceIdentity, { sourcePageURL: track.sourceURL });
+      const sourceIdentities = sanitizePersistedSourceIdentities(track.sourceIdentities, sourceIdentity
         ? [sourceIdentity, ...(sourceIdentity.aliases || [])]
         : []);
       return {
@@ -2337,6 +2448,10 @@ ipcMain.handle("server:credentials:save", async (event, value) => {
 ipcMain.handle("account:session:load", async (_event, value) => {
   if (!accountSession) accountSession = await readAccountSession();
   if (!accountSession) return null;
+  if (accountSession.imageURL && !isSafeAccountAvatarDataURL(accountSession.imageURL)) {
+    accountSession = await hydrateAccountSessionAvatar(accountSession);
+    await persistAccountSession(accountSession).catch(() => undefined);
+  }
   if (!accountSession.profileID || accountSession.profileID !== accountSession.accountID ||
       !accountSession.displayName ||
       accountSession.expiresAt <= Date.now() + 5 * 60_000) {
@@ -2775,6 +2890,7 @@ ipcMain.handle("local-import:upload", async (event, {
     });
     controller.signal.throwIfAborted();
     const response = await putSourceLinkRegistration({
+      base,
       url,
       headers: {
         ...profileHeaders(adminToken, profileID),
@@ -2926,7 +3042,7 @@ async function loadClientConfig({ baseURL, token, profileID, force = false }) {
 
   let response = null;
   try {
-    response = await fetch(new URL("api/v1/client-config", context.base), {
+    response = await fetchSameOrigin(context.base, new URL("api/v1/client-config", context.base), {
       headers: {
         ...profileHeaders(exactToken, profileID),
         ...context.expected.request_headers,
@@ -3163,7 +3279,7 @@ ipcMain.handle("server:source-import", async (event, settings = {}) => {
     force: true,
   });
   controller.signal.throwIfAborted();
-  const response = await fetch(new URL("api/v1/admin/source-imports", base), {
+  const response = await fetchSameOrigin(base, new URL("api/v1/admin/source-imports", base), {
     method: "POST",
     headers: {
       ...profileHeaders(adminToken, profileID),
@@ -3221,21 +3337,21 @@ ipcMain.handle("server:source-import", async (event, settings = {}) => {
 ipcMain.handle("server:profiles:get", async (_event, { baseURL, token }) => {
   if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
-  const response = await fetch(new URL("api/v1/profiles", base), { headers: authorizationHeaders(token) });
+  const response = await fetchSameOrigin(base, new URL("api/v1/profiles", base), { headers: authorizationHeaders(token) });
   if (!response.ok) throw await serverResponseError(response);
-  return response.json();
+  return readResponseJSON(response, MAX_SERVER_JSON_RESPONSE_BYTES, "Server profiles response");
 });
 
 ipcMain.handle("server:profiles:create", async (_event, { baseURL, token, name }) => {
   if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
-  const response = await fetch(new URL("api/v1/profiles", base), {
+  const response = await fetchSameOrigin(base, new URL("api/v1/profiles", base), {
     method: "POST",
     headers: { ...profileHeaders(token, "default"), "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
   if (!response.ok) throw await serverResponseError(response);
-  return response.json();
+  return readResponseJSON(response, MAX_SERVER_JSON_RESPONSE_BYTES, "Server profile response");
 });
 
 ipcMain.handle("server:artwork", async (_event, { baseURL, token, profileID, songID }) => {
@@ -3243,7 +3359,7 @@ ipcMain.handle("server:artwork", async (_event, { baseURL, token, profileID, son
   if (!songID) throw new Error("Song artwork is unavailable.");
   const base = normalizeBaseURL(baseURL);
   const artworkURL = new URL(`api/v1/songs/${encodeURIComponent(songID)}/artwork`, base);
-  const response = await fetch(artworkURL, { headers: profileHeaders(token, profileID) });
+  const response = await fetchSameOrigin(base, artworkURL, { headers: profileHeaders(token, profileID) });
   if (!response.ok) throw await serverResponseError(response);
   const contentType = String(response.headers.get("content-type") || "").split(";", 1)[0].trim().toLocaleLowerCase();
   if (!SERVER_ARTWORK_TYPES.has(contentType)) throw new Error("Server returned an unsupported artwork format.");
@@ -3256,7 +3372,7 @@ ipcMain.handle("server:artwork", async (_event, { baseURL, token, profileID, son
 });
 
 async function fetchServerCatalogDocument(base, token, profileID, { signal, extraHeaders = {} } = {}) {
-  const response = await fetch(new URL("api/v1/songs", base), {
+  const response = await fetchSameOrigin(base, new URL("api/v1/songs", base), {
     headers: { ...profileHeaders(token, profileID), ...extraHeaders, Accept: "application/json" },
     redirect: "manual",
     signal,
@@ -3313,15 +3429,15 @@ ipcMain.handle("server:catalog", async (event, { baseURL, token, profileID }) =>
 ipcMain.handle("server:playlists:get", async (_event, { baseURL, token, profileID }) => {
   if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
-  const response = await fetch(new URL("api/v1/playlists", base), { headers: profileHeaders(token, profileID) });
+  const response = await fetchSameOrigin(base, new URL("api/v1/playlists", base), { headers: profileHeaders(token, profileID) });
   if (!response.ok) throw await serverResponseError(response);
-  return response.json();
+  return readResponseJSON(response, MAX_SERVER_JSON_RESPONSE_BYTES, "Server playlists response");
 });
 
 ipcMain.handle("server:playlists:put", async (_event, { baseURL, token, profileID, document }) => {
   if (!token) throw new Error("Sign in to your Resonance account.");
   const base = normalizeBaseURL(baseURL);
-  const response = await fetch(new URL("api/v1/playlists", base), {
+  const response = await fetchSameOrigin(base, new URL("api/v1/playlists", base), {
     method: "PUT",
     headers: {
       ...profileHeaders(token, profileID),
@@ -3331,7 +3447,10 @@ ipcMain.handle("server:playlists:put", async (_event, { baseURL, token, profileI
     body: JSON.stringify(document),
   });
   if (response.status !== 200 && response.status !== 409) throw await serverResponseError(response);
-  return { status: response.status, document: await response.json() };
+  return {
+    status: response.status,
+    document: await readResponseJSON(response, MAX_SERVER_JSON_RESPONSE_BYTES, "Server playlist response"),
+  };
 });
 
 ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token, profileID, entries }) => {
@@ -3350,7 +3469,7 @@ ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token,
     return { id, song_id: songID, started_at: startedAt, listened_seconds: listenedSeconds };
   });
   const base = normalizeBaseURL(baseURL);
-  const response = await fetch(new URL("api/v1/listening-history", base), {
+  const response = await fetchSameOrigin(base, new URL("api/v1/listening-history", base), {
     method: "POST",
     headers: {
       ...profileHeaders(token, profileID),
@@ -3361,7 +3480,10 @@ ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token,
   });
   if (response.status === 404 || response.status === 405) return { supported: false, accepted: 0 };
   if (!response.ok) throw await serverResponseError(response);
-  return { supported: true, ...(await response.json()) };
+  return {
+    supported: true,
+    ...(await readResponseJSON(response, MAX_SERVER_JSON_RESPONSE_BYTES, "Listening-history response")),
+  };
 });
 
 ipcMain.handle("server:listening-history:get", async (_event, { baseURL, token, profileID, limit = 2000 }) => {
@@ -3369,7 +3491,7 @@ ipcMain.handle("server:listening-history:get", async (_event, { baseURL, token, 
   const base = normalizeBaseURL(baseURL);
   const url = new URL("api/v1/listening-history", base);
   url.searchParams.set("limit", String(Math.max(1, Math.min(2000, Math.floor(Number(limit) || 2000)))));
-  const response = await fetch(url, {
+  const response = await fetchSameOrigin(base, url, {
     headers: {
       ...profileHeaders(token, profileID),
       Accept: "application/json",
@@ -3379,7 +3501,10 @@ ipcMain.handle("server:listening-history:get", async (_event, { baseURL, token, 
     return { supported: false, profile_id: profileID || "default", entries: [] };
   }
   if (!response.ok) throw await serverResponseError(response);
-  return { supported: true, ...(await response.json()) };
+  return {
+    supported: true,
+    ...(await readResponseJSON(response, MAX_SERVER_JSON_RESPONSE_BYTES, "Listening-history response")),
+  };
 });
 
 function sameOriginServerMediaURL(candidate, base, label) {
@@ -3413,7 +3538,7 @@ async function refreshedSongMediaLocation(song, base, token, profileID, requestC
     base,
     "media refresh",
   );
-  const response = await fetch(refreshURL, {
+  const response = await fetchSameOrigin(base, refreshURL, {
     method: "POST",
     headers: {
       ...profileHeaders(token, profileID),
@@ -3565,7 +3690,7 @@ function boundedStreamCatalogSong(song) {
 }
 
 async function fetchFreshStreamCatalogSong({ base, token, profileID, songID, requestContext, signal }) {
-  const response = await fetch(new URL("api/v1/songs", base), {
+  const response = await fetchSameOrigin(base, new URL("api/v1/songs", base), {
     headers: {
       ...profileHeaders(token, profileID),
       ...requestContext.expected.request_headers,
@@ -3707,7 +3832,7 @@ async function handleServerStreamRequest(request) {
       "Accept-Encoding": "identity",
       ...(requestedRange ? { Range: requestedRange.header } : {}),
     };
-    response = await fetch(session.mediaURL.href, {
+    response = await fetchSameOrigin(session.base, session.mediaURL.href, {
       method,
       headers: upstreamHeaders,
       redirect: "manual",
@@ -3732,7 +3857,7 @@ async function handleServerStreamRequest(request) {
         stream_url: boundedStreamURLValue(refreshed.stream_url),
       }) });
       session.mediaURL = streamMediaURLForSong(session.song, session.base);
-      response = await fetch(session.mediaURL.href, {
+      response = await fetchSameOrigin(session.base, session.mediaURL.href, {
         method,
         headers: upstreamHeaders,
         redirect: "manual",
@@ -4194,7 +4319,7 @@ ipcMain.handle("server:sync", async (event, {
       let downloadedSHA256 = null;
       await retryServerDownload(async () => {
           policyLease.signal.throwIfAborted();
-          let response = await fetch(fileURL, {
+          let response = await fetchSameOrigin(base, fileURL, {
             headers: downloadHeaders,
             redirect: "manual",
             signal: policyLease.signal,
@@ -4203,7 +4328,7 @@ ipcMain.handle("server:sync", async (event, {
             response.body?.cancel?.().catch?.(() => undefined);
             fileURL = await refreshedSongDownloadURL(song, base, token, profileID, requestContext, policyLease.signal);
             refreshedMediaLocation = true;
-            response = await fetch(fileURL, {
+            response = await fetchSameOrigin(base, fileURL, {
               headers: downloadHeaders,
               redirect: "manual",
               signal: policyLease.signal,
@@ -4334,7 +4459,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
       album: String(item?.album || ""),
       duration: Number(item?.duration) || 0,
       artworkURL: safeArtworkURL(item?.artworkURL)?.href || null,
-      mediaSourceURL: preservedMediaSourceURL(item?.mediaSourceURL),
+      mediaSourceURL: transientMediaSourceURL(item?.mediaSourceURL),
       mediaKind: item?.mediaKind === "video" ? "video" : "audio",
       uploadFilename: serverUploadFilename(item?.filePath, item?.title),
       serverOrigin: base.origin,
@@ -4395,6 +4520,7 @@ ipcMain.handle("server:upload", async (event, { baseURL, adminToken, profileID, 
         });
         signal.throwIfAborted();
         const response = await putSourceLinkRegistration({
+          base,
           url,
           headers: {
             ...profileHeaders(adminToken, requestedProfileID),
@@ -4515,9 +4641,10 @@ ipcMain.handle("server:delete", async (_event, { baseURL, adminToken, profileID,
   const base = normalizeBaseURL(baseURL);
   const encodedSongID = encodeURIComponent(String(songID || ""));
   if (!encodedSongID) throw new Error("Choose a server song to delete.");
-  const response = await fetch(new URL(`api/v1/admin/songs/${encodedSongID}`, base), { method: "DELETE", headers: profileHeaders(adminToken, profileID) });
+  const response = await fetchSameOrigin(base, new URL(`api/v1/admin/songs/${encodedSongID}`, base), { method: "DELETE", headers: profileHeaders(adminToken, profileID) });
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
+    const payload = await readResponseJSON(response, MAX_SERVER_ERROR_RESPONSE_BYTES, "Server delete response")
+      .catch(() => ({}));
     throw new Error(payload?.error || `Server returned HTTP ${response.status}`);
   }
   invalidateServerCatalogSnapshots(base, profileID);

@@ -8,6 +8,8 @@ import crashSafeFile from "../crash-safe-file.cjs";
 import downloadFile from "../download-file.cjs";
 import filenamePolicy from "../filename-policy.cjs";
 import provenance from "../provenance.cjs";
+import responseBody from "../response-body.cjs";
+import updaterAuth from "../updater-auth.cjs";
 import serverPolicy from "../server-policy.cjs";
 import {
   canonicalYouTubeSourcePageURL,
@@ -31,7 +33,19 @@ import {
 const { crashSafeReplace, readPrimaryOrBackup } = crashSafeFile;
 const { MAX_SERVER_MEDIA_BYTES, writeResponseToFile } = downloadFile;
 const { sanitizeWindowsFilename, windowsCollisionFilename } = filenamePolicy;
-const { normalizeSourceIdentity, normalizeSourceIdentities } = provenance;
+const {
+  isEphemeralProviderMediaURL,
+  normalizeSourceIdentity,
+  normalizeSourceIdentities,
+  sanitizePersistedJSON,
+  sanitizePersistedSourceIdentity,
+} = provenance;
+const { readResponseJSON } = responseBody;
+const {
+  updateAuthenticityPolicy,
+  verifyDownloadedWindowsUpdate,
+  verifyWindowsUpdatePublisher,
+} = updaterAuth;
 const { catalogSHA256, normalizeServerBaseURL } = serverPolicy;
 
 async function temporaryDirectory(t) {
@@ -265,6 +279,37 @@ test("persists bounded structured source provenance without unsafe URLs", () => 
   assert.equal(normalizeSourceIdentity({ sourcePageURL: "https://user:secret@example.com/song" }), null);
   assert.equal(normalizeSourceIdentity({ mediaSourceURL: "file:///private/song.mp3" }), null);
 
+  assert.equal(isEphemeralProviderMediaURL("https://r1---sn.googlevideo.com/videoplayback?expire=1"), true);
+  assert.equal(isEphemeralProviderMediaURL("https://cf-media.sndcdn.com/song.mp3?Policy=short-lived"), true);
+  assert.equal(isEphemeralProviderMediaURL("https://p.scdn.co/mp3-preview/track.mp3?token=short-lived"), true);
+  assert.equal(isEphemeralProviderMediaURL("https://resonance.example/api/v1/songs/song-a"), false);
+  assert.equal(normalizeSourceIdentity({
+    sourcePageURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    mediaSourceURL: "https://r1---sn.googlevideo.com/videoplayback?expire=1",
+  }).mediaSourceURL, "https://r1---sn.googlevideo.com/videoplayback?expire=1");
+  assert.equal(sanitizePersistedSourceIdentity({
+    sourcePageURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    mediaSourceURL: "https://r1---sn.googlevideo.com/videoplayback?expire=1",
+  }).sourcePageURL, "https://www.youtube.com/watch?v=jNQXAC9IVRw");
+  assert.equal(sanitizePersistedSourceIdentity({
+    sourcePageURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    mediaSourceURL: "https://r1---sn.googlevideo.com/videoplayback?expire=1",
+  }).mediaSourceURL, null);
+  assert.equal(sanitizePersistedSourceIdentity({
+    sourcePageURL: "https://resonance.example/api/v1/songs/song-a",
+    mediaSourceURL: "https://resonance.example/api/v1/songs/song-a/download",
+  }).mediaSourceURL, "https://resonance.example/api/v1/songs/song-a/download");
+  assert.deepEqual(sanitizePersistedJSON({
+    sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    mediaSourceURL: "https://r1---sn.googlevideo.com/videoplayback?expire=1",
+    nested: ["https://cf-media.sndcdn.com/song.mp3?Policy=short-lived"],
+    "audio:https://r1---sn.googlevideo.com/videoplayback?expire=1": { cached: true },
+  }), {
+    sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    mediaSourceURL: null,
+    nested: [null],
+  });
+
   const repeatedAlias = { provider: "youtube", providerID: "video-1" };
   const withAliases = normalizeSourceIdentity({
     provider: "spotify",
@@ -277,6 +322,48 @@ test("persists bounded structured source provenance without unsafe URLs", () => 
   assert.equal(withAliases.aliases.length, 8);
   assert.equal(withAliases.aliases.filter((identity) => identity.providerID === "video-1").length, 1);
   assert.equal(normalizeSourceIdentities([repeatedAlias, repeatedAlias]).length, 1);
+});
+
+test("bounds JSON response bodies before parsing", async () => {
+  const body = JSON.stringify({ ok: true });
+  assert.deepEqual(await readResponseJSON(new Response(body), 128, "test response"), { ok: true });
+  const oversized = new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("{" + "x".repeat(140)));
+      controller.close();
+    },
+  }));
+  await assert.rejects(readResponseJSON(oversized, 128, "test response"), /too large/);
+});
+
+test("pins Windows update identity to the installed Authenticode signer", async () => {
+  const current = {
+    status: "Valid",
+    subject: "CN=Resonance Release, O=Resonance",
+    issuer: "CN=Trusted Issuer",
+    thumbprint: "a".repeat(40),
+  };
+  const same = { ...current };
+  assert.equal(verifyWindowsUpdatePublisher({ currentSignature: current, updateSignature: same }).verified, true);
+  assert.throws(() => verifyWindowsUpdatePublisher({
+    currentSignature: current,
+    updateSignature: { ...same, thumbprint: "b".repeat(40) },
+  }), /different publisher identity/);
+  assert.deepEqual(updateAuthenticityPolicy({
+    packaged: false,
+    environment: { NODE_ENV: "test", RESONANCE_ALLOW_UNSIGNED_UPDATE_TESTS: "1" },
+  }), { requirePublisher: false, testException: true });
+  const reads = [];
+  const result = await verifyDownloadedWindowsUpdate({
+    downloadedFile: "C:\\Updates\\Resonance-Setup-2.0.1.exe",
+    currentExecutable: "C:\\Program Files\\Resonance\\Resonance.exe",
+    readSignature: async (filePath) => {
+      reads.push(filePath);
+      return current;
+    },
+  });
+  assert.equal(result.verified, true);
+  assert.equal(reads.length, 2);
 });
 
 test("downloads require exact declared size and SHA-256 before adoption", async (t) => {
@@ -499,6 +586,11 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(mainSource, /encodedSongID = encodeURIComponent\(String\(songID \|\| ""\)\)[\s\S]+api\/v1\/admin\/songs\/\$\{encodedSongID\}/);
   assert.match(mainSource, /setWindowOpenHandler\(\(\) => \(\{ action: "deny" \}\)\)[\s\S]+will-navigate[\s\S]+targetURL !== trustedRendererURL[\s\S]+will-attach-webview/);
   assert.match(mainSource, /openAccountSignInBrowser\(destination\)[\s\S]+shell\.openExternal\(destination\.href\)/);
+  assert.match(mainSource, /fetchAccountAvatar\([\s\S]+decodeAccountAvatar/);
+  assert.match(mainSource, /nativeImage\.createFromBuffer\([\s\S]+image\.toPNG\(\)/);
+  assert.match(mainSource, /persistAccountSession\([\s\S]+isSafeAccountAvatarDataURL/);
+  assert.match(appSource, /function safeAccountAvatarDataURL\([\s\S]+ACCOUNT_AVATAR_DATA_URL_PATTERN/);
+  assert.match(appSource, /activeProfilePicture = safeAccountAvatarDataURL\(accountSession\?\.imageURL\)/);
   assert.doesNotMatch(mainSource, /function isAllowedAccountAuthNavigation|resonance-clerk-auth-/);
   assert.match(mainSource, /ipcMain\.handle\("account:sign-in"[\s\S]+openAccountSignInBrowser\(destination\)/);
   assert.match(
@@ -589,6 +681,8 @@ test("Windows renderer and main-process integrations retain the hardening bounda
     mainSource.indexOf("function sourceLinkRegistrationBody"),
     mainSource.indexOf("async function ensureServerUploadRetriesLoaded"),
   );
+  assert.match(sourceLinkBody, /const sourceURL = transientMediaSourceURL\(item\.mediaSourceURL\)/);
+  assert.doesNotMatch(sourceLinkBody, /const sourceURL = preservedMediaSourceURL\(item\.mediaSourceURL\)/);
   assert.match(sourceLinkBody, /schema_version: 3,[\s\S]+source_url: sourceURL/);
   assert.match(sourceLinkBody, /media_kind: item\.mediaKind === "video" \? "video" : "audio"/);
   assert.match(sourceLinkBody, /schemaVersion === 2[\s\S]+schema_version: 2,[\s\S]+source_url: sourceURL/);
@@ -611,7 +705,7 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(sourceLinkBody, /method: "PUT",[\s\S]+redirect: "manual"/);
   assert.match(localRawUploadHandler, /"Content-Type": "application\/json"/);
   assert.doesNotMatch(localRawUploadHandler, /createReadStream|application\/octet-stream|duplex: "half"/);
-  assert.match(sourceImportHandler, /requireClientUploadMode\(\{[\s\S]+mode: "server_source_link",[\s\S]+force: true,[\s\S]+const response = await fetch\(new URL\("api\/v1\/admin\/source-imports"/);
+  assert.match(sourceImportHandler, /requireClientUploadMode\(\{[\s\S]+mode: "server_source_link",[\s\S]+force: true,[\s\S]+const response = await fetchSameOrigin\(base, new URL\("api\/v1\/admin\/source-imports"/);
   assert.match(externalImportHandler, /requireClientUploadMode\(\{[\s\S]+mode: "external_object",[\s\S]+force: true,[\s\S]+importFileBackedSource/);
   assert.match(rawUploadHandler, /clientConfigContext\(base\.href, requestedProfileID\)/);
   assert.match(rawUploadHandler, /\.\.\.profileHeaders\(adminToken, requestedProfileID\),[\s\S]+\.\.\.requestContext\.expected\.request_headers/);
@@ -763,10 +857,14 @@ test("Windows renderer and main-process integrations retain the hardening bounda
     "filename-policy.cjs",
     "provenance.cjs",
     "server-policy.cjs",
+    "server-request.cjs",
+    "account-avatar.cjs",
     "client-config.cjs",
     "client-config-state.cjs",
     "policy-lease.cjs",
     "server-stream.cjs",
     "server-upload-response.cjs",
+    "response-body.cjs",
+    "updater-auth.cjs",
   ]) assert.ok(packageJSON.build.files.includes(filename), `${filename} must ship in packaged builds`);
 });

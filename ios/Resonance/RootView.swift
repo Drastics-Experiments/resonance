@@ -386,20 +386,18 @@ private struct MobileSettingsSheet: View {
         HStack(spacing: 13) {
             ZStack {
                 Circle().fill(palette.secondary)
+                Text(String(displayName.prefix(1)).uppercased())
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(.white)
                 if let imageURL = library.accountImageURL {
-                    AsyncImage(url: imageURL) { phase in
-                        if let image = phase.image {
-                            image.resizable().scaledToFill()
-                        } else {
-                            Text(String(displayName.prefix(1)).uppercased())
-                                .font(.headline.weight(.bold))
-                                .foregroundStyle(.white)
-                        }
+                    MobileSafeArtworkImage(
+                        url: imageURL,
+                        allowedOrigin: library.listenAlongServerURL
+                    ) { image in
+                        image.resizable().scaledToFill()
                     }
                 } else {
-                    Text(String(displayName.prefix(1)).uppercased())
-                        .font(.headline.weight(.bold))
-                        .foregroundStyle(.white)
+                    EmptyView()
                 }
             }
             .frame(width: 48, height: 48)
@@ -474,6 +472,7 @@ private struct MobileThemePicker: View {
 
 private struct ProfileButton: View {
     @Environment(\.resonancePalette) private var palette
+    @EnvironmentObject private var library: MusicLibrary
     let displayName: String
     let email: String?
     let imageURL: URL?
@@ -509,20 +508,18 @@ private struct ProfileButton: View {
         } label: {
             ZStack {
                 Circle().fill(palette.secondary)
+                Text(initial)
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(.white)
                 if let imageURL {
-                    AsyncImage(url: imageURL) { phase in
-                        if let image = phase.image {
-                            image.resizable().scaledToFill()
-                        } else {
-                            Text(initial)
-                                .font(.headline.weight(.bold))
-                                .foregroundStyle(.white)
-                        }
+                    MobileSafeArtworkImage(
+                        url: imageURL,
+                        allowedOrigin: library.listenAlongServerURL
+                    ) { image in
+                        image.resizable().scaledToFill()
                     }
                 } else {
-                    Text(initial)
-                        .font(.headline.weight(.bold))
-                        .foregroundStyle(.white)
+                    EmptyView()
                 }
             }
             .frame(width: 44, height: 44)
@@ -3129,25 +3126,14 @@ struct TrackArtwork: View {
                     .scaledToFit()
                     .frame(width: size.width, height: size.height)
             } else if let artworkURL = library.listenAlongArtworkURL(for: track) {
-                AsyncImage(url: artworkURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
-                    switch phase {
-                    case .success(let image):
+                ZStack {
+                    ArtworkTile(symbol: fallbackSymbol)
+                    MobileSafeArtworkImage(url: artworkURL) { image in
                         image
                             .resizable()
                             .scaledToFill()
                             .frame(width: size.width, height: size.height)
                             .clipped()
-                    case .empty:
-                        ZStack {
-                            ArtworkTile(symbol: fallbackSymbol)
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(.white.opacity(0.82))
-                        }
-                    case .failure:
-                        ArtworkTile(symbol: fallbackSymbol)
-                    @unknown default:
-                        ArtworkTile(symbol: fallbackSymbol)
                     }
                 }
             } else {
@@ -3158,6 +3144,7 @@ struct TrackArtwork: View {
 }
 
 private struct ServerArtwork: View {
+    @EnvironmentObject private var library: MusicLibrary
     let song: MobileRemoteSong
 
     var body: some View {
@@ -3170,25 +3157,17 @@ private struct ServerArtwork: View {
                         .tint(.white.opacity(0.72))
                 }
             } else if let artworkURL = song.artworkURL {
-                AsyncImage(url: artworkURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
-                    switch phase {
-                    case .success(let image):
+                ZStack {
+                    ArtworkTile(symbol: "music.note")
+                    MobileSafeArtworkImage(
+                        url: artworkURL,
+                        allowedOrigin: library.listenAlongServerURL
+                    ) { image in
                         image
                             .resizable()
                             .scaledToFill()
                             .frame(width: size.width, height: size.height)
                             .clipped()
-                    case .empty:
-                        ZStack {
-                            ArtworkTile(symbol: "music.note")
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(.white)
-                        }
-                    case .failure:
-                        ArtworkTile(symbol: "music.note")
-                    @unknown default:
-                        ArtworkTile(symbol: "music.note")
                     }
                 }
             } else {

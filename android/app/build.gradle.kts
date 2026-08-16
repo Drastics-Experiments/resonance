@@ -7,6 +7,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+dependencyLocking {
+    lockAllConfigurations()
+}
+
 val releaseKeystorePath = providers.environmentVariable("RESONANCE_ANDROID_KEYSTORE_PATH").orNull
 val releaseKeystorePassword = providers.environmentVariable("RESONANCE_ANDROID_KEYSTORE_PASSWORD").orNull
 val releaseKeyAlias = providers.environmentVariable("RESONANCE_ANDROID_KEY_ALIAS").orNull

@@ -2,6 +2,8 @@ package mov.unblocked.resonance.data
 
 import android.net.Uri
 import android.util.Base64
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -197,7 +199,7 @@ class SocialAuthClient(private val baseURL: String) {
             accountID = accountID,
             profileID = bounded(profileID, "Clerk profile ID"),
             displayName = displayName,
-            imageURL = account.imageURL,
+            imageURL = ProfileImageNetworkPolicy.resolveURL(origin, account.imageURL)?.toString(),
             migratedProfileID = account.migratedProfileID,
         )
     }
@@ -389,7 +391,7 @@ class SocialAuthClient(private val baseURL: String) {
             accountID = accountID,
             profileID = bounded(profileID, "Clerk profile ID"),
             displayName = displayName,
-            imageURL = account.imageURL,
+            imageURL = ProfileImageNetworkPolicy.resolveURL(serverOrigin, account.imageURL)?.toString(),
             migratedProfileID = account.migratedProfileID,
         )
     }
@@ -426,11 +428,32 @@ class SocialAuthClient(private val baseURL: String) {
             }
         }
         return try {
-            val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
-            Response(connection.responseCode, stream?.bufferedReader()?.use { it.readText() }.orEmpty())
+            val status = connection.responseCode
+            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+            val bodyText = stream?.use { readBoundedText(it, MAX_AUTH_RESPONSE_BYTES) }.orEmpty()
+            Response(status, bodyText)
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun readBoundedText(input: java.io.InputStream, maximumBytes: Int): String {
+        if (input.available() > maximumBytes) throw IOException("The authentication response is too large")
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(32 * 1_024)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            if (output.size() > maximumBytes - count) {
+                throw IOException("The authentication response is too large")
+            }
+            output.write(buffer, 0, count)
+        }
+        return output.toString(Charsets.UTF_8.name())
+    }
+
+    private companion object {
+        const val MAX_AUTH_RESPONSE_BYTES = 512 * 1_024
     }
 }
 

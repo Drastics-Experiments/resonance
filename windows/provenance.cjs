@@ -15,6 +15,109 @@ function safeURL(value, maximumLength = 8_192) {
   }
 }
 
+function isEphemeralProviderMediaURL(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.length > 8_192) return false;
+  try {
+    const url = new URL(text);
+    if (url.protocol !== "https:" || url.username || url.password) return false;
+    const host = url.hostname.toLocaleLowerCase();
+    const path = url.pathname.toLocaleLowerCase();
+    if (host === "googlevideo.com" || host.endsWith(".googlevideo.com")) return true;
+    if (host === "googleusercontent.com" || host.endsWith(".googleusercontent.com")) {
+      return path.includes("/videoplayback") || path.includes("/audio/") || path.includes("/video/");
+    }
+    if (host === "sndcdn.com" || host.endsWith(".sndcdn.com")) return true;
+    if (host === "scdn.co" || host.endsWith(".scdn.co")) return true;
+    if (host === "p.scdn.co" || host.endsWith(".p.scdn.co")) return true;
+    if (host === "api-v2.soundcloud.com" && path.startsWith("/media/")) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function containsEphemeralProviderMediaURL(value) {
+  const text = typeof value === "string" ? value : "";
+  return /(?:googlevideo\.com|googleusercontent\.com|sndcdn\.com|scdn\.co)(?:[/:?#]|$)/i.test(text);
+}
+
+function canonicalSourceURL(value) {
+  const source = safeURL(value);
+  return source && !isEphemeralProviderMediaURL(source) ? source : null;
+}
+
+function preservedMediaSourceURL(value) {
+  const source = canonicalSourceURL(value);
+  if (!source) return null;
+  try {
+    return new URL(source).hash ? null : source;
+  } catch {
+    return null;
+  }
+}
+
+function sanitizePersistedSourceIdentity(value, fallback = {}) {
+  const candidate = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const identity = normalizeSourceIdentity(candidate, fallback);
+  if (!identity) return null;
+  const sanitize = (current) => {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return null;
+    const sourcePageURL = canonicalSourceURL(current.sourcePageURL || current.sourceURL);
+    const mediaSourceURL = canonicalSourceURL(current.mediaSourceURL);
+    const aliases = Array.isArray(current.aliases)
+      ? current.aliases.map(sanitize).filter(Boolean).slice(0, 8)
+      : [];
+    const normalized = {
+      ...current,
+      sourcePageURL,
+      mediaSourceURL,
+    };
+    if (aliases.length) normalized.aliases = aliases;
+    else delete normalized.aliases;
+    return normalized;
+  };
+  return sanitize(identity);
+}
+
+function sanitizePersistedSourceIdentities(value, additional = []) {
+  const candidates = [
+    ...(Array.isArray(value) ? value : []),
+    ...(Array.isArray(additional) ? additional : [additional]),
+  ];
+  const seen = new Set();
+  const identities = [];
+  for (const candidate of candidates) {
+    const identity = sanitizePersistedSourceIdentity(candidate);
+    if (!identity) continue;
+    const key = JSON.stringify([
+      identity.provider,
+      identity.providerID,
+      identity.sourcePageURL,
+      identity.mediaSourceURL,
+      identity.confidence,
+      identity.score,
+      identity.evidence,
+    ]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    identities.push(identity);
+    if (identities.length >= 8) break;
+  }
+  return identities;
+}
+
+function sanitizePersistedJSON(value) {
+  if (typeof value === "string") return isEphemeralProviderMediaURL(value) ? null : value;
+  if (Array.isArray(value)) return value.map(sanitizePersistedJSON);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([key]) => !containsEphemeralProviderMediaURL(key))
+      .map(([key, current]) => [key, sanitizePersistedJSON(current)]));
+  }
+  return value;
+}
+
 function boundedEvidence(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const entries = Object.entries(value).slice(0, 24).flatMap(([key, candidate]) => {
@@ -86,6 +189,11 @@ function normalizeSourceIdentity(value, fallback = {}) {
 }
 
 module.exports = {
+  isEphemeralProviderMediaURL,
   normalizeSourceIdentity,
   normalizeSourceIdentities,
+  preservedMediaSourceURL,
+  sanitizePersistedJSON,
+  sanitizePersistedSourceIdentities,
+  sanitizePersistedSourceIdentity,
 };

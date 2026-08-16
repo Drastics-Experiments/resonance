@@ -1,5 +1,20 @@
 import Foundation
 
+enum MobileDurableURLPolicy {
+    static let maximumCharacters = 8_192
+
+    static func trimmed(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= maximumCharacters else { return nil }
+        return trimmed
+    }
+
+    static func accepts(_ url: URL) -> Bool {
+        url.absoluteString.count <= maximumCharacters
+    }
+}
+
 enum MobilePlayableMediaDurationPolicy {
     private static let maximumRemoteDuration: TimeInterval = 24 * 60 * 60
 
@@ -65,8 +80,8 @@ enum MobileServerEndpointPolicy {
     private static let productionHost = "resonance-core.blithe-haven-9710.chatgpt.site"
 
     static func resolve(_ rawValue: String) throws -> MobileServerEndpointResolution {
-        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard var components = URLComponents(string: trimmed),
+        guard let trimmed = MobileDurableURLPolicy.trimmed(rawValue),
+              var components = URLComponents(string: trimmed),
               let scheme = components.scheme?.lowercased(),
               let host = components.host?.lowercased(),
               !host.isEmpty,
@@ -90,12 +105,14 @@ enum MobileServerEndpointPolicy {
         if scheme == "http", !isLoopback {
             throw MobileServerEndpointError.insecureRemoteHTTP
         }
-        guard let url = components.url else { throw MobileServerEndpointError.invalidURL }
+        guard let url = components.url,
+              MobileDurableURLPolicy.accepts(url) else { throw MobileServerEndpointError.invalidURL }
         return MobileServerEndpointResolution(url: url, usesInsecureLocalHTTP: scheme == "http")
     }
 
     static func normalizedOrigin(of url: URL) -> String? {
-        guard let scheme = url.scheme?.lowercased(),
+        guard MobileDurableURLPolicy.accepts(url),
+              let scheme = url.scheme?.lowercased(),
               scheme == "https" || scheme == "http",
               let host = url.host?.lowercased(),
               !host.isEmpty else { return nil }
@@ -114,11 +131,24 @@ enum MobileServerEndpointPolicy {
         return MobileServerContext(origin: origin, profileID: context.profileID)
     }
 
+    static func isCanonicalContext(_ context: MobileServerContext) -> Bool {
+        canonicalContext(context) == context
+            && MobileDurableURLPolicy.trimmed(context.origin) != nil
+    }
+
     static func canonicalStoredServerKey(_ value: String?) -> String? {
-        guard let value else { return nil }
+        guard let value = MobileDurableURLPolicy.trimmed(value) else { return nil }
         let legacyOrigin = "https://\(legacyProductionHost)"
         guard value == legacyOrigin || value.hasPrefix("\(legacyOrigin)#profile=") else { return value }
-        return "https://\(productionHost)" + value.dropFirst(legacyOrigin.count)
+        let migrated = "https://\(productionHost)" + value.dropFirst(legacyOrigin.count)
+        return migrated.count <= MobileDurableURLPolicy.maximumCharacters ? migrated : nil
+    }
+
+    static func canonicalStoredServerURL(_ value: String?) -> String? {
+        guard let value = MobileDurableURLPolicy.trimmed(value),
+              let resolved = try? resolve(value),
+              MobileDurableURLPolicy.accepts(resolved.url) else { return nil }
+        return resolved.url.absoluteString
     }
 
     static func context(serverURL: URL, profileID: String) -> MobileServerContext? {
@@ -271,7 +301,8 @@ struct MobileTrack: Identifiable, Codable, Hashable {
 
     func remoteIdentity(fallbackServerURL: URL? = nil) -> MobileRemoteIdentity? {
         guard let remoteID, !remoteID.isEmpty else { return nil }
-        let serverURL = sourceServer.flatMap(URL.init(string:)) ?? fallbackServerURL
+        let serverURL = MobileServerEndpointPolicy.canonicalStoredServerURL(sourceServer)
+            .flatMap(URL.init(string:)) ?? fallbackServerURL
         guard let serverURL,
               let context = MobileServerEndpointPolicy.context(
                 serverURL: serverURL,
@@ -281,12 +312,90 @@ struct MobileTrack: Identifiable, Codable, Hashable {
     }
 }
 
+enum MobileTrackPersistencePolicy {
+    private static let temporaryProviderHosts = [
+        "googlevideo.com",
+        "googleusercontent.com",
+        "sndcdn.com",
+        "scdn.co",
+        "spotifycdn.com",
+    ]
+
+    static func canonicalSourceURL(_ value: String?) -> String? {
+        guard let trimmed = MobileDurableURLPolicy.trimmed(value) else { return nil }
+        if let videoID = try? LocalImportURL.youtubeVideoID(trimmed) {
+            return "https://www.youtube.com/watch?v=\(videoID)"
+        }
+        if let track = try? LocalImportURL.spotifyTrack(trimmed) {
+            return track.url.absoluteString
+        }
+        if let playlist = try? LocalImportURL.spotifyPlaylist(trimmed) {
+            return playlist.url.absoluteString
+        }
+        guard let url = URL(string: trimmed),
+              MobileDurableURLPolicy.accepts(url),
+              url.scheme?.lowercased() == "https",
+              url.user == nil,
+              url.password == nil else { return nil }
+        if isTemporaryProviderURL(url) { return nil }
+        return trimmed
+    }
+
+    static func persistedDownloadSourceURL(
+        _ value: URL?,
+        legitimateServerOrigin: URL? = nil
+    ) -> String? {
+        guard let value,
+              MobileDurableURLPolicy.accepts(value),
+              value.scheme?.lowercased() == "https",
+              value.user == nil,
+              value.password == nil else { return nil }
+        if let legitimateServerOrigin,
+           MobileSameOriginPolicy.matches(value, legitimateServerOrigin) {
+            return value.absoluteString
+        }
+        return isTemporaryProviderURL(value) ? nil : value.absoluteString
+    }
+
+    static func sanitized(_ track: MobileTrack) -> MobileTrack {
+        var sanitized = track
+        sanitized.sourceServer = MobileServerEndpointPolicy.canonicalStoredServerURL(track.sourceServer)
+        sanitized.sourceURL = canonicalSourceURL(track.sourceURL)
+        sanitized.downloadSourceURL = persistedDownloadSourceURL(
+            track.downloadSourceURL.flatMap(URL.init(string:)),
+            legitimateServerOrigin: sanitized.sourceServer.flatMap(URL.init(string:))
+        )
+        if sanitized.sourceURL == nil,
+           sanitized.downloadSourceURL == nil,
+           track.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            // Keep a completed local import available after removing an
+            // expired, malformed, or oversized source URL rather than making
+            // migration delete it.
+            sanitized.preservesUnlinkedImport = true
+        }
+        return sanitized
+    }
+
+    private static func isTemporaryProviderURL(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        return temporaryProviderHosts.contains { host == $0 || host.hasSuffix(".\($0)") }
+            || url.lastPathComponent.lowercased() == "videoplayback"
+    }
+}
+
 enum MobileDownloadedSongMetadataRefreshPolicy {
     static func sourceURL(for track: MobileTrack, fileExists: Bool) -> String? {
         guard fileExists else { return nil }
-        let source = (track.sourceURL ?? track.downloadSourceURL)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return source.isEmpty ? nil : source
+        if let source = MobileTrackPersistencePolicy.canonicalSourceURL(track.sourceURL) {
+            return source
+        }
+        guard let downloadSource = track.downloadSourceURL.flatMap({ URL(string: $0) }) else {
+            return nil
+        }
+        return MobileTrackPersistencePolicy.persistedDownloadSourceURL(
+            downloadSource,
+            legitimateServerOrigin: track.sourceServer.flatMap(URL.init(string:))
+        )
     }
 
     static func applying(
@@ -469,8 +578,7 @@ enum MobileRemoteAssociationPolicy {
             .isEmpty == false
         let hasPersistedAssociation = hasRemoteID || hasSourceServer
         guard hasPersistedAssociation else { return }
-        guard let sourceServer = track.sourceServer,
-              !sourceServer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        guard let sourceServer = MobileServerEndpointPolicy.canonicalStoredServerURL(track.sourceServer),
               let profileID = track.syncProfileID,
               !profileID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let serverURL = URL(string: sourceServer),
@@ -960,9 +1068,8 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable, Sendable {
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(String.self, forKey: .id)
-        let decodedSourceURL = try values.decodeIfPresent(String.self, forKey: .sourceURL)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        sourceURL = decodedSourceURL.flatMap { $0.isEmpty ? nil : $0 }
+        let decodedSourceURL = try values.decodeIfPresent(String.self, forKey: .sourceURL)
+        sourceURL = decodedSourceURL.flatMap(MobileTrackPersistencePolicy.canonicalSourceURL)
         let declaredMediaKind = try values.decodeIfPresent(String.self, forKey: .mediaKind)
         let decodedSize = try values.decodeIfPresent(Int64.self, forKey: .size) ?? 0
         isSourceLinkRecord = sourceURL != nil && (declaredMediaKind != nil || decodedSize == 0)
@@ -1010,8 +1117,9 @@ struct MobileRemoteSong: Identifiable, Decodable, Hashable, Sendable {
         let decodedArtworkURL = try values.decodeIfPresent(String.self, forKey: .artworkURL)
             ?? values.decodeIfPresent(String.self, forKey: .artwork)
         artworkURL = decodedArtworkURL.flatMap { value in
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : URL(string: trimmed)
+            guard let trimmed = MobileDurableURLPolicy.trimmed(value),
+                  let url = URL(string: trimmed) else { return nil }
+            return MobileArtworkURLPolicy.validatedCatalogURL(url)
         }
         contentSHA256 = try values.decodeIfPresent(String.self, forKey: .contentSHA256)
         isMetadataLoading = isSourceLinkRecord && (decodedTitle == nil || decodedArtist == nil)
@@ -1050,14 +1158,7 @@ enum MobileRemoteSongMetadataCachePolicy {
     static let limit = 2_000
 
     static func key(sourceURL: String, mediaKind: String) -> String? {
-        let source = sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !source.isEmpty,
-              source.utf8.count <= 8_192,
-              let url = URL(string: source),
-              url.scheme?.lowercased() == "https",
-              url.host != nil,
-              url.user == nil,
-              url.password == nil else { return nil }
+        guard let source = MobileTrackPersistencePolicy.canonicalSourceURL(sourceURL) else { return nil }
         return "\(mediaKind == "video" ? "video" : "audio"):\(source)"
     }
 
@@ -1073,13 +1174,47 @@ enum MobileRemoteSongMetadataCachePolicy {
                   !entry.metadata.artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   entry.metadata.title.utf8.count <= 512,
                   entry.metadata.artist.utf8.count <= 512,
-                  let key = key(sourceURL: entry.sourceURL, mediaKind: entry.mediaKind),
+                  let source = MobileTrackPersistencePolicy.canonicalSourceURL(entry.sourceURL),
+                  let key = key(sourceURL: source, mediaKind: entry.mediaKind),
                   key == storedKey else { return nil }
-            return (key, entry)
+            let metadataSource = MobileTrackPersistencePolicy.canonicalSourceURL(entry.metadata.sourceURL)
+                ?? source
+            let metadata = LocalImportSpotifyTrack(
+                provider: entry.metadata.provider,
+                type: entry.metadata.type,
+                trackID: entry.metadata.trackID,
+                title: entry.metadata.title,
+                artist: entry.metadata.artist,
+                album: entry.metadata.album,
+                trackNumber: entry.metadata.trackNumber,
+                durationSeconds: entry.metadata.durationSeconds,
+                artworkURL: entry.metadata.artworkURL
+                    .flatMap(URL.init(string:))
+                    .flatMap { MobileArtworkURLPolicy.validated($0) }?
+                    .absoluteString,
+                embedURL: boundedHTTPSURL(entry.metadata.embedURL) ?? "",
+                sourceURL: metadataSource
+            )
+            return (key, MobileRemoteSongMetadataCacheEntry(
+                sourceURL: source,
+                mediaKind: entry.mediaKind,
+                metadata: metadata,
+                cachedAt: entry.cachedAt
+            ))
         }
         .sorted { $0.1.cachedAt > $1.1.cachedAt }
         .prefix(limit)
         return Dictionary(uniqueKeysWithValues: entries)
+    }
+
+    private static func boundedHTTPSURL(_ value: String?) -> String? {
+        guard let value = MobileDurableURLPolicy.trimmed(value),
+              let url = URL(string: value),
+              MobileDurableURLPolicy.accepts(url),
+              url.scheme?.lowercased() == "https",
+              url.user == nil,
+              url.password == nil else { return nil }
+        return value
     }
 }
 
@@ -1409,8 +1544,7 @@ enum MobileRemoteSourceMetadataReusePolicy {
             isMetadataLoading: song.isMetadataLoading,
             title: song.title,
             artist: song.artist
-        ), let source = song.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !source.isEmpty else { return nil }
+        ), let source = song.sourceURL.flatMap(MobileTrackPersistencePolicy.canonicalSourceURL) else { return nil }
         let durationSeconds = song.duration.flatMap { duration -> Int? in
             guard duration.isFinite,
                   duration > 0,
@@ -1439,8 +1573,7 @@ enum MobileRemoteSourceMetadataReusePolicy {
     /// search terms needed to locate its audio counterpart.
     static func acquisitionTrack(for song: MobileRemoteSong) -> LocalImportSpotifyTrack? {
         if let known = knownTrack(for: song) { return known }
-        guard let source = song.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !source.isEmpty else { return nil }
+        guard let source = song.sourceURL.flatMap(MobileTrackPersistencePolicy.canonicalSourceURL) else { return nil }
         let isDirectYouTube = (try? LocalImportURL.youtubeVideoID(source)) != nil
         guard LocalImportURL.isSoundCloud(source) || isDirectYouTube else { return nil }
         let filenameTitle = (song.filename as NSString).deletingPathExtension
@@ -1553,10 +1686,9 @@ enum MobileRemoteSourceResolutionCachePolicy {
               originURL.user == nil,
               originURL.password == nil,
               MobileServerEndpointPolicy.normalizedOrigin(of: originURL) != nil,
-              let source = sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !source.isEmpty,
-              source.utf8.count <= 8_192,
+              let source = MobileDurableURLPolicy.trimmed(sourceURL),
               let url = URL(string: source),
+              MobileDurableURLPolicy.accepts(url),
               url.scheme?.lowercased() == "https",
               url.host != nil,
               url.user == nil,

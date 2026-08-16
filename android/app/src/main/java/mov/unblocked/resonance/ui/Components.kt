@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import mov.unblocked.resonance.BuildConfig
 import mov.unblocked.resonance.data.Playlist
+import mov.unblocked.resonance.data.ArtworkPayloadPolicy
 import mov.unblocked.resonance.data.ServerNetworkPolicy
 import mov.unblocked.resonance.data.Track
 import java.io.ByteArrayOutputStream
@@ -247,7 +248,7 @@ internal fun resolveRemoteArtworkURL(
 
 private fun loadRemoteArtwork(serverURL: String, url: String): Bitmap? =
     loadRemoteArtworkBytes(serverURL, url)?.let { bytes ->
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        ArtworkPayloadPolicy.decode(bytes)
     }
 
 /**
@@ -299,9 +300,9 @@ internal fun loadRemoteArtworkBytes(
             if (responseCode !in 200..299) return@runCatching null
 
             val declaredBytes = connection.contentLengthLong
-            if (declaredBytes > MAX_REMOTE_ARTWORK_BYTES) return@runCatching null
+            if (declaredBytes > ArtworkPayloadPolicy.MAX_BYTES) return@runCatching null
             return@runCatching connection.inputStream.use { input ->
-                readRemoteArtworkBytes(input, MAX_REMOTE_ARTWORK_BYTES)
+                readRemoteArtworkBytes(input, ArtworkPayloadPolicy.MAX_BYTES)
             }
         } finally {
             connection.disconnect()
@@ -328,7 +329,7 @@ internal fun readRemoteArtworkBytes(
     return output.toByteArray().takeIf(ByteArray::isNotEmpty)
 }
 
-internal const val MAX_REMOTE_ARTWORK_BYTES = 10L * 1_024L * 1_024L
+internal const val MAX_REMOTE_ARTWORK_BYTES = ArtworkPayloadPolicy.MAX_BYTES
 private const val MAX_REMOTE_ARTWORK_REDIRECTS = 5
 private const val REMOTE_ARTWORK_CONNECT_TIMEOUT_MS = 10_000
 private const val REMOTE_ARTWORK_READ_TIMEOUT_MS = 20_000

@@ -1,6 +1,8 @@
 const RELEASES_API_URL = "https://api.github.com/repos/Drastics-Experiments/resonance/releases?per_page=30";
 const WINDOWS_MANIFEST_NAME = "latest.yml";
 const WINDOWS_DOWNLOAD_PREFIX = "https://github.com/Drastics-Experiments/resonance/releases/download/";
+const MAX_RELEASE_LIST_RESPONSE_BYTES = 2 * 1024 * 1024;
+const { readResponseJSON } = require("./response-body.cjs");
 
 async function resolveWindowsUpdateFeed(fetchImpl = fetch) {
   const response = await fetchImpl(RELEASES_API_URL, {
@@ -11,7 +13,7 @@ async function resolveWindowsUpdateFeed(fetchImpl = fetch) {
   });
   if (!response.ok) throw new Error(`GitHub release lookup failed with HTTP ${response.status}.`);
 
-  const releases = await response.json();
+  const releases = await readResponseJSON(response, MAX_RELEASE_LIST_RESPONSE_BYTES, "GitHub release list");
   if (!Array.isArray(releases)) throw new Error("GitHub returned an invalid release list.");
 
   for (const release of releases) {

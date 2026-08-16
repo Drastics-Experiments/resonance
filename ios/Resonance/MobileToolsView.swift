@@ -2720,10 +2720,8 @@ struct MobileLocalImportSheet: View {
             Image(systemName: viewModel.mediaMode == .video ? "play.rectangle.fill" : "music.note")
                 .foregroundStyle(.white.opacity(0.8))
             if let artworkURL {
-                AsyncImage(url: artworkURL) { phase in
-                    if case .success(let image) = phase {
-                        image.resizable().scaledToFill()
-                    }
+                MobileSafeArtworkImage(url: artworkURL) { image in
+                    image.resizable().scaledToFill()
                 }
             }
         }
@@ -2893,10 +2891,8 @@ struct MobileLocalImportSheet: View {
             Image(systemName: "music.note")
                 .foregroundStyle(.white.opacity(0.8))
             if let artworkURL {
-                AsyncImage(url: artworkURL) { phase in
-                    if case .success(let image) = phase {
-                        image.resizable().scaledToFill()
-                    }
+                MobileSafeArtworkImage(url: artworkURL) { image in
+                    image.resizable().scaledToFill()
                 }
             }
         }

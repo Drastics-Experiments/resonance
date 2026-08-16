@@ -104,6 +104,8 @@ let serverToken = "";
 let serverAdminToken = "";
 let accountSession = null;
 let isAccountEmailRevealed = false;
+const MAX_ACCOUNT_AVATAR_DATA_URL_LENGTH = 4 * 1024 * 1024;
+const ACCOUNT_AVATAR_DATA_URL_PATTERN = /^data:image\/(?:avif|gif|jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
 let serverCatalog = [];
 let serverCatalogGeneration = 0;
 let serverMetadataHydrationGeneration = 0;
@@ -969,6 +971,15 @@ function paintProfileAvatar(element, initial) {
   else element.style.removeProperty("background-image");
 }
 
+function safeAccountAvatarDataURL(value) {
+  const candidate = typeof value === "string" ? value.trim() : "";
+  return candidate
+    && candidate.length <= MAX_ACCOUNT_AVATAR_DATA_URL_LENGTH
+    && ACCOUNT_AVATAR_DATA_URL_PATTERN.test(candidate)
+    ? candidate
+    : null;
+}
+
 function updateProfileControl() {
   updateProfileControlView();
 }
@@ -997,7 +1008,7 @@ function updateProfileControlView({ refreshPicture = true } = {}) {
   button.title = `Profile: ${name}`;
   button.setAttribute("aria-label", `Open profile menu for ${name}`);
   const initial = Array.from(name)[0]?.toLocaleUpperCase() || "D";
-  activeProfilePicture = accountSession?.imageURL || null;
+  activeProfilePicture = safeAccountAvatarDataURL(accountSession?.imageURL);
   paintProfileAvatar($("#profileInitial"), initial);
   paintProfileAvatar($("#profileMenuInitial"), initial);
   $("#profileMenuName").textContent = name;

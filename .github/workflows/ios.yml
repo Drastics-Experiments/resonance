@@ -50,9 +50,10 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
       - name: Apply direct candidate version
         if: ${{ inputs.release_candidate && inputs.version_override }}
@@ -84,7 +85,7 @@ jobs:
 
       - name: Restore iOS DerivedData cache
         id: ios-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ runner.temp }}/ResonanceDerivedData
           key: resonance-ios-derived-data-${{ runner.arch }}-${{ hashFiles('ios/Resonance.xcodeproj/project.pbxproj', 'ios/Resonance/**') }}
@@ -115,7 +116,7 @@ jobs:
 
       - name: Upload simulator app
         if: ${{ !inputs.release_candidate }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Resonance-iOS-Simulator-${{ github.sha }}
           path: ${{ runner.temp }}/ResonanceDerivedData/Build/Products/Debug-iphonesimulator/Resonance.app
@@ -136,7 +137,7 @@ jobs:
 
       - name: Upload iOS release candidate
         if: ${{ inputs.release_candidate }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-assets-ios
           path: |
@@ -148,7 +149,7 @@ jobs:
 
       - name: Save iOS DerivedData cache from main
         if: ${{ github.ref == 'refs/heads/main' && steps.ios-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ runner.temp }}/ResonanceDerivedData
           key: ${{ steps.ios-cache.outputs.cache-primary-key }}

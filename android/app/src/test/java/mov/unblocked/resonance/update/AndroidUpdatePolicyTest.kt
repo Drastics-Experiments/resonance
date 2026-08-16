@@ -1,7 +1,11 @@
 package mov.unblocked.resonance.update
 
+import java.net.URL
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -60,6 +64,53 @@ class AndroidUpdatePolicyTest {
         }
 
         assertEquals("The update download URL is not secure.", error.message)
+    }
+
+    @Test
+    fun onlyApprovedReleaseHostsAreAccepted() {
+        assertThrows(IllegalArgumentException::class.java) {
+            AndroidUpdatePolicy.availableUpdate(
+                manifest(versionCode = 7, apkUrl = "https://updates.example/resonance.apk"),
+                6,
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AndroidUpdatePolicy.availableUpdate(
+                manifest(versionCode = 7, apkUrl = "https://github.com:8443/Drastics-Experiments/resonance/releases/download/v1.0.7/app.apk"),
+                6,
+            )
+        }
+        assertNotNull(
+            AndroidUpdatePolicy.availableUpdate(
+                manifest(versionCode = 7, apkUrl = "https://release-assets.githubusercontent.com/resonance.apk"),
+                6,
+            ),
+        )
+    }
+
+    @Test
+    fun updaterRedirectsAreRevalidatedAgainstTheReleaseAllowlist() {
+        val github = URL("https://github.com/Drastics-Experiments/resonance/releases/latest/download/latest-android.json")
+
+        assertNotNull(
+            AndroidUpdateNetworkPolicy.resolveRedirect(
+                github,
+                "https://release-assets.githubusercontent.com/resonance.apk",
+            ),
+        )
+        assertNull(
+            AndroidUpdateNetworkPolicy.resolveRedirect(github, "https://evil.example/resonance.apk"),
+        )
+        assertNull(
+            AndroidUpdateNetworkPolicy.resolveRedirect(github, "http://127.0.0.1/resonance.apk"),
+        )
+        assertFalse(AndroidUpdateNetworkPolicy.isAllowedURL("https://github.com:8443/releases/app.apk"))
+        assertTrue(
+            AndroidUpdateNetworkPolicy.isAllowedURL(
+                "http://10.0.2.2:8765/Resonance-Android.apk",
+                allowLocalDevelopment = true,
+            ),
+        )
     }
 
     @Test

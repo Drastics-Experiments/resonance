@@ -1247,7 +1247,7 @@ struct LocalImportTests {
         let track = model.insertLocalImportedAudio(imported)
         #expect(track.kind == .video)
         #expect(track.fileURL == imported.fileURL)
-        #expect(track.downloadSourceURL == "https://rr1.example.googlevideo.com/videoplayback")
+        #expect(track.downloadSourceURL == nil)
     }
 
     @Test

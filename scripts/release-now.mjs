@@ -110,7 +110,6 @@ function sleep(milliseconds) {
 
 export function parseArguments(arguments_) {
   const options = {
-    allowUnsignedDesktop: false,
     build: undefined,
     dryRun: false,
     help: false,
@@ -121,9 +120,6 @@ export function parseArguments(arguments_) {
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
     switch (argument) {
-      case "--allow-unsigned-desktop":
-        options.allowUnsignedDesktop = true;
-        break;
       case "--build": {
         const value = arguments_[index + 1];
         if (!value || !/^[0-9]+$/.test(value)) fail("--build requires a positive integer");
@@ -211,31 +207,22 @@ export function porcelainChangedPaths(status) {
     .map((line) => line.replace(/^[ MADRCU?!]{1,2} /, ""));
 }
 
-export function requiredReleaseSecretNames(allowUnsignedDesktop) {
-  return allowUnsignedDesktop
-    ? [...requiredAndroidSecrets]
-    : [...requiredAndroidSecrets, ...requiredMacOSSecrets, ...requiredWindowsSecrets];
+export function requiredReleaseSecretNames() {
+  return [...requiredAndroidSecrets, ...requiredMacOSSecrets, ...requiredWindowsSecrets];
 }
 
 function usage() {
   console.log(`Usage: /path/to/Resonance/app/scripts/release-now.mjs [options]
 
-Creates one release PR from the current clean, committed HEAD, waits for all four
-platform candidates, merges only after the validated bundle passes, publishes the
-same artifacts, and verifies the public release plus its desktop-signing evidence.
+The legacy PR-based release path is disabled. Production releases must be dispatched
+from the protected main branch through direct-release-build.yml with production signing.
+This command is retained only to report the migration; it never creates a branch,
+commit, pull request, tag, release, or build.
 
 Options:
-  --version X.Y.Z   Release version (default: next patch)
-  --build N         Cross-platform build number (default: current + 1)
-  --allow-unsigned-desktop
-                    Publish macOS and Windows without signing credentials and
-                    label the release with an unsigned-desktop warning
-  --dry-run         Run preflight and print the plan without changing anything
-  --retry-failed    Rerun failed candidate/publisher jobs when resuming
   -h, --help        Show this help
 
-Rerun the same command from an existing release/vX.Y.Z branch to resume after an
-interruption. The command never stages an already-dirty working tree.`);
+Use Release Studio or dispatch the protected direct-release workflow explicitly.`);
 }
 
 function readManifest() {
@@ -258,19 +245,19 @@ function readReleasePolicy() {
     !versionPattern.test(policy.version) ||
     !Number.isInteger(policy.build) ||
     policy.build < 1 ||
-    !["production", "unsigned"].includes(policy.desktopSigning)
+    policy.desktopSigning !== "production"
   ) {
     fail(`${releasePolicyFile} is invalid`);
   }
   return policy;
 }
 
-function writeReleasePolicy(version, build, allowUnsignedDesktop) {
+function writeReleasePolicy(version, build) {
   const policy = {
     schemaVersion: 1,
     version,
     build,
-    desktopSigning: allowUnsignedDesktop ? "unsigned" : "production",
+    desktopSigning: "production",
   };
   fs.writeFileSync(
     path.join(repositoryRoot, releasePolicyFile),
@@ -326,10 +313,10 @@ function resolveRepository() {
   return gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
 }
 
-function ensureReleaseSigningSecrets(repository, allowUnsignedDesktop) {
+function ensureReleaseSigningSecrets(repository) {
   const secrets = ghJSON(["secret", "list", "--repo", repository, "--json", "name"]);
   const names = new Set(secrets.map((secret) => secret.name));
-  const required = requiredReleaseSecretNames(allowUnsignedDesktop);
+  const required = requiredReleaseSecretNames();
   const missing = required.filter((name) => !names.has(name));
   if (missing.length > 0) {
     fail(`missing production release-signing secret(s): ${missing.join(", ")}`);
@@ -370,15 +357,13 @@ function validateVersionChanges() {
   }
 }
 
-function releaseBody(version, build, sourceSha, allowUnsignedDesktop) {
-  const desktopPolicy = allowUnsignedDesktop
-    ? "macOS and Windows are intentionally unsigned; no desktop signing credentials are used"
-    : "macOS and Windows are production-signed and verified";
+function releaseBody(version, build, sourceSha) {
   return `## Release\n- version: ${version}\n- build: ${build}\n- source: ${sourceSha}\n\n` +
-    `The release-candidate workflow builds all four platforms in parallel; ${desktopPolicy}. ` +
+    "The production direct-release workflow builds all four platforms from the exact " +
+    "protected main SHA in parallel; macOS and Windows are production-signed and verified. " +
     "It validates the complete asset and release-policy " +
-    "contract, and records exact source provenance. Merging " +
-    "this PR publishes those already-built artifacts without rebuilding them.";
+    "contract and records exact source provenance. Publication is performed only by " +
+    "the trusted direct-release workflow after its protected-environment approval.";
 }
 
 function findReleasePullRequest(repository, branch) {
@@ -405,7 +390,6 @@ function createReleasePullRequest(
   version,
   build,
   sourceSha,
-  allowUnsignedDesktop,
 ) {
   const url = gh([
     "pr",
@@ -419,7 +403,7 @@ function createReleasePullRequest(
     "--title",
     `Prepare Resonance ${version}`,
     "--body",
-    releaseBody(version, build, sourceSha, allowUnsignedDesktop),
+    releaseBody(version, build, sourceSha),
   ]);
   console.log(`Opened ${url}`);
   return findReleasePullRequest(repository, branch);
@@ -546,7 +530,6 @@ async function verifyPublicRelease(
   candidateSha,
   mergeSha,
   candidateRunId,
-  allowUnsignedDesktop,
 ) {
   const tag = `v${version}`;
   const release = ghJSON([
@@ -608,9 +591,8 @@ async function verifyPublicRelease(
       "scripts/validate-release-assets.mjs",
       assetDirectory,
       version,
-      ...(allowUnsignedDesktop
-        ? ["--allow-unsigned-desktop-release"]
-        : ["--signing-evidence", path.join(provenanceDirectory, "signing")]),
+      "--signing-evidence",
+      path.join(provenanceDirectory, "signing"),
     ];
     run(process.execPath, validationArguments, { capture: false });
   } finally {
@@ -626,6 +608,11 @@ async function main() {
     usage();
     return;
   }
+
+  fail(
+    "the legacy PR release path is disabled; dispatch direct-release-build.yml from " +
+      "protected main with production_release=true and the exact main SHA",
+  );
 
   ensureCleanWorkingTree();
   let currentBranch = git(["branch", "--show-current"]);
@@ -646,14 +633,7 @@ async function main() {
   const build = resuming ? manifest.build : options.build || manifest.build + 1;
   const branch = `release/v${version}`;
   const tag = `v${version}`;
-  const allowUnsignedDesktop = resuming
-    ? releasePolicy.desktopSigning === "unsigned"
-    : options.allowUnsignedDesktop;
-
-  if (resuming && options.allowUnsignedDesktop && !allowUnsignedDesktop) {
-    fail(`${currentBranch} is configured for production desktop signing`);
-  }
-  ensureReleaseSigningSecrets(repository, allowUnsignedDesktop);
+  ensureReleaseSigningSecrets(repository);
 
   if (resuming) {
     if (manifest.version !== version) {
@@ -677,11 +657,7 @@ async function main() {
   console.log(
     `${options.dryRun ? "Dry-run" : "Release"} plan: ${tag} build ${build} from ${source.head}`,
   );
-  console.log(
-    allowUnsignedDesktop
-      ? "Desktop mode: unsigned macOS and Windows; no desktop signing credentials will be used."
-      : "Desktop mode: production signing and signing evidence required.",
-  );
+  console.log("Desktop mode: production signing and signing evidence required.");
   console.log("One PR; Android, iOS, macOS, and Windows build in parallel; no post-merge rebuild.");
   if (options.dryRun) return;
 
@@ -692,7 +668,7 @@ async function main() {
     run("node", ["scripts/release-version.mjs", "--set", version, String(build)], {
       capture: false,
     });
-    writeReleasePolicy(version, build, allowUnsignedDesktop);
+    writeReleasePolicy(version, build);
     validateVersionChanges();
     run("git", ["add", "--", ...releaseFiles], { capture: false });
     run("git", ["commit", "-m", `Prepare Resonance ${version}`], { capture: false });
@@ -718,7 +694,6 @@ async function main() {
       manifest.version,
       manifest.build,
       candidateSha,
-      allowUnsignedDesktop,
     );
   }
   if (!pullRequest) fail(`could not resolve the release PR for ${branch}`);
@@ -750,7 +725,6 @@ async function main() {
     candidateSha,
     mergeSha,
     candidateRun.databaseId,
-    allowUnsignedDesktop,
   );
 
   if (initialBranch !== branch && succeeds("git", ["show-ref", "--verify", "--quiet", `refs/heads/${initialBranch}`])) {

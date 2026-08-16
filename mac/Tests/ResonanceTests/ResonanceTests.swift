@@ -692,20 +692,33 @@ struct ResonanceTests {
             MockMusicURLProtocol.handler = nil
         }
         MockMusicURLProtocol.handler = { request in
-            let url = try #require(request.url)
+            _ = try #require(request.url)
             #expect(request.value(forHTTPHeaderField: "Cache-Control") == "no-cache")
             return (
-                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                HTTPURLResponse(
+                    url: URL(string: "https://objects.githubusercontent.com/resonance/latest-mac.json")!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
                 try JSONEncoder().encode(manifest)
             )
         }
 
-        let firstLaunch = UpdateManager(session: session, updateDirectory: updateDirectory)
+        let firstLaunch = UpdateManager(
+            session: session,
+            updateDirectory: updateDirectory,
+            updatesEnabled: true
+        )
         await firstLaunch.checkForUpdates(silent: true)
         #expect(firstLaunch.canInstall)
         #expect(firstLaunch.downloadedArchive == archive)
 
-        let relaunched = UpdateManager(session: session, updateDirectory: updateDirectory)
+        let relaunched = UpdateManager(
+            session: session,
+            updateDirectory: updateDirectory,
+            updatesEnabled: true
+        )
         await relaunched.checkForUpdates(silent: true)
         #expect(relaunched.canInstall)
         #expect(relaunched.downloadedArchive == archive)

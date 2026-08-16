@@ -51,9 +51,10 @@ class LibraryRepository(
                 }
             }
             val migration = migrateUnlinkedDownloads(decoded)
-            val durationMigration = migratePlayableDurations(migration.library)
+            val providerURLMigration = migrateProviderMediaURLs(migration.library)
+            val durationMigration = migratePlayableDurations(providerURLMigration.library)
             normalize(durationMigration.library).also { library ->
-                if (migration.changed || durationMigration.changed) writeState(library)
+                if (migration.changed || providerURLMigration.changed || durationMigration.changed) writeState(library)
                 cleanupUnreferencedAppOwnedFiles(library)
             }
         }
@@ -102,6 +103,32 @@ class LibraryRepository(
             ),
             changed = true,
         )
+    }
+
+    private fun migrateProviderMediaURLs(library: StoredLibrary): LibraryMigration {
+        if (ProviderMediaURLMigrationPolicy.Identifier in library.completedMigrations) {
+            return LibraryMigration(library, changed = false)
+        }
+        val migrated = library.copy(
+            tracks = library.tracks.map(ProviderMediaURLPolicy::sanitizeTrack),
+            remoteSongMetadataCache = library.remoteSongMetadataCache.mapNotNull { (storedKey, entry) ->
+                val sourceURL = ProviderMediaURLPolicy.persistableSourceURL(entry.sourceURL)
+                    ?: return@mapNotNull null
+                storedKey to entry.copy(
+                    sourceURL = sourceURL,
+                    artworkURL = ProviderMediaURLPolicy.sanitizeMetadataArtworkURL(entry.artworkURL),
+                )
+            }.toMap(),
+            serverURL = ProviderMediaURLPolicy.boundedURL(library.serverURL) ?: StoredLibrary().serverURL,
+            playlistSyncServerURL = ProviderMediaURLPolicy.boundedURL(library.playlistSyncServerURL),
+            profileStates = library.profileStates
+                .filterKeys { it.length <= ProviderMediaURLPolicy.MAX_URL_LENGTH }
+                .mapValues { (_, state) ->
+                    state.copy(playlistSyncServerURL = ProviderMediaURLPolicy.boundedURL(state.playlistSyncServerURL))
+                },
+            completedMigrations = library.completedMigrations + ProviderMediaURLMigrationPolicy.Identifier,
+        )
+        return LibraryMigration(migrated, changed = migrated != library)
     }
 
     private fun migrateUnlinkedDownloads(library: StoredLibrary): LibraryMigration {
@@ -256,7 +283,7 @@ class LibraryRepository(
                 sourceServer = sourceServer,
                 syncProfileID = syncProfileID,
                 sourceURL = song.sourceURL,
-                downloadSourceURL = song.sourceURL,
+                downloadSourceURL = ProviderMediaURLPolicy.persistableDownloadURL(song.sourceURL),
                 fallbackArtwork = fallbackArtwork,
                 contentSHA256 = verifiedContentSHA256,
                 preservesUnlinkedImport = false,
@@ -401,7 +428,7 @@ class LibraryRepository(
             library = library,
             candidateTracks = library.tracks.filter { fileForTrack(it).isFile },
         )
-        val existingTracks = reconciled.tracks
+        val existingTracks = reconciled.tracks.map(ProviderMediaURLPolicy::sanitizeTrack)
         val trackIDs = existingTracks.mapTo(linkedSetOf()) { it.id }
         val favorites = reconciled.favorites.intersect(trackIDs)
         val cleanedPlaylists = reconciled.playlists.map { playlist ->
@@ -416,15 +443,21 @@ class LibraryRepository(
         )
         if (likedIndex >= 0) cleanedPlaylists[likedIndex] = liked else cleanedPlaylists.add(0, liked)
         return reconciled.copy(
+            serverURL = ProviderMediaURLPolicy.boundedURL(reconciled.serverURL) ?: StoredLibrary().serverURL,
+            playlistSyncServerURL = ProviderMediaURLPolicy.boundedURL(reconciled.playlistSyncServerURL),
             tracks = existingTracks,
             playlists = cleanedPlaylists,
             favorites = favorites,
             remoteSongMetadataCache = RemoteSongMetadataCachePolicy.normalized(
                 reconciled.remoteSongMetadataCache,
             ),
-            profileStates = reconciled.profileStates.mapValues { (_, state) ->
-                normalizeProfileState(state, existingTracks)
-            },
+            profileStates = reconciled.profileStates
+                .filterKeys { it.length <= ProviderMediaURLPolicy.MAX_URL_LENGTH }
+                .mapValues { (_, state) ->
+                    normalizeProfileState(state, existingTracks).copy(
+                        playlistSyncServerURL = ProviderMediaURLPolicy.boundedURL(state.playlistSyncServerURL),
+                    )
+                },
         )
     }
 
@@ -481,8 +514,8 @@ class LibraryRepository(
                 remoteID = remoteID,
                 sourceServer = sourceServer,
                 syncProfileID = syncProfileID,
-                sourceURL = sourceURL,
-                downloadSourceURL = downloadSourceURL,
+                sourceURL = ProviderMediaURLPolicy.persistableSourceURL(sourceURL),
+                downloadSourceURL = ProviderMediaURLPolicy.persistableDownloadURL(downloadSourceURL),
                 artworkFilename = artworkFilename,
                 artworkScanComplete = true,
                 sourceSHA256 = sourceSHA256,

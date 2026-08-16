@@ -390,7 +390,10 @@ struct TrackArtworkView: View {
             } else if let artworkURL = track.artworkURL.flatMap(URL.init(string:)),
                       artworkURL.scheme?.lowercased() == "https",
                       artworkURL.host?.isEmpty == false {
-                CroppedRemoteArtwork(url: artworkURL) { isLoading in
+                CroppedRemoteArtwork(
+                    url: artworkURL,
+                    serverOrigin: track.sourceServer.flatMap(URL.init(string:))
+                ) { isLoading in
                     ZStack {
                         ArtworkView(
                             style: track.artwork,

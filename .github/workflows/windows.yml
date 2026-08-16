@@ -33,7 +33,8 @@ on:
         required: false
         type: boolean
         default: false
-      unsigned_desktop:
+      production_signing:
+        description: Permit production signing only from the protected direct-release workflow.
         required: false
         type: boolean
         default: false
@@ -70,15 +71,17 @@ jobs:
   build:
     if: ${{ inputs.release_candidate || github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release/') }}
     runs-on: windows-latest
+    environment: ${{ inputs.production_signing && 'production-release' || '' }}
     defaults:
       run:
         working-directory: windows
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
       - name: Apply direct candidate version
         if: ${{ inputs.release_candidate && inputs.version_override }}
@@ -103,7 +106,7 @@ jobs:
           [[ "$BUILD" == "$EXPECTED_BUILD" ]]
 
       - name: Validate Authenticode signing secrets
-        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        if: ${{ inputs.release_candidate && inputs.production_signing }}
         shell: pwsh
         working-directory: .
         env:
@@ -122,7 +125,7 @@ jobs:
           }
 
       - name: Configure Authenticode signing
-        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        if: ${{ inputs.release_candidate && inputs.production_signing }}
         shell: pwsh
         working-directory: .
         env:
@@ -138,12 +141,12 @@ jobs:
           }
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 11.7.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
           cache: pnpm
@@ -151,7 +154,7 @@ jobs:
 
       - name: Restore Electron packaging cache
         id: electron-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~\AppData\Local\electron\Cache
@@ -171,20 +174,20 @@ jobs:
         run: node --test scripts/release-now.test.mjs scripts/validate-release-assets.test.mjs
 
       - name: Build unsigned development installer
-        if: ${{ !inputs.release_candidate || inputs.unsigned_desktop }}
+        if: ${{ !inputs.release_candidate || !inputs.production_signing }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: pnpm run installer:win
 
       - name: Build signed release candidate
-        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        if: ${{ inputs.release_candidate && inputs.production_signing }}
         env:
           WIN_CSC_LINK: ${{ runner.temp }}\resonance-code-signing.pfx
           WIN_CSC_KEY_PASSWORD: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_PASSWORD }}
         run: pnpm exec electron-builder --win nsis --x64 --publish never --config.forceCodeSigning=true
 
       - name: Verify Authenticode signatures and record evidence
-        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        if: ${{ inputs.release_candidate && inputs.production_signing }}
         shell: pwsh
         working-directory: .
         env:
@@ -249,7 +252,7 @@ jobs:
 
       - name: Upload installer artifact
         if: ${{ !inputs.release_candidate }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Resonance-Windows-${{ github.sha }}
           path: |
@@ -260,7 +263,7 @@ jobs:
 
       - name: Upload Windows release candidate
         if: ${{ inputs.release_candidate }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-assets-windows
           path: |
@@ -272,8 +275,8 @@ jobs:
           overwrite: true
 
       - name: Upload Windows signing evidence
-        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
-        uses: actions/upload-artifact@v7
+        if: ${{ inputs.release_candidate && inputs.production_signing }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-signing-windows
           path: ${{ runner.temp }}/resonance-signing-evidence/windows.json
@@ -282,14 +285,14 @@ jobs:
           overwrite: true
 
       - name: Remove temporary signing material
-        if: ${{ always() && inputs.release_candidate && !inputs.unsigned_desktop }}
+        if: ${{ always() && inputs.release_candidate && inputs.production_signing }}
         shell: pwsh
         working-directory: .
         run: Remove-Item "$env:RUNNER_TEMP/resonance-code-signing.pfx" -Force -ErrorAction SilentlyContinue
 
       - name: Save Electron packaging cache from main
         if: ${{ github.ref == 'refs/heads/main' && steps.electron-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~\AppData\Local\electron\Cache

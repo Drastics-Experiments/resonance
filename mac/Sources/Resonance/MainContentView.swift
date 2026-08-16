@@ -789,7 +789,10 @@ private struct MacServerArtwork: View {
         Group {
             if let rawArtworkURL = song.artworkURL,
                let artworkURL = URL(string: rawArtworkURL) {
-                CroppedRemoteArtwork(url: artworkURL) { isLoading in
+                CroppedRemoteArtwork(
+                    url: artworkURL,
+                    serverOrigin: URL(string: song.downloadURL)
+                ) { isLoading in
                     fallbackArtwork
                         .overlay {
                             if isLoading {
@@ -1277,6 +1280,28 @@ private struct MacProfileMenu: View {
 
 }
 
+@MainActor
+private final class MacProfileImageLoader: ObservableObject {
+    @Published private(set) var image: NSImage?
+    private var generation: UInt = 0
+
+    func load(url: URL?) async {
+        generation &+= 1
+        let currentGeneration = generation
+        image = nil
+        guard let url,
+              let safeURL = MacArtworkURLPolicy.allowedPublicURL(url) else { return }
+        guard let data = await ArtworkCropping.remoteImageData(
+            from: safeURL,
+            allowPublicHost: true
+        ),
+        !Task.isCancelled,
+        currentGeneration == generation,
+        let decoded = ArtworkCropping.validatedImage(from: data) else { return }
+        image = decoded
+    }
+}
+
 private struct ProfileAvatar: View {
     @Environment(\.resonancePalette) private var palette
     let initial: String
@@ -1284,6 +1309,21 @@ private struct ProfileAvatar: View {
     let fontSize: CGFloat
     var imageData: Data? = nil
     var imageURL: URL? = nil
+    @StateObject private var imageLoader = MacProfileImageLoader()
+
+    init(
+        initial: String,
+        size: CGFloat,
+        fontSize: CGFloat,
+        imageData: Data? = nil,
+        imageURL: URL? = nil
+    ) {
+        self.initial = initial
+        self.size = size
+        self.fontSize = fontSize
+        self.imageData = imageData
+        self.imageURL = imageURL
+    }
 
     var body: some View {
         ZStack {
@@ -1293,17 +1333,11 @@ private struct ProfileAvatar: View {
                 endPoint: .bottomTrailing
             )
 
-            if let imageURL {
-                AsyncImage(url: imageURL) { image in
-                    image
-                        .resizable()
-                        .scaledToFill()
-                } placeholder: {
-                    Text(initial)
-                        .font(.system(size: fontSize, weight: .bold, design: .rounded))
-                        .foregroundStyle(Color.white)
-                }
-            } else if let imageData, let image = NSImage(data: imageData) {
+            if let image = imageLoader.image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if imageURL == nil, let imageData, let image = NSImage(data: imageData) {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFill()
@@ -1320,6 +1354,9 @@ private struct ProfileAvatar: View {
             }
             .shadow(color: palette.secondary.opacity(0.26), radius: 9, y: 4)
             .contentShape(Circle())
+            .task(id: imageURL?.absoluteString ?? "") {
+                await imageLoader.load(url: imageURL)
+            }
     }
 }
 

@@ -1,16 +1,232 @@
 import AppKit
+import Foundation
+import ImageIO
 import SwiftUI
 
+enum MacArtworkURLPolicy {
+    static let maximumURLBytes = 8_192
+    private static let providerHosts = [
+        "scdn.co",
+        "spotifycdn.com",
+        "ytimg.com",
+        "ggpht.com",
+        "sndcdn.com",
+    ]
+
+    static func allowedURL(_ url: URL, serverOrigin: URL? = nil) -> URL? {
+        guard url.scheme?.lowercased() == "https",
+              url.user == nil,
+              url.password == nil,
+              url.fragment == nil,
+              url.absoluteString.utf8.count <= maximumURLBytes,
+              let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !host.isEmpty,
+              url.port == nil || url.port == 443,
+              !isPrivateHost(host) else { return nil }
+
+        if isProviderHost(host) || sameOrigin(url, serverOrigin) {
+            return url
+        }
+        return nil
+    }
+
+    /// Profile images may be hosted by an external identity provider. Keep
+    /// that surface limited to credential-free public HTTPS origins; callers
+    /// still validate the image response and decoded dimensions separately.
+    static func allowedPublicURL(_ url: URL) -> URL? {
+        guard url.scheme?.lowercased() == "https",
+              url.user == nil,
+              url.password == nil,
+              url.fragment == nil,
+              url.absoluteString.utf8.count <= maximumURLBytes,
+              let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !host.isEmpty,
+              url.port == nil || url.port == 443,
+              !isPrivateHost(host) else { return nil }
+        return url
+    }
+
+    static func isWithinDecodedPixelBounds(width: Int, height: Int) -> Bool {
+        guard width > 0, height > 0,
+              width <= 4_096, height <= 4_096 else { return false }
+        return Int64(width) * Int64(height) <= 16_777_216
+    }
+
+    private static func isProviderHost(_ host: String) -> Bool {
+        providerHosts.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+
+    private static func sameOrigin(_ lhs: URL, _ rhs: URL?) -> Bool {
+        guard let rhs,
+              rhs.scheme?.lowercased() == "https",
+              rhs.user == nil,
+              rhs.password == nil,
+              let lhsHost = lhs.host?.lowercased(),
+              let rhsHost = rhs.host?.lowercased() else { return false }
+        let lhsPort = lhs.port ?? 443
+        let rhsPort = rhs.port ?? 443
+        return lhsHost == rhsHost && lhsPort == rhsPort
+    }
+
+    /// Reject destinations that are commonly used for loopback, link-local,
+    /// RFC1918, carrier-grade NAT, or other local-only services. This is a
+    /// lexical check; the redirect delegate also re-evaluates every hop.
+    static func isPrivateHost(_ rawHost: String) -> Bool {
+        var host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        while host.hasSuffix(".") {
+            host.removeLast()
+        }
+        if host == "localhost"
+            || host.hasSuffix(".localhost")
+            || host.hasSuffix(".local")
+            || host.hasSuffix(".internal")
+            || host.hasSuffix(".lan")
+            || host.hasSuffix(".home.arpa") {
+            return true
+        }
+
+        func isPrivateIPv4(_ value: String) -> Bool {
+            let octets = value.split(separator: ".", omittingEmptySubsequences: false)
+            let values = octets.compactMap { Int($0) }
+            guard octets.count == 4,
+                  values.count == 4,
+                  octets.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }),
+                  values.allSatisfy({ (0...255).contains($0) }) else { return false }
+            let first = values[0]
+            let second = values[1]
+            if first == 0 || first == 10 || first == 127 || first >= 224 { return true }
+            if first == 100, (64...127).contains(second) { return true }
+            if first == 169, second == 254 { return true }
+            if first == 172, (16...31).contains(second) { return true }
+            if first == 192, second == 0 { return true }
+            if first == 192, second == 168 { return true }
+            if first == 198, (18...19).contains(second) { return true }
+            return false
+        }
+        if isPrivateIPv4(host) {
+            return true
+        }
+        if host.allSatisfy(\.isNumber), !host.isEmpty {
+            // Decimal-only hostnames can be parsed by URL clients as a
+            // 32-bit IPv4 address (for example, 2130706433 == 127.0.0.1).
+            return true
+        }
+        if host.contains(":"),
+           let embeddedIPv4 = host.split(separator: ":").last,
+           isPrivateIPv4(String(embeddedIPv4)) {
+            return true
+        }
+
+        if host == "::" || host == "::1"
+            || host.hasPrefix("fc")
+            || host.hasPrefix("fd")
+            || host.hasPrefix("fe8")
+            || host.hasPrefix("fe9")
+            || host.hasPrefix("fea")
+            || host.hasPrefix("feb")
+            || host.hasPrefix("ff") {
+            return true
+        }
+        return false
+    }
+}
+
+private final class MacArtworkRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let validator: @Sendable (URL) -> Bool
+
+    init(validator: @escaping @Sendable (URL) -> Bool) {
+        self.validator = validator
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(request.url.map(validator) == true ? request : nil)
+    }
+}
+
 enum ArtworkCropping {
+    static let maxRemoteBytes = 10 * 1_024 * 1_024
     private static let imageCache = NSCache<NSData, NSImage>()
 
     static func squareImage(from data: Data) -> NSImage? {
+        guard let image = validatedImage(from: data) else { return nil }
         let key = data as NSData
         if let cached = imageCache.object(forKey: key) { return cached }
-        guard let source = NSImage(data: data) else { return nil }
-        let image = squareImage(source)
-        imageCache.setObject(image, forKey: key)
-        return image
+        let cropped = squareImage(image)
+        imageCache.setObject(cropped, forKey: key)
+        return cropped
+    }
+
+    static func validatedImage(from data: Data) -> NSImage? {
+        guard data.count <= maxRemoteBytes,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+              let width = (properties[kCGImagePropertyPixelWidth as String] as? NSNumber)?.intValue,
+              let height = (properties[kCGImagePropertyPixelHeight as String] as? NSNumber)?.intValue,
+              MacArtworkURLPolicy.isWithinDecodedPixelBounds(width: width, height: height),
+              let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        return NSImage(cgImage: decoded, size: NSSize(width: width, height: height))
+    }
+
+    static func remoteImageData(
+        from url: URL,
+        serverOrigin: URL? = nil,
+        allowPublicHost: Bool = false
+    ) async -> Data? {
+        let validate: @Sendable (URL) -> URL? = { candidate in
+            if allowPublicHost {
+                return MacArtworkURLPolicy.allowedPublicURL(candidate)
+            }
+            return MacArtworkURLPolicy.allowedURL(candidate, serverOrigin: serverOrigin)
+        }
+        guard let initialURL = validate(url) else {
+            return nil
+        }
+        let delegate = MacArtworkRedirectDelegate { candidate in
+            validate(candidate) != nil
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 60
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+
+        var request = URLRequest(url: initialURL)
+        request.httpMethod = "GET"
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+        do {
+            let (bytes, rawResponse) = try await session.bytes(for: request)
+            guard let response = rawResponse as? HTTPURLResponse,
+                  (200...299).contains(response.statusCode),
+                  let finalURL = response.url,
+                  validate(finalURL) != nil,
+                  response.value(forHTTPHeaderField: "Content-Type")?.lowercased().hasPrefix("image/") == true else {
+                return nil
+            }
+            if let declared = response.value(forHTTPHeaderField: "Content-Length").flatMap(Int.init),
+               declared > maxRemoteBytes {
+                return nil
+            }
+            var data = Data()
+            data.reserveCapacity(min(maxRemoteBytes, 256 * 1_024))
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                guard data.count < maxRemoteBytes else { return nil }
+                data.append(byte)
+            }
+            return data
+        } catch {
+            return nil
+        }
     }
 
     static func squareImage(_ image: NSImage) -> NSImage {
@@ -161,10 +377,21 @@ enum ArtworkCropping {
 
 struct CroppedRemoteArtwork<Placeholder: View>: View {
     let url: URL
+    let serverOrigin: URL?
     @ViewBuilder let placeholder: (_ isLoading: Bool) -> Placeholder
 
     @State private var image: NSImage?
     @State private var isLoading = true
+
+    init(
+        url: URL,
+        serverOrigin: URL? = nil,
+        @ViewBuilder placeholder: @escaping (_ isLoading: Bool) -> Placeholder
+    ) {
+        self.url = url
+        self.serverOrigin = serverOrigin
+        self.placeholder = placeholder
+    }
 
     var body: some View {
         ZStack {
@@ -175,13 +402,12 @@ struct CroppedRemoteArtwork<Placeholder: View>: View {
                     .scaledToFit()
             }
         }
-        .task(id: url) {
+        .task(id: url.absoluteString + (serverOrigin?.absoluteString ?? "")) {
             image = nil
             isLoading = true
             defer { isLoading = false }
-            guard let (data, response) = try? await URLSession.shared.data(from: url),
+            guard let data = await ArtworkCropping.remoteImageData(from: url, serverOrigin: serverOrigin),
                   !Task.isCancelled,
-                  (response as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true,
                   let cropped = ArtworkCropping.squareImage(from: data) else { return }
             image = cropped
         }

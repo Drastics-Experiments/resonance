@@ -2051,7 +2051,7 @@ struct PlayerModelRegressionTests {
     }
 
     @Test
-    func corruptLibraryBytesArePreservedForRecovery() throws {
+    func corruptLibraryBytesAreNotCopiedIntoRecovery() throws {
         let (defaults, suiteName) = try isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let corrupt = Data("not valid library json".utf8)
@@ -2061,7 +2061,7 @@ struct PlayerModelRegressionTests {
 
         #expect(model.tracks.isEmpty)
         #expect(defaults.data(forKey: "Resonance.library.v2") == corrupt)
-        #expect(defaults.data(forKey: "Resonance.library.v2.recovery") == corrupt)
+        #expect(defaults.data(forKey: "Resonance.library.v2.recovery") == nil)
     }
 
     @Test
