@@ -1211,9 +1211,19 @@ actor LocalDeviceImportService {
         }
     }
 
-    func previewStream(for candidate: LocalImportAudioSourceMatch) async throws -> LocalImportPreviewStream {
+    func previewStream(
+        for candidate: LocalImportAudioSourceMatch,
+        mediaMode: LocalImportMediaMode = .audio
+    ) async throws -> LocalImportPreviewStream {
         try Task.checkCancellation()
         if candidate.sourceProvider == .soundcloud {
+            guard mediaMode == .audio else {
+                throw LocalImportError(
+                    stage: .inspectingSource,
+                    code: "SOUNDCLOUD_AUDIO_ONLY",
+                    message: "SoundCloud links can only be previewed as audio."
+                )
+            }
             let stream = try await soundCloudOperations.resolveAudio(candidate.sourceURL, sessions.soundcloud)
             return LocalImportPreviewStream(url: stream.streamingURL, httpHeaders: LocalImportSoundCloud.streamHeaders)
         }
@@ -1224,7 +1234,7 @@ actor LocalDeviceImportService {
                 message: "This option is not a supported YouTube audio source."
             )
         }
-        let resolved = try await resolveYouTubeMedia(videoID: videoID, mediaMode: .audio)
+        let resolved = try await resolveYouTubeMedia(videoID: videoID, mediaMode: mediaMode)
         return LocalImportPreviewStream(
             url: resolved.primaryStream.streamingURL,
             httpHeaders: resolved.primaryStream.streamingHeaders

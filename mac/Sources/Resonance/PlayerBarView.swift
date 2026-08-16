@@ -4,6 +4,7 @@ struct PlayerBarView: View {
     @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     @State private var isSpeedPickerPresented = false
+    @State private var isListenAlongPresented = false
     let compact: Bool
     let onOpenNowPlaying: () -> Void
 
@@ -68,8 +69,8 @@ struct PlayerBarView: View {
                 )
             }
             .frame(maxWidth: 580)
-            .disabled(model.tracks.isEmpty)
-            .opacity(model.tracks.isEmpty ? 0.45 : 1)
+            .disabled(model.tracks.isEmpty || model.isListenAlongGuest)
+            .opacity(model.tracks.isEmpty ? 0.45 : (model.isListenAlongGuest ? 0.72 : 1))
 
             Spacer(minLength: 0)
 
@@ -172,6 +173,8 @@ struct PlayerBarView: View {
                     }
                     .buttonStyle(.plain)
                 }
+
+                listenAlongButton
             }
         } else {
             HStack(spacing: 11) {
@@ -184,7 +187,30 @@ struct PlayerBarView: View {
                         .font(.system(size: 10))
                         .foregroundStyle(palette.muted)
                 }
+                Spacer(minLength: 0)
+                listenAlongButton
             }
+        }
+    }
+
+    private var listenAlongButton: some View {
+        Button {
+            isListenAlongPresented.toggle()
+        } label: {
+            Image(systemName: model.listenAlongRole == nil
+                ? "person.2.wave.2"
+                : "person.2.wave.2.fill")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(
+                    model.listenAlongRole == nil
+                        ? palette.muted
+                        : palette.foregroundAccent
+                )
+        }
+        .buttonStyle(.plain)
+        .help(model.listenAlongRole == nil ? "Start or Join Listen Along" : model.listenAlongStatus)
+        .popover(isPresented: $isListenAlongPresented, arrowEdge: .bottom) {
+            MacListenAlongPopover()
         }
     }
 }

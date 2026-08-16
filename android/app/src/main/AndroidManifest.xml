@@ -37,6 +37,24 @@
                     android:path="/callback"
                     android:scheme="resonance" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="listen"
+                    android:path="/join"
+                    android:scheme="resonance" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="listen-along"
+                    android:pathPrefix="/"
+                    android:scheme="resonance" />
+            </intent-filter>
         </activity>
 
         <service

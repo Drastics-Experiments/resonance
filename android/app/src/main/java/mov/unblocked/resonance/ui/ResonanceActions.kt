@@ -60,4 +60,7 @@ interface ResonanceActions {
     fun toggleRemoteSelection(songId: String)
     fun clearRemoteSelection()
     fun deleteRemoteSong(songId: String)
+    fun createListenAlong()
+    fun joinListenAlong(code: String)
+    fun leaveListenAlong()
 }

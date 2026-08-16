@@ -79,8 +79,10 @@ fun MiniPlayer(
     val track = state.currentTrack ?: return
     val palette = LocalResonancePalette.current
     val singletonStream = state.isTransientPlayback
+    val listenAlongGuest = state.listenAlong.isGuest
+    val transportLocked = singletonStream || listenAlongGuest
     val fraction = state.playbackProgressFraction
-    val seekInput = if (state.canSeekPlayback) {
+    val seekInput = if (state.canSeekPlayback && !listenAlongGuest) {
         Modifier
             .pointerInput(track.id) {
                 detectTapGestures { offset -> actions.seekToFraction(offset.x / size.width.coerceAtLeast(1)) }
@@ -119,7 +121,7 @@ fun MiniPlayer(
             }
             IconButton(
                 onClick = { actions.playPrevious() },
-                enabled = !singletonStream,
+                enabled = !transportLocked,
             ) {
                 Icon(
                     Icons.Default.SkipPrevious,
@@ -133,6 +135,7 @@ fun MiniPlayer(
             }
             IconButton(
                 onClick = { actions.togglePlayPause() },
+                enabled = !listenAlongGuest,
                 modifier = Modifier
                     .size(44.dp)
                     .background(palette.raised, CircleShape)
@@ -146,7 +149,7 @@ fun MiniPlayer(
             }
             IconButton(
                 onClick = { actions.playNext() },
-                enabled = !singletonStream,
+                enabled = !transportLocked,
             ) {
                 Icon(
                     Icons.Default.SkipNext,
@@ -189,6 +192,8 @@ fun NowPlayingScreen(
     val track = state.currentTrack ?: return
     val palette = LocalResonancePalette.current
     val isServerStream = state.transientCurrentTrack?.id == track.id
+    val listenAlongGuest = state.listenAlong.isGuest
+    val transportLocked = isServerStream || listenAlongGuest
     var dragOffset by remember { mutableFloatStateOf(0f) }
     var speedMenu by remember { mutableStateOf(false) }
     val fraction = state.playbackProgressFraction
@@ -286,7 +291,11 @@ fun NowPlayingScreen(
             }
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    PlayerSeekBar(fraction = fraction, enabled = state.canSeekPlayback, onSeek = actions::seekToFraction)
+                    PlayerSeekBar(
+                        fraction = fraction,
+                        enabled = state.canSeekPlayback && !listenAlongGuest,
+                        onSeek = actions::seekToFraction,
+                    )
                     Row {
                         Text(durationText(state.playbackElapsedMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
                         Spacer(Modifier.weight(1f))
@@ -316,13 +325,14 @@ fun NowPlayingScreen(
                 ) {
                     IconButton(
                         onClick = actions::playPrevious,
-                        enabled = !isServerStream,
+                        enabled = !transportLocked,
                         modifier = Modifier.size(60.dp),
                     ) {
                         Icon(Icons.Default.SkipPrevious, "Previous", Modifier.size(35.dp))
                     }
                     IconButton(
                         onClick = actions::togglePlayPause,
+                        enabled = !listenAlongGuest,
                         modifier = Modifier
                             .size(76.dp)
                             .background(palette.raised, CircleShape)
@@ -336,7 +346,7 @@ fun NowPlayingScreen(
                     }
                     IconButton(
                         onClick = actions::playNext,
-                        enabled = !isServerStream,
+                        enabled = !transportLocked,
                         modifier = Modifier.size(60.dp),
                     ) {
                         Icon(Icons.Default.SkipNext, "Next", Modifier.size(35.dp))
@@ -351,20 +361,20 @@ fun NowPlayingScreen(
                 ) {
                     IconButton(
                         onClick = { actions.setShuffleEnabled(!state.shuffleEnabled) },
-                        enabled = !isServerStream,
+                        enabled = !transportLocked,
                     ) {
                         Icon(
                             Icons.Default.Shuffle,
                             "Shuffle",
                             tint = when {
-                                isServerStream -> MaterialTheme.colorScheme.onSurface.copy(alpha = .24f)
+                                transportLocked -> MaterialTheme.colorScheme.onSurface.copy(alpha = .24f)
                                 state.shuffleEnabled -> MaterialTheme.colorScheme.tertiary
                                 else -> MaterialTheme.colorScheme.onSurface.copy(alpha = .55f)
                             },
                         )
                     }
                     Box {
-                        IconButton(onClick = { speedMenu = true }) {
+                        IconButton(onClick = { speedMenu = true }, enabled = !listenAlongGuest) {
                             Icon(
                                 Icons.Default.Speed,
                                 "Playback speed",
@@ -384,7 +394,10 @@ fun NowPlayingScreen(
                             }
                         }
                     }
-                    IconButton(onClick = { actions.setRepeatEnabled(!state.repeatEnabled) }) {
+                    IconButton(
+                        onClick = { actions.setRepeatEnabled(!state.repeatEnabled) },
+                        enabled = !listenAlongGuest,
+                    ) {
                         Icon(
                             Icons.Default.Repeat,
                             "Repeat",
@@ -415,6 +428,7 @@ fun NowPlayingScreen(
                         "Source",
                         when {
                             isServerStream -> "Server stream • not stored"
+                            listenAlongGuest -> "Listen Along • following host"
                             track.sourceServer == null -> "Stored locally"
                             else -> "Music server"
                         },

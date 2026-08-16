@@ -22,10 +22,13 @@
 		A1000000000000000000000E /* SocialAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* SocialAuth.swift */; };
 		A10000000000000000000012 /* MobileLegacyAppMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* MobileLegacyAppMigration.swift */; };
 		A10000000000000000000013 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* Theme.swift */; };
+		A10000000000000000000015 /* MobileListenAlong.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* MobileListenAlong.swift */; };
+		A10000000000000000000016 /* MobileListenAlongView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* MobileListenAlongView.swift */; };
 		B10000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift */; };
 		B10000000000000000000002 /* MobileClientConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000003 /* MobileClientConfigurationTests.swift */; };
 		B10000000000000000000003 /* MobileLegacyAppMigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000004 /* MobileLegacyAppMigrationTests.swift */; };
 		B10000000000000000000004 /* ThemeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000005 /* ThemeTests.swift */; };
+		B10000000000000000000005 /* MobileListenAlongTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000006 /* MobileListenAlongTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,11 +60,14 @@
 		A20000000000000000000010 /* SocialAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocialAuth.swift; sourceTree = "<group>"; };
 		A20000000000000000000012 /* MobileLegacyAppMigration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileLegacyAppMigration.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		A20000000000000000000014 /* MobileListenAlong.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileListenAlong.swift; sourceTree = "<group>"; };
+		A20000000000000000000015 /* MobileListenAlongView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileListenAlongView.swift; sourceTree = "<group>"; };
 		B20000000000000000000001 /* MobileMissingServerUploadPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileMissingServerUploadPolicyTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000002 /* ResonanceTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ResonanceTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B20000000000000000000003 /* MobileClientConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileClientConfigurationTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000004 /* MobileLegacyAppMigrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileLegacyAppMigrationTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000005 /* ThemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeTests.swift; sourceTree = "<group>"; };
+		B20000000000000000000006 /* MobileListenAlongTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileListenAlongTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -97,6 +103,8 @@
 				A20000000000000000000010 /* SocialAuth.swift */,
 				A20000000000000000000012 /* MobileLegacyAppMigration.swift */,
 				A20000000000000000000013 /* Theme.swift */,
+				A20000000000000000000014 /* MobileListenAlong.swift */,
+				A20000000000000000000015 /* MobileListenAlongView.swift */,
 				A20000000000000000000005 /* Info.plist */,
 				A20000000000000000000007 /* Assets.xcassets */,
 			);
@@ -119,6 +127,7 @@
 				B20000000000000000000003 /* MobileClientConfigurationTests.swift */,
 				B20000000000000000000004 /* MobileLegacyAppMigrationTests.swift */,
 				B20000000000000000000005 /* ThemeTests.swift */,
+				B20000000000000000000006 /* MobileListenAlongTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -213,6 +222,8 @@
 				A1000000000000000000000E /* SocialAuth.swift in Sources */,
 				A10000000000000000000012 /* MobileLegacyAppMigration.swift in Sources */,
 				A10000000000000000000013 /* Theme.swift in Sources */,
+				A10000000000000000000015 /* MobileListenAlong.swift in Sources */,
+				A10000000000000000000016 /* MobileListenAlongView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -224,6 +235,7 @@
 				B10000000000000000000002 /* MobileClientConfigurationTests.swift in Sources */,
 				B10000000000000000000003 /* MobileLegacyAppMigrationTests.swift in Sources */,
 				B10000000000000000000004 /* ThemeTests.swift in Sources */,
+				B10000000000000000000005 /* MobileListenAlongTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

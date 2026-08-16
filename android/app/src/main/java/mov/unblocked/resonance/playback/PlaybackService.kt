@@ -329,6 +329,7 @@ class PlaybackService : MediaSessionService() {
         player?.release()
         player = null
         AuthenticatedStreamRegistry.clearAll()
+        ListenAlongProviderStreamPolicy.clearAll()
         super.onDestroy()
     }
 

@@ -868,9 +868,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var profileSyncStates: [MobileServerContext: MobileProfileSyncState] = [:]
     private var clientConfigRequestGeneration: UInt64 = 0
     private var streamingTrack: MobileTrack?
+    private var streamingArtworkURL: URL?
     private var streamingPlayer: AVPlayer?
     private var streamingResourceLoader: MobileAuthenticatedStreamResourceLoader?
     private var streamingAuthorizationLease: MobileAuthenticatedStreamAuthorizationLease?
+    private var streamingPreview: LocalImportPreviewStream?
+    private var streamingPreviewSourceURL: String?
     private var streamingEndObserver: NSObjectProtocol?
     private var streamingFailureObserver: NSObjectProtocol?
     private var streamingStatusObservation: NSKeyValueObservation?
@@ -878,6 +881,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var accountSession: ResonanceAccountSession?
     private var accountRefreshTask: Task<Void, Never>?
     private var isRefreshingAccountSession = false
+    private weak var listenAlongController: MobileListenAlongController?
+    private var listenAlongApplyingRemoteState = false
 
     private struct EmbeddedMetadata {
         var title: String?
@@ -1010,6 +1015,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     func signOutAccount() async {
         let active = accountSession
+        listenAlongController?.profileOrServerContextDidChange()
         cancelActiveDownloadBatch()
         accountSession = nil
         remoteSourceResolutions.removeAll()
@@ -1066,6 +1072,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             if refreshChangesDownloadScope {
                 // Cancellation and authorization revocation precede every
                 // credential/context mutation visible to transfer callbacks.
+                listenAlongController?.profileOrServerContextDidChange()
                 cancelActiveDownloadBatch()
             }
             migrateConfirmedLegacyProfile(for: refreshed)
@@ -1180,6 +1187,24 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             ?? streamingTrack.flatMap { $0.id == currentTrackID ? $0 : nil }
     }
 
+    /// Artwork for a transient Listen Along stream. Transient tracks are not
+    /// persisted in the local library, so their provider artwork is kept
+    /// alongside the stream and consumed by the normal player artwork view.
+    func listenAlongArtworkURL(for track: MobileTrack) -> URL? {
+        guard streamingTrack?.id == track.id else { return nil }
+        return streamingArtworkURL
+    }
+
+    private func resolvedListenAlongArtworkURL(_ value: URL?, relativeTo baseURL: URL) -> URL? {
+        guard let value else { return nil }
+        let resolved = value.scheme == nil
+            ? URL(string: value.relativeString, relativeTo: baseURL)?.absoluteURL
+            : value
+        guard resolved?.scheme?.lowercased() == "https",
+              resolved?.host?.isEmpty == false else { return nil }
+        return resolved
+    }
+
     private func removeOrphanedTransferArtifacts() {
         MobileOwnedTransferArtifactCleaner.removeOrphans(
             temporaryDirectory: fileManager.temporaryDirectory,
@@ -1191,6 +1216,56 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     var activeServerContext: MobileServerContext? {
         guard let server = URL(string: serverURL) else { return nil }
         return MobileServerEndpointPolicy.context(serverURL: server, profileID: syncProfileID)
+    }
+
+    var isListenAlongPlaybackLocked: Bool {
+        listenAlongController?.isParticipant == true
+    }
+
+    var listenAlongCurrentSourceURL: String? {
+        guard let track = currentTrack else { return nil }
+        if let sourceURL = track.sourceURL,
+           !sourceURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return sourceURL
+        }
+        guard let remoteID = track.remoteID else { return nil }
+        return remoteSongs.first(where: { $0.id == remoteID })?.sourceURL
+    }
+
+    var listenAlongCurrentMediaKind: String {
+        guard let track = currentTrack else { return "audio" }
+        if let remoteID = track.remoteID,
+           let remoteSong = remoteSongs.first(where: { $0.id == remoteID }) {
+            return remoteSong.mediaKind == "video" ? "video" : "audio"
+        }
+        let videoExtensions: Set<String> = ["mp4", "mov", "m4v", "webm"]
+        return videoExtensions.contains(
+            URL(fileURLWithPath: track.relativePath).pathExtension.lowercased()
+        ) ? "video" : "audio"
+    }
+
+    var listenAlongServerURL: URL? { normalizedServer() }
+
+    func listenAlongRequestContext() -> MobileClientRequestContext {
+        clientRequestContext()
+    }
+
+    func attachListenAlongController(_ controller: MobileListenAlongController) {
+        listenAlongController = controller
+        updateNowPlaying()
+    }
+
+    func refreshListenAlongControlState() {
+        updateNowPlaying()
+    }
+
+    private var listenAlongLocalPlaybackIsLocked: Bool {
+        listenAlongController?.isParticipant == true && !listenAlongApplyingRemoteState
+    }
+
+    private func notifyListenAlongPlaybackChanged() {
+        guard !listenAlongApplyingRemoteState else { return }
+        listenAlongController?.hostPlaybackDidChange()
     }
 
     private var authoritativeCatalogSongIDs: Set<String>? {
@@ -2206,6 +2281,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func play(_ track: MobileTrack, in queue: [MobileTrack], playlistID: UUID? = nil) {
+        guard !listenAlongLocalPlaybackIsLocked else { return }
         let queueIDs = queue.map(\.id)
         playbackQueue = queueIDs.contains(track.id) ? queueIDs : [track.id]
         playbackPlaylistID = playlistID
@@ -2214,9 +2290,231 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func play(_ playlist: MobilePlaylist) {
+        guard !listenAlongLocalPlaybackIsLocked else { return }
         let queue = tracks(in: playlist)
         guard let first = shuffleEnabled ? queue.randomElement() : queue.first else { return }
         play(first, in: queue, playlistID: playlist.id)
+    }
+
+    func followListenAlongLocalTrack(
+        _ track: MobileTrack,
+        position: TimeInterval,
+        isPlaying: Bool
+    ) {
+        listenAlongApplyingRemoteState = true
+        defer { listenAlongApplyingRemoteState = false }
+        if currentTrack?.id != track.id || isTransientStreamActive {
+            playbackQueue = [track.id]
+            playbackPlaylistID = nil
+            startPlayback(track, recordHistory: false, startingAt: position)
+        } else {
+            applyListenAlongPlaybackPosition(position, isPlaying: isPlaying)
+            return
+        }
+        if !isPlaying { pausePlayback() }
+        updateNowPlaying()
+    }
+
+    func followListenAlongRemoteSong(
+        _ song: MobileRemoteSong,
+        position: TimeInterval,
+        isPlaying: Bool
+    ) async -> Bool {
+        guard song.mediaKind == "audio", song.size > 0 else { return false }
+        listenAlongApplyingRemoteState = true
+        defer { listenAlongApplyingRemoteState = false }
+        await streamRemoteSong(song)
+        guard isTransientStreamActive,
+              streamingTrack?.remoteID == song.id else { return false }
+        applyListenAlongPlaybackPosition(position, isPlaying: isPlaying)
+        return true
+    }
+
+    /// Applies a revision to an already-loaded transient stream without
+    /// resolving or rebuilding the stream. Listen Along publishes play/pause
+    /// and seek changes as new revisions, so the source identity is the only
+    /// thing that needs to be checked before applying them locally.
+    func followListenAlongCurrentStream(
+        sourceIdentity: String?,
+        position: TimeInterval,
+        isPlaying: Bool
+    ) -> Bool {
+        guard isTransientStreamActive,
+              streamingPlayer != nil,
+              let track = streamingTrack,
+              currentTrackID == track.id,
+              let sourceURL = track.sourceURL,
+              MobileListenAlongSourcePolicy.identity(sourceURL) == sourceIdentity else {
+            return false
+        }
+        listenAlongApplyingRemoteState = true
+        defer { listenAlongApplyingRemoteState = false }
+        applyListenAlongPlaybackPosition(position, isPlaying: isPlaying)
+        return true
+    }
+
+    func stopListenAlongPlaybackIfNeeded() {
+        guard isTransientStreamActive else { return }
+        discardStreamingPlayback()
+    }
+
+    func playListenAlongPreview(
+        _ preview: LocalImportPreviewStream,
+        sourceURL: String,
+        title: String,
+        artist: String,
+        album: String,
+        artworkURL: URL? = nil,
+        duration: TimeInterval,
+        position: TimeInterval,
+        isPlaying: Bool
+    ) async throws {
+        guard let scheme = preview.url.scheme?.lowercased(), scheme == "https" else {
+            throw MobileListenAlongError.invalidSource
+        }
+        guard preview.url.user == nil,
+              preview.url.password == nil,
+              preview.url.host?.isEmpty == false else {
+            throw MobileListenAlongError.invalidSource
+        }
+
+        let departingLocalID = streamingTrack == nil ? currentTrackID : nil
+        discardStreamingPlayback()
+        if let departingLocalID,
+           tracks.contains(where: { $0.id == departingLocalID }) {
+            history.append(departingLocalID)
+        }
+        stopTimer()
+        player?.stop()
+        player = nil
+
+        streamingGeneration &+= 1
+        let generation = streamingGeneration
+        let transientTrack = MobileTrack(
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Listen Along" : title,
+            artist: artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Unknown Artist" : artist,
+            album: album.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Listen Along" : album,
+            duration: max(duration, 0),
+            relativePath: "",
+            sourceURL: sourceURL,
+            artworkScanComplete: true
+        )
+        streamingTrack = transientTrack
+        streamingArtworkURL = artworkURL
+        streamingPreview = preview
+        streamingPreviewSourceURL = sourceURL
+        isTransientStreamActive = true
+        currentTrackID = transientTrack.id
+        playbackQueue = [transientTrack.id]
+        playbackPlaylistID = nil
+        self.position = max(position, 0)
+        UserDefaults.standard.removeObject(forKey: "Resonance.currentTrack")
+
+        var assetOptions: [String: Any] = [:]
+        if !preview.httpHeaders.isEmpty {
+            assetOptions["AVURLAssetHTTPHeaderFieldsKey"] = preview.httpHeaders
+        }
+        let asset = AVURLAsset(url: preview.url, options: assetOptions)
+        guard try await asset.load(.isPlayable) else {
+            discardStreamingPlayback()
+            throw MobileAuthenticatedStreamError.invalidResponse
+        }
+        let measuredDuration = try? await asset.load(.duration).seconds
+        try Task.checkCancellation()
+
+        let item = AVPlayerItem(asset: asset)
+        let streamPlayer = AVPlayer(playerItem: item)
+        streamPlayer.volume = PlaybackVolumePolicy.gain(for: volume)
+        streamPlayer.defaultRate = playbackRate
+        streamPlayer.automaticallyWaitsToMinimizeStalling = true
+        streamingPlayer = streamPlayer
+        if let measuredDuration,
+           measuredDuration.isFinite,
+           measuredDuration > 0 {
+            streamingTrack?.duration = measuredDuration
+        }
+        streamingEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self, weak item] _ in
+            Task { @MainActor [weak self, weak item] in
+                guard let self, let item else { return }
+                self.authenticatedStreamDidFinish(item: item, generation: generation)
+            }
+        }
+        streamingFailureObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self, weak item] notification in
+            let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            Task { @MainActor [weak self, weak item] in
+                guard let self, let item else { return }
+                self.authenticatedStreamDidFail(item: item, generation: generation, error: error)
+            }
+        }
+        streamingStatusObservation = item.observe(\.status, options: [.new]) { [weak self, weak item] _, _ in
+            Task { @MainActor [weak self, weak item] in
+                guard let self, let item, item.status == .failed else { return }
+                self.authenticatedStreamDidFail(item: item, generation: generation, error: item.error)
+            }
+        }
+
+        let streamBounds = playbackBounds(for: streamingTrack ?? transientTrack)
+        let clampedPosition = min(max(position, streamBounds.start), streamBounds.end)
+        if clampedPosition > streamBounds.start {
+            await seekAuthenticatedStream(streamPlayer, to: clampedPosition)
+        }
+        try AVAudioSession.sharedInstance().setActive(true)
+        if isPlaying {
+            streamPlayer.playImmediately(atRate: playbackRate)
+            self.isPlaying = true
+            startTimer()
+        } else {
+            streamPlayer.pause()
+            self.isPlaying = false
+            stopTimer()
+        }
+        self.position = clampedPosition
+        updateNowPlaying()
+    }
+
+    private func applyListenAlongPlaybackPosition(
+        _ requestedPosition: TimeInterval,
+        isPlaying requestedIsPlaying: Bool
+    ) {
+        guard let track = currentTrack else { return }
+        let duration = isTransientStreamActive ? nil : player?.duration
+        let bounds = playbackBounds(for: track, duration: duration)
+        let target = min(max(requestedPosition.isFinite ? requestedPosition : 0, bounds.start), bounds.end)
+        if isTransientStreamActive, let streamingPlayer {
+            streamingPlayer.seek(
+                to: CMTime(seconds: target, preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+            if requestedIsPlaying {
+                streamingPlayer.playImmediately(atRate: playbackRate)
+                startTimer()
+            } else {
+                streamingPlayer.pause()
+                stopTimer()
+            }
+        } else if let player {
+            player.currentTime = target
+            if requestedIsPlaying {
+                player.rate = playbackRate
+                _ = player.play()
+                startTimer()
+            } else {
+                player.pause()
+                stopTimer()
+            }
+        }
+        position = target
+        isPlaying = requestedIsPlaying
+        updateNowPlaying()
     }
 
     func isPlaylistPlaying(_ playlist: MobilePlaylist) -> Bool {
@@ -2242,6 +2540,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         recordHistory: Bool = true,
         startingAt requestedPosition: TimeInterval = 0
     ) {
+        guard !listenAlongLocalPlaybackIsLocked else { return }
         stopTimer()
         cancelCrossfade()
         if streamingTrack != nil {
@@ -2287,6 +2586,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             startTimer()
             updateNowPlaying()
             if !isTransientStream { save() }
+            notifyListenAlongPlaybackChanged()
         } catch {
             stopTimer()
             isPlaying = false
@@ -2295,6 +2595,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func togglePlay() {
+        guard !listenAlongLocalPlaybackIsLocked else { return }
         if player?.isPlaying == true
             || streamingPlayer?.timeControlStatus == .playing
             || isPlaying {
@@ -2305,6 +2606,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func resumePlayback() {
+        guard !listenAlongLocalPlaybackIsLocked else { return }
         if isTransientStreamActive, let streamingPlayer {
             do {
                 try AVAudioSession.sharedInstance().setActive(true)
@@ -2315,6 +2617,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 isPlaying = false
             }
             updateNowPlaying()
+            notifyListenAlongPlaybackChanged()
             return
         }
         guard let player else {
@@ -2343,9 +2646,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             isPlaying = false
         }
         updateNowPlaying()
+        notifyListenAlongPlaybackChanged()
     }
 
     func pausePlayback() {
+        guard !listenAlongLocalPlaybackIsLocked else { return }
         cancelCrossfade()
         if isTransientStreamActive, let streamingPlayer {
             streamingPlayer.pause()
@@ -2354,6 +2659,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             stopTimer()
             isPlaying = false
             updateNowPlaying()
+            notifyListenAlongPlaybackChanged()
             return
         }
         if let player {
@@ -2364,9 +2670,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         stopTimer()
         isPlaying = false
         updateNowPlaying()
+        notifyListenAlongPlaybackChanged()
     }
 
     func seek(to fraction: Double) {
+        guard !listenAlongLocalPlaybackIsLocked else { return }
         cancelCrossfade()
         if isTransientStreamActive,
            let streamingPlayer,
@@ -2383,6 +2691,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 toleranceAfter: .zero
             )
             updateNowPlaying()
+            notifyListenAlongPlaybackChanged()
             return
         }
         guard let player, let track = currentTrack else { return }
@@ -2391,6 +2700,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         position = player.currentTime
         UserDefaults.standard.set(position, forKey: "Resonance.position")
         updateNowPlaying()
+        notifyListenAlongPlaybackChanged()
     }
 
     private func seek(toElapsedTime elapsedTime: TimeInterval) {
@@ -2404,6 +2714,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func next() {
+        guard !listenAlongLocalPlaybackIsLocked else { return }
         guard !isTransientStreamActive else { return }
         let queue = activeQueue
         guard !queue.isEmpty else { return }
@@ -2416,6 +2727,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func previous() {
+        guard !listenAlongLocalPlaybackIsLocked else { return }
         guard !isTransientStreamActive else { return }
         if let player, let track = currentTrack {
             let bounds = playbackBounds(for: track, duration: player.duration)
@@ -2423,6 +2735,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 player.currentTime = bounds.start
                 position = bounds.start
                 updateNowPlaying()
+                notifyListenAlongPlaybackChanged()
                 return
             }
         }
@@ -2478,6 +2791,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         UserDefaults.standard.set(position, forKey: "Resonance.position")
         isPlaying = false
         updateNowPlaying()
+        notifyListenAlongPlaybackChanged()
     }
 
     private var activeQueue: [MobileTrack] {
@@ -2771,6 +3085,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         await downloadLoadedCatalogSongs(pendingSongs)
     }
     func download(_ song: MobileRemoteSong) async {
+        guard !listenAlongLocalPlaybackIsLocked else { return }
         if activeDownloadMode == .streamOnly {
             await streamRemoteSong(song)
             return
@@ -4496,10 +4811,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 remoteID: song.id,
                 sourceServer: baseURL.absoluteString,
                 syncProfileID: profileID,
+                sourceURL: song.sourceURL,
                 artworkScanComplete: true,
                 contentSHA256: MobileContentHashPolicy.normalizedSHA256(song.contentSHA256)
             )
             streamingTrack = transientTrack
+            streamingArtworkURL = resolvedListenAlongArtworkURL(song.artworkURL, relativeTo: baseURL)
             isTransientStreamActive = true
             currentTrackID = transientTrack.id
             playbackQueue = [transientTrack.id]
@@ -4622,6 +4939,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             )
             startTimer()
             updateNowPlaying()
+            notifyListenAlongPlaybackChanged()
         } catch is MobileTransferPolicyChangedError {
             discardStreamingPlayback()
             downloadDetail = "Stream stopped because the signed policy expired or changed"
@@ -4674,6 +4992,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             isPlaying = false
         }
         updateNowPlaying()
+        notifyListenAlongPlaybackChanged()
     }
 
     private func seekAuthenticatedStream(_ player: AVPlayer, to seconds: TimeInterval) async {
@@ -4733,6 +5052,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             || streamingPlayer != nil
             || streamingResourceLoader != nil
             || streamingAuthorizationLease != nil
+            || streamingPreview != nil
         let streamingID = streamingTrack?.id
         streamingGeneration &+= 1
         if let streamingEndObserver {
@@ -4755,6 +5075,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         authorizationLease?.setInvalidationHandler(nil)
         authorizationLease?.invalidate()
         streamingTrack = nil
+        streamingArtworkURL = nil
+        streamingPreview = nil
+        streamingPreviewSourceURL = nil
         isTransientStreamActive = false
         if hadStreamingState {
             stopTimer()
@@ -4932,6 +5255,13 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
         let previousContext = activeServerContext
         let previousServerURL = normalizedServer()?.absoluteString
+        let nextContextBeforeMutation = MobileServerEndpointPolicy.context(
+            serverURL: resolution.url,
+            profileID: syncProfileID
+        )
+        if previousContext != nextContextBeforeMutation || previousServerURL != resolution.url.absoluteString {
+            listenAlongController?.profileOrServerContextDidChange()
+        }
         clientConfigRequestGeneration &+= 1
         captureActiveProfileState()
         serverURL = resolution.url.absoluteString
@@ -6260,6 +6590,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             save()
             return
         }
+        listenAlongController?.profileOrServerContextDidChange()
         cancelActiveDownloadBatch()
         playlistSyncTask?.cancel()
         remoteSourceResolutions.removeAll()
@@ -6729,6 +7060,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             stopTimer()
             isPlaying = false
             updateNowPlaying()
+            notifyListenAlongPlaybackChanged()
 
         case .ended:
             let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
@@ -6750,6 +7082,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 }
                 if isPlaying { startTimer() }
                 updateNowPlaying()
+                notifyListenAlongPlaybackChanged()
             } catch {
                 isPlaying = false
             }
@@ -6833,13 +7166,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         remoteCommandTargets.append((center.changePlaybackPositionCommand, positionTarget))
 
         let hasCurrentTrack = currentTrack != nil
-        let allowsTrackNavigation = hasCurrentTrack && !isTransientStreamActive && activeQueue.count > 1
-        center.playCommand.isEnabled = hasCurrentTrack && !isPlaying
-        center.pauseCommand.isEnabled = hasCurrentTrack && isPlaying
-        center.togglePlayPauseCommand.isEnabled = hasCurrentTrack
+        let allowsLocalPlaybackControl = !isListenAlongPlaybackLocked
+        let allowsTrackNavigation = allowsLocalPlaybackControl
+            && hasCurrentTrack
+            && !isTransientStreamActive
+            && activeQueue.count > 1
+        center.playCommand.isEnabled = allowsLocalPlaybackControl && hasCurrentTrack && !isPlaying
+        center.pauseCommand.isEnabled = allowsLocalPlaybackControl && hasCurrentTrack && isPlaying
+        center.togglePlayPauseCommand.isEnabled = allowsLocalPlaybackControl && hasCurrentTrack
         center.nextTrackCommand.isEnabled = allowsTrackNavigation
         center.previousTrackCommand.isEnabled = allowsTrackNavigation
-        center.changePlaybackPositionCommand.isEnabled = hasCurrentTrack
+        center.changePlaybackPositionCommand.isEnabled = allowsLocalPlaybackControl && hasCurrentTrack
         center.changePlaybackRateCommand.isEnabled = false
         center.seekForwardCommand.isEnabled = false
         center.seekBackwardCommand.isEnabled = false
@@ -7028,6 +7365,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         UserDefaults.standard.set(position, forKey: "Resonance.position")
         isPlaying = nextPlayer.isPlaying
         updateNowPlaying()
+        notifyListenAlongPlaybackChanged()
         save()
     }
 
@@ -7047,13 +7385,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             return
         }
 
-        let allowsTrackNavigation = !isTransientStreamActive && activeQueue.count > 1
-        remoteCommands.playCommand.isEnabled = !isPlaying
-        remoteCommands.pauseCommand.isEnabled = isPlaying
-        remoteCommands.togglePlayPauseCommand.isEnabled = true
+        let allowsLocalPlaybackControl = !isListenAlongPlaybackLocked
+        let allowsTrackNavigation = allowsLocalPlaybackControl
+            && !isTransientStreamActive
+            && activeQueue.count > 1
+        remoteCommands.playCommand.isEnabled = allowsLocalPlaybackControl && !isPlaying
+        remoteCommands.pauseCommand.isEnabled = allowsLocalPlaybackControl && isPlaying
+        remoteCommands.togglePlayPauseCommand.isEnabled = allowsLocalPlaybackControl
         remoteCommands.nextTrackCommand.isEnabled = allowsTrackNavigation
         remoteCommands.previousTrackCommand.isEnabled = allowsTrackNavigation
-        remoteCommands.changePlaybackPositionCommand.isEnabled = true
+        remoteCommands.changePlaybackPositionCommand.isEnabled = allowsLocalPlaybackControl
 
         let playerDuration = isTransientStreamActive ? nil : player?.duration
         let bounds = playbackBounds(for: track, duration: playerDuration)

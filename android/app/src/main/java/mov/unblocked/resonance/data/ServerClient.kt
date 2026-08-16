@@ -116,6 +116,93 @@ class ServerClient(
         json.decodeFromString<RemoteCatalog>(response.body.toString(Charsets.UTF_8))
     }
 
+    suspend fun createListenAlong(snapshot: ListenAlongSnapshot): ListenAlongEnvelope =
+        withContext(Dispatchers.IO) {
+            val response = request(
+                method = "POST",
+                url = endpoint("/api/v1/listen-along"),
+                token = requireAccessToken(),
+                body = json.encodeToString(ListenAlongSnapshotPolicy.normalized(snapshot))
+                    .toByteArray(Charsets.UTF_8),
+                contentType = "application/json",
+                accept = "application/json",
+                requestHeaders = clientContextHeaders(requireInstallationCohortKey()),
+                maxResponseBytes = MAX_LISTEN_ALONG_RESPONSE_BYTES,
+            )
+            decodeListenAlongResponse(response)
+        }
+
+    suspend fun fetchListenAlong(code: String): ListenAlongEnvelope = withContext(Dispatchers.IO) {
+        val normalizedCode = code.trim()
+        require(normalizedCode.length in 4..64) { "Enter a valid listen-along code" }
+        val response = request(
+            method = "GET",
+            url = endpoint("/api/v1/listen-along/${encodePathSegment(normalizedCode)}"),
+            token = requireAccessToken(),
+            accept = "application/json",
+            requestHeaders = clientContextHeaders(requireInstallationCohortKey()),
+            maxResponseBytes = MAX_LISTEN_ALONG_RESPONSE_BYTES,
+        )
+        decodeListenAlongResponse(response)
+    }
+
+    suspend fun updateListenAlong(
+        code: String,
+        revision: Long,
+        snapshot: ListenAlongSnapshot,
+        hostToken: String,
+    ): ListenAlongEnvelope = withContext(Dispatchers.IO) {
+        require(hostToken.isNotBlank()) { "The listen-along host token is missing" }
+        val normalizedCode = code.trim()
+        require(normalizedCode.length in 4..64) { "The listen-along code is invalid" }
+        val normalizedSnapshot = ListenAlongSnapshotPolicy.normalized(snapshot)
+        val body = ListenAlongUpdatePayload(
+            revision = revision,
+            sourceURL = normalizedSnapshot.sourceURL,
+            mediaKind = normalizedSnapshot.mediaKind,
+            positionSeconds = normalizedSnapshot.positionSeconds,
+            isPlaying = normalizedSnapshot.isPlaying,
+        )
+        val response = request(
+            method = "PUT",
+            url = endpoint("/api/v1/listen-along/${encodePathSegment(normalizedCode)}"),
+            token = requireAccessToken(),
+            body = json.encodeToString(body).toByteArray(Charsets.UTF_8),
+            contentType = "application/json",
+            accept = "application/json",
+            requestHeaders = clientContextHeaders(requireInstallationCohortKey()) +
+                ("X-Resonance-Listen-Host" to hostToken),
+            maxResponseBytes = MAX_LISTEN_ALONG_RESPONSE_BYTES,
+        )
+        if (response.status == HttpURLConnection.HTTP_CONFLICT) {
+            val current = runCatching {
+                json.decodeFromString<ListenAlongEnvelope>(response.body.toString(Charsets.UTF_8))
+            }.getOrNull()
+            throw ListenAlongRevisionConflictException(current)
+        }
+        decodeListenAlongResponse(response)
+    }
+
+    suspend fun endListenAlong(code: String, hostToken: String) = withContext(Dispatchers.IO) {
+        require(hostToken.isNotBlank()) { "The listen-along host token is missing" }
+        val normalizedCode = code.trim()
+        require(normalizedCode.length in 4..64) { "The listen-along code is invalid" }
+        val response = request(
+            method = "DELETE",
+            url = endpoint("/api/v1/listen-along/${encodePathSegment(normalizedCode)}"),
+            token = requireAccessToken(),
+            requestHeaders = clientContextHeaders(requireInstallationCohortKey()) +
+                ("X-Resonance-Listen-Host" to hostToken),
+            maxResponseBytes = MAX_LISTEN_ALONG_RESPONSE_BYTES,
+        )
+        requireStatus(response, setOf(HttpURLConnection.HTTP_OK, HttpURLConnection.HTTP_NO_CONTENT))
+    }
+
+    private fun decodeListenAlongResponse(response: Response): ListenAlongEnvelope {
+        if (response.status !in 200..299) throw serverException(response)
+        return json.decodeFromString(response.body.toString(Charsets.UTF_8))
+    }
+
     suspend fun fetchClientConfig(cohortKey: String): ClientConfigFetchResult = withContext(Dispatchers.IO) {
         val bearer = requireClientConfigToken()
         val context = clientConfigRequestContext(cohortKey)
@@ -196,8 +283,18 @@ class ServerClient(
         )
     }
 
-    suspend fun fetchArtwork(song: RemoteSong): ByteArray? = withContext(Dispatchers.IO) {
-        val rawURL = song.artworkURL?.trim()?.takeIf(String::isNotEmpty) ?: return@withContext null
+    suspend fun fetchArtwork(song: RemoteSong): ByteArray? = fetchArtworkURL(song.artworkURL)
+
+    /**
+     * Fetches a public artwork URL for transient playback metadata.
+     *
+     * Listen Along guests resolve the host's source locally, so the artwork does not
+     * necessarily belong to a catalog [RemoteSong]. Keep the same origin/HTTPS,
+     * redirect, size, and credential rules as catalog artwork while allowing that
+     * transient URL to be fetched for Media3 system metadata.
+     */
+    suspend fun fetchArtworkURL(rawArtworkURL: String?): ByteArray? = withContext(Dispatchers.IO) {
+        val rawURL = rawArtworkURL?.trim()?.takeIf(String::isNotEmpty) ?: return@withContext null
         runCatching {
             val url = ServerNetworkPolicy.resolveArtworkURL(
                 baseURL,
@@ -891,6 +988,7 @@ class ServerClient(
         private const val MAX_ERROR_BYTES = 64 * 1_024
         private const val MAX_SOURCE_IMPORT_RESPONSE_BYTES = 256 * 1_024
         private const val MAX_REVIEWED_MATCH_RESPONSE_BYTES = 512 * 1_024
+        private const val MAX_LISTEN_ALONG_RESPONSE_BYTES = 256 * 1_024
         private const val MAX_ARTWORK_BYTES = 10L * 1_024L * 1_024L
         private const val BUFFER_SIZE = 64 * 1_024
         private const val MAX_MEDIA_REDIRECTS = 5

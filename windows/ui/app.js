@@ -191,6 +191,16 @@ let clientConfigRequestGeneration = 0;
 let clientConfigRenewalTimer = null;
 let activeServerStream = null;
 let serverStreamRequestGeneration = 0;
+let activeListenAlongStream = null;
+let listenAlongSession = null;
+let listenAlongStatus = "idle";
+let listenAlongApplyInFlight = false;
+let listenAlongPublishInFlight = null;
+let listenAlongPendingHostSnapshot = null;
+let listenAlongCopyFeedbackTimer = null;
+const listenAlongSourceKeyCache = new Map();
+const listenAlongArtworkCache = new Map();
+const listenAlongArtworkPending = new Map();
 let serverConnectInFlight = false;
 let serverConnectPending = false;
 let serverAutoAttempted = false;
@@ -738,7 +748,8 @@ function disposeCustomSelects(root) {
 function playbackTrackByID(trackID) {
   const persistent = state.tracks.find((track) => track.id === trackID && trackBelongsToActiveProfile(state, track));
   if (persistent) return persistent;
-  return activeServerStream?.track.id === trackID ? activeServerStream.track : null;
+  if (activeServerStream?.track.id === trackID) return activeServerStream.track;
+  return activeListenAlongStream?.track.id === trackID ? activeListenAlongStream.track : null;
 }
 
 function persistentPlaybackQueueIDs(trackIDs) {
@@ -779,7 +790,7 @@ function applyShuffleToPlaybackContext(anchorTrackID = currentID) {
 }
 
 function setShuffleEnabled(value) {
-  if (currentTrack()?.transientStream) return false;
+  if (listenAlongIsGuest() || currentTrack()?.transientStream) return false;
   cancelCrossfade();
   shuffle = Boolean(value);
   state.shuffle = shuffle;
@@ -2740,6 +2751,524 @@ async function playRemoteStream(song) {
   }
 }
 
+function listenAlongIsGuest() {
+  return listenAlongSession?.role === "guest";
+}
+
+function canonicalListenAlongSourceForRenderer(value) {
+  const source = typeof value === "string" ? value.trim() : "";
+  if (!source || source.length > 8192) return null;
+  try {
+    const url = new URL(source);
+    if (url.protocol !== "https:" || url.username || url.password || url.hash) return null;
+    url.hash = "";
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+async function listenAlongSourceKey(sourceURL) {
+  const canonical = canonicalListenAlongSourceForRenderer(sourceURL);
+  if (!canonical) return null;
+  if (listenAlongSourceKeyCache.has(canonical)) return listenAlongSourceKeyCache.get(canonical);
+  try {
+    const bytes = new TextEncoder().encode(canonical);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const value = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    listenAlongSourceKeyCache.set(canonical, value);
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function listenAlongSourceURLForTrack(track) {
+  if (!track) return null;
+  const remote = track.remoteID
+    ? serverCatalog.find((song) => song?.id === track.remoteID && typeof song.source_url === "string")
+    : null;
+  return canonicalListenAlongSourceForRenderer(remote?.source_url)
+    || canonicalListenAlongSourceForRenderer(preservedUploadSourceURL(track))
+    || canonicalListenAlongSourceForRenderer(track.sourceURL);
+}
+
+function listenAlongMediaKindForTrack(track) {
+  if (!track) return "audio";
+  const remote = track.remoteID ? serverCatalog.find((song) => song?.id === track.remoteID) : null;
+  return remote?.media_kind === "video" || isInstalledVideoTrack(track) ? "video" : "audio";
+}
+
+function listenAlongSnapshotForTrack(track = currentTrack()) {
+  const sourceURL = listenAlongSourceURLForTrack(track);
+  const position = Number(audio.currentTime);
+  return {
+    source_url: sourceURL,
+    media_kind: listenAlongMediaKindForTrack(track),
+    position_seconds: Number.isFinite(position) && position >= 0 ? position : Number(state.position) || 0,
+    is_playing: Boolean(sourceURL && track && !audio.paused && !audio.ended),
+  };
+}
+
+function listenAlongRenderStatus(status = listenAlongStatus, error = null) {
+  listenAlongStatus = status || "idle";
+  const statusElement = $("#listenAlongStatus");
+  if (statusElement) {
+    const labels = {
+      idle: "Not connected",
+      starting: "Starting room…",
+      joining: "Joining room…",
+      active: listenAlongSession?.role === "host" ? "Hosting" : "Listening with host",
+      reconnecting: "Reconnecting…",
+      resolving: "Preparing shared source…",
+      stale: "Refreshing room…",
+      ended: "Room ended",
+      left: "Not connected",
+      error: "Connection error",
+    };
+    statusElement.textContent = error ? `${labels[listenAlongStatus] || listenAlongStatus}: ${error.message || error}` : (labels[listenAlongStatus] || listenAlongStatus);
+  }
+  const codeElement = $("#listenAlongCode");
+  const roomCode = listenAlongSession?.code || "";
+  if (codeElement) codeElement.textContent = roomCode || "—";
+  const copyButton = $("#copyListenAlongCode");
+  const copyFeedback = $("#listenAlongCopyFeedback");
+  if (copyButton) {
+    copyButton.disabled = !roomCode;
+    if (!roomCode) {
+      if (listenAlongCopyFeedbackTimer) clearTimeout(listenAlongCopyFeedbackTimer);
+      listenAlongCopyFeedbackTimer = null;
+      copyButton.dataset.copied = "false";
+    }
+    if (copyButton.dataset.copied !== "true") {
+      copyButton.querySelector("span")?.replaceChildren(document.createTextNode("Copy code"));
+      copyButton.setAttribute("aria-label", roomCode ? "Copy room code" : "Copy room code unavailable");
+    }
+  }
+  if (copyFeedback && !roomCode) copyFeedback.textContent = "";
+  const roleElement = $("#listenAlongRole");
+  if (roleElement) roleElement.textContent = listenAlongSession?.role === "host" ? "Host controls playback" : listenAlongSession?.role === "guest" ? "Host controls playback" : "Create a room or join one";
+  const startButton = $("#startListenAlong");
+  const joinButton = $("#joinListenAlong");
+  const leaveButton = $("#leaveListenAlong");
+  if (startButton) {
+    startButton.disabled = Boolean(listenAlongSession);
+    startButton.textContent = "Start hosting";
+  }
+  if (joinButton) joinButton.disabled = Boolean(listenAlongSession);
+  if (leaveButton) leaveButton.hidden = !listenAlongSession;
+  const playerButton = $("#openListenAlong");
+  if (playerButton) {
+    const active = Boolean(listenAlongSession);
+    const label = active
+      ? `${listenAlongSession.role === "host" ? "Hosting" : "Listening along"} in ${listenAlongSession.code}`
+      : "Start or join Listen Along";
+    playerButton.classList.toggle("active", active);
+    playerButton.setAttribute("aria-pressed", String(active));
+    playerButton.setAttribute("aria-label", label);
+    playerButton.title = label;
+  }
+}
+
+async function copyListenAlongRoomCode() {
+  const code = String(listenAlongSession?.code || "").trim();
+  const button = $("#copyListenAlongCode");
+  const feedback = $("#listenAlongCopyFeedback");
+  if (!code || !button || button.disabled) return false;
+  try {
+    await api.copyListenAlongCode(code);
+    button.dataset.copied = "true";
+    button.querySelector("span")?.replaceChildren(document.createTextNode("Copied"));
+    button.setAttribute("aria-label", "Room code copied");
+    if (feedback) feedback.textContent = "Room code copied to clipboard.";
+    if (listenAlongCopyFeedbackTimer) clearTimeout(listenAlongCopyFeedbackTimer);
+    listenAlongCopyFeedbackTimer = setTimeout(() => {
+      listenAlongCopyFeedbackTimer = null;
+      button.dataset.copied = "false";
+      button.querySelector("span")?.replaceChildren(document.createTextNode("Copy code"));
+      button.setAttribute("aria-label", "Copy room code");
+      if (feedback) feedback.textContent = "";
+    }, 1800);
+    return true;
+  } catch (error) {
+    if (feedback) feedback.textContent = "Could not copy the room code.";
+    showNotice(friendlyIPCError(error, "Could not copy the room code."));
+    return false;
+  }
+}
+
+function listenAlongReplaceSession(result, context, role) {
+  if (listenAlongCopyFeedbackTimer) clearTimeout(listenAlongCopyFeedbackTimer);
+  listenAlongCopyFeedbackTimer = null;
+  const copyButton = $("#copyListenAlongCode");
+  if (copyButton) copyButton.dataset.copied = "false";
+  const copyFeedback = $("#listenAlongCopyFeedback");
+  if (copyFeedback) copyFeedback.textContent = "";
+  listenAlongSession = {
+    id: result?.session_id || result?.sessionID || "",
+    code: result?.code || "",
+    role,
+    revision: Number(result?.revision) || 0,
+    sourceKey: result?.source_key || null,
+    mediaKind: result?.snapshot?.media_kind || "audio",
+    context,
+  };
+  listenAlongStatus = "active";
+  listenAlongRenderStatus();
+}
+
+async function startListenAlongHost() {
+  if (!serverToken || !state.serverURL) {
+    showNotice("Connect a server profile before starting Listen Along.");
+    return false;
+  }
+  const track = currentTrack();
+  const snapshot = listenAlongSnapshotForTrack(track);
+  if (!track || !snapshot.source_url) {
+    showNotice("This track has no supported source link. Import it from a supported link or associate it with the server first.");
+    return false;
+  }
+  const context = currentProfileContext();
+  listenAlongRenderStatus("starting");
+  try {
+    const result = await api.createListenAlong({
+      baseURL: context.serverURL,
+      token: context.token,
+      profileID: context.profileID,
+      snapshot,
+    });
+    if (!result?.session_id || !result?.code || result.role !== "host") throw new Error("The server returned an invalid Listen Along room.");
+    listenAlongReplaceSession(result, context, "host");
+    void applyListenAlongEvent(result);
+    return true;
+  } catch (error) {
+    listenAlongRenderStatus("error", error);
+    showNotice(friendlyIPCError(error, "Listen Along could not start."));
+    return false;
+  }
+}
+
+async function joinListenAlongGuest(code) {
+  if (!serverToken || !state.serverURL) {
+    showNotice("Connect a server profile before joining Listen Along.");
+    return false;
+  }
+  const normalizedCode = String(code || "").trim().toUpperCase();
+  if (!/^[A-Z0-9][A-Z0-9_-]{3,63}$/.test(normalizedCode)) {
+    showNotice("Enter the Listen Along code from the host.");
+    return false;
+  }
+  const context = currentProfileContext();
+  listenAlongRenderStatus("joining");
+  try {
+    const result = await api.joinListenAlong({
+      baseURL: context.serverURL,
+      token: context.token,
+      profileID: context.profileID,
+      code: normalizedCode,
+    });
+    if (!result?.session_id || !result?.code || result.role !== "guest") throw new Error("The server returned an invalid Listen Along room.");
+    listenAlongReplaceSession(result, context, "guest");
+    void applyListenAlongEvent(result);
+    return true;
+  } catch (error) {
+    listenAlongRenderStatus("error", error);
+    showNotice(friendlyIPCError(error, "Listen Along could not join."));
+    return false;
+  }
+}
+
+async function releaseActiveListenAlongStream({ stopPlayback = false } = {}) {
+  const stream = activeListenAlongStream;
+  if (!stream) return false;
+  const ownsPlayback = currentID === stream.track.id;
+  activeListenAlongStream = null;
+  if (stopPlayback && ownsPlayback) {
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+    audioSourceTrackID = null;
+    audioMetadataTrackID = null;
+    currentID = null;
+    state.currentTrackID = null;
+    state.position = 0;
+    activePlaybackQueueIDs = activePlaybackQueueIDs.filter((id) => id !== stream.track.id);
+    activePlaybackSourceQueueIDs = activePlaybackSourceQueueIDs.filter((id) => id !== stream.track.id);
+    state.playbackQueueIDs = persistentPlaybackQueueIDs(activePlaybackQueueIDs);
+    state.playbackSourceQueueIDs = persistentPlaybackQueueIDs(activePlaybackSourceQueueIDs);
+  }
+  if (stream.capabilityID) await api.releaseListenAlongSource({ capabilityID: stream.capabilityID }).catch(() => false);
+  if (stopPlayback && ownsPlayback) {
+    persistInBackground({ refreshSidebar: false });
+    updateChrome();
+    render();
+  }
+  return true;
+}
+
+async function leaveListenAlong({ silent = false } = {}) {
+  const session = listenAlongSession;
+  if (!session) return true;
+  listenAlongSession = null;
+  listenAlongApplyInFlight = false;
+  listenAlongPublishInFlight = null;
+  listenAlongPendingHostSnapshot = null;
+  await releaseActiveListenAlongStream({ stopPlayback: true });
+  if (session.role === "guest") await releaseActiveServerStream({ stopPlayback: true });
+  try {
+    await api.leaveListenAlong({ sessionID: session.id });
+  } catch (error) {
+    if (!silent) showNotice(friendlyIPCError(error, "Listen Along could not end cleanly."));
+  }
+  listenAlongRenderStatus("left");
+  updateChrome();
+  if (!silent) showNotice("You left Listen Along.");
+  return true;
+}
+
+function openListenAlongDialog() {
+  closeProfileMenu();
+  listenAlongRenderStatus();
+  const dialog = $("#listenAlongDialog");
+  if (!dialog.open) dialog.showModal();
+  requestAnimationFrame(() => (listenAlongSession ? $("#leaveListenAlong") : $("#listenAlongJoinCode"))?.focus());
+}
+
+async function publishListenAlongSnapshot(track = currentTrack()) {
+  const session = listenAlongSession;
+  if (!session || session.role !== "host" || listenAlongApplyInFlight) return false;
+  const snapshot = listenAlongSnapshotForTrack(track);
+  if (!snapshot.source_url) {
+    await leaveListenAlong({ silent: true });
+    showNotice("Listen Along ended because the selected track has no shareable source link.");
+    return false;
+  }
+  listenAlongPendingHostSnapshot = snapshot;
+  if (listenAlongPublishInFlight) return listenAlongPublishInFlight;
+  const run = (async () => {
+    let conflictRetries = 0;
+    while (listenAlongSession === session && session.role === "host") {
+      const nextSnapshot = listenAlongPendingHostSnapshot;
+      if (!nextSnapshot) return true;
+      listenAlongPendingHostSnapshot = null;
+      const result = await api.updateListenAlong({ sessionID: session.id, revision: session.revision, snapshot: nextSnapshot });
+      if (result?.stale) {
+        if (Number.isSafeInteger(Number(result.revision))) session.revision = Math.max(session.revision, Number(result.revision));
+        session.sourceKey = Object.hasOwn(result, "source_key") ? result.source_key : session.sourceKey;
+        if (conflictRetries >= 1) {
+          listenAlongRenderStatus("stale");
+          return false;
+        }
+        conflictRetries += 1;
+        listenAlongPendingHostSnapshot = listenAlongPendingHostSnapshot || nextSnapshot;
+        continue;
+      }
+      conflictRetries = 0;
+      if (result?.revision !== undefined) session.revision = Number(result.revision) || session.revision;
+      session.sourceKey = Object.hasOwn(result, "source_key") ? result.source_key : session.sourceKey;
+      listenAlongRenderStatus("active");
+    }
+    return false;
+  })();
+  const pending = run
+    .catch((error) => {
+      if (listenAlongSession === session) {
+        listenAlongRenderStatus("reconnecting", error);
+        showNotice(friendlyIPCError(error, "Listen Along could not update playback."));
+      }
+      return false;
+    })
+    .finally(() => {
+      if (listenAlongPublishInFlight === pending) listenAlongPublishInFlight = null;
+    });
+  listenAlongPublishInFlight = pending;
+  return pending;
+}
+
+async function localTrackForListenAlongSource(sourceKey) {
+  if (!sourceKey) return null;
+  const candidates = tracksForActiveProfile(state).filter((track) => track.available !== false && !track.missing);
+  for (const track of candidates) {
+    const key = await listenAlongSourceKey(listenAlongSourceURLForTrack(track));
+    if (key === sourceKey) return track;
+  }
+  return null;
+}
+
+async function remoteSongForListenAlongSource(sourceKey) {
+  if (!sourceKey) return null;
+  for (const song of serverCatalog) {
+    const key = await listenAlongSourceKey(song?.source_url);
+    if (key === sourceKey) return song;
+  }
+  return null;
+}
+
+function rememberListenAlongArtwork(key, artwork) {
+  if (listenAlongArtworkCache.size >= 256) {
+    listenAlongArtworkCache.delete(listenAlongArtworkCache.keys().next().value);
+  }
+  listenAlongArtworkCache.set(key, artwork || null);
+  return artwork || null;
+}
+
+async function hydrateListenAlongArtwork({ session, sourceKey, track, artworkURL }) {
+  const source = String(artworkURL || "").trim();
+  if (!source || track?.artwork || !session || !sourceKey) return null;
+  const key = `${sourceKey}:${source}`;
+  if (listenAlongArtworkCache.has(key)) {
+    const cached = listenAlongArtworkCache.get(key);
+    if (cached && activeListenAlongStream?.sessionID === session.id && activeListenAlongStream.sourceKey === sourceKey) {
+      activeListenAlongStream.track = Object.freeze({ ...activeListenAlongStream.track, artwork: cached });
+      updateChrome();
+    }
+    return cached;
+  }
+  let pending = listenAlongArtworkPending.get(key);
+  if (!pending) {
+    pending = api.fetchLocalImportArtwork(source)
+      .catch(() => null)
+      .then((artwork) => rememberListenAlongArtwork(key, artwork));
+    listenAlongArtworkPending.set(key, pending);
+  }
+  try {
+    const artwork = await pending;
+    if (
+      artwork
+      && listenAlongSession === session
+      && activeListenAlongStream?.sessionID === session.id
+      && activeListenAlongStream.sourceKey === sourceKey
+      && activeListenAlongStream.track.id === track.id
+    ) {
+      activeListenAlongStream.track = Object.freeze({ ...activeListenAlongStream.track, artwork });
+      updateChrome();
+    }
+    return artwork;
+  } finally {
+    if (listenAlongArtworkPending.get(key) === pending) listenAlongArtworkPending.delete(key);
+  }
+}
+
+function applyListenAlongPosition(position) {
+  const duration = currentPlaybackDuration();
+  const target = duration > 0 ? Math.max(0, Math.min(Number(position) || 0, Math.max(0, duration - 0.05))) : Math.max(0, Number(position) || 0);
+  if (Math.abs((Number(audio.currentTime) || 0) - target) > 0.35) audio.currentTime = target;
+  state.position = Number(audio.currentTime) || target;
+}
+
+async function applyListenAlongEvent(event) {
+  const session = listenAlongSession;
+  if (!session || event?.session_id !== session.id) return;
+  const revision = Number(event.revision);
+  if (!Number.isSafeInteger(revision) || revision <= session.revision && session.hasEvent) return;
+  if (session.applyingRevision === revision) return;
+  session.applyingRevision = revision;
+  const applyGeneration = (session.applyGeneration || 0) + 1;
+  session.applyGeneration = applyGeneration;
+  session.revision = Math.max(session.revision, revision);
+  session.sourceKey = event.source_key || null;
+  session.mediaKind = event.snapshot?.media_kind === "video" ? "video" : "audio";
+  session.hasEvent = true;
+  if (session.role === "host") {
+    listenAlongRenderStatus("active");
+    return;
+  }
+  const snapshot = event.snapshot || {};
+  const serverTime = Date.parse(event.server_time || "") || Date.now();
+  const updatedAt = Date.parse(event.updated_at || "") || serverTime;
+  const projectedPosition = Math.max(0, Number(snapshot.position_seconds) || 0)
+    + (snapshot.is_playing ? Math.max(0, serverTime - updatedAt) / 1000 : 0);
+  listenAlongApplyInFlight = true;
+  try {
+    if (!event.source_key) {
+      await releaseActiveListenAlongStream({ stopPlayback: true });
+      await releaseActiveServerStream({ stopPlayback: true });
+      audio.pause();
+      showNotice("The host selected a track without a shareable source link.");
+      return;
+    }
+    // Playback state updates for the current source (play/pause/seek) do not
+    // need another provider resolution. Reuse the already prepared transient
+    // track so those actions reach the audio element immediately.
+    let track = activeListenAlongStream?.sessionID === session.id
+      && activeListenAlongStream.sourceKey === event.source_key
+      ? activeListenAlongStream.track
+      : await localTrackForListenAlongSource(event.source_key);
+    if (!track) {
+      const song = await remoteSongForListenAlongSource(event.source_key);
+      const cached = song ? playableActiveRemoteTrack(song.id) : null;
+      if (cached) track = cached;
+      else if (song && song.id && currentServerTransferModes().downloadMode === "stream_only" && !serverSongRequiresDownload(song)) {
+        await releaseActiveListenAlongStream({ stopPlayback: true });
+        await playRemoteStream(song);
+        track = currentTrack();
+      }
+    }
+    if (session !== listenAlongSession || session.applyGeneration !== applyGeneration) return;
+    if (!track) {
+      const capability = await api.createListenAlongSource({
+        sessionID: session.id,
+        sourceKey: event.source_key,
+        mediaKind: session.mediaKind,
+      });
+      if (!capability?.url || !/^file:\/\//i.test(capability.url)) {
+        if (capability?.capabilityID) await api.releaseListenAlongSource({ capabilityID: capability.capabilityID }).catch(() => false);
+        throw new Error("The Listen Along source capability was invalid.");
+      }
+      if (session !== listenAlongSession || session.applyGeneration !== applyGeneration) {
+        if (capability.capabilityID) await api.releaseListenAlongSource({ capabilityID: capability.capabilityID }).catch(() => false);
+        return;
+      }
+      await releaseActiveListenAlongStream({ stopPlayback: true });
+      track = Object.freeze({
+        id: `listen-along:${session.id}:${revision}`,
+        title: capability.title || "Listen Along",
+        artist: capability.artist || "Unknown Artist",
+        album: capability.album || "Listen Along",
+        duration: Number(capability.duration) || 0,
+        artwork: null,
+        artworkURL: capability.artworkURL || null,
+        filePath: session.mediaKind === "video" ? "listen-along.mp4" : null,
+        fileUrl: capability.url,
+        available: true,
+        transientStream: true,
+      });
+      activeListenAlongStream = { capabilityID: capability.capabilityID, track, sourceKey: event.source_key, sessionID: session.id };
+    }
+    if (session !== listenAlongSession || session.applyGeneration !== applyGeneration) return;
+    if (track && activeListenAlongStream && activeListenAlongStream.track.id !== track.id) {
+      await releaseActiveListenAlongStream({ stopPlayback: false });
+    }
+    if (activeListenAlongStream?.sessionID === session.id && activeListenAlongStream.sourceKey === event.source_key) {
+      void hydrateListenAlongArtwork({
+        session,
+        sourceKey: event.source_key,
+        track: activeListenAlongStream.track,
+        artworkURL: activeListenAlongStream.track.artworkURL,
+      });
+    }
+    const changedTrack = currentID !== track.id;
+    if (changedTrack) play(track, [track], { recordHistory: false, autoplay: false, playlistID: null });
+    pendingRestorePosition = projectedPosition;
+    if (audio.readyState >= 1) applyListenAlongPosition(projectedPosition);
+    if (snapshot.is_playing) await requestPlayback();
+    else audio.pause();
+    if (session.mediaKind === "video" && isInstalledVideoTrack(track)) {
+      if (installedVideoSession) configureInstalledVideoSource(track, projectedPosition);
+      else openInstalledVideo(track);
+    } else if (installedVideoSession) {
+      closeInstalledVideo();
+    }
+  } catch (error) {
+    showNotice(friendlyIPCError(error, "The shared source could not be played."));
+  } finally {
+    if (session.applyingRevision === revision) session.applyingRevision = null;
+    if (session.applyGeneration === applyGeneration) listenAlongApplyInFlight = false;
+    listenAlongRenderStatus("active");
+    updateChrome();
+  }
+}
+
 function currentServerUploadContext() {
   return Object.freeze({
     ...currentProfileContext(),
@@ -4081,6 +4610,7 @@ async function activateProfile(profileID, serverURL = state.serverURL) {
   const targetServerKey = normalizedServerKey(serverURL);
   if (profileID === activeProfileID() && targetServerKey === normalizedServerKey(state.serverURL)) return;
   ensureServerContextCanChange();
+  if (listenAlongSession) await leaveListenAlong({ silent: true });
   releaseActiveServerStream({ stopPlayback: true });
   const resumeListeningSession = checkpointListeningSessionForContextChange();
   storeActiveProfileState(state);
@@ -4136,6 +4666,9 @@ async function saveServerForm() {
 
 async function applyAccountSession(nextSession, error = null) {
   const previousToken = serverToken;
+  if (listenAlongSession && previousToken !== String(nextSession?.accessToken || "").trim()) {
+    await leaveListenAlong({ silent: true });
+  }
   const previousEmail = accountSession?.email || null;
   accountSession = nextSession || null;
   if ((accountSession?.email || null) !== previousEmail) isAccountEmailRevealed = false;
@@ -6714,6 +7247,10 @@ function finishClipPlaybackIfNeeded() {
 
 function play(track, queue = null, options = {}) {
   if (!track) return;
+  if (listenAlongIsGuest() && !listenAlongApplyInFlight) {
+    showNotice("The Listen Along host controls shared playback. You can leave the room or change your volume locally.");
+    return;
+  }
   cancelCrossfade();
   if (track.available === false || track.missing) {
     showNotice(`${track.title || "This song"} is still in your library, but its file is unavailable on this device.`);
@@ -6741,6 +7278,9 @@ function play(track, queue = null, options = {}) {
   if (activeServerStream && track.id !== activeServerStream.track.id) {
     releaseActiveServerStream({ stopPlayback: false });
   }
+  if (activeListenAlongStream && track.id !== activeListenAlongStream.track.id) {
+    void releaseActiveListenAlongStream({ stopPlayback: false });
+  }
   currentID = track.id;
   state.currentTrackID = track.transientStream ? null : currentID;
   const range = playbackRangeForTrack(state, track);
@@ -6750,10 +7290,15 @@ function play(track, queue = null, options = {}) {
   audio.volume = playbackGainForVolume(state.volume);
   audio.playbackRate = Number($("#speed").value) || 1;
   if (autoplay) void requestPlayback();
+  if (listenAlongSession?.role === "host" && !listenAlongApplyInFlight) void publishListenAlongSnapshot(track);
   persistInBackground(); updateChrome(); render();
 }
 
 function toggle() {
+  if (listenAlongIsGuest()) {
+    showNotice("The Listen Along host controls shared playback.");
+    return;
+  }
   const track = currentTrack();
   if (!track) {
     const firstTrack = tracksForActiveProfile(state).find((candidate) => candidate.available !== false);
@@ -6772,10 +7317,12 @@ function toggle() {
     cancelCrossfade();
     audio.pause();
   }
+  if (listenAlongSession?.role === "host") void publishListenAlongSnapshot(track);
   updateChrome();
 }
 
 function move(direction, recordHistory = direction > 0) {
+  if (listenAlongIsGuest()) return false;
   if (currentTrack()?.transientStream) return false;
   const tracks = activePlaybackTracks();
   const index = nextIndex(tracks, currentID, direction);
@@ -6931,6 +7478,7 @@ function promoteCrossfade() {
   crossfadeAudio.volume = 0;
   beginListeningSession();
   startPlaybackProgressAnimation();
+  if (listenAlongSession?.role === "host" && !listenAlongApplyInFlight) void publishListenAlongSnapshot(nextTrack);
   persistInBackground();
   updateChrome();
   render();
@@ -6938,12 +7486,14 @@ function promoteCrossfade() {
 }
 
 function previous() {
+  if (listenAlongIsGuest()) return;
   if (currentTrack()?.transientStream) return;
   const range = activeClipRange();
   const start = range?.startSeconds ?? 0;
   if (audio.currentTime > start + 3) {
     audio.currentTime = start;
     state.position = start;
+    if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
     return;
   }
   const previousID = history.pop();
@@ -7511,6 +8061,7 @@ function selectInstalledVideoTarget(track, { recordHistory = true } = {}) {
 }
 
 function advanceInstalledVideo(direction = 1) {
+  if (listenAlongIsGuest()) return false;
   const tracks = activePlaybackTracks();
   const index = nextIndex(tracks, currentID, direction);
   if (index < 0) return false;
@@ -7519,11 +8070,13 @@ function advanceInstalledVideo(direction = 1) {
 }
 
 function previousInstalledVideo() {
+  if (listenAlongIsGuest()) return;
   const { start } = installedVideoBounds();
   if (audio.currentTime > start + 3) {
     audio.currentTime = start;
     installedVideoPlayer.currentTime = start;
     state.position = start;
+    if (listenAlongSession?.role === "host" && !listenAlongApplyInFlight) void publishListenAlongSnapshot();
     syncInstalledVideoProgress();
     return;
   }
@@ -7802,6 +8355,7 @@ function updateChrome() {
   const playing = track && playbackIsActive();
   const liked = Boolean(track && state.favorites.includes(track.id));
   const transientStream = Boolean(track?.transientStream);
+  const listenAlongGuest = listenAlongIsGuest();
   $("#bottomTitle").textContent = track?.title || "Nothing playing";
   $("#bottomMeta").textContent = track ? `${track.artist} / ${playing ? "Now playing" : "Paused"}` : "Local library";
   $(".mini-art").innerHTML = track?.artwork ? squareArtworkImageMarkup(track.artwork) : "♪";
@@ -7824,14 +8378,29 @@ function updateChrome() {
   $("#repeat").setAttribute("aria-pressed", String(repeat));
   $("#heroShuffle")?.setAttribute("aria-pressed", String(shuffle));
   document.querySelectorAll("[data-action=next], [data-action=previous]").forEach((button) => {
-    button.disabled = transientStream;
-    button.title = transientStream ? "Unavailable for one-song server playback" : button.dataset.action === "next" ? "Next" : "Previous";
+    button.disabled = transientStream || listenAlongGuest;
+    button.title = listenAlongGuest
+      ? "The Listen Along host controls playback"
+      : transientStream ? "Unavailable for one-song server playback" : button.dataset.action === "next" ? "Next" : "Previous";
     button.setAttribute("aria-label", button.title);
   });
   for (const button of [$("#shuffle"), $("#fullPlayerShuffle"), $("#heroShuffle")].filter(Boolean)) {
-    button.disabled = transientStream;
-    button.title = transientStream ? "Unavailable for one-song server playback" : "Shuffle";
+    button.disabled = transientStream || listenAlongGuest;
+    button.title = listenAlongGuest
+      ? "The Listen Along host controls playback"
+      : transientStream ? "Unavailable for one-song server playback" : "Shuffle";
     button.setAttribute("aria-label", button.title);
+  }
+  for (const button of [$("#repeat"), $("#fullPlayerRepeat"), $("#installedVideoRepeat")].filter(Boolean)) {
+    button.disabled = listenAlongGuest;
+    if (listenAlongGuest) button.title = "The Listen Along host controls playback";
+  }
+  const listenAlongBadge = $("#listenAlongMiniStatus");
+  if (listenAlongBadge) {
+    listenAlongBadge.hidden = !listenAlongSession;
+    listenAlongBadge.textContent = listenAlongSession
+      ? `${listenAlongSession.role === "host" ? "Hosting" : "Listening along"} · ${listenAlongSession.code}`
+      : "";
   }
   if ($("#installedVideoDialog").open) syncInstalledVideoTransport();
   renderFullPlayer();
@@ -7847,6 +8416,7 @@ function syncRepeatControls() {
 }
 
 function setRepeatEnabled(value) {
+  if (listenAlongIsGuest()) return;
   cancelCrossfade();
   repeat = Boolean(value);
   state.repeat = repeat;
@@ -7903,12 +8473,14 @@ $("#installedVideoRepeat").onclick = () => {
   showInstalledVideoControls();
 };
 $("#installedVideoSeek").oninput = (event) => {
+  if (listenAlongIsGuest()) return;
   const { start, end } = installedVideoBounds();
   if (end > start) {
     const position = start + (end - start) * Number(event.target.value) / 1000;
     audio.currentTime = position;
     installedVideoPlayer.currentTime = position;
     state.position = position;
+    if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
   }
   syncInstalledVideoProgress();
   showInstalledVideoControls();
@@ -8007,10 +8579,27 @@ $("#profileMenuEmail").onclick = (event) => {
   updateProfileControlView({ refreshPicture: false });
 };
 $("#profileHistory").onclick = openListeningHistory;
+$("#profileListenAlong").onclick = openListenAlongDialog;
+$("#openListenAlong").onclick = openListenAlongDialog;
 $("#profileClipEditor").onclick = openClipEditor;
 $("#profileSettings").onclick = () => {
   openSettings();
 };
+$("#closeListenAlong").onclick = () => $("#listenAlongDialog").close();
+$("#listenAlongDialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  $("#listenAlongDialog").close();
+});
+$("#startListenAlong").onclick = () => { void startListenAlongHost(); };
+$("#joinListenAlong").onclick = () => { void joinListenAlongGuest($("#listenAlongJoinCode").value); };
+$("#copyListenAlongCode").onclick = () => { void copyListenAlongRoomCode(); };
+$("#listenAlongJoinCode").onkeydown = (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void joinListenAlongGuest(event.currentTarget.value);
+  }
+};
+$("#leaveListenAlong").onclick = () => { void leaveListenAlong(); };
 $("#dismissServerTransfer").onclick = cancelServerTransfer;
 $("#dismissAppNotice").onclick = dismissNotice;
 $("#cancelPlaylist").onclick = () => { pendingPlaylistTrackID = null; $("#playlistDialog").close(); };
@@ -8482,14 +9071,17 @@ $("#fullPlayerSpeed").onchange = (event) => {
   persistInBackground();
 };
 $("#seek").oninput = (event) => {
+  if (listenAlongIsGuest()) return;
   cancelCrossfade();
   const duration = currentPlaybackDuration();
   if (duration) audio.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
   event.target.value = duration ? String(Math.round(audio.currentTime / duration * 1000)) : "0";
   event.target.setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(duration)}`);
   paintRange(event.target);
+  if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
 };
 $("#fullPlayerSeek").oninput = (event) => {
+  if (listenAlongIsGuest()) return;
   cancelCrossfade();
   const duration = currentPlaybackDuration();
   if (duration) audio.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
@@ -8498,6 +9090,7 @@ $("#fullPlayerSeek").oninput = (event) => {
   $("#seek").value = event.target.value;
   $("#seek").setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(duration)}`);
   paintRange($("#seek"));
+  if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
 };
 function bindPrimaryAudioEvents(media) {
   media.ontimeupdate = () => {
@@ -8521,6 +9114,7 @@ function bindPrimaryAudioEvents(media) {
     synchronizeInstalledVideoWithAudio({ forceSeek: true });
     updateChrome();
     renderQueue();
+    if (listenAlongSession?.role === "host" && !listenAlongApplyInFlight) void publishListenAlongSnapshot();
   };
   media.onpause = () => {
     if (media !== audio) return;
@@ -8536,9 +9130,14 @@ function bindPrimaryAudioEvents(media) {
       playbackProgressTimer = null;
     }
     persistInBackground({ refreshSidebar: false });
+    if (listenAlongSession?.role === "host" && !listenAlongApplyInFlight) void publishListenAlongSnapshot();
   };
   media.onended = () => {
     if (media !== audio) return;
+    if (listenAlongIsGuest()) {
+      audio.pause();
+      return;
+    }
     if (crossfadeStarted && promoteCrossfade()) return;
     stopPlaybackProgressAnimation();
     updatePlaybackProgressUI();
@@ -8555,14 +9154,19 @@ function bindPrimaryAudioEvents(media) {
     } else if ($("#installedVideoDialog").open && installedVideoSession) {
       advanceInstalledVideo(1);
     } else if (!move(1) && currentTrack()?.transientStream) {
-      releaseActiveServerStream({ stopPlayback: true });
+      if (activeListenAlongStream) void releaseActiveListenAlongStream({ stopPlayback: true });
+      else releaseActiveServerStream({ stopPlayback: true });
     }
+    if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
   };
   media.onerror = () => {
     if (media !== audio) return;
     stopPlaybackProgressAnimation();
     const streamFailed = Boolean(currentTrack()?.transientStream);
-    if (streamFailed) releaseActiveServerStream({ stopPlayback: true });
+    if (streamFailed) {
+      if (activeListenAlongStream) void releaseActiveListenAlongStream({ stopPlayback: true });
+      else releaseActiveServerStream({ stopPlayback: true });
+    }
     updateChrome();
     showNotice(streamFailed
       ? "This song could not be streamed. Check the connection and signed server policy, then try again."
@@ -8587,7 +9191,12 @@ function bindPrimaryAudioEvents(media) {
       await persist();
       renderQueue();
     } else if (track.transientStream && measuredDuration > 0 && Math.abs(Number(track.duration) - measuredDuration) > 0.25) {
-      activeServerStream.track = Object.freeze({ ...track, duration: measuredDuration });
+      if (activeServerStream?.track.id === track.id) {
+        activeServerStream.track = Object.freeze({ ...track, duration: measuredDuration });
+      }
+      if (activeListenAlongStream?.track.id === track.id) {
+        activeListenAlongStream.track = Object.freeze({ ...track, duration: measuredDuration });
+      }
       renderQueue();
     }
     if (track.id === currentID) updateFullPlayerProgress();
@@ -8595,6 +9204,22 @@ function bindPrimaryAudioEvents(media) {
 }
 
 bindPrimaryAudioEvents(audio);
+
+api.onListenAlongEvent((event) => {
+  void applyListenAlongEvent(event);
+});
+api.onListenAlongStatus((status) => {
+  if (!listenAlongSession || status?.session_id !== listenAlongSession.id) return;
+  listenAlongRenderStatus(status.state, status.error ? new Error(status.error) : null);
+  if (["ended", "window_closed", "credentials_changed", "signed_out", "app_closed"].includes(status.state)) {
+    const ended = status.state === "ended";
+    listenAlongSession = null;
+    void releaseActiveListenAlongStream({ stopPlayback: true });
+    listenAlongRenderStatus(ended ? "ended" : "left", status.error ? new Error(status.error) : null);
+    updateChrome();
+    if (ended) showNotice("The Listen Along host ended the room.");
+  }
+});
 
 api.onDiscordPresenceStatus((status) => {
   discordPresenceStatus = status || discordPresenceStatus;
@@ -8614,6 +9239,7 @@ api.onPrepareToClose(async () => {
   closeFlushStarted = true;
   if (clientConfigRenewalTimer) clearTimeout(clientConfigRenewalTimer);
   clientConfigRenewalTimer = null;
+  await leaveListenAlong({ silent: true });
   releaseActiveServerStream({ stopPlayback: true });
   updateListeningSession();
   state.position = Number(audio.currentTime) || state.position || 0;
@@ -8811,6 +9437,7 @@ $("#dismissUpdateAvailable").onclick = () => {
   dismissedWindowsUpdateVersion = availableWindowsUpdateVersion;
   $("#updateAvailableBadge").hidden = true;
 };
+updateTopSearch();
 render(); updateChrome();
 void refreshClientConfig().then(() => {
   persistInBackground({ refreshSidebar: false });

@@ -55,6 +55,7 @@
       "client-config-state.cjs",
       "server-download.cjs",
       "server-stream.cjs",
+      "listen-along.cjs",
       "server-upload.cjs",
       "server-upload-response.cjs",
       "social-auth.cjs",

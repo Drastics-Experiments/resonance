@@ -863,6 +863,25 @@ private struct InstalledVideoTransitionArtwork: View {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFill()
+            } else if let artworkURL = track.artworkURL.flatMap(URL.init(string:)),
+                      artworkURL.scheme?.lowercased() == "https",
+                      artworkURL.host?.isEmpty == false {
+                CroppedRemoteArtwork(url: artworkURL) { isLoading in
+                    ZStack {
+                        ArtworkView(
+                            style: track.artwork,
+                            symbol: "music.note",
+                            symbolSize: symbolSize,
+                            cornerRadius: cornerRadius,
+                            glow: true
+                        )
+                        if isLoading {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white.opacity(0.78))
+                        }
+                    }
+                }
             } else {
                 ArtworkView(
                     style: track.artwork,

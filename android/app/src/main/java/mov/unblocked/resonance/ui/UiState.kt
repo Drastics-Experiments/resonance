@@ -12,6 +12,8 @@ import mov.unblocked.resonance.data.LinkImportStage
 import mov.unblocked.resonance.data.EffectiveClientConfig
 import mov.unblocked.resonance.data.ServerDownloadMode
 import mov.unblocked.resonance.data.ServerUploadMode
+import mov.unblocked.resonance.data.ListenAlongRole
+import mov.unblocked.resonance.data.ListenAlongSnapshot
 
 data class LinkImportUiState(
     val mediaMode: LinkImportMediaMode = LinkImportMediaMode.Audio,
@@ -84,6 +86,34 @@ sealed interface PlaybackUiStatus {
     data class Failed(val message: String, val retryable: Boolean) : PlaybackUiStatus
 }
 
+enum class ListenAlongConnectionStatus {
+    Idle, Connecting, Active, Reconnecting, Ended, Failed,
+}
+
+data class ListenAlongUiState(
+    val status: ListenAlongConnectionStatus = ListenAlongConnectionStatus.Idle,
+    val code: String? = null,
+    val role: ListenAlongRole? = null,
+    val snapshot: ListenAlongSnapshot? = null,
+    val revision: Long = 0L,
+    val message: String = "",
+    val errorMessage: String? = null,
+) {
+    val isActive: Boolean
+        get() = status == ListenAlongConnectionStatus.Active && code != null && role != null
+
+    val isGuest: Boolean
+        get() = role == ListenAlongRole.Guest && code != null &&
+            status !in setOf(
+                ListenAlongConnectionStatus.Idle,
+                ListenAlongConnectionStatus.Ended,
+                ListenAlongConnectionStatus.Failed,
+            )
+
+    val isHost: Boolean
+        get() = isActive && role == ListenAlongRole.Host
+}
+
 /** A complete, render-only snapshot of Resonance. The ViewModel owns this state. */
 data class ResonanceUiState(
     val tracks: List<Track> = emptyList(),
@@ -150,6 +180,7 @@ data class ResonanceUiState(
     val availableStorageBytes: Long = 0,
     val errorMessage: String? = null,
     val linkImport: LinkImportUiState = LinkImportUiState(),
+    val listenAlong: ListenAlongUiState = ListenAlongUiState(),
 ) {
     val currentTrack: Track?
         get() = currentTrackId?.let { id ->

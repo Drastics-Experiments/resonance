@@ -192,8 +192,20 @@ internal class AuthenticatedStreamDataSource : BaseDataSource(true) {
     private var resolvedURI: Uri? = null
     private var responseHeaders: Map<String, List<String>> = emptyMap()
     private var authorizationExpiry: AtomicReference<Instant>? = null
+    private var providerDelegate: ListenAlongProviderDataSource? = null
 
     override fun open(dataSpec: DataSpec): Long {
+        if (dataSpec.uri.scheme == "resonance-listen") {
+            val delegate = ListenAlongProviderDataSource()
+            providerDelegate = delegate
+            return try {
+                delegate.open(dataSpec)
+            } catch (error: Throwable) {
+                providerDelegate = null
+                delegate.close()
+                throw error
+            }
+        }
         transferInitializing(dataSpec)
         val request = AuthenticatedStreamRegistry.entry(dataSpec.uri)
             ?: throw IOException("The authenticated stream session is unavailable")
@@ -227,6 +239,7 @@ internal class AuthenticatedStreamDataSource : BaseDataSource(true) {
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        providerDelegate?.let { return it.read(buffer, offset, length) }
         if (!Instant.now().isBefore(authorizationExpiry?.get() ?: Instant.EPOCH)) {
             throw IOException("The authenticated stream policy has expired")
         }
@@ -248,11 +261,17 @@ internal class AuthenticatedStreamDataSource : BaseDataSource(true) {
         return read
     }
 
-    override fun getUri(): Uri? = resolvedURI
+    override fun getUri(): Uri? = providerDelegate?.getUri() ?: resolvedURI
 
-    override fun getResponseHeaders(): Map<String, List<String>> = responseHeaders
+    override fun getResponseHeaders(): Map<String, List<String>> =
+        providerDelegate?.getResponseHeaders() ?: responseHeaders
 
     override fun close() {
+        providerDelegate?.let {
+            runCatching { it.close() }
+            providerDelegate = null
+            return
+        }
         try {
             input?.close()
         } finally {
