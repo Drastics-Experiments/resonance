@@ -15,6 +15,8 @@ PRODUCTION_SIGNING_REQUIRED="${RESONANCE_REQUIRE_PRODUCTION_SIGNING:-0}"
 NOTARY_KEY_PATH="${NOTARY_KEY_PATH:-}"
 NOTARY_KEY_ID="${NOTARY_KEY_ID:-}"
 NOTARY_ISSUER_ID="${NOTARY_ISSUER_ID:-}"
+UPDATE_TEAM_ID="${RESONANCE_MACOS_UPDATE_TEAM_ID:-}"
+UPDATE_DESIGNATED_REQUIREMENT="${RESONANCE_MACOS_UPDATE_DESIGNATED_REQUIREMENT:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -54,6 +56,14 @@ if [[ "$PRODUCTION_SIGNING_REQUIRED" == "1" ]]; then
     }
     [[ "$NOTARY_API_CONFIGURED" == "1" ]] || {
         echo "Notary authentication is required for a production release." >&2
+        exit 64
+    }
+    if [[ -n "$UPDATE_TEAM_ID" && ! "$UPDATE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+        echo "RESONANCE_MACOS_UPDATE_TEAM_ID must be a ten-character Apple Team ID." >&2
+        exit 64
+    fi
+    [[ "$UPDATE_DESIGNATED_REQUIREMENT" != *$'\n'* && "$UPDATE_DESIGNATED_REQUIREMENT" != *$'\r'* ]] || {
+        echo "RESONANCE_MACOS_UPDATE_DESIGNATED_REQUIREMENT must be a single-line requirement." >&2
         exit 64
     }
 fi
@@ -101,6 +111,13 @@ plutil -insert LSApplicationCategoryType -string public.app-category.music "$PLI
 plutil -insert LSMinimumSystemVersion -string 14.0 "$PLIST"
 plutil -insert NSHighResolutionCapable -bool YES "$PLIST"
 plutil -insert NSPrincipalClass -string NSApplication "$PLIST"
+if [[ "$PRODUCTION_SIGNING_REQUIRED" == "1" ]]; then
+    plutil -insert ResonanceUpdateAuthenticity -string production "$PLIST"
+    [[ -z "$UPDATE_TEAM_ID" ]] || plutil -insert ResonanceUpdateTeamIdentifier -string "$UPDATE_TEAM_ID" "$PLIST"
+    [[ -z "$UPDATE_DESIGNATED_REQUIREMENT" ]] || plutil -insert ResonanceUpdateDesignatedRequirement -string "$UPDATE_DESIGNATED_REQUIREMENT" "$PLIST"
+else
+    plutil -insert ResonanceUpdateAuthenticity -string development "$PLIST"
+fi
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 BASE_ICON="$WORK_DIR/AppIcon-1024.png"
@@ -130,8 +147,48 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 
 if [[ "$PRODUCTION_SIGNING_REQUIRED" == "1" ]]; then
     APP_SIGNATURE_DETAILS="$(codesign --display --verbose=4 "$APP" 2>&1)"
+    SIGNING_TEAM_ID="$(awk -F= '/^TeamIdentifier=/{print $2; exit}' <<< "$APP_SIGNATURE_DETAILS")"
+    [[ "$SIGNING_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || {
+        echo "The production app signature does not expose a valid Apple Team ID." >&2
+        exit 65
+    }
+    if [[ -z "$UPDATE_TEAM_ID" ]]; then
+        UPDATE_TEAM_ID="$SIGNING_TEAM_ID"
+    fi
+    [[ "$SIGNING_TEAM_ID" == "$UPDATE_TEAM_ID" ]] || {
+        echo "The configured updater Team ID does not match the signing identity." >&2
+        exit 65
+    }
+    if [[ -z "$UPDATE_DESIGNATED_REQUIREMENT" ]]; then
+        UPDATE_DESIGNATED_REQUIREMENT="identifier \"$BUNDLE_ID\" and anchor apple generic and certificate leaf[subject.OU] = \"$UPDATE_TEAM_ID\""
+    else
+        CANONICAL_UPDATE_REQUIREMENT="identifier \"$BUNDLE_ID\" and anchor apple generic and certificate leaf[subject.OU] = \"$UPDATE_TEAM_ID\""
+        [[ "$UPDATE_DESIGNATED_REQUIREMENT" == "$CANONICAL_UPDATE_REQUIREMENT" ]] || {
+            echo "RESONANCE_MACOS_UPDATE_DESIGNATED_REQUIREMENT must equal the canonical Team ID requirement." >&2
+            exit 65
+        }
+    fi
+    if plutil -extract ResonanceUpdateTeamIdentifier raw "$PLIST" >/dev/null 2>&1; then
+        plutil -replace ResonanceUpdateTeamIdentifier -string "$UPDATE_TEAM_ID" "$PLIST"
+    else
+        plutil -insert ResonanceUpdateTeamIdentifier -string "$UPDATE_TEAM_ID" "$PLIST"
+    fi
+    if plutil -extract ResonanceUpdateDesignatedRequirement raw "$PLIST" >/dev/null 2>&1; then
+        plutil -replace ResonanceUpdateDesignatedRequirement -string "$UPDATE_DESIGNATED_REQUIREMENT" "$PLIST"
+    else
+        plutil -insert ResonanceUpdateDesignatedRequirement -string "$UPDATE_DESIGNATED_REQUIREMENT" "$PLIST"
+    fi
+    # Adding the exact publisher identity to Info.plist invalidates the first
+    # signature, so sign once more before validating the release artifact.
+    codesign --force --deep --options runtime --sign "$APP_SIGN_IDENTITY" --timestamp "$APP"
+    codesign --verify --deep --strict --verbose=2 -R="$UPDATE_DESIGNATED_REQUIREMENT" "$APP"
+    APP_SIGNATURE_DETAILS="$(codesign --display --verbose=4 "$APP" 2>&1)"
     grep -Fqx "Authority=$APP_SIGN_IDENTITY" <<< "$APP_SIGNATURE_DETAILS" || {
         echo "The app is not signed by the configured Developer ID Application certificate." >&2
+        exit 65
+    }
+    grep -Fqx "TeamIdentifier=$UPDATE_TEAM_ID" <<< "$APP_SIGNATURE_DETAILS" || {
+        echo "The app signature Team ID does not match the updater allowlist." >&2
         exit 65
     }
     grep -Eq '^Timestamp=.+' <<< "$APP_SIGNATURE_DETAILS" || {

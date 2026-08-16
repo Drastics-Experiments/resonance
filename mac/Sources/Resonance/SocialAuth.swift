@@ -75,6 +75,47 @@ struct ResonanceAccountSession: Codable, Equatable {
         case accountID, profileID, displayName, imageURL
     }
 
+    init(
+        accessToken: String,
+        refreshToken: String,
+        expiresAt: Date,
+        email: String,
+        role: String,
+        baseURL: URL,
+        accountID: String?,
+        profileID: String?,
+        displayName: String?,
+        imageURL: URL?,
+        migratedProfileID: String? = nil
+    ) {
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+        self.expiresAt = expiresAt
+        self.email = email
+        self.role = role
+        self.baseURL = baseURL
+        self.accountID = accountID
+        self.profileID = profileID
+        self.displayName = displayName
+        self.imageURL = imageURL.flatMap(MacArtworkURLPolicy.allowedPublicURL)
+        self.migratedProfileID = migratedProfileID
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        accessToken = try values.decode(String.self, forKey: .accessToken)
+        refreshToken = try values.decode(String.self, forKey: .refreshToken)
+        expiresAt = try values.decode(Date.self, forKey: .expiresAt)
+        email = try values.decode(String.self, forKey: .email)
+        role = try values.decode(String.self, forKey: .role)
+        baseURL = try values.decode(URL.self, forKey: .baseURL)
+        accountID = try values.decodeIfPresent(String.self, forKey: .accountID)
+        profileID = try values.decodeIfPresent(String.self, forKey: .profileID)
+        displayName = try values.decodeIfPresent(String.self, forKey: .displayName)
+        imageURL = try values.decodeIfPresent(URL.self, forKey: .imageURL)
+            .flatMap(MacArtworkURLPolicy.allowedPublicURL)
+    }
+
     var isAdmin: Bool { role == "admin" }
     var usesLegacyProductionServer: Bool {
         baseURL.scheme?.lowercased() == "https"
@@ -252,14 +293,22 @@ struct ResonanceSocialAuthClient {
     }
 
     func signOut(_ current: ResonanceAccountSession) async {
-        guard let configuration = try? await configuration() else { return }
+        guard Self.httpsOrigin(current.baseURL) == baseURL,
+              let accessToken = try? Self.bounded(current.accessToken),
+              let refreshToken = try? Self.bounded(current.refreshToken),
+              let configuration = try? await configuration(),
+              Self.httpsOrigin(configuration.logoutEndpoint) == baseURL else { return }
         var request = URLRequest(url: configuration.logoutEndpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(current.accessToken)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["refresh_token": current.refreshToken])
-        _ = try? await session.data(for: request)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["refresh_token": refreshToken])
+        _ = try? await MacBoundedResponse.data(
+            for: session,
+            request: request,
+            limit: 64 * 1_024
+        )
     }
 
     private func configuration() async throws -> ResonanceAuthConfiguration {
@@ -267,8 +316,12 @@ struct ResonanceSocialAuthClient {
         var request = URLRequest(url: endpoint)
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+        let (data, response) = try await MacBoundedResponse.data(
+            for: session,
+            request: request,
+            limit: 256 * 1_024
+        )
+        guard (200..<300).contains(response.statusCode),
               let payload = try? JSONDecoder().decode(ResonanceAuthConfigurationPayload.self, from: data),
               (payload.version == 2 || payload.version == 3), payload.redirectURI == Self.callbackURL,
               payload.scope == "openid profile email",
@@ -305,9 +358,13 @@ struct ResonanceSocialAuthClient {
         var components = URLComponents()
         components.queryItems = body.map { URLQueryItem(name: $0.key, value: $0.value) }
         request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await MacBoundedResponse.data(
+            for: session,
+            request: request,
+            limit: 256 * 1_024
+        )
         let payload = try JSONDecoder().decode(ResonanceAuthTokenPayload.self, from: data)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        guard (200..<300).contains(response.statusCode) else {
             throw ResonanceSocialAuthError.rejected(
                 payload.message ?? payload.errorDescription ?? payload.error ?? "Sign-in could not be completed."
             )
@@ -348,7 +405,7 @@ struct ResonanceSocialAuthClient {
             accountID: accountID,
             profileID: profileID,
             displayName: displayName,
-            imageURL: account.imageURL,
+            imageURL: account.imageURL.flatMap(MacArtworkURLPolicy.allowedPublicURL),
             migratedProfileID: account.migratedProfileID
         )
     }
@@ -365,9 +422,13 @@ struct ResonanceSocialAuthClient {
            !migrationProfileID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             request.setValue(migrationProfileID, forHTTPHeaderField: "X-Resonance-Profile")
         }
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await MacBoundedResponse.data(
+            for: session,
+            request: request,
+            limit: 256 * 1_024
+        )
         let account = try JSONDecoder().decode(ResonanceAccountPayload.self, from: data)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        guard (200..<300).contains(response.statusCode) else {
             throw ResonanceSocialAuthError.rejected(account.error ?? "This account could not access this Resonance server.")
         }
         return account

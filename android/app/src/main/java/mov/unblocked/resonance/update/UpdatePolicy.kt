@@ -1,8 +1,9 @@
 package mov.unblocked.resonance.update
 
-import java.net.URI
+import java.net.URL
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import mov.unblocked.resonance.data.RemoteURLPolicy
 
 @Serializable
 data class AndroidUpdateManifest(
@@ -24,6 +25,34 @@ data class AndroidUpdateInfo(
     val releaseNotes: String?,
 )
 
+internal object AndroidUpdateNetworkPolicy {
+    private val approvedHosts = setOf(
+        "github.com",
+        "www.github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+        "github-releases.githubusercontent.com",
+    )
+
+    fun isAllowedURL(value: String, allowLocalDevelopment: Boolean = false): Boolean = runCatching {
+        RemoteURLPolicy.isSafeURL(
+            URL(value.trim()),
+            approvedHost = { host -> host in approvedHosts },
+            allowCleartextDevelopment = allowLocalDevelopment,
+        )
+    }.getOrDefault(false)
+
+    fun resolveRedirect(
+        currentURL: URL,
+        location: String,
+        allowLocalDevelopment: Boolean = false,
+    ): URL? = RemoteURLPolicy.resolveRedirect(
+        currentURL = currentURL,
+        location = location,
+        approvedHost = { host -> host in approvedHosts },
+        allowCleartextDevelopment = allowLocalDevelopment,
+    )
+}
 internal object AndroidUpdatePolicy {
     private val json = Json { ignoreUnknownKeys = true }
     private val sha256Pattern = Regex("^[a-fA-F0-9]{64}$")
@@ -40,7 +69,7 @@ internal object AndroidUpdatePolicy {
         val versionName = manifest.versionName.trim()
         require(versionName.isNotEmpty()) { "The update version is missing." }
         val apkUrl = manifest.apkUrl.trim()
-        require(isSecureWebUrl(apkUrl) || allowInsecureDownloadUrl && isWebUrl(apkUrl)) {
+        require(AndroidUpdateNetworkPolicy.isAllowedURL(apkUrl, allowInsecureDownloadUrl)) {
             "The update download URL is not secure."
         }
         val sha256 = manifest.sha256.trim().lowercase()
@@ -70,13 +99,4 @@ internal object AndroidUpdatePolicy {
         }
     }
 
-    private fun isSecureWebUrl(value: String): Boolean = runCatching {
-        val uri = URI(value)
-        uri.scheme.equals("https", ignoreCase = true) && !uri.host.isNullOrBlank()
-    }.getOrDefault(false)
-
-    private fun isWebUrl(value: String): Boolean = runCatching {
-        val uri = URI(value)
-        uri.scheme.equals("http", ignoreCase = true) && !uri.host.isNullOrBlank()
-    }.getOrDefault(false)
 }

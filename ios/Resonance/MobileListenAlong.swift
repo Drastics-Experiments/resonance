@@ -18,7 +18,7 @@ struct MobileListenAlongSnapshot: Codable, Equatable, Sendable {
         positionSeconds: TimeInterval,
         isPlaying: Bool
     ) {
-        self.sourceURL = sourceURL
+        self.sourceURL = MobileListenAlongSourcePolicy.validatedSource(sourceURL)
         self.mediaKind = mediaKind == "video" ? "video" : "audio"
         self.positionSeconds = positionSeconds.isFinite ? max(positionSeconds, 0) : 0
         self.isPlaying = isPlaying
@@ -176,7 +176,7 @@ enum MobileListenAlongSourcePolicy {
     static func identity(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 8_192,
+        guard !trimmed.isEmpty, trimmed.count <= MobileDurableURLPolicy.maximumCharacters,
               let components = URLComponents(string: trimmed),
               components.scheme?.lowercased() == "https",
               components.user == nil,
@@ -263,30 +263,6 @@ enum MobileListenAlongError: LocalizedError, Equatable {
             if let message, !message.isEmpty { return message }
             return "Listen Along returned HTTP \(status)."
         }
-    }
-}
-
-private final class MobileListenAlongRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    private let origin: String?
-
-    init(origin: URL) {
-        self.origin = MobileServerEndpointPolicy.normalizedOrigin(of: origin)
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        guard let origin,
-              let redirectURL = request.url,
-              MobileServerEndpointPolicy.normalizedOrigin(of: redirectURL) == origin else {
-            completionHandler(nil)
-            return
-        }
-        completionHandler(request)
     }
 }
 
@@ -759,26 +735,17 @@ final class MobileListenAlongController: ObservableObject {
                 == MobileServerEndpointPolicy.normalizedOrigin(of: context.baseURL) else {
             throw URLError(.dataNotAllowed)
         }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        configuration.urlCache = nil
-        let delegate = MobileListenAlongRedirectDelegate(origin: context.baseURL)
-        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw MobileListenAlongError.invalidResponse
-        }
+        let (data, httpResponse) = try await MobileSensitiveNetworkPolicy.data(
+            for: request,
+            origin: context.baseURL,
+            maximumBytes: MobileBoundedResponsePolicy.listenAlongMaximumBytes
+        )
         guard (200..<300).contains(httpResponse.statusCode) else {
             let payload = try? JSONDecoder().decode(ErrorPayload.self, from: data)
             throw MobileListenAlongError.server(
                 status: httpResponse.statusCode,
                 message: payload?.error ?? payload?.message
             )
-        }
-        guard MobileServerEndpointPolicy.normalizedOrigin(of: httpResponse.url ?? requestURL)
-                == MobileServerEndpointPolicy.normalizedOrigin(of: context.baseURL) else {
-            throw URLError(.dataNotAllowed)
         }
         return (data, httpResponse)
     }

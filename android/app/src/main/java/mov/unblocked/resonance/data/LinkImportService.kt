@@ -8,6 +8,7 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
@@ -152,6 +153,10 @@ class LinkImportService(context: Context) {
         val primary: ResolvedStream,
         val companionAudio: ResolvedStream? = null,
     )
+    private data class ProviderConnection(
+        val finalURL: URL,
+        val connection: HttpURLConnection,
+    )
     private data class PreparedMedia(
         val media: ResolvedMedia,
         val preparedAtNanos: Long,
@@ -174,6 +179,7 @@ class LinkImportService(context: Context) {
     private val json = Json { ignoreUnknownKeys = true }
     private val spotifyHosts = setOf("open.spotify.com", "www.open.spotify.com", "spotify.link", "www.spotify.link")
     private val youtubeHosts = setOf("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com")
+    private val youtubeProviderHosts = youtubeHosts + setOf("youtu.be", "www.youtu.be")
     private val maxAudioBytes = 256L * 1_024 * 1_024
     private val maxVideoBytes = 1_024L * 1_024 * 1_024
     private val webAgent = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36"
@@ -1014,19 +1020,23 @@ class LinkImportService(context: Context) {
         accept: String,
         allowedHosts: Set<String>,
     ): ByteArray {
-        val connection = open(
-            url,
-            "GET",
-            mapOf(
+        val response = openProviderConnection(
+            initialURL = url,
+            method = "GET",
+            headers = mapOf(
                 "Accept" to accept,
                 "Accept-Language" to "en-US,en;q=0.8",
                 "User-Agent" to LinkImportSearchRequestPolicy.USER_AGENT,
             ),
+            stage = LinkImportStage.SearchingCandidates,
+            approvedURL = { candidate ->
+                RemoteURLPolicy.isSafeURL(candidate, approvedHost = { host -> host in allowedHosts })
+            },
         )
+        val connection = response.connection
         try {
             val status = connection.responseCode
-            val final = connection.url
-            if (status !in 200..299 || final.protocol != "https" || final.userInfo != null || final.host.lowercase() !in allowedHosts) {
+            if (status !in 200..299) {
                 throw LinkImportException(
                     LinkImportStage.SearchingCandidates,
                     "SEARCH_PROVIDER_FAILED",
@@ -1241,14 +1251,17 @@ class LinkImportService(context: Context) {
     }
 
     private suspend fun verifyYouTubeStream(stream: ResolvedStream) {
-        val connection = open(
-            stream.url,
-            "GET",
-            stream.headers + mapOf("Range" to "bytes=0-0", "Accept-Encoding" to "identity"),
+        val response = openProviderConnection(
+            initialURL = stream.url,
+            method = "GET",
+            headers = stream.headers + mapOf("Range" to "bytes=0-0", "Accept-Encoding" to "identity"),
+            stage = LinkImportStage.InspectingSource,
+            approvedURL = ::isGoogleVideo,
         )
+        val connection = response.connection
         try {
             val status = connection.responseCode
-            if (!isGoogleVideo(connection.url)) throw LinkImportException(
+            if (!isGoogleVideo(response.finalURL)) throw LinkImportException(
                 LinkImportStage.InspectingSource,
                 "YOUTUBE_UNSAFE_REDIRECT",
                 "YouTube returned an unsafe stream redirect.",
@@ -1407,17 +1420,20 @@ class LinkImportService(context: Context) {
             while (completed < stream.contentLength) {
                 currentCoroutineContext().ensureActive()
                 val end = minOf(stream.contentLength - 1, completed + 10L * 1_024 * 1_024 - 1)
-                val connection = open(
-                    stream.url,
-                    "GET",
-                    stream.headers + mapOf(
+                val response = openProviderConnection(
+                    initialURL = stream.url,
+                    method = "GET",
+                    headers = stream.headers + mapOf(
                         "Range" to "bytes=" + completed + "-" + end,
                         "Accept-Encoding" to "identity",
                     ),
+                    stage = LinkImportStage.Downloading,
+                    approvedURL = ::isGoogleVideo,
                 )
+                val connection = response.connection
                 try {
                     val status = connection.responseCode
-                    if (!isGoogleVideo(connection.url) || status !in listOf(200, 206)) {
+                    if (!isGoogleVideo(response.finalURL) || status !in listOf(200, 206)) {
                         throw LinkImportException(LinkImportStage.Downloading, "YOUTUBE_DOWNLOAD_FAILED", "The YouTube media stream could not be read.")
                     }
                     val contentType = connection.contentType?.substringBefore(';')?.trim()?.lowercase()
@@ -1602,17 +1618,84 @@ class LinkImportService(context: Context) {
 
     private suspend fun fetchArtwork(value: String?): ByteArray? {
         val url = value?.takeIf(::isArtwork)?.let(::URL) ?: return null
-        return runCatching { requestBytes(url, 10 * 1_024 * 1_024, "image/*") }.getOrNull()
+        return runCatching { requestArtworkBytes(url) }.getOrNull()
+    }
+
+    private suspend fun requestArtworkBytes(initialURL: URL): ByteArray = withContext(Dispatchers.IO) {
+        var currentURL = initialURL
+        repeat(MAX_ARTWORK_REDIRECTS + 1) { redirectCount ->
+            currentCoroutineContext().ensureActive()
+            val connection = (currentURL.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                instanceFollowRedirects = false
+                useCaches = false
+                connectTimeout = ARTWORK_CONNECT_TIMEOUT_MS
+                readTimeout = ARTWORK_READ_TIMEOUT_MS
+                setRequestProperty("Accept", "image/*")
+            }
+            try {
+                val status = connection.responseCode
+                if (status in ARTWORK_REDIRECT_STATUSES) {
+                    if (redirectCount == MAX_ARTWORK_REDIRECTS) {
+                        throw IOException("Artwork redirected too many times")
+                    }
+                    val location = connection.getHeaderField("Location")
+                        ?.trim()
+                        ?.takeIf(String::isNotEmpty)
+                        ?: throw IOException("Artwork redirect is missing a location")
+                    val redirected = currentURL.toURI().resolve(URI(location)).toURL()
+                    if (!isArtwork(redirected.toString())) {
+                        throw IOException("Artwork redirect left the approved provider hosts")
+                    }
+                    currentURL = redirected
+                    return@repeat
+                }
+                if (status !in 200..299) throw IOException("Artwork provider returned HTTP $status")
+                if (connection.contentLengthLong > ArtworkPayloadPolicy.MAX_BYTES) {
+                    throw IOException("Artwork response is too large")
+                }
+                val bytes = connection.inputStream.use { input ->
+                    val output = java.io.ByteArrayOutputStream()
+                    val buffer = ByteArray(32 * 1_024)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        if (output.size().toLong() + count > ArtworkPayloadPolicy.MAX_BYTES) {
+                            throw IOException("Artwork response is too large")
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                    output.toByteArray()
+                }
+                if (!ArtworkPayloadPolicy.hasSafeDecodedBounds(bytes)) {
+                    throw IOException("Artwork image dimensions are unsafe")
+                }
+                return@withContext bytes
+            } finally {
+                connection.disconnect()
+            }
+        }
+        throw IOException("Artwork redirected too many times")
     }
 
     private suspend fun spotifyURL(value: String): URL? {
         val source = runCatching { URL(value) }.getOrNull() ?: return null
-        if (source.protocol != "https" || source.host.lowercase() !in spotifyHosts || source.userInfo != null) return null
+        if (!RemoteURLPolicy.isSafeURL(source, approvedHost = { it in spotifyHosts })) return null
         if (!source.host.lowercase().contains("spotify.link")) return source
-        val connection = open(source, "HEAD")
+        val response = openProviderConnection(
+            initialURL = source,
+            method = "HEAD",
+            headers = mapOf("Accept" to "text/html", "User-Agent" to webAgent),
+            stage = LinkImportStage.ResolvingMetadata,
+            approvedURL = { candidate ->
+                RemoteURLPolicy.isSafeURL(candidate, approvedHost = { it in spotifyHosts })
+            },
+        )
+        val connection = response.connection
         return try {
             connection.responseCode
-            spotifyURL(connection.url.toString())
+            response.finalURL
         } finally {
             connection.disconnect()
         }
@@ -1659,18 +1742,18 @@ class LinkImportService(context: Context) {
         headers: Map<String, String> = emptyMap(),
         validatesFinalURL: ((URL) -> Boolean)? = null,
     ): ByteArray {
-        val connection = open(
-            url,
-            method,
-            mapOf("Accept" to accept, "Accept-Language" to "en-US,en;q=0.8", "User-Agent" to webAgent) + headers,
+        val response = openProviderConnection(
+            initialURL = url,
+            method = method,
+            body = body,
+            headers = mapOf("Accept" to accept, "Accept-Language" to "en-US,en;q=0.8", "User-Agent" to webAgent) + headers,
+            stage = LinkImportStage.InspectingSource,
+            approvedURL = providerURLValidator(url),
         )
+        val connection = response.connection
         try {
-            if (body != null) {
-                connection.doOutput = true
-                connection.outputStream.use { it.write(body) }
-            }
             val status = connection.responseCode
-            if (validatesFinalURL?.invoke(connection.url) == false) throw LinkImportException(
+            if (validatesFinalURL?.invoke(response.finalURL) == false) throw LinkImportException(
                 LinkImportStage.ResolvingMetadata,
                 "UNSAFE_PROVIDER_REDIRECT",
                 "The media provider redirected metadata to an untrusted destination.",
@@ -1706,17 +1789,85 @@ class LinkImportService(context: Context) {
         }
     }
 
+    private suspend fun openProviderConnection(
+        initialURL: URL,
+        method: String,
+        headers: Map<String, String>,
+        stage: LinkImportStage,
+        approvedURL: (URL) -> Boolean,
+        body: ByteArray? = null,
+    ): ProviderConnection {
+        var currentURL = initialURL
+        var currentMethod = method
+        var currentBody = body
+        var redirects = 0
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            if (!approvedURL(currentURL)) unsafeProviderRedirect(stage)
+            val connection = open(currentURL, currentMethod, headers)
+            try {
+                if (currentBody != null) {
+                    connection.doOutput = true
+                    connection.outputStream.use { it.write(currentBody) }
+                }
+                val status = connection.responseCode
+                if (status !in PROVIDER_REDIRECT_STATUSES) {
+                    return ProviderConnection(currentURL, connection)
+                }
+                if (redirects++ >= MAX_PROVIDER_REDIRECTS) unsafeProviderRedirect(stage)
+                val location = connection.getHeaderField("Location")?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                    ?: unsafeProviderRedirect(stage)
+                val nextURL = runCatching {
+                    currentURL.toURI().resolve(URI(location)).toURL()
+                }.getOrNull()?.takeIf(approvedURL::invoke)
+                    ?: unsafeProviderRedirect(stage)
+                currentURL = nextURL
+                if (status == HttpURLConnection.HTTP_MOVED_PERM ||
+                    status == HttpURLConnection.HTTP_MOVED_TEMP ||
+                    status == HttpURLConnection.HTTP_SEE_OTHER
+                ) {
+                    currentMethod = "GET"
+                    currentBody = null
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }
+    }
+
     private fun open(url: URL, method: String, headers: Map<String, String> = emptyMap()): HttpURLConnection =
         (url.openConnection() as HttpURLConnection).apply {
             requestMethod = method
-            instanceFollowRedirects = true
+            instanceFollowRedirects = false
             connectTimeout = 45_000
             readTimeout = 180_000
             headers.forEach(::setRequestProperty)
         }
 
-    private fun isGoogleVideo(url: URL): Boolean =
-        url.protocol == "https" && (url.host == "googlevideo.com" || url.host.endsWith(".googlevideo.com"))
+    private fun isGoogleVideo(url: URL): Boolean = RemoteURLPolicy.isSafeURL(
+        url,
+        approvedHost = { host -> host == "googlevideo.com" || host.endsWith(".googlevideo.com") },
+    )
+
+    private fun providerURLValidator(initialURL: URL): (URL) -> Boolean {
+        val host = initialURL.host.trimEnd('.').lowercase()
+        val allowedHosts = when {
+            host in youtubeHosts || host == "youtu.be" || host == "www.youtu.be" -> youtubeProviderHosts
+            host in spotifyHosts -> spotifyHosts
+            host == "debridvault.elfhosted.com" -> setOf(host)
+            else -> emptySet()
+        }
+        return { candidate ->
+            RemoteURLPolicy.isSafeURL(candidate, approvedHost = { candidateHost -> candidateHost in allowedHosts })
+        }
+    }
+
+    private fun unsafeProviderRedirect(stage: LinkImportStage): Nothing = throw LinkImportException(
+        stage,
+        "UNSAFE_PROVIDER_REDIRECT",
+        "The media provider redirected to an untrusted destination.",
+    )
 
     private fun expectedRangeLength(value: String?, start: Long, end: Long, total: Long): Long {
         val match = Regex("""^bytes\s+(\d+)-(\d+)/(\d+)$""", RegexOption.IGNORE_CASE)
@@ -1734,15 +1885,39 @@ class LinkImportService(context: Context) {
 
     private fun isArtwork(value: String): Boolean = runCatching {
         val url = URL(value)
-        val host = url.host.lowercase()
-        url.protocol == "https" && (
-            host == "ytimg.com" || host.endsWith(".ytimg.com")
-                || host == "ggpht.com" || host.endsWith(".ggpht.com")
-                || host == "scdn.co" || host.endsWith(".scdn.co")
-                || host == "spotifycdn.com" || host.endsWith(".spotifycdn.com")
-                || host == "sndcdn.com" || host.endsWith(".sndcdn.com")
-        )
+        RemoteURLPolicy.isSafeURL(url, ::isArtworkHost)
     }.getOrDefault(false)
+
+    private fun isArtworkHost(host: String): Boolean =
+        artworkHostSuffixes.any { suffix -> host == suffix || host.endsWith(".$suffix") }
+
+    private companion object {
+        const val MAX_PROVIDER_REDIRECTS = 5
+        const val MAX_ARTWORK_REDIRECTS = 5
+        const val ARTWORK_CONNECT_TIMEOUT_MS = 10_000
+        const val ARTWORK_READ_TIMEOUT_MS = 20_000
+        val PROVIDER_REDIRECT_STATUSES = setOf(
+            HttpURLConnection.HTTP_MOVED_PERM,
+            HttpURLConnection.HTTP_MOVED_TEMP,
+            HttpURLConnection.HTTP_SEE_OTHER,
+            307,
+            308,
+        )
+        val ARTWORK_REDIRECT_STATUSES = setOf(
+            HttpURLConnection.HTTP_MOVED_PERM,
+            HttpURLConnection.HTTP_MOVED_TEMP,
+            HttpURLConnection.HTTP_SEE_OTHER,
+            307,
+            308,
+        )
+        val artworkHostSuffixes = setOf(
+            "ytimg.com",
+            "ggpht.com",
+            "scdn.co",
+            "spotifycdn.com",
+            "sndcdn.com",
+        )
+    }
 
     private fun capture(value: String, pattern: Regex): String? =
         pattern.find(value)?.groupValues?.getOrNull(1)?.let { encoded ->

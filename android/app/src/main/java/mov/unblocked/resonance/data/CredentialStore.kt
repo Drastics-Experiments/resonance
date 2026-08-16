@@ -30,14 +30,20 @@ class CredentialStore(context: Context) {
     var serverURL: String
         get() {
             val stored = preferences.getString(SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
-            return if (stored.trim().trimEnd('/') == ResonanceLegacyProductionServerURL) {
+            val bounded = stored.trim().takeIf { it.length <= ProviderMediaURLPolicy.MAX_URL_LENGTH }
+                ?: DEFAULT_SERVER_URL
+            return if (bounded.trimEnd('/') == ResonanceLegacyProductionServerURL) {
                 DEFAULT_SERVER_URL
             } else {
-                stored
+                bounded
             }
         }
         set(value) {
-            preferences.edit().putString(SERVER_URL, value.trim()).apply()
+            val normalized = value.trim()
+            require(normalized.length <= ProviderMediaURLPolicy.MAX_URL_LENGTH) {
+                "Server URL is too long"
+            }
+            preferences.edit().putString(SERVER_URL, normalized).apply()
         }
 
     fun clearTokens() {
@@ -48,22 +54,54 @@ class CredentialStore(context: Context) {
         get() = readSecret(ACCOUNT_SESSION)?.let {
             runCatching {
                 val decoded = JSON.decodeFromString<AccountSession>(it)
-                val canonicalBaseURL = canonicalHTTPSOrigin(decoded.baseURL)
-                if (canonicalBaseURL == decoded.baseURL) decoded else decoded.copy(baseURL = canonicalBaseURL)
+                val boundedBaseURL = ProviderMediaURLPolicy.boundedURL(decoded.baseURL)
+                    ?: error("Account server URL is missing")
+                val canonicalBaseURL = canonicalHTTPSOrigin(boundedBaseURL)
+                val imageURL = ProfileImageNetworkPolicy.resolveURL(canonicalBaseURL, decoded.imageURL)?.toString()
+                if (canonicalBaseURL == decoded.baseURL && imageURL == decoded.imageURL) {
+                    decoded
+                } else {
+                    decoded.copy(baseURL = canonicalBaseURL, imageURL = imageURL)
+                }
             }.getOrNull()
         }
         set(value) {
             if (value == null) preferences.edit().remove(ACCOUNT_SESSION).apply()
-            else writeSecret(ACCOUNT_SESSION, JSON.encodeToString(value))
+            else {
+                val baseURL = ProviderMediaURLPolicy.boundedURL(value.baseURL)
+                require(baseURL != null) { "Account server URL is missing" }
+                val canonicalBaseURL = canonicalHTTPSOrigin(baseURL)
+                writeSecret(
+                    ACCOUNT_SESSION,
+                    JSON.encodeToString(value.copy(
+                        baseURL = canonicalBaseURL,
+                        imageURL = ProfileImageNetworkPolicy.resolveURL(canonicalBaseURL, value.imageURL)?.toString(),
+                    )),
+                )
+            }
         }
 
     var pendingAccountSignIn: PendingAccountSignIn?
         get() = readSecret(PENDING_ACCOUNT_SIGN_IN)?.let {
-            runCatching { JSON.decodeFromString<PendingAccountSignIn>(it) }.getOrNull()
+            runCatching {
+                JSON.decodeFromString<PendingAccountSignIn>(it).let { pending ->
+                    pending.copy(
+                        baseURL = ProviderMediaURLPolicy.boundedURL(pending.baseURL)
+                            ?: error("Pending account server URL is missing"),
+                    )
+                }
+            }.getOrNull()
         }
         set(value) {
             if (value == null) preferences.edit().remove(PENDING_ACCOUNT_SIGN_IN).apply()
-            else writeSecret(PENDING_ACCOUNT_SIGN_IN, JSON.encodeToString(value))
+            else {
+                val baseURL = ProviderMediaURLPolicy.boundedURL(value.baseURL)
+                require(baseURL != null) { "Pending account server URL is missing" }
+                writeSecret(
+                    PENDING_ACCOUNT_SIGN_IN,
+                    JSON.encodeToString(value.copy(baseURL = baseURL)),
+                )
+            }
         }
 
     private fun writeSecret(account: String, value: String) {

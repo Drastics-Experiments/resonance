@@ -1,11 +1,6 @@
 name: Publish release
 
 on:
-  pull_request:
-    branches:
-      - main
-    types:
-      - closed
   workflow_dispatch:
     inputs:
       tag:
@@ -17,7 +12,15 @@ on:
         required: true
         type: string
       merged_sha:
-        description: Main-branch merge commit that contains the candidate.
+        description: Exact protected-main SHA that was built; it must equal candidate_sha.
+        required: true
+        type: string
+      candidate_run_id:
+        description: Exact successful direct-release workflow run that produced the candidate.
+        required: true
+        type: string
+      request_id:
+        description: Exact Release Studio request identifier for the candidate run.
         required: true
         type: string
 
@@ -32,12 +35,9 @@ concurrency:
 jobs:
   publish:
     name: Publish verified candidate
-    if: >-
-      ${{
-        github.event_name == 'workflow_dispatch' ||
-        (github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/v'))
-      }}
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    environment: production-release
 
     steps:
       - name: Resolve release inputs
@@ -45,55 +45,53 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
-          PR_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_MERGED_SHA: ${{ github.event.pull_request.merge_commit_sha }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           INPUT_MERGED_SHA: ${{ inputs.merged_sha }}
         run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            TAG="${PR_BRANCH#release/}"
-            CANDIDATE_SHA="$PR_CANDIDATE_SHA"
-            MERGED_SHA="$PR_MERGED_SHA"
-          else
-            TAG="$INPUT_TAG"
-            CANDIDATE_SHA="$INPUT_CANDIDATE_SHA"
-            MERGED_SHA="$INPUT_MERGED_SHA"
-          fi
+          [[ "$EVENT_NAME" == "workflow_dispatch" ]]
+          TAG="$INPUT_TAG"
+          CANDIDATE_SHA="$INPUT_CANDIDATE_SHA"
+          MERGED_SHA="$INPUT_MERGED_SHA"
 
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$MERGED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$MERGED_SHA" == "$CANDIDATE_SHA" ]]
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           echo "candidate_sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
           echo "merged_sha=$MERGED_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Check out merged source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.release.outputs.merged_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Locate successful candidate run
+      - name: Verify exact direct candidate run
         id: candidate
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           CANDIDATE_SHA: ${{ steps.release.outputs.candidate_sha }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          INPUT_RUN_ID: ${{ inputs.candidate_run_id }}
         run: |
-          RUN_ID="$(
-            gh api \
-              "repos/${REPOSITORY}/actions/workflows/release-candidate.yml/runs?head_sha=${CANDIDATE_SHA}&status=success&per_page=20" \
-              --jq '.workflow_runs | map(select(.event == "pull_request")) | sort_by(.run_number) | last | .id'
-          )"
-          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
-          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          [[ "$INPUT_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$REQUEST_ID" =~ ^[A-Za-z0-9-]{8,64}$ ]]
+          RUN_JSON="$(gh api "repos/${REPOSITORY}/actions/runs/${INPUT_RUN_ID}")"
+          [[ "$(jq -r '.path' <<< "$RUN_JSON")" == ".github/workflows/direct-release-build.yml" ]]
+          [[ "$(jq -r '.event' <<< "$RUN_JSON")" == "workflow_dispatch" ]]
+          [[ "$(jq -r '.status' <<< "$RUN_JSON")" == "completed" ]]
+          [[ "$(jq -r '.conclusion' <<< "$RUN_JSON")" == "success" ]]
+          [[ "$(jq -r '.head_sha' <<< "$RUN_JSON")" == "$CANDIDATE_SHA" ]]
+          echo "run_id=$INPUT_RUN_ID" >> "$GITHUB_OUTPUT"
 
       - name: Download exact candidate assets
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: release-assets-*
           path: candidate/assets
@@ -103,9 +101,9 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Download exact candidate provenance
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          name: release-provenance-${{ steps.release.outputs.tag }}-${{ steps.release.outputs.candidate_sha }}
+          name: release-provenance-direct-${{ steps.release.outputs.tag }}-${{ steps.release.outputs.candidate_sha }}-${{ inputs.request_id }}
           path: candidate
           repository: ${{ github.repository }}
           run-id: ${{ steps.candidate.outputs.run_id }}
@@ -118,21 +116,16 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
           CANDIDATE_SHA: ${{ steps.release.outputs.candidate_sha }}
           CANDIDATE_RUN_ID: ${{ steps.candidate.outputs.run_id }}
+          REQUEST_ID: ${{ inputs.request_id }}
         run: |
           node scripts/release-version.mjs --check
           read -r POLICY_SCHEMA POLICY_VERSION POLICY_BUILD DESKTOP_SIGNING < <(node -e 'const value = require("./release/policy.json"); console.log(value.schemaVersion, value.version, value.build, value.desktopSigning)')
           [[ "$POLICY_SCHEMA" == "1" ]]
           [[ "$POLICY_VERSION" == "$VERSION" ]]
-          [[ "$DESKTOP_SIGNING" == "production" || "$DESKTOP_SIGNING" == "unsigned" ]]
-          if [[ "$DESKTOP_SIGNING" == "unsigned" ]]; then
-            node scripts/validate-release-assets.mjs \
-              candidate/assets "$VERSION" \
-              --allow-unsigned-desktop-release
-          else
-            node scripts/validate-release-assets.mjs \
-              candidate/assets "$VERSION" \
-              --signing-evidence candidate/signing
-          fi
+          [[ "$DESKTOP_SIGNING" == "production" ]]
+          node scripts/validate-release-assets.mjs \
+            candidate/assets "$VERSION" \
+            --signing-evidence candidate/signing
           git fetch --no-tags origin "$CANDIDATE_SHA"
           export SOURCE_TREE="$(git rev-parse "${CANDIDATE_SHA}^{tree}")"
           export BUILD="$(node -e 'const value = require("./release/version.json"); process.stdout.write(String(value.build))')"
@@ -148,6 +141,7 @@ jobs:
               sourceSha: process.env.CANDIDATE_SHA,
               sourceTree: process.env.SOURCE_TREE,
               workflowRunId: Number(process.env.CANDIDATE_RUN_ID),
+              requestId: process.env.REQUEST_ID,
               desktopSigning: process.env.DESKTOP_SIGNING,
             };
             for (const [key, expectedValue] of Object.entries(expected)) {
@@ -168,14 +162,8 @@ jobs:
           CANDIDATE_SHA: ${{ steps.release.outputs.candidate_sha }}
           MERGED_SHA: ${{ steps.release.outputs.merged_sha }}
         run: |
-          if git merge-base --is-ancestor "$CANDIDATE_SHA" "$MERGED_SHA"; then
-            RELEASE_TARGET="$CANDIDATE_SHA"
-          else
-            CANDIDATE_TREE="$(git rev-parse "${CANDIDATE_SHA}^{tree}")"
-            MERGED_TREE="$(git rev-parse "${MERGED_SHA}^{tree}")"
-            [[ "$CANDIDATE_TREE" == "$MERGED_TREE" ]]
-            RELEASE_TARGET="$MERGED_SHA"
-          fi
+          [[ "$CANDIDATE_SHA" == "$MERGED_SHA" ]]
+          RELEASE_TARGET="$CANDIDATE_SHA"
 
           EXISTING="$(gh release view "$TAG" --repo "$REPOSITORY" --json isDraft,assets,url 2>/dev/null || true)"
           if [[ -n "$EXISTING" ]]; then
@@ -225,6 +213,7 @@ jobs:
           assets=(candidate/assets/*)
           [[ "${#assets[@]}" -eq 12 ]]
           DESKTOP_SIGNING="$(node -e 'const value = require("./release/policy.json"); process.stdout.write(value.desktopSigning)')"
+          [[ "$DESKTOP_SIGNING" == "production" ]]
           release_arguments=(
             "$TAG"
             "${assets[@]}"
@@ -234,12 +223,6 @@ jobs:
             --generate-notes
             --latest
           )
-          if [[ "$DESKTOP_SIGNING" == "unsigned" ]]; then
-            release_arguments+=(
-              --notes
-              "⚠️ The macOS and Windows downloads in this release are intentionally unsigned. No personal Apple or Windows signing credentials were used or published. Users may need to approve the applications manually through their operating-system security settings."
-            )
-          fi
           gh release create "${release_arguments[@]}"
 
           RELEASE_JSON="$(gh release view "$TAG" --repo "$REPOSITORY" --json isDraft,assets,url)"

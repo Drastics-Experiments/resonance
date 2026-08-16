@@ -12,6 +12,11 @@ const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "u
 test("direct release workflow is dispatch-only and calls all four platform builders", () => {
   const workflow = read(".github/workflows/direct-release-build.yml");
   assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /production_release:/);
+  assert.match(workflow, /environment: production-release/);
+  assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(workflow, /\[\[ "\$\(git rev-parse origin\/main\)" == "\$SOURCE_SHA" \]\]/);
+  assert.doesNotMatch(workflow, /unsigned_desktop|allow-unsigned/);
   assert.doesNotMatch(workflow, /^\s*pull_request:/m);
   assert.doesNotMatch(workflow, /gh pr|refs\/heads\/release\/|release\/v[0-9]/);
   assert.doesNotMatch(workflow, /gh release|contents:\s*write/);
@@ -20,6 +25,48 @@ test("direct release workflow is dispatch-only and calls all four platform build
   }
   assert.equal((workflow.match(/^\s+version_override: true$/gm) || []).length, 4);
   assert.match(workflow, /No version file is committed|mode: "direct"/);
+});
+
+test("pull request release candidates are secretless and explicitly unsigned", () => {
+  const workflow = read(".github/workflows/release-candidate.yml");
+  assert.doesNotMatch(workflow, /^\s+secrets:/m);
+  assert.doesNotMatch(workflow, /secrets\./);
+  assert.match(workflow, /production_signing: false/);
+  assert.match(workflow, /desktop_signing=unsigned/);
+  assert.match(workflow, /--allow-unsigned-desktop-release/);
+});
+
+test("publish workflow is trusted-dispatch-only and fails closed on unsigned policy", () => {
+  const workflow = read(".github/workflows/publish-release.yml");
+  assert.doesNotMatch(workflow, /^\s+pull_request:/m);
+  assert.match(workflow, /environment: production-release/);
+  assert.match(workflow, /candidate_run_id:/);
+  assert.match(workflow, /request_id:/);
+  assert.match(workflow, /direct-release-build\.yml/);
+  assert.match(workflow, /\[\[ "\$MERGED_SHA" == "\$CANDIDATE_SHA" \]\]/);
+  assert.match(workflow, /\[\[ "\$DESKTOP_SIGNING" == "production" \]\]/);
+  assert.doesNotMatch(workflow, /allow-unsigned-desktop-release/);
+});
+
+test("all third-party actions are pinned and checkout does not persist credentials", () => {
+  for (const file of [
+    ".github/workflows/android.yml",
+    ".github/workflows/direct-release-build.yml",
+    ".github/workflows/ios.yml",
+    ".github/workflows/macos.yml",
+    ".github/workflows/publish-release.yml",
+    ".github/workflows/release-candidate.yml",
+    ".github/workflows/windows.yml",
+  ]) {
+    const workflow = read(file);
+    for (const match of workflow.matchAll(/^\s+uses:\s+([^\s#]+)/gm)) {
+      if (match[1].startsWith("./")) continue;
+      assert.match(match[1], /@[0-9a-f]{40}$/i, `${file} has an unpinned action: ${match[1]}`);
+    }
+    const checkouts = workflow.match(/uses: actions\/checkout@[0-9a-f]{40}[\s\S]*?persist-credentials: false/gi) || [];
+    const checkoutCount = (workflow.match(/uses: actions\/checkout@/g) || []).length;
+    assert.equal(checkouts.length, checkoutCount, `${file} checkout credentials are not disabled`);
+  }
 });
 
 for (const platform of ["android", "ios", "macos", "windows"]) {

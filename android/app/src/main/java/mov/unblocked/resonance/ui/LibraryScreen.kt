@@ -1,6 +1,7 @@
 package mov.unblocked.resonance.ui
 
 import android.graphics.BitmapFactory
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import androidx.compose.foundation.background
@@ -61,6 +62,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import mov.unblocked.resonance.data.Track
 import mov.unblocked.resonance.data.AccountEmailPrivacy
+import mov.unblocked.resonance.data.ProfileImageNetworkPolicy
+import mov.unblocked.resonance.data.ProfileImagePayloadPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -197,7 +200,7 @@ private fun ProfileButton(
     )
     var expanded by remember { mutableStateOf(false) }
     var isEmailRevealed by remember(state.accountEmail) { mutableStateOf(false) }
-    val profileBitmap = rememberAccountImage(state.accountImageURL)
+    val profileBitmap = rememberAccountImage(state.serverUrl, state.accountImageURL)
     Box {
         IconButton(
             onClick = { expanded = true },
@@ -255,29 +258,77 @@ private fun ProfileButton(
 }
 
 @Composable
-private fun rememberAccountImage(imageURL: String?): androidx.compose.ui.graphics.ImageBitmap? {
-    val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, imageURL) {
+private fun rememberAccountImage(
+    serverURL: String,
+    imageURL: String?,
+): androidx.compose.ui.graphics.ImageBitmap? {
+    val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, serverURL, imageURL) {
         value = withContext(Dispatchers.IO) {
-            runCatching {
-                val url = URL(imageURL?.takeIf(String::isNotBlank) ?: return@runCatching null)
-                require(url.protocol.equals("https", ignoreCase = true))
-                val connection = url.openConnection() as HttpURLConnection
-                try {
-                    connection.connectTimeout = 5_000
-                    connection.readTimeout = 5_000
-                    connection.instanceFollowRedirects = true
-                    connection.connect()
-                    require(connection.responseCode in 200..299)
-                    require(connection.contentLengthLong <= 5 * 1024 * 1024 || connection.contentLengthLong < 0)
-                    connection.inputStream.use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
-                } finally {
-                    connection.disconnect()
-                }
-            }.getOrNull()
+            loadProfileImageBytes(serverURL, imageURL)?.let { bytes ->
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+            }
         }
     }
     return bitmap
 }
+
+/** Fetches a server/Clerk profile image without following an unvalidated redirect. */
+internal fun loadProfileImageBytes(
+    serverURL: String,
+    imageURL: String?,
+    connectionFactory: (URL) -> HttpURLConnection = { target ->
+        target.openConnection() as HttpURLConnection
+    },
+): ByteArray? = runCatching {
+    var currentURL = ProfileImageNetworkPolicy.resolveURL(serverURL, imageURL)
+        ?: return@runCatching null
+    for (redirectCount in 0..MAX_PROFILE_IMAGE_REDIRECTS) {
+        val connection = connectionFactory(currentURL)
+        try {
+            connection.requestMethod = "GET"
+            connection.instanceFollowRedirects = false
+            connection.useCaches = false
+            connection.connectTimeout = PROFILE_IMAGE_CONNECT_TIMEOUT_MS
+            connection.readTimeout = PROFILE_IMAGE_READ_TIMEOUT_MS
+            connection.setRequestProperty("Accept", "image/*")
+            val responseCode = connection.responseCode
+            if (responseCode in PROFILE_IMAGE_REDIRECT_STATUSES) {
+                if (redirectCount == MAX_PROFILE_IMAGE_REDIRECTS) {
+                    throw IOException("The profile image redirected too many times")
+                }
+                val location = connection.getHeaderField("Location")
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                    ?: throw IOException("The profile image redirect is missing a location")
+                currentURL = ProfileImageNetworkPolicy.resolveRedirect(serverURL, currentURL, location)
+                    ?: throw IOException("The profile image redirect is not secure")
+                continue
+            }
+            if (responseCode !in 200..299) return@runCatching null
+            if (connection.contentLengthLong > ProfileImagePayloadPolicy.MAX_BYTES) {
+                return@runCatching null
+            }
+            val bytes = connection.inputStream.use(ProfileImagePayloadPolicy::readBoundedBytes)
+                ?: return@runCatching null
+            if (!ProfileImagePayloadPolicy.hasSafeDecodedBounds(bytes)) return@runCatching null
+            return@runCatching bytes
+        } finally {
+            connection.disconnect()
+        }
+    }
+    null
+}.getOrNull()
+
+private const val MAX_PROFILE_IMAGE_REDIRECTS = 5
+private const val PROFILE_IMAGE_CONNECT_TIMEOUT_MS = 5_000
+private const val PROFILE_IMAGE_READ_TIMEOUT_MS = 5_000
+private val PROFILE_IMAGE_REDIRECT_STATUSES = setOf(
+    HttpURLConnection.HTTP_MOVED_PERM,
+    HttpURLConnection.HTTP_MOVED_TEMP,
+    HttpURLConnection.HTTP_SEE_OTHER,
+    307,
+    308,
+)
 
 @Composable
 private fun RecentlyAddedSection(

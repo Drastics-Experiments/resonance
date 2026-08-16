@@ -16,15 +16,15 @@
     "release:win": "electron-builder --win nsis --x64 --publish always"
   },
   "dependencies": {
-    "electron-updater": "^6.6.2",
-    "ffmpeg-static": "^5.3.0",
-    "music-metadata": "^11.13.0"
+    "electron-updater": "6.8.9",
+    "ffmpeg-static": "5.3.0",
+    "music-metadata": "11.13.0"
   },
   "devDependencies": {
-    "@electron-internal/extract-zip": "^1.0.4",
-    "@electron/packager": "latest",
-    "electron": "latest",
-    "electron-builder": "^26.0.12"
+    "@electron-internal/extract-zip": "1.0.4",
+    "@electron/packager": "20.0.4",
+    "electron": "43.2.0",
+    "electron-builder": "26.15.3"
   },
   "build": {
     "appId": "mov.unblocked.resonance",
@@ -54,12 +54,16 @@
       "client-config.cjs",
       "client-config-state.cjs",
       "server-download.cjs",
+      "server-request.cjs",
       "server-stream.cjs",
       "listen-along.cjs",
       "server-upload.cjs",
       "server-upload-response.cjs",
       "social-auth.cjs",
+      "account-avatar.cjs",
       "updater-feed.cjs",
+      "response-body.cjs",
+      "updater-auth.cjs",
       "preload.cjs",
       "package.json",
       "resonance.ico",

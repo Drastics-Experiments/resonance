@@ -75,6 +75,7 @@ test("rejects cross-origin Clerk endpoints and hides refresh tokens from the ren
   assert.equal(publicSession(session).profileID, "user_listener");
   assert.equal(publicSession(session).displayName, "Listener");
   assert.equal(publicSession(session).migratedProfileID, "default");
+  assert.equal(publicSession(session).imageURL, null, "remote Clerk URLs must be hydrated before renderer use");
   assert.equal(Object.hasOwn(publicSession(session), "refreshToken"), false);
 
   assert.throws(() => canonicalSession(
@@ -88,6 +89,29 @@ test("rejects cross-origin Clerk endpoints and hides refresh tokens from the ren
     },
     "https://music.example",
   ), /legacy profile/);
+});
+
+test("accepts only allowlisted Clerk avatar URLs at the auth boundary", () => {
+  const baseAccount = {
+    id: "user_listener",
+    email: "listener@example.com",
+    role: "member",
+    profile_id: "user_listener",
+  };
+  for (const image_url of [
+    "http://images.clerk.dev/avatar.jpg",
+    "https://user:secret@images.clerk.dev/avatar.jpg",
+    "https://images.clerk.dev:8443/avatar.jpg",
+    "https://images.clerk.dev/avatar.jpg#fragment",
+    "https://avatars.evil.example/avatar.jpg",
+    "https://127.0.0.1/avatar.jpg",
+  ]) {
+    assert.throws(() => canonicalSession(
+      { id_token: "identity", refresh_token: "refresh", expires_in: 3600 },
+      { ...baseAccount, image_url },
+      "https://music.example",
+    ), /profile image URL is invalid/);
+  }
 });
 
 test("accepts the deployed legacy account shape only through the requested profile scope", () => {

@@ -104,9 +104,10 @@ struct LocalImportSessions: @unchecked Sendable {
             server: session { _ in false },
             googleVideo: session { LocalImportURL.isGoogleVideo($0) },
             artwork: session { url in
-                LocalImportURL.spotifyArtwork(url.absoluteString) != nil
+                MacArtworkURLPolicy.allowedURL(url) != nil
+                    && (LocalImportURL.spotifyArtwork(url.absoluteString) != nil
                     || LocalImportURL.soundCloudArtwork(url.absoluteString) != nil
-                    || LocalImportURL.youtubeArtwork(url.absoluteString) != nil
+                    || LocalImportURL.youtubeArtwork(url.absoluteString) != nil)
             }
         )
     }
@@ -2352,14 +2353,14 @@ actor LocalDeviceImportService {
         let url = LocalImportURL.spotifyArtwork(value)
             ?? LocalImportURL.soundCloudArtwork(value)
             ?? LocalImportURL.youtubeArtwork(value)
-        guard let url else { return nil }
+        guard let url, MacArtworkURLPolicy.allowedURL(url) != nil else { return nil }
         var request = URLRequest(url: url)
         request.setValue("image/avif,image/webp,image/png,image/jpeg", forHTTPHeaderField: "Accept")
         guard let (data, response) = try? await responseData(session: sessions.artwork, request: request, limit: maxArtworkBytes),
               (200..<300).contains(response.statusCode),
               let type = response.value(forHTTPHeaderField: "Content-Type")?.lowercased(),
               type.hasPrefix("image/"),
-              let image = NSImage(data: data),
+              let image = ArtworkCropping.validatedImage(from: data),
               let tiff = image.tiffRepresentation,
               let representation = NSBitmapImageRep(data: tiff),
               let jpeg = representation.representation(using: .jpeg, properties: [.compressionFactor: 0.9]) else { return nil }

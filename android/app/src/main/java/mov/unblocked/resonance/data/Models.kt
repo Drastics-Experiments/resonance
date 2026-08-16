@@ -59,6 +59,59 @@ data class Track(
         }
 }
 
+/**
+ * Provider media responses are signed/expiring URLs, not durable source links. Keep the stable
+ * source page on [Track.sourceURL], but never carry a known provider media URL into library state
+ * or an Android backup. Music-server URLs remain valid provenance and are retained.
+ */
+internal object ProviderMediaURLPolicy {
+    const val MAX_URL_LENGTH = 8_192
+    private const val GOOGLE_VIDEO_HOST = "googlevideo.com"
+    private const val SOUNDCLOUD_MEDIA_HOST_SUFFIX = ".sndcdn.com"
+
+    fun isShortLivedMediaURL(value: String?): Boolean {
+        val trimmed = value?.trim()?.takeIf(String::isNotEmpty) ?: return false
+        val uri = runCatching { URI(trimmed) }.getOrNull() ?: return false
+        val host = uri.host?.trimEnd('.')?.lowercase().orEmpty()
+        val isGoogleVideo = host == GOOGLE_VIDEO_HOST || host.endsWith(".$GOOGLE_VIDEO_HOST")
+        val isSoundCloudMedia = host.endsWith(SOUNDCLOUD_MEDIA_HOST_SUFFIX) &&
+            host.removeSuffix(SOUNDCLOUD_MEDIA_HOST_SUFFIX).let {
+                it.startsWith("cf-media") || it.startsWith("cf-hls-media")
+            }
+        return uri.scheme.equals("https", ignoreCase = true) &&
+            (isGoogleVideo || isSoundCloudMedia)
+    }
+
+    fun boundedURL(value: String?): String? = value
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && it.length <= MAX_URL_LENGTH }
+
+    fun persistableSourceURL(value: String?): String? = boundedURL(value)
+        ?.takeIf(::isSafePersistedURL)
+        ?.takeUnless(::isShortLivedMediaURL)
+
+    fun persistableDownloadURL(value: String?): String? = persistableSourceURL(value)
+
+    fun sanitizeTrack(track: Track): Track = track.copy(
+        sourceServer = boundedURL(track.sourceServer),
+        sourceURL = persistableSourceURL(track.sourceURL),
+        downloadSourceURL = persistableDownloadURL(track.downloadSourceURL),
+    )
+
+    fun sanitizeMetadataArtworkURL(value: String?): String? = persistableSourceURL(value)
+
+    private fun isSafePersistedURL(value: String): Boolean = runCatching {
+        val uri = URI(value)
+        val host = uri.host?.trimEnd('.')?.lowercase().orEmpty()
+        uri.scheme.equals("https", ignoreCase = true) &&
+            host.isNotEmpty() &&
+            uri.rawUserInfo == null &&
+            uri.rawFragment == null &&
+            (uri.port == -1 || uri.port == 443) &&
+            !ServerNetworkPolicy.isPrivateOrLocalHost(host)
+    }.getOrDefault(false)
+}
+
 object UnlinkedDownloadMigrationPolicy {
     const val Identifier = "delete-unlinked-downloads-v1"
 
@@ -75,8 +128,8 @@ object UnlinkedDownloadMigrationPolicy {
         }
         val hasRemoteIdentity = listOf(migrated.remoteID, migrated.sourceServer)
             .any { !it.isNullOrBlank() }
-        val hasSourceLink = listOf(migrated.sourceURL, migrated.downloadSourceURL)
-            .any { !it.isNullOrBlank() }
+        val hasSourceLink = ProviderMediaURLPolicy.persistableSourceURL(migrated.sourceURL) != null ||
+            ProviderMediaURLPolicy.persistableDownloadURL(migrated.downloadSourceURL) != null
         return Decision(
             track = migrated,
             shouldDelete = (hasRemoteIdentity || legacyDownloadOwned) &&
@@ -87,6 +140,10 @@ object UnlinkedDownloadMigrationPolicy {
 
 object PlayableDurationMigrationPolicy {
     const val Identifier = "playable-media-duration-v1"
+}
+
+object ProviderMediaURLMigrationPolicy {
+    const val Identifier = "remove-provider-media-urls-v2"
 }
 
 @Serializable
@@ -175,10 +232,7 @@ object RemoteSongMetadataCachePolicy {
     const val Limit = 2_000
 
     fun key(sourceURL: String, mediaKind: String): String? {
-        val source = sourceURL.trim()
-        if (source.isEmpty() || source.length > 8_192) return null
-        val uri = runCatching { URI(source) }.getOrNull() ?: return null
-        if (uri.scheme?.lowercase() != "https" || uri.host.isNullOrBlank() || uri.userInfo != null) return null
+        val source = ProviderMediaURLPolicy.persistableSourceURL(sourceURL) ?: return null
         return "${if (mediaKind == "video") "video" else "audio"}:$source"
     }
 
@@ -194,8 +248,14 @@ object RemoteSongMetadataCachePolicy {
                     entry.artist.isNotBlank() && entry.artist.length <= 512
             }
             .mapNotNull { (storedKey, entry) ->
-                val key = key(entry.sourceURL, entry.mediaKind)
-                if (key == null || key != storedKey) null else key to entry
+                val sourceURL = ProviderMediaURLPolicy.persistableSourceURL(entry.sourceURL)
+                    ?: return@mapNotNull null
+                val key = key(sourceURL, entry.mediaKind)
+                if (key == null || key != storedKey) null
+                else key to entry.copy(
+                    sourceURL = sourceURL,
+                    artworkURL = ProviderMediaURLPolicy.sanitizeMetadataArtworkURL(entry.artworkURL),
+                )
             }
             .sortedByDescending { it.second.cachedAtEpochMs }
             .take(Limit)
@@ -425,7 +485,9 @@ internal fun Track.associatedWithLocalSource(
         ?.trim()
         ?.takeIf { it.isNotEmpty() && it.length <= 8_192 }
     return copy(
-        sourceURL = normalized(sourceURL) ?: this.sourceURL,
-        downloadSourceURL = normalized(downloadSourceURL) ?: this.downloadSourceURL,
+        sourceURL = ProviderMediaURLPolicy.persistableSourceURL(normalized(sourceURL) ?: this.sourceURL),
+        downloadSourceURL = ProviderMediaURLPolicy.persistableDownloadURL(
+            normalized(downloadSourceURL) ?: this.downloadSourceURL,
+        ),
     )
 }

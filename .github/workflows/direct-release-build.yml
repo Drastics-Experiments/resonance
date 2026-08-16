@@ -1,5 +1,5 @@
 name: Direct release build
-run-name: Direct release v${{ inputs.version }} unsigned=${{ inputs.unsigned_desktop }} (${{ inputs.request_id }})
+run-name: Direct production release v${{ inputs.version }} (${{ inputs.request_id }})
 
 on:
   workflow_dispatch:
@@ -20,11 +20,11 @@ on:
         description: Unique Release Studio request identifier.
         required: true
         type: string
-      unsigned_desktop:
-        description: Build macOS and Windows without production signing.
+      production_release:
+        description: Explicit confirmation that this trusted dispatch may use production signing.
         required: true
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
@@ -36,7 +36,9 @@ concurrency:
 jobs:
   prepare:
     name: Validate direct release request
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    environment: production-release
     outputs:
       version: ${{ steps.release.outputs.version }}
       build: ${{ steps.release.outputs.build }}
@@ -44,14 +46,14 @@ jobs:
       source_sha: ${{ steps.source.outputs.sha }}
       source_tree: ${{ steps.source.outputs.tree }}
       desktop_signing: ${{ steps.release.outputs.desktop_signing }}
-      unsigned_desktop: ${{ steps.release.outputs.unsigned_desktop }}
 
     steps:
       - name: Check out exact source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Validate source and generated version
         id: release
@@ -61,8 +63,10 @@ jobs:
           BUILD: ${{ inputs.build_number }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           REQUEST_ID: ${{ inputs.request_id }}
-          UNSIGNED_DESKTOP: ${{ inputs.unsigned_desktop }}
+          PRODUCTION_RELEASE: ${{ inputs.production_release }}
         run: |
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$PRODUCTION_RELEASE" == "true" ]]
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$BUILD" =~ ^[1-9][0-9]*$ ]]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -83,17 +87,16 @@ jobs:
           ' "$VERSION" "$BASE_VERSION"
           (( BUILD > BASE_BUILD ))
           ! git show-ref --verify --quiet "refs/tags/v${VERSION}"
+          read -r POLICY_SCHEMA POLICY_VERSION POLICY_BUILD DESKTOP_SIGNING < <(node -e 'const value = require("./release/policy.json"); console.log(value.schemaVersion, value.version, value.build, value.desktopSigning)')
+          [[ "$POLICY_SCHEMA" == "1" ]]
+          [[ "$POLICY_VERSION" == "$BASE_VERSION" ]]
+          [[ "$POLICY_BUILD" == "$BASE_BUILD" ]]
+          [[ "$DESKTOP_SIGNING" == "production" ]]
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          if [[ "$UNSIGNED_DESKTOP" == "true" ]]; then
-            echo "desktop_signing=unsigned" >> "$GITHUB_OUTPUT"
-            echo "unsigned_desktop=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "desktop_signing=production" >> "$GITHUB_OUTPUT"
-            echo "unsigned_desktop=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "desktop_signing=production" >> "$GITHUB_OUTPUT"
 
       - name: Record exact source
         id: source
@@ -113,9 +116,14 @@ jobs:
     name: Android direct candidate
     needs: prepare
     uses: ./.github/workflows/android.yml
-    secrets: inherit
+    secrets:
+      RESONANCE_ANDROID_KEYSTORE_BASE64: ${{ secrets.RESONANCE_ANDROID_KEYSTORE_BASE64 }}
+      RESONANCE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RESONANCE_ANDROID_KEYSTORE_PASSWORD }}
+      RESONANCE_ANDROID_KEY_ALIAS: ${{ secrets.RESONANCE_ANDROID_KEY_ALIAS }}
+      RESONANCE_ANDROID_KEY_PASSWORD: ${{ secrets.RESONANCE_ANDROID_KEY_PASSWORD }}
     with:
       release_candidate: true
+      production_signing: true
       version_override: true
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
@@ -148,11 +156,11 @@ jobs:
       RESONANCE_MACOS_NOTARY_ISSUER_ID: ${{ secrets.RESONANCE_MACOS_NOTARY_ISSUER_ID }}
     with:
       release_candidate: true
+      production_signing: true
       version_override: true
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
       source_ref: ${{ needs.prepare.outputs.source_sha }}
-      unsigned_desktop: ${{ needs.prepare.outputs.unsigned_desktop == 'true' }}
 
   windows:
     name: Windows direct candidate
@@ -164,11 +172,11 @@ jobs:
       RESONANCE_WINDOWS_CERTIFICATE_SHA1: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_SHA1 }}
     with:
       release_candidate: true
+      production_signing: true
       version_override: true
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
       source_ref: ${{ needs.prepare.outputs.source_sha }}
-      unsigned_desktop: ${{ needs.prepare.outputs.unsigned_desktop == 'true' }}
 
   bundle:
     name: Validate direct release bundle
@@ -182,38 +190,30 @@ jobs:
 
     steps:
       - name: Check out validation tooling
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
 
       - name: Download platform assets
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: release-assets-*
           path: candidate/assets
           merge-multiple: true
 
       - name: Download desktop signing evidence
-        if: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: release-signing-*
           path: candidate/signing
           merge-multiple: true
 
       - name: Validate production-signed asset set
-        if: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
         run: >-
           node scripts/validate-release-assets.mjs
           candidate/assets "${{ needs.prepare.outputs.version }}"
           --signing-evidence candidate/signing
-
-      - name: Validate explicit unsigned desktop asset set
-        if: ${{ needs.prepare.outputs.unsigned_desktop == 'true' }}
-        run: >-
-          node scripts/validate-release-assets.mjs
-          candidate/assets "${{ needs.prepare.outputs.version }}"
-          --allow-unsigned-desktop-release
 
       - name: Write direct candidate provenance
         shell: bash
@@ -245,7 +245,7 @@ jobs:
           '
 
       - name: Upload validated direct provenance
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-provenance-direct-${{ needs.prepare.outputs.tag }}-${{ needs.prepare.outputs.source_sha }}-${{ inputs.request_id }}
           path: |

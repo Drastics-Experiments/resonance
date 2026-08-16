@@ -234,6 +234,13 @@ struct LocalImportedAudio: Hashable, Sendable {
 struct LocalImportSourceAssociation: Hashable, Sendable {
     let sourceURL: String
     let downloadSourceURL: URL?
+
+    init(sourceURL: String, downloadSourceURL: URL?) {
+        self.sourceURL = MobileTrackPersistencePolicy.canonicalSourceURL(sourceURL) ?? ""
+        self.downloadSourceURL = downloadSourceURL.flatMap {
+            MobileTrackPersistencePolicy.persistedDownloadSourceURL($0).flatMap(URL.init(string:))
+        }
+    }
 }
 
 enum LocalImportOutcome: Hashable, Sendable {
@@ -286,14 +293,15 @@ enum LocalImportURL {
     private static let debridVaultHost = "debridvault.elfhosted.com"
 
     static func isSpotify(_ value: String) -> Bool {
-        guard let url = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
+        guard let trimmed = MobileDurableURLPolicy.trimmed(value),
+              let url = URL(string: trimmed),
               let host = url.host?.lowercased() else { return false }
         return spotifyHosts.contains(host)
     }
 
     static func spotifySource(_ value: String) throws -> URL {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count <= 8_192,
+        guard trimmed.count <= MobileDurableURLPolicy.maximumCharacters,
               let components = URLComponents(string: trimmed),
               components.scheme?.lowercased() == "https",
               components.user == nil,
@@ -357,7 +365,8 @@ enum LocalImportURL {
 
     static func youtubeVideoID(_ value: String) throws -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count <= 8_192, let components = URLComponents(string: trimmed) else {
+        guard trimmed.count <= MobileDurableURLPolicy.maximumCharacters,
+              let components = URLComponents(string: trimmed) else {
             throw LocalImportError(stage: .inspectingSource, code: "INVALID_SOURCE", message: "Enter a Spotify track or YouTube video URL.")
         }
         guard components.scheme?.lowercased() == "https" else { return nil }
@@ -400,25 +409,31 @@ enum LocalImportURL {
     }
 
     static func spotifyArtwork(_ value: String?) -> URL? {
-        guard let value, let components = URLComponents(string: value),
+        guard let value,
+              value.count <= MobileDurableURLPolicy.maximumCharacters,
+              let components = URLComponents(string: value),
               components.scheme?.lowercased() == "https",
               components.user == nil,
               components.password == nil,
               let host = components.host?.lowercased(),
               host == "scdn.co" || host.hasSuffix(".scdn.co") || host == "spotifycdn.com" || host.hasSuffix(".spotifycdn.com")
         else { return nil }
-        return components.url
+        guard let url = components.url, MobileDurableURLPolicy.accepts(url) else { return nil }
+        return url
     }
 
     static func youtubeArtwork(_ value: String?) -> URL? {
-        guard let value, let components = URLComponents(string: value),
+        guard let value,
+              value.count <= MobileDurableURLPolicy.maximumCharacters,
+              let components = URLComponents(string: value),
               components.scheme?.lowercased() == "https",
               components.user == nil,
               components.password == nil,
               let host = components.host?.lowercased(),
               host == "ytimg.com" || host.hasSuffix(".ytimg.com") || host == "ggpht.com" || host.hasSuffix(".ggpht.com")
         else { return nil }
-        return components.url
+        guard let url = components.url, MobileDurableURLPolicy.accepts(url) else { return nil }
+        return url
     }
 
     static func isYouTubeDocument(_ url: URL) -> Bool {

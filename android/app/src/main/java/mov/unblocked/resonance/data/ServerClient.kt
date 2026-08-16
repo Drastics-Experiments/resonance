@@ -111,6 +111,7 @@ class ServerClient(
             url = endpoint("/api/v1/songs"),
             token = requireAccessToken(),
             accept = "application/json",
+            maxResponseBytes = MAX_CATALOG_RESPONSE_BYTES,
         )
         requireStatus(response, setOf(HttpURLConnection.HTTP_OK))
         json.decodeFromString<RemoteCatalog>(response.body.toString(Charsets.UTF_8))
@@ -306,7 +307,9 @@ class ServerClient(
                 if (connection.responseCode !in 200..299) return@runCatching null
                 val contentLength = connection.contentLengthLong
                 if (contentLength > MAX_ARTWORK_BYTES) return@runCatching null
-                connection.inputStream.use(::readArtworkBytes)
+                val contentType = connection.contentType?.substringBefore(';')?.trim()?.lowercase()
+                if (contentType != null && !contentType.startsWith("image/")) return@runCatching null
+                connection.inputStream.use(::readArtworkBytes)?.takeIf(ArtworkPayloadPolicy::hasSafeDecodedBounds)
             } finally {
                 connection.disconnect()
             }
@@ -481,6 +484,7 @@ class ServerClient(
             url = endpoint("/api/v1/playlists"),
             token = requireAccessToken(),
             accept = "application/json",
+            maxResponseBytes = MAX_PLAYLIST_RESPONSE_BYTES,
         )
         requireStatus(response, setOf(HttpURLConnection.HTTP_OK))
         json.decodeFromString<RemotePlaylistsDocument>(response.body.toString(Charsets.UTF_8))
@@ -493,6 +497,7 @@ class ServerClient(
             token = requireAccessToken(),
             accept = "application/json",
             includeProfile = false,
+            maxResponseBytes = MAX_PROFILE_RESPONSE_BYTES,
         )
         requireStatus(response, setOf(HttpURLConnection.HTTP_OK))
         json.decodeFromString<SyncProfilesResponse>(response.body.toString(Charsets.UTF_8))
@@ -507,6 +512,7 @@ class ServerClient(
             contentType = "application/json",
             accept = "application/json",
             includeProfile = false,
+            maxResponseBytes = MAX_PROFILE_RESPONSE_BYTES,
         )
         requireStatus(response, setOf(HttpURLConnection.HTTP_CREATED))
         json.decodeFromString<SyncProfile>(response.body.toString(Charsets.UTF_8))
@@ -521,6 +527,7 @@ class ServerClient(
                 body = json.encodeToString(document).toByteArray(Charsets.UTF_8),
                 contentType = "application/json",
                 accept = "application/json",
+                maxResponseBytes = MAX_PLAYLIST_RESPONSE_BYTES,
             )
             val updated = when (response.status) {
                 HttpURLConnection.HTTP_OK, HttpURLConnection.HTTP_CONFLICT ->
@@ -673,7 +680,7 @@ class ServerClient(
             val status = connection.responseCode
             beforeRead()
             if (status != HttpURLConnection.HTTP_OK) {
-                throw serverException(connection.response())
+                throw serverException(connection.response(MAX_ERROR_BYTES))
             }
             val expectations = DownloadIntegrityPolicy.withResponseLength(
                 requirements = requirements,
@@ -759,7 +766,7 @@ class ServerClient(
         }
         return try {
             if (body != null) connection.outputStream.use { it.write(body) }
-            connection.response(maxResponseBytes)
+            connection.response(maxResponseBytes ?: MAX_ERROR_BYTES)
         } finally {
             connection.disconnect()
         }
@@ -872,13 +879,14 @@ class ServerClient(
         throw IOException("The artwork download redirected too many times")
     }
 
-    private fun HttpURLConnection.response(maxBytes: Int? = null): Response {
+    private fun HttpURLConnection.response(maxBytes: Int): Response {
         val status = responseCode
         val source = if (status in 200..299) inputStream else errorStream
         return Response(
             status,
             source?.use { input ->
-                if (maxBytes == null) input.readBytes() else readBoundedBytes(input, maxBytes)
+                if (contentLengthLong > maxBytes) throw ResponseTooLargeException()
+                readBoundedBytes(input, maxBytes)
             } ?: ByteArray(0),
         )
     }
@@ -986,6 +994,9 @@ class ServerClient(
         private const val DOWNLOAD_TIMEOUT_MS = 120_000
         private const val CLIENT_CONFIG_TIMEOUT_MS = 15_000
         private const val MAX_ERROR_BYTES = 64 * 1_024
+        private const val MAX_CATALOG_RESPONSE_BYTES = 16 * 1_024 * 1_024
+        private const val MAX_PLAYLIST_RESPONSE_BYTES = 4 * 1_024 * 1_024
+        private const val MAX_PROFILE_RESPONSE_BYTES = 512 * 1_024
         private const val MAX_SOURCE_IMPORT_RESPONSE_BYTES = 256 * 1_024
         private const val MAX_REVIEWED_MATCH_RESPONSE_BYTES = 512 * 1_024
         private const val MAX_LISTEN_ALONG_RESPONSE_BYTES = 256 * 1_024
@@ -1159,11 +1170,55 @@ internal object ServerNetworkPolicy {
         require(uri.rawFragment == null) { "Artwork URL must not contain a fragment" }
         val url = runCatching { uri.toURL() }
             .getOrElse { throw IllegalArgumentException("The artwork URL is invalid", it) }
-        val sameOrigin = hasSameOrigin(url, normalizedBase.toURL())
+        val base = normalizedBase.toURL()
+        val sameOrigin = hasSameOrigin(url, base)
+        val host = normalizedHost(url.host)
+        require(sameOrigin || isApprovedArtworkHost(host)) {
+            "Artwork URL must use the configured server or an approved artwork host"
+        }
+        require(sameOrigin || url.port == -1 || url.port == 443) {
+            "Artwork URL must use the standard HTTPS port"
+        }
+        val isDevelopmentOrigin = sameOrigin && allowCleartextDevelopment
+        require(!isPrivateOrLocalHost(host) || isDevelopmentOrigin) {
+            "Artwork URL must not target a private or local host"
+        }
         require(url.protocol.equals("https", ignoreCase = true) || sameOrigin) {
             "Artwork URL must use HTTPS"
         }
         return url
+    }
+
+    private fun isApprovedArtworkHost(host: String): Boolean = artworkHostSuffixes.any { suffix ->
+        host == suffix || host.endsWith(".$suffix")
+    }
+
+    internal fun isPrivateOrLocalHost(host: String): Boolean {
+        val normalized = host.trimEnd('.').lowercase()
+        if (
+            normalized == "localhost" || normalized.endsWith(".localhost") ||
+            normalized.endsWith(".local") || normalized == "local" ||
+            normalized == "0.0.0.0" || normalized == "::" || normalized == "::1" ||
+            normalized.all(Char::isDigit)
+        ) return true
+        if (normalized.contains(':')) {
+            val address = runCatching { java.net.InetAddress.getByName(normalized) }.getOrNull()
+            return address?.let {
+                it.isAnyLocalAddress || it.isLoopbackAddress || it.isLinkLocalAddress ||
+                    it.isSiteLocalAddress || it.hostAddress?.lowercase()?.startsWith("fc") == true ||
+                    it.hostAddress?.lowercase()?.startsWith("fd") == true
+            } == true
+        }
+        val octets = normalized.split('.').mapNotNull(String::toIntOrNull)
+        if (octets.size == 4 && octets.joinToString(".") == normalized && octets.all { it in 0..255 }) {
+            val first = octets[0]
+            val second = octets[1]
+            return first == 0 || first == 10 || first == 127 ||
+                first == 169 && second == 254 ||
+                first == 172 && second in 16..31 ||
+                first == 192 && second == 168
+        }
+        return false
     }
 
     private fun normalizedHost(value: String?): String = value
@@ -1172,6 +1227,14 @@ internal object ServerNetworkPolicy {
         .removePrefix("[")
         .removeSuffix("]")
         .lowercase()
+
+    private val artworkHostSuffixes = setOf(
+        "ytimg.com",
+        "ggpht.com",
+        "scdn.co",
+        "spotifycdn.com",
+        "sndcdn.com",
+    )
 }
 
 internal data class DownloadRequirements(

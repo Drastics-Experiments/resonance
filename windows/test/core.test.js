@@ -1338,6 +1338,8 @@ test("ports playback reliability, recovery notices, and keyboard operation into 
   assert.match(appSource, /row\.onkeydown = async[\s\S]+dataset\.playlistEntry[\s\S]+CSS\.escape\(entryKey\)/);
   assert.match(appSource, /menu\.onkeydown = \(keyEvent\)[\s\S]+ArrowDown[\s\S]+Home[\s\S]+End/);
   assert.match(mainSource, /\.corrupt-\$\{Date\.now\(\)\}/);
+  assert.match(mainSource, /sanitizePersistedJSON\(rawBackup\)/);
+  assert.doesNotMatch(mainSource, /fs\.copyFile\(state, backup\)/);
   assert.match(mainSource, /playbackQueueIDs:[\s\S]+playbackPlaylistID:/);
   assert.match(htmlSource, /id="appNotice"[^>]+aria-live="polite"/);
   assert.match(htmlSource, /id="seek"[^>]+aria-label="Playback position"/);
@@ -1535,7 +1537,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(styleSource, /\.storage-import-menu\s*\{/);
   assert.match(styleSource, /\.local-import-candidates\s*\{[\s\S]*?overflow-y: auto/);
   assert.match(styleSource, /\.local-import-resolved\[hidden\],[\s\S]*?display: none/);
-  assert.match(packageSource, /"ffmpeg-static": "\^5\.3\.0"/);
+  assert.match(packageSource, /"ffmpeg-static": "5\.3\.0"/);
   assert.match(packageSource, /"local-debrid\.cjs"/);
   assert.match(packageSource, /"local-soundcloud\.cjs"/);
   assert.match(packageSource, /"node_modules\/ffmpeg-static\/\*\*"/);
@@ -2025,6 +2027,9 @@ test("installs downloaded Windows updates silently in place", () => {
   }), true);
   assert.deepEqual(installArguments, [true, true]);
   assert.match(mainSource, /autoUpdater\.autoDownload = true/);
+  assert.match(mainSource, /autoUpdater\.autoInstallOnAppQuit = false/);
+  assert.match(mainSource, /verifyDownloadedWindowsUpdate\(\{[\s\S]+downloadedFile: information\?\.downloadedFile/);
+  assert.match(mainSource, /if \(!verifiedWindowsUpdate \|\| windowsUpdateVerificationPromise\) return false/);
   assert.match(mainSource, /installDownloadedWindowsUpdate\(autoUpdater\)/);
   assert.doesNotMatch(mainSource, /autoUpdater\.quitAndInstall\(false, true\)/);
   assert.match(appSource, /Restarting to finish the update/);

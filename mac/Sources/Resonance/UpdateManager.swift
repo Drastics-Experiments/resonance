@@ -66,6 +66,14 @@ enum MacUpdateVersion {
 @MainActor
 final class UpdateManager: ObservableObject {
     nonisolated static let defaultManifestURL = URL(string: "https://github.com/Drastics-Experiments/resonance/releases/latest/download/latest-mac.json")!
+    nonisolated static let maxArchiveBytes: Int64 = 512 * 1_024 * 1_024
+    private static let archiveBufferBytes = 64 * 1_024
+    private static let githubUpdateHosts: Set<String> = [
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+        "github-releases.githubusercontent.com",
+    ]
 
     @Published private(set) var status = "GitHub Releases"
     @Published private(set) var availableUpdate: MacUpdateIdentity?
@@ -77,6 +85,7 @@ final class UpdateManager: ObservableObject {
     private let manifestURL: URL
     private let session: URLSession
     private let updateDirectoryOverride: URL?
+    private let authenticityPolicy: MacUpdateAuthenticityPolicy
     private var manifest: MacUpdateManifest?
     private var isRunningAutomaticChecks = false
 
@@ -84,13 +93,17 @@ final class UpdateManager: ObservableObject {
         manifestURL: URL = UpdateManager.defaultManifestURL,
         session: URLSession = .shared,
         updateDirectory: URL? = nil,
-        updatesEnabled: Bool? = nil
+        updatesEnabled: Bool? = nil,
+        authenticityPolicy: MacUpdateAuthenticityPolicy? = nil
     ) {
         self.manifestURL = manifestURL
         self.session = session
         updateDirectoryOverride = updateDirectory
+        let resolvedAuthenticityPolicy = authenticityPolicy ?? .current()
+        self.authenticityPolicy = resolvedAuthenticityPolicy
         self.updatesEnabled = updatesEnabled
-            ?? !CredentialStorePolicy.isPreviewBundle(bundleIdentifier: Bundle.main.bundleIdentifier)
+            ?? (!CredentialStorePolicy.isPreviewBundle(bundleIdentifier: Bundle.main.bundleIdentifier)
+                && resolvedAuthenticityPolicy.allowsAutomaticChecks())
     }
 
     var canInstall: Bool { downloadedArchive != nil && manifest != nil && !isBusy }
@@ -141,8 +154,20 @@ final class UpdateManager: ObservableObject {
                 timeoutInterval: 30
             )
             request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-            let (data, response) = try await session.data(for: request)
-            try Self.validate(response: response)
+            let allowedManifestHosts = Self.allowedUpdateHosts(for: manifestURL)
+            let (data, response) = try await MacBoundedResponse.data(
+                for: session,
+                request: request,
+                limit: 256 * 1_024,
+                rejectRedirects: false,
+                redirectValidator: { candidate in
+                    Self.allowsUpdateURL(candidate, allowedHosts: allowedManifestHosts)
+                }
+            )
+            try Self.validate(
+                response: response,
+                allowedHosts: allowedManifestHosts
+            )
             let candidate = try JSONDecoder().decode(MacUpdateManifest.self, from: data)
             try Self.validate(candidate)
             let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
@@ -179,9 +204,10 @@ final class UpdateManager: ObservableObject {
         defer { isBusy = false }
 
         do {
-            let (temporary, response) = try await session.download(from: manifest.url)
-            try Self.validate(response: response)
-            let digest = try Self.sha256(of: temporary)
+            let downloaded = try await downloadArchive(from: manifest.url)
+            let temporary = downloaded.url
+            defer { try? FileManager.default.removeItem(at: temporary) }
+            let digest = downloaded.sha256
             guard digest.caseInsensitiveCompare(manifest.sha256) == .orderedSame else {
                 throw UpdateError.checksumMismatch
             }
@@ -209,6 +235,7 @@ final class UpdateManager: ObservableObject {
 
     func installAndRestart() {
         guard updatesEnabled,
+              authenticityPolicy.isProductionConfigured || authenticityPolicy.allowsDevelopmentOverride(),
               let archive = downloadedArchive,
               let version = manifest?.version else { return }
         do {
@@ -238,8 +265,80 @@ final class UpdateManager: ObservableObject {
     }
 
     static func sha256(of url: URL) throws -> String {
-        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        var hasher = SHA256()
+        while let data = try file.read(upToCount: 1_024 * 1_024), !data.isEmpty {
+            try Task.checkCancellation()
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func downloadArchive(from url: URL) async throws -> (url: URL, sha256: String) {
+        let allowedHosts = Self.allowedUpdateHosts(for: url)
+        guard Self.allowsUpdateURL(url, allowedHosts: allowedHosts) else {
+            throw UpdateError.untrustedDownload
+        }
+
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        let (bytes, rawResponse) = try await session.bytes(
+            for: request,
+            delegate: MacBoundedRedirectDelegate { candidate in
+                Self.allowsUpdateURL(candidate, allowedHosts: allowedHosts)
+            }
+        )
+        guard let response = rawResponse as? HTTPURLResponse else {
+            throw UpdateError.invalidResponse
+        }
+        try Self.validate(response: response, allowedHosts: allowedHosts)
+        if let declared = response.value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init),
+           declared > Self.maxArchiveBytes {
+            throw UpdateError.archiveTooLarge
+        }
+
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("resonance-update-\(UUID().uuidString).zip")
+        guard FileManager.default.createFile(atPath: temporary.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        do {
+            let file = try FileHandle(forWritingTo: temporary)
+            defer { try? file.close() }
+            var hasher = SHA256()
+            var received: Int64 = 0
+            var buffer = Data()
+            buffer.reserveCapacity(Self.archiveBufferBytes)
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                received += 1
+                guard received <= Self.maxArchiveBytes else {
+                    throw UpdateError.archiveTooLarge
+                }
+                buffer.append(byte)
+                if buffer.count >= Self.archiveBufferBytes {
+                    try file.write(contentsOf: buffer)
+                    hasher.update(data: buffer)
+                    buffer.removeAll(keepingCapacity: true)
+                }
+            }
+            if !buffer.isEmpty {
+                try file.write(contentsOf: buffer)
+                hasher.update(data: buffer)
+            }
+            try file.synchronize()
+            let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+            return (temporary, digest)
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            if Task.isCancelled || (error as? URLError)?.code == .cancelled {
+                throw CancellationError()
+            }
+            throw error
+        }
     }
 
     private func updateDirectory() throws -> URL {
@@ -260,6 +359,12 @@ final class UpdateManager: ObservableObject {
             return nil
         }
         guard FileManager.default.fileExists(atPath: archive.path) else { return nil }
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: archive.path),
+              let size = attributes[.size] as? NSNumber,
+              size.int64Value <= Self.maxArchiveBytes else {
+            try? FileManager.default.removeItem(at: archive)
+            return nil
+        }
         guard let digest = try? Self.sha256(of: archive),
               digest.caseInsensitiveCompare(manifest.sha256) == .orderedSame else {
             try? FileManager.default.removeItem(at: archive)
@@ -270,7 +375,8 @@ final class UpdateManager: ObservableObject {
 
     static func validate(_ manifest: MacUpdateManifest) throws {
         guard !manifest.version.isEmpty, !manifest.build.isEmpty else { throw UpdateError.invalidManifest }
-        guard manifest.url.scheme == "https", manifest.url.host?.lowercased() == "github.com" else {
+        guard allowsUpdateURL(manifest.url, allowedHosts: ["github.com"]),
+              manifest.url.fragment == nil else {
             throw UpdateError.untrustedDownload
         }
         guard manifest.sha256.range(of: "^[a-fA-F0-9]{64}$", options: .regularExpression) != nil else {
@@ -278,14 +384,39 @@ final class UpdateManager: ObservableObject {
         }
     }
 
-    private static func validate(response: URLResponse) throws {
+    private static func allowedUpdateHosts(for url: URL) -> Set<String> {
+        guard url.host?.lowercased() == "github.com" else {
+            return [url.host?.lowercased() ?? ""]
+        }
+        return githubUpdateHosts
+    }
+
+    nonisolated static func allowsUpdateURL(_ url: URL, allowedHosts: Set<String>) -> Bool {
+        guard url.scheme?.lowercased() == "https",
+              url.user == nil,
+              url.password == nil,
+              url.fragment == nil,
+              url.port == nil || url.port == 443,
+              let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !host.isEmpty,
+              allowedHosts.contains(host),
+              !MacArtworkURLPolicy.isPrivateHost(host) else { return false }
+        return true
+    }
+
+    private static func validate(response: URLResponse, allowedHosts: Set<String>? = nil) throws {
         guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
+            throw UpdateError.invalidResponse
+        }
+        if let allowedHosts,
+           response.url.map({ !allowsUpdateURL($0, allowedHosts: allowedHosts) }) ?? true {
             throw UpdateError.invalidResponse
         }
     }
 }
 
 private enum UpdateError: LocalizedError {
+    case archiveTooLarge
     case checksumMismatch
     case installLocationNotWritable
     case invalidManifest
@@ -296,6 +427,7 @@ private enum UpdateError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .archiveTooLarge: "The update archive is larger than the allowed download size."
         case .checksumMismatch: "The update checksum did not match the signed release metadata."
         case .installLocationNotWritable: "Resonance cannot update this installation. Reinstall it in Applications using the macOS installer."
         case .invalidManifest: "The update manifest is invalid."

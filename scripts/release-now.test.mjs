@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import {
@@ -13,7 +14,6 @@ import {
 
 test("defaults require no arguments", () => {
   assert.deepEqual(parseArguments([]), {
-    allowUnsignedDesktop: false,
     build: undefined,
     dryRun: false,
     help: false,
@@ -31,10 +31,8 @@ test("explicit release arguments are parsed", () => {
       "91",
       "--retry-failed",
       "--dry-run",
-      "--allow-unsigned-desktop",
     ]),
     {
-      allowUnsignedDesktop: true,
       build: 91,
       dryRun: true,
       help: false,
@@ -48,6 +46,15 @@ test("invalid arguments fail before mutation", () => {
   assert.throws(() => parseArguments(["--version", "2.4"]), /semantic version/);
   assert.throws(() => parseArguments(["--build", "0"]), /positive integer/);
   assert.throws(() => parseArguments(["--unknown"]), /unknown argument/);
+});
+
+test("legacy PR release command fails closed before any mutation", () => {
+  const result = spawnSync(process.execPath, ["scripts/release-now.mjs"], {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /legacy PR release path is disabled/);
 });
 
 test("next patch and semantic comparisons are deterministic", () => {
@@ -67,16 +74,26 @@ test("public release contract contains exactly twelve assets", () => {
   assert.ok(assets.includes("latest-android.json"));
 });
 
-test("explicit unsigned desktop mode never requires Apple or Windows credentials", () => {
-  const unsignedSecrets = requiredReleaseSecretNames(true);
-  assert.deepEqual(unsignedSecrets.sort(), [
+test("every publishable release requires all platform signing credentials", () => {
+  const requiredSecrets = requiredReleaseSecretNames();
+  assert.deepEqual(requiredSecrets.sort(), [
     "RESONANCE_ANDROID_KEYSTORE_BASE64",
     "RESONANCE_ANDROID_KEYSTORE_PASSWORD",
     "RESONANCE_ANDROID_KEY_ALIAS",
     "RESONANCE_ANDROID_KEY_PASSWORD",
+    "RESONANCE_MACOS_APP_CERTIFICATE_BASE64",
+    "RESONANCE_MACOS_APP_CERTIFICATE_PASSWORD",
+    "RESONANCE_MACOS_APP_IDENTITY",
+    "RESONANCE_MACOS_INSTALLER_CERTIFICATE_BASE64",
+    "RESONANCE_MACOS_INSTALLER_CERTIFICATE_PASSWORD",
+    "RESONANCE_MACOS_INSTALLER_IDENTITY",
+    "RESONANCE_MACOS_NOTARY_ISSUER_ID",
+    "RESONANCE_MACOS_NOTARY_KEY_BASE64",
+    "RESONANCE_MACOS_NOTARY_KEY_ID",
+    "RESONANCE_WINDOWS_CERTIFICATE_BASE64",
+    "RESONANCE_WINDOWS_CERTIFICATE_PASSWORD",
+    "RESONANCE_WINDOWS_CERTIFICATE_SHA1",
   ]);
-  assert.ok(requiredReleaseSecretNames(false).some((name) => name.startsWith("RESONANCE_MACOS_")));
-  assert.ok(requiredReleaseSecretNames(false).some((name) => name.startsWith("RESONANCE_WINDOWS_")));
 });
 
 test("workflow discovery selects the newest exact-SHA run", () => {

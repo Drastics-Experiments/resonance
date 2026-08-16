@@ -1,5 +1,6 @@
 package mov.unblocked.resonance.data
 
+import java.net.URL
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -15,6 +16,19 @@ class SoundCloudImportTest {
         assertNull(SoundCloudImportUrls.source("http://soundcloud.com/forss/flickermood"))
         assertNull(SoundCloudImportUrls.source("https://soundcloud.com.example/forss/flickermood"))
         assertNull(SoundCloudImportUrls.source("https://user:secret@soundcloud.com/forss/flickermood"))
+        assertNull(SoundCloudImportUrls.source("https://soundcloud.com:8443/forss/flickermood"))
+        assertNull(SoundCloudImportUrls.source("https://127.0.0.1/forss/flickermood"))
+    }
+
+    @Test
+    fun `provider media and API URLs reject unsafe ports and private hosts`() {
+        assertTrue(SoundCloudImportUrls.isPage(URL("https://soundcloud.com/forss/flickermood")))
+        assertFalse(SoundCloudImportUrls.isPage(URL("https://soundcloud.com:8443/forss/flickermood")))
+        assertTrue(SoundCloudImportUrls.isAPI(URL("https://api-v2.soundcloud.com/media/1")))
+        assertFalse(SoundCloudImportUrls.isAPI(URL("https://api-v2.soundcloud.com:8443/media/1")))
+        assertTrue(SoundCloudImportUrls.isMedia(URL("https://cf-media.sndcdn.com/track.mp3")))
+        assertFalse(SoundCloudImportUrls.isMedia(URL("https://sndcdn.com:8443/track.mp3")))
+        assertFalse(SoundCloudImportUrls.isMedia(URL("https://127.0.0.1/track.mp3")))
     }
 
     @Test

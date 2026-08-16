@@ -5,6 +5,7 @@ const { sanitizeWindowsFilename, windowsCollisionFilename } = require("./filenam
 const { LocalImportError } = require("./local-import-core.cjs");
 const { duplicateTrack, normalizedMetadata } = require("./local-import-platform.cjs");
 const { normalizeSourceIdentity } = require("./provenance.cjs");
+const { fetchSameOrigin } = require("./server-request.cjs");
 
 const MAX_PROVIDER_JSON_BYTES = 1024 * 1024;
 const MAX_EXTERNAL_AUDIO_BYTES = 350 * 1024 * 1024;
@@ -214,13 +215,13 @@ async function searchFileBackedSources(track, settingsValue, signal, fetchImpl =
   const url = new URL("api/v1/admin/debrid/resolve", settings.base);
   let response;
   try {
-    response = await fetchImpl(url, {
+    response = await fetchSameOrigin(settings.base, url, {
       method: "POST",
       headers: reviewedLookupHeaders(settings, settingsValue?.clientContextHeaders),
       body: JSON.stringify({ source: track.sourceURL }),
       redirect: "manual",
       signal,
-    });
+    }, { fetchImpl });
   } catch (error) {
     if (error?.name === "AbortError") throw error;
     if (error instanceof LocalImportError) throw error;
@@ -299,11 +300,11 @@ async function downloadPreparedFile(payload, input, settings, signal, onStage, f
   }
   let response;
   try {
-    response = await fetchImpl(url, {
+    response = await fetchSameOrigin(settings.base, url, {
       headers: { Accept: "audio/*,application/ogg" },
       redirect: "manual",
       signal,
-    });
+    }, { fetchImpl });
   }
   catch (error) {
     if (error?.name === "AbortError") throw error;
@@ -393,13 +394,13 @@ async function importFileBackedSource(input, signal, onStage = () => {}, fetchIm
     onStage({ stage: attempt ? "waiting_external" : "preparing_external", provider: "torbox", attempt });
     let response;
     try {
-      response = await fetchImpl(url, {
+      response = await fetchSameOrigin(settings.base, url, {
         method: "POST",
         headers: providerHeaders(settings),
         body: JSON.stringify(body),
         redirect: "manual",
         signal,
-      });
+      }, { fetchImpl });
     } catch (error) {
       if (error?.name === "AbortError") throw error;
       throw externalError("preparing_external", "EXTERNAL_IMPORT_UNREACHABLE", "The file-backed source server could not be reached.");

@@ -259,7 +259,12 @@ struct ResonanceSocialAuthClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(current.accessToken)", forHTTPHeaderField: "Authorization")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["refresh_token": current.refreshToken])
-        _ = try? await session.data(for: request)
+        _ = try? await MobileSensitiveNetworkPolicy.data(
+            for: request,
+            origin: baseURL,
+            maximumBytes: MobileBoundedResponsePolicy.authMaximumBytes,
+            using: session
+        )
     }
 
     private func configuration() async throws -> ResonanceAuthConfiguration {
@@ -267,8 +272,13 @@ struct ResonanceSocialAuthClient {
         var request = URLRequest(url: endpoint)
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+        let (data, response) = try await MobileSensitiveNetworkPolicy.data(
+            for: request,
+            origin: baseURL,
+            maximumBytes: MobileBoundedResponsePolicy.authMaximumBytes,
+            using: session
+        )
+        guard (200..<300).contains(response.statusCode),
               let payload = try? JSONDecoder().decode(ResonanceAuthConfigurationPayload.self, from: data),
               (payload.version == 2 || payload.version == 3), payload.redirectURI == Self.callbackURL,
               payload.scope == "openid profile email",
@@ -305,9 +315,14 @@ struct ResonanceSocialAuthClient {
         var components = URLComponents()
         components.queryItems = body.map { URLQueryItem(name: $0.key, value: $0.value) }
         request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await MobileSensitiveNetworkPolicy.data(
+            for: request,
+            origin: configuration.issuer,
+            maximumBytes: MobileBoundedResponsePolicy.authMaximumBytes,
+            using: session
+        )
         let payload = try JSONDecoder().decode(ResonanceAuthTokenPayload.self, from: data)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        guard (200..<300).contains(response.statusCode) else {
             throw ResonanceSocialAuthError.rejected(
                 payload.message ?? payload.errorDescription ?? payload.error ?? "Sign-in could not be completed."
             )
@@ -348,7 +363,9 @@ struct ResonanceSocialAuthClient {
             accountID: accountID,
             profileID: profileID,
             displayName: displayName,
-            imageURL: account.imageURL,
+            imageURL: account.imageURL.flatMap {
+                MobileArtworkURLPolicy.validated($0, allowedOrigin: baseURL)
+            },
             migratedProfileID: account.migratedProfileID
         )
     }
@@ -365,9 +382,14 @@ struct ResonanceSocialAuthClient {
            !migrationProfileID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             request.setValue(migrationProfileID, forHTTPHeaderField: "X-Resonance-Profile")
         }
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await MobileSensitiveNetworkPolicy.data(
+            for: request,
+            origin: baseURL,
+            maximumBytes: MobileBoundedResponsePolicy.authMaximumBytes,
+            using: session
+        )
         let account = try JSONDecoder().decode(ResonanceAccountPayload.self, from: data)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        guard (200..<300).contains(response.statusCode) else {
             throw ResonanceSocialAuthError.rejected(account.error ?? "This account could not access this Resonance server.")
         }
         return account

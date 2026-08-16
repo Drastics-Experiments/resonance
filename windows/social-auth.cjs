@@ -1,8 +1,13 @@
 const { createHash, randomBytes } = require("node:crypto");
+const { allowedAccountAvatarURL, isSafeAccountAvatarDataURL } = require("./account-avatar.cjs");
+const { readResponseJSON } = require("./response-body.cjs");
+const { fetchSameOrigin } = require("./server-request.cjs");
 
 const SOCIAL_AUTH_PROVIDERS = Object.freeze(["clerk"]);
 const CALLBACK_URL = "resonance://auth/callback";
 const MAX_AUTH_VALUE_LENGTH = 16 * 1024;
+const MAX_AUTH_CONFIG_RESPONSE_BYTES = 256 * 1024;
+const MAX_AUTH_SESSION_RESPONSE_BYTES = 256 * 1024;
 const LEGACY_PRODUCTION_ORIGIN = "https://music.unblocked.mov";
 const PRODUCTION_ORIGIN = "https://resonance-core.blithe-haven-9710.chatgpt.site";
 const ACCOUNT_SIGN_IN_URL = "https://resonance-core.blithe-haven-9710.chatgpt.site/";
@@ -86,12 +91,15 @@ function canonicalAuthConfiguration(value, baseURL) {
 
 async function fetchAuthConfiguration(baseURL, fetchImpl = fetch) {
   const origin = httpsOrigin(baseURL, "Server URL");
-  const response = await fetchImpl(new URL("/api/v1/auth/config", origin), {
+  const response = await fetchSameOrigin(origin, new URL("/api/v1/auth/config", origin), {
     headers: { Accept: "application/json" },
     cache: "no-store",
-  });
+  }, { fetchImpl });
   if (!response.ok) throw new Error(`Account sign-in is unavailable (HTTP ${response.status}).`);
-  return canonicalAuthConfiguration(await response.json(), origin);
+  return canonicalAuthConfiguration(
+    await readResponseJSON(response, MAX_AUTH_CONFIG_RESPONSE_BYTES, "Account sign-in configuration"),
+    origin,
+  );
 }
 
 function createPKCE() {
@@ -155,8 +163,8 @@ function canonicalSession(
     : null;
   let imageURL = null;
   if (account?.image_url) {
-    const candidate = new URL(account.image_url);
-    if (candidate.protocol !== "https:" || candidate.username || candidate.password) {
+    const candidate = allowedAccountAvatarURL(account.image_url);
+    if (!candidate) {
       throw new Error("The Clerk profile image URL is invalid.");
     }
     imageURL = candidate.href;
@@ -181,25 +189,28 @@ function canonicalSession(
 async function accountForAccessToken(baseURL, accessToken, fetchImpl = fetch, migrationProfileID = null) {
   const headers = { Accept: "application/json", Authorization: `Bearer ${boundedAuthText(accessToken, "access token")}` };
   if (migrationProfileID) headers["X-Resonance-Profile"] = boundedAuthText(migrationProfileID, "migration profile ID");
-  const response = await fetchImpl(new URL("/api/v1/auth/me", httpsOrigin(baseURL, "Server URL")), {
+  const serverOrigin = httpsOrigin(baseURL, "Server URL");
+  const response = await fetchSameOrigin(serverOrigin, new URL("/api/v1/auth/me", serverOrigin), {
     headers,
     cache: "no-store",
-  });
-  const payload = await response.json().catch(() => ({}));
+  }, { fetchImpl });
+  const payload = await readResponseJSON(response, MAX_AUTH_SESSION_RESPONSE_BYTES, "Account session response")
+    .catch(() => ({}));
   if (!response.ok) throw new Error(payload?.error || `Account access was rejected (HTTP ${response.status}).`);
   return payload;
 }
 
 async function tokenRequest(configuration, fields, fetchImpl) {
-  const response = await fetchImpl(configuration.tokenEndpoint, {
+  const response = await fetchSameOrigin(configuration.tokenEndpoint, configuration.tokenEndpoint, {
     method: "POST",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: new URLSearchParams(fields),
-  });
-  const payload = await response.json().catch(() => ({}));
+  }, { fetchImpl });
+  const payload = await readResponseJSON(response, MAX_AUTH_SESSION_RESPONSE_BYTES, "Token response")
+    .catch(() => ({}));
   if (!response.ok) {
     throw new Error(payload?.error_description || payload?.error || "Sign-in could not be completed.");
   }
@@ -240,7 +251,7 @@ async function refreshAuthSession(configuration, session, fetchImpl = fetch, mig
 }
 
 async function revokeAuthSession(configuration, session, fetchImpl = fetch) {
-  await fetchImpl(configuration.logoutEndpoint, {
+  await fetchSameOrigin(configuration.logoutEndpoint, configuration.logoutEndpoint, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -248,7 +259,7 @@ async function revokeAuthSession(configuration, session, fetchImpl = fetch) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ refresh_token: boundedAuthText(session.refreshToken, "refresh token") }),
-  }).catch(() => undefined);
+  }, { fetchImpl }).catch(() => undefined);
 }
 
 function publicSession(session) {
@@ -262,7 +273,7 @@ function publicSession(session) {
     accountID: session.accountID || null,
     profileID: session.profileID || null,
     displayName: session.displayName || session.email,
-    imageURL: session.imageURL || null,
+    imageURL: isSafeAccountAvatarDataURL(session.imageURL) || null,
     migratedProfileID: session.migratedProfileID || null,
   });
 }

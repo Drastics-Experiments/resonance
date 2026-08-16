@@ -33,7 +33,8 @@ on:
         required: false
         type: boolean
         default: false
-      unsigned_desktop:
+      production_signing:
+        description: Permit production signing only from the protected direct-release workflow.
         required: false
         type: boolean
         default: false
@@ -82,12 +83,14 @@ jobs:
   build:
     if: ${{ inputs.release_candidate || github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release/') }}
     runs-on: macos-26
+    environment: ${{ inputs.production_signing && 'production-release' || '' }}
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
       - name: Apply direct candidate version
         if: ${{ inputs.release_candidate && inputs.version_override }}
@@ -113,7 +116,7 @@ jobs:
           fi
 
       - name: Validate production signing secrets
-        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        if: ${{ inputs.release_candidate && inputs.production_signing }}
         shell: bash
         env:
           APP_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_MACOS_APP_CERTIFICATE_BASE64 }}
@@ -150,7 +153,7 @@ jobs:
           }
 
       - name: Configure production signing
-        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        if: ${{ inputs.release_candidate && inputs.production_signing }}
         shell: bash
         env:
           APP_CERTIFICATE_BASE64: ${{ secrets.RESONANCE_MACOS_APP_CERTIFICATE_BASE64 }}
@@ -186,7 +189,7 @@ jobs:
 
       - name: Restore Swift build cache
         id: swift-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: mac/.build
           key: resonance-macos-swift-${{ runner.arch }}-${{ hashFiles('mac/Package.swift', 'mac/Sources/**', 'mac/Tests/**') }}
@@ -213,15 +216,15 @@ jobs:
         env:
           APP_VERSION: ${{ steps.release.outputs.version }}
           BUILD_NUMBER: ${{ steps.release.outputs.build }}
-          RESONANCE_REQUIRE_PRODUCTION_SIGNING: ${{ inputs.release_candidate && !inputs.unsigned_desktop && '1' || '0' }}
-          MACOS_APP_IDENTITY: ${{ inputs.release_candidate && !inputs.unsigned_desktop && secrets.RESONANCE_MACOS_APP_IDENTITY || '' }}
-          MACOS_INSTALLER_IDENTITY: ${{ inputs.release_candidate && !inputs.unsigned_desktop && secrets.RESONANCE_MACOS_INSTALLER_IDENTITY || '' }}
-          NOTARY_KEY_PATH: ${{ inputs.release_candidate && !inputs.unsigned_desktop && format('{0}/resonance-notary-key.p8', runner.temp) || '' }}
-          NOTARY_KEY_ID: ${{ inputs.release_candidate && !inputs.unsigned_desktop && secrets.RESONANCE_MACOS_NOTARY_KEY_ID || '' }}
-          NOTARY_ISSUER_ID: ${{ inputs.release_candidate && !inputs.unsigned_desktop && secrets.RESONANCE_MACOS_NOTARY_ISSUER_ID || '' }}
+          RESONANCE_REQUIRE_PRODUCTION_SIGNING: ${{ inputs.release_candidate && inputs.production_signing && '1' || '0' }}
+          MACOS_APP_IDENTITY: ${{ inputs.release_candidate && inputs.production_signing && secrets.RESONANCE_MACOS_APP_IDENTITY || '' }}
+          MACOS_INSTALLER_IDENTITY: ${{ inputs.release_candidate && inputs.production_signing && secrets.RESONANCE_MACOS_INSTALLER_IDENTITY || '' }}
+          NOTARY_KEY_PATH: ${{ inputs.release_candidate && inputs.production_signing && format('{0}/resonance-notary-key.p8', runner.temp) || '' }}
+          NOTARY_KEY_ID: ${{ inputs.release_candidate && inputs.production_signing && secrets.RESONANCE_MACOS_NOTARY_KEY_ID || '' }}
+          NOTARY_ISSUER_ID: ${{ inputs.release_candidate && inputs.production_signing && secrets.RESONANCE_MACOS_NOTARY_ISSUER_ID || '' }}
 
       - name: Record verified macOS signing evidence
-        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
+        if: ${{ inputs.release_candidate && inputs.production_signing }}
         run: >-
           node scripts/record-desktop-signing-evidence.mjs
           macos installers/macos/dist "${{ steps.release.outputs.version }}"
@@ -229,7 +232,7 @@ jobs:
 
       - name: Upload macOS artifact
         if: ${{ !inputs.release_candidate }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Resonance-macOS-${{ github.sha }}
           path: |
@@ -241,7 +244,7 @@ jobs:
 
       - name: Upload macOS release candidate
         if: ${{ inputs.release_candidate }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-assets-macos
           path: |
@@ -254,8 +257,8 @@ jobs:
           overwrite: true
 
       - name: Upload macOS signing evidence
-        if: ${{ inputs.release_candidate && !inputs.unsigned_desktop }}
-        uses: actions/upload-artifact@v7
+        if: ${{ inputs.release_candidate && inputs.production_signing }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-signing-macos
           path: ${{ runner.temp }}/resonance-signing-evidence/macos.json
@@ -264,7 +267,7 @@ jobs:
           overwrite: true
 
       - name: Remove temporary signing material
-        if: ${{ always() && inputs.release_candidate && !inputs.unsigned_desktop }}
+        if: ${{ always() && inputs.release_candidate && inputs.production_signing }}
         shell: bash
         run: |
           security delete-keychain "$RUNNER_TEMP/resonance-release-signing.keychain-db" 2>/dev/null || true
@@ -275,7 +278,7 @@ jobs:
 
       - name: Save Swift build cache from main
         if: ${{ github.ref == 'refs/heads/main' && steps.swift-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: mac/.build
           key: ${{ steps.swift-cache.outputs.cache-primary-key }}

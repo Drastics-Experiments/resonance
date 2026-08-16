@@ -23,10 +23,10 @@ class RemoteArtworkPolicyTest {
             ),
         )
         assertEquals(
-            "https://cdn.example/cover.jpg",
+            "https://i.ytimg.com/cover.jpg",
             resolveRemoteArtworkURL(
                 serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site",
-                artworkURL = "https://cdn.example/cover.jpg",
+                artworkURL = "https://i.ytimg.com/cover.jpg",
                 allowCleartextDevelopment = false,
             ),
         )
@@ -42,6 +42,27 @@ class RemoteArtworkPolicyTest {
             resolveRemoteArtworkURL(
                 serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site",
                 artworkURL = "https://user:secret@cdn.example/cover.jpg",
+                allowCleartextDevelopment = false,
+            ),
+        )
+        assertNull(
+            resolveRemoteArtworkURL(
+                serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site",
+                artworkURL = "https://cdn.example/cover.jpg",
+                allowCleartextDevelopment = false,
+            ),
+        )
+        assertNull(
+            resolveRemoteArtworkURL(
+                serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site",
+                artworkURL = "https://127.0.0.1/cover.jpg",
+                allowCleartextDevelopment = false,
+            ),
+        )
+        assertNull(
+            resolveRemoteArtworkURL(
+                serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site",
+                artworkURL = "https://i.ytimg.com:8443/cover.jpg",
                 allowCleartextDevelopment = false,
             ),
         )
@@ -81,7 +102,7 @@ class RemoteArtworkPolicyTest {
             listOf(
                 FakeResponse(
                     status = HttpURLConnection.HTTP_MOVED_TEMP,
-                    location = "https://cdn.example/final-cover.jpg",
+                    location = "https://i.ytimg.com/final-cover.jpg",
                 ),
                 FakeResponse(
                     status = HttpURLConnection.HTTP_OK,
@@ -103,7 +124,7 @@ class RemoteArtworkPolicyTest {
         assertEquals(
             listOf(
                 "https://resonance-core.blithe-haven-9710.chatgpt.site/cover.jpg",
-                "https://cdn.example/final-cover.jpg",
+                "https://i.ytimg.com/final-cover.jpg",
             ),
             openedConnections.map { it.url.toString() },
         )

@@ -2058,8 +2058,7 @@ actor LocalDeviceImportService {
               (200..<300).contains(response.statusCode),
               let type = response.value(forHTTPHeaderField: "Content-Type")?.lowercased(),
               type.hasPrefix("image/"),
-              let image = UIImage(data: data),
-              let jpeg = image.jpegData(compressionQuality: 0.9) else { return nil }
+              let jpeg = MobileArtworkImagePolicy.jpegData(from: data) else { return nil }
         return jpeg
     }
 

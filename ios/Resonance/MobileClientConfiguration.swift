@@ -849,11 +849,102 @@ enum MobileBoundedResponsePolicy {
     static let clientConfigMaximumBytes = 256 * 1_024
     static let sourceImportMaximumBytes = 256 * 1_024
     static let mediaLocationMaximumBytes = 64 * 1_024
+    static let authMaximumBytes = 256 * 1_024
+    static let catalogMaximumBytes = 16 * 1_024 * 1_024
+    static let playlistMaximumBytes = 4 * 1_024 * 1_024
+    static let profileMaximumBytes = 1 * 1_024 * 1_024
+    static let listenAlongMaximumBytes = 256 * 1_024
+    static let artworkMaximumBytes = 10 * 1_024 * 1_024
 
     static func accepts(currentCount: Int, adding additionalCount: Int, maximum: Int) -> Bool {
         guard currentCount >= 0, additionalCount >= 0, maximum >= 0 else { return false }
         let sum = currentCount.addingReportingOverflow(additionalCount)
         return !sum.overflow && sum.partialValue <= maximum
+    }
+}
+
+enum MobileSensitiveResponseError: LocalizedError, Equatable {
+    case tooLarge(limit: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .tooLarge(let limit):
+            "The response exceeded the \(limit)-byte safety limit."
+        }
+    }
+}
+
+private final class MobileSensitiveRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let origin: URL
+
+    init(origin: URL) {
+        self.origin = origin
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(MobileSameOriginPolicy.matches(request.url, origin) ? request : nil)
+    }
+}
+
+enum MobileSensitiveNetworkPolicy {
+    /// Performs a body-bounded request whose URL and every redirect must stay
+    /// on the supplied origin. The caller should pass the origin appropriate
+    /// for the endpoint (the API origin for server calls, or the issuer origin
+    /// for Clerk token/user calls).
+    static func data(
+        for request: URLRequest,
+        origin: URL,
+        maximumBytes: Int,
+        using sourceSession: URLSession = .shared
+    ) async throws -> (Data, HTTPURLResponse) {
+        guard MobileSameOriginPolicy.matches(request.url, origin) else {
+            throw URLError(.dataNotAllowed)
+        }
+
+        let sourceConfiguration = sourceSession.configuration
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = sourceConfiguration.timeoutIntervalForRequest
+        configuration.timeoutIntervalForResource = sourceConfiguration.timeoutIntervalForResource
+        configuration.protocolClasses = sourceConfiguration.protocolClasses
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        let delegate = MobileSensitiveRedirectDelegate(origin: origin)
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+
+        let (bytes, rawResponse) = try await session.bytes(for: request)
+        guard let response = rawResponse as? HTTPURLResponse,
+              MobileSameOriginPolicy.matches(response.url, origin) else {
+            throw URLError(.dataNotAllowed)
+        }
+        if response.expectedContentLength > Int64(maximumBytes) {
+            throw MobileSensitiveResponseError.tooLarge(limit: maximumBytes)
+        }
+        var body = Data()
+        if response.expectedContentLength > 0 {
+            let declaredLength = min(response.expectedContentLength, Int64(maximumBytes))
+            body.reserveCapacity(Int(declaredLength))
+        }
+        for try await byte in bytes {
+            guard MobileBoundedResponsePolicy.accepts(
+                currentCount: body.count,
+                adding: 1,
+                maximum: maximumBytes
+            ) else {
+                throw MobileSensitiveResponseError.tooLarge(limit: maximumBytes)
+            }
+            body.append(byte)
+        }
+        return (body, response)
     }
 }
 
@@ -864,7 +955,8 @@ enum MobileSourcePagePolicy {
 
     static func validatedOriginalYouTubePage(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
+        guard !trimmed.isEmpty,
+              trimmed.count <= MobileDurableURLPolicy.maximumCharacters else { return nil }
         let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
         guard canonicalYouTubePage.firstMatch(in: trimmed, range: range)?.range == range else {
             return nil
@@ -1027,7 +1119,7 @@ struct MobileReviewedMatchResponse: Decodable, Sendable {
     func reviewedResolution() throws -> LocalImportResolution {
         guard let title = boundedRequiredText(title),
               !source.isEmpty,
-              source.utf8.count <= 8_192 else {
+              source.count <= MobileDurableURLPolicy.maximumCharacters else {
             throw MobileReviewedMatchResponseError.invalidResponse
         }
         if provider == "spotify", type == "track" {

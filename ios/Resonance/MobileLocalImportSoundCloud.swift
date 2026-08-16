@@ -62,7 +62,7 @@ extension LocalImportURL {
 
     static func soundCloudSource(_ value: String) throws -> URL {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count <= 8_192,
+        guard trimmed.count <= MobileDurableURLPolicy.maximumCharacters,
               let components = URLComponents(string: trimmed),
               components.scheme?.lowercased() == "https",
               components.user == nil,
@@ -82,13 +82,16 @@ extension LocalImportURL {
 
     static func soundCloudArtwork(_ value: String?) -> URL? {
         guard let value,
+              value.count <= MobileDurableURLPolicy.maximumCharacters,
               let components = URLComponents(string: value),
               components.scheme?.lowercased() == "https",
               components.user == nil,
               components.password == nil,
               let host = components.host?.lowercased(),
-              host == "sndcdn.com" || host.hasSuffix(".sndcdn.com") else { return nil }
-        return components.url
+              host == "sndcdn.com" || host.hasSuffix(".sndcdn.com"),
+              let url = components.url,
+              MobileDurableURLPolicy.accepts(url) else { return nil }
+        return url
     }
 
     static func isSoundCloudPage(_ url: URL) -> Bool {

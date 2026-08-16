@@ -9,6 +9,7 @@ import android.provider.Settings
 import androidx.core.content.edit
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -39,6 +40,11 @@ class AndroidUpdateManager(
     context: Context,
     private val manifestUrl: String = DEFAULT_MANIFEST_URL,
 ) {
+    private data class UpdateConnection(
+        val finalURL: URL,
+        val connection: HttpURLConnection,
+    )
+
     private val appContext = context.applicationContext
     private val preferences = appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
     private val updateDirectory = File(appContext.cacheDir, "updates")
@@ -133,22 +139,34 @@ class AndroidUpdateManager(
     }
 
     private fun fetchText(url: String): String {
-        val connection = openConnection(url)
+        val connection = openFollowingRedirects(
+            url,
+            allowLocalDevelopment = BuildConfig.DEBUG && isEmulatorTestUrl(url),
+        ).connection
         return try {
             val responseCode = connection.responseCode
             if (responseCode !in 200..299) throw IOException("Update check returned HTTP $responseCode.")
             val length = connection.contentLengthLong
             if (length > MAX_MANIFEST_BYTES) throw IOException("The update manifest is too large.")
-            connection.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
-                val text = reader.readText()
-                if (text.toByteArray(Charsets.UTF_8).size > MAX_MANIFEST_BYTES) {
-                    throw IOException("The update manifest is too large.")
-                }
-                text
-            }
+            val bytes = connection.inputStream.use { input -> readBoundedBytes(input, MAX_MANIFEST_BYTES) }
+            String(bytes, Charsets.UTF_8)
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun readBoundedBytes(input: java.io.InputStream, maximumBytes: Long): ByteArray {
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(32 * 1_024)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            if (output.size().toLong() + count > maximumBytes) {
+                throw IOException("The update manifest is too large.")
+            }
+            output.write(buffer, 0, count)
+        }
+        return output.toByteArray()
     }
 
     private fun downloadAndVerify(update: AndroidUpdateInfo): File {
@@ -158,7 +176,11 @@ class AndroidUpdateManager(
         partial.delete()
         target.delete()
 
-        val connection = openConnection(update.apkUrl)
+        val connection = openFollowingRedirects(
+            update.apkUrl,
+            allowLocalDevelopment = BuildConfig.DEBUG &&
+                (isEmulatorTestUrl(update.apkUrl) || isEmulatorTestUrl(manifestUrl)),
+        ).connection
         try {
             val responseCode = connection.responseCode
             if (responseCode !in 200..299) throw IOException("Update download returned HTTP $responseCode.")
@@ -261,11 +283,42 @@ class AndroidUpdateManager(
         }
     }
 
-    private fun openConnection(url: String): HttpURLConnection =
-        (URL(url).openConnection() as HttpURLConnection).apply {
+    private fun openFollowingRedirects(
+        rawURL: String,
+        allowLocalDevelopment: Boolean,
+    ): UpdateConnection {
+        var currentURL = runCatching { URL(rawURL.trim()) }.getOrElse {
+            throw IOException("The update URL is invalid.")
+        }
+        repeat(MAX_REDIRECTS + 1) { redirectCount ->
+            if (!AndroidUpdateNetworkPolicy.isAllowedURL(currentURL.toString(), allowLocalDevelopment)) {
+                throw IOException("The update URL is not approved.")
+            }
+            val connection = openConnection(currentURL)
+            val status = connection.responseCode
+            if (status !in REDIRECT_STATUSES) {
+                return UpdateConnection(currentURL, connection)
+            }
+            if (redirectCount == MAX_REDIRECTS) {
+                connection.disconnect()
+                throw IOException("The update URL redirected too many times.")
+            }
+            val location = connection.getHeaderField("Location")?.trim()
+                ?.takeIf(String::isNotEmpty)
+            val redirected = location?.let {
+                AndroidUpdateNetworkPolicy.resolveRedirect(currentURL, it, allowLocalDevelopment)
+            }
+            connection.disconnect()
+            currentURL = redirected ?: throw IOException("The update URL redirected to an unsafe destination.")
+        }
+        throw IOException("The update URL redirected too many times.")
+    }
+
+    private fun openConnection(url: URL): HttpURLConnection =
+        (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = CONNECT_TIMEOUT_MS
             readTimeout = READ_TIMEOUT_MS
-            instanceFollowRedirects = true
+            instanceFollowRedirects = false
             useCaches = false
             setRequestProperty("Accept", "application/json, application/vnd.android.package-archive")
             setRequestProperty("User-Agent", "Resonance-Android/${BuildConfig.VERSION_NAME}")
@@ -286,7 +339,15 @@ class AndroidUpdateManager(
         private const val READ_TIMEOUT_MS = 30_000
         private const val MAX_MANIFEST_BYTES = 128 * 1024L
         private const val MAX_APK_BYTES = 1024 * 1024 * 1024L
+        private const val MAX_REDIRECTS = 5
         private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
+        private val REDIRECT_STATUSES = setOf(
+            HttpURLConnection.HTTP_MOVED_PERM,
+            HttpURLConnection.HTTP_MOVED_TEMP,
+            HttpURLConnection.HTTP_SEE_OTHER,
+            307,
+            308,
+        )
         private val DEBUG_EMULATOR_HTTP_PREFIXES = listOf(
             "http://10.0.2.2:",
             "http://127.0.0.1:",

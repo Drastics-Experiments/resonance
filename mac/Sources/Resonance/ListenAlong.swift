@@ -560,13 +560,11 @@ final class MacListenAlongController {
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         request.setValue("no-cache", forHTTPHeaderField: "Pragma")
-        let (data, rawResponse) = try await networkSession.data(
-            for: request,
-            delegate: MacRejectRedirectDelegate()
+        let (data, response) = try await MacBoundedResponse.data(
+            for: networkSession,
+            request: request,
+            limit: 512 * 1_024
         )
-        guard let response = rawResponse as? HTTPURLResponse else {
-            throw MacListenAlongError.invalidResponse
-        }
         guard (200..<300).contains(response.statusCode) else {
             let message = String(data: data.prefix(2_048), encoding: .utf8)
             throw MacListenAlongError.server(response.statusCode, message)

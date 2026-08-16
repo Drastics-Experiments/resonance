@@ -2632,10 +2632,337 @@ final class MobileClientConfigurationTests: XCTestCase {
     }
 }
 
+final class MobileSensitiveNetworkPolicyTests: XCTestCase {
+    private let origin = URL(string: "https://music.example")!
+    private let endpoint = URL(string: "https://music.example/api/v1/sensitive")!
+
+    override func setUp() {
+        super.setUp()
+        MobileSensitiveResponseURLProtocol.state.reset()
+    }
+
+    func testContentLengthIsRejectedBeforeBodyIsDecoded() async {
+        let session = testSession()
+        defer { session.invalidateAndCancel() }
+
+        do {
+            _ = try await MobileSensitiveNetworkPolicy.data(
+                for: URLRequest(url: endpoint),
+                origin: origin,
+                maximumBytes: 10,
+                using: session
+            )
+            XCTFail("A declared body larger than the limit must be rejected")
+        } catch let error as MobileSensitiveResponseError {
+            XCTAssertEqual(error, .tooLarge(limit: 10))
+            XCTAssertEqual(error.errorDescription, "The response exceeded the 10-byte safety limit.")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testStreamedBodyIsRejectedWhenItCrossesTheLimit() async {
+        MobileSensitiveResponseURLProtocol.state.mode = .streamed
+        let session = testSession()
+        defer { session.invalidateAndCancel() }
+
+        do {
+            _ = try await MobileSensitiveNetworkPolicy.data(
+                for: URLRequest(url: endpoint),
+                origin: origin,
+                maximumBytes: 10,
+                using: session
+            )
+            XCTFail("A streamed body larger than the limit must be rejected")
+        } catch let error as MobileSensitiveResponseError {
+            XCTAssertEqual(error, .tooLarge(limit: 10))
+            XCTAssertEqual(MobileSensitiveResponseURLProtocol.state.bodyDeliveryCount, 1)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testCrossOriginRedirectIsCancelledBeforeFollowingTheLocation() async {
+        MobileSensitiveResponseURLProtocol.state.mode = .crossOriginRedirect
+        let session = testSession()
+        defer { session.invalidateAndCancel() }
+
+        do {
+            _ = try await MobileSensitiveNetworkPolicy.data(
+                for: URLRequest(url: endpoint),
+                origin: origin,
+                maximumBytes: 10,
+                using: session
+            )
+            XCTFail("A cross-origin redirect must be cancelled")
+        } catch {
+            XCTAssertTrue(
+                (error as? URLError).map { $0.code == .cancelled || $0.code == .dataNotAllowed } == true,
+                "Unexpected redirect error: \(error)"
+            )
+            XCTAssertEqual(MobileSensitiveResponseURLProtocol.state.requestCount, 1)
+            XCTAssertTrue(MobileSensitiveResponseURLProtocol.state.redirectWasOffered)
+        }
+    }
+
+    func testArtworkPolicyAllowsKnownProvidersAndRejectsPrivateOrArbitraryHosts() throws {
+        XCTAssertNotNil(MobileArtworkURLPolicy.validated(
+            try XCTUnwrap(URL(string: "https://i.ytimg.com/vi/example/hqdefault.jpg"))
+        ))
+        XCTAssertNotNil(MobileArtworkURLPolicy.validated(
+            try XCTUnwrap(URL(string: "https://lh3.googleusercontent.com/example"))
+        ))
+        XCTAssertNil(MobileArtworkURLPolicy.validated(
+            try XCTUnwrap(URL(string: "https://127.0.0.1/private.jpg"))
+        ))
+        XCTAssertNil(MobileArtworkURLPolicy.validated(
+            try XCTUnwrap(URL(string: "https://arbitrary.example/image.jpg"))
+        ))
+
+        let server = try XCTUnwrap(URL(string: "https://music.example"))
+        XCTAssertEqual(
+            MobileArtworkURLPolicy.validated(
+                try XCTUnwrap(URL(string: "/api/v1/artwork/song.jpg")),
+                allowedOrigin: server
+            )?.absoluteString,
+            "https://music.example/api/v1/artwork/song.jpg"
+        )
+        XCTAssertNil(MobileArtworkURLPolicy.validated(
+            try XCTUnwrap(URL(string: "https://cdn.example/image.jpg")),
+            allowedOrigin: server
+        ))
+    }
+
+    func testPersistencePolicyKeepsProviderSourcePageAndServerURLButDropsExpiringMediaURL() throws {
+        XCTAssertEqual(
+            MobileTrackPersistencePolicy.canonicalSourceURL(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30"
+            ),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        )
+        XCTAssertNil(MobileTrackPersistencePolicy.canonicalSourceURL(
+            "https://r1---sn.googlevideo.com/videoplayback?expire=1&sig=secret"
+        ))
+        XCTAssertNil(MobileTrackPersistencePolicy.persistedDownloadSourceURL(
+            try XCTUnwrap(URL(string: "https://cf-media.sndcdn.com/track.mp3?Policy=short-lived"))
+        ))
+        XCTAssertEqual(
+            MobileTrackPersistencePolicy.persistedDownloadSourceURL(
+                try XCTUnwrap(URL(string: "https://music.example/api/v1/songs/song-id/file")),
+                legitimateServerOrigin: try XCTUnwrap(URL(string: "https://music.example"))
+            ),
+            "https://music.example/api/v1/songs/song-id/file"
+        )
+        XCTAssertNil(MobileRemoteSongMetadataCachePolicy.key(
+            sourceURL: "https://r1---sn.googlevideo.com/videoplayback?expire=1",
+            mediaKind: "audio"
+        ))
+        XCTAssertEqual(
+            MobileRemoteSongMetadataCachePolicy.key(
+                sourceURL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+                mediaKind: "audio"
+            ),
+            "audio:https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        )
+    }
+
+    func testDurableURLSanitizersShareThe8192CharacterBoundary() throws {
+        let maximum = MobileDurableURLPolicy.maximumCharacters
+        let serverPrefix = "https://music.example/"
+        let boundaryValue = serverPrefix + String(repeating: "a", count: maximum - serverPrefix.count)
+        let boundaryURL = try XCTUnwrap(URL(string: boundaryValue))
+        XCTAssertEqual(boundaryValue.count, maximum)
+        XCTAssertEqual(
+            MobileTrackPersistencePolicy.canonicalSourceURL(boundaryValue),
+            boundaryValue
+        )
+        XCTAssertEqual(
+            MobileTrackPersistencePolicy.persistedDownloadSourceURL(
+                boundaryURL,
+                legitimateServerOrigin: try XCTUnwrap(URL(string: "https://music.example"))
+            ),
+            boundaryValue
+        )
+        XCTAssertEqual(
+            try MobileServerEndpointPolicy.resolve(boundaryValue).url.absoluteString,
+            boundaryValue
+        )
+
+        let oversizedValue = boundaryValue + "a"
+        let oversizedURL = try XCTUnwrap(URL(string: oversizedValue))
+        XCTAssertNil(MobileTrackPersistencePolicy.canonicalSourceURL(oversizedValue))
+        XCTAssertNil(MobileTrackPersistencePolicy.persistedDownloadSourceURL(oversizedURL))
+        XCTAssertNil(MobileRemoteSongMetadataCachePolicy.key(sourceURL: oversizedValue, mediaKind: "audio"))
+        XCTAssertNil(MobileListenAlongSourcePolicy.identity(oversizedValue))
+        XCTAssertThrowsError(try MobileServerEndpointPolicy.resolve(oversizedValue))
+        let oversizedArtworkURL = try XCTUnwrap(URL(string: "https://i.ytimg.com/" + String(repeating: "a", count: maximum)))
+        XCTAssertNil(MobileArtworkURLPolicy.validated(oversizedArtworkURL))
+
+        let sanitized = MobileTrackPersistencePolicy.sanitized(MobileTrack(
+            title: "Long URL",
+            duration: 1,
+            relativePath: "long-url.m4a",
+            sourceServer: boundaryValue,
+            sourceURL: oversizedValue,
+            downloadSourceURL: oversizedValue
+        ))
+        XCTAssertEqual(sanitized.sourceServer, boundaryValue)
+        XCTAssertNil(sanitized.sourceURL)
+        XCTAssertNil(sanitized.downloadSourceURL)
+        XCTAssertEqual(sanitized.preservesUnlinkedImport, true)
+    }
+
+    private func testSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MobileSensitiveResponseURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+}
+
 private struct SignedResponse {
     let body: Data
     let digest: String
     let signature: String
+}
+
+private enum MobileSensitiveResponseURLProtocolMode: Sendable {
+    case contentLength
+    case streamed
+    case crossOriginRedirect
+}
+
+private final class MobileSensitiveResponseURLProtocolState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var currentMode: MobileSensitiveResponseURLProtocolMode = .contentLength
+    private var requests = 0
+    private var bodyDeliveries = 0
+    private var offeredRedirect = false
+
+    var mode: MobileSensitiveResponseURLProtocolMode {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return currentMode
+        }
+        set {
+            lock.lock()
+            currentMode = newValue
+            lock.unlock()
+        }
+    }
+
+    var requestCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests
+    }
+
+    var bodyDeliveryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return bodyDeliveries
+    }
+
+    var redirectWasOffered: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return offeredRedirect
+    }
+
+    func reset() {
+        lock.lock()
+        currentMode = .contentLength
+        requests = 0
+        bodyDeliveries = 0
+        offeredRedirect = false
+        lock.unlock()
+    }
+
+    func recordRequest() {
+        lock.lock()
+        requests += 1
+        lock.unlock()
+    }
+
+    func recordBodyDelivery() {
+        lock.lock()
+        bodyDeliveries += 1
+        lock.unlock()
+    }
+
+    func recordRedirect() {
+        lock.lock()
+        offeredRedirect = true
+        lock.unlock()
+    }
+}
+
+private final class MobileSensitiveResponseURLProtocol: URLProtocol, @unchecked Sendable {
+    static let state = MobileSensitiveResponseURLProtocolState()
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        Self.state.recordRequest()
+        switch Self.state.mode {
+        case .contentLength:
+            sendBody(
+                to: url,
+                headerFields: [
+                    "Content-Type": "application/json",
+                    "Content-Length": "11",
+                ],
+                body: Data("0123456789a".utf8)
+            )
+        case .streamed:
+            sendBody(
+                to: url,
+                headerFields: ["Content-Type": "application/json"],
+                body: Data("0123456789a".utf8)
+            )
+        case .crossOriginRedirect:
+            let target = URL(string: "https://evil.example/api/v1/sensitive")!
+            guard let response = HTTPURLResponse(
+                url: url,
+                statusCode: 302,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Location": target.absoluteString]
+            ) else {
+                client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+                return
+            }
+            Self.state.recordRedirect()
+            client?.urlProtocol(
+                self,
+                wasRedirectedTo: URLRequest(url: target),
+                redirectResponse: response
+            )
+        }
+    }
+
+    override func stopLoading() {}
+
+    private func sendBody(to url: URL, headerFields: [String: String], body: Data) {
+        guard let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: headerFields
+        ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        Self.state.recordBodyDelivery()
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
 }
 
 private final class MobileMetadataURLProtocolState: @unchecked Sendable {
