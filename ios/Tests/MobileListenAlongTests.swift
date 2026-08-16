@@ -2,6 +2,33 @@ import XCTest
 @testable import Resonance
 
 final class MobileListenAlongTests: XCTestCase {
+    func testArtworkPolicySelectsTheLargestProviderImage() {
+        let videoID = "jNQXAC9IVRw"
+        let highest = "https://i.ytimg.com/vi/\(videoID)/maxresdefault.jpg"
+        XCTAssertEqual(
+            LocalImportArtworkPolicy.highestQualityYouTubeThumbnail([
+                ["url": highest, "width": 1_280, "height": 720],
+                ["url": "https://i.ytimg.com/vi/\(videoID)/default.jpg", "width": 120, "height": 90],
+                ["url": "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg", "width": 480, "height": 360],
+            ]),
+            highest
+        )
+        XCTAssertEqual(
+            LocalImportArtworkPolicy.preferredArtwork(
+                metadataURL: "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg",
+                resolvedYouTubeURL: highest
+            ),
+            highest
+        )
+        XCTAssertEqual(
+            LocalImportArtworkPolicy.preferredArtwork(
+                metadataURL: "https://i.scdn.co/image/album",
+                resolvedYouTubeURL: highest
+            ),
+            "https://i.scdn.co/image/album"
+        )
+    }
+
     func testSnapshotUsesCoreSnakeCasePayload() throws {
         XCTAssertEqual(MobileListenAlongPollingPolicy.normalInterval, .milliseconds(250))
         XCTAssertEqual(MobileListenAlongPollingPolicy.maximumFailureInterval, 30)
@@ -70,6 +97,7 @@ final class MobileListenAlongTests: XCTestCase {
           "updated_at": "2026-08-15T12:00:00.000Z",
           "expires_at": "2026-08-15T13:00:00Z",
           "server_time": "2026-08-15T12:00:01Z",
+          "participant_count": 3,
           "role": "guest"
         }
         """#.utf8)
@@ -82,6 +110,7 @@ final class MobileListenAlongTests: XCTestCase {
         XCTAssertEqual(response.snapshot.positionSeconds, 4.25)
         XCTAssertTrue(response.snapshot.isPlaying)
         XCTAssertEqual(response.role, .guest)
+        XCTAssertEqual(response.participantCount, 3)
         XCTAssertNotNil(response.serverTime)
     }
 
@@ -116,7 +145,8 @@ final class MobileListenAlongTests: XCTestCase {
             updatedAt: serverTime.addingTimeInterval(-1),
             expiresAt: nil,
             serverTime: serverTime,
-            role: .guest
+            role: .guest,
+            participantCount: 2
         )
 
         XCTAssertEqual(room.projectedPosition(now: serverTime.addingTimeInterval(2)), 11, accuracy: 0.001)
@@ -132,7 +162,8 @@ final class MobileListenAlongTests: XCTestCase {
             updatedAt: room.updatedAt,
             expiresAt: room.expiresAt,
             serverTime: room.serverTime,
-            role: .guest
+            role: .guest,
+            participantCount: room.participantCount
         )
         XCTAssertEqual(paused.projectedPosition(now: serverTime.addingTimeInterval(2)), 10, accuracy: 0.001)
     }
@@ -148,6 +179,56 @@ final class MobileListenAlongTests: XCTestCase {
         )
         XCTAssertNil(MobileListenAlongSourcePolicy.identity("https://user:secret@example.com/song"))
         XCTAssertNil(MobileListenAlongSourcePolicy.identity("https://r1---sn.googlevideo.com/videoplayback"))
+    }
+
+    func testUndownloadedCatalogSongsContinueToProviderResolution() {
+        XCTAssertFalse(
+            MobileListenAlongPlaybackPolicy.shouldUseServerStream(
+                hasStoredBytes: false,
+                isAudio: true,
+                streamOnlyEnabled: true
+            )
+        )
+        XCTAssertFalse(
+            MobileListenAlongPlaybackPolicy.shouldUseServerStream(
+                hasStoredBytes: true,
+                isAudio: true,
+                streamOnlyEnabled: false
+            )
+        )
+        XCTAssertTrue(
+            MobileListenAlongPlaybackPolicy.shouldUseServerStream(
+                hasStoredBytes: true,
+                isAudio: true,
+                streamOnlyEnabled: true
+            )
+        )
+    }
+
+    func testYouTubeListenAlongUsesAnExplicitRangeLoader() throws {
+        let source = try XCTUnwrap(URL(string: "https://r1---sn.example.googlevideo.com/videoplayback?id=public"))
+        let asset = try MobileYouTubeStreamResourceLoader.assetURL(for: source)
+        XCTAssertEqual(asset.scheme, "resonance-youtube")
+        XCTAssertEqual(asset.host, source.host)
+        XCTAssertThrowsError(
+            try MobileYouTubeStreamResourceLoader.assetURL(
+                for: XCTUnwrap(URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
+            )
+        )
+        XCTAssertThrowsError(
+            try MobileYouTubeStreamResourceLoader(
+                sourceURL: source,
+                headers: ["Cookie": "must-not-leak"],
+                contentLength: 100,
+                contentType: "audio/mp4"
+            )
+        )
+    }
+
+    func testOnlyGuestsReplacePlaybackControlsWithParticipantIndicator() {
+        XCTAssertTrue(MobileListenAlongPresentationPolicy.replacesPlaybackControls(for: .guest))
+        XCTAssertFalse(MobileListenAlongPresentationPolicy.replacesPlaybackControls(for: .host))
+        XCTAssertFalse(MobileListenAlongPresentationPolicy.replacesPlaybackControls(for: nil))
     }
 
     func testInviteCodeParsesResonanceListenAlongURL() {

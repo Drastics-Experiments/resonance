@@ -63,6 +63,7 @@ struct MobileListenAlongRoom: Equatable, Sendable {
     let expiresAt: Date?
     let serverTime: Date?
     let role: MobileListenAlongRole
+    let participantCount: Int?
 
     func projectedPosition(now: Date = .now) -> TimeInterval {
         guard snapshot.isPlaying else {
@@ -90,6 +91,7 @@ struct MobileListenAlongResponse: Decodable, Sendable {
     let serverTime: Date?
     let role: MobileListenAlongRole?
     let hostToken: String?
+    let participantCount: Int?
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -102,6 +104,7 @@ struct MobileListenAlongResponse: Decodable, Sendable {
         case serverTime = "server_time"
         case role
         case hostToken = "host_token"
+        case participantCount = "participant_count"
     }
 
     init(from decoder: Decoder) throws {
@@ -121,6 +124,8 @@ struct MobileListenAlongResponse: Decodable, Sendable {
         role = try values.decodeIfPresent(MobileListenAlongRole.self, forKey: .role)
         hostToken = try values.decodeIfPresent(String.self, forKey: .hostToken)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        participantCount = try values.decodeIfPresent(Int.self, forKey: .participantCount)
+            .flatMap { $0 > 0 ? $0 : nil }
     }
 }
 
@@ -208,6 +213,26 @@ enum MobileListenAlongSourcePolicy {
               let identity = identity(value),
               !identity.isEmpty else { return nil }
         return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+enum MobileListenAlongPlaybackPolicy {
+    /// Server-catalog metadata must not make Listen Along depend on a local
+    /// download. Server bytes are only an optimization for an eligible
+    /// stream-only audio record; every other case continues to provider
+    /// resolution below.
+    static func shouldUseServerStream(
+        hasStoredBytes: Bool,
+        isAudio: Bool,
+        streamOnlyEnabled: Bool
+    ) -> Bool {
+        hasStoredBytes && isAudio && streamOnlyEnabled
+    }
+}
+
+enum MobileListenAlongPresentationPolicy {
+    static func replacesPlaybackControls(for role: MobileListenAlongRole?) -> Bool {
+        role == .guest
     }
 }
 
@@ -316,9 +341,12 @@ final class MobileListenAlongController: ObservableObject {
     }
 
     var isHosting: Bool { room?.role == .host }
-    var isParticipant: Bool { room?.role == .guest }
+    var isParticipant: Bool {
+        MobileListenAlongPresentationPolicy.replacesPlaybackControls(for: room?.role)
+    }
     var controlsLocked: Bool { isParticipant && !isApplyingRemoteSnapshot }
     var roomCode: String? { room?.code }
+    var participantCount: Int? { room?.participantCount }
 
     func bind(to library: MusicLibrary) {
         guard self.library !== library else { return }
@@ -649,9 +677,11 @@ final class MobileListenAlongController: ObservableObject {
 
         if let remoteSong = library.remoteSongs.first(where: {
             MobileListenAlongSourcePolicy.identity($0.sourceURL) == sourceIdentity
-        }), remoteSong.size > 0,
-           remoteSong.mediaKind == "audio",
-           library.activeDownloadMode == .streamOnly,
+        }), MobileListenAlongPlaybackPolicy.shouldUseServerStream(
+            hasStoredBytes: remoteSong.size > 0,
+            isAudio: remoteSong.mediaKind == "audio",
+            streamOnlyEnabled: library.activeDownloadMode == .streamOnly
+        ),
            await library.followListenAlongRemoteSong(
                remoteSong,
                position: position,
@@ -784,7 +814,8 @@ final class MobileListenAlongController: ObservableObject {
             updatedAt: response.updatedAt,
             expiresAt: response.expiresAt,
             serverTime: response.serverTime,
-            role: roleOverride ?? response.role ?? fallbackRole
+            role: roleOverride ?? response.role ?? fallbackRole,
+            participantCount: response.participantCount
         )
     }
 

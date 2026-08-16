@@ -124,6 +124,38 @@ internal object LinkImportSearchRequestPolicy {
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
 }
 
+internal object ProviderArtworkQualityPolicy {
+    data class Candidate(val url: String?, val width: Long, val height: Long)
+
+    fun highestQualityYouTubeThumbnail(candidates: List<Candidate>): String? =
+        candidates.withIndex()
+            .sortedWith(
+                compareByDescending<IndexedValue<Candidate>> {
+                    it.value.width.coerceIn(0L, 1_000_000L) * it.value.height.coerceIn(0L, 1_000_000L)
+                }.thenByDescending {
+                    maxOf(it.value.width.coerceIn(0L, 1_000_000L), it.value.height.coerceIn(0L, 1_000_000L))
+                }.thenByDescending { it.index },
+            )
+            .mapNotNull { it.value.url?.takeIf(::isYouTubeArtwork) }
+            .firstOrNull()
+
+    fun preferredYouTubeArtwork(metadataURL: String?, resolvedURL: String?): String? =
+        if (metadataURL?.let(::isYouTubeArtwork) == true) {
+            resolvedURL?.takeIf(::isYouTubeArtwork) ?: metadataURL
+        } else {
+            metadataURL ?: resolvedURL?.takeIf(::isYouTubeArtwork)
+        }
+
+    private fun isYouTubeArtwork(value: String): Boolean = runCatching {
+        val url = URL(value)
+        val host = url.host.lowercase()
+        url.protocol.equals("https", true) && url.userInfo == null && (
+            host == "ytimg.com" || host.endsWith(".ytimg.com") ||
+                host == "ggpht.com" || host.endsWith(".ggpht.com")
+            )
+    }.getOrDefault(false)
+}
+
 internal object PreparedMediaReusePolicy {
     const val MaximumAgeNanos = 90L * 1_000_000_000
     const val MaximumEntries = 24
@@ -685,14 +717,17 @@ class LinkImportService(context: Context) {
             validateDownloadedMedia(output, mediaMode)
             val sourceHash = if (companionHash == null) primaryHash else combinedHash(primaryHash, companionHash)
             val contentHash = if (companionHash == null) sourceHash else sha256(output)
-            val artwork = if (includeArtwork) {
-                fetchArtwork(metadata.artworkURL ?: resolved.candidate.thumbnailURL)
-            } else null
+            val artworkURL = ProviderArtworkQualityPolicy.preferredYouTubeArtwork(
+                metadata.artworkURL,
+                resolved.candidate.thumbnailURL,
+            )
+            val artwork = if (includeArtwork) fetchArtwork(artworkURL) else null
             LinkImportDownload(
                 output,
                 metadata.copy(
                     title = metadata.title.ifBlank { resolved.candidate.title },
                     artist = metadata.artist.ifBlank { resolved.candidate.artist ?: "Unknown uploader" },
+                    artworkURL = artworkURL,
                 ),
                 artwork,
                 ((metadata.durationSeconds ?: resolved.candidate.durationSeconds) ?: 0).coerceAtLeast(0) * 1_000L,
@@ -1195,7 +1230,9 @@ class LinkImportService(context: Context) {
             }
             .maxByOrNull(::formatBitrate)
         val thumbs = details.obj("thumbnail")?.array("thumbnails").orEmpty().mapNotNull { it as? JsonObject }
-        val thumbnail = thumbs.maxByOrNull { it.long("width") }?.string("url")?.takeIf(::isArtwork)
+        val thumbnail = ProviderArtworkQualityPolicy.highestQualityYouTubeThumbnail(
+            thumbs.map { ProviderArtworkQualityPolicy.Candidate(it.string("url"), it.long("width"), it.long("height")) },
+        )
         val candidate = LinkImportCandidate(
             videoID,
             details.string("title") ?: videoID,
@@ -1614,6 +1651,10 @@ class LinkImportService(context: Context) {
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    suspend fun artworkData(value: String?): ByteArray? = withContext(Dispatchers.IO) {
+        fetchArtwork(value)
     }
 
     private suspend fun fetchArtwork(value: String?): ByteArray? {

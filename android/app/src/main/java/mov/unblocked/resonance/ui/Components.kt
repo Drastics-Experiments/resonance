@@ -38,9 +38,9 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -197,8 +197,11 @@ fun RemoteArtwork(
     val resolvedURL = remember(artworkURL, serverURL) {
         resolveRemoteArtworkURL(serverURL, artworkURL)
     }
-    val bitmap by produceState<Bitmap?>(initialValue = null, key1 = resolvedURL) {
-        value = resolvedURL?.let { url ->
+    // A key-scoped state starts empty before the replacement request launches. This prevents a
+    // recycled row from rendering another song's cover while its own artwork loads or fails.
+    var bitmap by remember(resolvedURL, serverURL) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(resolvedURL, serverURL) {
+        bitmap = resolvedURL?.let { url ->
             withContext(Dispatchers.IO) { loadRemoteArtwork(serverURL, url) }
         }
     }

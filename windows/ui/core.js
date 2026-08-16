@@ -29,6 +29,27 @@ export function remoteMediaDuration(value) {
   return Number.isFinite(duration) && duration > 0 && duration <= 24 * 60 * 60 ? duration : null;
 }
 
+export function downloadedSongMetadataRefreshSource(track) {
+  if (!track?.available || !track.filePath) return null;
+  const source = typeof track.sourceURL === "string" ? track.sourceURL.trim() : "";
+  return source || null;
+}
+
+export function applyDownloadedSongMetadataRefresh(track, metadata, artwork = null) {
+  const nonempty = (value, fallback) => {
+    const text = typeof value === "string" ? value.trim() : "";
+    return text || fallback;
+  };
+  return {
+    ...track,
+    title: nonempty(metadata?.title, track.title),
+    artist: nonempty(metadata?.artist, track.artist),
+    album: nonempty(metadata?.album, track.album),
+    artworkURL: nonempty(metadata?.artworkURL, track.artworkURL || null),
+    artwork: artwork || track.artwork || null,
+  };
+}
+
 export function createEmptyState() {
   return {
     tracks: [],

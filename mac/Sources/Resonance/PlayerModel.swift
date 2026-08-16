@@ -717,6 +717,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     }
     @Published var favorites: Set<UUID>
     @Published private(set) var listeningHistoryEntries: [ListeningHistoryEntry] = []
+    @Published private(set) var isRefreshingDownloadedMetadata = false
+    @Published private(set) var downloadedMetadataRefreshDetail = "Refresh titles, artists, albums, and artwork from saved source links."
     @Published var searchText = ""
     @Published var filter: SongFilter = .all
     @Published var queueTab: QueueTab = .upNext
@@ -980,6 +982,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var remoteStreamDirectURL: URL?
     private var remoteStreamDirectHeaders: [String: String] = [:]
     private var remoteStreamLoader: MacAuthenticatedStreamResourceLoader?
+    private var remoteYouTubeStreamLoader: MacYouTubeStreamResourceLoader?
     private var remoteStreamAuthorizationLease: MacAuthenticatedStreamAuthorizationLease?
     private var offlineDownloadAuthorizationLease: MacAuthenticatedStreamAuthorizationLease?
     private var offlineDownloadRequiresVerifiedConfiguration = false
@@ -2582,9 +2585,18 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             )
             return
         }
-        if let remote = remoteSongs.first(where: {
+        let remote = remoteSongs.first(where: {
             MacListenAlongSourcePolicy.canonical($0.sourceURL) == sourceURL
-        }) {
+        })
+        if let remote,
+           MacListenAlongPlaybackPolicy.shouldUseServerStream(
+               hasCatalogMatch: true,
+               streamOnlyEnabled: clientConfiguration.allowsStreamOnlyPlayback,
+               hasPlayableServerBytes: MacRemoteStreamMediaPolicy.unavailableMessage(
+                   kind: remote.kind,
+                   size: remote.size
+               ) == nil
+           ) {
             startRemoteSong(
                 remote,
                 preservingShuffleQueue: true,
@@ -2595,6 +2607,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             )
             return
         }
+        // The server catalog is metadata here, not a download requirement.
+        // Resolve the host's stable source into a short-lived provider stream
+        // whenever there is no local file or usable server stream.
         do {
             let mode: LocalImportMediaMode = mediaKind == .video ? .video : .audio
             let resolution = try await serverLinkImportService.resolve(
@@ -2982,6 +2997,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             remoteStreamPlayer = nil
             remoteStreamLoader?.invalidate()
             remoteStreamLoader = nil
+            remoteYouTubeStreamLoader?.invalidate()
+            remoteYouTubeStreamLoader = nil
             remoteStreamAuthorizationLease?.invalidate()
             remoteStreamAuthorizationLease = nil
             remoteStreamSongID = nil
@@ -3034,6 +3051,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 track: track,
                 sourceURL: preview.url,
                 headers: preview.httpHeaders,
+                contentLength: preview.contentLength,
+                contentType: preview.contentType,
                 position: desiredPosition,
                 isPlaying: desiredPlaying,
                 generation: generation
@@ -3045,19 +3064,34 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         track: Track,
         sourceURL: URL,
         headers: [String: String],
+        contentLength: Int64?,
+        contentType: String?,
         position desiredPosition: TimeInterval,
         isPlaying desiredPlaying: Bool,
         generation: UInt64
     ) async {
         do {
-            let asset = AVURLAsset(
-                url: sourceURL,
-                options: [
-                    "AVURLAssetHTTPHeaderFieldsKey": headers.filter {
-                        $0.key.caseInsensitiveCompare("Authorization") != .orderedSame
-                    }
-                ]
-            )
+            let asset: AVURLAsset
+            if let contentLength, let contentType {
+                let loader = try MacYouTubeStreamResourceLoader(
+                    sourceURL: sourceURL,
+                    headers: headers,
+                    contentLength: contentLength,
+                    contentType: contentType
+                )
+                asset = AVURLAsset(url: try MacYouTubeStreamResourceLoader.assetURL(for: sourceURL))
+                asset.resourceLoader.setDelegate(loader, queue: loader.delegateQueue)
+                remoteYouTubeStreamLoader = loader
+            } else {
+                asset = AVURLAsset(
+                    url: sourceURL,
+                    options: [
+                        "AVURLAssetHTTPHeaderFieldsKey": headers.filter {
+                            $0.key.caseInsensitiveCompare("Authorization") != .orderedSame
+                        }
+                    ]
+                )
+            }
             guard try await asset.load(.isPlayable) else {
                 throw MacListenAlongError.invalidResponse
             }
@@ -3549,7 +3583,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         serverDownloadStateGeneration &+= 1
         let stateGeneration = serverDownloadStateGeneration
         isSyncingServer = true
-        isServerDownloadTransferVisible = false
+        isServerDownloadTransferVisible = true
+        downloadCurrentFile = "Loading song metadata"
+        downloadStatus = "Preparing download"
         var authorizationLease: MacAuthenticatedStreamAuthorizationLease?
         var authorizationRefresh: Task<Void, Never>?
         defer {
@@ -3575,7 +3611,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             serverMessage = downloadStatus
             return
         }
-        downloadStatus = "Checking downloads"
         downloadProgress = nil
         downloadBatchPosition = 0
         downloadBatchTotal = 0
@@ -3623,12 +3658,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             }
             remoteSongs = catalogSongs
             remoteCatalogIsAuthoritative = true
-            beginRemoteSongMetadataHydration(
+            reconcileDownloadedMediaKinds(with: catalogSongs)
+            var songs = songIDs.map { ids in catalogSongs.filter { ids.contains($0.id) } } ?? catalogSongs
+            songs = await prepareRemoteSongMetadataForDownload(
+                songs,
                 contextKey: Self.serverContextKey(base: base, profileID: catalogProfileID)
             )
-            reconcileDownloadedMediaKinds(with: catalogSongs)
-            let songs = songIDs.map { ids in catalogSongs.filter { ids.contains($0.id) } } ?? catalogSongs
-            downloadStatus = songs.isEmpty ? "Nothing to download" : "Checking \(songs.count) songs"
+            downloadStatus = songs.isEmpty ? "Nothing to download" : "Preparing download"
             let cache = try serverCacheDirectory(for: base, profileID: syncProfileID)
             var pendingSongIDs = Set<String>()
             var downloadPlans: [ServerSongDownloadPlan] = []
@@ -3868,6 +3904,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         remoteID: remote.id,
                         sourceServer: ServerSongIdentity.normalizedOrigin(base),
                         syncProfileID: syncProfileID,
+                        sourceURL: MacPersistentMediaURLPolicy.persistentString(
+                            remote.sourceURL ?? existingIndex.flatMap { tracks[$0].sourceURL }
+                        ),
                         downloadSourceURL: MacPersistentMediaURLPolicy.persistentString(
                             remote.sourceURL ?? existingIndex.flatMap { tracks[$0].downloadSourceURL }
                         ),
@@ -3898,6 +3937,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             }
 
             await reconcileCachedUploadedLocalTracks()
+            beginRemoteSongMetadataHydration(
+                contextKey: Self.serverContextKey(base: base, profileID: catalogProfileID)
+            )
             if currentTrackID == nil { currentTrackID = tracks.first?.id }
             hydrateRemotePlaylistTracks()
             persistLibrary()
@@ -4606,6 +4648,87 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         if changed { persistLibrary() }
     }
 
+    func refreshDownloadedSongMetadata() async {
+        guard !isRefreshingDownloadedMetadata else { return }
+        let candidates = tracks.compactMap { track -> (track: Track, fileURL: URL, source: String?)? in
+            guard let fileURL = track.fileURL,
+                  fileURL.isFileURL,
+                  FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+            return (
+                track,
+                fileURL,
+                DownloadedSongMetadataRefreshPolicy.sourceURL(for: track, fileExists: true)
+            )
+        }
+        guard !candidates.isEmpty else {
+            downloadedMetadataRefreshDetail = "No downloaded songs are available to refresh."
+            return
+        }
+
+        isRefreshingDownloadedMetadata = true
+        downloadedMetadataRefreshDetail = "Preparing " + String(candidates.count)
+            + " song" + (candidates.count == 1 ? "" : "s") + "…"
+        defer { isRefreshingDownloadedMetadata = false }
+
+        var sourceFailures = 0
+        for (offset, candidate) in candidates.enumerated() {
+            downloadedMetadataRefreshDetail = "Refreshing " + String(offset + 1)
+                + " of " + String(candidates.count) + " • " + candidate.track.title
+            let embedded = await Self.metadata(for: candidate.fileURL)
+            guard let currentIndex = tracks.firstIndex(where: { $0.id == candidate.track.id }) else { continue }
+
+            let fallbackStem = candidate.fileURL.deletingPathExtension().lastPathComponent
+            if embedded.title != fallbackStem { tracks[currentIndex].title = embedded.title }
+            if embedded.artist != "Unknown Artist" { tracks[currentIndex].artist = embedded.artist }
+            if embedded.album != "Unknown Album" { tracks[currentIndex].album = embedded.album }
+            if let artworkData = embedded.artworkData, !artworkData.isEmpty {
+                tracks[currentIndex].artworkData = artworkData
+            }
+            if let playableDuration = (try? AVAudioPlayer(contentsOf: candidate.fileURL))?.duration,
+               let duration = MacPlayableMediaDurationPolicy.preferred(
+                storedDuration: tracks[currentIndex].duration,
+                playableDurations: [playableDuration]
+               ) {
+                tracks[currentIndex].duration = duration
+            }
+
+            guard let source = candidate.source else { continue }
+            do {
+                let mediaMode: LocalImportMediaMode = tracks[currentIndex].kind == .video ? .video : .audio
+                let metadata = try await remoteSongMetadataResolver(source, mediaMode)
+                let artworkData = await serverLinkImportService.artworkData(for: metadata.artworkURL)
+                guard let refreshedIndex = tracks.firstIndex(where: { $0.id == candidate.track.id }) else { continue }
+                tracks[refreshedIndex] = DownloadedSongMetadataRefreshPolicy.applying(
+                    metadata,
+                    artworkData: artworkData,
+                    to: tracks[refreshedIndex]
+                )
+                let cacheKey = "\(mediaMode.rawValue):\(source)"
+                remoteSongMetadataCache[cacheKey] = CachedRemoteSongMetadata(
+                    metadata: metadata,
+                    cachedAt: Date()
+                )
+                if let remoteID = tracks[refreshedIndex].remoteID,
+                   let remoteIndex = remoteSongs.firstIndex(where: { $0.id == remoteID }) {
+                    remoteSongs[remoteIndex] = Self.applying(metadata, to: remoteSongs[remoteIndex])
+                }
+            } catch {
+                sourceFailures += 1
+            }
+        }
+
+        persistLibrary()
+        persistRemoteSongMetadataCache()
+        publishSystemPlayback()
+        downloadedMetadataRefreshDetail = sourceFailures == 0
+            ? "Re-cached metadata for " + String(candidates.count)
+                + " song" + (candidates.count == 1 ? "" : "s") + "."
+            : "Re-cached " + String(candidates.count)
+                + " song" + (candidates.count == 1 ? "" : "s") + " • "
+                + String(sourceFailures) + " source refresh"
+                + (sourceFailures == 1 ? "" : "es") + " failed."
+    }
+
     @discardableResult
     func associateLocalImportSource(
         trackID: UUID,
@@ -5049,6 +5172,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         remoteStreamPlayer = nil
         remoteStreamLoader?.invalidate()
         remoteStreamLoader = nil
+        remoteYouTubeStreamLoader?.invalidate()
+        remoteYouTubeStreamLoader = nil
         remoteStreamAuthorizationLease?.invalidate()
         remoteStreamAuthorizationLease = nil
         remoteStreamDirectURL = nil
@@ -6940,6 +7065,73 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 contextKey: contextKey
             )
         }
+    }
+
+    private func prepareRemoteSongMetadataForDownload(
+        _ songs: [RemoteSong],
+        contextKey: String
+    ) async -> [RemoteSong] {
+        let requests = remoteSongMetadataRequests(for: songs)
+        guard !requests.isEmpty else { return songs }
+
+        let resolver = remoteSongMetadataResolver
+        let retryDelays = remoteSongMetadataRetryDelays
+        var results: [RemoteSongMetadataResult] = []
+        await withTaskGroup(of: RemoteSongMetadataResult.self) { group in
+            var iterator = requests.makeIterator()
+            for _ in 0..<min(8, requests.count) {
+                guard let request = iterator.next() else { break }
+                group.addTask { [weak self] in
+                    guard let self else {
+                        return RemoteSongMetadataResult(request: request, metadata: nil)
+                    }
+                    return await self.sharedRemoteSongMetadataResult(
+                        request,
+                        contextKey: contextKey,
+                        using: resolver,
+                        retryDelays: retryDelays
+                    )
+                }
+            }
+            while let result = await group.next() {
+                guard let base = try? normalizedServerURL(),
+                      Self.serverContextKey(base: base, profileID: syncProfileID) == contextKey else {
+                    group.cancelAll()
+                    return
+                }
+                results.append(result)
+                if let request = iterator.next() {
+                    group.addTask { [weak self] in
+                        guard let self else {
+                            return RemoteSongMetadataResult(request: request, metadata: nil)
+                        }
+                        return await self.sharedRemoteSongMetadataResult(
+                            request,
+                            contextKey: contextKey,
+                            using: resolver,
+                            retryDelays: retryDelays
+                        )
+                    }
+                }
+            }
+        }
+
+        guard let base = try? normalizedServerURL(),
+              Self.serverContextKey(base: base, profileID: syncProfileID) == contextKey else {
+            return songs
+        }
+        var updatedSongs = remoteSongs
+        var cacheChanged = false
+        for result in results {
+            cacheChanged = applyRemoteSongMetadataResult(result, to: &updatedSongs) || cacheChanged
+        }
+        remoteSongs = updatedSongs
+        if cacheChanged { persistRemoteSongMetadataCache() }
+        let requestedIDs = Set(songs.map(\.id))
+        let preparedByID = Dictionary(uniqueKeysWithValues: remoteSongs
+            .filter { requestedIDs.contains($0.id) }
+            .map { ($0.id, $0) })
+        return songs.map { preparedByID[$0.id] ?? $0 }
     }
 
     private func sharedRemoteSongMetadataResult(

@@ -92,6 +92,25 @@ object QueuePolicy {
         return candidate
     }
 
+    /**
+     * Creates one complete shuffle cycle with the current item first. Keeping the current item at
+     * the front prevents an order change from jumping playback, while every remaining item is
+     * visited exactly once in a freshly randomized order.
+     */
+    fun shuffledOrder(
+        size: Int,
+        currentIndex: Int,
+        random: Random = Random.Default,
+    ): IntArray {
+        if (size <= 0) return intArrayOf()
+        val remaining = (0 until size).filterNot { it == currentIndex }.shuffled(random)
+        return if (currentIndex in 0 until size) {
+            (listOf(currentIndex) + remaining).toIntArray()
+        } else {
+            remaining.toIntArray()
+        }
+    }
+
     fun previousIndex(size: Int, currentIndex: Int): Int {
         if (size <= 0) return -1
         return if (currentIndex <= 0) size - 1 else currentIndex - 1

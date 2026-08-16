@@ -273,6 +273,20 @@ struct LocalImportProgress: Hashable, Sendable {
 struct LocalImportPreviewStream: Hashable, Sendable {
     let url: URL
     let httpHeaders: [String: String]
+    let contentLength: Int64?
+    let contentType: String?
+
+    init(
+        url: URL,
+        httpHeaders: [String: String],
+        contentLength: Int64? = nil,
+        contentType: String? = nil
+    ) {
+        self.url = url
+        self.httpHeaders = httpHeaders
+        self.contentLength = contentLength
+        self.contentType = contentType
+    }
 }
 
 struct LocalImportError: LocalizedError, Hashable, Sendable {
@@ -466,6 +480,42 @@ enum LocalImportURL {
     private static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
         let range = NSRange(value.startIndex..<value.endIndex, in: value)
         return expression.firstMatch(in: value, range: range)?.range == range
+    }
+}
+
+enum LocalImportArtworkPolicy {
+    static func highestQualityYouTubeThumbnail(_ values: [[String: Any]]) -> String? {
+        values.enumerated()
+            .sorted { left, right in
+                let leftSize = dimensions(left.element)
+                let rightSize = dimensions(right.element)
+                let leftArea = leftSize.width * leftSize.height
+                let rightArea = rightSize.width * rightSize.height
+                if leftArea != rightArea { return leftArea > rightArea }
+                let leftEdge = max(leftSize.width, leftSize.height)
+                let rightEdge = max(rightSize.width, rightSize.height)
+                if leftEdge != rightEdge { return leftEdge > rightEdge }
+                return left.offset > right.offset
+            }
+            .compactMap { LocalImportURL.youtubeArtwork($0.element["url"] as? String)?.absoluteString }
+            .first
+    }
+
+    static func preferredArtwork(metadataURL: String?, resolvedYouTubeURL: String?) -> String? {
+        if LocalImportURL.youtubeArtwork(metadataURL) != nil {
+            return LocalImportURL.youtubeArtwork(resolvedYouTubeURL)?.absoluteString ?? metadataURL
+        }
+        return metadataURL ?? LocalImportURL.youtubeArtwork(resolvedYouTubeURL)?.absoluteString
+    }
+
+    private static func dimensions(_ value: [String: Any]) -> (width: Int64, height: Int64) {
+        (dimension(value["width"]), dimension(value["height"]))
+    }
+
+    private static func dimension(_ value: Any?) -> Int64 {
+        if let number = value as? NSNumber { return min(max(number.int64Value, 0), 1_000_000) }
+        if let string = value as? String, let number = Int64(string) { return min(max(number, 0), 1_000_000) }
+        return 0
     }
 }
 
@@ -749,7 +799,7 @@ enum LocalImportParser {
 
     private static func thumbnail(_ value: [String: Any]?) -> String? {
         let values = value?["thumbnails"] as? [[String: Any]] ?? []
-        return values.reversed().compactMap { LocalImportURL.youtubeArtwork($0["url"] as? String)?.absoluteString }.first
+        return LocalImportArtworkPolicy.highestQualityYouTubeThumbnail(values)
     }
 
     private static func parseDuration(_ value: String) -> Int? {

@@ -146,6 +146,19 @@ enum MacListenAlongSourcePolicy {
     }
 }
 
+enum MacListenAlongPlaybackPolicy {
+    /// A catalog match is not proof that this Mac has playable media. Listen
+    /// Along may use server bytes only when stream-only playback can actually
+    /// serve them; otherwise the guest must resolve the shared source link.
+    static func shouldUseServerStream(
+        hasCatalogMatch: Bool,
+        streamOnlyEnabled: Bool,
+        hasPlayableServerBytes: Bool
+    ) -> Bool {
+        hasCatalogMatch && streamOnlyEnabled && hasPlayableServerBytes
+    }
+}
+
 enum MacListenAlongError: LocalizedError, Equatable {
     case invalidContext
     case invalidCode

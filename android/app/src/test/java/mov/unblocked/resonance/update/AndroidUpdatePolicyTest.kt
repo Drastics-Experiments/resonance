@@ -11,6 +11,32 @@ import org.junit.Test
 
 class AndroidUpdatePolicyTest {
     @Test
+    fun startupCheckBypassesRecentSuccessfulCheck() {
+        assertEquals(
+            true,
+            AndroidUpdateCheckPolicy.shouldCheck(
+                lastSuccessfulCheckMillis = 9_999L,
+                nowMillis = 10_000L,
+                force = true,
+            ),
+        )
+    }
+
+    @Test
+    fun resumedChecksRemainThrottledUntilTheIntervalElapses() {
+        val interval = AndroidUpdateCheckPolicy.DefaultIntervalMillis
+
+        assertEquals(false, AndroidUpdateCheckPolicy.shouldCheck(1_000L, 1_000L + interval - 1L))
+        assertEquals(true, AndroidUpdateCheckPolicy.shouldCheck(1_000L, 1_000L + interval))
+        assertEquals(true, AndroidUpdateCheckPolicy.shouldCheck(0L, 1_000L))
+    }
+
+    @Test
+    fun clockRollbackDoesNotSuppressUpdateChecks() {
+        assertEquals(true, AndroidUpdateCheckPolicy.shouldCheck(10_000L, 9_000L))
+    }
+
+    @Test
     fun newerManifestBecomesAvailableUpdate() {
         val update = AndroidUpdatePolicy.availableUpdate(
             rawManifest = manifest(versionCode = 7),

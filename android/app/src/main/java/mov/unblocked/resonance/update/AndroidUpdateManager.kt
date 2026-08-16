@@ -51,10 +51,18 @@ class AndroidUpdateManager(
     private val mutableState = MutableStateFlow<AndroidUpdateState>(AndroidUpdateState.Idle)
     val state = mutableState.asStateFlow()
 
+    suspend fun checkForUpdateOnStartup() {
+        checkForUpdate(force = true)
+    }
+
     suspend fun checkForUpdateIfDue() {
+        checkForUpdate(force = false)
+    }
+
+    private suspend fun checkForUpdate(force: Boolean) {
         if (mutableState.value !is AndroidUpdateState.Idle) return
         val lastCheck = preferences.getLong(LAST_CHECK_KEY, 0L)
-        if (System.currentTimeMillis() - lastCheck < CHECK_INTERVAL_MS) return
+        if (!AndroidUpdateCheckPolicy.shouldCheck(lastCheck, System.currentTimeMillis(), force)) return
 
         mutableState.value = AndroidUpdateState.Checking
         runCatching {
@@ -334,7 +342,6 @@ class AndroidUpdateManager(
             "https://github.com/Drastics-Experiments/resonance/releases/latest/download/latest-android.json"
         private const val PREFERENCES_NAME = "resonance.android-updater"
         private const val LAST_CHECK_KEY = "last-successful-check-ms"
-        private const val CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
         private const val CONNECT_TIMEOUT_MS = 15_000
         private const val READ_TIMEOUT_MS = 30_000
         private const val MAX_MANIFEST_BYTES = 128 * 1024L

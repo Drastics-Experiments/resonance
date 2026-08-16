@@ -681,6 +681,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
     }
     @Published var searchText = ""
+    @Published private(set) var isRefreshingDownloadedMetadata = false
+    @Published private(set) var downloadedMetadataRefreshDetail = "Refresh titles, artists, albums, and artwork from saved source links."
     @Published private(set) var serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site"
     @Published private(set) var serverToken = ""
     @Published private(set) var serverAdminToken = ""
@@ -842,6 +844,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var streamingArtworkURL: URL?
     private var streamingPlayer: AVPlayer?
     private var streamingResourceLoader: MobileAuthenticatedStreamResourceLoader?
+    private var streamingYouTubeLoader: MobileYouTubeStreamResourceLoader?
     private var streamingAuthorizationLease: MobileAuthenticatedStreamAuthorizationLease?
     private var streamingPreview: LocalImportPreviewStream?
     private var streamingPreviewSourceURL: String?
@@ -933,6 +936,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         streamingPlayer?.pause()
         crossfadePlayer?.stop()
         streamingResourceLoader?.invalidate()
+        streamingYouTubeLoader?.invalidate()
         streamingAuthorizationLease?.invalidate()
         for observer in audioSessionObservers {
             NotificationCenter.default.removeObserver(observer)
@@ -2349,11 +2353,25 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         self.position = max(position, 0)
         UserDefaults.standard.removeObject(forKey: "Resonance.currentTrack")
 
-        var assetOptions: [String: Any] = [:]
-        if !preview.httpHeaders.isEmpty {
-            assetOptions["AVURLAssetHTTPHeaderFieldsKey"] = preview.httpHeaders
+        let asset: AVURLAsset
+        if let contentLength = preview.contentLength,
+           let contentType = preview.contentType {
+            let loader = try MobileYouTubeStreamResourceLoader(
+                sourceURL: preview.url,
+                headers: preview.httpHeaders,
+                contentLength: contentLength,
+                contentType: contentType
+            )
+            asset = AVURLAsset(url: try MobileYouTubeStreamResourceLoader.assetURL(for: preview.url))
+            asset.resourceLoader.setDelegate(loader, queue: loader.delegateQueue)
+            streamingYouTubeLoader = loader
+        } else {
+            var assetOptions: [String: Any] = [:]
+            if !preview.httpHeaders.isEmpty {
+                assetOptions["AVURLAssetHTTPHeaderFieldsKey"] = preview.httpHeaders
+            }
+            asset = AVURLAsset(url: preview.url, options: assetOptions)
         }
-        let asset = AVURLAsset(url: preview.url, options: assetOptions)
         guard try await asset.load(.isPlayable) else {
             discardStreamingPlayback()
             throw MobileAuthenticatedStreamError.invalidResponse
@@ -3059,8 +3077,19 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         await downloadLoadedCatalogSongs(pendingSongs)
     }
 
-    private func beginDownloadTransfer() -> UUID? {
-        reserveTransferSession(kind: .download, requiresReceivedBytes: true)
+    private func beginDownloadTransfer(for songs: [MobileRemoteSong]) -> UUID? {
+        guard let first = songs.first else { return nil }
+        return beginTransferSession(with: MobileTransferDisplayState(
+            kind: .download,
+            itemID: first.id,
+            songTitle: "Loading song metadata",
+            detail: "Preparing download",
+            currentItem: 1,
+            totalItems: songs.count,
+            completedBytes: 0,
+            totalBytes: 0,
+            fallbackProgress: nil
+        ))
     }
 
     private func pendingLoadedCatalogSongs(
@@ -3074,9 +3103,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         )
     }
 
-    /// Downloads the immutable rows the user can already see. Catalog refresh
-    /// and metadata hydration are deliberately not awaited here; reconciliation
-    /// happens only after the media batch has released its transfer session.
+    /// Resolves the selected batch's display metadata first, then downloads the
+    /// resulting immutable rows one at a time.
     private func downloadLoadedCatalogSongs(_ songs: [MobileRemoteSong]) async {
         guard !songs.isEmpty,
               !isActivatingSyncProfile,
@@ -3094,7 +3122,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
         let submittedProfileID = syncProfileID
         let submittedAccessToken = serverToken
-        guard let transferSessionID = beginDownloadTransfer() else { return }
+        guard let transferSessionID = beginDownloadTransfer(for: songs) else { return }
 
         await downloadSerialGate.acquire()
         let ownsTransfer = MobileTransferSessionPolicy.accepts(
@@ -3110,8 +3138,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             let batchID = UUID()
             let batchTask = Task { @MainActor [weak self] in
                 guard let self else { return }
-                await self.performLoadedCatalogDownload(
+                let preparedSongs = await self.prepareRemoteSongMetadataForDownload(
                     songs,
+                    baseURL: baseURL,
+                    profileID: submittedProfileID
+                )
+                guard !Task.isCancelled,
+                      submittedContext == self.activeServerContext,
+                      submittedProfileID == self.syncProfileID,
+                      submittedAccessToken == self.serverToken else { return }
+                await self.performLoadedCatalogDownload(
+                    preparedSongs,
                     baseURL: baseURL,
                     profileID: submittedProfileID,
                     accessToken: submittedAccessToken,
@@ -3129,13 +3166,96 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         finishTransferSession(transferSessionID)
 
         // The transfer is complete and its popup is gone before playlist
-        // reconciliation begins. Do not refetch the unchanged song catalog
-        // here: that would cancel and restart metadata hydration which may
-        // already be ready to update one of the newly saved tracks.
+        // reconciliation begins. Retry only metadata that the fast preparation
+        // pass could not resolve; the unchanged catalog does not need refetching.
         guard submittedContext == activeServerContext,
               submittedProfileID == syncProfileID,
               submittedAccessToken == serverToken else { return }
+        retryPendingRemoteSongMetadata()
         await syncPlaylistsNow()
+    }
+
+    private func prepareRemoteSongMetadataForDownload(
+        _ songs: [MobileRemoteSong],
+        baseURL: URL,
+        profileID: String
+    ) async -> [MobileRemoteSong] {
+        downloadDetail = "Preparing download"
+        let songIDs = Set(songs.map(\.id))
+        let requests = remoteSongMetadataRequests(for: songs)
+        guard !requests.isEmpty else { return songs }
+
+        cancelRemoteSongMetadataHydration()
+        remoteSongMetadataHydrationGeneration &+= 1
+        let generation = remoteSongMetadataHydrationGeneration
+        pendingRemoteSongMetadataCount = requests.reduce(0) { $0 + $1.songIDs.count }
+        let service = remoteMetadataImportService
+        let broker = remoteMetadataResolutionBroker
+        var results: [RemoteSongMetadataResult] = []
+
+        await withTaskGroup(of: RemoteSongMetadataResult.self) { group in
+            var iterator = requests.makeIterator()
+            for _ in 0..<min(8, requests.count) {
+                guard let request = iterator.next() else { break }
+                group.addTask {
+                    await Self.resolveRemoteSongMetadata(
+                        request,
+                        scope: generation,
+                        using: service,
+                        broker: broker
+                    )
+                }
+            }
+            while let result = await group.next() {
+                guard isCurrentRemoteMetadataHydration(
+                    generation: generation,
+                    baseURL: baseURL,
+                    profileID: profileID
+                ) else {
+                    group.cancelAll()
+                    return
+                }
+                results.append(result)
+                pendingRemoteSongMetadataCount = max(
+                    0,
+                    pendingRemoteSongMetadataCount - result.request.songIDs.count
+                )
+                if let request = iterator.next() {
+                    group.addTask {
+                        await Self.resolveRemoteSongMetadata(
+                            request,
+                            scope: generation,
+                            using: service,
+                            broker: broker
+                        )
+                    }
+                }
+            }
+        }
+
+        guard !Task.isCancelled,
+              isCurrentRemoteMetadataHydration(
+            generation: generation,
+            baseURL: baseURL,
+            profileID: profileID
+        ) else { return songs }
+        var updatedSongs = remoteSongs
+        var cacheChanged = false
+        for result in results {
+            cacheChanged = applyRemoteSongMetadataResult(result, to: &updatedSongs) || cacheChanged
+        }
+        remoteSongs = updatedSongs
+        pendingRemoteSongMetadataCount = 0
+        if cacheChanged {
+            remoteSongMetadataCache = MobileRemoteSongMetadataCachePolicy.normalized(
+                remoteSongMetadataCache
+            )
+            save()
+        }
+        let preparedByID = Dictionary(uniqueKeysWithValues: remoteSongs
+            .filter { songIDs.contains($0.id) }
+            .map { ($0.id, $0) })
+        return songs.map { preparedByID[$0.id] ?? $0 }
     }
 
     private func performLoadedCatalogDownload(
@@ -3880,6 +4000,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 operationID: operationID
             )
         }
+        downloadDetail = "Downloading \(song.title)"
+        presentTransfer(
+            sessionID: transferSessionID,
+            operationID: operationID,
+            kind: .download,
+            itemID: song.id,
+            songTitle: song.title,
+            detail: "Downloading song",
+            currentItem: currentItem,
+            totalItems: totalItems
+        )
         if song.isSourceLinkRecord {
             do {
                 _ = try await importSavedRemoteSource(
@@ -4317,6 +4448,95 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             save()
             updateNowPlaying()
         }
+    }
+
+    func refreshDownloadedSongMetadata() async {
+        guard !isRefreshingDownloadedMetadata else { return }
+        let candidates = tracks.compactMap { track -> (track: MobileTrack, fileURL: URL, source: String?)? in
+            let mediaURL = fileURL(for: track)
+            guard fileManager.fileExists(atPath: mediaURL.path) else { return nil }
+            return (
+                track,
+                mediaURL,
+                MobileDownloadedSongMetadataRefreshPolicy.sourceURL(for: track, fileExists: true)
+            )
+        }
+        guard !candidates.isEmpty else {
+            downloadedMetadataRefreshDetail = "No downloaded songs are available to refresh."
+            return
+        }
+
+        isRefreshingDownloadedMetadata = true
+        downloadedMetadataRefreshDetail = "Preparing " + String(candidates.count)
+            + " song" + (candidates.count == 1 ? "" : "s") + "…"
+        defer { isRefreshingDownloadedMetadata = false }
+
+        var sourceFailures = 0
+        for (offset, candidate) in candidates.enumerated() {
+            downloadedMetadataRefreshDetail = "Refreshing " + String(offset + 1)
+                + " of " + String(candidates.count) + " • " + candidate.track.title
+            let embedded = await embeddedMetadata(at: candidate.fileURL)
+            guard let currentIndex = tracks.firstIndex(where: { $0.id == candidate.track.id }) else { continue }
+
+            if let title = embedded.title { tracks[currentIndex].title = title }
+            if let artist = embedded.artist { tracks[currentIndex].artist = artist }
+            if let album = embedded.album { tracks[currentIndex].album = album }
+            if let duration = embedded.duration,
+               duration.isFinite,
+               duration > 0 {
+                tracks[currentIndex].duration = duration
+            }
+            if let artworkData = embedded.artworkData,
+               let filename = saveArtwork(artworkData, for: tracks[currentIndex].id) {
+                tracks[currentIndex].artworkFilename = filename
+                tracks[currentIndex].artworkScanComplete = true
+            }
+
+            guard let source = candidate.source else { continue }
+            do {
+                let metadata = try await serverLinkImportService.resolveMetadata(source: source)
+                let artworkData = await serverLinkImportService.artworkData(for: metadata.artworkURL)
+                guard let refreshedIndex = tracks.firstIndex(where: { $0.id == candidate.track.id }) else { continue }
+                let artworkFilename = artworkData.flatMap { saveArtwork($0, for: tracks[refreshedIndex].id) }
+                tracks[refreshedIndex] = MobileDownloadedSongMetadataRefreshPolicy.applying(
+                    metadata,
+                    artworkFilename: artworkFilename,
+                    to: tracks[refreshedIndex]
+                )
+                let videoExtensions = Set(["mp4", "mov", "m4v", "webm"])
+                let mediaKind = videoExtensions.contains(candidate.fileURL.pathExtension.lowercased()) ? "video" : "audio"
+                if let cacheKey = MobileRemoteSongMetadataCachePolicy.key(
+                    sourceURL: source,
+                    mediaKind: mediaKind
+                ) {
+                    remoteSongMetadataCache[cacheKey] = MobileRemoteSongMetadataCacheEntry(
+                        sourceURL: source,
+                        mediaKind: mediaKind,
+                        metadata: metadata,
+                        cachedAt: Date()
+                    )
+                }
+                if let remoteID = tracks[refreshedIndex].remoteID,
+                   let remoteIndex = remoteSongs.firstIndex(where: { $0.id == remoteID }) {
+                    remoteSongs[remoteIndex] = Self.applying(metadata, to: remoteSongs[remoteIndex])
+                }
+            } catch {
+                sourceFailures += 1
+            }
+        }
+
+        normalizeSystemPlaylist()
+        nowPlayingArtworkCache = nil
+        nowPlayingArtworkCacheKey = nil
+        save()
+        updateNowPlaying()
+        downloadedMetadataRefreshDetail = sourceFailures == 0
+            ? "Re-cached metadata for " + String(candidates.count)
+                + " song" + (candidates.count == 1 ? "" : "s") + "."
+            : "Re-cached " + String(candidates.count)
+                + " song" + (candidates.count == 1 ? "" : "s") + " • "
+                + String(sourceFailures) + " source refresh"
+                + (sourceFailures == 1 ? "" : "es") + " failed."
     }
 
     private func embeddedMetadata(at url: URL) async -> EmbeddedMetadata {
@@ -5031,9 +5251,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         streamingPlayer = nil
         let loader = streamingResourceLoader
         streamingResourceLoader = nil
+        let youtubeLoader = streamingYouTubeLoader
+        streamingYouTubeLoader = nil
         let authorizationLease = streamingAuthorizationLease
         streamingAuthorizationLease = nil
         loader?.invalidate()
+        youtubeLoader?.invalidate()
         authorizationLease?.setInvalidationHandler(nil)
         authorizationLease?.invalidate()
         streamingTrack = nil

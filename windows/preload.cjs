@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("resonance", {
   loadLibrary: () => ipcRenderer.invoke("library:load"),
   saveLibrary: (state) => ipcRenderer.invoke("library:save", state),
+  refreshLibraryMetadata: (tracks) => ipcRenderer.invoke("library:refresh-metadata", tracks),
   videoFrames: (value) => ipcRenderer.invoke("library:video-frames", value),
   onPrepareToClose: (callback) => ipcRenderer.on("app:prepare-close", () => callback()),
   readyToClose: () => ipcRenderer.send("app:close-ready"),

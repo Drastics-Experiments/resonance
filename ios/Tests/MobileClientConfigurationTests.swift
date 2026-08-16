@@ -26,6 +26,55 @@ final class MobileCrossfadePolicyTests: XCTestCase {
     }
 }
 
+final class MobileDownloadedSongMetadataRefreshTests: XCTestCase {
+    func testRefreshReplacesDescriptiveFieldsAndPreservesPlaybackAndProvenance() {
+        let track = MobileTrack(
+            title: "Old title",
+            artist: "Old artist",
+            album: "Old album",
+            duration: 217,
+            relativePath: "song.m4a",
+            remoteID: "remote",
+            sourceServer: "https://music.test",
+            syncProfileID: "profile",
+            sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            downloadSourceURL: "https://media.example/song.m4a",
+            artworkFilename: "old.artwork",
+            contentSHA256: "hash"
+        )
+        let metadata = LocalImportSpotifyTrack(
+            provider: "youtube",
+            type: "track",
+            trackID: "jNQXAC9IVRw",
+            title: "Fresh title",
+            artist: "Fresh artist",
+            album: "Fresh album",
+            trackNumber: nil,
+            durationSeconds: 999,
+            artworkURL: "https://i.ytimg.com/vi/jNQXAC9IVRw/maxresdefault.jpg",
+            embedURL: "https://www.youtube.com/embed/jNQXAC9IVRw",
+            sourceURL: "https://youtu.be/jNQXAC9IVRw"
+        )
+
+        let refreshed = MobileDownloadedSongMetadataRefreshPolicy.applying(
+            metadata,
+            artworkFilename: "fresh.artwork",
+            to: track
+        )
+
+        XCTAssertEqual(refreshed.title, "Fresh title")
+        XCTAssertEqual(refreshed.artist, "Fresh artist")
+        XCTAssertEqual(refreshed.album, "Fresh album")
+        XCTAssertEqual(refreshed.artworkFilename, "fresh.artwork")
+        XCTAssertEqual(refreshed.duration, 217)
+        XCTAssertEqual(refreshed.sourceURL, track.sourceURL)
+        XCTAssertEqual(refreshed.downloadSourceURL, track.downloadSourceURL)
+        XCTAssertEqual(refreshed.contentSHA256, "hash")
+        XCTAssertEqual(MobileDownloadedSongMetadataRefreshPolicy.sourceURL(for: track, fileExists: true), track.sourceURL)
+        XCTAssertNil(MobileDownloadedSongMetadataRefreshPolicy.sourceURL(for: track, fileExists: false))
+    }
+}
+
 final class MobileNowPlayingPolicyTests: XCTestCase {
     private let track = MobileTrack(
         id: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA")!,
@@ -680,8 +729,23 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(state.songTitle, "Catalog Song Title")
+        XCTAssertEqual(state.displayTitle, "Downloading")
         XCTAssertEqual(state.batchPosition, "3/10")
         XCTAssertEqual(state.progress, 0.25)
+
+        let preparing = MobileTransferDisplayState(
+            kind: .download,
+            itemID: "catalog-song-id",
+            songTitle: "Loading song metadata",
+            detail: "Preparing download",
+            currentItem: 1,
+            totalItems: 10,
+            completedBytes: 0,
+            totalBytes: 0,
+            fallbackProgress: nil
+        )
+        XCTAssertEqual(preparing.displayTitle, "Preparing download")
+        XCTAssertNil(preparing.progress)
     }
 
     func testNoPendingTransfersUsesZeroBatchPosition() {
@@ -1346,6 +1410,61 @@ final class MobileClientConfigurationTests: XCTestCase {
             MobileProfilePictureScope.filename(serverURL: "https://music.example", profileID: "default"),
             MobileProfilePictureScope.filename(serverURL: "https://music.example", profileID: "family")
         )
+    }
+
+    func testSavedSoundCloudSongWithoutDirectRenditionFallsBackToMatchedYouTubeAudio() async throws {
+        let source = "https://soundcloud.com/the-weeknd/save-your-tears"
+        let metadata = LocalImportSpotifyTrack(
+            provider: "soundcloud",
+            type: "track",
+            trackID: "saved-soundcloud-track",
+            title: "Save Your Tears",
+            artist: "The Weeknd",
+            album: "After Hours",
+            trackNumber: nil,
+            durationSeconds: 216,
+            artworkURL: nil,
+            embedURL: "",
+            sourceURL: source
+        )
+        let alternate = LocalImportAudioSourceMatch(
+            videoID: "LIIDh-qI9oI",
+            title: "The Weeknd - Save Your Tears (Official Audio)",
+            artist: "The Weeknd",
+            album: "After Hours",
+            durationSeconds: 216,
+            thumbnailURL: "https://i.ytimg.com/vi/LIIDh-qI9oI/maxresdefault.jpg",
+            sourceProvider: .youtube,
+            officialArtist: true,
+            sourceURL: "https://www.youtube.com/watch?v=LIIDh-qI9oI",
+            score: 0.99,
+            confidence: "high",
+            match: .init(title: 1, artist: 1, album: 1, duration: 1, durationDeltaSeconds: 0)
+        )
+        let service = LocalDeviceImportService(
+            soundCloudOperations: LocalImportSoundCloudOperations(
+                resolveAudio: { _, _ in
+                    throw LocalImportError(
+                        stage: .inspectingSource,
+                        code: "SOUNDCLOUD_STREAM_UNAVAILABLE",
+                        message: "No direct rendition"
+                    )
+                }
+            ),
+            candidateSearch: { track in
+                guard track.title == metadata.title, track.artist == metadata.artist else { return [] }
+                return [alternate]
+            }
+        )
+
+        let resolution = try await service.resolveUsingCatalogMetadata(
+            source: source,
+            metadata: metadata
+        ) { _ in }
+
+        XCTAssertEqual(resolution.kind, .soundCloud)
+        XCTAssertEqual(resolution.track, metadata)
+        XCTAssertEqual(resolution.candidates, [alternate])
     }
 
     func testVerifierAcceptsExactDigestSignatureAndAudience() throws {

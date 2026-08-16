@@ -3,11 +3,13 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import {
+  applyDownloadedSongMetadataRefresh,
   applyRemotePlaylistDocument,
   APP_THEMES,
   buildLocalImportSourceIdentity,
   catalogRequestCanApply,
   createEmptyState,
+  downloadedSongMetadataRefreshSource,
   filterPlaylists,
   filterTracks,
   formatServerDownloadFailureNotice,
@@ -281,6 +283,41 @@ test("keeps a bounded fresh device-only server metadata cache", () => {
   assert.equal(cache[key].title, "Me at the zoo");
   assert.equal(cache[key].duration, 19);
   assert.equal(cache[key].mediaKind, "video");
+});
+
+test("refreshes downloaded metadata without changing playback or source provenance", () => {
+  const track = {
+    id: "downloaded",
+    title: "Old title",
+    artist: "Old artist",
+    album: "Old album",
+    duration: 217,
+    artwork: "old-artwork",
+    artworkURL: "https://example.com/old.jpg",
+    filePath: "C:\\Resonance\\ServerCache\\song.m4a",
+    available: true,
+    remoteID: "remote",
+    sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    sourceIdentity: { sourcePageURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw" },
+    contentSha256: "hash",
+  };
+  const refreshed = applyDownloadedSongMetadataRefresh(track, {
+    title: " Fresh title ",
+    artist: "Fresh artist",
+    album: "Fresh album",
+    duration: 999,
+    artworkURL: "https://i.ytimg.com/vi/jNQXAC9IVRw/maxresdefault.jpg",
+  }, "fresh-artwork");
+
+  assert.equal(refreshed.title, "Fresh title");
+  assert.equal(refreshed.artist, "Fresh artist");
+  assert.equal(refreshed.album, "Fresh album");
+  assert.equal(refreshed.artwork, "fresh-artwork");
+  assert.equal(refreshed.duration, 217);
+  assert.equal(refreshed.sourceIdentity, track.sourceIdentity);
+  assert.equal(refreshed.contentSha256, "hash");
+  assert.equal(downloadedSongMetadataRefreshSource(track), track.sourceURL);
+  assert.equal(downloadedSongMetadataRefreshSource({ ...track, available: false }), null);
 });
 
 test("uses lightweight batched Windows metadata hydration and mac-like song skeletons", () => {
@@ -771,7 +808,7 @@ test("binds the active library to the signed-in Clerk account", () => {
   assert.doesNotMatch(appSource, /id="syncProfile"|id="newSyncProfile"/);
   assert.match(appSource, /track\.id === currentID \? toggle\(\) : play\(track, tracks, \{ playlistID: null \}\)/);
   assert.match(appSource, /function updateProfileControl\(\)[\s\S]+control\.hidden = false/);
-  for (const id of ["settingsServer", "settingsCheckUpdates"]) {
+  for (const id of ["settingsServer", "settingsCheckUpdates", "settingsRefreshMetadata"]) {
     assert.match(appSource, new RegExp(`id="${id}"`));
   }
   assert.doesNotMatch(appSource, /Library & tools|data-settings-panel="tools"|id="settingsHistory"|id="settingsClipEditor"|id="settingsStorage"/);

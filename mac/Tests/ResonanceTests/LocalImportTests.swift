@@ -1987,3 +1987,22 @@ struct LocalImportTests {
         )
     }
 }
+    @Test
+    func artworkPolicySelectsTheLargestProviderImageWithoutLossyPreference() throws {
+        let videoID = "jNQXAC9IVRw"
+        let highest = "https://i.ytimg.com/vi/\(videoID)/maxresdefault.jpg"
+        let selected = LocalImportArtworkPolicy.highestQualityYouTubeThumbnail([
+            ["url": highest, "width": 1_280, "height": 720],
+            ["url": "https://i.ytimg.com/vi/\(videoID)/default.jpg", "width": 120, "height": 90],
+            ["url": "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg", "width": 480, "height": 360],
+        ])
+        #expect(selected == highest)
+        #expect(LocalImportArtworkPolicy.preferredArtwork(
+            metadataURL: "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg",
+            resolvedYouTubeURL: highest
+        ) == highest)
+        #expect(LocalImportArtworkPolicy.preferredArtwork(
+            metadataURL: "https://i.scdn.co/image/album",
+            resolvedYouTubeURL: highest
+        ) == "https://i.scdn.co/image/album")
+    }

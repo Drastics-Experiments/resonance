@@ -486,6 +486,28 @@ function safeThumbnailURL(value) {
   return null;
 }
 
+function highestQualityThumbnailURL(values) {
+  if (!Array.isArray(values)) return null;
+  return values.map((thumbnail, index) => ({ thumbnail, index }))
+    .sort((left, right) => {
+      const leftWidth = Math.min(numericValue(left.thumbnail?.width), 1_000_000);
+      const leftHeight = Math.min(numericValue(left.thumbnail?.height), 1_000_000);
+      const rightWidth = Math.min(numericValue(right.thumbnail?.width), 1_000_000);
+      const rightHeight = Math.min(numericValue(right.thumbnail?.height), 1_000_000);
+      const areaDifference = (rightWidth * rightHeight) - (leftWidth * leftHeight);
+      if (areaDifference) return areaDifference;
+      const edgeDifference = Math.max(rightWidth, rightHeight) - Math.max(leftWidth, leftHeight);
+      return edgeDifference || right.index - left.index;
+    })
+    .map(({ thumbnail }) => safeThumbnailURL(thumbnail?.url))
+    .find(Boolean) || null;
+}
+
+function preferredYouTubeArtworkURL(metadataURL, resolvedURL) {
+  if (safeThumbnailURL(metadataURL)) return safeThumbnailURL(resolvedURL) || metadataURL;
+  return metadataURL || safeThumbnailURL(resolvedURL);
+}
+
 async function resolveYouTubeMetadata(source, signal, fetchImpl = fetch) {
   const videoID = YOUTUBE_VIDEO_ID.test(source) ? source : youtubeVideoID(source);
   if (!videoID) throw youtubeError("INVALID_YOUTUBE_VIDEO", "Enter a supported YouTube video URL.", { stage: "resolving_metadata" });
@@ -577,8 +599,7 @@ async function resolveYouTubeAudio(source, signal, fetchImpl = fetch) {
   const duration = numericValue(details?.lengthSeconds);
   if (duration > 24 * 60 * 60) throw youtubeError("YOUTUBE_DURATION_TOO_LONG", "The selected audio is too long to import.");
   const thumbnails = Array.isArray(details?.thumbnail?.thumbnails) ? details.thumbnail.thumbnails : [];
-  const thumbnailURL = thumbnails.slice().sort((left, right) => numericValue(right?.width) - numericValue(left?.width))
-    .map((item) => safeThumbnailURL(item?.url)).find(Boolean) || null;
+  const thumbnailURL = highestQualityThumbnailURL(thumbnails);
   return {
     videoID,
     title: cleanLabel(details?.title, videoID),
@@ -636,8 +657,7 @@ async function resolveYouTubeVideo(source, signal, fetchImpl = fetch) {
   const duration = numericValue(details?.lengthSeconds);
   if (duration > 24 * 60 * 60) throw youtubeError("YOUTUBE_DURATION_TOO_LONG", "The selected video is too long to import.");
   const thumbnails = Array.isArray(details?.thumbnail?.thumbnails) ? details.thumbnail.thumbnails : [];
-  const thumbnailURL = thumbnails.slice().sort((left, right) => numericValue(right?.width) - numericValue(left?.width))
-    .map((item) => safeThumbnailURL(item?.url)).find(Boolean) || null;
+  const thumbnailURL = highestQualityThumbnailURL(thumbnails);
   return {
     videoID,
     title: cleanLabel(details?.title, videoID),
@@ -839,6 +859,8 @@ module.exports = {
   extractYouTubeVisitorData,
   inspectYouTubeAudio,
   inspectYouTubeVideo,
+  highestQualityThumbnailURL,
+  preferredYouTubeArtworkURL,
   resolveYouTubeMetadata,
   resolveYouTubeAudio,
   resolveYouTubeVideo,

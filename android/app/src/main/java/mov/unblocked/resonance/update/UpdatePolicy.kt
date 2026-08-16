@@ -5,6 +5,22 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import mov.unblocked.resonance.data.RemoteURLPolicy
 
+internal object AndroidUpdateCheckPolicy {
+    const val DefaultIntervalMillis = 6 * 60 * 60 * 1_000L
+
+    fun shouldCheck(
+        lastSuccessfulCheckMillis: Long,
+        nowMillis: Long,
+        force: Boolean = false,
+        intervalMillis: Long = DefaultIntervalMillis,
+    ): Boolean {
+        require(intervalMillis > 0L) { "The update interval must be positive." }
+        if (force || lastSuccessfulCheckMillis <= 0L) return true
+        val elapsed = nowMillis - lastSuccessfulCheckMillis
+        return elapsed < 0L || elapsed >= intervalMillis
+    }
+}
+
 @Serializable
 data class AndroidUpdateManifest(
     val schemaVersion: Int = 1,

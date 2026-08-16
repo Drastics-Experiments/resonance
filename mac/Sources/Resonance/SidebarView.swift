@@ -288,6 +288,16 @@ struct MacSettingsSheet: View {
                     ) {
                         panel = .server
                     }
+                    Rectangle().fill(palette.divider).frame(height: 1)
+                    settingsActionRow(
+                        symbol: "arrow.clockwise",
+                        title: "Refresh song metadata",
+                        detail: model.downloadedMetadataRefreshDetail,
+                        actionTitle: model.isRefreshingDownloadedMetadata ? "Refreshing…" : "Refresh",
+                        isEnabled: !model.isRefreshingDownloadedMetadata
+                    ) {
+                        Task { await model.refreshDownloadedSongMetadata() }
+                    }
                 }
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .overlay { RoundedRectangle(cornerRadius: 15).stroke(palette.divider) }
@@ -647,6 +657,7 @@ struct MacSettingsSheet: View {
         title: String,
         detail: String,
         actionTitle: String,
+        isEnabled: Bool = true,
         action: @escaping () -> Void
     ) -> some View {
         HStack(spacing: 13) {
@@ -663,6 +674,7 @@ struct MacSettingsSheet: View {
             Button(actionTitle, action: action)
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .disabled(!isEnabled)
         }
         .padding(.horizontal, 14)
         .frame(minHeight: 64)

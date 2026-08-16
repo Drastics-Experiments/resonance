@@ -67,7 +67,9 @@ struct ContentView: View {
                         && !model.isRefreshingServerCatalog
                         && model.isServerDownloadTransferVisible {
                         TransferProgressOverlay(
-                            title: "Downloading",
+                            title: model.downloadStatus == "Preparing download"
+                                ? "Preparing download"
+                                : "Downloading",
                             detail: model.downloadCurrentFile,
                             status: model.downloadStatus,
                             progress: model.downloadProgress,

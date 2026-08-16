@@ -557,3 +557,184 @@ final class MobileAuthenticatedStreamResourceLoader: NSObject, AVAssetResourceLo
         }
     }
 }
+
+/// Range-capable YouTube playback for transient Listen Along media. Supplying
+/// headers through AVURLAsset options is not reliable across AVFoundation's
+/// follow-up range requests, so this loader applies the same verified range
+/// contract used by the working download path.
+final class MobileYouTubeStreamResourceLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
+    let delegateQueue = DispatchQueue(label: "mov.unblocked.resonance.ios.youtube-stream-loader")
+
+    private final class LoadingRequestBox: @unchecked Sendable {
+        let request: AVAssetResourceLoadingRequest
+        init(_ request: AVAssetResourceLoadingRequest) { self.request = request }
+    }
+
+    private let sourceURL: URL
+    private let headers: [String: String]
+    private let contentLength: Int64
+    private let contentType: String
+    private let session: URLSession
+    private let stateQueue = DispatchQueue(label: "mov.unblocked.resonance.ios.youtube-stream-loader.state")
+    private var tasks: [ObjectIdentifier: Task<Void, Never>] = [:]
+    private var invalidated = false
+
+    init(sourceURL: URL, headers: [String: String], contentLength: Int64, contentType: String) throws {
+        guard Self.isGoogleVideo(sourceURL), contentLength > 0 else {
+            throw MobileAuthenticatedStreamError.invalidURL
+        }
+        self.sourceURL = sourceURL
+        self.headers = try Self.safeHeaders(headers)
+        self.contentLength = contentLength
+        self.contentType = contentType
+        self.session = MobileAuthenticatedStreamSession.makeEphemeral()
+        super.init()
+    }
+
+    deinit { invalidate() }
+
+    static func assetURL(for sourceURL: URL) throws -> URL {
+        guard isGoogleVideo(sourceURL),
+              var components = URLComponents(url: sourceURL, resolvingAgainstBaseURL: false) else {
+            throw MobileAuthenticatedStreamError.invalidURL
+        }
+        components.scheme = "resonance-youtube"
+        guard let url = components.url else { throw MobileAuthenticatedStreamError.invalidURL }
+        return url
+    }
+
+    func invalidate() {
+        let active = stateQueue.sync {
+            guard !invalidated else { return [Task<Void, Never>]() }
+            invalidated = true
+            let active = Array(tasks.values)
+            tasks.removeAll()
+            return active
+        }
+        active.forEach { $0.cancel() }
+        session.invalidateAndCancel()
+    }
+
+    func resourceLoader(
+        _ resourceLoader: AVAssetResourceLoader,
+        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
+    ) -> Bool {
+        let identifier = ObjectIdentifier(loadingRequest)
+        let box = LoadingRequestBox(loadingRequest)
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.fulfill(box, identifier: identifier)
+        }
+        let accepted = stateQueue.sync {
+            guard !invalidated else { return false }
+            tasks[identifier]?.cancel()
+            tasks[identifier] = task
+            return true
+        }
+        if !accepted {
+            task.cancel()
+            loadingRequest.finishLoading(with: CancellationError())
+        }
+        return true
+    }
+
+    func resourceLoader(
+        _ resourceLoader: AVAssetResourceLoader,
+        didCancel loadingRequest: AVAssetResourceLoadingRequest
+    ) {
+        let task = stateQueue.sync { tasks.removeValue(forKey: ObjectIdentifier(loadingRequest)) }
+        task?.cancel()
+    }
+
+    private func fulfill(_ box: LoadingRequestBox, identifier: ObjectIdentifier) async {
+        defer { _ = stateQueue.sync { tasks.removeValue(forKey: identifier) } }
+        let loadingRequest = box.request
+        do {
+            try Task.checkCancellation()
+            let dataRequest = loadingRequest.dataRequest
+            let offset = dataRequest.map { $0.currentOffset != 0 ? $0.currentOffset : $0.requestedOffset } ?? 0
+            guard offset >= 0, offset < contentLength else { throw MobileAuthenticatedStreamError.invalidRange }
+            let requestedCount = dataRequest.map {
+                $0.requestsAllDataToEndOfResource
+                    ? contentLength - offset
+                    : min(Int64($0.requestedLength), contentLength - offset)
+            } ?? 1
+            guard requestedCount > 0 else { throw MobileAuthenticatedStreamError.invalidRange }
+
+            if let information = loadingRequest.contentInformationRequest {
+                information.contentType = UTType(mimeType: contentType)?.identifier ?? contentType
+                information.contentLength = contentLength
+                information.isByteRangeAccessSupported = true
+            }
+            guard let dataRequest else {
+                loadingRequest.finishLoading()
+                return
+            }
+            var received: Int64 = 0
+            while received < requestedCount {
+                let chunkStart = offset + received
+                let chunkCount = min(10 * 1_024 * 1_024, requestedCount - received)
+                var request = URLRequest(url: sourceURL)
+                request.httpMethod = "GET"
+                request.cachePolicy = .reloadIgnoringLocalCacheData
+                headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+                request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+                request.setValue("bytes=\(chunkStart)-\(chunkStart + chunkCount - 1)", forHTTPHeaderField: "Range")
+                let (bytes, rawResponse) = try await session.bytes(for: request, delegate: MobileRejectRedirectDelegate())
+                guard let response = rawResponse as? HTTPURLResponse,
+                      response.statusCode == 206,
+                      Self.isGoogleVideo(response.url),
+                      let range = Self.contentRange(response.value(forHTTPHeaderField: "Content-Range")),
+                      range.start == chunkStart,
+                      range.end - range.start + 1 == chunkCount,
+                      range.total == contentLength else {
+                    throw MobileAuthenticatedStreamError.invalidRange
+                }
+                var chunkReceived: Int64 = 0
+                var buffer = Data()
+                buffer.reserveCapacity(64 * 1_024)
+                for try await byte in bytes {
+                    try Task.checkCancellation()
+                    guard chunkReceived < chunkCount else { throw MobileAuthenticatedStreamError.invalidRange }
+                    buffer.append(byte)
+                    chunkReceived += 1
+                    if buffer.count >= 64 * 1_024 || chunkReceived == chunkCount {
+                        dataRequest.respond(with: buffer)
+                        buffer.removeAll(keepingCapacity: true)
+                    }
+                }
+                guard chunkReceived == chunkCount else { throw MobileAuthenticatedStreamError.truncatedResponse }
+                received += chunkReceived
+            }
+            loadingRequest.finishLoading()
+        } catch is CancellationError {
+            return
+        } catch {
+            loadingRequest.finishLoading(with: error)
+        }
+    }
+
+    private static func safeHeaders(_ headers: [String: String]) throws -> [String: String] {
+        guard !headers.keys.contains(where: {
+            $0.caseInsensitiveCompare("Authorization") == .orderedSame
+                || $0.caseInsensitiveCompare("Cookie") == .orderedSame
+        }) else { throw MobileAuthenticatedStreamError.invalidURL }
+        let allowed = Set(["accept", "accept-language", "origin", "referer", "user-agent", "x-goog-visitor-id"])
+        return headers.filter { allowed.contains($0.key.lowercased()) && !$0.value.isEmpty && $0.value.count <= 2_048 }
+    }
+
+    private static func isGoogleVideo(_ url: URL?) -> Bool {
+        guard let url, url.scheme?.lowercased() == "https", url.user == nil, url.password == nil,
+              let host = url.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) else { return false }
+        return host == "googlevideo.com" || host.hasSuffix(".googlevideo.com")
+    }
+
+    private static func contentRange(_ value: String?) -> (start: Int64, end: Int64, total: Int64)? {
+        guard let value, value.hasPrefix("bytes ") else { return nil }
+        let halves = value.dropFirst(6).split(separator: "/", omittingEmptySubsequences: false)
+        let bounds = halves.first?.split(separator: "-", omittingEmptySubsequences: false) ?? []
+        guard halves.count == 2, bounds.count == 2,
+              let start = Int64(bounds[0]), let end = Int64(bounds[1]), let total = Int64(halves[1]) else { return nil }
+        return (start, end, total)
+    }
+}

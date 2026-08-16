@@ -760,11 +760,10 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(serverDownloadSource, /publishProgress\.reset = \(\) => \{[\s\S]+lastPublishedAt = Number\.NEGATIVE_INFINITY;[\s\S]+publishedInitial = false;[\s\S]+publishedFinal = false/);
   assert.match(appSource, /if \(dismiss\) \{[\s\S]+hideServerTransfer\(owner\);[\s\S]+return;/);
   assert.doesNotMatch(serverSyncHandler, /completedBytes: itemCompletedBytes \|\| 1|totalBytes: itemTotalBytes \|\| itemCompletedBytes \|\| 1/);
-  assert.doesNotMatch(appSource, /updateServerTransfer\(\{ direction: "download", currentFile: "Preparing download/);
-  assert.doesNotMatch(appSource, /Preparing transfer|Preparing download/);
-  assert.doesNotMatch(htmlSource, /Preparing transfer|Preparing download|id="serverTransferPercent">0%<|id="serverTransferProgress"[^>]+value="0"/);
+  assert.match(appSource, /title: "Preparing download",[\s\S]+phase: "preparing",[\s\S]+currentFile: "Loading song metadata"/);
+  assert.doesNotMatch(htmlSource, /id="serverTransferPercent">0%<|id="serverTransferProgress"[^>]+value="0"/);
   assert.match(htmlSource, /id="serverTransferToast"[^>]+hidden[\s\S]+id="serverTransferTitle"><\/strong>[\s\S]+id="serverTransferDetail"><\/small>[\s\S]+id="serverTransferProgress" max="1"[\s\S]+id="serverTransferPercent"><\/span>/);
-  assert.match(appSource, /if \(direction === "download" && downloadBytes <= 0 && !ownsVisibleDownload\) \{[\s\S]+toast\.hidden = true;[\s\S]+return;/);
+  assert.match(appSource, /const isPreparingDownload = direction === "download" && phase === "preparing";[\s\S]+if \(direction === "download" && downloadBytes <= 0 && !ownsVisibleDownload && !isPreparingDownload\) \{[\s\S]+toast\.hidden = true;[\s\S]+return;/);
   assert.match(appSource, /const displayedTransferComplete = itemTotal !== undefined[\s\S]+Number\(itemCompleted\) >= Number\(itemTotal\)/);
   assert.match(appSource, /const ownsVisibleDownload = serverTransferActive[\s\S]+if \(!ownsVisibleDownload && !\(stage === "downloading" && completed > 0\)\) return;/);
   assert.match(appSource, /if \(ownsVisibleDownload && stage === "downloading" && completed <= 0\) return;/);

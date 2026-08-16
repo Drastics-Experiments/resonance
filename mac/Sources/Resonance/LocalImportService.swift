@@ -303,6 +303,8 @@ enum LocalImportRangeVerifier {
 }
 
 actor LocalDeviceImportService {
+    typealias CandidateSearch = @Sendable (LocalImportSpotifyTrack) async throws -> [LocalImportAudioSourceMatch]
+
     private struct YouTubeOEmbedResponse: Decodable, Sendable {
         let type: String
         let providerName: String
@@ -400,6 +402,7 @@ actor LocalDeviceImportService {
     private let temporaryRoot: URL
     private let fileManager: FileManager
     private let soundCloudOperations: LocalImportSoundCloudOperations
+    private let candidateSearchOverride: CandidateSearch?
     private var preparedSoundCloudStreams = LocalImportPreparedSoundCloudStreamCache()
     private var preparedDirectories = false
 
@@ -415,12 +418,14 @@ actor LocalDeviceImportService {
         localRoot: URL? = nil,
         temporaryRoot: URL = FileManager.default.temporaryDirectory,
         fileManager: FileManager = .default,
-        soundCloudOperations: LocalImportSoundCloudOperations = .production
+        soundCloudOperations: LocalImportSoundCloudOperations = .production,
+        candidateSearch: CandidateSearch? = nil
     ) {
         self.sessions = sessions
         self.temporaryRoot = temporaryRoot
         self.fileManager = fileManager
         self.soundCloudOperations = soundCloudOperations
+        self.candidateSearchOverride = candidateSearch
         if let localRoot {
             self.localRoot = localRoot
         } else {
@@ -543,7 +548,28 @@ actor LocalDeviceImportService {
                 preparationContext: preparationContext
             )
             await progress(.init(stage: .inspectingSource))
-            let stream = try await soundCloudOperations.resolveAudio(normalizedSource, sessions.soundcloud)
+            let stream: LocalImportSoundCloudAudioStream
+            do {
+                stream = try await soundCloudOperations.resolveAudio(normalizedSource, sessions.soundcloud)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                await progress(.init(stage: .searchingCandidates))
+                let candidates = try await searchCandidates(for: metadata)
+                guard !candidates.isEmpty else {
+                    throw LocalImportError(
+                        stage: .searchingCandidates,
+                        code: "SOUNDCLOUD_STREAM_UNAVAILABLE",
+                        message: "This SoundCloud track has no direct public audio rendition and no matching alternate source was found."
+                    )
+                }
+                return LocalImportResolution(
+                    kind: .soundCloud,
+                    track: metadata,
+                    candidates: candidates,
+                    releases: []
+                )
+            }
             try Task.checkCancellation()
             try preparedSoundCloudStreams.store(
                 stream,
@@ -1010,7 +1036,10 @@ actor LocalDeviceImportService {
             title: cleanMetadata(enrichedInputMetadata.title, fallback: resolved.preview.title),
             artist: cleanMetadata(enrichedInputMetadata.artist, fallback: resolved.preview.author ?? "Unknown uploader"),
             album: cleanMetadata(enrichedInputMetadata.album, fallback: "Imported"),
-            artworkURL: enrichedInputMetadata.artworkURL ?? resolved.preview.thumbnailURL,
+            artworkURL: LocalImportArtworkPolicy.preferredArtwork(
+                metadataURL: enrichedInputMetadata.artworkURL,
+                resolvedYouTubeURL: resolved.preview.thumbnailURL
+            ),
             sourceURL: enrichedInputMetadata.sourceURL
         )
         let artwork = await fetchArtwork(metadata.artworkURL)
@@ -1238,7 +1267,9 @@ actor LocalDeviceImportService {
         let resolved = try await resolveYouTubeMedia(videoID: videoID, mediaMode: mediaMode)
         return LocalImportPreviewStream(
             url: resolved.primaryStream.streamingURL,
-            httpHeaders: resolved.primaryStream.streamingHeaders
+            httpHeaders: resolved.primaryStream.streamingHeaders,
+            contentLength: resolved.primaryStream.contentLength,
+            contentType: resolved.primaryStream.contentType
         )
     }
 
@@ -1786,6 +1817,9 @@ actor LocalDeviceImportService {
     }
 
     private func searchCandidates(for track: LocalImportSpotifyTrack) async throws -> [LocalImportAudioSourceMatch] {
+        if let candidateSearchOverride {
+            return try await candidateSearchOverride(track)
+        }
         let query = [track.artist, track.title, track.album].compactMap { $0 }.joined(separator: " ")
         var musicComponents = URLComponents(string: "https://music.youtube.com/search")!
         musicComponents.queryItems = [URLQueryItem(name: "q", value: query)]
@@ -2172,9 +2206,8 @@ actor LocalDeviceImportService {
         guard duration <= 24 * 60 * 60 else {
             throw LocalImportError(stage: .inspectingSource, code: "YOUTUBE_DURATION_TOO_LONG", message: "The selected \(mediaMode.rawValue) is too long to import.")
         }
-        let thumbnails = ((details["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]] ?? [])
-            .sorted { Self.integer($0["width"]) > Self.integer($1["width"]) }
-        let thumbnail = thumbnails.compactMap { LocalImportURL.youtubeArtwork($0["url"] as? String)?.absoluteString }.first
+        let thumbnails = (details["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]] ?? []
+        let thumbnail = LocalImportArtworkPolicy.highestQualityYouTubeThumbnail(thumbnails)
         let preview = LocalImportYouTubePreview(
             videoID: videoID,
             title: cleanMetadata(details["title"] as? String, fallback: videoID),
@@ -2360,11 +2393,15 @@ actor LocalDeviceImportService {
               (200..<300).contains(response.statusCode),
               let type = response.value(forHTTPHeaderField: "Content-Type")?.lowercased(),
               type.hasPrefix("image/"),
-              let image = ArtworkCropping.validatedImage(from: data),
-              let tiff = image.tiffRepresentation,
+              let image = ArtworkCropping.validatedImage(from: data) else { return nil }
+        // Keep JPEG and PNG bytes exactly as supplied. Convert newer provider
+        // formats losslessly so AVFoundation can embed a broadly supported cover.
+        if type.hasPrefix("image/jpeg") || type.hasPrefix("image/png") { return data }
+        guard let tiff = image.tiffRepresentation,
               let representation = NSBitmapImageRep(data: tiff),
-              let jpeg = representation.representation(using: .jpeg, properties: [.compressionFactor: 0.9]) else { return nil }
-        return jpeg
+              let png = representation.representation(using: .png, properties: [:]),
+              png.count <= maxArtworkBytes else { return nil }
+        return png
     }
 
     private func responseData(

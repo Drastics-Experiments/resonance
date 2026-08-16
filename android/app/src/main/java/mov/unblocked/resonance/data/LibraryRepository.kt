@@ -287,6 +287,10 @@ class LibraryRepository(
                 fallbackArtwork = fallbackArtwork,
                 contentSHA256 = verifiedContentSHA256,
                 preservesUnlinkedImport = false,
+            ).copy(
+                // Catalog artwork is authoritative for a server song. Preserve embedded artwork
+                // only as a temporary fallback until the non-blocking catalog backfill completes.
+                artworkScanComplete = song.artworkURL.isNullOrBlank(),
             )
         } catch (error: Throwable) {
             discardUncommittedDownload(file)
@@ -349,6 +353,24 @@ class LibraryRepository(
             val filename = writeArtwork(track.id, artwork) ?: return@withContext track
             track.copy(artworkFilename = filename, artworkScanComplete = true)
         }
+
+    suspend fun refreshEmbeddedMetadata(track: Track): Track = withContext(Dispatchers.IO) {
+        val file = fileForTrack(track)
+        if (!file.isFile) return@withContext track
+        val metadata = readMetadata(file)
+        var refreshed = track.copy(
+            title = metadata.title ?: track.title,
+            artist = metadata.artist ?: track.artist,
+            album = metadata.album ?: track.album,
+            durationMs = metadata.durationMs.takeIf { it > 0L } ?: track.durationMs,
+        )
+        metadata.artwork?.let { artwork ->
+            writeArtwork(track.id, artwork)?.let { filename ->
+                refreshed = refreshed.copy(artworkFilename = filename, artworkScanComplete = true)
+            }
+        }
+        refreshed
+    }
 
     internal fun newDownloadFile(preferredFilename: String): File = File(
         musicDirectory,

@@ -383,6 +383,43 @@ enum MobileTrackPersistencePolicy {
     }
 }
 
+enum MobileDownloadedSongMetadataRefreshPolicy {
+    static func sourceURL(for track: MobileTrack, fileExists: Bool) -> String? {
+        guard fileExists else { return nil }
+        if let source = MobileTrackPersistencePolicy.canonicalSourceURL(track.sourceURL) {
+            return source
+        }
+        guard let downloadSource = track.downloadSourceURL.flatMap({ URL(string: $0) }) else {
+            return nil
+        }
+        return MobileTrackPersistencePolicy.persistedDownloadSourceURL(
+            downloadSource,
+            legitimateServerOrigin: track.sourceServer.flatMap(URL.init(string:))
+        )
+    }
+
+    static func applying(
+        _ metadata: LocalImportSpotifyTrack,
+        artworkFilename: String?,
+        to track: MobileTrack
+    ) -> MobileTrack {
+        var refreshed = track
+        refreshed.title = nonempty(metadata.title) ?? track.title
+        refreshed.artist = nonempty(metadata.artist) ?? track.artist
+        refreshed.album = nonempty(metadata.album) ?? track.album
+        if let artworkFilename {
+            refreshed.artworkFilename = artworkFilename
+            refreshed.artworkScanComplete = true
+        }
+        return refreshed
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        let value = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? nil : value
+    }
+}
+
 struct MobileNowPlayingSnapshot: Equatable {
     let identifier: String
     let title: String
@@ -1389,6 +1426,12 @@ struct MobileTransferDisplayState: Equatable, Sendable {
     let completedBytes: Int64
     let totalBytes: Int64
     let fallbackProgress: Double?
+
+    var displayTitle: String {
+        kind == .download && detail == "Preparing download"
+            ? "Preparing download"
+            : kind.title
+    }
 
     var progress: Double? {
         MobileTransferDisplayPolicy.progress(

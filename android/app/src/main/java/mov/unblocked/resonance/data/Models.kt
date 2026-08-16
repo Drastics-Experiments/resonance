@@ -112,6 +112,24 @@ internal object ProviderMediaURLPolicy {
     }.getOrDefault(false)
 }
 
+object DownloadedSongMetadataRefreshPolicy {
+    fun sourceURL(track: Track, fileExists: Boolean): String? = (track.sourceURL ?: track.downloadSourceURL)
+        ?.trim()
+        ?.takeIf { fileExists && it.isNotEmpty() }
+
+    fun apply(
+        track: Track,
+        metadata: LinkImportTrack,
+        artworkFilename: String? = null,
+    ): Track = track.copy(
+        title = metadata.title.trim().ifEmpty { track.title },
+        artist = metadata.artist.trim().ifEmpty { track.artist },
+        album = metadata.album?.trim()?.takeIf(String::isNotEmpty) ?: track.album,
+        artworkFilename = artworkFilename ?: track.artworkFilename,
+        artworkScanComplete = if (artworkFilename != null) true else track.artworkScanComplete,
+    )
+}
+
 object UnlinkedDownloadMigrationPolicy {
     const val Identifier = "delete-unlinked-downloads-v1"
 
