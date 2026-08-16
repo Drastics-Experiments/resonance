@@ -12,11 +12,13 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.ShuffleOrder
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import kotlin.random.Random
 import mov.unblocked.resonance.MainActivity
 
 @UnstableApi
@@ -31,6 +33,8 @@ class PlaybackService : MediaSessionService() {
     private var crossfadeDurationMs = 0L
     private var crossfadeStarted = false
     private var crossfadeUpdatesRunning = false
+    private var shuffledQueueMediaIDs: List<String>? = null
+    private var remainingShuffledMediaIDs = mutableSetOf<String>()
     private val playbackPreferences by lazy { getSharedPreferences("resonance.playback", 0) }
     private val playbackPreferenceListener =
         SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -52,6 +56,14 @@ class PlaybackService : MediaSessionService() {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             handlePrimaryTransition(mediaItem, reason)
             seekToClipStartIfNeeded(mediaItem)
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) {
+                // Starting a queue again from a user-selected song deserves a new cycle even when
+                // the queue contains the same IDs as before.
+                shuffledQueueMediaIDs = null
+                refreshShuffleOrderForQueue()
+            } else {
+                advanceShuffleCycle(mediaItem)
+            }
         }
 
         override fun onPositionDiscontinuity(
@@ -68,6 +80,14 @@ class PlaybackService : MediaSessionService() {
         }
 
         override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+            refreshShuffleOrderForQueue()
+            refreshCrossfadeUpdateSchedule()
+        }
+
+        override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+            shuffledQueueMediaIDs = null
+            remainingShuffledMediaIDs.clear()
+            if (shuffleModeEnabled) refreshShuffleOrderForQueue()
             refreshCrossfadeUpdateSchedule()
         }
 
@@ -158,6 +178,37 @@ class PlaybackService : MediaSessionService() {
         val player = player ?: return
         val start = clipStartMs(mediaItem)
         if (player.currentPosition < start) player.seekTo(start)
+    }
+
+    private fun refreshShuffleOrderForQueue() {
+        val primary = player ?: return
+        if (!primary.shuffleModeEnabled || primary.mediaItemCount <= 0) {
+            shuffledQueueMediaIDs = null
+            remainingShuffledMediaIDs.clear()
+            return
+        }
+        val mediaIDs = (0 until primary.mediaItemCount).map { primary.getMediaItemAt(it).mediaId }
+        if (mediaIDs == shuffledQueueMediaIDs) return
+        installFreshShuffleOrder(primary, mediaIDs)
+    }
+
+    private fun advanceShuffleCycle(mediaItem: MediaItem?) {
+        val primary = player ?: return
+        if (!primary.shuffleModeEnabled || primary.mediaItemCount <= 1) return
+        val mediaID = mediaItem?.mediaId ?: return
+        if (!remainingShuffledMediaIDs.remove(mediaID) || remainingShuffledMediaIDs.isNotEmpty()) return
+        val mediaIDs = (0 until primary.mediaItemCount).map { primary.getMediaItemAt(it).mediaId }
+        installFreshShuffleOrder(primary, mediaIDs)
+    }
+
+    private fun installFreshShuffleOrder(primary: ExoPlayer, mediaIDs: List<String>) {
+        shuffledQueueMediaIDs = mediaIDs
+        val currentIndex = primary.currentMediaItemIndex
+        val order = QueuePolicy.shuffledOrder(primary.mediaItemCount, currentIndex)
+        remainingShuffledMediaIDs = mediaIDs.toMutableSet().apply {
+            primary.currentMediaItem?.mediaId?.let(::remove)
+        }
+        primary.setShuffleOrder(ShuffleOrder.DefaultShuffleOrder(order, Random.nextLong()))
     }
 
     private fun clipStartMs(mediaItem: MediaItem?): Long =

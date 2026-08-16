@@ -103,6 +103,7 @@ import mov.unblocked.resonance.data.ProfileLibraryState
 import mov.unblocked.resonance.data.RemotePlaylist
 import mov.unblocked.resonance.data.RemoteClipRange
 import mov.unblocked.resonance.data.RemotePlaylistsDocument
+import mov.unblocked.resonance.data.RemoteArtworkPersistencePolicy
 import mov.unblocked.resonance.data.RemoteSong
 import mov.unblocked.resonance.data.RemoteSongMetadataCacheEntry
 import mov.unblocked.resonance.data.RemoteSongMetadataCachePolicy
@@ -2143,7 +2144,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             songID = remoteID,
             serverURL = serverURL,
             profileID = library.syncProfileID,
-        )
+        ).let { associated ->
+            val hasCatalogArtwork = !mutableState.value.remoteSongs
+                .firstOrNull { it.id == remoteID }
+                ?.artworkURL
+                .isNullOrBlank()
+            if (hasCatalogArtwork) associated.copy(artworkScanComplete = false) else associated
+        }
         library = library.copy(tracks = library.tracks.map { if (it.id == trackID) updatedTrack else it })
         val changedPlaylists = library.playlists.filter {
             !it.isSystem && (trackID in it.trackIDs || oldRemoteID in it.remoteSongIDs.orEmpty())
@@ -3153,9 +3160,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val candidates = library.tracks.filter { track ->
             val existingArtwork = repository.artworkFile(track)?.takeIf(File::isFile)
             val song = track.takeIf(::trackBelongsToActiveContext)?.remoteID?.let(songsByID::get)
-            trackBelongsToActiveContext(track) &&
-                existingArtwork?.length()?.let { it > 0L } != true &&
-                !song?.artworkURL.isNullOrBlank()
+            trackBelongsToActiveContext(track) && RemoteArtworkPersistencePolicy.shouldBackfill(
+                artworkScanComplete = track.artworkScanComplete,
+                existingArtworkBytes = existingArtwork?.length(),
+                artworkURL = song?.artworkURL,
+            )
         }
         var changed = false
 
@@ -3602,6 +3611,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 library = hydrateRemoteLikes(hydrateRemotePlaylists(
                     library.copy(tracks = library.tracks + result.tracks),
                 ))
+                // Media downloads stay serialized and fast; once the batch is complete, replace
+                // temporary embedded covers with artwork bound to each catalog song ID.
+                backfillDownloadedArtwork(downloadClient, mutableState.value.remoteSongs)
                 persistLibrary()
                 val downloadedCount = sourceDownloads + result.tracks.size
                 val failedCount = sourceFailures.size + result.failures.size
