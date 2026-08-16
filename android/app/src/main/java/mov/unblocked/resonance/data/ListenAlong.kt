@@ -47,6 +47,7 @@ data class ListenAlongEnvelope(
     @SerialName("server_time") val serverTime: String? = null,
     val role: String? = null,
     @SerialName("host_token") val hostToken: String? = null,
+    @SerialName("participant_count") val participantCount: Int? = null,
 ) {
     val inviteCode: String?
         get() = formattedCode ?: code ?: sessionCode
@@ -65,6 +66,9 @@ data class ListenAlongEnvelope(
         } else {
             ListenAlongRole.Guest
         }
+
+    val normalizedParticipantCount: Int?
+        get() = participantCount?.takeIf { it > 0 }
 }
 
 enum class ListenAlongRole { Host, Guest }

@@ -980,6 +980,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     private var remoteStreamDirectURL: URL?
     private var remoteStreamDirectHeaders: [String: String] = [:]
     private var remoteStreamLoader: MacAuthenticatedStreamResourceLoader?
+    private var remoteYouTubeStreamLoader: MacYouTubeStreamResourceLoader?
     private var remoteStreamAuthorizationLease: MacAuthenticatedStreamAuthorizationLease?
     private var offlineDownloadAuthorizationLease: MacAuthenticatedStreamAuthorizationLease?
     private var offlineDownloadRequiresVerifiedConfiguration = false
@@ -2574,9 +2575,18 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             )
             return
         }
-        if let remote = remoteSongs.first(where: {
+        let remote = remoteSongs.first(where: {
             MacListenAlongSourcePolicy.canonical($0.sourceURL) == sourceURL
-        }) {
+        })
+        if let remote,
+           MacListenAlongPlaybackPolicy.shouldUseServerStream(
+               hasCatalogMatch: true,
+               streamOnlyEnabled: clientConfiguration.allowsStreamOnlyPlayback,
+               hasPlayableServerBytes: MacRemoteStreamMediaPolicy.unavailableMessage(
+                   kind: remote.kind,
+                   size: remote.size
+               ) == nil
+           ) {
             startRemoteSong(
                 remote,
                 preservingShuffleQueue: true,
@@ -2587,6 +2597,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             )
             return
         }
+        // The server catalog is metadata here, not a download requirement.
+        // Resolve the host's stable source into a short-lived provider stream
+        // whenever there is no local file or usable server stream.
         do {
             let mode: LocalImportMediaMode = mediaKind == .video ? .video : .audio
             let resolution = try await serverLinkImportService.resolve(
@@ -2974,6 +2987,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             remoteStreamPlayer = nil
             remoteStreamLoader?.invalidate()
             remoteStreamLoader = nil
+            remoteYouTubeStreamLoader?.invalidate()
+            remoteYouTubeStreamLoader = nil
             remoteStreamAuthorizationLease?.invalidate()
             remoteStreamAuthorizationLease = nil
             remoteStreamSongID = nil
@@ -3026,6 +3041,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 track: track,
                 sourceURL: preview.url,
                 headers: preview.httpHeaders,
+                contentLength: preview.contentLength,
+                contentType: preview.contentType,
                 position: desiredPosition,
                 isPlaying: desiredPlaying,
                 generation: generation
@@ -3037,19 +3054,34 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         track: Track,
         sourceURL: URL,
         headers: [String: String],
+        contentLength: Int64?,
+        contentType: String?,
         position desiredPosition: TimeInterval,
         isPlaying desiredPlaying: Bool,
         generation: UInt64
     ) async {
         do {
-            let asset = AVURLAsset(
-                url: sourceURL,
-                options: [
-                    "AVURLAssetHTTPHeaderFieldsKey": headers.filter {
-                        $0.key.caseInsensitiveCompare("Authorization") != .orderedSame
-                    }
-                ]
-            )
+            let asset: AVURLAsset
+            if let contentLength, let contentType {
+                let loader = try MacYouTubeStreamResourceLoader(
+                    sourceURL: sourceURL,
+                    headers: headers,
+                    contentLength: contentLength,
+                    contentType: contentType
+                )
+                asset = AVURLAsset(url: try MacYouTubeStreamResourceLoader.assetURL(for: sourceURL))
+                asset.resourceLoader.setDelegate(loader, queue: loader.delegateQueue)
+                remoteYouTubeStreamLoader = loader
+            } else {
+                asset = AVURLAsset(
+                    url: sourceURL,
+                    options: [
+                        "AVURLAssetHTTPHeaderFieldsKey": headers.filter {
+                            $0.key.caseInsensitiveCompare("Authorization") != .orderedSame
+                        }
+                    ]
+                )
+            }
             guard try await asset.load(.isPlayable) else {
                 throw MacListenAlongError.invalidResponse
             }
@@ -5035,6 +5067,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         remoteStreamPlayer = nil
         remoteStreamLoader?.invalidate()
         remoteStreamLoader = nil
+        remoteYouTubeStreamLoader?.invalidate()
+        remoteYouTubeStreamLoader = nil
         remoteStreamAuthorizationLease?.invalidate()
         remoteStreamAuthorizationLease = nil
         remoteStreamDirectURL = nil

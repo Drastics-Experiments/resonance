@@ -169,6 +169,9 @@ test("keeps listen-along network and provider capabilities out of the renderer",
   assert.match(renderer, /event\.updated_at/);
   assert.match(renderer, /revision <= session\.revision && session\.hasEvent/);
   assert.match(renderer, /activeListenAlongStream\?\.sessionID === session\.id/);
+  assert.match(renderer, /localTrackForListenAlongSource\(event\.source_key\)/);
+  assert.match(renderer, /currentServerTransferModes\(\)\.downloadMode === "stream_only"/);
+  assert.match(renderer, /if \(!track\) \{\s*const capability = await api\.createListenAlongSource/);
   assert.match(renderer, /hydrateListenAlongArtwork/);
   assert.match(renderer, /api\.fetchLocalImportArtwork\(source\)/);
   assert.match(renderer, /!\/\^file:/i);

@@ -2641,6 +2641,7 @@ private struct ServerSourceImportSheet: View {
 private struct MobilePlayerBar: View {
     @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
+    @EnvironmentObject private var listenAlong: MobileListenAlongController
     @Binding var showsNowPlaying: Bool
 
     var body: some View {
@@ -2664,20 +2665,27 @@ private struct MobilePlayerBar: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Open Now Playing for \(track.title)")
-                    Button { library.previous() } label: { Image(systemName: "backward.end.fill") }
-                        .disabled(library.isTransientStreamActive || library.isListenAlongPlaybackLocked)
-                    Button { library.togglePlay() } label: {
-                        Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.title3)
-                            .frame(width: 38, height: 38)
-                            .background(palette.raisedSurface, in: Circle())
-                            .overlay { Circle().stroke(palette.accent.opacity(0.72), lineWidth: 1.5) }
-                            .foregroundStyle(.white)
-                            .shadow(color: palette.accent.opacity(0.22), radius: 8)
+                    if library.isListenAlongPlaybackLocked {
+                        ListenAlongParticipantIndicator(
+                            count: listenAlong.participantCount,
+                            height: 44,
+                            iconSize: 19
+                        )
+                    } else {
+                        Button { library.previous() } label: { Image(systemName: "backward.end.fill") }
+                            .disabled(library.isTransientStreamActive)
+                        Button { library.togglePlay() } label: {
+                            Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.title3)
+                                .frame(width: 38, height: 38)
+                                .background(palette.raisedSurface, in: Circle())
+                                .overlay { Circle().stroke(palette.accent.opacity(0.72), lineWidth: 1.5) }
+                                .foregroundStyle(.white)
+                                .shadow(color: palette.accent.opacity(0.22), radius: 8)
+                        }
+                        Button { library.next() } label: { Image(systemName: "forward.end.fill") }
+                            .disabled(library.isTransientStreamActive)
                     }
-                    .disabled(library.isListenAlongPlaybackLocked)
-                    Button { library.next() } label: { Image(systemName: "forward.end.fill") }
-                        .disabled(library.isTransientStreamActive || library.isListenAlongPlaybackLocked)
                 }
                 GeometryReader { geometry in
                     ZStack(alignment: .leading) {
@@ -2702,6 +2710,7 @@ private struct MobilePlayerBar: View {
 private struct NowPlayingView: View {
     @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
+    @EnvironmentObject private var listenAlong: MobileListenAlongController
     @Binding var isPresented: Bool
     @State private var dismissalOffset: CGFloat = 0
 
@@ -2743,7 +2752,9 @@ private struct NowPlayingView: View {
 
                         progress(for: track)
                         transportControls
-                        playbackOptions
+                        if !library.isListenAlongPlaybackLocked {
+                            playbackOptions
+                        }
                         trackDetails(track)
                     }
                     .padding(.horizontal, 24)
@@ -2838,27 +2849,36 @@ private struct NowPlayingView: View {
     }
 
     private var transportControls: some View {
-        HStack(spacing: 44) {
-            Button { library.previous() } label: {
-                Image(systemName: "backward.end.fill").font(.title)
+        Group {
+            if library.isListenAlongPlaybackLocked {
+                ListenAlongParticipantIndicator(
+                    count: listenAlong.participantCount,
+                    height: 72,
+                    iconSize: 28
+                )
+            } else {
+                HStack(spacing: 44) {
+                    Button { library.previous() } label: {
+                        Image(systemName: "backward.end.fill").font(.title)
+                    }
+                    .disabled(library.isTransientStreamActive)
+                    Button { library.togglePlay() } label: {
+                        Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 30, weight: .bold))
+                            .frame(width: 72, height: 72)
+                            .background(palette.raisedSurface, in: Circle())
+                            .overlay { Circle().stroke(palette.accent.opacity(0.72), lineWidth: 2) }
+                            .foregroundStyle(.white)
+                            .shadow(color: palette.accent.opacity(0.24), radius: 14)
+                    }
+                    Button { library.next() } label: {
+                        Image(systemName: "forward.end.fill").font(.title)
+                    }
+                    .disabled(library.isTransientStreamActive)
+                }
+                .buttonStyle(.plain)
             }
-            .disabled(library.isTransientStreamActive || library.isListenAlongPlaybackLocked)
-            Button { library.togglePlay() } label: {
-                Image(systemName: library.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 30, weight: .bold))
-                    .frame(width: 72, height: 72)
-                    .background(palette.raisedSurface, in: Circle())
-                    .overlay { Circle().stroke(palette.accent.opacity(0.72), lineWidth: 2) }
-                    .foregroundStyle(.white)
-                    .shadow(color: palette.accent.opacity(0.24), radius: 14)
-            }
-            .disabled(library.isListenAlongPlaybackLocked)
-            Button { library.next() } label: {
-                Image(systemName: "forward.end.fill").font(.title)
-            }
-            .disabled(library.isTransientStreamActive || library.isListenAlongPlaybackLocked)
         }
-        .buttonStyle(.plain)
     }
 
     private var playbackOptions: some View {
@@ -2921,6 +2941,34 @@ private struct NowPlayingView: View {
     private func timeText(_ interval: TimeInterval) -> String {
         let seconds = max(Int(interval), 0)
         return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
+    }
+}
+
+private struct ListenAlongParticipantIndicator: View {
+    @Environment(\.resonancePalette) private var palette
+    let count: Int?
+    let height: CGFloat
+    let iconSize: CGFloat
+
+    var body: some View {
+        HStack(spacing: height > 44 ? 10 : 7) {
+            Image(systemName: "person.2.fill")
+                .font(.system(size: iconSize, weight: .semibold))
+            if let count {
+                Text(count, format: .number)
+                    .font(height > 44 ? .title3.weight(.bold) : .subheadline.weight(.bold))
+                    .monospacedDigit()
+            }
+        }
+        .foregroundStyle(.white)
+        .frame(height: height)
+        .padding(.horizontal, height > 44 ? 22 : 13)
+        .background(palette.raisedSurface, in: Capsule())
+        .overlay { Capsule().stroke(palette.accent.opacity(0.72), lineWidth: height > 44 ? 2 : 1.5) }
+        .shadow(color: palette.accent.opacity(0.24), radius: height > 44 ? 14 : 8)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(count.map { "Listening Along with \($0) people" } ?? "Listening Along")
+        .accessibilityHint("Playback is controlled by the session host")
     }
 }
 

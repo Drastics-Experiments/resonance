@@ -871,6 +871,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var streamingArtworkURL: URL?
     private var streamingPlayer: AVPlayer?
     private var streamingResourceLoader: MobileAuthenticatedStreamResourceLoader?
+    private var streamingYouTubeLoader: MobileYouTubeStreamResourceLoader?
     private var streamingAuthorizationLease: MobileAuthenticatedStreamAuthorizationLease?
     private var streamingPreview: LocalImportPreviewStream?
     private var streamingPreviewSourceURL: String?
@@ -962,6 +963,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         streamingPlayer?.pause()
         crossfadePlayer?.stop()
         streamingResourceLoader?.invalidate()
+        streamingYouTubeLoader?.invalidate()
         streamingAuthorizationLease?.invalidate()
         for observer in audioSessionObservers {
             NotificationCenter.default.removeObserver(observer)
@@ -2410,11 +2412,25 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         self.position = max(position, 0)
         UserDefaults.standard.removeObject(forKey: "Resonance.currentTrack")
 
-        var assetOptions: [String: Any] = [:]
-        if !preview.httpHeaders.isEmpty {
-            assetOptions["AVURLAssetHTTPHeaderFieldsKey"] = preview.httpHeaders
+        let asset: AVURLAsset
+        if let contentLength = preview.contentLength,
+           let contentType = preview.contentType {
+            let loader = try MobileYouTubeStreamResourceLoader(
+                sourceURL: preview.url,
+                headers: preview.httpHeaders,
+                contentLength: contentLength,
+                contentType: contentType
+            )
+            asset = AVURLAsset(url: try MobileYouTubeStreamResourceLoader.assetURL(for: preview.url))
+            asset.resourceLoader.setDelegate(loader, queue: loader.delegateQueue)
+            streamingYouTubeLoader = loader
+        } else {
+            var assetOptions: [String: Any] = [:]
+            if !preview.httpHeaders.isEmpty {
+                assetOptions["AVURLAssetHTTPHeaderFieldsKey"] = preview.httpHeaders
+            }
+            asset = AVURLAsset(url: preview.url, options: assetOptions)
         }
-        let asset = AVURLAsset(url: preview.url, options: assetOptions)
         guard try await asset.load(.isPlayable) else {
             discardStreamingPlayback()
             throw MobileAuthenticatedStreamError.invalidResponse
@@ -5069,9 +5085,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         streamingPlayer = nil
         let loader = streamingResourceLoader
         streamingResourceLoader = nil
+        let youtubeLoader = streamingYouTubeLoader
+        streamingYouTubeLoader = nil
         let authorizationLease = streamingAuthorizationLease
         streamingAuthorizationLease = nil
         loader?.invalidate()
+        youtubeLoader?.invalidate()
         authorizationLease?.setInvalidationHandler(nil)
         authorizationLease?.invalidate()
         streamingTrack = nil

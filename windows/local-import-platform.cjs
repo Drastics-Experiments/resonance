@@ -22,6 +22,7 @@ const {
   downloadYouTubeVideo,
   inspectYouTubeAudio,
   inspectYouTubeVideo,
+  preferredYouTubeArtworkURL,
   resolveYouTubeMetadata,
 } = require("./local-youtube.cjs");
 const {
@@ -664,7 +665,39 @@ async function resolveLocalImportDownloadSource(
     }
     onStage({ stage: "inspecting_source" });
     const audioResolve = adapters.resolveSoundCloudAudio || resolveSoundCloudAudio;
-    const preparedAudio = await audioResolve(source, signal);
+    let preparedAudio;
+    try {
+      preparedAudio = await audioResolve(source, signal);
+    } catch {
+      assertNotAborted(signal);
+      const durationSeconds = Number(knownMetadata?.durationSeconds || knownMetadata?.duration);
+      const track = {
+        provider: "soundcloud",
+        type: "track",
+        trackID: cleanMetadata(knownMetadata?.trackID, ""),
+        title: metadata.title,
+        artist: metadata.artist,
+        album: metadata.album,
+        trackNumber: null,
+        durationSeconds: Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : null,
+        artworkURL: metadata.artworkURL,
+        embedURL: "",
+        sourceURL: normalizedSoundCloudPreparationSource(source),
+        directlyImportable: false,
+      };
+      onStage({ stage: "searching_candidates", track });
+      const candidateSearch = adapters.searchYouTubeAudioSources || searchYouTubeAudioSources;
+      const candidates = await candidateSearch(track, signal);
+      assertNotAborted(signal);
+      if (!candidates.length) {
+        throw localImportError(
+          "searching_candidates",
+          "SOUNDCLOUD_STREAM_UNAVAILABLE",
+          "This SoundCloud track has no direct public audio rendition and no matching alternate source was found.",
+        );
+      }
+      return { kind: "soundcloud", mediaKind: "audio", track, candidates };
+    }
     assertNotAborted(signal);
     const durationSeconds = Number(knownMetadata?.durationSeconds || knownMetadata?.duration);
     const track = {
@@ -855,6 +888,7 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
       artworkURL: result.preview.thumbnailURL,
       sourceURL: result.preview.sourceURL,
     });
+    metadata.artworkURL = preferredYouTubeArtworkURL(metadata.artworkURL, result.preview.thumbnailURL);
     const completedSourceIdentity = normalizeSourceIdentity(sourceIdentity, {
       mediaSourceURL: result.mediaSourceURL,
     });

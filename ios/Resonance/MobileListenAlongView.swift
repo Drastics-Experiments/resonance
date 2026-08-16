@@ -20,6 +20,12 @@ struct MobileListenAlongCard: View {
                 Image(systemName: listenAlong.room == nil ? "shareplay" : "person.2.wave.2")
                     .font(.headline)
                     .foregroundStyle(palette.accent)
+                if let count = listenAlong.participantCount {
+                    Text(count, format: .number)
+                        .font(.caption.weight(.bold).monospacedDigit())
+                        .foregroundStyle(palette.accent)
+                        .accessibilityLabel("\(count) people connected")
+                }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.subheadline.weight(.semibold))

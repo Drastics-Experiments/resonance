@@ -7,6 +7,43 @@ import org.junit.Test
 
 class LinkImportSearchTest {
     @Test
+    fun selectsTheLargestYouTubeArtworkAndPreservesAlbumProviders() {
+        val highest = "https://i.ytimg.com/vi/jNQXAC9IVRw/maxresdefault.jpg"
+        assertEquals(
+            highest,
+            ProviderArtworkQualityPolicy.highestQualityYouTubeThumbnail(
+                listOf(
+                    ProviderArtworkQualityPolicy.Candidate(highest, 1_280, 720),
+                    ProviderArtworkQualityPolicy.Candidate(
+                        "https://i.ytimg.com/vi/jNQXAC9IVRw/default.jpg",
+                        120,
+                        90,
+                    ),
+                    ProviderArtworkQualityPolicy.Candidate(
+                        "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg",
+                        480,
+                        360,
+                    ),
+                ),
+            ),
+        )
+        assertEquals(
+            highest,
+            ProviderArtworkQualityPolicy.preferredYouTubeArtwork(
+                "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg",
+                highest,
+            ),
+        )
+        assertEquals(
+            "https://i.scdn.co/image/album",
+            ProviderArtworkQualityPolicy.preferredYouTubeArtwork(
+                "https://i.scdn.co/image/album",
+                highest,
+            ),
+        )
+    }
+
+    @Test
     fun distinguishesSearchTextFromLinks() {
         assertFalse(LinkImportInput.looksLikeLink("Test Song Test Artist"))
         assertTrue(LinkImportInput.looksLikeLink("https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8"))
