@@ -144,6 +144,8 @@ data class ResonanceUiState(
     val crossfadeEnabled: Boolean = false,
     val crossfadeSeconds: Float = 5f,
     val themeChoice: ResonanceThemeChoice = ResonanceThemeChoice.Midnight,
+    val isRefreshingDownloadedMetadata: Boolean = false,
+    val downloadedMetadataRefreshDetail: String = "Refresh titles, artists, albums, and artwork from saved source links.",
     val librarySearch: String = "",
     val serverUrl: String = "https://resonance-core.blithe-haven-9710.chatgpt.site",
     val serverToken: String = "",

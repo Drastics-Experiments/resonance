@@ -2092,6 +2092,10 @@ actor LocalDeviceImportService {
         }
     }
 
+    func artworkData(for value: String?) async -> Data? {
+        await fetchArtwork(value)
+    }
+
     private func fetchArtwork(_ value: String?) async -> Data? {
         let url = LocalImportURL.spotifyArtwork(value)
             ?? LocalImportURL.soundCloudArtwork(value)

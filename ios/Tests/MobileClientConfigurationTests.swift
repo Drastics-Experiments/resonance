@@ -26,6 +26,55 @@ final class MobileCrossfadePolicyTests: XCTestCase {
     }
 }
 
+final class MobileDownloadedSongMetadataRefreshTests: XCTestCase {
+    func testRefreshReplacesDescriptiveFieldsAndPreservesPlaybackAndProvenance() {
+        let track = MobileTrack(
+            title: "Old title",
+            artist: "Old artist",
+            album: "Old album",
+            duration: 217,
+            relativePath: "song.m4a",
+            remoteID: "remote",
+            sourceServer: "https://music.test",
+            syncProfileID: "profile",
+            sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            downloadSourceURL: "https://media.example/song.m4a",
+            artworkFilename: "old.artwork",
+            contentSHA256: "hash"
+        )
+        let metadata = LocalImportSpotifyTrack(
+            provider: "youtube",
+            type: "track",
+            trackID: "jNQXAC9IVRw",
+            title: "Fresh title",
+            artist: "Fresh artist",
+            album: "Fresh album",
+            trackNumber: nil,
+            durationSeconds: 999,
+            artworkURL: "https://i.ytimg.com/vi/jNQXAC9IVRw/maxresdefault.jpg",
+            embedURL: "https://www.youtube.com/embed/jNQXAC9IVRw",
+            sourceURL: "https://youtu.be/jNQXAC9IVRw"
+        )
+
+        let refreshed = MobileDownloadedSongMetadataRefreshPolicy.applying(
+            metadata,
+            artworkFilename: "fresh.artwork",
+            to: track
+        )
+
+        XCTAssertEqual(refreshed.title, "Fresh title")
+        XCTAssertEqual(refreshed.artist, "Fresh artist")
+        XCTAssertEqual(refreshed.album, "Fresh album")
+        XCTAssertEqual(refreshed.artworkFilename, "fresh.artwork")
+        XCTAssertEqual(refreshed.duration, 217)
+        XCTAssertEqual(refreshed.sourceURL, track.sourceURL)
+        XCTAssertEqual(refreshed.downloadSourceURL, track.downloadSourceURL)
+        XCTAssertEqual(refreshed.contentSHA256, "hash")
+        XCTAssertEqual(MobileDownloadedSongMetadataRefreshPolicy.sourceURL(for: track, fileExists: true), track.sourceURL)
+        XCTAssertNil(MobileDownloadedSongMetadataRefreshPolicy.sourceURL(for: track, fileExists: false))
+    }
+}
+
 final class MobileNowPlayingPolicyTests: XCTestCase {
     private let track = MobileTrack(
         id: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA")!,

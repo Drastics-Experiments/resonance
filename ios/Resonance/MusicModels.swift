@@ -281,6 +281,36 @@ struct MobileTrack: Identifiable, Codable, Hashable {
     }
 }
 
+enum MobileDownloadedSongMetadataRefreshPolicy {
+    static func sourceURL(for track: MobileTrack, fileExists: Bool) -> String? {
+        guard fileExists else { return nil }
+        let source = (track.sourceURL ?? track.downloadSourceURL)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return source.isEmpty ? nil : source
+    }
+
+    static func applying(
+        _ metadata: LocalImportSpotifyTrack,
+        artworkFilename: String?,
+        to track: MobileTrack
+    ) -> MobileTrack {
+        var refreshed = track
+        refreshed.title = nonempty(metadata.title) ?? track.title
+        refreshed.artist = nonempty(metadata.artist) ?? track.artist
+        refreshed.album = nonempty(metadata.album) ?? track.album
+        if let artworkFilename {
+            refreshed.artworkFilename = artworkFilename
+            refreshed.artworkScanComplete = true
+        }
+        return refreshed
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        let value = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? nil : value
+    }
+}
+
 struct MobileNowPlayingSnapshot: Equatable {
     let identifier: String
     let title: String

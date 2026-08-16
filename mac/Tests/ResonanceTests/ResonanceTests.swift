@@ -26,6 +26,58 @@ private final class MockMusicURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+@Suite
+struct DownloadedSongMetadataRefreshTests {
+    @Test
+    func refreshReplacesDescriptiveFieldsAndPreservesPlaybackAndProvenance() {
+        let track = Track(
+            title: "Old title",
+            artist: "Old artist",
+            album: "Old album",
+            duration: 217,
+            artwork: .electric,
+            artworkData: Data([1]),
+            fileURL: URL(fileURLWithPath: "/tmp/song.m4a"),
+            remoteID: "remote",
+            sourceServer: "https://music.test",
+            syncProfileID: "profile",
+            sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            downloadSourceURL: "https://media.example/song.m4a",
+            contentSHA256: "hash"
+        )
+        let metadata = LocalImportSpotifyTrack(
+            provider: "youtube",
+            type: "track",
+            trackID: "jNQXAC9IVRw",
+            title: "Fresh title",
+            artist: "Fresh artist",
+            album: "Fresh album",
+            trackNumber: nil,
+            durationSeconds: 999,
+            artworkURL: "https://i.ytimg.com/vi/jNQXAC9IVRw/maxresdefault.jpg",
+            embedURL: "https://www.youtube.com/embed/jNQXAC9IVRw",
+            sourceURL: "https://youtu.be/jNQXAC9IVRw"
+        )
+
+        let refreshed = DownloadedSongMetadataRefreshPolicy.applying(
+            metadata,
+            artworkData: Data([2]),
+            to: track
+        )
+
+        #expect(refreshed.title == "Fresh title")
+        #expect(refreshed.artist == "Fresh artist")
+        #expect(refreshed.album == "Fresh album")
+        #expect(refreshed.artworkData == Data([2]))
+        #expect(refreshed.duration == 217)
+        #expect(refreshed.sourceURL == track.sourceURL)
+        #expect(refreshed.downloadSourceURL == track.downloadSourceURL)
+        #expect(refreshed.contentSHA256 == "hash")
+        #expect(DownloadedSongMetadataRefreshPolicy.sourceURL(for: track, fileExists: true) == track.sourceURL)
+        #expect(DownloadedSongMetadataRefreshPolicy.sourceURL(for: track, fileExists: false) == nil)
+    }
+}
+
 private func requestBodyData(_ request: URLRequest) throws -> Data {
     if let body = request.httpBody { return body }
     guard let stream = request.httpBodyStream else { throw URLError(.cannotDecodeContentData) }

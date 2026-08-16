@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -148,6 +149,18 @@ fun SettingsScreen(
                                 title = "Background Audio",
                                 detail = "Playback continues while Resonance is in the background.",
                                 trailing = "Enabled",
+                            )
+                            SettingsDivider()
+                            SettingsRow(
+                                icon = Icons.Default.Refresh,
+                                title = "Refresh song metadata",
+                                detail = state.downloadedMetadataRefreshDetail,
+                                trailing = if (state.isRefreshingDownloadedMetadata) "Refreshing…" else "Refresh",
+                                onClick = if (state.isRefreshingDownloadedMetadata) {
+                                    null
+                                } else {
+                                    actions::refreshDownloadedSongMetadata
+                                },
                             )
                         }
                     }

@@ -63,6 +63,7 @@ import mov.unblocked.resonance.data.ClientConfigStore
 import mov.unblocked.resonance.data.EffectiveClientConfig
 import mov.unblocked.resonance.data.DownloadItemProgressPolicy
 import mov.unblocked.resonance.data.DownloadItemProgressPresentation
+import mov.unblocked.resonance.data.DownloadedSongMetadataRefreshPolicy
 import mov.unblocked.resonance.data.LinkImportException
 import mov.unblocked.resonance.data.LinkImportCandidate
 import mov.unblocked.resonance.data.LinkImportExistingPolicy
@@ -2326,6 +2327,105 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         if (mutableState.value.themeChoice == choice) return
         mutableState.value = mutableState.value.copy(themeChoice = choice)
         appearancePreferences.edit().putString("theme", choice.storageID).apply()
+    }
+
+    override fun refreshDownloadedSongMetadata() {
+        if (mutableState.value.isRefreshingDownloadedMetadata) return
+        viewModelScope.launch {
+            val candidates = library.tracks.filter { repository.fileForTrack(it).isFile }
+            if (candidates.isEmpty()) {
+                mutableState.update {
+                    it.copy(downloadedMetadataRefreshDetail = "No downloaded songs are available to refresh.")
+                }
+                return@launch
+            }
+
+            mutableState.update {
+                it.copy(
+                    isRefreshingDownloadedMetadata = true,
+                    downloadedMetadataRefreshDetail = "Preparing ${candidates.size} song${if (candidates.size == 1) "" else "s"}…",
+                )
+            }
+            var sourceFailures = 0
+            try {
+                candidates.forEachIndexed { index, snapshot ->
+                    mutableState.update {
+                        it.copy(
+                            downloadedMetadataRefreshDetail = "Refreshing ${index + 1} of ${candidates.size} • ${snapshot.title}",
+                        )
+                    }
+                    val embedded = repository.refreshEmbeddedMetadata(snapshot)
+                    var refreshed = embedded
+                    val source = DownloadedSongMetadataRefreshPolicy.sourceURL(
+                        embedded,
+                        fileExists = repository.fileForTrack(embedded).isFile,
+                    )
+                    if (source != null) {
+                        try {
+                            val metadata = linkImportService.resolveMetadata(source)
+                            val artwork = linkImportService.artworkData(metadata.artworkURL)
+                            val artworkTrack = if (artwork != null) {
+                                repository.persistArtwork(refreshed, artwork)
+                            } else {
+                                refreshed
+                            }
+                            refreshed = DownloadedSongMetadataRefreshPolicy.apply(
+                                artworkTrack,
+                                metadata,
+                                artworkTrack.artworkFilename.takeIf { artwork != null },
+                            )
+                            val mediaKind = if (repository.fileForTrack(refreshed).extension.lowercase() in
+                                setOf("mp4", "mov", "m4v", "webm")) "video" else "audio"
+                            RemoteSongMetadataCachePolicy.key(source, mediaKind)?.let { cacheKey ->
+                                library = library.copy(
+                                    remoteSongMetadataCache = library.remoteSongMetadataCache + (
+                                        cacheKey to RemoteSongMetadataCacheEntry(
+                                            sourceURL = source,
+                                            mediaKind = mediaKind,
+                                            title = metadata.title,
+                                            artist = metadata.artist,
+                                            album = metadata.album,
+                                            durationSeconds = metadata.durationSeconds?.toDouble(),
+                                            artworkURL = metadata.artworkURL,
+                                            cachedAtEpochMs = System.currentTimeMillis(),
+                                        )
+                                    ),
+                                )
+                            }
+                            refreshed.remoteID?.let { remoteID ->
+                                mutableState.update { state ->
+                                    state.copy(remoteSongs = state.remoteSongs.map { song ->
+                                        if (song.id == remoteID) applyRemoteSongMetadata(song, metadata) else song
+                                    })
+                                }
+                            }
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Throwable) {
+                            sourceFailures += 1
+                        }
+                    }
+                    library = library.copy(
+                        tracks = library.tracks.map { current ->
+                            if (current.id == snapshot.id) refreshed else current
+                        },
+                    )
+                }
+                persistLibrary()
+                refreshQueuedClipMetadata()
+                mutableState.update {
+                    it.copy(
+                        downloadedMetadataRefreshDetail = if (sourceFailures == 0) {
+                            "Re-cached metadata for ${candidates.size} song${if (candidates.size == 1) "" else "s"}."
+                        } else {
+                            "Re-cached ${candidates.size} song${if (candidates.size == 1) "" else "s"} • $sourceFailures source refresh${if (sourceFailures == 1) "" else "es"} failed."
+                        },
+                    )
+                }
+            } finally {
+                mutableState.update { it.copy(isRefreshingDownloadedMetadata = false) }
+            }
+        }
     }
 
     override fun toggleFavorite(trackId: String) {

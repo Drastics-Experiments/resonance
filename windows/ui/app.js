@@ -1,12 +1,14 @@
 import {
   activeServerClientConfig,
   APP_THEMES,
+  applyDownloadedSongMetadataRefresh,
   applyRemotePlaylistDocument,
   buildLocalImportSourceIdentity,
   canonicalYouTubeSourcePageURL,
   catalogRequestCanApply,
   clientConfigRenewalDelay,
   createEmptyState,
+  downloadedSongMetadataRefreshSource,
   exactYouTubeSourcePageURL,
   filterPlaylists,
   filterTracks,
@@ -269,6 +271,8 @@ let clipBoundaryTrackID = null;
 let profileGeneration = 0;
 let activeProfilePicture = null;
 let settingsPanel = "general";
+let downloadedMetadataRefreshInProgress = false;
+let downloadedMetadataRefreshDetail = "Refresh titles, artists, albums, and artwork from saved source links.";
 let settingsRecordingAction = null;
 let discordPresenceStatus = { state: "disabled", message: "Rich Presence is off.", applicationConfigured: false };
 let discordPresenceSyncTimer = null;
@@ -315,6 +319,7 @@ const settingsIcons = Object.freeze({
   background: settingsIcon('<path d="M4 7h16v11H4z"/><path d="M8 7V4h8v3M8 21h8"/>'),
   discord: settingsIcon('<path d="M7.5 7.4A11 11 0 0 1 12 6.5a11 11 0 0 1 4.5.9c1.1 1.5 2 4.4 2 6.4-1.3 1.6-2.6 2.2-4 2.6l-1-1.3M16.5 7.4l.9-1.7M7.5 7.4l-.9-1.7M10 13h.01M14 13h.01M9.5 15.1c1.7.7 3.3.7 5 0"/>'),
   update: settingsIcon('<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/>'),
+  refresh: settingsIcon('<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/><path d="M12 7v5l3 2"/>'),
   playback: settingsIcon('<path d="M4 12h2m2-5v10m3-13v16m3-11v6m3-9v12m3-7v2"/>'),
 });
 
@@ -4784,6 +4789,11 @@ function renderSettings() {
                 <span class="settings-row-copy"><strong>Updates</strong><small id="settingsUpdateStatus">${escapeHTML($("#updateStatus").textContent || "Automatic in-app updates")}</small></span>
                 <button id="settingsCheckUpdates" class="settings-row-action" type="button">Check now</button>
               </div>
+              <div class="settings-row">
+                <span class="settings-row-icon" aria-hidden="true">${settingsIcons.refresh}</span>
+                <span class="settings-row-copy"><strong>Refresh song metadata</strong><small id="settingsMetadataRefreshStatus">${escapeHTML(downloadedMetadataRefreshDetail)}</small></span>
+                <button id="settingsRefreshMetadata" class="settings-row-action" type="button" ${downloadedMetadataRefreshInProgress ? "disabled" : ""}>${downloadedMetadataRefreshInProgress ? "Refreshing…" : "Refresh"}</button>
+              </div>
             </div>
           </div>
         </section>
@@ -4885,8 +4895,85 @@ function renderSettings() {
   };
   if ($("#settingsServer")) $("#settingsServer").onclick = openServerSettings;
   if ($("#settingsCheckUpdates")) $("#settingsCheckUpdates").onclick = checkForUpdates;
+  if ($("#settingsRefreshMetadata")) $("#settingsRefreshMetadata").onclick = refreshDownloadedSongMetadata;
 
   if (settingsPanel === "server") bindServerSettingsControls();
+}
+
+async function refreshDownloadedSongMetadata() {
+  if (downloadedMetadataRefreshInProgress) return;
+  const candidates = state.tracks.filter((track) => track?.available && track.filePath);
+  if (!candidates.length) {
+    downloadedMetadataRefreshDetail = "No downloaded songs are available to refresh.";
+    renderSettings();
+    return;
+  }
+
+  downloadedMetadataRefreshInProgress = true;
+  downloadedMetadataRefreshDetail = `Preparing ${candidates.length} song${candidates.length === 1 ? "" : "s"}…`;
+  renderSettings();
+  const setProgress = (detail) => {
+    downloadedMetadataRefreshDetail = detail;
+    const status = $("#settingsMetadataRefreshStatus");
+    if (status) status.textContent = detail;
+  };
+
+  let sourceFailures = 0;
+  try {
+    const embedded = await api.refreshLibraryMetadata(candidates.map(({ id, filePath }) => ({ id, filePath })));
+    const embeddedByID = new Map((embedded || []).map((item) => [item.id, item.metadata]));
+    for (let index = 0; index < candidates.length; index += 1) {
+      const snapshot = candidates[index];
+      setProgress(`Refreshing ${index + 1} of ${candidates.length} • ${snapshot.title || "Untitled"}`);
+      const currentIndex = state.tracks.findIndex((track) => track.id === snapshot.id);
+      if (currentIndex < 0) continue;
+      const embeddedMetadata = embeddedByID.get(snapshot.id);
+      if (embeddedMetadata) {
+        state.tracks[currentIndex] = applyDownloadedSongMetadataRefresh(
+          state.tracks[currentIndex],
+          embeddedMetadata,
+          embeddedMetadata.artwork,
+        );
+      }
+
+      const sourceURL = downloadedSongMetadataRefreshSource(state.tracks[currentIndex]);
+      if (!sourceURL) continue;
+      const mediaKind = isInstalledVideoTrack(state.tracks[currentIndex]) ? "video" : "audio";
+      try {
+        const metadata = await api.resolveServerSourceMetadata({ sourceURL, mediaKind });
+        const artwork = metadata?.artworkURL
+          ? await api.fetchLocalImportArtwork(metadata.artworkURL).catch(() => null)
+          : null;
+        const refreshedIndex = state.tracks.findIndex((track) => track.id === snapshot.id);
+        if (refreshedIndex < 0) continue;
+        state.tracks[refreshedIndex] = applyDownloadedSongMetadataRefresh(
+          state.tracks[refreshedIndex],
+          metadata,
+          artwork,
+        );
+        const cacheKey = remoteSongMetadataCacheKey(sourceURL, mediaKind);
+        if (cacheKey) {
+          delete state.remoteSongMetadataCache[cacheKey];
+          rememberServerSongMetadata({ source_url: sourceURL, media_kind: mediaKind }, metadata);
+        }
+      } catch {
+        sourceFailures += 1;
+      }
+    }
+    serverArtworkCache.clear();
+    squareArtworkCache.clear();
+    await persist();
+    updateChrome();
+    render();
+    downloadedMetadataRefreshDetail = sourceFailures === 0
+      ? `Re-cached metadata for ${candidates.length} song${candidates.length === 1 ? "" : "s"}.`
+      : `Re-cached ${candidates.length} song${candidates.length === 1 ? "" : "s"} • ${sourceFailures} source refresh${sourceFailures === 1 ? "" : "es"} failed.`;
+  } catch (error) {
+    downloadedMetadataRefreshDetail = friendlyIPCError(error, "Song metadata could not be refreshed.");
+  } finally {
+    downloadedMetadataRefreshInProgress = false;
+    renderSettings();
+  }
 }
 
 function bindServerSettingsControls() {

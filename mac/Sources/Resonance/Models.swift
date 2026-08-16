@@ -341,6 +341,36 @@ struct Track: Identifiable, Hashable, Codable {
 
 }
 
+enum DownloadedSongMetadataRefreshPolicy {
+    static func sourceURL(for track: Track, fileExists: Bool) -> String? {
+        guard fileExists else { return nil }
+        let source = (track.sourceURL ?? track.downloadSourceURL)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return source.isEmpty ? nil : source
+    }
+
+    static func applying(
+        _ metadata: LocalImportSpotifyTrack,
+        artworkData: Data?,
+        to track: Track
+    ) -> Track {
+        var refreshed = track
+        refreshed.title = nonempty(metadata.title) ?? track.title
+        refreshed.artist = nonempty(metadata.artist) ?? track.artist
+        refreshed.album = nonempty(metadata.album) ?? track.album
+        refreshed.artworkURL = nonempty(metadata.artworkURL) ?? track.artworkURL
+        if let artworkData, !artworkData.isEmpty {
+            refreshed.artworkData = artworkData
+        }
+        return refreshed
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        let value = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? nil : value
+    }
+}
+
 enum UnlinkedDownloadMigrationPolicy {
     static let identifier = "delete-unlinked-downloads-v1"
 
