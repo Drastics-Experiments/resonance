@@ -1905,7 +1905,7 @@ private struct ServerTransferPopup: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    Text(transfer.kind.title)
+                    Text(transfer.displayTitle)
                         .font(.caption.weight(.semibold))
                     Spacer(minLength: 4)
                     Text(transfer.batchPosition)
@@ -1949,7 +1949,7 @@ private struct ServerTransferPopup: View {
         }
         .shadow(color: .black.opacity(0.28), radius: 18, y: 8)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(transfer.kind.title) \(transfer.songTitle), \(transfer.batchPosition)")
+        .accessibilityLabel("\(transfer.displayTitle) \(transfer.songTitle), \(transfer.batchPosition)")
         .accessibilityValue(transfer.detail)
     }
 }

@@ -680,8 +680,23 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(state.songTitle, "Catalog Song Title")
+        XCTAssertEqual(state.displayTitle, "Downloading")
         XCTAssertEqual(state.batchPosition, "3/10")
         XCTAssertEqual(state.progress, 0.25)
+
+        let preparing = MobileTransferDisplayState(
+            kind: .download,
+            itemID: "catalog-song-id",
+            songTitle: "Loading song metadata",
+            detail: "Preparing download",
+            currentItem: 1,
+            totalItems: 10,
+            completedBytes: 0,
+            totalBytes: 0,
+            fallbackProgress: nil
+        )
+        XCTAssertEqual(preparing.displayTitle, "Preparing download")
+        XCTAssertNil(preparing.progress)
     }
 
     func testNoPendingTransfersUsesZeroBatchPosition() {

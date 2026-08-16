@@ -3569,7 +3569,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         serverDownloadStateGeneration &+= 1
         let stateGeneration = serverDownloadStateGeneration
         isSyncingServer = true
-        isServerDownloadTransferVisible = false
+        isServerDownloadTransferVisible = true
+        downloadCurrentFile = "Loading song metadata"
+        downloadStatus = "Preparing download"
         var authorizationLease: MacAuthenticatedStreamAuthorizationLease?
         var authorizationRefresh: Task<Void, Never>?
         defer {
@@ -3595,7 +3597,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             serverMessage = downloadStatus
             return
         }
-        downloadStatus = "Checking downloads"
         downloadProgress = nil
         downloadBatchPosition = 0
         downloadBatchTotal = 0
@@ -3643,12 +3644,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             }
             remoteSongs = catalogSongs
             remoteCatalogIsAuthoritative = true
-            beginRemoteSongMetadataHydration(
+            reconcileDownloadedMediaKinds(with: catalogSongs)
+            var songs = songIDs.map { ids in catalogSongs.filter { ids.contains($0.id) } } ?? catalogSongs
+            songs = await prepareRemoteSongMetadataForDownload(
+                songs,
                 contextKey: Self.serverContextKey(base: base, profileID: catalogProfileID)
             )
-            reconcileDownloadedMediaKinds(with: catalogSongs)
-            let songs = songIDs.map { ids in catalogSongs.filter { ids.contains($0.id) } } ?? catalogSongs
-            downloadStatus = songs.isEmpty ? "Nothing to download" : "Checking \(songs.count) songs"
+            downloadStatus = songs.isEmpty ? "Nothing to download" : "Preparing download"
             let cache = try serverCacheDirectory(for: base, profileID: syncProfileID)
             var pendingSongIDs = Set<String>()
             var downloadPlans: [ServerSongDownloadPlan] = []
@@ -3916,6 +3918,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             }
 
             await reconcileCachedUploadedLocalTracks()
+            beginRemoteSongMetadataHydration(
+                contextKey: Self.serverContextKey(base: base, profileID: catalogProfileID)
+            )
             if currentTrackID == nil { currentTrackID = tracks.first?.id }
             hydrateRemotePlaylistTracks()
             persistLibrary()
@@ -6960,6 +6965,73 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 contextKey: contextKey
             )
         }
+    }
+
+    private func prepareRemoteSongMetadataForDownload(
+        _ songs: [RemoteSong],
+        contextKey: String
+    ) async -> [RemoteSong] {
+        let requests = remoteSongMetadataRequests(for: songs)
+        guard !requests.isEmpty else { return songs }
+
+        let resolver = remoteSongMetadataResolver
+        let retryDelays = remoteSongMetadataRetryDelays
+        var results: [RemoteSongMetadataResult] = []
+        await withTaskGroup(of: RemoteSongMetadataResult.self) { group in
+            var iterator = requests.makeIterator()
+            for _ in 0..<min(8, requests.count) {
+                guard let request = iterator.next() else { break }
+                group.addTask { [weak self] in
+                    guard let self else {
+                        return RemoteSongMetadataResult(request: request, metadata: nil)
+                    }
+                    return await self.sharedRemoteSongMetadataResult(
+                        request,
+                        contextKey: contextKey,
+                        using: resolver,
+                        retryDelays: retryDelays
+                    )
+                }
+            }
+            while let result = await group.next() {
+                guard let base = try? normalizedServerURL(),
+                      Self.serverContextKey(base: base, profileID: syncProfileID) == contextKey else {
+                    group.cancelAll()
+                    return
+                }
+                results.append(result)
+                if let request = iterator.next() {
+                    group.addTask { [weak self] in
+                        guard let self else {
+                            return RemoteSongMetadataResult(request: request, metadata: nil)
+                        }
+                        return await self.sharedRemoteSongMetadataResult(
+                            request,
+                            contextKey: contextKey,
+                            using: resolver,
+                            retryDelays: retryDelays
+                        )
+                    }
+                }
+            }
+        }
+
+        guard let base = try? normalizedServerURL(),
+              Self.serverContextKey(base: base, profileID: syncProfileID) == contextKey else {
+            return songs
+        }
+        var updatedSongs = remoteSongs
+        var cacheChanged = false
+        for result in results {
+            cacheChanged = applyRemoteSongMetadataResult(result, to: &updatedSongs) || cacheChanged
+        }
+        remoteSongs = updatedSongs
+        if cacheChanged { persistRemoteSongMetadataCache() }
+        let requestedIDs = Set(songs.map(\.id))
+        let preparedByID = Dictionary(uniqueKeysWithValues: remoteSongs
+            .filter { requestedIDs.contains($0.id) }
+            .map { ($0.id, $0) })
+        return songs.map { preparedByID[$0.id] ?? $0 }
     }
 
     private func sharedRemoteSongMetadataResult(

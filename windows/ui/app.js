@@ -3574,7 +3574,7 @@ function hydrateServerCatalogMetadata(songs) {
       if (bufferedResults.length >= 4 || completedRequests === requests.size) flush();
     }
   });
-  void Promise.allSettled(workers).then(() => {
+  return Promise.allSettled(workers).then(() => {
     if (hydrationGeneration === serverMetadataHydrationGeneration) {
       serverMetadataHydrationActive = false;
     }
@@ -6787,6 +6787,7 @@ function updateServerTransfer({
   itemCount,
   owner = "server",
   title = null,
+  phase = null,
   autoHide = true,
   dismiss = false,
 }) {
@@ -6801,7 +6802,8 @@ function updateServerTransfer({
     && serverTransferOwner === owner
     && toast.dataset.direction === "download";
   const downloadBytes = Number(itemCompleted === undefined ? completed : itemCompleted) || 0;
-  if (direction === "download" && downloadBytes <= 0 && !ownsVisibleDownload) {
+  const isPreparingDownload = direction === "download" && phase === "preparing";
+  if (direction === "download" && downloadBytes <= 0 && !ownsVisibleDownload && !isPreparingDownload) {
     toast.hidden = true;
     return;
   }
@@ -6953,6 +6955,19 @@ async function serverAction(mode) {
       const songIDs = mode === "selected" ? [...selectedRemoteIDs] : null;
       if (mode === "selected" && !songIDs.length) throw new Error("Select one or more songs first.");
       const selectedSongIDs = songIDs ? new Set(songIDs) : null;
+      const requestedSongs = serverCatalog.filter((song) => !selectedSongIDs || selectedSongIDs.has(song.id));
+      updateServerTransfer({
+        direction: "download",
+        owner: "server",
+        title: "Preparing download",
+        phase: "preparing",
+        currentFile: "Loading song metadata",
+        completed: 0,
+        total: requestedSongs.length || 1,
+        autoHide: false,
+      });
+      await hydrateServerCatalogMetadata(requestedSongs);
+      if (serverTransferCancelRequested || !profileContextIsCurrent(context)) return;
       const songTitles = Object.fromEntries(serverCatalog
         .filter((song) => !selectedSongIDs || selectedSongIDs.has(song.id))
         .map((song) => [song.id, song.title || "Untitled song"]));
