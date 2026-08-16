@@ -20,6 +20,28 @@ class QueuePolicyTest {
         }
     }
 
+    @Test fun shuffleOrderStartsCurrentAndVisitsEveryTrackExactlyOnce() {
+        val order = QueuePolicy.shuffledOrder(size = 7, currentIndex = 3, random = Random(41))
+
+        assertEquals(3, order.first())
+        assertEquals((0 until 7).toList(), order.sorted())
+        assertNotEquals((0 until 7).toList(), order.toList())
+    }
+
+    @Test fun eachFreshShuffleCycleCanProduceANewOrder() {
+        val first = QueuePolicy.shuffledOrder(size = 8, currentIndex = 2, random = Random(11))
+        val second = QueuePolicy.shuffledOrder(size = 8, currentIndex = 2, random = Random(12))
+
+        assertEquals(2, first.first())
+        assertEquals(2, second.first())
+        assertFalse(first.contentEquals(second))
+    }
+
+    @Test fun shuffleOrderHandlesEmptyAndUnselectedQueues() {
+        assertTrue(QueuePolicy.shuffledOrder(0, 0).isEmpty())
+        assertEquals(listOf(0, 1, 2), QueuePolicy.shuffledOrder(3, -1, Random(5)).sorted())
+    }
+
     @Test fun emptyAndSingleQueuesAreSafe() {
         assertEquals(-1, QueuePolicy.nextIndex(0, 0, false))
         assertEquals(0, QueuePolicy.nextIndex(1, 0, true))

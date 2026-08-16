@@ -260,6 +260,10 @@ class LibraryRepository(
                 fallbackArtwork = fallbackArtwork,
                 contentSHA256 = verifiedContentSHA256,
                 preservesUnlinkedImport = false,
+            ).copy(
+                // Catalog artwork is authoritative for a server song. Preserve embedded artwork
+                // only as a temporary fallback until the non-blocking catalog backfill completes.
+                artworkScanComplete = song.artworkURL.isNullOrBlank(),
             )
         } catch (error: Throwable) {
             discardUncommittedDownload(file)

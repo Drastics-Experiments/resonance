@@ -57,6 +57,7 @@ class MainActivity : ComponentActivity() {
             context = applicationContext,
             manifestUrl = updateManifestUrl ?: AndroidUpdateManager.DEFAULT_MANIFEST_URL,
         )
+        lifecycleScope.launch { updateManager.checkForUpdateOnStartup() }
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
