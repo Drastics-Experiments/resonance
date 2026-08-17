@@ -191,6 +191,8 @@ export function expectedAssetNames(version) {
     "latest-android.json",
     `Resonance-iOS-Simulator-${version}.zip`,
     `Resonance-iOS-Simulator-${version}.zip.sha256`,
+    `Resonance-iOS-Device-${version}.ipa`,
+    `Resonance-iOS-Device-${version}.ipa.sha256`,
   ].sort();
 }
 

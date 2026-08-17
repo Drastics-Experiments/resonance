@@ -65,12 +65,13 @@ test("next patch and semantic comparisons are deterministic", () => {
   assert.equal(compareVersions("1.0.9", "1.1.0"), -1);
 });
 
-test("public release contract contains exactly twelve assets", () => {
+test("public release contract contains exactly fourteen assets", () => {
   const assets = expectedAssetNames("1.2.3");
-  assert.equal(assets.length, 12);
+  assert.equal(assets.length, 14);
   assert.ok(assets.includes("Resonance-Android-1.2.3.apk"));
   assert.ok(assets.includes("Resonance-Setup-1.2.3.exe"));
   assert.ok(assets.includes("Resonance-iOS-Simulator-1.2.3.zip"));
+  assert.ok(assets.includes("Resonance-iOS-Device-1.2.3.ipa"));
   assert.ok(assets.includes("latest-android.json"));
 });
 
