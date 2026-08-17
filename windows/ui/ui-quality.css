@@ -1,0 +1,94 @@
+/* Shared renderer guardrails that stay independent from feature-specific screen CSS. */
+:where(main, #content, .playlist-links, .track-table, .storage-list, .remote-list) {
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
+:where(button, [role="button"], input, select, textarea):focus-visible {
+  outline: 2px solid var(--accent-tertiary);
+  outline-offset: 3px;
+}
+
+:where(button, [role="button"]):disabled,
+:where(button, [role="button"])[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+.side-heading button {
+  width: 32px;
+  height: 32px;
+  margin: -3px;
+}
+
+:where(
+  .history-buttons button,
+  .profile-button,
+  .transport button,
+  .full-player-round-button,
+  .update-available-dismiss,
+  .app-notice button,
+  .server-transfer-toast > button,
+  dialog header > button
+) {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+:where(.track-copy, .track-details, .recent-track-copy, .player-track-summary > span:last-child) {
+  min-width: 0;
+}
+
+:where(.track-copy, .track-details, .recent-track-copy, .player-track-summary > span:last-child) > :where(strong, small) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@supports (content-visibility: auto) {
+  .storage-list.redesigned .storage-row:not(:hover):not(:focus-within),
+  .remote-list.redesigned .remote-row:not(:hover):not(:focus-within) {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 64px;
+  }
+}
+
+@media (max-width: 980px) {
+  .app-shell {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .sidebar {
+    padding-inline: 12px;
+  }
+
+  .nav {
+    gap: 10px;
+    padding-inline: 11px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:focus-within {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  :where(button, [role="button"], input, select, textarea):focus-visible {
+    outline: 2px solid Highlight;
+  }
+
+  :where(.nav.active, .track-row.playing, .remote-row.selected, .storage-row.selected) {
+    border: 1px solid Highlight;
+  }
+}

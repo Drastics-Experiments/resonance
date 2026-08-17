@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -77,17 +78,26 @@ fun LibraryScreen(
 ) {
     var clipEditorOpen by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
-    val query = state.librarySearch.trim()
-    val tracks = if (query.isEmpty()) state.tracks else state.tracks.filter {
-        it.title.contains(query, true) || it.artist.contains(query, true) ||
-            it.album.contains(query, true) || it.relativePath.contains(query, true)
+    val query = remember(state.librarySearch) { state.librarySearch.trim() }
+    val tracks = remember(state.tracks, query) {
+        if (query.isEmpty()) {
+            state.tracks
+        } else {
+            state.tracks.filter {
+                it.title.contains(query, true) || it.artist.contains(query, true) ||
+                    it.album.contains(query, true) || it.relativePath.contains(query, true)
+            }
+        }
     }
+    val recentlyAdded = remember(state.tracks) { recentlyAddedTracks(state.tracks) }
+    val queueIDs = remember(state.tracks) { state.tracks.map(Track::id) }
+
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.Top,
     ) {
-        item {
+        item(key = "library-header", contentType = "chrome") {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -96,7 +106,7 @@ fun LibraryScreen(
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Library", fontSize = 36.sp, fontWeight = FontWeight.Bold)
                     Text(
-                        "${state.tracks.size} songs on this device",
+                        "${songCountLabel(state.tracks.size)} on this device",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
@@ -112,7 +122,8 @@ fun LibraryScreen(
                 )
             }
         }
-        item {
+        item(key = "library-header-gap", contentType = "spacer") { Spacer(Modifier.height(16.dp)) }
+        item(key = "library-search", contentType = "chrome") {
             OutlinedTextField(
                 value = state.librarySearch,
                 onValueChange = actions::setLibrarySearch,
@@ -130,18 +141,21 @@ fun LibraryScreen(
                 ),
             )
         }
-        val recentlyAdded = recentlyAddedTracks(state.tracks)
+        item(key = "library-search-gap", contentType = "spacer") { Spacer(Modifier.height(16.dp)) }
         if (query.isEmpty() && recentlyAdded.isNotEmpty()) {
-            item {
+            item(key = "recently-added", contentType = "recently-added") {
                 RecentlyAddedSection(
                     tracks = recentlyAdded,
+                    queueIDs = queueIDs,
                     state = state,
                     actions = actions,
                 )
             }
+            item(key = "recently-added-gap", contentType = "spacer") { Spacer(Modifier.height(16.dp)) }
         }
         if (tracks.isEmpty()) {
-            item {
+            item(key = "library-empty", contentType = "empty-state") {
+                val emptyState = libraryEmptyStateCopy(hasSongs = state.tracks.isNotEmpty())
                 Column(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -153,34 +167,36 @@ fun LibraryScreen(
                         Modifier.size(44.dp),
                         tint = MaterialTheme.colorScheme.tertiary,
                     )
-                    Text(if (state.tracks.isEmpty()) "No songs yet" else "No results", style = MaterialTheme.typography.titleMedium)
+                    Text(emptyState.title, style = MaterialTheme.typography.titleMedium)
                     Text(
-                        if (state.tracks.isEmpty()) "Import audio or video, or sync your music server." else "Try another search term.",
+                        emptyState.detail,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
                 }
             }
         } else {
-            item {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("All Songs", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                        Text(
-                            tracks.size.toString(),
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
-                        )
-                    }
-                    tracks.forEachIndexed { index, track ->
-                        TrackRow(track, state, actions, number = index + 1, queue = tracks)
-                    }
+            item(key = "all-songs-header", contentType = "section-header") {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("All Songs", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text(
+                        tracks.size.toString(),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                    )
                 }
             }
+            itemsIndexed(
+                items = tracks,
+                key = { _, track -> track.id },
+                contentType = { _, _ -> "track" },
+            ) { index, track ->
+                TrackRow(track, state, actions, number = index + 1, queue = tracks)
+            }
         }
-        item { Spacer(Modifier.height(8.dp)) }
+        item(key = "library-bottom-gap", contentType = "spacer") { Spacer(Modifier.height(8.dp)) }
     }
 
     if (clipEditorOpen) {
@@ -333,6 +349,7 @@ private val PROFILE_IMAGE_REDIRECT_STATUSES = setOf(
 @Composable
 private fun RecentlyAddedSection(
     tracks: List<Track>,
+    queueIDs: List<String>,
     state: ResonanceUiState,
     actions: ResonanceActions,
 ) {
@@ -342,11 +359,11 @@ private fun RecentlyAddedSection(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            items(tracks, key = Track::id) { track ->
+            items(tracks, key = Track::id, contentType = { "recent-track" }) { track ->
                 Column(
                     modifier = Modifier
                         .width(132.dp)
-                        .clickable { actions.playTrack(track.id, state.tracks.map(Track::id)) },
+                        .clickable { actions.playTrack(track.id, queueIDs) },
                     verticalArrangement = Arrangement.spacedBy(7.dp),
                 ) {
                     Artwork(
@@ -389,6 +406,19 @@ internal fun syncProfileInitial(name: String): String =
     name.trim().firstOrNull(Char::isLetterOrDigit)?.uppercase() ?: "?"
 
 internal fun recentlyAddedTracks(tracks: List<Track>, limit: Int = 6): List<Track> {
-    if (limit <= 0) return emptyList()
-    return tracks.sortedByDescending(Track::dateAddedEpochMs).take(limit)
+    if (limit <= 0 || tracks.isEmpty()) return emptyList()
+    if (tracks.size <= limit) return tracks.sortedByDescending(Track::dateAddedEpochMs)
+
+    val recent = ArrayList<Track>(limit)
+    for (track in tracks) {
+        val insertionIndex = recent.indexOfFirst { candidate ->
+            track.dateAddedEpochMs > candidate.dateAddedEpochMs
+        }
+        when {
+            insertionIndex >= 0 -> recent.add(insertionIndex, track)
+            recent.size < limit -> recent.add(track)
+        }
+        if (recent.size > limit) recent.removeAt(recent.lastIndex)
+    }
+    return recent
 }

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -75,41 +76,61 @@ fun StorageScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     var deleteCandidate by remember { mutableStateOf<Track?>(null) }
 
-    LaunchedEffect(state.tracks.map(Track::id)) {
-        selected = selected.intersect(state.tracks.mapTo(mutableSetOf(), Track::id))
-        if (selected.isEmpty() && state.tracks.isEmpty()) editing = false
+    val trackIDs = remember(state.tracks) { state.tracks.mapTo(mutableSetOf(), Track::id) }
+    LaunchedEffect(trackIDs) {
+        val retainedSelection = selected.intersect(trackIDs)
+        if (retainedSelection != selected) selected = retainedSelection
+        if (trackIDs.isEmpty()) editing = false
     }
 
-    val downloaded = state.tracks.filter { it.sourceServer != null || it.remoteID != null }
-    val imported = state.tracks.filter { it.sourceServer == null && it.remoteID == null }
-    val scoped = when (scope) {
-        StorageScope.Songs -> state.tracks
-        StorageScope.Downloads -> downloaded
-        StorageScope.Files -> imported
+    val downloaded = remember(state.tracks) {
+        state.tracks.filter { it.sourceServer != null || it.remoteID != null }
     }
-    val query = search.trim()
-    val visible = scoped.filter {
-        query.isEmpty() || it.title.contains(query, true) || it.artist.contains(query, true) ||
-            it.album.contains(query, true) || it.relativePath.contains(query, true)
-    }.sortedWith { a, b ->
-        when (sort) {
-            StorageSort.Title -> a.title.compareTo(b.title, true)
-            StorageSort.Artist -> a.artist.compareTo(b.artist, true)
-            StorageSort.RecentlyAdded -> b.dateAddedEpochMs.compareTo(a.dateAddedEpochMs)
-            StorageSort.FileSize -> state.trackSizesById.getOrDefault(b.id, 0).compareTo(state.trackSizesById.getOrDefault(a.id, 0))
+    val imported = remember(state.tracks) {
+        state.tracks.filter { it.sourceServer == null && it.remoteID == null }
+    }
+    val scoped = remember(state.tracks, downloaded, imported, scope) {
+        when (scope) {
+            StorageScope.Songs -> state.tracks
+            StorageScope.Downloads -> downloaded
+            StorageScope.Files -> imported
         }
     }
-    val visibleDownloaded = visible.filter { it.sourceServer != null || it.remoteID != null }
-    val visibleImported = visible.filter { it.sourceServer == null && it.remoteID == null }
-    val downloadedBytes = downloaded.sumOf { state.trackSizesById[it.id] ?: 0 }
-    val importedBytes = imported.sumOf { state.trackSizesById[it.id] ?: 0 }
+    val query = remember(search) { search.trim() }
+    val visible = remember(scoped, query, sort, state.trackSizesById) {
+        scoped.filter {
+            query.isEmpty() || it.title.contains(query, true) || it.artist.contains(query, true) ||
+                it.album.contains(query, true) || it.relativePath.contains(query, true)
+        }.sortedWith { a, b ->
+            when (sort) {
+                StorageSort.Title -> a.title.compareTo(b.title, true)
+                StorageSort.Artist -> a.artist.compareTo(b.artist, true)
+                StorageSort.RecentlyAdded -> b.dateAddedEpochMs.compareTo(a.dateAddedEpochMs)
+                StorageSort.FileSize -> state.trackSizesById.getOrDefault(b.id, 0)
+                    .compareTo(state.trackSizesById.getOrDefault(a.id, 0))
+            }
+        }
+    }
+    val visibleDownloaded = remember(visible) {
+        visible.filter { it.sourceServer != null || it.remoteID != null }
+    }
+    val visibleImported = remember(visible) {
+        visible.filter { it.sourceServer == null && it.remoteID == null }
+    }
+    val downloadedBytes = remember(downloaded, state.trackSizesById) {
+        downloaded.sumOf { state.trackSizesById[it.id] ?: 0 }
+    }
+    val importedBytes = remember(imported, state.trackSizesById) {
+        imported.sumOf { state.trackSizesById[it.id] ?: 0 }
+    }
+    val scopeLabels = remember { StorageScope.entries.map(StorageScope::label) }
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.Top,
     ) {
-        item {
+        item(key = "storage-header", contentType = "chrome") {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -147,10 +168,10 @@ fun StorageScreen(
                     IconButton(
                         onClick = { actionsMenu = true },
                         modifier = Modifier.size(44.dp).background(Color.White.copy(alpha = .08f), CircleShape),
-                    ) { Icon(Icons.Default.MoreVert, "Song storage actions") }
+                    ) { Icon(Icons.Default.MoreVert, "Storage actions") }
                     DropdownMenu(expanded = actionsMenu, onDismissRequest = { actionsMenu = false }) {
                         DropdownMenuItem(
-                            text = { Text(if (editing) "Done Editing" else "Select Songs") },
+                            text = { Text(if (editing) "Done" else "Select Songs") },
                             leadingIcon = { Icon(if (editing) Icons.Default.Check else Icons.Default.Checklist, null) },
                             enabled = state.tracks.isNotEmpty(),
                             onClick = {
@@ -163,7 +184,8 @@ fun StorageScreen(
                 }
             }
         }
-        item {
+        item(key = "storage-header-gap", contentType = "spacer") { Spacer(Modifier.height(14.dp)) }
+        item(key = "storage-summary", contentType = "summary") {
             StorageSummary(
                 importedBytes = importedBytes,
                 importedCount = imported.size,
@@ -172,7 +194,8 @@ fun StorageScreen(
                 availableBytes = state.availableStorageBytes,
             )
         }
-        item {
+        item(key = "storage-summary-gap", contentType = "spacer") { Spacer(Modifier.height(14.dp)) }
+        item(key = "storage-search", contentType = "chrome") {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
                     value = search,
@@ -207,11 +230,13 @@ fun StorageScreen(
                 }
             }
         }
-        item {
-            SegmentedControl(StorageScope.entries.map { it.label }, scope.ordinal, { scope = StorageScope.entries[it] })
+        item(key = "storage-search-gap", contentType = "spacer") { Spacer(Modifier.height(14.dp)) }
+        item(key = "storage-scope", contentType = "chrome") {
+            SegmentedControl(scopeLabels, scope.ordinal, { scope = StorageScope.entries[it] })
         }
+        item(key = "storage-scope-gap", contentType = "spacer") { Spacer(Modifier.height(14.dp)) }
         if (editing && selected.isNotEmpty()) {
-            item {
+            item(key = "storage-selection", contentType = "selection") {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("${selected.size} selected", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                     TextButton(onClick = { confirmDelete = true }) {
@@ -221,9 +246,11 @@ fun StorageScreen(
                     }
                 }
             }
+            item(key = "storage-selection-gap", contentType = "spacer") { Spacer(Modifier.height(14.dp)) }
         }
         if (visible.isEmpty()) {
-            item {
+            item(key = "storage-empty", contentType = "empty-state") {
+                val emptyState = storageEmptyStateCopy(scope, hasQuery = query.isNotEmpty())
                 Column(
                     Modifier.fillMaxWidth().padding(vertical = 44.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -235,27 +262,64 @@ fun StorageScreen(
                         Modifier.size(44.dp),
                         tint = MaterialTheme.colorScheme.tertiary,
                     )
-                    Text(if (query.isNotEmpty()) "No Results" else "No Stored Songs", style = MaterialTheme.typography.titleMedium)
-                    Text("Import audio or video, or download songs from your music server.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
+                    Text(emptyState.title, style = MaterialTheme.typography.titleMedium)
+                    Text(emptyState.detail, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
                 }
             }
         } else {
-            if (visibleDownloaded.isNotEmpty()) item {
-                StorageSection("Downloaded from server", visibleDownloaded, state, actions, editing, selected, { track ->
-                    deleteCandidate = track
-                }) { id ->
-                    selected = if (id in selected) selected - id else selected + id
+            if (visibleDownloaded.isNotEmpty()) {
+                item(key = "downloaded-section", contentType = "section-header") {
+                    StorageSectionHeader("Downloaded from server", visibleDownloaded.size)
+                }
+                itemsIndexed(
+                    items = visibleDownloaded,
+                    key = { _, track -> "downloaded:${track.id}" },
+                    contentType = { _, _ -> "track" },
+                ) { index, track ->
+                    StorageTrackRow(
+                        index = index,
+                        track = track,
+                        queue = visibleDownloaded,
+                        state = state,
+                        actions = actions,
+                        editing = editing,
+                        selected = track.id in selected,
+                        onDelete = { deleteCandidate = track },
+                        onToggle = {
+                            selected = if (track.id in selected) selected - track.id else selected + track.id
+                        },
+                    )
                 }
             }
-            if (visibleImported.isNotEmpty()) item {
-                StorageSection("Imported on device", visibleImported, state, actions, editing, selected, { track ->
-                    deleteCandidate = track
-                }) { id ->
-                    selected = if (id in selected) selected - id else selected + id
+            if (visibleDownloaded.isNotEmpty() && visibleImported.isNotEmpty()) {
+                item(key = "storage-section-gap", contentType = "spacer") { Spacer(Modifier.height(14.dp)) }
+            }
+            if (visibleImported.isNotEmpty()) {
+                item(key = "imported-section", contentType = "section-header") {
+                    StorageSectionHeader("Imported on device", visibleImported.size)
+                }
+                itemsIndexed(
+                    items = visibleImported,
+                    key = { _, track -> "imported:${track.id}" },
+                    contentType = { _, _ -> "track" },
+                ) { index, track ->
+                    StorageTrackRow(
+                        index = index,
+                        track = track,
+                        queue = visibleImported,
+                        state = state,
+                        actions = actions,
+                        editing = editing,
+                        selected = track.id in selected,
+                        onDelete = { deleteCandidate = track },
+                        onToggle = {
+                            selected = if (track.id in selected) selected - track.id else selected + track.id
+                        },
+                    )
                 }
             }
         }
-        item { Spacer(Modifier.height(8.dp)) }
+        item(key = "storage-bottom-gap", contentType = "spacer") { Spacer(Modifier.height(8.dp)) }
     }
 
     if (confirmDelete) {
@@ -309,7 +373,7 @@ private fun StorageSummary(
     ) {
         Row(verticalAlignment = Alignment.Bottom) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("${importedCount + downloadedCount} songs on device", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text("${songCountLabel(importedCount + downloadedCount)} on device", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 Text("${formatBytes(usedBytes)} used", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
             }
             Text("${formatBytes(availableBytes)} available", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f))
@@ -327,39 +391,44 @@ private fun StorageSummary(
 }
 
 @Composable
-private fun StorageSection(
-    title: String,
-    tracks: List<Track>,
-    state: ResonanceUiState,
-    actions: ResonanceActions,
-    editing: Boolean,
-    selected: Set<String>,
-    onDelete: (Track) -> Unit,
-    onToggle: (String) -> Unit,
-) {
+private fun StorageSectionHeader(title: String, count: Int) {
     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
         Row(Modifier.padding(horizontal = 5.dp), verticalAlignment = Alignment.CenterVertically) {
             Eyebrow(title, Modifier.weight(1f))
-            Text("${tracks.size} ${if (tracks.size == 1) "SONG" else "SONGS"}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+            Text(
+                "$count ${if (count == 1) "SONG" else "SONGS"}",
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+            )
         }
-        Column(Modifier.fillMaxWidth()) {
-            SongListHeader(trailingTitle = "Size")
-            tracks.forEachIndexed { index, track ->
-                TrackRow(
-                    track = track,
-                    state = state,
-                    actions = actions,
-                    number = index + 1,
-                    queue = tracks,
-                    trailingText = formatBytes(state.trackSizesById[track.id] ?: 0),
-                    showSelection = editing,
-                    selected = track.id in selected,
-                    onSelect = { onToggle(track.id) },
-                    allowDeleteFromDevice = true,
-                    onDeleteFromDevice = { onDelete(track) },
-                    showMenu = !editing,
-                )
-            }
-        }
+        SongListHeader(trailingTitle = "Size")
     }
+}
+
+@Composable
+private fun StorageTrackRow(
+    index: Int,
+    track: Track,
+    queue: List<Track>,
+    state: ResonanceUiState,
+    actions: ResonanceActions,
+    editing: Boolean,
+    selected: Boolean,
+    onDelete: () -> Unit,
+    onToggle: () -> Unit,
+) {
+    TrackRow(
+        track = track,
+        state = state,
+        actions = actions,
+        number = index + 1,
+        queue = queue,
+        trailingText = formatBytes(state.trackSizesById[track.id] ?: 0),
+        showSelection = editing,
+        selected = selected,
+        onSelect = onToggle,
+        allowDeleteFromDevice = true,
+        onDeleteFromDevice = onDelete,
+        showMenu = !editing,
+    )
 }
