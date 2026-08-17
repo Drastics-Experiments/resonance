@@ -23,7 +23,7 @@ enum class DownloadProgressDisplayMode {
     DeterminateTransfer,
 }
 
-/** Preparation and connection setup stay indeterminate until media bytes arrive. */
+/** The popup is hidden before the first byte, so every displayed mode represents real transfer. */
 object DownloadProgressDisplayPolicy {
     fun mode(bytesTransferred: Long, totalBytes: Long?): DownloadProgressDisplayMode = when {
         bytesTransferred <= 0L -> DownloadProgressDisplayMode.IndeterminateTransfer

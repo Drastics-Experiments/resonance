@@ -276,9 +276,6 @@ struct PreviewRegressionTests {
         #expect(InstalledVideoLayoutPolicy.edgeInset == 38)
         #expect(InstalledVideoLayoutPolicy.artworkCornerRadius == 22)
         #expect(InstalledVideoLayoutPolicy.videoCornerRadius == 18)
-        #expect(InstalledVideoLayoutPolicy.leadInDuration == 0.035)
-        #expect(InstalledVideoLayoutPolicy.revealDelay == 0.035)
-        #expect(InstalledVideoLayoutPolicy.revealDelay < InstalledVideoLayoutPolicy.geometryDuration)
         #expect(InstalledVideoLayoutPolicy.geometryDuration == 0.40)
         #expect(InstalledVideoLayoutPolicy.revealDuration == 0.14)
         #expect(InstalledVideoLayoutPolicy.chromeFadeDuration == 0.30)
@@ -347,37 +344,51 @@ struct PreviewRegressionTests {
     }
 
     @Test
-    func fullscreenVideoDoesNotContinuouslySeekAgainstTheSampledAudioClock() {
-        #expect(!InstalledVideoSyncPolicy.continuouslyPollsAudioClock)
+    func fullscreenVideoKeepsAudioAuthoritativeWithoutSteadyStateReseeking() {
+        #expect(InstalledVideoSyncPolicy.audioRemainsAudibleOwner)
+        #expect(InstalledVideoSyncPolicy.videoRemainsMuted)
+        #expect(!InstalledVideoSyncPolicy.allowsSteadyStateReseeking)
+        #expect(InstalledVideoSyncPolicy.forcedSeekThreshold == 0.005)
+        #expect(InstalledVideoSyncPolicy.rateUpdateInterval == .milliseconds(250))
+        #expect(InstalledVideoSyncPolicy.startupSeekTolerance == 0.50)
+        #expect(InstalledVideoSyncPolicy.startupTarget(
+            audioPosition: 10,
+            audioRate: 1.5,
+            isPlaying: true
+        ) == 10.3)
+        #expect(InstalledVideoSyncPolicy.startupTarget(
+            audioPosition: 10,
+            audioRate: 1.5,
+            isPlaying: false
+        ) == 10)
+        #expect(InstalledVideoSyncPolicy.catchUpRate(
+            audioRate: 1,
+            audioPosition: 10,
+            videoPosition: 9.5
+        ) > 1)
+        #expect(InstalledVideoSyncPolicy.catchUpRate(
+            audioRate: 1,
+            audioPosition: 10,
+            videoPosition: 10.5
+        ) < 1)
+        #expect(InstalledVideoSyncPolicy.catchUpRate(
+            audioRate: 1.5,
+            audioPosition: 10,
+            videoPosition: 10.02
+        ) == 1.5)
+        #expect(!InstalledVideoSyncPolicy.hasMaterialDrift(
+            audioPosition: 12.5,
+            videoPosition: 12.504
+        ))
+        #expect(InstalledVideoSyncPolicy.hasMaterialDrift(
+            audioPosition: 12.5,
+            videoPosition: 12.51
+        ))
         #expect(InstalledVideoSyncPolicy.shouldResumeAfterSeek(
             audioIsPlaying: true,
             trackMatches: true,
             videoIsVisible: true,
             isClosing: false
-        ))
-        #expect(!InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: false,
-            trackMatches: true,
-            videoIsVisible: true,
-            isClosing: false
-        ))
-        #expect(!InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: true,
-            trackMatches: false,
-            videoIsVisible: true,
-            isClosing: false
-        ))
-        #expect(!InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: true,
-            trackMatches: true,
-            videoIsVisible: false,
-            isClosing: false
-        ))
-        #expect(!InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: true,
-            trackMatches: true,
-            videoIsVisible: true,
-            isClosing: true
         ))
     }
 

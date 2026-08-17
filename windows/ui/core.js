@@ -250,6 +250,34 @@ export function crossfadeProgress(remainingSeconds, durationSeconds) {
   return Math.max(0, Math.min(1, 1 - (Number(remainingSeconds) || 0) / duration));
 }
 
+export function installedVideoSyncDecision({
+  audioPlaying = false,
+  videoPlaying = false,
+  driftSeconds = 0,
+  forceSeek = false,
+  syncInFlight = false,
+} = {}) {
+  if (syncInFlight) return "none";
+  const drift = Math.abs(Number(driftSeconds) || 0);
+  if (forceSeek && drift > 0.005) return "seek";
+  if (!audioPlaying) return videoPlaying ? "pause" : "none";
+  return videoPlaying ? "none" : "play";
+}
+
+export function installedVideoCatchUpRate({
+  audioRate = 1,
+  audioPosition = 0,
+  videoPosition = 0,
+  enabled = true,
+} = {}) {
+  const baseline = Number(audioRate);
+  if (!Number.isFinite(baseline) || baseline <= 0) return 1;
+  const drift = Number(videoPosition) - Number(audioPosition);
+  if (!enabled || !Number.isFinite(drift) || Math.abs(drift) <= 0.04) return baseline;
+  const multiplier = Math.min(1.2, Math.max(0.85, Math.exp(-0.35 * drift)));
+  return baseline * multiplier;
+}
+
 export const SAFE_CLIENT_CONFIG = Object.freeze({
   schema_version: 1,
   revision: 0,

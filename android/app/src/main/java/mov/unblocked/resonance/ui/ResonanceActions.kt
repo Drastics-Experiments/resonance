@@ -1,10 +1,13 @@
 package mov.unblocked.resonance.ui
 
+import androidx.media3.common.Player
+
 /**
  * All side effects requested by the Compose UI. Keeping this contract separate makes every
  * screen previewable and prevents the UI layer from depending directly on a ViewModel.
  */
 interface ResonanceActions {
+    fun playbackPlayer(): Player?
     fun dismissError()
     fun importAudio()
     fun setLibrarySearch(query: String)

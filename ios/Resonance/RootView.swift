@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -1931,7 +1932,7 @@ private struct ServerTransferPopup: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    Text(transfer.displayTitle)
+                    Text(transfer.kind.title)
                         .font(.caption.weight(.semibold))
                     Spacer(minLength: 4)
                     Text(transfer.batchPosition)
@@ -1975,7 +1976,7 @@ private struct ServerTransferPopup: View {
         }
         .shadow(color: .black.opacity(0.28), radius: 18, y: 8)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(transfer.displayTitle) \(transfer.songTitle), \(transfer.batchPosition)")
+        .accessibilityLabel("\(transfer.kind.title) \(transfer.songTitle), \(transfer.batchPosition)")
         .accessibilityValue(transfer.detail)
     }
 }
@@ -2739,6 +2740,8 @@ private struct NowPlayingView: View {
     @EnvironmentObject private var listenAlong: MobileListenAlongController
     @Binding var isPresented: Bool
     @State private var dismissalOffset: CGFloat = 0
+    @State private var videoFirstFrameTrackID: UUID?
+    @State private var videoUnavailableTrackID: UUID?
 
     var body: some View {
         ZStack {
@@ -2747,10 +2750,7 @@ private struct NowPlayingView: View {
                 ScrollView {
                     VStack(spacing: 24) {
                         header
-                        TrackArtwork(track: track, fallbackSymbol: "waveform")
-                            .frame(maxWidth: 330)
-                            .aspectRatio(1, contentMode: .fit)
-                            .shadow(color: .black.opacity(0.35), radius: 28, y: 18)
+                        nowPlayingMedia(for: track)
 
                         HStack(alignment: .top, spacing: 16) {
                             VStack(alignment: .leading, spacing: 7) {
@@ -2795,6 +2795,57 @@ private struct NowPlayingView: View {
         .scaleEffect(1 - min(dismissalOffset / 4_000, 0.025))
         .simultaneousGesture(dismissGesture)
         .preferredColorScheme(.dark)
+        .onChange(of: library.currentTrackID) { _, _ in
+            videoFirstFrameTrackID = nil
+            videoUnavailableTrackID = nil
+        }
+    }
+
+    @ViewBuilder
+    private func nowPlayingMedia(for track: MobileTrack) -> some View {
+        let isVideo = MobileInstalledVideoPolicy.isVideo(track.relativePath)
+        ZStack {
+            if isVideo {
+                MobileInstalledVideoSurface(
+                    url: library.fileURL(for: track),
+                    position: library.companionVideoPlaybackPosition,
+                    isPlaying: library.isPlaying,
+                    playbackRate: library.playbackRate,
+                    companionState: {
+                        MobileInstalledVideoClockState(
+                            position: library.companionVideoPlaybackPosition,
+                            isPlaying: library.isPlaying,
+                            playbackRate: library.playbackRate
+                        )
+                    },
+                    onFirstFrameReady: {
+                        guard library.currentTrackID == track.id else { return }
+                        videoFirstFrameTrackID = track.id
+                    },
+                    onPlaybackUnavailable: {
+                        guard library.currentTrackID == track.id else { return }
+                        videoUnavailableTrackID = track.id
+                    }
+                )
+                .accessibilityLabel("Video for \(track.title)")
+            }
+
+            TrackArtwork(track: track, fallbackSymbol: "waveform")
+                .opacity(isVideo && videoFirstFrameTrackID == track.id ? 0 : 1)
+
+            if isVideo,
+               videoFirstFrameTrackID != track.id,
+               videoUnavailableTrackID != track.id {
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(.white)
+                    .accessibilityLabel("Opening video")
+            }
+        }
+        .frame(maxWidth: 330)
+        .aspectRatio(1, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: .black.opacity(0.35), radius: 28, y: 18)
     }
 
     private var dismissGesture: some Gesture {
@@ -3109,6 +3160,366 @@ private struct PlaylistArtworkTile: View {
             ArtworkPlaceholder(symbol: "music.note", compact: true)
                 .frame(width: size.width, height: size.height)
                 .clipped()
+        }
+    }
+}
+
+enum MobileInstalledVideoPolicy {
+    static let supportedExtensions: Set<String> = ["mp4", "mov", "m4v", "webm"]
+    static let audioRemainsAudibleOwner = true
+    static let usesDedicatedMutedCompanionPlayer = true
+    static let startupSeekTolerance: TimeInterval = 0
+    static let allowsSteadyStateReseeking = false
+    static let playbackDiscontinuityThreshold: TimeInterval = 0.75
+    static let catchUpDeadband: TimeInterval = 0.04
+    static let catchUpExponent = 0.35
+    static let minimumRateMultiplier = 0.85
+    static let maximumRateMultiplier = 1.20
+    static let rateUpdateInterval: TimeInterval = 0.25
+
+    static func catchUpRate(
+        audioRate: Float,
+        audioPosition: TimeInterval,
+        videoPosition: TimeInterval
+    ) -> Float {
+        guard audioRate.isFinite, audioRate > 0,
+              audioPosition.isFinite, videoPosition.isFinite else { return max(audioRate, 0) }
+        let drift = videoPosition - audioPosition
+        guard abs(drift) > catchUpDeadband else { return audioRate }
+        let multiplier = min(
+            max(exp(-catchUpExponent * drift), minimumRateMultiplier),
+            maximumRateMultiplier
+        )
+        return audioRate * Float(multiplier)
+    }
+
+    static func isVideo(_ relativePath: String) -> Bool {
+        supportedExtensions.contains(URL(fileURLWithPath: relativePath).pathExtension.lowercased())
+    }
+}
+
+private struct MobileInstalledVideoClockState {
+    let position: TimeInterval
+    let isPlaying: Bool
+    let playbackRate: Float
+}
+
+private struct MobileInstalledVideoSurface: UIViewRepresentable {
+    let url: URL
+    let position: TimeInterval
+    let isPlaying: Bool
+    let playbackRate: Float
+    let companionState: () -> MobileInstalledVideoClockState
+    let onFirstFrameReady: () -> Void
+    let onPlaybackUnavailable: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> MobileVideoPlayerContainerView {
+        let view = MobileVideoPlayerContainerView()
+        view.onReadyForDisplay = { context.coordinator.videoLayerBecameReady() }
+        view.player = context.coordinator.player
+        context.coordinator.update(
+            url: url,
+            position: position,
+            isPlaying: isPlaying,
+            playbackRate: playbackRate,
+            companionState: companionState,
+            onFirstFrameReady: onFirstFrameReady,
+            onPlaybackUnavailable: onPlaybackUnavailable
+        )
+        return view
+    }
+
+    func updateUIView(_ view: MobileVideoPlayerContainerView, context: Context) {
+        view.onReadyForDisplay = { context.coordinator.videoLayerBecameReady() }
+        view.player = context.coordinator.player
+        context.coordinator.update(
+            url: url,
+            position: position,
+            isPlaying: isPlaying,
+            playbackRate: playbackRate,
+            companionState: companionState,
+            onFirstFrameReady: onFirstFrameReady,
+            onPlaybackUnavailable: onPlaybackUnavailable
+        )
+    }
+
+    static func dismantleUIView(_ view: MobileVideoPlayerContainerView, coordinator: Coordinator) {
+        coordinator.stop()
+        view.player = nil
+    }
+
+    final class Coordinator {
+        let player = AVPlayer()
+        private var representedURL: URL?
+        private var itemStatusObservation: NSKeyValueObservation?
+        private var onFirstFrameReady: () -> Void = {}
+        private var onPlaybackUnavailable: () -> Void = {}
+        private var synchronizationSeekGeneration: UInt = 0
+        private var synchronizationSeekTarget: TimeInterval?
+        private var desiredPosition: TimeInterval = 0
+        private var desiredIsPlaying = false
+        private var desiredPlaybackRate: Float = 1
+        private var desiredVideoRate: Float = 1
+        private var videoLayerIsReady = false
+        private var firstFrameWasPublished = false
+        private var lastDesiredSampleTime: TimeInterval?
+        private var companionState: (() -> MobileInstalledVideoClockState)?
+        private var rateControllerTimer: Timer?
+
+        init() {
+            player.isMuted = true
+            player.volume = 0
+            player.actionAtItemEnd = .pause
+        }
+
+        func update(
+            url: URL,
+            position: TimeInterval,
+            isPlaying: Bool,
+            playbackRate: Float,
+            companionState: @escaping () -> MobileInstalledVideoClockState,
+            onFirstFrameReady: @escaping () -> Void,
+            onPlaybackUnavailable: @escaping () -> Void
+        ) {
+            self.onFirstFrameReady = onFirstFrameReady
+            self.onPlaybackUnavailable = onPlaybackUnavailable
+            self.companionState = companionState
+            startRateController()
+            let nextPosition = max(position.isFinite ? position : 0, 0)
+            let now = ProcessInfo.processInfo.systemUptime
+            let elapsedSinceLastSample = lastDesiredSampleTime.map { max(now - $0, 0) } ?? 0
+            let expectedAdvance = desiredIsPlaying ? elapsedSinceLastSample * Double(desiredPlaybackRate) : 0
+            let positionDiscontinuity = abs((nextPosition - desiredPosition) - expectedAdvance)
+                > MobileInstalledVideoPolicy.playbackDiscontinuityThreshold
+            lastDesiredSampleTime = now
+            desiredPosition = nextPosition
+            desiredIsPlaying = isPlaying
+            desiredPlaybackRate = playbackRate
+            desiredVideoRate = playbackRate
+            player.isMuted = true
+            player.volume = 0
+            player.defaultRate = playbackRate
+
+            if representedURL != url {
+                representedURL = url
+                videoLayerIsReady = false
+                firstFrameWasPublished = false
+                lastDesiredSampleTime = now
+                let item = AVPlayerItem(url: url)
+                itemStatusObservation?.invalidate()
+                itemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        if item.status == .failed {
+                            self.cancelSynchronizationSeek()
+                            self.player.pause()
+                            self.onPlaybackUnavailable()
+                        } else if item.status == .readyToPlay,
+                                  self.synchronizationSeekTarget == nil {
+                            self.synchronizeToDesiredPosition(startup: true, force: false)
+                        }
+                    }
+                }
+                player.replaceCurrentItem(with: item)
+                synchronizeToDesiredPosition(startup: true, force: true)
+                return
+            } else if player.currentItem?.status == .readyToPlay {
+                if synchronizationSeekTarget == nil, positionDiscontinuity {
+                    synchronizeToDesiredPosition(startup: false, force: true)
+                    return
+                }
+                let videoPosition = player.currentTime().seconds
+                desiredVideoRate = MobileInstalledVideoPolicy.catchUpRate(
+                    audioRate: playbackRate,
+                    audioPosition: nextPosition,
+                    videoPosition: videoPosition
+                )
+            }
+
+            applyDesiredPlaybackState()
+        }
+
+        deinit {
+            itemStatusObservation?.invalidate()
+            rateControllerTimer?.invalidate()
+        }
+
+        func stop() {
+            rateControllerTimer?.invalidate()
+            rateControllerTimer = nil
+            companionState = nil
+            cancelSynchronizationSeek()
+            player.pause()
+        }
+
+        private func startRateController() {
+            guard rateControllerTimer == nil else { return }
+            let timer = Timer(
+                timeInterval: MobileInstalledVideoPolicy.rateUpdateInterval,
+                repeats: true
+            ) { [weak self] _ in
+                self?.updateFromAuthoritativeClock()
+            }
+            rateControllerTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
+
+        private func updateFromAuthoritativeClock() {
+            guard let snapshot = companionState?() else { return }
+            let nextPosition = max(snapshot.position.isFinite ? snapshot.position : 0, 0)
+            let now = ProcessInfo.processInfo.systemUptime
+            let elapsedSinceLastSample = lastDesiredSampleTime.map { max(now - $0, 0) } ?? 0
+            let expectedAdvance = desiredIsPlaying ? elapsedSinceLastSample * Double(desiredPlaybackRate) : 0
+            let positionDiscontinuity = abs((nextPosition - desiredPosition) - expectedAdvance)
+                > MobileInstalledVideoPolicy.playbackDiscontinuityThreshold
+            lastDesiredSampleTime = now
+            desiredPosition = nextPosition
+            desiredIsPlaying = snapshot.isPlaying
+            desiredPlaybackRate = snapshot.playbackRate
+            desiredVideoRate = snapshot.playbackRate
+            player.isMuted = true
+            player.volume = 0
+
+            guard player.currentItem?.status == .readyToPlay,
+                  synchronizationSeekTarget == nil else { return }
+            if positionDiscontinuity {
+                synchronizeToDesiredPosition(startup: false, force: true)
+                return
+            }
+            desiredVideoRate = MobileInstalledVideoPolicy.catchUpRate(
+                audioRate: snapshot.playbackRate,
+                audioPosition: nextPosition,
+                videoPosition: player.currentTime().seconds
+            )
+            applyDesiredPlaybackState()
+        }
+
+        func videoLayerBecameReady() {
+            videoLayerIsReady = true
+            publishFirstFrameIfAligned()
+        }
+
+        private func synchronizeToDesiredPosition(
+            startup: Bool,
+            force: Bool
+        ) {
+            let position = desiredPosition
+            let currentTime = player.currentTime().seconds
+            guard force || !currentTime.isFinite
+                    || abs(currentTime - position) > MobileInstalledVideoPolicy.playbackDiscontinuityThreshold else {
+                applyDesiredPlaybackState()
+                return
+            }
+            if let pendingTarget = synchronizationSeekTarget,
+               abs(pendingTarget - position) <= 0.05 { return }
+
+            synchronizationSeekGeneration &+= 1
+            let seekGeneration = synchronizationSeekGeneration
+            synchronizationSeekTarget = position
+            desiredVideoRate = desiredPlaybackRate
+            player.pause()
+            let tolerance = startup ? MobileInstalledVideoPolicy.startupSeekTolerance : 0
+            let toleranceTime = CMTime(seconds: tolerance, preferredTimescale: 600)
+            player.seek(
+                to: CMTime(seconds: max(position, 0), preferredTimescale: 600),
+                toleranceBefore: toleranceTime,
+                toleranceAfter: toleranceTime
+            ) { [weak self] finished in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.synchronizationSeekGeneration == seekGeneration else { return }
+                    self.synchronizationSeekTarget = nil
+                    guard finished else { return }
+                    self.applyDesiredPlaybackState()
+                }
+            }
+        }
+
+        private func applyDesiredPlaybackState() {
+            guard synchronizationSeekTarget == nil,
+                  player.currentItem?.status == .readyToPlay else {
+                player.pause()
+                return
+            }
+            publishFirstFrameIfAligned()
+            if desiredIsPlaying {
+                if player.timeControlStatus == .playing {
+                    if abs(player.rate - desiredVideoRate) > 0.001 {
+                        player.rate = desiredVideoRate
+                    }
+                } else {
+                    player.playImmediately(atRate: desiredVideoRate)
+                }
+            } else {
+                player.pause()
+            }
+        }
+
+        private func cancelSynchronizationSeek() {
+            synchronizationSeekGeneration &+= 1
+            synchronizationSeekTarget = nil
+        }
+
+        private func publishFirstFrameIfAligned() {
+            guard videoLayerIsReady,
+                  !firstFrameWasPublished,
+                  synchronizationSeekTarget == nil else { return }
+            firstFrameWasPublished = true
+            onFirstFrameReady()
+        }
+    }
+}
+
+private final class MobileVideoPlayerContainerView: UIView {
+    var onReadyForDisplay: () -> Void = {} {
+        didSet {
+            if playerLayer.isReadyForDisplay { onReadyForDisplay() }
+        }
+    }
+    private var readyForDisplayObservation: NSKeyValueObservation?
+
+    var player: AVPlayer? {
+        get { playerLayer.player }
+        set {
+            guard playerLayer.player !== newValue else { return }
+            playerLayer.player = newValue
+            observeReadyForDisplay()
+        }
+    }
+
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+
+    private var playerLayer: AVPlayerLayer {
+        guard let layer = layer as? AVPlayerLayer else {
+            preconditionFailure("MobileVideoPlayerContainerView requires AVPlayerLayer")
+        }
+        return layer
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .black
+        playerLayer.videoGravity = .resizeAspect
+        observeReadyForDisplay()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func observeReadyForDisplay() {
+        readyForDisplayObservation?.invalidate()
+        readyForDisplayObservation = playerLayer.observe(
+            \.isReadyForDisplay,
+            options: [.initial, .new]
+        ) { [weak self] layer, _ in
+            guard layer.isReadyForDisplay else { return }
+            DispatchQueue.main.async {
+                self?.onReadyForDisplay()
+            }
         }
     }
 }

@@ -129,6 +129,33 @@ final class MobileNowPlayingPolicyTests: XCTestCase {
         XCTAssertEqual(MobileNowPlayingPolicy.seekFraction(elapsedTime: 90, bounds: bounds), 1)
         XCTAssertEqual(MobileNowPlayingPolicy.seekFraction(elapsedTime: .nan, bounds: bounds), 0)
     }
+
+    func testInstalledVideoPolicyRecognizesOnlyLocalVideoExtensions() {
+        XCTAssertTrue(MobileInstalledVideoPolicy.isVideo("downloaded/clip.mp4"))
+        XCTAssertTrue(MobileInstalledVideoPolicy.isVideo("downloaded/CLIP.MOV"))
+        XCTAssertFalse(MobileInstalledVideoPolicy.isVideo("downloaded/song.m4a"))
+        XCTAssertTrue(MobileInstalledVideoPolicy.audioRemainsAudibleOwner)
+        XCTAssertTrue(MobileInstalledVideoPolicy.usesDedicatedMutedCompanionPlayer)
+        XCTAssertEqual(MobileInstalledVideoPolicy.startupSeekTolerance, 0)
+        XCTAssertFalse(MobileInstalledVideoPolicy.allowsSteadyStateReseeking)
+        XCTAssertEqual(MobileInstalledVideoPolicy.playbackDiscontinuityThreshold, 0.75)
+        XCTAssertEqual(MobileInstalledVideoPolicy.rateUpdateInterval, 0.25)
+        XCTAssertGreaterThan(MobileInstalledVideoPolicy.catchUpRate(
+            audioRate: 1,
+            audioPosition: 10,
+            videoPosition: 9.5
+        ), 1)
+        XCTAssertLessThan(MobileInstalledVideoPolicy.catchUpRate(
+            audioRate: 1,
+            audioPosition: 10,
+            videoPosition: 10.5
+        ), 1)
+        XCTAssertEqual(MobileInstalledVideoPolicy.catchUpRate(
+            audioRate: 1.5,
+            audioPosition: 10,
+            videoPosition: 10.02
+        ), 1.5)
+    }
 }
 
 final class MobileCatalogRefreshFailurePolicyTests: XCTestCase {
@@ -729,23 +756,8 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(state.songTitle, "Catalog Song Title")
-        XCTAssertEqual(state.displayTitle, "Downloading")
         XCTAssertEqual(state.batchPosition, "3/10")
         XCTAssertEqual(state.progress, 0.25)
-
-        let preparing = MobileTransferDisplayState(
-            kind: .download,
-            itemID: "catalog-song-id",
-            songTitle: "Loading song metadata",
-            detail: "Preparing download",
-            currentItem: 1,
-            totalItems: 10,
-            completedBytes: 0,
-            totalBytes: 0,
-            fallbackProgress: nil
-        )
-        XCTAssertEqual(preparing.displayTitle, "Preparing download")
-        XCTAssertNil(preparing.progress)
     }
 
     func testNoPendingTransfersUsesZeroBatchPosition() {
