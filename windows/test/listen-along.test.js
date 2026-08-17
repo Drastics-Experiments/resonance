@@ -178,7 +178,7 @@ test("keeps listen-along network and provider capabilities out of the renderer",
   assert.doesNotMatch(renderer, /audio\.src\s*=\s*event\??\.snapshot\??\.source_url/);
   assert.match(index, /connect-src 'none'/);
   assert.match(index, /media-src[^;]*file:/);
-  assert.match(index, /id="openListenAlong"[^>]*>[^<]*<svg[^>]*class="transport-icon"/);
+  assert.match(index, /id="openListenAlong"/);
   assert.match(index, /id="copyListenAlongCode"[^>]*disabled/);
   assert.match(index, /id="listenAlongCopyFeedback"[^>]*aria-live="polite"/);
   assert.match(index, /id="listenAlongStatus">Not connected<\/span>/);
@@ -186,4 +186,25 @@ test("keeps listen-along network and provider capabilities out of the renderer",
   assert.match(renderer, /\$\("#copyListenAlongCode"\)\.onclick = \(\) => \{ void copyListenAlongRoomCode\(\); \}/);
   assert.match(await readFile(new URL("../ui/styles.css", import.meta.url), "utf8"), /#listenAlongStatus/);
   assert.match(packageJSON, /"listen-along\.cjs"/);
+});
+
+test("matches the macOS Listen Along access flow in the Windows player bar", async () => {
+  const [renderer, index, styles] = await Promise.all([
+    readFile(new URL("../ui/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../ui/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../ui/styles.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(index, /class="player-track"[^>]*>.*id="favoriteCurrent".*id="openListenAlong"/);
+  assert.match(index, /id="openListenAlong"[^>]*aria-expanded="false"[^>]*aria-haspopup="dialog"/);
+  assert.match(index, /id="startListenAlong"[^>]*>Start as Host<\/button>/);
+  assert.match(index, /id="listenAlongJoinCode"[^>]*placeholder="XXXX-XXXX"/);
+  assert.doesNotMatch(index, /id="profileListenAlong"/);
+  assert.match(styles, /\.listen-along-dialog\s*{[^}]*position: fixed;[^}]*width: min\(300px,/s);
+  assert.match(styles, /\.listen-along-fill\s*{[^}]*display: none;/s);
+  assert.match(styles, /\.listen-along-player-button\.active \.listen-along-fill\s*{[^}]*display: inline;/s);
+  assert.match(renderer, /dialog\.show\(\);/);
+  assert.doesNotMatch(renderer, /#listenAlongDialog"\);\s*if \(!dialog\.open\) dialog\.showModal\(\)/);
+  assert.match(renderer, /!dialog\.contains\(event\.target\) && !button\?\.contains\(event\.target\)/);
+  assert.match(renderer, /event\.key === "Escape" && \$\("#listenAlongDialog"\)\?\.open/);
 });
