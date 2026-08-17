@@ -1672,6 +1672,8 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(styleSource, /\.local-import-candidates\s*\{[\s\S]*?overflow-y: auto/);
   assert.match(styleSource, /\.local-import-resolved\[hidden\],[\s\S]*?display: none/);
   assert.match(packageSource, /"ffmpeg-static": "5\.3\.0"/);
+  assert.match(packageSource, /"resonanceUpdateAuthenticity": "production"/);
+  assert.match(packageSource, /extraMetadata\.resonanceUpdateAuthenticity=unsigned/);
   assert.match(packageSource, /"local-debrid\.cjs"/);
   assert.match(packageSource, /"local-soundcloud\.cjs"/);
   assert.match(packageSource, /"node_modules\/ffmpeg-static\/\*\*"/);
@@ -2260,7 +2262,7 @@ test("installs downloaded Windows updates silently in place", () => {
   assert.deepEqual(installArguments, [true, true]);
   assert.match(mainSource, /autoUpdater\.autoDownload = true/);
   assert.match(mainSource, /autoUpdater\.autoInstallOnAppQuit = false/);
-  assert.match(mainSource, /verifyDownloadedWindowsUpdate\(\{[\s\S]+downloadedFile: information\?\.downloadedFile/);
+  assert.match(mainSource, /verifyDownloadedWindowsUpdate\(\{[\s\S]+downloadedFile: information\?\.downloadedFile[\s\S]+authenticityMode: windowsPackage\.resonanceUpdateAuthenticity/);
   assert.match(mainSource, /if \(!verifiedWindowsUpdate \|\| windowsUpdateVerificationPromise\) return false/);
   assert.match(mainSource, /installDownloadedWindowsUpdate\(autoUpdater\)/);
   assert.doesNotMatch(mainSource, /autoUpdater\.quitAndInstall\(false, true\)/);

@@ -42,6 +42,22 @@ test("pull request release candidates are secretless and explicitly unsigned", (
   assert.match(workflow, /--allow-unsigned-desktop-release/);
 });
 
+test("Windows packages embed the update authenticity policy selected by the build", () => {
+  const workflow = read(".github/workflows/windows.yml");
+  const packageJSON = JSON.parse(read("windows/package.json"));
+  assert.equal(packageJSON.resonanceUpdateAuthenticity, "production");
+  assert.match(packageJSON.scripts["installer:win"], /extraMetadata\.resonanceUpdateAuthenticity=unsigned/);
+  assert.match(workflow, /Verify unsigned installer state[\s\S]+Status -ne "NotSigned"/);
+  assert.match(
+    workflow,
+    /Verify packaged startup modules and update policy[\s\S]+ELECTRON_RUN_AS_NODE[\s\S]+Start-Process[\s\S]+ExitCode/,
+  );
+  assert.match(
+    workflow,
+    /Build signed release candidate[\s\S]+extraMetadata\.resonanceUpdateAuthenticity=production/,
+  );
+});
+
 test("publish workflow is trusted-dispatch-only and fails closed on unsigned policy", () => {
   const workflow = read(".github/workflows/publish-release.yml");
   assert.doesNotMatch(workflow, /^\s+pull_request:/m);
