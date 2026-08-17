@@ -746,6 +746,99 @@ function listeningHistorySongKey(entry) {
     : `${serverOrigin}#${profileID}#track:${entry?.trackID || "unknown"}`;
 }
 
+function listeningHistoryArtworkURL(value, serverURL) {
+  const origin = normalizedServerOrigin(serverURL);
+  if (!origin || typeof value !== "string" || value.length > 2_048) return null;
+  try {
+    const url = new URL(value, `${origin}/`);
+    return url.protocol === "https:"
+      && url.origin === origin
+      && !url.username
+      && !url.password
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function listeningHistoryMetadataPlaceholder(value, field) {
+  const normalized = String(value || "").trim().replaceAll("…", "...").toLocaleLowerCase();
+  if (!normalized) return true;
+  if (field === "title") {
+    return normalized === "resolving metadata..."
+      || normalized === "unknown song"
+      || normalized === "untitled"
+      || normalized.startsWith("saved song ");
+  }
+  if (field === "artist") {
+    return normalized === "automatic lookup" || normalized === "unknown artist";
+  }
+  return normalized === "link only"
+    || normalized === "unknown album"
+    || normalized === "server library";
+}
+
+function preferredListeningHistoryMetadata(field, ...values) {
+  for (const value of values) {
+    const text = optionalHistoryText(value);
+    if (text && !listeningHistoryMetadataPlaceholder(text, field)) return text;
+  }
+  return null;
+}
+
+export function serverSongHasCatalogMetadata(song) {
+  return Boolean(
+    preferredListeningHistoryMetadata("title", song?.title, song?.name)
+    && preferredListeningHistoryMetadata("artist", song?.artist),
+  );
+}
+
+export function hydrateListeningHistoryFromCatalog(
+  state,
+  catalog = [],
+  requestedProfileID = state?.syncProfileID || "default",
+  requestedServerURL = state?.serverURL,
+) {
+  const requestedServerOrigin = normalizedServerOrigin(requestedServerURL);
+  if (!requestedServerOrigin || !Array.isArray(state?.listeningHistory)) return false;
+  const songsByRemoteID = new Map((Array.isArray(catalog) ? catalog : [])
+    .filter((song) => optionalHistoryText(song?.id, 128))
+    .map((song) => [String(song.id), song]));
+  let changed = false;
+  for (const entry of state.listeningHistory) {
+    if ((entry?.profileID || "default") !== requestedProfileID
+        || normalizedServerOrigin(entry?.serverOrigin) !== requestedServerOrigin) continue;
+    const remoteID = optionalHistoryText(entry?.remoteID, 128);
+    const song = remoteID ? songsByRemoteID.get(remoteID) : null;
+    if (!song) continue;
+    const nextTitle = preferredListeningHistoryMetadata(
+      "title", song.title, song.name, song.filename, entry.title,
+    );
+    const nextArtist = preferredListeningHistoryMetadata("artist", song.artist, entry.artist);
+    const nextAlbum = preferredListeningHistoryMetadata("album", song.album, entry.album);
+    const catalogDuration = normalizedHistoryDuration(song.duration_seconds ?? song.duration);
+    const nextDuration = catalogDuration > 0 ? catalogDuration : entry.duration;
+    const nextArtworkURL = listeningHistoryArtworkURL(
+      song.artwork_url ?? song.artworkURL ?? entry.artworkURL,
+      requestedServerOrigin,
+    );
+    if (entry.title !== nextTitle
+        || entry.artist !== nextArtist
+        || entry.album !== nextAlbum
+        || entry.duration !== nextDuration
+        || entry.artworkURL !== nextArtworkURL) {
+      entry.title = nextTitle;
+      entry.artist = nextArtist;
+      entry.album = nextAlbum;
+      entry.duration = nextDuration;
+      entry.artworkURL = nextArtworkURL;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function listeningHistoryTrackSnapshot(state, entry) {
   const profileID = entry?.profileID || "default";
   const remoteID = optionalHistoryText(entry?.remoteID, 128);
@@ -767,11 +860,15 @@ function listeningHistoryTrackSnapshot(state, entry) {
   return {
     id: track?.id || entry?.trackID,
     remoteID: track?.remoteID || remoteID,
-    title: optionalHistoryText(track?.title) || optionalHistoryText(entry?.title) || "Unknown song",
-    artist: optionalHistoryText(track?.artist) || optionalHistoryText(entry?.artist) || "Unknown artist",
-    album: optionalHistoryText(track?.album) || optionalHistoryText(entry?.album) || "Unknown Album",
+    title: preferredListeningHistoryMetadata("title", track?.title, entry?.title) || "Unknown song",
+    artist: preferredListeningHistoryMetadata("artist", track?.artist, entry?.artist) || "Unknown artist",
+    album: preferredListeningHistoryMetadata("album", track?.album, entry?.album) || "Unknown Album",
     duration: trackDuration && trackDuration > 0 ? trackDuration : entryDuration ?? 0,
     artwork: track?.artwork || null,
+    artworkURL: listeningHistoryArtworkURL(
+      track?.artworkURL || entry?.artworkURL,
+      entry?.serverOrigin || state?.serverURL,
+    ),
     fileUrl: track?.fileUrl || null,
   };
 }
@@ -1053,6 +1150,7 @@ export function normalizeState(value) {
       artist: optionalHistoryText(entry.artist),
       album: optionalHistoryText(entry.album),
       duration: normalizedHistoryDuration(entry.duration),
+      artworkURL: listeningHistoryArtworkURL(entry.artworkURL, inferredHistoryOrigin(entry)),
       originatedOnThisDevice: entry.originatedOnThisDevice !== false,
     }))
     .slice(-2000);
@@ -1209,6 +1307,7 @@ export function summarizeListeningHistory(state, dayCount = 30, now = new Date()
           album: snapshot.album,
           duration: snapshot.duration,
           artwork: snapshot.artwork,
+          artworkURL: snapshot.artworkURL,
           fileUrl: snapshot.fileUrl,
           seconds: 0,
           plays: 0,
@@ -1264,6 +1363,7 @@ export function summarizeListeningStats(state, now = new Date()) {
       album: snapshot.album,
       duration: snapshot.duration,
       artwork: snapshot.artwork,
+      artworkURL: snapshot.artworkURL,
       fileUrl: snapshot.fileUrl,
       seconds: 0,
       plays: 0,
@@ -1298,6 +1398,7 @@ export function mergeListeningHistoryDocument(
   document,
   requestedProfileID = state?.syncProfileID || "default",
   requestedServerURL = state?.serverURL,
+  catalog = [],
 ) {
   const profileID = typeof document?.profile_id === "string" && document.profile_id
     ? document.profile_id
@@ -1320,7 +1421,9 @@ export function mergeListeningHistoryDocument(
   const tracksByRemoteID = new Map(activeTracks
     .filter((track) => track?.remoteID && (track.syncProfileID || "default") === profileID)
     .map((track) => [track.remoteID, track]));
-
+  const songsByRemoteID = new Map((Array.isArray(catalog) ? catalog : [])
+    .filter((song) => optionalHistoryText(song?.id, 128))
+    .map((song) => [String(song.id), song]));
   for (const remote of document.entries) {
     const id = optionalHistoryText(remote?.id, 128);
     const rawTrackID = optionalHistoryText(remote?.track_id ?? remote?.trackID, 128);
@@ -1331,6 +1434,9 @@ export function mergeListeningHistoryDocument(
     const remoteID = optionalHistoryText(remote?.song_id ?? remote?.remoteID, 128)
       || existing?.remoteID;
     const mappedTrack = (remoteID && tracksByRemoteID.get(remoteID)) || tracksByID.get(rawTrackID);
+    const catalogSong = remoteID ? songsByRemoteID.get(remoteID) : null;
+    const remoteDuration = normalizedHistoryDuration(remote?.duration_seconds ?? remote?.duration);
+    const catalogDuration = normalizedHistoryDuration(catalogSong?.duration_seconds ?? catalogSong?.duration);
     entriesByID.set(identity, {
       id,
       trackID: mappedTrack?.id || existing?.trackID || rawTrackID,
@@ -1339,12 +1445,25 @@ export function mergeListeningHistoryDocument(
       startedAt: existing?.startedAt || startedAt.toISOString(),
       listenedSeconds: Math.max(existing?.listenedSeconds || 0, Number(remote?.listened_seconds ?? remote?.listenedSeconds) || 0),
       remoteID: remoteID || mappedTrack?.remoteID || null,
-      title: optionalHistoryText(remote?.title) || existing?.title || optionalHistoryText(mappedTrack?.title),
-      artist: optionalHistoryText(remote?.artist) || existing?.artist || optionalHistoryText(mappedTrack?.artist),
-      album: optionalHistoryText(remote?.album) || existing?.album || optionalHistoryText(mappedTrack?.album),
-      duration: normalizedHistoryDuration(remote?.duration_seconds ?? remote?.duration)
-        ?? existing?.duration
+      title: preferredListeningHistoryMetadata(
+        "title", remote?.title, catalogSong?.title, catalogSong?.name, catalogSong?.filename, existing?.title, mappedTrack?.title,
+      ),
+      artist: preferredListeningHistoryMetadata(
+        "artist", remote?.artist, catalogSong?.artist, existing?.artist, mappedTrack?.artist,
+      ),
+      album: preferredListeningHistoryMetadata(
+        "album", remote?.album, catalogSong?.album, existing?.album, mappedTrack?.album,
+      ),
+      duration: (remoteDuration > 0 ? remoteDuration : null)
+        ?? (catalogDuration > 0 ? catalogDuration : null)
+        ?? (existing?.duration > 0 ? existing.duration : null)
         ?? normalizedHistoryDuration(mappedTrack?.duration),
+      artworkURL: listeningHistoryArtworkURL(
+        remote?.artwork_url ?? remote?.artworkURL
+          ?? catalogSong?.artwork_url ?? catalogSong?.artworkURL
+          ?? existing?.artworkURL ?? mappedTrack?.artworkURL,
+        requestedServerOrigin,
+      ),
       originatedOnThisDevice: existing?.originatedOnThisDevice ?? false,
     });
   }

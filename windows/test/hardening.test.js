@@ -805,7 +805,7 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(appSource, /finishClipPlaybackIfNeeded\(\)[\s\S]+else if \(!move\(1\)\)[\s\S]+audio\.pause\(\)/);
   assert.match(appSource, /media\.onended = \(\) => \{[\s\S]+if \(repeat\)[\s\S]+finishListeningSessionForReplay\(\)[\s\S]+else if \(\$\("#installedVideoDialog"\)\.open && installedVideoSession\)[\s\S]+advanceInstalledVideo\(1\)/);
   assert.match(appSource, /context = currentProfileContext\(\)[\s\S]+api\.postListeningHistory\(\{[\s\S]+baseURL: context\.serverURL,[\s\S]+token: context\.token/);
-  assert.match(appSource, /api\.fetchListeningHistory\(\{[\s\S]+profileID: context\.profileID[\s\S]+profileContextIsCurrent\(context\)[\s\S]+mergeListeningHistoryDocument\(state, remoteDocument, context\.profileID, context\.serverURL\)/);
+  assert.match(appSource, /api\.fetchListeningHistory\(\{[\s\S]+profileID: context\.profileID[\s\S]+profileContextIsCurrent\(context\)[\s\S]+mergeListeningHistoryDocument\(state, remoteDocument, context\.profileID, context\.serverURL, serverCatalog\)/);
   assert.match(appSource, /row\.onkeydown = \(event\) => \{[\s\S]+event\.key === "Enter" \|\| event\.key === " "/);
   assert.match(appSource, /function bindRemoteRows\(\)[\s\S]+const activate = \(\) => \{[\s\S]+playRemoteStream\(song\)[\s\S]+row\.onclick = \(event\)[\s\S]+activate\(\)[\s\S]+row\.onkeydown/);
   assert.match(appSource, /button\.tabIndex = active \? 0 : -1/);

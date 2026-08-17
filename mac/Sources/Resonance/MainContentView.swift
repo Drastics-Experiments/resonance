@@ -1460,6 +1460,7 @@ private struct MacListeningHistorySheet: View {
         ListeningHistoryCalendarSummary(
             entries: model.activeProfileListeningHistoryEntries,
             tracks: model.tracks,
+            remoteSongs: model.remoteSongs,
             dayCount: range.rawValue,
             windowOffset: windowOffset
         )
@@ -1468,7 +1469,8 @@ private struct MacListeningHistorySheet: View {
     private var allTimeStats: ListeningHistoryStatsSummary {
         ListeningHistoryStatsSummary(
             entries: model.activeProfileListeningHistoryEntries,
-            tracks: model.tracks
+            tracks: model.tracks,
+            remoteSongs: model.remoteSongs
         )
     }
 
@@ -1540,6 +1542,9 @@ private struct MacListeningHistorySheet: View {
         .foregroundStyle(palette.ink)
         .preferredColorScheme(.dark)
         .presentationBackground(Color.clear)
+        .task {
+            await model.prepareListeningHistoryMetadata()
+        }
         .onChange(of: range) {
             windowOffset = 0
             selectedDayDate = preferredDayDate

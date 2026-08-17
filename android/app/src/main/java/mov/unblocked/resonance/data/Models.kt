@@ -338,6 +338,7 @@ data class StoredLibrary(
     val clipRanges: Map<String, ClipRange> = emptyMap(),
     val dirtyClipRangeKeys: Set<String> = emptySet(),
     val deletedClipRangeKeys: Set<String> = emptySet(),
+    val listeningHistory: List<ListeningHistoryEntry> = emptyList(),
     /**
      * Durable profile-scoped snapshots keyed by normalized server origin and profile ID.
      *

@@ -83,6 +83,8 @@ import mov.unblocked.resonance.data.ListenAlongPollPolicy
 import mov.unblocked.resonance.data.ListenAlongArtworkPolicy
 import mov.unblocked.resonance.data.ListenAlongPlaybackPolicy
 import mov.unblocked.resonance.data.ListenAlongRevisionConflictException
+import mov.unblocked.resonance.data.ListeningHistoryPlaybackPolicy
+import mov.unblocked.resonance.data.ListeningHistoryRetentionPolicy
 import mov.unblocked.resonance.data.LatestValuePersistenceGate
 import mov.unblocked.resonance.data.ReviewedMatchResolutionPolicy
 import mov.unblocked.resonance.data.LibraryRepository
@@ -161,6 +163,14 @@ private data class ServerUploadPolicySnapshot(
     val context: ServerProfileContext,
     val config: EffectiveClientConfig,
     val mode: ServerUploadMode,
+)
+
+private data class ListeningPlaybackSnapshot(
+    val track: Track,
+    val serverURL: String?,
+    val profileID: String,
+    val remoteSongID: String?,
+    val artworkURL: String?,
 )
 
 private data class RemoteSongMetadataRequest(
@@ -250,6 +260,14 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private var activeQueue: List<String> = emptyList()
     private var activePlaylistId: String? = null
     private var syncDebounce: Job? = null
+    private var listeningHistorySyncJob: Job? = null
+    private var listeningHistorySyncPending = false
+    private var listeningHistoryRetryAt = 0L
+    private var listeningHistorySyncInFlight = false
+    private val listeningHistorySyncedSeconds = mutableMapOf<String, Double>()
+    private var activeListeningEntryID: String? = null
+    private var lastListeningPositionSeconds = 0.0
+    private var lastPersistedListeningSeconds = 0.0
     private var playlistMutationGeneration = 0L
     private var likesMutationGeneration = 0L
     private var clipRangeMutationGeneration = 0L
@@ -420,6 +438,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun signOutAccount() {
         val current = accountSession
+        finishListeningSession(flush = true)
+        connectionGeneration += 1
+        listeningHistorySyncJob?.cancel()
+        listeningHistorySyncJob = null
+        listeningHistorySyncPending = false
         clearListenAlongSession(stopPlayback = true)
         RemoteDownloadContextChangePolicy.mutateAfterInvalidation(
             invalidateDownload = {
@@ -580,6 +603,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         if (migrated == library) return
         library = normalizeLiked(migrated.copy(
             syncProfiles = listOf(SyncProfile(accountProfileID, session.profileDisplayName, true)),
+            listeningHistory = migrated.listeningHistory.map { entry ->
+                if (ListeningHistoryRetentionPolicy.matchesContext(entry, session.baseURL, migratedProfileID)) {
+                    entry.copy(syncProfileID = accountProfileID)
+                } else entry
+            },
         ))
         rebuildPlaybackQueueForActiveContext()
         refreshLibraryState()
@@ -694,6 +722,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             refreshStorage()
             refreshAccountSessionIfNeeded()
             syncPlaylistsAutomatically()
+            syncListeningHistoryAutomatically()
         }
         viewModelScope.launch {
             while (isActive) {
@@ -707,6 +736,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 expireClientConfigIfNeeded()
                 retryRemoteSongMetadataIfNeeded()
                 syncPlaylistsAutomatically()
+                syncListeningHistoryAutomatically()
             }
         }
     }
@@ -724,6 +754,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 mediaController.setPlaybackSpeed(mutableState.value.playbackSpeed)
                 mediaController.volume = PlaybackVolumePolicy.gainForSlider(mutableState.value.volume)
                 mediaController.addListener(object : Player.Listener {
+                    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                        finishListeningSession(flush = true)
+                        refreshPlaybackState()
+                    }
+
                     override fun onEvents(player: Player, events: Player.Events) {
                         refreshPlaybackState()
                         if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
@@ -732,7 +767,12 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     }
 
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        if (!isPlaying) updateListeningSession(flush = true)
                         publishListenAlongSnapshot()
+                    }
+
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (playbackState == Player.STATE_ENDED) finishListeningSession(flush = true)
                     }
 
                     override fun onPositionDiscontinuity(
@@ -757,6 +797,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         stopLinkImportPreview()
         remoteSongMetadataHydrationJob?.cancel()
         clearListenAlongSession(stopPlayback = false)
+        finishListeningSession(flush = true)
+        listeningHistorySyncJob?.cancel()
         controller?.release()
         controller = null
         controllerFuture?.cancel(true)
@@ -2222,6 +2264,125 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         publishListenAlongSnapshot()
     }
 
+    private fun listeningPlaybackSnapshot(player: Player): ListeningPlaybackSnapshot? {
+        val mediaID = player.currentMediaItem?.mediaId?.takeIf(String::isNotBlank) ?: return null
+        library.tracks.firstOrNull { it.id == mediaID }?.let { track ->
+            val connectedServer = activeAccessToken().takeIf(String::isNotBlank)?.let { library.serverURL }
+            return ListeningPlaybackSnapshot(
+                track = track,
+                serverURL = connectedServer ?: track.sourceServer,
+                profileID = track.syncProfileID?.takeIf(String::isNotBlank) ?: library.syncProfileID,
+                remoteSongID = track.remoteID,
+                artworkURL = track.remoteID?.let { remoteID ->
+                    mutableState.value.remoteSongs.firstOrNull { it.id == remoteID }?.artworkURL
+                },
+            )
+        }
+        val transient = activeStreamPresentation?.takeIf { it.id == mediaID } ?: return null
+        val streamContext = activeStreamPolicyContext ?: currentServerProfileContext()
+        return ListeningPlaybackSnapshot(
+            track = transient,
+            serverURL = streamContext?.serverURL,
+            profileID = streamContext?.profileID ?: library.syncProfileID,
+            remoteSongID = transient.remoteID ?: mediaID.removePrefix("remote-stream:")
+                .substringBefore(':').takeIf(String::isNotBlank),
+            artworkURL = mutableState.value.transientArtworkURL,
+        )
+    }
+
+    private fun playbackPositionSeconds(player: Player): Double =
+        (player.currentPosition.takeIf { it != C.TIME_UNSET && it >= 0L } ?: 0L) / 1_000.0
+
+    private fun updateListeningSession(flush: Boolean = false) {
+        val player = controller ?: return
+        val snapshot = listeningPlaybackSnapshot(player)
+        val activeID = activeListeningEntryID
+        if (activeID == null) {
+            if (player.isPlaying && snapshot != null) beginListeningSession(snapshot, player)
+            return
+        }
+        val active = library.listeningHistory.firstOrNull { it.id == activeID }
+        if (active == null) {
+            clearListeningSessionState()
+            if (player.isPlaying && snapshot != null) beginListeningSession(snapshot, player)
+            return
+        }
+        val sameSession = snapshot != null && active.trackID == snapshot.track.id &&
+            active.syncProfileID.ifBlank { "default" } == snapshot.profileID.ifBlank { "default" } &&
+            active.serverOrigin == snapshot.serverURL?.let(RemoteTrackIdentityPolicy::normalizedOrigin)
+        if (!sameSession) {
+            finishListeningSession(flush = true)
+            if (player.isPlaying && snapshot != null) beginListeningSession(snapshot, player)
+            return
+        }
+        val position = playbackPositionSeconds(player)
+        val updated = ListeningHistoryPlaybackPolicy.advance(
+            active,
+            position,
+            lastListeningPositionSeconds,
+            player.isPlaying,
+            player.duration.takeIf { it != C.TIME_UNSET && it > 0L }?.div(1_000.0),
+        )
+        lastListeningPositionSeconds = position
+        if (updated != active) {
+            library = library.copy(listeningHistory = library.listeningHistory.map { if (it.id == activeID) updated else it })
+            if (flush || updated.listenedSeconds - lastPersistedListeningSeconds >= 15.0) {
+                lastPersistedListeningSeconds = updated.listenedSeconds
+                saveSoon()
+                scheduleListeningHistorySync()
+            }
+        } else if (flush) saveSoon()
+    }
+
+    private fun beginListeningSession(snapshot: ListeningPlaybackSnapshot, player: Player) {
+        if (activeListeningEntryID != null) finishListeningSession(flush = true)
+        val entry = ListeningHistoryRetentionPolicy.entry(
+            snapshot.track,
+            snapshot.serverURL,
+            snapshot.profileID,
+            snapshot.remoteSongID,
+            snapshot.artworkURL,
+        )
+        library = library.copy(listeningHistory = ListeningHistoryRetentionPolicy.append(library.listeningHistory, entry))
+        activeListeningEntryID = entry.id
+        lastListeningPositionSeconds = playbackPositionSeconds(player)
+        lastPersistedListeningSeconds = 0.0
+        saveSoon()
+    }
+
+    private fun finishListeningSession(flush: Boolean) {
+        val activeID = activeListeningEntryID ?: return
+        val player = controller
+        val snapshot = player?.let(::listeningPlaybackSnapshot)
+        val active = library.listeningHistory.firstOrNull { it.id == activeID }
+        if (active != null && player != null && snapshot != null &&
+            active.trackID == snapshot.track.id &&
+            active.syncProfileID.ifBlank { "default" } == snapshot.profileID.ifBlank { "default" }
+        ) {
+            val updated = ListeningHistoryPlaybackPolicy.advance(
+                active,
+                playbackPositionSeconds(player),
+                lastListeningPositionSeconds,
+                player.isPlaying,
+                player.duration.takeIf { it != C.TIME_UNSET && it > 0L }?.div(1_000.0),
+            )
+            if (updated != active) {
+                library = library.copy(listeningHistory = library.listeningHistory.map { if (it.id == activeID) updated else it })
+            }
+        }
+        if (flush) {
+            saveSoon()
+            scheduleListeningHistorySync()
+        }
+        clearListeningSessionState()
+    }
+
+    private fun clearListeningSessionState() {
+        activeListeningEntryID = null
+        lastListeningPositionSeconds = 0.0
+        lastPersistedListeningSeconds = 0.0
+    }
+
     override fun togglePlayPause() {
         if (mutableState.value.listenAlong.isGuest) return
         val player = controller ?: return
@@ -2243,6 +2404,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun playNext() {
         if (activeStreamPresentation != null || mutableState.value.listenAlong.isGuest) return
+        updateListeningSession(flush = true)
         controller?.seekToNextMediaItem()
         publishListenAlongSnapshot()
     }
@@ -2250,6 +2412,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     override fun playPrevious() {
         if (activeStreamPresentation != null || mutableState.value.listenAlong.isGuest) return
         controller?.let { player ->
+            updateListeningSession(flush = true)
             val track = player.currentMediaItem?.mediaId?.let { id -> library.tracks.firstOrNull { it.id == id } }
             val start = track?.let(::playbackRange)?.startMs ?: 0L
             if (player.currentPosition > start + 3_000) player.seekTo(start) else player.seekToPreviousMediaItem()
@@ -2951,6 +3114,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     saveSoon()
                 }
                 syncPlaylistsNow()
+                syncListeningHistoryNow(force = true)
             }
             .onFailure { error ->
                 if (currentServerProfileContext() != catalogSnapshot.context) return@onFailure
@@ -3356,6 +3520,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             mutableState.value = state.copy(serverMessage = "Wait for the current connection or transfer to finish.")
             return
         }
+        finishListeningSession(flush = true)
+        listeningHistorySyncJob?.cancel()
+        listeningHistorySyncJob = null
+        listeningHistorySyncPending = false
         val normalized = runCatching { ServerClient.normalizeServerURL(url) }.getOrElse { showError(it); return }
         val normalizedProfileName = accountSession?.profileDisplayName ?: normalizeProfileName(profileName)
         if (normalizedProfileName.isEmpty()) {
@@ -3495,6 +3663,10 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val sameContext = RemoteTrackIdentityPolicy.normalizedOrigin(library.serverURL) ==
             RemoteTrackIdentityPolicy.normalizedOrigin(serverURL) && profileId == library.syncProfileID
         if (sameContext) return
+        finishListeningSession(flush = true)
+        listeningHistorySyncJob?.cancel()
+        listeningHistorySyncJob = null
+        listeningHistorySyncPending = false
         RemoteDownloadContextChangePolicy.mutateAfterInvalidation(
             invalidateDownload = {
                 invalidateActiveRemoteDownload("Download stopped because the server profile changed")
@@ -4093,6 +4265,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun clearActiveStreamPresentation() {
+        finishListeningSession(flush = true)
         streamConfigRenewalJob?.cancel()
         streamConfigRenewalJob = null
         streamLeaseExpiryJob?.cancel()
@@ -4988,6 +5161,105 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun syncListeningHistoryAutomatically() {
+        if (activeAccessToken().isBlank()) return
+        scheduleListeningHistorySync(delayMillis = 0L)
+    }
+
+    private fun scheduleListeningHistorySync(delayMillis: Long = 1_500L) {
+        if (activeAccessToken().isBlank()) return
+        listeningHistorySyncJob?.cancel()
+        val retryDelay = (listeningHistoryRetryAt - System.currentTimeMillis()).coerceAtLeast(0L)
+        listeningHistorySyncJob = viewModelScope.launch {
+            delay(maxOf(delayMillis, retryDelay))
+            listeningHistorySyncJob = null
+            syncListeningHistoryNow()
+        }
+    }
+
+    private suspend fun syncListeningHistoryNow(force: Boolean = false): Boolean {
+        val token = activeAccessToken().trim()
+        if (token.isEmpty() || (!force && System.currentTimeMillis() < listeningHistoryRetryAt)) return false
+        if (listeningHistorySyncInFlight) {
+            listeningHistorySyncPending = true
+            return false
+        }
+        val expected = currentServerProfileContext() ?: return false
+        listeningHistorySyncInFlight = true
+        var shouldRetry = false
+        try {
+            val origin = RemoteTrackIdentityPolicy.normalizedOrigin(expected.serverURL) ?: return false
+            val tracksByID = library.tracks.associateBy(Track::id)
+            val pending = library.listeningHistory.filter { entry ->
+                entry.originatedOnThisDevice &&
+                    ListeningHistoryRetentionPolicy.matchesContext(entry, expected.serverURL, expected.profileID) &&
+                    ListeningHistoryRetentionPolicy.qualifies(entry, tracksByID[entry.trackID]) &&
+                    (listeningHistorySyncedSeconds[listeningHistorySyncKey(origin, expected.profileID, entry.id)] ?: -1.0) < entry.listenedSeconds
+            }
+            val client = ServerClient(
+                expected.serverURL,
+                token,
+                token,
+                expected.profileID,
+                clientConfigStore.cohortKey,
+            )
+            for (batch in pending.sortedBy { it.startedAt }.chunked(ListeningHistoryRetentionPolicy.MAX_UPLOAD_BATCH)) {
+                ensureListeningHistoryContext(expected, token)
+                if (!client.postListeningHistory(batch)) {
+                    shouldRetry = true
+                    return false
+                }
+                batch.forEach { entry ->
+                    listeningHistorySyncedSeconds[listeningHistorySyncKey(origin, expected.profileID, entry.id)] = entry.listenedSeconds
+                }
+            }
+            ensureListeningHistoryContext(expected, token)
+            val remote = client.fetchListeningHistory(ListeningHistoryRetentionPolicy.MAXIMUM_ENTRIES)
+                ?: run { shouldRetry = true; return false }
+            ensureListeningHistoryContext(expected, token)
+            val merged = ListeningHistoryRetentionPolicy.mergeRemote(
+                library.listeningHistory,
+                remote,
+                expected.serverURL,
+                expected.profileID,
+                library.tracks,
+                mutableState.value.remoteSongs,
+            )
+            if (merged != library.listeningHistory) {
+                library = library.copy(listeningHistory = merged)
+                persistLibrary()
+            }
+            remote.entries.forEach { entry ->
+                listeningHistorySyncedSeconds[listeningHistorySyncKey(origin, expected.profileID, entry.id)] = entry.listenedSeconds
+            }
+            return true
+        } catch (_: CancellationException) {
+            throw CancellationException()
+        } catch (_: Throwable) {
+            if (isListeningHistoryContextCurrent(expected, token)) shouldRetry = true
+            return false
+        } finally {
+            listeningHistorySyncInFlight = false
+            listeningHistoryRetryAt = if (shouldRetry) System.currentTimeMillis() + 60_000L else 0L
+            if (listeningHistorySyncPending) {
+                listeningHistorySyncPending = false
+                scheduleListeningHistorySync(delayMillis = 0L)
+            } else if (shouldRetry && isListeningHistoryContextCurrent(expected, token)) {
+                scheduleListeningHistorySync(delayMillis = 60_000L)
+            }
+        }
+    }
+
+    private fun listeningHistorySyncKey(origin: String, profileID: String, eventID: String): String =
+        "$origin#profile=${profileID.ifBlank { "default" }}#event=$eventID"
+
+    private fun isListeningHistoryContextCurrent(expected: ServerProfileContext, token: String): Boolean =
+        currentServerProfileContext() == expected && activeAccessToken().trim() == token
+
+    private fun ensureListeningHistoryContext(expected: ServerProfileContext, token: String) {
+        if (!isListeningHistoryContextCurrent(expected, token)) throw StaleServerProfileException()
+    }
+
     fun syncPlaylistsAutomatically() {
         if (activeAccessToken().isBlank()) return
         viewModelScope.launch { syncPlaylistsNow() }
@@ -5417,6 +5689,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun refreshPlaybackState() {
         val player = controller ?: return
+        updateListeningSession()
         val currentId = player.currentMediaItem?.mediaId?.takeIf(String::isNotBlank)
         val playbackStatus = player.playerError?.let { error ->
             PlaybackFailurePolicy.status(error.errorCode, error.message)

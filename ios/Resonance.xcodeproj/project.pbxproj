@@ -29,6 +29,7 @@
 		B10000000000000000000003 /* MobileLegacyAppMigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000004 /* MobileLegacyAppMigrationTests.swift */; };
 		B10000000000000000000004 /* ThemeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000005 /* ThemeTests.swift */; };
 		B10000000000000000000005 /* MobileListenAlongTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000006 /* MobileListenAlongTests.swift */; };
+		B10000000000000000000006 /* MobileListeningHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000007 /* MobileListeningHistoryTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -68,6 +69,7 @@
 		B20000000000000000000004 /* MobileLegacyAppMigrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileLegacyAppMigrationTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000005 /* ThemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000006 /* MobileListenAlongTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileListenAlongTests.swift; sourceTree = "<group>"; };
+		B20000000000000000000007 /* MobileListeningHistoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileListeningHistoryTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -128,6 +130,7 @@
 				B20000000000000000000004 /* MobileLegacyAppMigrationTests.swift */,
 				B20000000000000000000005 /* ThemeTests.swift */,
 				B20000000000000000000006 /* MobileListenAlongTests.swift */,
+				B20000000000000000000007 /* MobileListeningHistoryTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -236,6 +239,7 @@
 				B10000000000000000000003 /* MobileLegacyAppMigrationTests.swift in Sources */,
 				B10000000000000000000004 /* ThemeTests.swift in Sources */,
 				B10000000000000000000005 /* MobileListenAlongTests.swift in Sources */,
+				B10000000000000000000006 /* MobileListeningHistoryTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

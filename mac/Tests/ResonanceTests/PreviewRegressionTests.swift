@@ -804,7 +804,7 @@ struct PreviewRegressionTests {
     }
 
     @Test
-    func listeningHistoryDashboardAggregatesPersistedSessionsByDayAndSong() {
+    func listeningHistoryDashboardAggregatesPersistedSessionsByDayAndSong() throws {
         let firstID = UUID()
         let first = Track(
             id: firstID,
@@ -963,6 +963,53 @@ struct PreviewRegressionTests {
         #expect(serverOnlyStats.topArtist == "Remote Artist")
         #expect(serverOnlyStats.songRanking.first?.track.album == "Remote Album")
         #expect(serverOnlyStats.songRanking.first?.seconds == 120)
+
+        let catalogSong = try JSONDecoder().decode(RemoteSong.self, from: Data(
+            #"{"id":"catalog-song","filename":"catalog-song.m4a","title":"Catalog title","artist":"Catalog artist","album":"Catalog album","size":0,"modified_at":"now","content_type":"audio/mp4","duration_seconds":300,"artwork_url":"https://music.example/api/v1/songs/catalog-song/artwork?token=signed","download_url":"/api/v1/songs/catalog-song/file","stream_url":"/api/v1/songs/catalog-song/stream"}"#.utf8
+        ))
+        let catalogOnlyEntry = ListeningHistoryEntry(
+            trackID: UUID(),
+            startedAt: now,
+            listenedSeconds: 60,
+            syncProfileID: "default",
+            remoteSongID: "catalog-song",
+            originatedOnThisDevice: false
+        )
+        let catalogSummary = ListeningHistoryStatsSummary(
+            entries: [catalogOnlyEntry],
+            tracks: [],
+            remoteSongs: [catalogSong]
+        )
+        #expect(catalogSummary.songRanking.first?.track.title == "Catalog title")
+        #expect(catalogSummary.songRanking.first?.track.artist == "Catalog artist")
+        #expect(catalogSummary.songRanking.first?.track.album == "Catalog album")
+        #expect(catalogSummary.songRanking.first?.track.artworkURL == catalogSong.artworkURL)
+        #expect(catalogSummary.plays == 1)
+
+        let placeholderCatalogSong = try JSONDecoder().decode(RemoteSong.self, from: Data(
+            #"{"id":"placeholder-song","title":"Resolving metadata…","artist":"Automatic lookup","album":"Link only","source_url":"https://open.spotify.com/track/example","download_url":"/api/v1/songs/placeholder-song/file","stream_url":"/api/v1/songs/placeholder-song/stream"}"#.utf8
+        ))
+        #expect(placeholderCatalogSong.isMetadataLoading)
+        let snapshotEntry = ListeningHistoryEntry(
+            trackID: UUID(),
+            startedAt: now,
+            listenedSeconds: 60,
+            syncProfileID: "default",
+            remoteSongID: "placeholder-song",
+            title: "Snapshot title",
+            artist: "Snapshot artist",
+            album: "Snapshot album",
+            duration: 240,
+            originatedOnThisDevice: false
+        )
+        let placeholderSummary = ListeningHistoryStatsSummary(
+            entries: [snapshotEntry],
+            tracks: [],
+            remoteSongs: [placeholderCatalogSong]
+        )
+        #expect(placeholderSummary.songRanking.first?.track.title == "Snapshot title")
+        #expect(placeholderSummary.songRanking.first?.track.artist == "Snapshot artist")
+        #expect(placeholderSummary.songRanking.first?.track.album == "Snapshot album")
     }
 
     @Test

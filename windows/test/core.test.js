@@ -16,6 +16,7 @@ import {
   formatServerUploadFailureNotice,
   formatHistoryWindowLabel,
   formatTime,
+  hydrateListeningHistoryFromCatalog,
   isInstalledVideoTrack,
   listeningHistoryEntryQualifiesAsPlay,
   localImportCandidateCanAutoSelect,
@@ -64,6 +65,7 @@ import {
   serverUploadConfigurationError,
   serverTrackRemoteIDBelongsToContext,
   serverSongRequiresDownload,
+  serverSongHasCatalogMetadata,
   serverSourceDisplayFallback,
   serverSourceNeedsOriginalPage,
   serverTransferProgressPresentation,
@@ -1627,20 +1629,21 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(mainSource, /ipcMain\.handle\("server:listening-history:post"/);
   assert.match(mainSource, /ipcMain\.handle\("server:listening-history:get"[\s\S]+url\.searchParams\.set\("limit"[\s\S]+Accept: "application\/json"/);
   assert.match(mainSource, /api\/v1\/listening-history/);
-  assert.match(mainSource, /const minimalEntries = entries\.map[\s\S]+song_id: songID[\s\S]+JSON\.stringify\(\{ entries: minimalEntries \}\)/);
-  assert.doesNotMatch(
+  assert.match(mainSource, /normalizeListeningHistoryUploadEntries/);
+  assert.match(mainSource, /JSON\.stringify\(\{ entries: minimalEntries, client: "windows" \}\)/);
+  assert.match(
     mainSource.slice(
       mainSource.indexOf('ipcMain.handle("server:listening-history:post"'),
       mainSource.indexOf('ipcMain.handle("server:listening-history:get"'),
     ),
-    /device_id|client: "windows"|title:|artist:|album:|duration_seconds/,
+    /normalizeListeningHistoryUploadEntries[\s\S]+client: "windows"/,
   );
   assert.match(mainSource, /response\.status === 404[\s\S]+supported: false/);
   assert.match(appSource, /const LISTENING_HISTORY_BATCH_SIZE = 500/);
   assert.match(appSource, /profileID: activeProfileID\(\)/);
   assert.match(appSource, /function pendingListeningHistoryBatches\(\)/);
   assert.match(appSource, /api\.postListeningHistory\(\{/);
-  assert.match(appSource, /api\.fetchListeningHistory\(\{[\s\S]+mergeListeningHistoryDocument\(state, remoteDocument, context\.profileID, context\.serverURL\)/);
+  assert.match(appSource, /api\.fetchListeningHistory\(\{[\s\S]+mergeListeningHistoryDocument\(state, remoteDocument, context\.profileID, context\.serverURL, serverCatalog\)/);
   assert.match(appSource, /result\?\.supported === false/);
   assert.match(appSource, /scheduleListeningHistorySync\(\)/);
   assert.match(appSource, /syncListeningHistoryNow\(\{ force: true \}\)/);
@@ -1884,6 +1887,103 @@ test("merges and displays server-only listening history snapshots", () => {
   const restored = normalizeState(JSON.parse(JSON.stringify(state)));
   assert.equal(restored.listeningHistory[0].title, "Server Only");
   assert.equal(restored.listeningHistory[0].originatedOnThisDevice, false);
+});
+
+test("hydrates uninstalled listening-history songs from the server catalog", () => {
+  const state = normalizeState({
+    serverURL: "https://music.example",
+    syncProfileID: "default",
+    tracks: [],
+    listeningHistory: [],
+  });
+  const merged = mergeListeningHistoryDocument(state, {
+    profile_id: "default",
+    entries: [{
+      id: "catalog-history-event",
+      track_id: "track-on-another-device",
+      song_id: "catalog-song",
+      started_at: "2026-08-16T12:00:00Z",
+      listened_seconds: 45,
+    }],
+  }, "default", "https://music.example", [{
+    id: "catalog-song",
+    title: "Catalog title",
+    artist: "Catalog artist",
+    album: "Catalog album",
+      duration_seconds: 300,
+      artwork_url: "https://music.example/api/v1/songs/catalog-song/artwork?token=signed",
+    }]);
+
+  assert.equal(merged, true);
+  assert.equal(state.listeningHistory[0].title, "Catalog title");
+  assert.equal(state.listeningHistory[0].artist, "Catalog artist");
+  assert.equal(state.listeningHistory[0].album, "Catalog album");
+  assert.equal(state.listeningHistory[0].duration, 300);
+  assert.equal(state.listeningHistory[0].artworkURL, "https://music.example/api/v1/songs/catalog-song/artwork?token=signed");
+  assert.equal(summarizeListeningStats(state).songRanking[0].artworkURL, state.listeningHistory[0].artworkURL);
+});
+
+test("catalog placeholders never replace history metadata and resolved catalog updates apply immediately", () => {
+  const state = normalizeState({
+    serverURL: "https://music.example",
+    syncProfileID: "default",
+    tracks: [],
+    listeningHistory: [{
+      id: "history-event",
+      trackID: "track-on-another-device",
+      profileID: "default",
+      serverOrigin: "https://music.example",
+      startedAt: "2026-08-16T12:00:00Z",
+      listenedSeconds: 45,
+      remoteID: "catalog-song",
+      title: "Snapshot title",
+      artist: "Snapshot artist",
+      album: "Snapshot album",
+      duration: 200,
+    }],
+  });
+
+  assert.equal(hydrateListeningHistoryFromCatalog(state, [{
+    id: "catalog-song",
+    title: "Resolving metadata…",
+    artist: "Automatic lookup",
+    album: "Link only",
+  }]), false);
+  assert.equal(state.listeningHistory[0].title, "Snapshot title");
+
+  assert.equal(hydrateListeningHistoryFromCatalog(state, [{
+    id: "catalog-song",
+    title: "Resolved title",
+    artist: "Resolved artist",
+    album: "Resolved album",
+    duration: 245,
+    artwork_url: "https://music.example/api/v1/songs/catalog-song/artwork?token=signed",
+  }]), true);
+  assert.deepEqual({
+    title: state.listeningHistory[0].title,
+    artist: state.listeningHistory[0].artist,
+    album: state.listeningHistory[0].album,
+    duration: state.listeningHistory[0].duration,
+    artworkURL: state.listeningHistory[0].artworkURL,
+  }, {
+    title: "Resolved title",
+    artist: "Resolved artist",
+    album: "Resolved album",
+    duration: 245,
+    artworkURL: "https://music.example/api/v1/songs/catalog-song/artwork?token=signed",
+  });
+});
+
+test("stored catalog placeholders still require provider metadata hydration", () => {
+  assert.equal(serverSongHasCatalogMetadata({
+    title: "Resolving metadata…",
+    artist: "Automatic lookup",
+    album: "Link only",
+  }), false);
+  assert.equal(serverSongHasCatalogMetadata({
+    title: "Resolved title",
+    artist: "Resolved artist",
+  }), true);
 });
 
 test("hydrates legacy listening history from one downloaded local copy without guessing", () => {

@@ -490,6 +490,58 @@ class ServerClient(
         json.decodeFromString<RemotePlaylistsDocument>(response.body.toString(Charsets.UTF_8))
     }
 
+    suspend fun postListeningHistory(entries: List<ListeningHistoryEntry>): Boolean =
+        withContext(Dispatchers.IO) {
+            if (entries.isEmpty()) return@withContext true
+            require(entries.size <= ListeningHistoryRetentionPolicy.MAX_UPLOAD_BATCH)
+            val body = json.encodeToString(
+                ListeningHistoryUploadDocument(entries.map { entry ->
+                    ListeningHistoryUploadEntry(
+                        id = entry.id,
+                        trackID = entry.trackID,
+                        songID = entry.remoteSongID,
+                        startedAt = entry.startedAt,
+                        listenedSeconds = entry.listenedSeconds,
+                        title = entry.title,
+                        artist = entry.artist,
+                        album = entry.album,
+                        durationSeconds = entry.durationSeconds,
+                    )
+                }),
+            ).toByteArray(Charsets.UTF_8)
+            val response = request(
+                method = "POST",
+                url = endpoint("/api/v1/listening-history"),
+                token = requireAccessToken(),
+                body = body,
+                contentType = "application/json",
+                accept = "application/json",
+                maxResponseBytes = MAX_ERROR_BYTES,
+            )
+            when (response.status) {
+                HttpURLConnection.HTTP_NOT_FOUND, HttpURLConnection.HTTP_BAD_METHOD -> false
+                in 200..299 -> true
+                else -> throw serverException(response)
+            }
+        }
+
+    suspend fun fetchListeningHistory(limit: Int = 2_000): RemoteListeningHistoryDocument? =
+        withContext(Dispatchers.IO) {
+            require(limit in 1..2_000)
+            val response = request(
+                method = "GET",
+                url = URL("$baseURL/api/v1/listening-history?limit=$limit"),
+                token = requireAccessToken(),
+                accept = "application/json",
+                maxResponseBytes = MAX_LISTENING_HISTORY_RESPONSE_BYTES,
+            )
+            when (response.status) {
+                HttpURLConnection.HTTP_NOT_FOUND, HttpURLConnection.HTTP_BAD_METHOD -> null
+                HttpURLConnection.HTTP_OK -> json.decodeFromString(response.body.toString(Charsets.UTF_8))
+                else -> throw serverException(response)
+            }
+        }
+
     suspend fun fetchProfiles(): SyncProfilesResponse = withContext(Dispatchers.IO) {
         val response = request(
             method = "GET",
@@ -994,6 +1046,7 @@ class ServerClient(
         private const val DOWNLOAD_TIMEOUT_MS = 120_000
         private const val CLIENT_CONFIG_TIMEOUT_MS = 15_000
         private const val MAX_ERROR_BYTES = 64 * 1_024
+        private const val MAX_LISTENING_HISTORY_RESPONSE_BYTES = 8 * 1_024 * 1_024
         private const val MAX_CATALOG_RESPONSE_BYTES = 16 * 1_024 * 1_024
         private const val MAX_PLAYLIST_RESPONSE_BYTES = 4 * 1_024 * 1_024
         private const val MAX_PROFILE_RESPONSE_BYTES = 512 * 1_024

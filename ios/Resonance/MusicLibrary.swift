@@ -581,6 +581,15 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
     }
 
+    private struct ListeningHistorySyncContext: Equatable {
+        let baseURL: URL
+        let origin: String
+        let profileID: String
+        let accountID: String?
+        let token: String
+        let generation: UInt64
+    }
+
     private struct SourceLinkRequiredError: LocalizedError {
         var errorDescription: String? {
             "Only songs downloaded from a preserved source link can be uploaded. Download this song from its link again first."
@@ -719,6 +728,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published private(set) var selectedUploadMode = MobileUploadMode.localFile
     @Published private(set) var selectedDownloadMode = MobileDownloadMode.verifiedFileCache
     @Published private(set) var isTransientStreamActive = false
+    @Published private(set) var listeningHistoryEntries: [MobileListeningHistoryEntry] = []
 
     var visibleSyncProfileName: String {
         ResonanceEmailPrivacy.safeDisplayName(syncProfileName, email: accountEmail)
@@ -822,6 +832,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var deletedPlaylistIDs: Set<UUID> = []
     private var playlistSyncServerURL: String?
     private var playlistSyncTask: Task<Void, Never>?
+    private var listeningHistorySyncTask: Task<Void, Never>?
+    private var isSyncingListeningHistory = false
+    private var listeningHistorySyncPending = false
+    private var listeningHistorySyncGeneration: UInt64 = 0
+    private var listeningHistorySyncedSeconds: [String: TimeInterval] = [:]
     private var clientConfigRefreshTask: Task<Void, Never>?
     private var activeDownloadAuthorizations: [UUID: MobileTransferAuthorization] = [:]
     private var activeDownloadBatch: (id: UUID, task: Task<Void, Never>)?
@@ -855,6 +870,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var accountSession: ResonanceAccountSession?
     private var accountRefreshTask: Task<Void, Never>?
     private var isRefreshingAccountSession = false
+    private var activeListeningHistoryEntryID: UUID?
+    private var lastListeningPosition: TimeInterval = 0
+    private var lastPersistedListeningSeconds: TimeInterval = 0
+    private var pendingListeningSeconds: TimeInterval = 0
     private weak var listenAlongController: MobileListenAlongController?
     private var listenAlongApplyingRemoteState = false
 
@@ -925,6 +944,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         timer?.invalidate()
         remoteSongMetadataHydrationTask?.cancel()
         playlistSyncTask?.cancel()
+        listeningHistorySyncTask?.cancel()
         clientConfigRefreshTask?.cancel()
         accountRefreshTask?.cancel()
         nowPlayingArtworkLoadTask?.cancel()
@@ -962,6 +982,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             // Stop the owned transfer before replacing any account, token, or
             // profile state that its callbacks are scoped to.
             cancelActiveDownloadBatch()
+            endListeningHistorySession()
+            invalidateListeningHistorySync()
             migrateConfirmedLegacyProfile(for: session)
             try Self.storeAccountSession(session)
             accountSession = session
@@ -982,6 +1004,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             scheduleAccountRefresh(session)
             serverMessage = "Signed in with Clerk"
             await refreshClientConfiguration()
+            await syncListeningHistoryNow()
         } catch {
             serverMessage = error.localizedDescription
             serverConfigurationMessage = error.localizedDescription
@@ -989,6 +1012,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func signOutAccount() async {
+        endListeningHistorySession()
+        await syncListeningHistoryNow()
         let active = accountSession
         listenAlongController?.profileOrServerContextDidChange()
         cancelActiveDownloadBatch()
@@ -996,6 +1021,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         remoteSourceResolutions.removeAll()
         accountRefreshTask?.cancel()
         accountRefreshTask = nil
+        invalidateListeningHistorySync()
         try? Self.storeToken("", key: Self.accountSessionKey)
         try? Self.storeToken("", key: "client")
         try? Self.storeToken("", key: "admin")
@@ -1032,6 +1058,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             let client = try ResonanceSocialAuthClient(baseURL: current.baseURL)
             let refreshed = try await client.refresh(current, migrationProfileID: syncProfileID)
             guard accountSession == current else { return }
+            if refreshed.accountID != current.accountID
+                || refreshed.baseURL != current.baseURL
+                || refreshed.profileID != current.profileID {
+                endListeningHistorySession()
+                invalidateListeningHistorySync()
+            }
             let previousCatalogContext = activeServerContext
             let previousCatalogServerURL = normalizedServer()?.absoluteString
             let previousCatalogToken = serverToken
@@ -1067,6 +1099,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 selectSyncProfile(profileID, name: refreshed.profileDisplayName)
             }
             await refreshClientConfiguration()
+            await syncListeningHistoryNow()
             scheduleAccountRefresh(refreshed)
         } catch {
             guard accountSession == current else { return }
@@ -1123,6 +1156,14 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         if streamingTrack?.remoteIdentity()?.context == oldContext {
             streamingTrack?.syncProfileID = accountProfileID
         }
+        for index in listeningHistoryEntries.indices
+        where MobileListeningHistoryPolicy.normalizedOrigin(listeningHistoryEntries[index].serverOrigin) == oldContext.origin
+            && (listeningHistoryEntries[index].syncProfileID ?? "default") == migratedProfileID
+            && (listeningHistoryEntries[index].accountID == nil || listeningHistoryEntries[index].accountID == session.accountID) {
+            listeningHistoryEntries[index].serverOrigin = newContext.origin
+            listeningHistoryEntries[index].syncProfileID = accountProfileID
+            listeningHistoryEntries[index].accountID = session.accountID
+        }
 
         let oldClipPrefix = "\(oldContext.storagePrefix)|remote:"
         let newClipPrefix = "\(newContext.storagePrefix)|remote:"
@@ -1160,6 +1201,21 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         guard let currentTrackID else { return nil }
         return tracks.first { $0.id == currentTrackID }
             ?? streamingTrack.flatMap { $0.id == currentTrackID ? $0 : nil }
+    }
+
+    var activeListeningHistoryEntries: [MobileListeningHistoryEntry] {
+        guard let activeServerContext else {
+            let accountID = accountSession?.accountID
+            return listeningHistoryEntries.filter {
+                $0.serverOrigin == nil && ($0.accountID == nil || $0.accountID == accountID)
+            }
+        }
+        let accountID = accountSession?.accountID
+        return listeningHistoryEntries.filter {
+            MobileListeningHistoryPolicy.normalizedOrigin($0.serverOrigin) == activeServerContext.origin
+                && ($0.syncProfileID ?? "default") == syncProfileID
+                && ($0.accountID == nil || $0.accountID == accountID)
+        }
     }
 
     /// Artwork for a transient Listen Along stream. Transient tracks are not
@@ -2498,6 +2554,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         startingAt requestedPosition: TimeInterval = 0
     ) {
         guard !listenAlongLocalPlaybackIsLocked else { return }
+        if currentTrackID != track.id || streamingTrack != nil {
+            endListeningHistorySession()
+        }
         stopTimer()
         cancelCrossfade()
         if streamingTrack != nil {
@@ -2540,6 +2599,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             isPlaying = true
             position = resumePosition
             UserDefaults.standard.set(position, forKey: "Resonance.position")
+            beginListeningHistorySession(for: track)
             startTimer()
             updateNowPlaying()
             if !isTransientStream { save() }
@@ -2569,6 +2629,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 try AVAudioSession.sharedInstance().setActive(true)
                 streamingPlayer.playImmediately(atRate: playbackRate)
                 isPlaying = true
+                if let streamingTrack { beginListeningHistorySession(for: streamingTrack) }
                 startTimer()
             } catch {
                 isPlaying = false
@@ -2598,7 +2659,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             }
             player.rate = playbackRate
             isPlaying = player.play()
-            if isPlaying { startTimer() }
+            if isPlaying {
+                if let currentTrack { beginListeningHistorySession(for: currentTrack) }
+                startTimer()
+            }
         } catch {
             isPlaying = false
         }
@@ -2613,6 +2677,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             streamingPlayer.pause()
             let currentTime = streamingPlayer.currentTime().seconds
             if currentTime.isFinite { position = max(currentTime, 0) }
+            updateListeningHistorySession(flush: true)
+            persistListeningHistory()
+            scheduleListeningHistorySync()
             stopTimer()
             isPlaying = false
             updateNowPlaying()
@@ -2624,6 +2691,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             position = player.currentTime
             UserDefaults.standard.set(position, forKey: "Resonance.position")
         }
+        updateListeningHistorySession(flush: true)
+        persistListeningHistory()
+        scheduleListeningHistorySync()
         stopTimer()
         isPlaying = false
         updateNowPlaying()
@@ -2711,6 +2781,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func advanceAfterFinishing() {
+        endListeningHistorySession()
         stopTimer()
         guard let track = currentTrack else {
             completePlaybackAtQueueEnd()
@@ -2741,6 +2812,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func completePlaybackAtQueueEnd() {
+        endListeningHistorySession()
         stopTimer()
         let start = currentTrack.map { playbackBounds(for: $0).start } ?? 0
         player?.currentTime = start
@@ -4973,6 +5045,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 expiresAt: policyExpiration
             )
             let departingLocalID = streamingTrack == nil ? currentTrackID : nil
+            endListeningHistorySession()
             discardStreamingPlayback()
             if let departingLocalID,
                tracks.contains(where: { $0.id == departingLocalID }) {
@@ -5108,6 +5181,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             try AVAudioSession.sharedInstance().setActive(true)
             streamPlayer.playImmediately(atRate: playbackRate)
             isPlaying = true
+            if let streamingTrack { beginListeningHistorySession(for: streamingTrack) }
             downloadDetail = "Streaming \(song.title) • no offline file saved"
             presentTransfer(
                 sessionID: transferSessionID,
@@ -5158,6 +5232,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
               let streamingPlayer,
               let streamingTrack else { return }
         let bounds = playbackBounds(for: streamingTrack)
+        endListeningHistorySession()
         stopTimer()
         streamingPlayer.pause()
         streamingPlayer.seek(
@@ -5169,6 +5244,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         if repeatEnabled {
             streamingPlayer.playImmediately(atRate: playbackRate)
             isPlaying = true
+            beginListeningHistorySession(for: streamingTrack)
             startTimer()
         } else {
             isPlaying = false
@@ -5235,6 +5311,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             || streamingResourceLoader != nil
             || streamingAuthorizationLease != nil
             || streamingPreview != nil
+        endListeningHistorySession()
         let streamingID = streamingTrack?.id
         streamingGeneration &+= 1
         if let streamingEndObserver {
@@ -6225,6 +6302,207 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
     }
 
+    func syncListeningHistoryAutomatically() async {
+        guard listeningHistorySyncContext() != nil else { return }
+        await syncListeningHistoryNow()
+    }
+
+    func syncListeningHistoryNow() async {
+        guard !isSyncingListeningHistory else {
+            listeningHistorySyncPending = true
+            return
+        }
+        guard let context = listeningHistorySyncContext() else { return }
+        isSyncingListeningHistory = true
+        listeningHistorySyncTask?.cancel()
+        listeningHistorySyncTask = nil
+        defer {
+            isSyncingListeningHistory = false
+            if listeningHistorySyncPending {
+                listeningHistorySyncPending = false
+                scheduleListeningHistorySync(delay: .zero)
+            }
+        }
+
+        do {
+            let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+            let pendingEntries = listeningHistoryEntries.filter { entry in
+                entry.originatedOnThisDevice != false
+                    && MobileListeningHistoryPolicy.normalizedOrigin(entry.serverOrigin) == context.origin
+                    && (entry.syncProfileID ?? "default") == context.profileID
+                    && (entry.accountID == nil || entry.accountID == context.accountID)
+                    && MobileListeningHistoryPolicy.qualifies(entry, trackDuration: tracksByID[entry.trackID]?.duration)
+                    && (listeningHistorySyncedSeconds[listeningHistorySyncKey(context: context, eventID: entry.id)] ?? -1)
+                        < entry.listenedSeconds
+            }
+            var shouldRetry = false
+            for pendingBatch in MobileListeningHistoryPolicy.batches(pendingEntries) {
+                guard isCurrentListeningHistoryContext(context) else {
+                    listeningHistorySyncPending = true
+                    return
+                }
+                let uploadBatch = pendingBatch.compactMap { entry -> (MobileListeningHistoryEntry, MobileListeningHistoryUploadEntry)? in
+                    guard let upload = MobileListeningHistoryPolicy.uploadEntry(
+                        entry,
+                        track: tracksByID[entry.trackID],
+                        origin: context.origin,
+                        profileID: context.profileID,
+                        accountID: context.accountID
+                    ) else { return nil }
+                    return (entry, upload)
+                }
+                guard !uploadBatch.isEmpty else { continue }
+                do {
+                    guard try await postListeningHistory(uploadBatch.map(\.1), context: context) else { break }
+                    guard isCurrentListeningHistoryContext(context) else {
+                        listeningHistorySyncPending = true
+                        return
+                    }
+                    for (entry, _) in uploadBatch {
+                        listeningHistorySyncedSeconds[listeningHistorySyncKey(context: context, eventID: entry.id)] = entry.listenedSeconds
+                    }
+                    persistListeningHistory()
+                } catch is CancellationError {
+                    return
+                } catch {
+                    shouldRetry = true
+                    break
+                }
+            }
+
+            guard isCurrentListeningHistoryContext(context),
+                  let remoteDocument = try await fetchListeningHistory(context: context) else { return }
+            guard isCurrentListeningHistoryContext(context) else {
+                listeningHistorySyncPending = true
+                return
+            }
+            listeningHistoryEntries = MobileListeningHistoryPolicy.merge(
+                remoteDocument,
+                into: listeningHistoryEntries,
+                tracks: tracks,
+                catalog: remoteSongs,
+                origin: context.origin,
+                profileID: context.profileID,
+                accountID: context.accountID
+            )
+            for remote in remoteDocument.entries {
+                guard let eventID = UUID(uuidString: remote.id) else { continue }
+                let key = listeningHistorySyncKey(context: context, eventID: eventID)
+                listeningHistorySyncedSeconds[key] = max(
+                    listeningHistorySyncedSeconds[key] ?? 0,
+                    MobileListeningHistoryPolicy.clampedListenedSeconds(remote.listenedSeconds)
+                )
+            }
+            persistListeningHistory()
+            if shouldRetry { scheduleListeningHistorySync(delay: .seconds(60)) }
+        } catch is CancellationError {
+            return
+        } catch {
+            scheduleListeningHistorySync(delay: .seconds(60))
+        }
+    }
+
+    private func listeningHistorySyncContext() -> ListeningHistorySyncContext? {
+        let token = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty,
+              let baseURL = normalizedServer(),
+              let origin = MobileServerEndpointPolicy.normalizedOrigin(of: baseURL) else { return nil }
+        return ListeningHistorySyncContext(
+            baseURL: baseURL,
+            origin: origin,
+            profileID: syncProfileID,
+            accountID: accountSession?.accountID,
+            token: token,
+            generation: listeningHistorySyncGeneration
+        )
+    }
+
+    private func isCurrentListeningHistoryContext(_ context: ListeningHistorySyncContext) -> Bool {
+        guard context.generation == listeningHistorySyncGeneration,
+              context.profileID == syncProfileID,
+              context.accountID == accountSession?.accountID,
+              context.token == serverToken.trimmingCharacters(in: .whitespacesAndNewlines),
+              normalizedServer()?.absoluteString == context.baseURL.absoluteString else { return false }
+        return true
+    }
+
+    private func listeningHistorySyncKey(
+        context: ListeningHistorySyncContext,
+        eventID: UUID
+    ) -> String {
+        let account = context.accountID ?? "anonymous"
+        return "\(context.origin)#profile=\(context.profileID)#account=\(account)#event=\(eventID.uuidString.lowercased())"
+    }
+
+    private func invalidateListeningHistorySync() {
+        listeningHistorySyncGeneration &+= 1
+        listeningHistorySyncTask?.cancel()
+        listeningHistorySyncTask = nil
+        listeningHistorySyncPending = false
+    }
+
+    private func scheduleListeningHistorySync(delay: Duration = .seconds(2)) {
+        guard listeningHistorySyncContext() != nil else { return }
+        listeningHistorySyncTask?.cancel()
+        listeningHistorySyncTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: delay) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.listeningHistorySyncTask = nil
+            await self.syncListeningHistoryNow()
+        }
+    }
+
+    private func postListeningHistory(
+        _ entries: [MobileListeningHistoryUploadEntry],
+        context: ListeningHistorySyncContext
+    ) async throws -> Bool {
+        guard !entries.isEmpty else { return true }
+        var request = URLRequest(url: context.baseURL.appendingPathComponent("api/v1/listening-history"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(context.token)", forHTTPHeaderField: "Authorization")
+        request.setValue(context.profileID, forHTTPHeaderField: "X-Resonance-Profile")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(MobileListeningHistoryUploadDocument(entries: entries))
+        let (data, response) = try await sameOriginData(
+            for: request,
+            origin: context.baseURL,
+            maximumBytes: 256 * 1_024
+        )
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        if http.statusCode == 404 || http.statusCode == 405 { return false }
+        guard (200..<300).contains(http.statusCode) else {
+            throw playlistServerError(status: http.statusCode, data: data)
+        }
+        return true
+    }
+
+    private func fetchListeningHistory(
+        context: ListeningHistorySyncContext
+    ) async throws -> MobileRemoteListeningHistoryDocument? {
+        var components = URLComponents(
+            url: context.baseURL.appendingPathComponent("api/v1/listening-history"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [URLQueryItem(name: "limit", value: "2000")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(context.token)", forHTTPHeaderField: "Authorization")
+        request.setValue(context.profileID, forHTTPHeaderField: "X-Resonance-Profile")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await sameOriginData(
+            for: request,
+            origin: context.baseURL,
+            maximumBytes: 8 * 1_024 * 1_024
+        )
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        if http.statusCode == 404 || http.statusCode == 405 { return nil }
+        guard (200..<300).contains(http.statusCode) else {
+            throw playlistServerError(status: http.statusCode, data: data)
+        }
+        return try JSONDecoder().decode(MobileRemoteListeningHistoryDocument.self, from: data)
+    }
+
     func syncPlaylistsNow() async {
         guard !isActivatingSyncProfile, !isSyncingPlaylists else { return }
         guard let baseURL = normalizedServer() else {
@@ -6323,6 +6601,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         guard normalizedServer() != nil,
               !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         await syncPlaylistsNow()
+        await syncListeningHistoryAutomatically()
     }
 
     func runAutomaticPlaylistSync() async {
@@ -6667,6 +6946,98 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         return (bounds.start, bounds.end)
     }
 
+    private func beginListeningHistorySession(for track: MobileTrack) {
+        let serverOrigin = track.remoteIdentity()?.context.origin ?? activeServerContext?.origin
+        let profileID = track.syncProfileID ?? syncProfileID
+        let accountID = accountSession?.accountID
+        if let activeID = activeListeningHistoryEntryID,
+           let active = listeningHistoryEntries.first(where: { $0.id == activeID }),
+           active.trackID == track.id,
+           MobileListeningHistoryPolicy.normalizedOrigin(active.serverOrigin) == serverOrigin,
+           (active.syncProfileID ?? "default") == profileID,
+           active.accountID == accountID {
+            lastListeningPosition = currentListeningPlaybackPosition
+            return
+        }
+        endListeningHistorySession()
+        let entry = MobileListeningHistoryEntry(
+            trackID: track.id,
+            serverOrigin: serverOrigin,
+            syncProfileID: profileID,
+            accountID: accountID,
+            remoteSongID: track.remoteID,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            duration: track.duration,
+            artworkURL: isTransientStreamActive && streamingTrack?.id == track.id
+                ? streamingArtworkURL?.absoluteString
+                : nil,
+            originatedOnThisDevice: true
+        )
+        MobileListeningHistoryPolicy.append(entry, to: &listeningHistoryEntries)
+        activeListeningHistoryEntryID = entry.id
+        lastListeningPosition = currentListeningPlaybackPosition
+        lastPersistedListeningSeconds = 0
+        pendingListeningSeconds = 0
+        persistListeningHistory()
+    }
+
+    private func updateListeningHistorySession(flush: Bool = false) {
+        let currentPosition = currentListeningPlaybackPosition
+        guard let activeID = activeListeningHistoryEntryID,
+              let index = listeningHistoryEntries.firstIndex(where: { $0.id == activeID }) else {
+            lastListeningPosition = currentPosition
+            pendingListeningSeconds = 0
+            return
+        }
+        let delta = currentPosition - lastListeningPosition
+        if isPlaying, delta > 0, delta < 5 { pendingListeningSeconds += delta }
+        lastListeningPosition = currentPosition
+        let listenedSeconds = listeningHistoryEntries[index].listenedSeconds + pendingListeningSeconds
+        let reachedPersistenceBoundary = listenedSeconds - lastPersistedListeningSeconds >= 15
+        guard (flush || reachedPersistenceBoundary), pendingListeningSeconds > 0 else { return }
+        listeningHistoryEntries[index].listenedSeconds = MobileListeningHistoryPolicy.clampedListenedSeconds(listenedSeconds)
+        pendingListeningSeconds = 0
+        lastPersistedListeningSeconds = listeningHistoryEntries[index].listenedSeconds
+        persistListeningHistory()
+        scheduleListeningHistorySync()
+    }
+
+    private func endListeningHistorySession() {
+        updateListeningHistorySession(flush: true)
+        guard activeListeningHistoryEntryID != nil else { return }
+        persistListeningHistory()
+        scheduleListeningHistorySync()
+        activeListeningHistoryEntryID = nil
+        lastListeningPosition = 0
+        lastPersistedListeningSeconds = 0
+        pendingListeningSeconds = 0
+    }
+
+    private var currentListeningPlaybackPosition: TimeInterval {
+        if isTransientStreamActive, let streamingPlayer {
+            let currentTime = streamingPlayer.currentTime().seconds
+            if currentTime.isFinite { return max(currentTime, 0) }
+        }
+        if let player, player.currentTime.isFinite { return max(player.currentTime, 0) }
+        return max(position, 0)
+    }
+
+    private func persistListeningHistory() {
+        listeningHistoryEntries = MobileListeningHistoryPolicy.bounded(listeningHistoryEntries)
+        pruneListeningHistorySyncState()
+        save()
+    }
+
+    private func pruneListeningHistorySyncState() {
+        let eventIDs = Set(listeningHistoryEntries.map { $0.id.uuidString.lowercased() })
+        listeningHistorySyncedSeconds = listeningHistorySyncedSeconds.filter { key, _ in
+            guard let marker = key.range(of: "#event=") else { return false }
+            return eventIDs.contains(String(key[marker.upperBound...]))
+        }
+    }
+
     private func captureActiveProfileState() {
         guard let activeServerContext else { return }
         profileSyncStates[activeServerContext] = MobileProfileSyncState(
@@ -6793,8 +7164,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         if id == syncProfileID {
             syncProfileName = name
             save()
+            scheduleListeningHistorySync(delay: .zero)
             return
         }
+        endListeningHistorySession()
+        invalidateListeningHistorySync()
         listenAlongController?.profileOrServerContextDidChange()
         cancelActiveDownloadBatch()
         playlistSyncTask?.cancel()
@@ -6832,6 +7206,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         useSafeClientConfiguration(status: "Using safe defaults until the profile policy refreshes")
         normalizeSystemPlaylist()
         save()
+        scheduleListeningHistorySync(delay: .zero)
         updateNowPlaying()
     }
 
@@ -6882,6 +7257,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     private func save() {
         normalizeSystemPlaylist()
+        listeningHistoryEntries = MobileListeningHistoryPolicy.bounded(listeningHistoryEntries)
+        pruneListeningHistorySyncState()
         captureActiveProfileState()
         let queueReferences = playbackQueue.compactMap { trackID -> MobilePlaybackQueueReference? in
             guard let track = tracks.first(where: { $0.id == trackID }) else { return nil }
@@ -6924,6 +7301,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             playbackQueue: queueReferences.map(\.trackID),
             playbackPlaylistID: queueReferences.isEmpty ? nil : playbackPlaylistID,
             playbackSnapshot: playbackSnapshot,
+            listeningHistory: listeningHistoryEntries,
+            listeningHistorySyncedSeconds: listeningHistorySyncedSeconds,
             transferFailures: transferFailures,
             completedMigrations: completedMigrations,
             remoteSongMetadataCache: MobileRemoteSongMetadataCachePolicy.normalized(
@@ -7098,6 +7477,19 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
         syncProfileID = stored.syncProfileID ?? "default"
         syncProfileName = stored.syncProfileName ?? (syncProfileID == "default" ? "Default" : syncProfileID)
+        let fallbackHistoryOrigin = fallbackServerURL.flatMap {
+            MobileServerEndpointPolicy.normalizedOrigin(of: $0)
+        }
+        listeningHistoryEntries = MobileListeningHistoryPolicy.bounded(
+            (stored.listeningHistory ?? []).map { entry in
+                var migrated = entry
+                if migrated.serverOrigin == nil { migrated.serverOrigin = fallbackHistoryOrigin }
+                if migrated.syncProfileID == nil { migrated.syncProfileID = syncProfileID }
+                return migrated
+            }
+        )
+        listeningHistorySyncedSeconds = stored.listeningHistorySyncedSeconds ?? [:]
+        pruneListeningHistorySyncState()
         var availableTracks = stored.tracks.filter {
             fileManager.fileExists(atPath: musicDirectory.appendingPathComponent($0.relativePath).path)
         }
@@ -7254,6 +7646,19 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 self?.handleRouteChange(notification)
             }
         })
+
+        audioSessionObservers.append(center.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.updateListeningHistorySession(flush: true)
+                self.persistListeningHistory()
+                self.scheduleListeningHistorySync()
+            }
+        })
     }
 
     private func handleAudioInterruption(_ notification: Notification) {
@@ -7266,6 +7671,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 || streamingPlayer?.timeControlStatus == .playing
                 || isPlaying
             cancelCrossfade()
+            updateListeningHistorySession(flush: true)
+            persistListeningHistory()
+            scheduleListeningHistorySync()
             streamingPlayer?.pause()
             stopTimer()
             isPlaying = false
@@ -7426,6 +7834,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                         }
                     }
                     self.isPlaying = streamingPlayer.timeControlStatus != .paused
+                    self.updateListeningHistorySession()
                     if self.isPlaying != wasPlaying {
                         self.updateNowPlaying()
                     }
@@ -7449,6 +7858,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                     }
                 }
                 self.position = player.currentTime
+                self.updateListeningHistorySession()
                 UserDefaults.standard.set(self.position, forKey: "Resonance.position")
                 self.isPlaying = true
             }

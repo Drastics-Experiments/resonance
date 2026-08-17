@@ -16,6 +16,7 @@ import {
   formatServerUploadFailureNotice,
   formatHistoryWindowLabel,
   formatTime,
+  hydrateListeningHistoryFromCatalog,
   isInstalledVideoTrack,
   listeningHistoryEntryQualifiesAsPlay,
   localImportCandidateCanAutoSelect,
@@ -65,6 +66,7 @@ import {
   serverUploadConfigurationError,
   serverTrackRemoteIDBelongsToContext,
   serverSongRequiresDownload,
+  serverSongHasCatalogMetadata,
   serverCatalogAuthorityIsCurrent,
   serverCatalogAuthoritySnapshot,
   serverSourceDisplayFallback,
@@ -1868,6 +1870,18 @@ function historyAxisLabel(value) {
   return `${Number(value.toFixed(precision)).toLocaleString()}m`;
 }
 
+function historyOnlyTrack(series) {
+  const catalogSong = series?.remoteID
+    ? serverCatalog.find((song) => song.id === series.remoteID)
+    : null;
+  return {
+    ...series,
+    artwork: catalogSong?.artwork || null,
+    artworkURL: catalogSong?.artwork_url || series?.artworkURL || null,
+    historyOnly: true,
+  };
+}
+
 function historyDayDetailsMarkup(summary, dayKey) {
   const dayIndex = summary.days.findIndex((day) => day.key === dayKey);
   if (dayIndex < 0) return "";
@@ -1878,7 +1892,7 @@ function historyDayDetailsMarkup(summary, dayKey) {
       const activity = series.days[dayIndex];
       const track = activeTracks.find((item) => item.id === series.trackID)
         || activeTracks.find((item) => series.remoteID && item.remoteID === series.remoteID)
-        || series;
+        || historyOnlyTrack(series);
       return { activity, track, trackID: series.trackID };
     })
     .filter((item) => item.activity.seconds > 0 || item.activity.plays > 0)
@@ -2087,11 +2101,11 @@ function renderListeningHistory() {
   const topSong = allTimeStats.songRanking[0];
   const topTrack = activeTracks.find((track) => track.id === allTimeStats.topTrackID)
     || activeTracks.find((track) => topSong?.remoteID && track.remoteID === topSong.remoteID)
-    || topSong;
+    || (topSong ? historyOnlyTrack(topSong) : null);
   const rankedSongs = allTimeStats.songRanking.map((song, index) => {
     const track = activeTracks.find((item) => item.id === song.trackID)
       || activeTracks.find((item) => song.remoteID && item.remoteID === song.remoteID)
-      || song;
+      || historyOnlyTrack(song);
     const title = track.title || "Unknown song";
     const artist = track.artist || "Unknown artist";
     return `<article class="history-ranked-song" data-history-track="${escapeHTML(song.trackID)}" tabindex="0" aria-keyshortcuts="Shift+F10">
@@ -2200,6 +2214,28 @@ function openListeningHistory() {
   ensureListeningHistorySelection();
   renderListeningHistory();
   $("#listeningHistoryDialog").showModal();
+  void prepareListeningHistoryMetadata();
+}
+
+async function prepareListeningHistoryMetadata() {
+  try {
+    const context = currentProfileContext();
+    const hydrated = hydrateListeningHistoryFromCatalog(
+      state, serverCatalog, context.profileID, context.serverURL,
+    );
+    if (hydrated) {
+      persistInBackground({ refreshSidebar: false });
+      renderListeningHistory();
+    }
+    if (!serverCatalogIsAuthoritativeForCurrentContext()) {
+      await serverAction("catalog");
+    } else if (!serverMetadataHydrationActive) {
+      void hydrateServerCatalogMetadata(serverCatalog);
+    }
+    void syncListeningHistoryNow({ force: true });
+  } catch {
+    void syncListeningHistoryNow({ force: true });
+  }
 }
 
 function activePlaybackMedia() {
@@ -2232,6 +2268,7 @@ function beginListeningSession() {
     artist: track.artist || null,
     album: track.album || null,
     duration: Number.isFinite(Number(track.duration)) ? Number(track.duration) : null,
+    artworkURL: track.artworkURL || null,
     originatedOnThisDevice: true,
   };
   state.listeningHistory = [...state.listeningHistory, entry].slice(-2000);
@@ -2290,6 +2327,7 @@ function pendingListeningHistoryBatches() {
   for (const entry of state.listeningHistory) {
     if (entry.originatedOnThisDevice === false) continue;
     if (normalizedServerOrigin(entry.serverOrigin) !== serverOrigin) continue;
+    if ((entry.profileID || "default") !== activeProfileID()) continue;
     const listenedSeconds = Math.max(0, Number(entry.listenedSeconds) || 0);
     if (!listeningHistoryEntryQualifiesAsPlay(state, entry)
         || listenedSeconds > 31 * 24 * 60 * 60) continue;
@@ -2299,15 +2337,21 @@ function pendingListeningHistoryBatches() {
     if ((listeningHistorySyncedSeconds.get(syncKey) || 0) >= listenedSeconds) continue;
     const track = tracksByID.get(entry.trackID);
     const remoteID = optionalText(entry.remoteID || track?.remoteID, 128);
-    if (!remoteID) continue;
     const upload = {
       syncKey,
       listenedSeconds,
       entry: {
         id: entry.id,
+        trackID: entry.trackID,
         remoteID,
         startedAt: entry.startedAt,
         listenedSeconds,
+        title: optionalText(track?.title || entry.title, 500),
+        artist: optionalText(track?.artist || entry.artist, 500),
+        album: optionalText(track?.album || entry.album, 500),
+        duration: Number.isFinite(Number(track?.duration ?? entry.duration))
+          ? Number(track?.duration ?? entry.duration)
+          : null,
       },
     };
     if (!entriesByProfile.has(profileID)) entriesByProfile.set(profileID, []);
@@ -2378,7 +2422,7 @@ async function syncListeningHistoryNow({ force = false } = {}) {
         limit: 2000,
       });
       if (remoteDocument?.supported !== false && profileContextIsCurrent(context)) {
-        if (mergeListeningHistoryDocument(state, remoteDocument, context.profileID, context.serverURL)) {
+        if (mergeListeningHistoryDocument(state, remoteDocument, context.profileID, context.serverURL, serverCatalog)) {
           await persist({ refreshSidebar: false });
           if ($("#listeningHistoryDialog").open) renderListeningHistory();
           if ($("#nowPlayingDialog").open && fullPlayerQueueTab === "history") renderFullPlayerQueue();
@@ -3407,6 +3451,8 @@ async function hydrateServerArtwork(song) {
     serverArtworkCache.set(key, dataURL);
     song.artwork = dataURL;
     updateServerArtworkNode(song);
+    if ($("#listeningHistoryDialog").open) renderListeningHistory();
+    if ($("#nowPlayingDialog").open && fullPlayerQueueTab === "history") renderFullPlayerQueue();
   } catch {
     song.artwork = null;
     updateServerArtworkNode(song);
@@ -3426,10 +3472,6 @@ function hydrateServerCatalogArtwork(songs) {
 function cachedServerSongMetadata(song) {
   const key = remoteSongMetadataCacheKey(song?.source_url, song?.media_kind);
   return key ? state.remoteSongMetadataCache?.[key] || null : null;
-}
-
-function serverSongHasCatalogMetadata(song) {
-  return Boolean(String(song?.title || song?.name || "").trim() && String(song?.artist || "").trim());
 }
 
 function applyServerSongMetadata(song, metadata) {
@@ -3490,6 +3532,8 @@ async function hydrateServerMetadataArtwork(song, context, generation) {
       current.artwork = artwork;
     }
     updateServerArtworkNode(current);
+    if ($("#listeningHistoryDialog").open) renderListeningHistory();
+    if ($("#nowPlayingDialog").open && fullPlayerQueueTab === "history") renderFullPlayerQueue();
   } finally {
     if (serverArtworkPending.get(key) === pending) serverArtworkPending.delete(key);
   }
@@ -3550,6 +3594,7 @@ function hydrateServerCatalogMetadata(songs) {
   const bufferedResults = [];
   let completedRequests = 0;
   let cacheChanged = false;
+  let historyChanged = false;
   const flush = () => {
     if (generation !== serverCatalogGeneration
         || hydrationGeneration !== serverMetadataHydrationGeneration
@@ -3569,7 +3614,15 @@ function hydrateServerCatalogMetadata(songs) {
         }
       }
     }
+    const didHydrateHistory = hydrateListeningHistoryFromCatalog(
+      state, serverCatalog, context.profileID, context.serverURL,
+    );
+    historyChanged = didHydrateHistory || historyChanged;
     if (section === "server") renderServer();
+    if (didHydrateHistory && $("#listeningHistoryDialog").open) renderListeningHistory();
+    if (didHydrateHistory && $("#nowPlayingDialog").open && fullPlayerQueueTab === "history") {
+      renderFullPlayerQueue();
+    }
     hydrateServerCatalogMetadataArtwork(artworkSongs, context, generation);
     return true;
   };
@@ -3595,7 +3648,7 @@ function hydrateServerCatalogMetadata(songs) {
       serverMetadataHydrationActive = false;
     }
     flush();
-    if (!cacheChanged) return;
+    if (!cacheChanged && !historyChanged) return;
     state.remoteSongMetadataCache = normalizedRemoteSongMetadataCache(state.remoteSongMetadataCache);
     persistInBackground({ refreshSidebar: false });
   });
@@ -3643,6 +3696,14 @@ function replaceServerCatalog(songs) {
   serverCatalogGeneration += 1;
   const context = currentProfileContext();
   const generation = serverCatalogGeneration;
+  const historyChanged = hydrateListeningHistoryFromCatalog(
+    state, serverCatalog, context.profileID, context.serverURL,
+  );
+  if (historyChanged) {
+    persistInBackground({ refreshSidebar: false });
+    if ($("#listeningHistoryDialog").open) renderListeningHistory();
+    if ($("#nowPlayingDialog").open && fullPlayerQueueTab === "history") renderFullPlayerQueue();
+  }
   hydrateServerCatalogMetadataArtwork(serverCatalog, context, generation);
   hydrateServerCatalogMetadata(serverCatalog);
 }
@@ -3798,7 +3859,7 @@ async function syncPlaylistsNow({ automatic = false } = {}) {
 }
 
 function artwork(track, { animateLoading = false, forceLoading = false } = {}) {
-  const source = track?.artwork;
+  const source = track?.artwork || (track?.historyOnly ? track?.artworkURL : null);
   const hasRemoteArtwork = animateLoading && Boolean(forceLoading || source || track?.artwork_url);
   const canRenderImage = source && !/^https?:/i.test(source);
   if (!hasRemoteArtwork) {
@@ -4641,10 +4702,22 @@ async function refreshProfiles() {
   renderProfileOptions(resolution.profile?.id || activeProfileID());
 }
 
+function pullAccountListeningHistory() {
+  if (!serverToken.trim() || !state.serverURL) return;
+  if (listeningHistorySyncInFlight) {
+    listeningHistorySyncPending = true;
+    return;
+  }
+  void syncListeningHistoryNow({ force: true });
+}
+
 async function activateProfile(profileID, serverURL = state.serverURL) {
   if (!profileID) return;
   const targetServerKey = normalizedServerKey(serverURL);
-  if (profileID === activeProfileID() && targetServerKey === normalizedServerKey(state.serverURL)) return;
+  if (profileID === activeProfileID() && targetServerKey === normalizedServerKey(state.serverURL)) {
+    pullAccountListeningHistory();
+    return;
+  }
   ensureServerContextCanChange();
   if (listenAlongSession) await leaveListenAlong({ silent: true });
   releaseActiveServerStream({ stopPlayback: true });
@@ -4680,6 +4753,7 @@ async function activateProfile(profileID, serverURL = state.serverURL) {
   }
   await persist();
   if (resumeListeningSession && currentID && playbackIsActive()) beginListeningSession();
+  pullAccountListeningHistory();
 }
 
 function openServerSettings() {
@@ -4739,6 +4813,7 @@ async function applyAccountSession(nextSession, error = null) {
   if ($("#settingsDialog")?.open && settingsPanel === "server") renderSettings();
   if (migratedLocalContext) await persist();
   updateProfileControlView({ refreshPicture: false });
+  pullAccountListeningHistory();
 }
 
 function renderSettings() {
@@ -7706,13 +7781,9 @@ function fullPlayerHistoryTracks() {
       const track = activeTracks.find((item) => item.id === entry.trackID)
         || activeTracks.find((item) => entry.remoteID && item.remoteID === entry.remoteID && (item.syncProfileID || "default") === profileID);
       return track || {
+        ...historyOnlyTrack(entry),
         id: entry.trackID,
-        remoteID: entry.remoteID,
-        title: entry.title || "Unknown song",
-        artist: entry.artist || "Unknown artist",
-        album: entry.album || "Unknown Album",
         duration: Number(entry.duration) || 0,
-        artwork: null,
         historyOnly: true,
       };
     });
@@ -9399,6 +9470,7 @@ if (accountSession) {
     }];
     await activateProfile(accountSession.profileID, accountSession.baseURL);
   }
+  pullAccountListeningHistory();
 } else {
   ({ clientToken: serverToken = "", adminToken: serverAdminToken = "" } = await api.loadServerCredentials());
   serverToken = serverToken.trim();

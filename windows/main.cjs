@@ -27,6 +27,7 @@ const {
 const { MAX_SERVER_MEDIA_BYTES, adoptDownloadedFile, writeResponseToFile } = require("./download-file.cjs");
 const { sanitizeWindowsFilename, windowsCollisionFilename } = require("./filename-policy.cjs");
 const { isManagedLibraryFile } = require("./library-paths.cjs");
+const { normalizeListeningHistoryUploadEntries } = require("./listening-history.cjs");
 const {
   UNLINKED_DOWNLOAD_MIGRATION_ID,
   migrateUnlinkedDownloads,
@@ -1115,6 +1116,19 @@ async function deleteManagedServerCacheFile(track) {
   }
 }
 
+function safeListeningHistoryArtworkURL(candidate, serverOrigin) {
+  const origin = normalizedServerOrigin(serverOrigin);
+  if (!origin || typeof candidate !== "string" || candidate.length > 2_048) return null;
+  try {
+    const url = new URL(candidate, `${origin}/`);
+    return url.protocol === "https:" && url.origin === origin && !url.username && !url.password
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function safeListeningHistory(value) {
   const optionalText = (candidate, maximumLength = 500) => {
     const text = typeof candidate === "string" ? candidate.trim() : "";
@@ -1128,23 +1142,27 @@ function safeListeningHistory(value) {
       && entry.id.length <= 128
       && entry.trackID.length <= 128
       && Number.isFinite(Date.parse(entry.startedAt)))
-    .map((entry) => ({
-      id: entry.id,
-      trackID: entry.trackID,
-      profileID: typeof entry.profileID === "string" && entry.profileID ? entry.profileID : "default",
-      serverOrigin: normalizedServerOrigin(entry.serverOrigin),
-      startedAt: new Date(entry.startedAt).toISOString(),
-      listenedSeconds: Math.max(0, Number(entry.listenedSeconds) || 0),
-      remoteID: optionalText(entry.remoteID, 128),
-      title: optionalText(entry.title),
-      artist: optionalText(entry.artist),
-      album: optionalText(entry.album),
-      duration: entry.duration !== null && entry.duration !== undefined && entry.duration !== ""
-        && Number.isFinite(Number(entry.duration)) && Number(entry.duration) >= 0
-        ? Math.min(Number(entry.duration), 7 * 24 * 60 * 60)
-        : null,
-      originatedOnThisDevice: entry.originatedOnThisDevice !== false,
-    }))
+    .map((entry) => {
+      const serverOrigin = normalizedServerOrigin(entry.serverOrigin);
+      return {
+        id: entry.id,
+        trackID: entry.trackID,
+        profileID: typeof entry.profileID === "string" && entry.profileID ? entry.profileID : "default",
+        serverOrigin,
+        startedAt: new Date(entry.startedAt).toISOString(),
+        listenedSeconds: Math.max(0, Number(entry.listenedSeconds) || 0),
+        remoteID: optionalText(entry.remoteID, 128),
+        title: optionalText(entry.title),
+        artist: optionalText(entry.artist),
+        album: optionalText(entry.album),
+        duration: entry.duration !== null && entry.duration !== undefined && entry.duration !== ""
+          && Number.isFinite(Number(entry.duration)) && Number(entry.duration) >= 0
+          ? Math.min(Number(entry.duration), 7 * 24 * 60 * 60)
+          : null,
+        artworkURL: safeListeningHistoryArtworkURL(entry.artworkURL, serverOrigin),
+        originatedOnThisDevice: entry.originatedOnThisDevice !== false,
+      };
+    })
     .slice(-2000);
 }
 
@@ -3455,19 +3473,7 @@ ipcMain.handle("server:playlists:put", async (_event, { baseURL, token, profileI
 
 ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token, profileID, entries }) => {
   if (!token) throw new Error("Sign in to your Resonance account.");
-  if (!Array.isArray(entries) || entries.length === 0 || entries.length > 500) {
-    throw new Error("Listening history must contain between 1 and 500 entries.");
-  }
-  const minimalEntries = entries.map((entry) => {
-    const id = boundedText(entry?.id, 128);
-    const songID = boundedText(entry?.remoteID || entry?.songID || entry?.song_id, 128);
-    const startedAt = new Date(entry?.startedAt || entry?.started_at || "").toISOString();
-    const listenedSeconds = Number(entry?.listenedSeconds ?? entry?.listened_seconds);
-    if (!id || !songID || !Number.isFinite(listenedSeconds) || listenedSeconds < 0) {
-      throw new Error("Listening history may sync only UUID-linked saved songs.");
-    }
-    return { id, song_id: songID, started_at: startedAt, listened_seconds: listenedSeconds };
-  });
+  const minimalEntries = normalizeListeningHistoryUploadEntries(entries);
   const base = normalizeBaseURL(baseURL);
   const response = await fetchSameOrigin(base, new URL("api/v1/listening-history", base), {
     method: "POST",
@@ -3476,7 +3482,7 @@ ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token,
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body: JSON.stringify({ entries: minimalEntries }),
+    body: JSON.stringify({ entries: minimalEntries, client: "windows" }),
   });
   if (response.status === 404 || response.status === 405) return { supported: false, accepted: 0 };
   if (!response.ok) throw await serverResponseError(response);

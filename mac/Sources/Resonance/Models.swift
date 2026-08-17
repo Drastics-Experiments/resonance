@@ -536,6 +536,7 @@ struct ListeningHistoryEntry: Identifiable, Codable, Hashable {
     var artist: String?
     var album: String?
     var duration: TimeInterval?
+    var artworkURL: String?
     var originatedOnThisDevice: Bool?
 
     init(
@@ -550,6 +551,7 @@ struct ListeningHistoryEntry: Identifiable, Codable, Hashable {
         artist: String? = nil,
         album: String? = nil,
         duration: TimeInterval? = nil,
+        artworkURL: String? = nil,
         originatedOnThisDevice: Bool? = true
     ) {
         self.id = id
@@ -563,6 +565,7 @@ struct ListeningHistoryEntry: Identifiable, Codable, Hashable {
         self.artist = artist
         self.album = album
         self.duration = duration
+        self.artworkURL = artworkURL
         self.originatedOnThisDevice = originatedOnThisDevice
     }
 }
@@ -584,6 +587,7 @@ enum ListeningHistoryRetentionPolicy {
             artist: track.artist,
             album: track.album,
             duration: track.duration,
+            artworkURL: track.artworkURL,
             originatedOnThisDevice: true
         )
     }
@@ -611,6 +615,12 @@ enum ListeningHistoryPlayPolicy {
 }
 
 enum ListeningHistoryTrackResolver {
+    enum MetadataField {
+        case title
+        case artist
+        case album
+    }
+
     static func identity(for entry: ListeningHistoryEntry) -> String {
         let origin = entry.serverOrigin ?? "local"
         let profileID = entry.syncProfileID ?? "default"
@@ -643,7 +653,8 @@ enum ListeningHistoryTrackResolver {
         for entry: ListeningHistoryEntry,
         tracksByID: [UUID: Track],
         tracksByRemoteIdentity: [String: Track],
-        localTracksByMetadataKey: [String: [Track]] = [:]
+        localTracksByMetadataKey: [String: [Track]] = [:],
+        remoteSongsByID: [String: RemoteSong] = [:]
     ) -> Track {
         if let remoteSongID = nonempty(entry.remoteSongID),
            let track = tracksByRemoteIdentity[remoteIdentity(
@@ -652,6 +663,24 @@ enum ListeningHistoryTrackResolver {
                remoteSongID: remoteSongID
            )] {
             return track
+        }
+        if let remoteSongID = nonempty(entry.remoteSongID),
+           let song = remoteSongsByID[remoteSongID] {
+            return Track(
+                id: entry.trackID,
+                title: preferredMetadata([song.title, entry.title], field: .title) ?? "Unknown song",
+                artist: preferredMetadata([song.artist, entry.artist], field: .artist) ?? "Unknown artist",
+                album: preferredMetadata([song.album, entry.album], field: .album) ?? "Unknown Album",
+                duration: song.durationSeconds.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+                    ?? entry.duration ?? 0,
+                kind: song.kind,
+                artwork: .weightless,
+                artworkURL: nonempty(song.artworkURL) ?? nonempty(entry.artworkURL),
+                remoteID: song.id,
+                sourceServer: entry.serverOrigin,
+                syncProfileID: entry.syncProfileID ?? "default",
+                dateAdded: entry.startedAt
+            )
         }
         if let track = tracksByID[entry.trackID] { return track }
         if let title = nonempty(entry.title),
@@ -676,11 +705,12 @@ enum ListeningHistoryTrackResolver {
         } ?? 0
         return Track(
             id: entry.trackID,
-            title: nonempty(entry.title) ?? "Unknown song",
-            artist: nonempty(entry.artist) ?? "Unknown artist",
-            album: nonempty(entry.album) ?? "Unknown Album",
+            title: preferredMetadata([entry.title], field: .title) ?? "Unknown song",
+            artist: preferredMetadata([entry.artist], field: .artist) ?? "Unknown artist",
+            album: preferredMetadata([entry.album], field: .album) ?? "Unknown Album",
             duration: duration,
             artwork: .weightless,
+            artworkURL: nonempty(entry.artworkURL),
             remoteID: nonempty(entry.remoteSongID),
             sourceServer: entry.serverOrigin,
             syncProfileID: entry.syncProfileID ?? "default",
@@ -691,6 +721,35 @@ enum ListeningHistoryTrackResolver {
     private static func nonempty(_ value: String?) -> String? {
         let text = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return text.isEmpty ? nil : text
+    }
+
+    static func preferredMetadata(
+        _ values: [String?],
+        field: MetadataField
+    ) -> String? {
+        values.lazy.compactMap(nonempty).first { value in
+            !isPlaceholder(value, field: field)
+        }
+    }
+
+    private static func isPlaceholder(_ value: String, field: MetadataField) -> Bool {
+        let normalized = value
+            .replacingOccurrences(of: "…", with: "...")
+            .lowercased()
+        switch field {
+        case .title:
+            return normalized == "resolving metadata..."
+                || normalized == "unknown song"
+                || normalized == "untitled"
+                || normalized.hasPrefix("saved song ")
+        case .artist:
+            return normalized == "automatic lookup"
+                || normalized == "unknown artist"
+        case .album:
+            return normalized == "link only"
+                || normalized == "unknown album"
+                || normalized == "server library"
+        }
     }
 }
 
@@ -714,6 +773,7 @@ struct RemoteListeningHistoryEntry: Decodable {
     let artist: String?
     let album: String?
     let durationSeconds: TimeInterval?
+    let artworkURL: String?
 
     enum CodingKeys: String, CodingKey {
         case id, title, artist, album
@@ -722,6 +782,7 @@ struct RemoteListeningHistoryEntry: Decodable {
         case startedAt = "started_at"
         case listenedSeconds = "listened_seconds"
         case durationSeconds = "duration_seconds"
+        case artworkURL = "artwork_url"
     }
 }
 
@@ -762,6 +823,7 @@ struct ListeningHistoryCalendarSummary: Hashable {
     init(
         entries: [ListeningHistoryEntry],
         tracks: [Track],
+        remoteSongs: [RemoteSong] = [],
         dayCount: Int,
         windowOffset: Int = 0,
         now: Date = .now,
@@ -806,6 +868,7 @@ struct ListeningHistoryCalendarSummary: Hashable {
         )
         let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
         let localTracksByMetadataKey = ListeningHistoryTrackResolver.localTracksByMetadataKey(tracks)
+        let remoteSongsByID = Dictionary(remoteSongs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var tracksByRemoteIdentity: [String: Track] = [:]
         for track in tracks {
             guard let remoteID = track.remoteID else { continue }
@@ -835,7 +898,8 @@ struct ListeningHistoryCalendarSummary: Hashable {
                 for: entry,
                 tracksByID: tracksByID,
                 tracksByRemoteIdentity: tracksByRemoteIdentity,
-                localTracksByMetadataKey: localTracksByMetadataKey
+                localTracksByMetadataKey: localTracksByMetadataKey,
+                remoteSongsByID: remoteSongsByID
             )
             let qualifiesAsPlay = ListeningHistoryPlayPolicy.qualifies(entry, track: track)
             if calendar.isDate(entry.startedAt, inSameDayAs: now) {
@@ -925,9 +989,10 @@ struct ListeningHistoryStatsSummary: Hashable {
     let topArtist: String
     let songRanking: [ListeningHistoryRankedSong]
 
-    init(entries: [ListeningHistoryEntry], tracks: [Track]) {
+    init(entries: [ListeningHistoryEntry], tracks: [Track], remoteSongs: [RemoteSong] = []) {
         let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
         let localTracksByMetadataKey = ListeningHistoryTrackResolver.localTracksByMetadataKey(tracks)
+        let remoteSongsByID = Dictionary(remoteSongs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var tracksByRemoteIdentity: [String: Track] = [:]
         for track in tracks {
             guard let remoteID = track.remoteID else { continue }
@@ -953,7 +1018,8 @@ struct ListeningHistoryStatsSummary: Hashable {
                 for: entry,
                 tracksByID: tracksByID,
                 tracksByRemoteIdentity: tracksByRemoteIdentity,
-                localTracksByMetadataKey: localTracksByMetadataKey
+                localTracksByMetadataKey: localTracksByMetadataKey,
+                remoteSongsByID: remoteSongsByID
             )
             let qualifiesAsPlay = ListeningHistoryPlayPolicy.qualifies(entry, track: track)
             if qualifiesAsPlay { playCount += 1 }
@@ -1216,15 +1282,27 @@ struct RemoteSong: Identifiable, Hashable, Decodable, Sendable {
         let decodedArtist = try values.decodeIfPresent(String.self, forKey: .artist).flatMap { value in
             value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
         }
-        title = decodedTitle
+        let usefulTitle = ListeningHistoryTrackResolver.preferredMetadata(
+            [decodedTitle],
+            field: .title
+        )
+        let usefulArtist = ListeningHistoryTrackResolver.preferredMetadata(
+            [decodedArtist],
+            field: .artist
+        )
+        title = usefulTitle
             ?? (isSourceLinkRecord
                 ? "Resolving metadata…"
                 : URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent)
-        artist = decodedArtist
+        artist = usefulArtist
             ?? (isSourceLinkRecord ? "Automatic lookup" : "Unknown Artist")
-        album = try values.decodeIfPresent(String.self, forKey: .album).flatMap { value in
+        let decodedAlbum = try values.decodeIfPresent(String.self, forKey: .album).flatMap { value in
             value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
         }
+        album = ListeningHistoryTrackResolver.preferredMetadata(
+            [decodedAlbum],
+            field: .album
+        )
             ?? (isSourceLinkRecord ? "Link only" : "Server Library")
         size = decodedSize
         if let timestamp = try values.decodeIfPresent(String.self, forKey: .modifiedAt) {
@@ -1248,7 +1326,7 @@ struct RemoteSong: Identifiable, Hashable, Decodable, Sendable {
         downloadURL = try values.decode(String.self, forKey: .downloadURL)
         streamURL = try values.decode(String.self, forKey: .streamURL)
         contentSHA256 = try values.decodeIfPresent(String.self, forKey: .contentSHA256)
-        isMetadataLoading = isSourceLinkRecord && (decodedTitle == nil || decodedArtist == nil)
+        isMetadataLoading = isSourceLinkRecord && (usefulTitle == nil || usefulArtist == nil)
     }
 
     var kind: SongFilter {

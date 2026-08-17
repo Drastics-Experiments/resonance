@@ -146,6 +146,9 @@ object RemoteTrackIdentityPolicy {
             tracks = result.tracks,
             playlists = remapPlaylists(library.playlists),
             favorites = library.favorites.mapTo(linkedSetOf(), ::mapped),
+            listeningHistory = ListeningHistoryRetentionPolicy.normalize(
+                library.listeningHistory.map { it.copy(trackID = mapped(it.trackID)) },
+            ),
             profileStates = library.profileStates.mapValues { (_, state) -> remapState(state) },
         )
     }
