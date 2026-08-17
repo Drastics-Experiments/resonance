@@ -24,6 +24,7 @@ function writeFixture(root) {
   const windowsInstaller = `Resonance-Setup-${version}.exe`;
   const androidPackage = `Resonance-Android-${version}.apk`;
   const iosArchive = `Resonance-iOS-Simulator-${version}.zip`;
+  const iosDevicePackage = `Resonance-iOS-Device-${version}.ipa`;
   const contents = {
     "Resonance-Installer.pkg": "signed and notarized package",
     "Resonance-macOS.zip": "signed and notarized app archive",
@@ -31,11 +32,12 @@ function writeFixture(root) {
     [`${windowsInstaller}.blockmap`]: "block map",
     [androidPackage]: "signed Android package",
     [iosArchive]: "iOS Simulator archive",
+    [iosDevicePackage]: "unsigned iOS device package",
   };
   for (const [name, value] of Object.entries(contents)) {
     fs.writeFileSync(path.join(assets, name), value);
   }
-  for (const name of ["Resonance-macOS.zip", androidPackage, iosArchive]) {
+  for (const name of ["Resonance-macOS.zip", androidPackage, iosArchive, iosDevicePackage]) {
     fs.writeFileSync(path.join(assets, `${name}.sha256`), `${digest(path.join(assets, name), "sha256", "hex")}  ${name}\n`);
   }
   fs.writeFileSync(
@@ -77,7 +79,7 @@ function withFixture(callback) {
 
 test("production validation requires hash-bound desktop signing evidence", () => {
   withFixture(({ assets, signing }) => {
-    assert.equal(validateReleaseAssets(assets, version, { signingEvidenceDirectory: signing }).length, 12);
+    assert.equal(validateReleaseAssets(assets, version, { signingEvidenceDirectory: signing }).length, 14);
   });
 });
 
@@ -122,7 +124,7 @@ test("production validation rejects incomplete verification policy", () => {
 
 test("unsigned desktop release fixtures require an explicit opt-out", () => {
   withFixture(({ assets }) => {
-    assert.equal(validateReleaseAssets(assets, version, { requireDesktopSignatures: false }).length, 12);
+    assert.equal(validateReleaseAssets(assets, version, { requireDesktopSignatures: false }).length, 14);
     const production = spawnSync(process.execPath, [validatorPath, assets, version], { encoding: "utf8" });
     assert.equal(production.status, 1);
     assert.match(production.stderr, /desktop signing evidence is required/);

@@ -182,6 +182,8 @@ jobs:
               latest-android.json
               "Resonance-iOS-Simulator-${VERSION}.zip"
               "Resonance-iOS-Simulator-${VERSION}.zip.sha256"
+              "Resonance-iOS-Device-${VERSION}.ipa"
+              "Resonance-iOS-Device-${VERSION}.ipa.sha256"
             )
             mapfile -t EXPECTED_ASSETS < <(printf '%s\n' "${EXPECTED_ASSETS[@]}" | sort)
             [[ "${EXPECTED_ASSETS[*]}" == "${ACTUAL_ASSETS[*]}" ]]
@@ -211,7 +213,7 @@ jobs:
           RELEASE_TARGET: ${{ steps.verify.outputs.release_target }}
         run: |
           assets=(candidate/assets/*)
-          [[ "${#assets[@]}" -eq 12 ]]
+          [[ "${#assets[@]}" -eq 14 ]]
           DESKTOP_SIGNING="$(node -e 'const value = require("./release/policy.json"); process.stdout.write(value.desktopSigning)')"
           [[ "$DESKTOP_SIGNING" == "production" ]]
           release_arguments=(
@@ -227,7 +229,7 @@ jobs:
 
           RELEASE_JSON="$(gh release view "$TAG" --repo "$REPOSITORY" --json isDraft,assets,url)"
           [[ "$(jq -r '.isDraft' <<< "$RELEASE_JSON")" == "false" ]]
-          [[ "$(jq '.assets | length' <<< "$RELEASE_JSON")" -eq 12 ]]
+          [[ "$(jq '.assets | length' <<< "$RELEASE_JSON")" -eq 14 ]]
           TAG_TARGET="$(gh api "repos/${REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')"
           [[ "$TAG_TARGET" == "$RELEASE_TARGET" ]]
           echo "Published $(jq -r '.url' <<< "$RELEASE_JSON")"

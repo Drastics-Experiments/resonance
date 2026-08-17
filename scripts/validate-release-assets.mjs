@@ -14,6 +14,7 @@ function expectedAssetNames(version) {
   const windowsInstaller = `Resonance-Setup-${version}.exe`;
   const androidPackage = `Resonance-Android-${version}.apk`;
   const iosArchive = `Resonance-iOS-Simulator-${version}.zip`;
+  const iosDevicePackage = `Resonance-iOS-Device-${version}.ipa`;
   return [
     "Resonance-Installer.pkg",
     "Resonance-macOS.zip",
@@ -27,6 +28,8 @@ function expectedAssetNames(version) {
     "latest-android.json",
     iosArchive,
     `${iosArchive}.sha256`,
+    iosDevicePackage,
+    `${iosDevicePackage}.sha256`,
   ].sort();
 }
 
@@ -123,6 +126,7 @@ export function validateReleaseAssets(
   const windowsInstaller = `Resonance-Setup-${version}.exe`;
   const androidPackage = `Resonance-Android-${version}.apk`;
   const iosArchive = `Resonance-iOS-Simulator-${version}.zip`;
+  const iosDevicePackage = `Resonance-iOS-Device-${version}.ipa`;
   const expectedAssets = expectedAssetNames(version);
 
   function readAsset(name) {
@@ -172,6 +176,7 @@ export function validateReleaseAssets(
   const macSha256 = validateSha256Sidecar("Resonance-macOS.zip");
   validateSha256Sidecar(androidPackage);
   validateSha256Sidecar(iosArchive);
+  validateSha256Sidecar(iosDevicePackage);
 
   const macManifest = JSON.parse(readAsset("latest-mac.json").toString("utf8"));
   if (macManifest.version !== version) {

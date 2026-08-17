@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Resonance iPhone Installer</title>
+    <link rel="stylesheet" href="./styles.css?v=2" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="app-header">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 44 44" role="img">
+            <path d="M8 25.5v-7M14 30v-16M20 34V10M26 31.5v-19M32 27v-10M38 24v-4" />
+          </svg>
+        </div>
+        <div>
+          <h1>Resonance</h1>
+          <p class="eyebrow">iPhone Installer</p>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <nav class="progress-rail" aria-label="Installation progress">
+          <p>Setup</p>
+          <div class="rail-step is-current" data-rail="connect">
+            <span>1</span><strong>Connect</strong>
+          </div>
+          <div class="rail-step" data-rail="account">
+            <span>2</span><strong>Apple Account</strong>
+          </div>
+          <div class="rail-step" data-rail="install">
+            <span>3</span><strong>Install</strong>
+          </div>
+        </nav>
+
+        <div class="content-column">
+          <section id="notice" class="notice" role="status" aria-live="polite" hidden></section>
+
+          <section class="panel" data-panel="connect">
+        <div class="panel-heading">
+          <h2>Connect an iPhone</h2>
+          <p>Unlock your iPhone, connect it with USB, and tap <strong>Trust</strong> if prompted.</p>
+        </div>
+
+        <section class="installation-history" aria-labelledby="installation-history-title">
+          <div class="section-heading">
+            <h3 id="installation-history-title">Installed iPhones</h3>
+            <span id="installation-count"></span>
+          </div>
+          <div id="installation-list" class="installation-list"></div>
+        </section>
+
+        <div class="section-heading connected-heading">
+          <h3>Connected iPhones</h3>
+        </div>
+        <div id="device-list" class="device-list" aria-live="polite">
+          <div class="empty-state">
+            <span class="device-glyph" aria-hidden="true"></span>
+            <strong>No iPhone connected</strong>
+            <p>Connect with USB, then select Find iPhone.</p>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="find-device" class="primary-button" type="button">Find iPhone</button>
+          <button id="continue-device" class="secondary-button" type="button" disabled>Continue</button>
+        </div>
+          </section>
+
+          <section class="panel" data-panel="account" hidden>
+        <div class="panel-heading">
+          <h2>Sign in to Apple</h2>
+          <p>Your Apple Account creates a free personal installation for this iPhone. It is separate from your Resonance account.</p>
+        </div>
+
+        <form id="account-form" class="form-stack">
+          <label>
+            <span>Apple Account email</span>
+            <input id="apple-email" name="email" type="email" autocomplete="off" required />
+          </label>
+          <label>
+            <span>Apple Account password</span>
+            <input id="apple-password" name="password" type="password" autocomplete="off" required />
+          </label>
+          <details class="privacy-note">
+            <summary>How authentication works</summary>
+            <p>Your email, password, verification code, and signing state are kept only for this installation and discarded when the installer closes. A third-party anisette service supplies device-authentication headers but does not receive your password or verification code.</p>
+          </details>
+          <div class="actions">
+            <button class="quiet-button" data-back="connect" type="button">Back</button>
+            <button id="sign-in" class="primary-button" type="submit">Continue with Apple</button>
+          </div>
+        </form>
+          </section>
+
+          <section class="panel" data-panel="install" hidden>
+        <div class="panel-heading">
+          <h2>Install Resonance</h2>
+          <p>Keep your iPhone unlocked and connected until every check finishes.</p>
+        </div>
+
+        <div class="install-summary">
+          <div>
+            <span>Device</span>
+            <strong id="summary-device">iPhone</strong>
+          </div>
+          <div>
+            <span>Signing</span>
+            <strong>Free Personal Team · 7 days</strong>
+          </div>
+        </div>
+
+        <ol id="install-checklist" class="checklist">
+          <li data-install-step="verify"><span></span><div><strong>Download Resonance</strong><small>Get and verify the latest GitHub release.</small></div></li>
+          <li data-install-step="profile"><span></span><div><strong>Prepare Apple profile</strong><small>Register the device and application.</small></div></li>
+          <li data-install-step="sign"><span></span><div><strong>Sign Resonance</strong><small>Create a build for this Apple Account.</small></div></li>
+          <li data-install-step="transfer"><span></span><div><strong>Install on iPhone</strong><small>Transfer and verify the application.</small></div></li>
+        </ol>
+
+        <div class="actions">
+          <button class="quiet-button" data-back="account" type="button">Back</button>
+          <button id="install-button" class="primary-button" type="button">Install Resonance</button>
+        </div>
+          </section>
+
+          <section class="panel success-panel" data-panel="success" hidden>
+        <div class="success-icon" aria-hidden="true">✓</div>
+        <h2>Installation complete</h2>
+        <p>Open Resonance on your iPhone to finish setup. If iOS blocks the first launch, trust your Apple Account in <strong>Settings → General → VPN &amp; Device Management</strong>.</p>
+
+        <div class="expiry-card">
+          <span>Version</span>
+          <strong id="installed-version"></strong>
+          <span>Refresh before</span>
+          <strong id="expiry-date"></strong>
+          <small>Run this installer again before that date to keep Resonance available.</small>
+        </div>
+
+        <div class="actions centered">
+          <button id="refresh-now" class="secondary-button" type="button">Refresh installation</button>
+          <button id="done-button" class="primary-button" type="button">Done</button>
+        </div>
+          </section>
+
+          <footer>
+            <span>Personal Team installations expire after 7 days.</span>
+            <button id="copy-details" class="quiet-button" type="button" hidden>Copy error details</button>
+          </footer>
+        </div>
+      </div>
+    </main>
+
+    <dialog id="two-factor-dialog">
+      <form method="dialog" id="two-factor-form">
+        <h2>Enter your verification code</h2>
+        <p>Use the six-digit code Apple sent to your trusted device.</p>
+        <input id="two-factor-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required />
+        <div class="actions">
+          <button class="primary-button" value="submit" type="submit">Verify</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="certificate-dialog">
+      <form method="dialog" id="certificate-form">
+        <h2>Choose a certificate to replace</h2>
+        <p>Apple allows only a limited number of development certificates. Select one created by a sideloading tool that you no longer use.</p>
+        <div id="certificate-list" class="certificate-list"></div>
+        <div class="actions">
+          <button class="quiet-button" value="cancel" type="button" id="cancel-certificate">Cancel</button>
+          <button class="primary-button" value="submit" type="submit">Replace selected</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
