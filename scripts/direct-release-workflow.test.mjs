@@ -14,6 +14,7 @@ test("direct release workflow is dispatch-only and calls all four platform build
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /production_release:/);
   assert.match(workflow, /unsigned_desktop:/);
+  assert.match(workflow, /replace_prerelease:/);
   assert.match(workflow, /environment: production-release/);
   assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /\[\[ "\$\(git rev-parse origin\/main\)" == "\$SOURCE_SHA" \]\]/);
@@ -23,6 +24,11 @@ test("direct release workflow is dispatch-only and calls all four platform build
   );
   assert.match(workflow, /android:[\s\S]+production_signing: true/);
   assert.match(workflow, /--allow-unsigned-desktop-release/);
+  assert.match(
+    workflow,
+    /REPLACE_PRERELEASE[\s\S]+git show-ref --verify --quiet "refs\/tags\/\$\{TAG\}"[\s\S]+releases\/tags\/\$\{TAG\}[\s\S]+\.prerelease[\s\S]+== "true"/,
+  );
+  assert.match(workflow, /replacePrerelease: process\.env\.REPLACE_PRERELEASE === "true"/);
   assert.doesNotMatch(workflow, /^\s*pull_request:/m);
   assert.doesNotMatch(workflow, /gh pr|refs\/heads\/release\/|release\/v[0-9]/);
   assert.doesNotMatch(workflow, /gh release|contents:\s*write/);
