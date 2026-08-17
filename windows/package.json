@@ -3,6 +3,7 @@
   "version": "2.0.0",
   "resonanceBuild": 17,
   "resonanceDiscordApplicationID": "1535574125395841154",
+  "resonanceUpdateAuthenticity": "production",
   "private": true,
   "type": "module",
   "description": "Functional Resonance music player for Windows",
@@ -11,9 +12,9 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test",
-    "package:win": "electron-builder --dir --win --x64 --publish never --config.directories.output=dist",
-    "installer:win": "electron-builder --win nsis --x64 --publish never",
-    "release:win": "electron-builder --win nsis --x64 --publish always"
+    "package:win": "electron-builder --dir --win --x64 --publish never --config.directories.output=dist --config.extraMetadata.resonanceUpdateAuthenticity=unsigned",
+    "installer:win": "electron-builder --win nsis --x64 --publish never --config.extraMetadata.resonanceUpdateAuthenticity=unsigned",
+    "release:win": "electron-builder --win nsis --x64 --publish always --config.forceCodeSigning=true --config.extraMetadata.resonanceUpdateAuthenticity=production"
   },
   "dependencies": {
     "electron-updater": "6.8.9",
@@ -43,6 +44,7 @@
       "local-youtube.cjs",
       "library-paths.cjs",
       "library-update-migration.cjs",
+      "listening-history.cjs",
       "crash-safe-file.cjs",
       "discord-rpc.cjs",
       "download-file.cjs",

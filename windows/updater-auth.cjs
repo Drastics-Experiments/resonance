@@ -4,6 +4,8 @@ const { promisify } = require("node:util");
 
 const execFileAsync = promisify(execFile);
 const WINDOWS_UPDATE_TEST_EXCEPTION = "RESONANCE_ALLOW_UNSIGNED_UPDATE_TESTS";
+const WINDOWS_UPDATE_AUTHENTICITY_PRODUCTION = "production";
+const WINDOWS_UPDATE_AUTHENTICITY_UNSIGNED = "unsigned";
 
 function boundedSignatureText(value, maximum = 512) {
   const text = typeof value === "string" ? value.trim() : "";
@@ -25,23 +27,77 @@ function canonicalAuthenticodeSignature(value) {
   return Object.freeze({ status, subject, issuer, thumbprint });
 }
 
-function updateAuthenticityPolicy({ packaged = true, environment = process.env } = {}) {
+function unsignedAuthenticodeSignature(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const status = boundedSignatureText(value.status || value.Status, 64);
+  const subject = boundedSignatureText(value.subject || value.Subject, 2_048);
+  const issuer = boundedSignatureText(value.issuer || value.Issuer, 2_048);
+  const thumbprint = normalizedThumbprint(value.thumbprint || value.Thumbprint);
+  return status === "NotSigned" && !subject && !issuer && !thumbprint;
+}
+
+function updateAuthenticityPolicy({
+  authenticityMode,
+  packaged = true,
+  environment = process.env,
+} = {}) {
   // Only a non-packaged test process may opt out. A packaged executable never
-  // accepts an environment-controlled unsigned-update bypass.
+  // accepts an environment-controlled unsigned-update bypass. An unsigned
+  // packaged build must declare that policy in its bundled package metadata.
   const testException = !packaged
     && String(environment?.NODE_ENV || "").toLowerCase() === "test"
     && String(environment?.[WINDOWS_UPDATE_TEST_EXCEPTION] || "") === "1";
-  return Object.freeze({ requirePublisher: !testException, testException });
+  if (testException) {
+    return Object.freeze({
+      authenticityMode: "test",
+      requirePublisher: false,
+      exception: "test",
+    });
+  }
+  if (authenticityMode === WINDOWS_UPDATE_AUTHENTICITY_PRODUCTION) {
+    return Object.freeze({
+      authenticityMode,
+      requirePublisher: true,
+      exception: null,
+    });
+  }
+  if (authenticityMode === WINDOWS_UPDATE_AUTHENTICITY_UNSIGNED) {
+    return Object.freeze({
+      authenticityMode,
+      requirePublisher: false,
+      exception: "explicit-unsigned-release",
+    });
+  }
+  throw new Error("The Windows build has no valid update authenticity policy.");
 }
 
 function verifyWindowsUpdatePublisher({
   currentSignature,
   updateSignature,
+  authenticityMode,
   packaged = true,
   environment = process.env,
 } = {}) {
-  const policy = updateAuthenticityPolicy({ packaged, environment });
-  if (!policy.requirePublisher) return Object.freeze({ verified: false, exception: "test" });
+  const policy = updateAuthenticityPolicy({ authenticityMode, packaged, environment });
+  if (policy.exception === "test") {
+    return Object.freeze({
+      authenticityMode: policy.authenticityMode,
+      verified: false,
+      exception: policy.exception,
+    });
+  }
+
+  if (policy.authenticityMode === WINDOWS_UPDATE_AUTHENTICITY_UNSIGNED) {
+    if (!unsignedAuthenticodeSignature(currentSignature) || !unsignedAuthenticodeSignature(updateSignature)) {
+      throw new Error("The unsigned Windows update policy requires both executables to be explicitly unsigned.");
+    }
+    return Object.freeze({
+      authenticityMode: policy.authenticityMode,
+      verified: true,
+      authenticode: false,
+      exception: policy.exception,
+    });
+  }
 
   const current = canonicalAuthenticodeSignature(currentSignature);
   const update = canonicalAuthenticodeSignature(updateSignature);
@@ -52,6 +108,7 @@ function verifyWindowsUpdatePublisher({
     throw new Error("The Windows update is signed by a different publisher identity.");
   }
   return Object.freeze({
+    authenticityMode: policy.authenticityMode,
     verified: true,
     subject: update.subject,
     issuer: update.issuer,
@@ -85,12 +142,21 @@ async function readAuthenticodeSignature(filePath, execFileImpl = execFileAsync)
   let payload;
   try { payload = JSON.parse(String(result?.stdout || "")); }
   catch { throw new Error("Windows could not read the update Authenticode signature."); }
-  return canonicalAuthenticodeSignature(payload);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("Windows returned an invalid update Authenticode signature.");
+  }
+  return Object.freeze({
+    status: boundedSignatureText(payload.Status, 64),
+    subject: boundedSignatureText(payload.Subject, 2_048),
+    issuer: boundedSignatureText(payload.Issuer, 2_048),
+    thumbprint: normalizedThumbprint(payload.Thumbprint),
+  });
 }
 
 async function verifyDownloadedWindowsUpdate({
   downloadedFile,
   currentExecutable,
+  authenticityMode,
   packaged = true,
   environment = process.env,
   readSignature = readAuthenticodeSignature,
@@ -100,9 +166,18 @@ async function verifyDownloadedWindowsUpdate({
   if (!updatePath || !/\.exe$/i.test(updatePath) || !executablePath || !/\.exe$/i.test(executablePath)) {
     throw new Error("The downloaded Windows update package is invalid.");
   }
+  const policy = updateAuthenticityPolicy({ authenticityMode, packaged, environment });
+  if (policy.exception === "test") {
+    return Object.freeze({
+      authenticityMode: policy.authenticityMode,
+      verified: false,
+      exception: policy.exception,
+    });
+  }
   return verifyWindowsUpdatePublisher({
     currentSignature: await readSignature(executablePath),
     updateSignature: await readSignature(updatePath),
+    authenticityMode,
     packaged,
     environment,
   });
@@ -110,7 +185,10 @@ async function verifyDownloadedWindowsUpdate({
 
 module.exports = {
   WINDOWS_UPDATE_TEST_EXCEPTION,
+  WINDOWS_UPDATE_AUTHENTICITY_PRODUCTION,
+  WINDOWS_UPDATE_AUTHENTICITY_UNSIGNED,
   canonicalAuthenticodeSignature,
+  unsignedAuthenticodeSignature,
   readAuthenticodeSignature,
   updateAuthenticityPolicy,
   verifyDownloadedWindowsUpdate,

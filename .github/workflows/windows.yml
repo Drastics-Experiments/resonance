@@ -179,12 +179,43 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: pnpm run installer:win
 
+      - name: Verify unsigned installer state
+        if: ${{ !inputs.release_candidate || !inputs.production_signing }}
+        shell: pwsh
+        working-directory: .
+        run: |
+          $installers = @(Get-ChildItem "installers/windows/dist/Resonance-Setup-*.exe")
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one unsigned Windows installer, found $($installers.Count)."
+          }
+          $application = Resolve-Path "installers/windows/dist/win-unpacked/Resonance.exe"
+          foreach ($file in @($application.Path, $installers[0].FullName)) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file
+            if ($signature.Status -ne "NotSigned") {
+              throw "$file must be explicitly unsigned, but Authenticode reported $($signature.Status)."
+            }
+          }
+
       - name: Build signed release candidate
         if: ${{ inputs.release_candidate && inputs.production_signing }}
         env:
           WIN_CSC_LINK: ${{ runner.temp }}\resonance-code-signing.pfx
           WIN_CSC_KEY_PASSWORD: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_PASSWORD }}
-        run: pnpm exec electron-builder --win nsis --x64 --publish never --config.forceCodeSigning=true
+        run: pnpm exec electron-builder --win nsis --x64 --publish never --config.forceCodeSigning=true --config.extraMetadata.resonanceUpdateAuthenticity=production
+
+      - name: Verify packaged startup modules and update policy
+        shell: pwsh
+        env:
+          EXPECTED_UPDATE_AUTHENTICITY: ${{ inputs.release_candidate && inputs.production_signing && 'production' || 'unsigned' }}
+        run: |
+          $application = Resolve-Path "../installers/windows/dist/win-unpacked/Resonance.exe"
+          $archive = Resolve-Path "../installers/windows/dist/win-unpacked/resources/app.asar"
+          $validator = Resolve-Path "validate-packaged-app.cjs"
+          $env:ELECTRON_RUN_AS_NODE = "1"
+          & $application.Path $validator.Path $archive.Path $env:EXPECTED_UPDATE_AUTHENTICITY
+          if ($LASTEXITCODE -ne 0) {
+            throw "The packaged Windows startup-module validation failed."
+          }
 
       - name: Verify Authenticode signatures and record evidence
         if: ${{ inputs.release_candidate && inputs.production_signing }}

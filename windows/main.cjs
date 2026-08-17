@@ -732,6 +732,7 @@ autoUpdater.on("update-downloaded", (information) => {
     const verification = await verifyDownloadedWindowsUpdate({
       downloadedFile: information?.downloadedFile,
       currentExecutable: process.execPath,
+      authenticityMode: windowsPackage.resonanceUpdateAuthenticity,
       packaged: app.isPackaged,
     });
     verifiedWindowsUpdate = Object.freeze({

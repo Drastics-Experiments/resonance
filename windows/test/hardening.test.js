@@ -344,19 +344,25 @@ test("pins Windows update identity to the installed Authenticode signer", async 
     thumbprint: "a".repeat(40),
   };
   const same = { ...current };
-  assert.equal(verifyWindowsUpdatePublisher({ currentSignature: current, updateSignature: same }).verified, true);
+  assert.equal(verifyWindowsUpdatePublisher({
+    currentSignature: current,
+    updateSignature: same,
+    authenticityMode: "production",
+  }).verified, true);
   assert.throws(() => verifyWindowsUpdatePublisher({
     currentSignature: current,
     updateSignature: { ...same, thumbprint: "b".repeat(40) },
+    authenticityMode: "production",
   }), /different publisher identity/);
   assert.deepEqual(updateAuthenticityPolicy({
     packaged: false,
     environment: { NODE_ENV: "test", RESONANCE_ALLOW_UNSIGNED_UPDATE_TESTS: "1" },
-  }), { requirePublisher: false, testException: true });
+  }), { authenticityMode: "test", requirePublisher: false, exception: "test" });
   const reads = [];
   const result = await verifyDownloadedWindowsUpdate({
     downloadedFile: "C:\\Updates\\Resonance-Setup-2.0.1.exe",
     currentExecutable: "C:\\Program Files\\Resonance\\Resonance.exe",
+    authenticityMode: "production",
     readSignature: async (filePath) => {
       reads.push(filePath);
       return current;
@@ -364,6 +370,66 @@ test("pins Windows update identity to the installed Authenticode signer", async 
   });
   assert.equal(result.verified, true);
   assert.equal(reads.length, 2);
+});
+
+test("uses the immutable packaged update policy for explicitly unsigned Windows builds", async () => {
+  const reads = [];
+  const unsigned = { status: "NotSigned", subject: null, issuer: null, thumbprint: null };
+  const result = await verifyDownloadedWindowsUpdate({
+    downloadedFile: "C:\\Updates\\Resonance-Setup-2.0.1.exe",
+    currentExecutable: "C:\\Program Files\\Resonance\\Resonance.exe",
+    authenticityMode: "unsigned",
+    packaged: true,
+    environment: {
+      NODE_ENV: "production",
+      RESONANCE_ALLOW_UNSIGNED_UPDATE_TESTS: "0",
+    },
+    readSignature: async (filePath) => {
+      reads.push(filePath);
+      return unsigned;
+    },
+  });
+  assert.deepEqual(result, {
+    authenticityMode: "unsigned",
+    verified: true,
+    authenticode: false,
+    exception: "explicit-unsigned-release",
+  });
+  assert.equal(reads.length, 2);
+
+  assert.throws(() => verifyWindowsUpdatePublisher({
+    currentSignature: {
+      status: "Valid",
+      subject: "CN=Resonance Release, O=Resonance",
+      issuer: "CN=Trusted Issuer",
+      thumbprint: "a".repeat(40),
+    },
+    updateSignature: unsigned,
+    authenticityMode: "unsigned",
+  }), /both executables to be explicitly unsigned/i);
+  assert.throws(() => verifyWindowsUpdatePublisher({
+    currentSignature: unsigned,
+    updateSignature: { status: "HashMismatch" },
+    authenticityMode: "unsigned",
+  }), /both executables to be explicitly unsigned/i);
+
+  assert.throws(() => updateAuthenticityPolicy({
+    packaged: true,
+    environment: { NODE_ENV: "test", RESONANCE_ALLOW_UNSIGNED_UPDATE_TESTS: "1" },
+  }), /no valid update authenticity policy/i);
+  assert.throws(() => updateAuthenticityPolicy({
+    authenticityMode: "unexpected",
+    packaged: true,
+  }), /no valid update authenticity policy/i);
+  assert.deepEqual(updateAuthenticityPolicy({
+    authenticityMode: "production",
+    packaged: true,
+    environment: { NODE_ENV: "test", RESONANCE_ALLOW_UNSIGNED_UPDATE_TESTS: "1" },
+  }), {
+    authenticityMode: "production",
+    requirePublisher: true,
+    exception: null,
+  });
 });
 
 test("downloads require exact declared size and SHA-256 before adoption", async (t) => {
@@ -863,6 +929,7 @@ test("Windows renderer and main-process integrations retain the hardening bounda
     "account-avatar.cjs",
     "client-config.cjs",
     "client-config-state.cjs",
+    "listening-history.cjs",
     "policy-lease.cjs",
     "server-stream.cjs",
     "server-upload-response.cjs",
