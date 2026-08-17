@@ -13,10 +13,16 @@ test("direct release workflow is dispatch-only and calls all four platform build
   const workflow = read(".github/workflows/direct-release-build.yml");
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /production_release:/);
+  assert.match(workflow, /unsigned_desktop:/);
   assert.match(workflow, /environment: production-release/);
   assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /\[\[ "\$\(git rev-parse origin\/main\)" == "\$SOURCE_SHA" \]\]/);
-  assert.doesNotMatch(workflow, /unsigned_desktop|allow-unsigned/);
+  assert.equal(
+    (workflow.match(/production_signing: \$\{\{ needs\.prepare\.outputs\.unsigned_desktop != 'true' \}\}/g) || []).length,
+    2,
+  );
+  assert.match(workflow, /android:[\s\S]+production_signing: true/);
+  assert.match(workflow, /--allow-unsigned-desktop-release/);
   assert.doesNotMatch(workflow, /^\s*pull_request:/m);
   assert.doesNotMatch(workflow, /gh pr|refs\/heads\/release\/|release\/v[0-9]/);
   assert.doesNotMatch(workflow, /gh release|contents:\s*write/);
