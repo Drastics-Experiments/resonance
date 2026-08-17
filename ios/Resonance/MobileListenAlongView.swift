@@ -145,6 +145,7 @@ struct MobileListenAlongCard: View {
         .onDisappear {
             copyFeedbackTask?.cancel()
             copyFeedbackTask = nil
+            didCopyCode = false
         }
     }
 
@@ -169,7 +170,7 @@ struct MobileListenAlongCard: View {
         guard MobileListenAlongCodeInputPolicy.isJoinable(normalized), !listenAlong.isWorking else { return }
         code = normalized
         Task { @MainActor in
-            await listenAlong.join(code: normalized)
+            await listenAlong.oin(code: normalized)
             guard listenAlong.room != nil else { return }
             code = ""
             codeFieldFocused = false

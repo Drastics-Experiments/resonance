@@ -82,7 +82,6 @@ fun LibraryScreen(
     val tracks = remember(state.tracks, state.librarySearch) {
         filteredLibraryTracks(state.tracks, state.librarySearch)
     }
-    val filteredTrackIDs = remember(tracks) { tracks.map(Track::id) }
     val allTrackIDs = remember(state.tracks) { state.tracks.map(Track::id) }
     val recentlyAdded = remember(state.tracks) { recentlyAddedTracks(state.tracks) }
     val hasQuery = state.librarySearch.isNotBlank()
@@ -187,7 +186,7 @@ fun LibraryScreen(
                 items = tracks,
                 key = { _, track -> track.id },
             ) { index, track ->
-                TrackRow(track, state, actions, number = index + 1, queue = filteredTrackIDs)
+                TrackRow(track, state, actions, number = index + 1, queue = tracks)
             }
         }
         item { Spacer(Modifier.height(8.dp)) }

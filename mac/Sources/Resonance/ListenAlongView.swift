@@ -99,6 +99,7 @@ struct MacListenAlongPopover: View {
         .onDisappear {
             copyFeedbackTask?.cancel()
             copyFeedbackTask = nil
+            didCopyCode = false
         }
     }
 
