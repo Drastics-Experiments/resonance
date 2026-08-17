@@ -1,5 +1,5 @@
 name: Direct release build
-run-name: Direct release v${{ inputs.version }} unsigned=${{ inputs.unsigned_desktop }} (${{ inputs.request_id }})
+run-name: Direct release v${{ inputs.version }} unsigned=${{ inputs.unsigned_desktop }} replace-prerelease=${{ inputs.replace_prerelease }} (${{ inputs.request_id }})
 
 on:
   workflow_dispatch:
@@ -27,6 +27,11 @@ on:
         default: false
       unsigned_desktop:
         description: Explicitly build macOS and Windows without production signing.
+        required: true
+        type: boolean
+        default: false
+      replace_prerelease:
+        description: Rebuild an existing public prerelease without permitting a stable release or ordinary tag overwrite.
         required: true
         type: boolean
         default: false
@@ -71,10 +76,14 @@ jobs:
           REQUEST_ID: ${{ inputs.request_id }}
           PRODUCTION_RELEASE: ${{ inputs.production_release }}
           UNSIGNED_DESKTOP: ${{ inputs.unsigned_desktop }}
+          REPLACE_PRERELEASE: ${{ inputs.replace_prerelease }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           [[ "$GITHUB_REF" == "refs/heads/main" ]]
           [[ "$PRODUCTION_RELEASE" == "true" ]]
           [[ "$UNSIGNED_DESKTOP" == "true" || "$UNSIGNED_DESKTOP" == "false" ]]
+          [[ "$REPLACE_PRERELEASE" == "true" || "$REPLACE_PRERELEASE" == "false" ]]
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$BUILD" =~ ^[1-9][0-9]*$ ]]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -94,7 +103,16 @@ jobs:
             process.exit(1);
           ' "$VERSION" "$BASE_VERSION"
           (( BUILD > BASE_BUILD ))
-          ! git show-ref --verify --quiet "refs/tags/v${VERSION}"
+          TAG="v${VERSION}"
+          if [[ "$REPLACE_PRERELEASE" == "true" ]]; then
+            git show-ref --verify --quiet "refs/tags/${TAG}"
+            RELEASE_JSON="$(gh api "repos/${REPOSITORY}/releases/tags/${TAG}")"
+            [[ "$(jq -r '.tag_name' <<< "$RELEASE_JSON")" == "$TAG" ]]
+            [[ "$(jq -r '.draft' <<< "$RELEASE_JSON")" == "false" ]]
+            [[ "$(jq -r '.prerelease' <<< "$RELEASE_JSON")" == "true" ]]
+          else
+            ! git show-ref --verify --quiet "refs/tags/${TAG}"
+          fi
           read -r POLICY_SCHEMA POLICY_VERSION POLICY_BUILD DESKTOP_SIGNING < <(node -e 'const value = require("./release/policy.json"); console.log(value.schemaVersion, value.version, value.build, value.desktopSigning)')
           [[ "$POLICY_SCHEMA" == "1" ]]
           [[ "$POLICY_VERSION" == "$BASE_VERSION" ]]
@@ -249,6 +267,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           REQUEST_ID: ${{ inputs.request_id }}
           DESKTOP_SIGNING: ${{ needs.prepare.outputs.desktop_signing }}
+          REPLACE_PRERELEASE: ${{ inputs.replace_prerelease }}
         run: |
           node --input-type=module -e '
             import fs from "node:fs";
@@ -263,6 +282,7 @@ jobs:
               workflowRunId: Number(process.env.RUN_ID),
               requestId: process.env.REQUEST_ID,
               desktopSigning: process.env.DESKTOP_SIGNING,
+              replacePrerelease: process.env.REPLACE_PRERELEASE === "true",
             };
             fs.writeFileSync("candidate/candidate.json", `${JSON.stringify(value, null, 2)}\n`);
           '
