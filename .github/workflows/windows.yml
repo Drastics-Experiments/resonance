@@ -212,8 +212,13 @@ jobs:
           $archive = Resolve-Path "../installers/windows/dist/win-unpacked/resources/app.asar"
           $validator = Resolve-Path "validate-packaged-app.cjs"
           $env:ELECTRON_RUN_AS_NODE = "1"
-          & $application.Path $validator.Path $archive.Path $env:EXPECTED_UPDATE_AUTHENTICITY
-          if ($LASTEXITCODE -ne 0) {
+          $validation = Start-Process `
+            -FilePath $application.Path `
+            -ArgumentList @($validator.Path, $archive.Path, $env:EXPECTED_UPDATE_AUTHENTICITY) `
+            -NoNewWindow `
+            -Wait `
+            -PassThru
+          if ($validation.ExitCode -ne 0) {
             throw "The packaged Windows startup-module validation failed."
           }
 

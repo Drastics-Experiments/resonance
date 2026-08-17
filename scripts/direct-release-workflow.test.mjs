@@ -48,7 +48,10 @@ test("Windows packages embed the update authenticity policy selected by the buil
   assert.equal(packageJSON.resonanceUpdateAuthenticity, "production");
   assert.match(packageJSON.scripts["installer:win"], /extraMetadata\.resonanceUpdateAuthenticity=unsigned/);
   assert.match(workflow, /Verify unsigned installer state[\s\S]+Status -ne "NotSigned"/);
-  assert.match(workflow, /Verify packaged startup modules and update policy[\s\S]+ELECTRON_RUN_AS_NODE/);
+  assert.match(
+    workflow,
+    /Verify packaged startup modules and update policy[\s\S]+ELECTRON_RUN_AS_NODE[\s\S]+Start-Process[\s\S]+ExitCode/,
+  );
   assert.match(
     workflow,
     /Build signed release candidate[\s\S]+extraMetadata\.resonanceUpdateAuthenticity=production/,
