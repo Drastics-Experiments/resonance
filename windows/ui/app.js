@@ -2919,35 +2919,39 @@ function listenAlongRenderStatus(status = listenAlongStatus, error = null) {
   if (copyFeedback && !roomCode) copyFeedback.textContent = "";
   const roleElement = $("#listenAlongRole");
   if (roleElement) roleElement.textContent = listenAlongSession?.role === "host"
-    ? "You’re hosting. Share the room code with a friend."
+    ? "You are hosting"
     : listenAlongSession?.role === "guest"
-      ? "You joined as a listener."
+      ? "Following the host"
       : "Listen together, with one person in control.";
   const startButton = $("#startListenAlong");
   const joinButton = $("#joinListenAlong");
   const joinInput = $("#listenAlongJoinCode");
   const leaveButton = $("#leaveListenAlong");
   if (startButton) {
-    startButton.disabled = hasSession || isWorking;
-    startButton.textContent = listenAlongStatus === "starting" ? "Starting…" : "Start room";
+    startButton.disabled = hasSession || isWorking || !serverToken || !state.serverURL || !currentTrack();
+    startButton.textContent = listenAlongStatus === "starting" ? "Starting…" : "Start as Host";
   }
   if (joinButton) {
-    joinButton.disabled = hasSession || isWorking;
+    joinButton.disabled = hasSession || isWorking || !String(joinInput?.value || "").trim();
     joinButton.textContent = listenAlongStatus === "joining" ? "Joining…" : "Join";
   }
   if (joinInput) joinInput.disabled = hasSession || isWorking;
-  if (leaveButton) leaveButton.hidden = !hasSession;
+  if (leaveButton) {
+    leaveButton.hidden = !hasSession;
+    leaveButton.textContent = listenAlongSession?.role === "host" ? "End Session" : "Leave Session";
+  }
   const playerButton = $("#openListenAlong");
   if (playerButton) {
     const active = Boolean(listenAlongSession);
     const label = active
-      ? `${listenAlongSession.role === "host" ? "Hosting" : "Listening along"} in ${listenAlongSession.code}`
-      : "Start or join Listen Along";
+      ? `${listenAlongSession.role === "host" ? "Hosting" : "Following"} ${listenAlongSession.code}`
+      : "Start or Join Listen Along";
     playerButton.classList.toggle("active", active);
     playerButton.setAttribute("aria-pressed", String(active));
     playerButton.setAttribute("aria-label", label);
     playerButton.title = label;
   }
+  if (dialog?.open) requestAnimationFrame(positionListenAlongPopover);
 }
 
 async function copyListenAlongRoomCode() {
@@ -3106,12 +3110,52 @@ async function leaveListenAlong({ silent = false } = {}) {
   return true;
 }
 
+function positionListenAlongPopover() {
+  const dialog = $("#listenAlongDialog");
+  const button = $("#openListenAlong");
+  if (!dialog?.open || !button) return;
+  const buttonRect = button.getBoundingClientRect();
+  const dialogRect = dialog.getBoundingClientRect();
+  const edgeInset = 12;
+  const gap = 10;
+  const left = Math.min(
+    window.innerWidth - dialogRect.width - edgeInset,
+    Math.max(edgeInset, buttonRect.right - dialogRect.width),
+  );
+  const top = Math.max(edgeInset, buttonRect.top - dialogRect.height - gap);
+  const arrowLeft = Math.min(dialogRect.width - 18, Math.max(18, buttonRect.left + (buttonRect.width / 2) - left));
+  dialog.style.left = `${Math.round(left)}px`;
+  dialog.style.top = `${Math.round(top)}px`;
+  dialog.style.setProperty("--listen-along-arrow-left", `${Math.round(arrowLeft)}px`);
+}
+
+function closeListenAlongPopover({ restoreFocus = false } = {}) {
+  const dialog = $("#listenAlongDialog");
+  const button = $("#openListenAlong");
+  if (!dialog?.open) return;
+  dialog.close();
+  button?.setAttribute("aria-expanded", "false");
+  if (restoreFocus) button?.focus();
+}
+
 function openListenAlongDialog() {
   closeProfileMenu();
   listenAlongRenderStatus();
   const dialog = $("#listenAlongDialog");
-  if (!dialog.open) dialog.showModal();
-  requestAnimationFrame(() => (listenAlongSession ? $("#leaveListenAlong") : $("#listenAlongJoinCode"))?.focus());
+  const button = $("#openListenAlong");
+  if (dialog.open) {
+    closeListenAlongPopover({ restoreFocus: true });
+    return;
+  }
+  dialog.show();
+  button?.setAttribute("aria-expanded", "true");
+  positionListenAlongPopover();
+  requestAnimationFrame(() => {
+    const target = listenAlongSession
+      ? $("#leaveListenAlong")
+      : !$("#startListenAlong")?.disabled ? $("#startListenAlong") : $("#listenAlongJoinCode");
+    target?.focus();
+  });
 }
 
 async function publishListenAlongSnapshot(track = currentTrack()) {
@@ -8599,13 +8643,6 @@ function updateChrome() {
     button.disabled = listenAlongGuest;
     if (listenAlongGuest) button.title = "The Listen Along host controls playback";
   }
-  const listenAlongBadge = $("#listenAlongMiniStatus");
-  if (listenAlongBadge) {
-    listenAlongBadge.hidden = !listenAlongSession;
-    listenAlongBadge.textContent = listenAlongSession
-      ? `${listenAlongSession.role === "host" ? "Hosting" : "Listening along"} · ${listenAlongSession.code}`
-      : "";
-  }
   if ($("#installedVideoDialog").open) syncInstalledVideoTransport();
   renderFullPlayer();
   bindSquareArtworkImages();
@@ -8783,19 +8820,14 @@ $("#profileMenuEmail").onclick = (event) => {
   updateProfileControlView({ refreshPicture: false });
 };
 $("#profileHistory").onclick = openListeningHistory;
-$("#profileListenAlong").onclick = openListenAlongDialog;
 $("#openListenAlong").onclick = openListenAlongDialog;
 $("#profileClipEditor").onclick = openClipEditor;
 $("#profileSettings").onclick = () => {
   openSettings();
 };
-$("#closeListenAlong").onclick = () => $("#listenAlongDialog").close();
-$("#listenAlongDialog").addEventListener("cancel", (event) => {
-  event.preventDefault();
-  $("#listenAlongDialog").close();
-});
 $("#startListenAlong").onclick = () => { void startListenAlongHost(); };
 $("#joinListenAlong").onclick = () => { void joinListenAlongGuest($("#listenAlongJoinCode").value); };
+$("#listenAlongJoinCode").oninput = () => { listenAlongRenderStatus(); };
 $("#copyListenAlongCode").onclick = () => { void copyListenAlongRoomCode(); };
 $("#listenAlongJoinCode").onkeydown = (event) => {
   if (event.key === "Enter") {
@@ -9049,7 +9081,7 @@ function keybindFromKeyboardEvent(event) {
 
 function hasBlockingDialog() {
   return [...document.querySelectorAll("dialog[open]")]
-    .some((dialog) => !dialog.matches("#installedVideoDialog.video-mini"));
+    .some((dialog) => !dialog.matches("#installedVideoDialog.video-mini, #listenAlongDialog"));
 }
 
 document.addEventListener("keydown", (event) => {
@@ -9105,12 +9137,21 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("click", (event) => {
   if (!$("#profileControl")?.contains(event.target)) closeProfileMenu();
 });
+document.addEventListener("pointerdown", (event) => {
+  const dialog = $("#listenAlongDialog");
+  const button = $("#openListenAlong");
+  if (dialog?.open && !dialog.contains(event.target) && !button?.contains(event.target)) closeListenAlongPopover();
+});
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("#profileMenu")?.hidden) {
     event.preventDefault();
     closeProfileMenu({ restoreFocus: true });
+  } else if (event.key === "Escape" && $("#listenAlongDialog")?.open) {
+    event.preventDefault();
+    closeListenAlongPopover({ restoreFocus: true });
   }
 });
+window.addEventListener("resize", positionListenAlongPopover);
 window.addEventListener("blur", () => {
   document.querySelectorAll(".recent-track-item.hovering").forEach((button) => button.classList.remove("hovering"));
 });
