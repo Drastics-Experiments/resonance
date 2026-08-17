@@ -448,6 +448,7 @@ class LibraryRepository(
             tracks = existingTracks,
             playlists = cleanedPlaylists,
             favorites = favorites,
+            listeningHistory = ListeningHistoryRetentionPolicy.normalize(reconciled.listeningHistory),
             remoteSongMetadataCache = RemoteSongMetadataCachePolicy.normalized(
                 reconciled.remoteSongMetadataCache,
             ),

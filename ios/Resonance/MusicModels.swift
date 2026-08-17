@@ -1146,6 +1146,315 @@ struct MobileRemoteCatalog: Decodable {
     let count: Int
 }
 
+struct MobileListeningHistoryEntry: Identifiable, Codable, Hashable, Sendable {
+    let id: UUID
+    var trackID: UUID
+    let startedAt: Date
+    var listenedSeconds: TimeInterval
+    var serverOrigin: String?
+    var syncProfileID: String?
+    var accountID: String?
+    var remoteSongID: String?
+    var title: String?
+    var artist: String?
+    var album: String?
+    var duration: TimeInterval?
+    var artworkURL: String?
+    var originatedOnThisDevice: Bool?
+
+    init(
+        id: UUID = UUID(),
+        trackID: UUID,
+        startedAt: Date = .now,
+        listenedSeconds: TimeInterval = 0,
+        serverOrigin: String? = nil,
+        syncProfileID: String? = nil,
+        accountID: String? = nil,
+        remoteSongID: String? = nil,
+        title: String? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        duration: TimeInterval? = nil,
+        artworkURL: String? = nil,
+        originatedOnThisDevice: Bool? = true
+    ) {
+        self.id = id
+        self.trackID = trackID
+        self.startedAt = startedAt
+        self.listenedSeconds = MobileListeningHistoryPolicy.clampedListenedSeconds(listenedSeconds)
+        self.serverOrigin = MobileListeningHistoryPolicy.normalizedOrigin(serverOrigin)
+        self.syncProfileID = MobileListeningHistoryPolicy.nonempty(syncProfileID, maximum: 128)
+        self.accountID = MobileListeningHistoryPolicy.nonempty(accountID, maximum: 256)
+        self.remoteSongID = MobileListeningHistoryPolicy.nonempty(remoteSongID, maximum: 128)
+        self.title = MobileListeningHistoryPolicy.nonempty(title, maximum: 500)
+        self.artist = MobileListeningHistoryPolicy.nonempty(artist, maximum: 500)
+        self.album = MobileListeningHistoryPolicy.nonempty(album, maximum: 500)
+        self.duration = MobileListeningHistoryPolicy.clampedDuration(duration)
+        self.artworkURL = MobileListeningHistoryPolicy.normalizedArtworkURL(artworkURL)
+        self.originatedOnThisDevice = originatedOnThisDevice
+    }
+}
+
+struct MobileListeningHistoryUploadEntry: Encodable, Equatable, Sendable {
+    let id: String
+    let trackID: String
+    let songID: String?
+    let startedAt: String
+    let listenedSeconds: TimeInterval
+    let title: String?
+    let artist: String?
+    let album: String?
+    let durationSeconds: TimeInterval?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case trackID = "track_id"
+        case songID = "song_id"
+        case startedAt = "started_at"
+        case listenedSeconds = "listened_seconds"
+        case title, artist, album
+        case durationSeconds = "duration_seconds"
+    }
+}
+
+struct MobileListeningHistoryUploadDocument: Encodable, Equatable, Sendable {
+    let entries: [MobileListeningHistoryUploadEntry]
+}
+
+struct MobileRemoteListeningHistoryDocument: Decodable, Equatable, Sendable {
+    let profileID: String
+    let entries: [MobileRemoteListeningHistoryEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case entries
+        case profileID = "profile_id"
+    }
+}
+
+struct MobileRemoteListeningHistoryEntry: Decodable, Equatable, Sendable {
+    let id: String
+    let trackID: String
+    let songID: String?
+    let startedAt: String
+    let listenedSeconds: TimeInterval
+    let title: String?
+    let artist: String?
+    let album: String?
+    let durationSeconds: TimeInterval?
+    let artworkURL: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, artist, album
+        case trackID = "track_id"
+        case songID = "song_id"
+        case startedAt = "started_at"
+        case listenedSeconds = "listened_seconds"
+        case durationSeconds = "duration_seconds"
+        case artworkURL = "artwork_url"
+    }
+}
+
+enum MobileListeningHistoryPolicy {
+    static let maximumEntries = 2_000
+    static let maximumBatchSize = 500
+    static let minimumListenedFraction = 0.10
+    static let maximumListenedSeconds: TimeInterval = 31 * 24 * 60 * 60
+    static let maximumDuration: TimeInterval = 7 * 24 * 60 * 60
+
+    static func qualifies(
+        _ entry: MobileListeningHistoryEntry,
+        trackDuration: TimeInterval? = nil
+    ) -> Bool {
+        guard entry.listenedSeconds.isFinite, entry.listenedSeconds > 0 else { return false }
+        let knownDuration = trackDuration.flatMap(validDuration) ?? entry.duration.flatMap(validDuration)
+        guard let knownDuration else { return false }
+        return entry.listenedSeconds > knownDuration * minimumListenedFraction
+    }
+
+    static func append(
+        _ entry: MobileListeningHistoryEntry,
+        to entries: inout [MobileListeningHistoryEntry]
+    ) {
+        entries.append(entry)
+        entries = bounded(entries)
+    }
+
+    static func bounded(_ entries: [MobileListeningHistoryEntry]) -> [MobileListeningHistoryEntry] {
+        Array(entries.sorted { lhs, rhs in
+            if lhs.startedAt == rhs.startedAt { return lhs.id.uuidString < rhs.id.uuidString }
+            return lhs.startedAt < rhs.startedAt
+        }.suffix(maximumEntries))
+    }
+
+    static func batches<T>(_ values: [T]) -> [[T]] {
+        guard !values.isEmpty else { return [] }
+        return stride(from: 0, to: values.count, by: maximumBatchSize).map { start in
+            Array(values[start..<min(start + maximumBatchSize, values.count)])
+        }
+    }
+
+    static func uploadEntry(
+        _ entry: MobileListeningHistoryEntry,
+        track: MobileTrack?,
+        origin: String,
+        profileID: String,
+        accountID: String?
+    ) -> MobileListeningHistoryUploadEntry? {
+        guard entry.originatedOnThisDevice != false,
+              normalizedOrigin(entry.serverOrigin) == normalizedOrigin(origin),
+              (entry.syncProfileID ?? "default") == profileID,
+              entry.accountID == nil || entry.accountID == accountID,
+              qualifies(entry, trackDuration: track?.duration) else { return nil }
+
+        let trackRemoteID: String? = {
+            guard let track,
+                  let remoteID = nonempty(track.remoteID, maximum: 128),
+                  let identity = track.remoteIdentity(fallbackServerURL: URL(string: origin)),
+                  identity.context.origin == normalizedOrigin(origin),
+                  identity.context.profileID == profileID else { return nil }
+            return remoteID
+        }()
+        return MobileListeningHistoryUploadEntry(
+            id: entry.id.uuidString.lowercased(),
+            trackID: entry.trackID.uuidString.lowercased(),
+            songID: nonempty(entry.remoteSongID ?? trackRemoteID, maximum: 128),
+            startedAt: timestamp(entry.startedAt),
+            listenedSeconds: clampedListenedSeconds(entry.listenedSeconds),
+            title: nonempty(entry.title ?? track?.title, maximum: 500),
+            artist: nonempty(entry.artist ?? track?.artist, maximum: 500),
+            album: nonempty(entry.album ?? track?.album, maximum: 500),
+            durationSeconds: clampedDuration(entry.duration ?? track?.duration)
+        )
+    }
+
+    static func merge(
+        _ document: MobileRemoteListeningHistoryDocument,
+        into localEntries: [MobileListeningHistoryEntry],
+        tracks: [MobileTrack],
+        catalog: [MobileRemoteSong] = [],
+        origin: String,
+        profileID: String,
+        accountID: String?
+    ) -> [MobileListeningHistoryEntry] {
+        let activeOrigin = normalizedOrigin(origin)
+        guard document.profileID == profileID, let activeOrigin else { return bounded(localEntries) }
+        let context = MobileServerContext(origin: activeOrigin, profileID: profileID)
+        let activeRemoteTracks = Dictionary(uniqueKeysWithValues: tracks.compactMap { track -> (String, MobileTrack)? in
+            guard let remoteID = nonempty(track.remoteID, maximum: 128),
+                  track.remoteIdentity()?.context == context else { return nil }
+            return (remoteID, track)
+        })
+        let activeTracksByID = Dictionary(uniqueKeysWithValues: tracks.compactMap { track -> (UUID, MobileTrack)? in
+            guard track.remoteID == nil || track.remoteIdentity()?.context == context else { return nil }
+            return (track.id, track)
+        })
+        let activeCatalogByID = Dictionary(uniqueKeysWithValues: catalog.map { ($0.id, $0) })
+        let isActiveEntry: (MobileListeningHistoryEntry) -> Bool = { entry in
+            normalizedOrigin(entry.serverOrigin) == activeOrigin
+                && (entry.syncProfileID ?? "default") == profileID
+                && (entry.accountID == nil || entry.accountID == accountID)
+        }
+        let otherContextEntries = localEntries.filter { !isActiveEntry($0) }
+        var activeByID = Dictionary(uniqueKeysWithValues: localEntries.filter(isActiveEntry).map { ($0.id, $0) })
+
+        for remote in document.entries {
+            guard let eventID = UUID(uuidString: remote.id),
+                  let startedAt = date(from: remote.startedAt) else { continue }
+            let existing = activeByID[eventID]
+            let remoteSongID = nonempty(remote.songID, maximum: 128)
+                ?? nonempty(existing?.remoteSongID, maximum: 128)
+            let mappedTrack = remoteSongID.flatMap { activeRemoteTracks[$0] }
+                ?? UUID(uuidString: remote.trackID).flatMap { activeTracksByID[$0] }
+            let catalogSong = remoteSongID.flatMap { activeCatalogByID[$0] }
+            guard let trackID = mappedTrack?.id ?? UUID(uuidString: remote.trackID) else { continue }
+            let useCatalogSnapshot = mappedTrack == nil && catalogSong != nil
+            let resolvedTrackID = mappedTrack?.id ?? existing?.trackID ?? trackID
+            let resolvedTitle = useCatalogSnapshot
+                ? catalogSong?.title
+                : remote.title ?? existing?.title ?? mappedTrack?.title ?? catalogSong?.title
+            let resolvedArtist = useCatalogSnapshot
+                ? catalogSong?.artist
+                : remote.artist ?? existing?.artist ?? mappedTrack?.artist ?? catalogSong?.artist
+            let resolvedAlbum = useCatalogSnapshot
+                ? catalogSong?.album
+                : remote.album ?? existing?.album ?? mappedTrack?.album ?? catalogSong?.album
+            let resolvedDuration = useCatalogSnapshot
+                ? catalogSong?.duration ?? remote.durationSeconds ?? existing?.duration ?? mappedTrack?.duration
+                : remote.durationSeconds ?? existing?.duration ?? mappedTrack?.duration ?? catalogSong?.duration
+            let resolvedArtworkURL = normalizedArtworkURL(
+                remote.artworkURL ?? catalogSong?.artworkURL?.absoluteString ?? existing?.artworkURL
+            )
+            activeByID[eventID] = MobileListeningHistoryEntry(
+                id: eventID,
+                trackID: resolvedTrackID,
+                startedAt: existing?.startedAt ?? startedAt,
+                listenedSeconds: max(existing?.listenedSeconds ?? 0, remote.listenedSeconds),
+                serverOrigin: activeOrigin,
+                syncProfileID: profileID,
+                accountID: accountID,
+                remoteSongID: remoteSongID ?? existing?.remoteSongID ?? mappedTrack?.remoteID,
+                title: resolvedTitle,
+                artist: resolvedArtist,
+                album: resolvedAlbum,
+                duration: resolvedDuration,
+                artworkURL: resolvedArtworkURL,
+                originatedOnThisDevice: existing?.originatedOnThisDevice ?? false
+            )
+        }
+        return bounded(otherContextEntries + Array(activeByID.values))
+    }
+
+    static func normalizedOrigin(_ value: String?) -> String? {
+        guard let value, let url = URL(string: value) else { return nil }
+        return MobileServerEndpointPolicy.normalizedOrigin(of: url)
+    }
+
+    static func nonempty(_ value: String?, maximum: Int) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(maximum))
+    }
+
+    static func clampedListenedSeconds(_ value: TimeInterval) -> TimeInterval {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), maximumListenedSeconds)
+    }
+
+    static func clampedDuration(_ value: TimeInterval?) -> TimeInterval? {
+        guard let value, let valid = validDuration(value) else { return nil }
+        return min(valid, maximumDuration)
+    }
+
+    static func normalizedArtworkURL(_ value: String?) -> String? {
+        guard let value = nonempty(value, maximum: 2_048),
+              let url = URL(string: value),
+              url.scheme?.lowercased() == "https",
+              url.user == nil,
+              url.password == nil,
+              url.host?.isEmpty == false else { return nil }
+        return url.absoluteString
+    }
+
+    static func timestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    static func date(from value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+
+    private static func validDuration(_ value: TimeInterval) -> TimeInterval? {
+        guard value.isFinite, value > 0 else { return nil }
+        return value
+    }
+}
+
 struct MobileRemoteSongMetadataCacheEntry: Codable, Equatable, Sendable {
     let sourceURL: String
     let mediaKind: String
@@ -1252,6 +1561,8 @@ struct MobileStoredLibrary: Codable, Equatable {
     var playbackQueue: [UUID]? = nil
     var playbackPlaylistID: UUID? = nil
     var playbackSnapshot: MobilePlaybackSnapshot? = nil
+    var listeningHistory: [MobileListeningHistoryEntry]? = nil
+    var listeningHistorySyncedSeconds: [String: TimeInterval]? = nil
     var transferFailures: [MobileTransferFailure]? = nil
     var completedMigrations: Set<String>? = nil
     var remoteSongMetadataCache: [String: MobileRemoteSongMetadataCacheEntry]? = nil

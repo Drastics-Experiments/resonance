@@ -559,15 +559,23 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
 
     private struct ListeningHistoryUploadEntry: Encodable {
         let id: String
-        let songID: String
+        let trackID: String
+        let songID: String?
         let startedAt: String
         let listenedSeconds: TimeInterval
+        let title: String?
+        let artist: String?
+        let album: String?
+        let durationSeconds: TimeInterval?
 
         enum CodingKeys: String, CodingKey {
             case id
+            case trackID = "track_id"
             case songID = "song_id"
             case startedAt = "started_at"
             case listenedSeconds = "listened_seconds"
+            case title, artist, album
+            case durationSeconds = "duration_seconds"
         }
     }
 
@@ -1529,6 +1537,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
     var historyTracks: [Track] {
         let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
         let localTracksByMetadataKey = ListeningHistoryTrackResolver.localTracksByMetadataKey(tracks)
+        let remoteSongsByID = Dictionary(remoteSongs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var tracksByRemoteIdentity: [String: Track] = [:]
         for track in tracks {
             guard let remoteID = track.remoteID else { continue }
@@ -1546,7 +1555,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     for: entry,
                     tracksByID: tracksByID,
                     tracksByRemoteIdentity: tracksByRemoteIdentity,
-                    localTracksByMetadataKey: localTracksByMetadataKey
+                    localTracksByMetadataKey: localTracksByMetadataKey,
+                    remoteSongsByID: remoteSongsByID
                 )
                 return ListeningHistoryPlayPolicy.qualifies(entry, track: track)
             }
@@ -1557,7 +1567,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     for: $0,
                     tracksByID: tracksByID,
                     tracksByRemoteIdentity: tracksByRemoteIdentity,
-                    localTracksByMetadataKey: localTracksByMetadataKey
+                    localTracksByMetadataKey: localTracksByMetadataKey,
+                    remoteSongsByID: remoteSongsByID
                 )
             }
         }
@@ -2110,10 +2121,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         await refreshClientConfigurationNow()
         await refreshServerCatalogNow()
         await syncPlaylistsNow()
+        await syncListeningHistoryNow()
     }
 
     func signOutAccount() async {
         let active = accountSession
+        endListeningSession()
+        await syncListeningHistoryNow()
         clearServerCredentials()
         if let active, let client = try? ResonanceSocialAuthClient(baseURL: active.baseURL, session: networkSession) {
             await client.signOut(active)
@@ -2156,6 +2170,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 ))
             }
             await refreshClientConfigurationNow()
+            await syncListeningHistoryNow()
             scheduleAccountRefresh(refreshed)
         } catch {
             guard accountSession == current else { return }
@@ -6184,6 +6199,19 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         await syncListeningHistoryNow()
     }
 
+    func prepareListeningHistoryMetadata() async {
+        guard !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let base = try? normalizedServerURL() else { return }
+        if remoteCatalogIsAuthoritative {
+            beginRemoteSongMetadataHydration(
+                contextKey: Self.serverContextKey(base: base, profileID: syncProfileID)
+            )
+        } else {
+            await refreshServerCatalogNow()
+        }
+        await syncListeningHistoryNow()
+    }
+
     func syncListeningHistoryNow() async {
         guard !isSyncingListeningHistory else {
             listeningHistorySyncPending = true
@@ -6312,15 +6340,27 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                   track.remoteIdentity == entryIdentity else { return nil }
             return remoteID
         }()
-        guard let songID = Self.limitedHistoryText(
+        let songID = Self.limitedHistoryText(
             entry.remoteSongID ?? scopedTrackRemoteID,
             maximum: 128
-        ) else { return nil }
+        )
+        let durationSeconds: TimeInterval? = {
+            guard let duration = entry.duration ?? track?.duration,
+                  duration.isFinite,
+                  duration >= 0,
+                  duration <= 7 * 24 * 60 * 60 else { return nil }
+            return duration
+        }()
         return ListeningHistoryUploadEntry(
             id: entry.id.uuidString.lowercased(),
+            trackID: entry.trackID.uuidString.lowercased(),
             songID: songID,
             startedAt: Self.listeningHistoryTimestamp(entry.startedAt),
-            listenedSeconds: min(max(entry.listenedSeconds, 0), 31 * 24 * 60 * 60)
+            listenedSeconds: min(max(entry.listenedSeconds, 0), 31 * 24 * 60 * 60),
+            title: Self.limitedHistoryText(entry.title ?? track?.title, maximum: 500),
+            artist: Self.limitedHistoryText(entry.artist ?? track?.artist, maximum: 500),
+            album: Self.limitedHistoryText(entry.album ?? track?.album, maximum: 500),
+            durationSeconds: durationSeconds
         )
     }
 
@@ -6421,10 +6461,20 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 serverOrigin: ServerSongIdentity.normalizedOrigin(base),
                 syncProfileID: profileID,
                 remoteSongID: remote.songID ?? existing?.remoteSongID ?? mappedTrack?.remoteID,
-                title: remote.title ?? existing?.title ?? mappedTrack?.title,
-                artist: remote.artist ?? existing?.artist ?? mappedTrack?.artist,
-                album: remote.album ?? existing?.album ?? mappedTrack?.album,
+                title: ListeningHistoryTrackResolver.preferredMetadata(
+                    [remote.title, existing?.title, mappedTrack?.title],
+                    field: .title
+                ),
+                artist: ListeningHistoryTrackResolver.preferredMetadata(
+                    [remote.artist, existing?.artist, mappedTrack?.artist],
+                    field: .artist
+                ),
+                album: ListeningHistoryTrackResolver.preferredMetadata(
+                    [remote.album, existing?.album, mappedTrack?.album],
+                    field: .album
+                ),
                 duration: remote.durationSeconds ?? existing?.duration ?? mappedTrack?.duration,
+                artworkURL: remote.artworkURL ?? existing?.artworkURL ?? mappedTrack?.artworkURL,
                 originatedOnThisDevice: existing?.originatedOnThisDevice ?? false
             )
             listeningHistorySyncedSeconds[listeningHistorySyncKey(
@@ -7056,6 +7106,9 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         let resolver = remoteSongMetadataResolver
         let retryDelays = remoteSongMetadataRetryDelays
         serverMetadataHydrationTask = Task { @MainActor [weak self] in
+            // Let the owning property receive this task before a cached or
+            // zero-delay resolver can finish and clear it.
+            await Task.yield()
             guard let self else { return }
             await hydrateRemoteSongMetadata(
                 requests,

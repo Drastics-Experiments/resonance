@@ -320,9 +320,12 @@ struct PlayerModelRegressionTests {
                 #expect(Set(body.keys) == ["entries"])
                 let entries = try #require(body["entries"] as? [[String: Any]])
                 #expect(entries.count == 1)
-                #expect(Set(entries[0].keys) == ["id", "song_id", "started_at", "listened_seconds"])
+                #expect(entries[0]["track_id"] as? String == localTrack.id.uuidString.lowercased())
                 #expect(entries[0]["song_id"] as? String == (
                     profileID == "default" ? defaultSongID : otherProfileSongID
+                ))
+                #expect(entries[0]["title"] as? String == (
+                    profileID == "default" ? "Mac song" : "Other profile song"
                 ))
                 #expect(((entries[0]["listened_seconds"] as? Double) ?? 0) > 0)
                 return (
