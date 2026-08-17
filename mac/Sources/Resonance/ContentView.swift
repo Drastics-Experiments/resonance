@@ -67,9 +67,7 @@ struct ContentView: View {
                         && !model.isRefreshingServerCatalog
                         && model.isServerDownloadTransferVisible {
                         TransferProgressOverlay(
-                            title: model.downloadStatus == "Preparing download"
-                                ? "Preparing download"
-                                : "Downloading",
+                            title: "Downloading",
                             detail: model.downloadCurrentFile,
                             status: model.downloadStatus,
                             progress: model.downloadProgress,
@@ -271,6 +269,7 @@ struct ContentView: View {
 
     private func dismissMiniVideo(_ session: InstalledVideoSession) {
         guard miniVideoSession?.id == session.id else { return }
+        session.stopRateController()
         session.player.pause()
         miniVideoSession = nil
     }

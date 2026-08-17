@@ -765,6 +765,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun importAudio() { mutableImportRequests.tryEmit(Unit) }
 
+    override fun playbackPlayer(): Player? = controller
+
     fun importUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
         viewModelScope.launch {
@@ -3031,67 +3033,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private suspend fun prepareRemoteSongMetadataForDownload(
-        songs: List<RemoteSong>,
-        context: ServerProfileContext,
-    ): List<RemoteSong> {
-        val songIDs = songs.mapTo(mutableSetOf(), RemoteSong::id)
-        val requests = remoteSongMetadataRequests(songs)
-        if (requests.isEmpty()) return songs
-
-        cancelRemoteSongMetadataHydration()
-        val results = mutableListOf<RemoteSongMetadataResult>()
-        for (batch in requests.chunked(8)) {
-            val batchResults = coroutineScope {
-                batch.map { request ->
-                    async(Dispatchers.IO) {
-                        val metadata = try {
-                            linkImportService.resolveMetadata(request.source)
-                        } catch (error: CancellationException) {
-                            throw error
-                        } catch (_: Throwable) {
-                            null
-                        }
-                        RemoteSongMetadataResult(request, metadata)
-                    }
-                }.awaitAll()
-            }
-            if (currentServerProfileContext() != context) throw CancellationException()
-            results += batchResults
-        }
-
-        var updatedSongs = mutableState.value.remoteSongs
-        var cache = library.remoteSongMetadataCache
-        results.forEach { result ->
-            val metadata = result.metadata ?: return@forEach
-            val resolvedIDs = result.request.songIDs.toSet()
-            updatedSongs = updatedSongs.map { song ->
-                if (song.id in resolvedIDs && song.isMetadataLoading) {
-                    applyRemoteSongMetadata(song, metadata)
-                } else {
-                    song
-                }
-            }
-            cache += result.request.cacheKey to RemoteSongMetadataCacheEntry(
-                sourceURL = result.request.source,
-                mediaKind = result.request.mediaKind,
-                title = metadata.title,
-                artist = metadata.artist,
-                album = metadata.album,
-                durationSeconds = metadata.durationSeconds?.toDouble(),
-                artworkURL = metadata.artworkURL,
-                cachedAtEpochMs = System.currentTimeMillis(),
-            )
-        }
-        mutableState.value = mutableState.value.copy(remoteSongs = updatedSongs)
-        library = library.copy(
-            remoteSongMetadataCache = RemoteSongMetadataCachePolicy.normalized(cache),
-        )
-        if (results.any { it.metadata != null }) persistLibrary()
-        val preparedByID = updatedSongs.filter { it.id in songIDs }.associateBy(RemoteSong::id)
-        return songs.map { preparedByID[it.id] ?: it }
-    }
-
     private fun beginRemoteSongMetadataHydration(
         context: ServerProfileContext,
         client: ServerClient,
@@ -3596,15 +3537,18 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             )
             return
         }
+        val pendingSourceSongs = pendingSongs.filter(RemoteSong::isSourceLinkRecord)
+        val pendingFileSongs = pendingSongs.filterNot(RemoteSong::isSourceLinkRecord)
+        val firstPendingSong = pendingSourceSongs.firstOrNull() ?: pendingFileSongs.first()
         mutableState.value = mutableState.value.copy(
             isDownloading = true,
             downloadProgress = 0f,
-            downloadDetail = "Preparing download",
+            downloadDetail = "Downloading",
             downloadCurrentItem = 1,
             downloadTotalItems = pendingSongs.size,
-            downloadCurrentTitle = null,
+            downloadCurrentTitle = firstPendingSong.title,
             downloadBytesTransferred = 0L,
-            downloadTotalBytes = null,
+            downloadTotalBytes = firstPendingSong.size.takeIf { it > 0L },
         )
         activeDownloadPolicySnapshot = snapshot
         remoteDownloadJob?.cancel()
@@ -3612,13 +3556,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val downloadClient = serverClient(transferContext)
         val job = viewModelScope.launch {
             try {
-                val preparedSongs = prepareRemoteSongMetadataForDownload(
-                    pendingSongs,
-                    snapshot.context,
-                )
-                requireDownloadPolicySnapshot(snapshot)
-                val pendingSourceSongs = preparedSongs.filter(RemoteSong::isSourceLinkRecord)
-                val pendingFileSongs = preparedSongs.filterNot(RemoteSong::isSourceLinkRecord)
                 val sourceSongs = pendingSourceSongs
                 var sourceDownloads = 0
                 var sourceProcessed = 0
@@ -3753,7 +3690,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 val catalog = mov.unblocked.resonance.data.RemoteCatalog(
                     pendingFileSongs,
                 )
-                val catalogTitlesByID = preparedSongs.associate { it.id to it.title }
+                val catalogTitlesByID = pendingSongs.associate { it.id to it.title }
                 val result = downloadClient.downloadSelected(
                     catalog = catalog,
                     selectedIDs = catalog.songs.mapTo(mutableSetOf(), RemoteSong::id),

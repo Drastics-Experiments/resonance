@@ -75,8 +75,6 @@ enum InstalledVideoLayoutPolicy {
     static let nowPlayingContentTopPadding: CGFloat = 28
     static let artworkCornerRadius: CGFloat = 22
     static let videoCornerRadius: CGFloat = 18
-    static let leadInDuration: TimeInterval = 0.035
-    static let revealDelay: TimeInterval = leadInDuration
     static let geometryDuration: TimeInterval = 0.40
     static let revealDuration: TimeInterval = 0.14
     static let chromeFadeDuration: TimeInterval = 0.30
@@ -156,7 +154,51 @@ enum InstalledVideoControlsPolicy {
 }
 
 enum InstalledVideoSyncPolicy {
-    static let continuouslyPollsAudioClock = false
+    static let audioRemainsAudibleOwner = true
+    static let videoRemainsMuted = true
+    static let allowsSteadyStateReseeking = false
+    static let forcedSeekThreshold: TimeInterval = 0.005
+    static let catchUpDeadband: TimeInterval = 0.04
+    static let catchUpExponent = 0.35
+    static let minimumRateMultiplier = 0.85
+    static let maximumRateMultiplier = 1.20
+    static let rateUpdateInterval: Duration = .milliseconds(250)
+    static let startupSeekTolerance: TimeInterval = 0.50
+    static let startupProjectionInterval: TimeInterval = 0.20
+
+    static func startupTarget(
+        audioPosition: TimeInterval,
+        audioRate: Float,
+        isPlaying: Bool
+    ) -> TimeInterval {
+        let position = audioPosition.isFinite ? max(audioPosition, 0) : 0
+        guard isPlaying, audioRate.isFinite, audioRate > 0 else { return position }
+        return position + startupProjectionInterval * Double(audioRate)
+    }
+
+    static func catchUpRate(
+        audioRate: Float,
+        audioPosition: TimeInterval,
+        videoPosition: TimeInterval
+    ) -> Float {
+        guard audioRate.isFinite, audioRate > 0,
+              audioPosition.isFinite, videoPosition.isFinite else { return max(audioRate, 0) }
+        let drift = videoPosition - audioPosition
+        guard abs(drift) > catchUpDeadband else { return audioRate }
+        let multiplier = min(
+            max(exp(-catchUpExponent * drift), minimumRateMultiplier),
+            maximumRateMultiplier
+        )
+        return audioRate * Float(multiplier)
+    }
+
+    static func hasMaterialDrift(
+        audioPosition: TimeInterval,
+        videoPosition: TimeInterval
+    ) -> Bool {
+        guard audioPosition.isFinite, videoPosition.isFinite else { return true }
+        return abs(audioPosition - videoPosition) > forcedSeekThreshold
+    }
 
     static func shouldResumeAfterSeek(
         audioIsPlaying: Bool,
@@ -185,6 +227,7 @@ struct NowPlayingView: View {
     @State private var installedVideoSession: InstalledVideoSession?
     @State private var isInstalledVideoExpanded = false
     @State private var isInstalledVideoRevealed = false
+    @State private var isInstalledVideoFirstFrameReady = false
     @State private var isInstalledVideoArtworkRestored = false
     @State private var isClosingInstalledVideo = false
     @State private var isRestoringNowPlayingChrome = false
@@ -253,8 +296,19 @@ struct NowPlayingView: View {
                         viewportSize: proxy.size,
                         isExpanded: isInstalledVideoExpanded,
                         isVideoRevealed: isInstalledVideoRevealed,
+                        isFirstFrameReady: isInstalledVideoFirstFrameReady,
                         isArtworkRestored: isInstalledVideoArtworkRestored,
                         isClosing: isClosingInstalledVideo,
+                        onFirstFrameReady: {
+                            guard self.installedVideoSession?.id == installedVideoSession.id,
+                                  !isClosingInstalledVideo else { return }
+                            isInstalledVideoFirstFrameReady = true
+                        },
+                        onPlaybackUnavailable: {
+                            guard self.installedVideoSession?.id == installedVideoSession.id,
+                                  !isClosingInstalledVideo else { return }
+                            closeInstalledVideo(installedVideoSession)
+                        },
                         onMinimize: { minimizeInstalledVideo(installedVideoSession) },
                         onClose: { closeInstalledVideo(installedVideoSession) }
                     )
@@ -719,6 +773,7 @@ struct NowPlayingView: View {
         let player = AVPlayer(url: url)
         player.isMuted = true
         player.volume = 0
+        player.automaticallyWaitsToMinimizeStalling = false
         let session = InstalledVideoSession(
             track: track,
             player: player
@@ -726,45 +781,30 @@ struct NowPlayingView: View {
         isClosingInstalledVideo = false
         isRestoringNowPlayingChrome = false
         isInstalledVideoExpanded = false
-        isInstalledVideoRevealed = false
+        isInstalledVideoRevealed = true
+        isInstalledVideoFirstFrameReady = false
         isInstalledVideoArtworkRestored = false
+        session.synchronize(force: true, startup: true) {
+            InstalledVideoCompanionState(
+                position: model.companionVideoPlaybackPosition,
+                isPlaying: model.isPlaying,
+                rate: model.playbackRate,
+                isValid: model.currentTrackID == track.id
+            )
+        }
+        session.startRateController {
+            InstalledVideoCompanionState(
+                position: model.companionVideoPlaybackPosition,
+                isPlaying: model.isPlaying,
+                rate: model.playbackRate,
+                isValid: model.currentTrackID == track.id
+            )
+        }
         withAnimation(reduceMotion ? nil : InstalledVideoLayoutPolicy.chromeAnimation) {
             installedVideoSession = session
         }
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + InstalledVideoLayoutPolicy.duration(
-                InstalledVideoLayoutPolicy.revealDelay,
-                reduceMotion: reduceMotion
-            )
-        ) {
-            guard installedVideoSession?.id == session.id,
-                  !isClosingInstalledVideo else { return }
-            withAnimation(reduceMotion ? nil : InstalledVideoLayoutPolicy.geometryAnimation) {
-                isInstalledVideoExpanded = true
-            }
-            withAnimation(
-                reduceMotion
-                    ? nil
-                    : .easeInOut(duration: InstalledVideoLayoutPolicy.revealDuration)
-            ) {
-                isInstalledVideoRevealed = true
-            }
-            let handoffDuration = model.playbackDuration > 0
-                ? model.playbackDuration
-                : track.duration
-            let handoffTime = min(max(model.position, 0), max(handoffDuration, 0))
-            player.seek(
-                to: CMTime(seconds: handoffTime, preferredTimescale: 600),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
-            )
-            player.isMuted = true
-            player.volume = 0
-            if model.isPlaying {
-                player.playImmediately(atRate: model.playbackRate)
-            } else {
-                player.pause()
-            }
+        withAnimation(reduceMotion ? nil : InstalledVideoLayoutPolicy.geometryAnimation) {
+            isInstalledVideoExpanded = true
         }
     }
 
@@ -772,6 +812,7 @@ struct NowPlayingView: View {
         guard installedVideoSession?.id == session.id,
               !isClosingInstalledVideo else { return }
         isClosingInstalledVideo = true
+        session.stopRateController()
         session.player.isMuted = true
         session.player.volume = 0
         session.player.pause()
@@ -816,6 +857,7 @@ struct NowPlayingView: View {
             withTransaction(transaction) {
                 installedVideoSession = nil
                 isInstalledVideoRevealed = false
+                isInstalledVideoFirstFrameReady = false
                 isInstalledVideoArtworkRestored = false
                 isRestoringNowPlayingChrome = false
             }
@@ -834,21 +876,154 @@ struct NowPlayingView: View {
             installedVideoSession = nil
             isInstalledVideoExpanded = false
             isInstalledVideoRevealed = false
+            isInstalledVideoFirstFrameReady = false
         }
         onMinimizeVideo(session)
     }
 
 }
 
-final class InstalledVideoSession: Identifiable {
+final class InstalledVideoSession: Identifiable, @unchecked Sendable {
     let id = UUID()
     let track: Track
     let player: AVPlayer
+    var layerIsReadyForDisplay = false
+    var synchronizationGeneration: UInt64 = 0
+    var synchronizationInFlight = false
+    var hasCompletedInitialAlignment = false
+    private var rateControllerTask: Task<Void, Never>?
 
     init(track: Track, player: AVPlayer) {
         self.track = track
         self.player = player
     }
+
+    func cancelSynchronization() {
+        synchronizationGeneration &+= 1
+        synchronizationInFlight = false
+    }
+
+    @MainActor
+    func startRateController(
+        state: @escaping @MainActor () -> InstalledVideoCompanionState
+    ) {
+        guard rateControllerTask == nil else { return }
+        rateControllerTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: InstalledVideoSyncPolicy.rateUpdateInterval)
+                guard !Task.isCancelled, let self else { return }
+                self.synchronize(state: state)
+            }
+        }
+    }
+
+    func stopRateController() {
+        rateControllerTask?.cancel()
+        rateControllerTask = nil
+        cancelSynchronization()
+    }
+
+    @MainActor
+    func synchronize(
+        force: Bool = false,
+        startup: Bool = false,
+        state: @escaping @MainActor () -> InstalledVideoCompanionState
+    ) {
+        let snapshot = state()
+        guard snapshot.isValid else {
+            cancelSynchronization()
+            player.pause()
+            return
+        }
+        player.isMuted = true
+        player.volume = 0
+        if synchronizationInFlight {
+            guard force else { return }
+            cancelSynchronization()
+        }
+
+        let videoPosition = player.currentTime().seconds
+        let targetPosition = startup
+            ? InstalledVideoSyncPolicy.startupTarget(
+                audioPosition: snapshot.position,
+                audioRate: snapshot.rate,
+                isPlaying: snapshot.isPlaying
+            )
+            : snapshot.position
+        let hasMaterialDrift = InstalledVideoSyncPolicy.hasMaterialDrift(
+            audioPosition: targetPosition,
+            videoPosition: videoPosition
+        )
+        let targetRate = force
+            ? snapshot.rate
+            : InstalledVideoSyncPolicy.catchUpRate(
+                audioRate: snapshot.rate,
+                audioPosition: snapshot.position,
+                videoPosition: videoPosition
+            )
+        player.defaultRate = targetRate
+        guard force && hasMaterialDrift else {
+            if force {
+                hasCompletedInitialAlignment = true
+            }
+            if !snapshot.isPlaying {
+                player.pause()
+            } else if player.timeControlStatus != .playing {
+                player.playImmediately(atRate: targetRate)
+            } else if abs(player.rate - targetRate) > 0.001 {
+                player.rate = targetRate
+            }
+            return
+        }
+
+        if !snapshot.isPlaying {
+            player.pause()
+        }
+
+        synchronizationGeneration &+= 1
+        let generation = synchronizationGeneration
+        synchronizationInFlight = true
+        let tolerance = startup ? InstalledVideoSyncPolicy.startupSeekTolerance : 0
+        let toleranceTime = CMTime(seconds: tolerance, preferredTimescale: 600)
+        player.seek(
+            to: CMTime(seconds: max(targetPosition, 0), preferredTimescale: 600),
+            toleranceBefore: toleranceTime,
+            toleranceAfter: toleranceTime
+        ) { [weak self] finished in
+            Task { @MainActor [weak self] in
+                guard let self, self.synchronizationGeneration == generation else { return }
+                self.synchronizationInFlight = false
+                guard finished else { return }
+                self.hasCompletedInitialAlignment = true
+                let latest = state()
+                guard latest.isValid else {
+                    self.player.pause()
+                    return
+                }
+                let latestRate = InstalledVideoSyncPolicy.catchUpRate(
+                    audioRate: latest.rate,
+                    audioPosition: latest.position,
+                    videoPosition: self.player.currentTime().seconds
+                )
+                self.player.defaultRate = latestRate
+                guard latest.isPlaying else {
+                    self.player.pause()
+                    return
+                }
+                self.player.playImmediately(atRate: latestRate)
+            }
+        }
+        if snapshot.isPlaying {
+            player.playImmediately(atRate: snapshot.rate)
+        }
+    }
+}
+
+struct InstalledVideoCompanionState {
+    let position: TimeInterval
+    let isPlaying: Bool
+    let rate: Float
+    let isValid: Bool
 }
 
 private struct InstalledVideoTransitionArtwork: View {
@@ -975,8 +1150,11 @@ private struct InstalledVideoPlayerView: View {
     let viewportSize: CGSize
     let isExpanded: Bool
     let isVideoRevealed: Bool
+    let isFirstFrameReady: Bool
     let isArtworkRestored: Bool
     let isClosing: Bool
+    let onFirstFrameReady: () -> Void
+    let onPlaybackUnavailable: () -> Void
     let onMinimize: () -> Void
     let onClose: () -> Void
     @State private var controlsVisible = true
@@ -1040,7 +1218,12 @@ private struct InstalledVideoPlayerView: View {
 
                 AspectFitVideoPlayer(
                     player: session.player,
-                    cornerRadius: surfaceCornerRadius
+                    cornerRadius: surfaceCornerRadius,
+                    onReadyForDisplay: {
+                        session.layerIsReadyForDisplay = true
+                        onFirstFrameReady()
+                    },
+                    onPlaybackUnavailable: onPlaybackUnavailable
                 )
                     .opacity(isVideoRevealed && !isArtworkRestored ? 1 : 0)
                     .allowsHitTesting(isVideoRevealed && !isClosing)
@@ -1051,6 +1234,14 @@ private struct InstalledVideoPlayerView: View {
                     symbolSize: min(viewportSize.width, viewportSize.height) * 0.18
                 )
                 .opacity(isVideoRevealed && !isArtworkRestored ? 0 : 1)
+
+                if isVideoRevealed && !isFirstFrameReady && !isArtworkRestored {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
+                        .accessibilityLabel("Opening video")
+                        .allowsHitTesting(false)
+                }
 
                 RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous)
                     .stroke(surfaceBorderColor, lineWidth: 1)
@@ -1163,85 +1354,54 @@ private struct InstalledVideoPlayerView: View {
             }
         }
         .onAppear {
-            session.player.isMuted = true
-            session.player.volume = 0
-            session.player.defaultRate = model.playbackRate
-            applyAudioPlaybackState()
+            synchronizeVideoToAudio()
+            startVideoRateController()
             showControls()
         }
-        .onChange(of: model.playbackRate) { _, rate in
-            session.player.defaultRate = rate
-            if model.isPlaying {
-                session.player.rate = rate
-            }
-        }
-        .onChange(of: model.isPlaying) { _, _ in
-            applyAudioPlaybackState(seekToAudioClock: true)
+        .onChange(of: model.playbackRate) { _, _ in
+            synchronizeVideoToAudio()
         }
         .onChange(of: model.currentTrackID) { _, trackID in
             if trackID != session.track.id { onClose() }
         }
         .onChange(of: model.isPlaying) { _, playing in
+            synchronizeVideoToAudio()
             if playing {
                 showControls()
             } else {
                 showControls(keepVisible: true)
             }
         }
-        .onReceive(model.playbackDiscontinuities) { position in
-            seekVideo(to: position, resumeAfterSeek: true)
+        .onReceive(model.playbackDiscontinuities) { _ in
+            synchronizeVideoToAudio(force: true)
         }
         .onDisappear {
             controlsHideTask?.cancel()
-            session.player.pause()
+            session.cancelSynchronization()
         }
     }
 
-    private func applyAudioPlaybackState(seekToAudioClock: Bool = false) {
-        guard model.currentTrackID == session.track.id else {
-            session.player.pause()
-            return
-        }
-        session.player.isMuted = true
-        session.player.volume = 0
-        session.player.defaultRate = model.playbackRate
-        let shouldPlay = InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: model.isPlaying,
-            trackMatches: true,
-            videoIsVisible: isVideoRevealed,
-            isClosing: isClosing
-        )
-        if seekToAudioClock {
-            seekVideo(to: model.position, resumeAfterSeek: shouldPlay)
-            if !shouldPlay { session.player.pause() }
-            return
-        }
-        if shouldPlay {
-            if session.player.timeControlStatus == .paused {
-                session.player.playImmediately(atRate: model.playbackRate)
-            }
-        } else {
-            session.player.pause()
+    private func synchronizeVideoToAudio(force: Bool = false) {
+        session.synchronize(force: force) {
+            InstalledVideoCompanionState(
+                position: model.companionVideoPlaybackPosition,
+                isPlaying: model.isPlaying,
+                rate: model.playbackRate,
+                isValid: model.currentTrackID == session.track.id && !isClosing
+            )
         }
     }
 
-    private func seekVideo(to time: TimeInterval, resumeAfterSeek: Bool = false) {
-        guard time.isFinite else { return }
-        session.player.seek(
-            to: CMTime(seconds: max(time, 0), preferredTimescale: 600),
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
-        ) { finished in
-            guard finished, resumeAfterSeek else { return }
-            Task { @MainActor in
-                guard InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-                    audioIsPlaying: model.isPlaying,
-                    trackMatches: model.currentTrackID == session.track.id,
-                    videoIsVisible: isVideoRevealed,
-                    isClosing: isClosing
-                ) else { return }
-                session.player.playImmediately(atRate: model.playbackRate)
-            }
+    private func startVideoRateController() {
+        let model = model
+        let session = session
+        session.startRateController {
+            InstalledVideoCompanionState(
+                position: model.companionVideoPlaybackPosition,
+                isPlaying: model.isPlaying,
+                rate: model.playbackRate,
+                isValid: model.currentTrackID == session.track.id
+            )
         }
     }
 
@@ -1282,7 +1442,7 @@ private struct InstalledVideoPlayerView: View {
 
     private func togglePlayback() {
         model.togglePlay()
-        applyAudioPlaybackState()
+        synchronizeVideoToAudio()
         if model.isPlaying { showControls() }
         else { showControls(keepVisible: true) }
     }
@@ -1359,17 +1519,23 @@ struct InstalledVideoMiniPlayer: View {
         }
         .shadow(color: Color.black.opacity(0.62), radius: 24, y: 12)
         .foregroundStyle(Color.white)
-        .onAppear { applyAudioPlaybackState() }
-        .onChange(of: model.isPlaying) { _, _ in
-            applyAudioPlaybackState(seekToAudioClock: true)
+        .onAppear {
+            isPlaying = model.isPlaying
+            synchronizeVideoToAudio()
+            startVideoRateController()
         }
-        .onChange(of: model.playbackRate) { _, _ in applyAudioPlaybackState() }
+        .onChange(of: model.isPlaying) { _, playing in
+            isPlaying = playing
+            synchronizeVideoToAudio()
+        }
+        .onChange(of: model.playbackRate) { _, _ in synchronizeVideoToAudio() }
         .onChange(of: model.currentTrackID) { _, trackID in
             if trackID != session.track.id { onClose() }
         }
-        .onReceive(model.playbackDiscontinuities) { position in
-            seekVideo(to: position, resumeAfterSeek: true)
+        .onReceive(model.playbackDiscontinuities) { _ in
+            synchronizeVideoToAudio(force: true)
         }
+        .onDisappear { session.cancelSynchronization() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Video mini-player for \(session.track.title)")
     }
@@ -1387,56 +1553,30 @@ struct InstalledVideoMiniPlayer: View {
         .accessibilityLabel(label)
     }
 
-    private func applyAudioPlaybackState(seekToAudioClock: Bool = false) {
-        guard model.currentTrackID == session.track.id else {
-            session.player.pause()
-            isPlaying = false
-            return
-        }
-        session.player.isMuted = true
-        session.player.volume = 0
-        session.player.defaultRate = model.playbackRate
-        isPlaying = model.isPlaying
-        let shouldPlay = InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-            audioIsPlaying: model.isPlaying,
-            trackMatches: true,
-            videoIsVisible: true,
-            isClosing: false
-        )
-        if seekToAudioClock {
-            seekVideo(to: model.position, resumeAfterSeek: shouldPlay)
-            if !shouldPlay { session.player.pause() }
-            return
-        }
-        if shouldPlay {
-            if session.player.timeControlStatus == .paused {
-                session.player.playImmediately(atRate: model.playbackRate)
-            }
-        } else {
-            session.player.pause()
+    private func synchronizeVideoToAudio(force: Bool = false) {
+        session.synchronize(force: force) {
+            InstalledVideoCompanionState(
+                position: model.companionVideoPlaybackPosition,
+                isPlaying: model.isPlaying,
+                rate: model.playbackRate,
+                isValid: model.currentTrackID == session.track.id
+            )
         }
     }
 
-    private func seekVideo(to time: TimeInterval, resumeAfterSeek: Bool = false) {
-        guard time.isFinite else { return }
-        session.player.seek(
-            to: CMTime(seconds: max(time, 0), preferredTimescale: 600),
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
-        ) { finished in
-            guard finished, resumeAfterSeek else { return }
-            Task { @MainActor in
-                guard InstalledVideoSyncPolicy.shouldResumeAfterSeek(
-                    audioIsPlaying: model.isPlaying,
-                    trackMatches: model.currentTrackID == session.track.id,
-                    videoIsVisible: true,
-                    isClosing: false
-                ) else { return }
-                session.player.playImmediately(atRate: model.playbackRate)
-                isPlaying = true
-            }
+    private func startVideoRateController() {
+        let model = model
+        let session = session
+        session.startRateController {
+            InstalledVideoCompanionState(
+                position: model.companionVideoPlaybackPosition,
+                isPlaying: model.isPlaying,
+                rate: model.playbackRate,
+                isValid: model.currentTrackID == session.track.id
+            )
         }
     }
+
 }
 
 private struct InstalledVideoControlsOverlay: View {
@@ -1648,9 +1788,13 @@ private struct InstalledVideoTransportButton: View {
 struct AspectFitVideoPlayer: NSViewRepresentable {
     let player: AVPlayer
     var cornerRadius: CGFloat = 0
+    var onReadyForDisplay: () -> Void = {}
+    var onPlaybackUnavailable: () -> Void = {}
 
     func makeNSView(context: Context) -> AspectFitPlayerContainerView {
         let view = AspectFitPlayerContainerView()
+        view.onReadyForDisplay = onReadyForDisplay
+        view.onPlaybackUnavailable = onPlaybackUnavailable
         view.player = player
         view.cornerRadius = cornerRadius
         return view
@@ -1659,13 +1803,25 @@ struct AspectFitVideoPlayer: NSViewRepresentable {
     func updateNSView(_ view: AspectFitPlayerContainerView, context: Context) {
         view.player = player
         view.cornerRadius = cornerRadius
+        view.onReadyForDisplay = onReadyForDisplay
+        view.onPlaybackUnavailable = onPlaybackUnavailable
     }
 }
 
 final class AspectFitPlayerContainerView: NSView {
+    var onReadyForDisplay: () -> Void = {}
+    var onPlaybackUnavailable: () -> Void = {}
+    private var readyForDisplayObservation: NSKeyValueObservation?
+    private var playerItemStatusObservation: NSKeyValueObservation?
+
     var player: AVPlayer? {
         get { playerLayer.player }
-        set { playerLayer.player = newValue }
+        set {
+            guard playerLayer.player !== newValue else { return }
+            playerLayer.player = newValue
+            observeReadyForDisplay()
+            observePlayerItemStatus()
+        }
     }
 
     var cornerRadius: CGFloat {
@@ -1692,6 +1848,8 @@ final class AspectFitPlayerContainerView: NSView {
         wantsLayer = true
         playerLayer.videoGravity = .resizeAspect
         playerLayer.backgroundColor = NSColor.black.cgColor
+        observeReadyForDisplay()
+        observePlayerItemStatus()
     }
 
     @available(*, unavailable)
@@ -1701,6 +1859,30 @@ final class AspectFitPlayerContainerView: NSView {
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
+    private func observeReadyForDisplay() {
+        readyForDisplayObservation?.invalidate()
+        readyForDisplayObservation = playerLayer.observe(
+            \.isReadyForDisplay,
+            options: [.initial, .new]
+        ) { [weak self] layer, _ in
+            guard layer.isReadyForDisplay else { return }
+            DispatchQueue.main.async {
+                self?.onReadyForDisplay()
+            }
+        }
+    }
+
+    private func observePlayerItemStatus() {
+        playerItemStatusObservation?.invalidate()
+        guard let item = playerLayer.player?.currentItem else { return }
+        playerItemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+            guard item.status == .failed else { return }
+            DispatchQueue.main.async {
+                self?.onPlaybackUnavailable()
+            }
+        }
     }
 }
 

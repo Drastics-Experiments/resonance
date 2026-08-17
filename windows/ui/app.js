@@ -17,6 +17,8 @@ import {
   formatHistoryWindowLabel,
   formatTime,
   isInstalledVideoTrack,
+  installedVideoCatchUpRate,
+  installedVideoSyncDecision,
   listeningHistoryEntryQualifiesAsPlay,
   localImportCandidateCanAutoSelect,
   localImportOperationFingerprint,
@@ -156,13 +158,10 @@ let installedVideoChromeTimer = null;
 let installedVideoArtworkTimer = null;
 let installedVideoControlsTimer = null;
 const FULL_PLAYER_TRANSITION_MS = 380;
-const INSTALLED_VIDEO_LEAD_IN_MS = 35;
 const INSTALLED_VIDEO_TRANSITION_MS = 400;
-const INSTALLED_VIDEO_REVEAL_MS = 140;
 const INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS = 190;
 const INSTALLED_VIDEO_CHROME_RESTORE_LEAD_MS = 120;
 const INSTALLED_VIDEO_CONTROLS_TIMEOUT_MS = 2200;
-const INSTALLED_VIDEO_SYNC_TOLERANCE_SECONDS = 0.12;
 let navigationHistory = [{ section: "library", playlistID: null }];
 let navigationIndex = 0;
 let pendingPlaylistTrackID = null;
@@ -2806,12 +2805,13 @@ function listenAlongMediaKindForTrack(track) {
 
 function listenAlongSnapshotForTrack(track = currentTrack()) {
   const sourceURL = listenAlongSourceURLForTrack(track);
-  const position = Number(audio.currentTime);
+  const media = activePlaybackMedia();
+  const position = Number(media.currentTime);
   return {
     source_url: sourceURL,
     media_kind: listenAlongMediaKindForTrack(track),
     position_seconds: Number.isFinite(position) && position >= 0 ? position : Number(state.position) || 0,
-    is_playing: Boolean(sourceURL && track && !audio.paused && !audio.ended),
+    is_playing: Boolean(sourceURL && track && !media.paused && !media.ended),
   };
 }
 
@@ -3177,8 +3177,10 @@ async function hydrateListenAlongArtwork({ session, sourceKey, track, artworkURL
 function applyListenAlongPosition(position) {
   const duration = currentPlaybackDuration();
   const target = duration > 0 ? Math.max(0, Math.min(Number(position) || 0, Math.max(0, duration - 0.05))) : Math.max(0, Number(position) || 0);
-  if (Math.abs((Number(audio.currentTime) || 0) - target) > 0.35) audio.currentTime = target;
-  state.position = Number(audio.currentTime) || target;
+  const media = activePlaybackMedia();
+  if (Math.abs((Number(media.currentTime) || 0) - target) > 0.35) media.currentTime = target;
+  if (media !== audio) audio.currentTime = target;
+  state.position = Number(media.currentTime) || target;
 }
 
 async function applyListenAlongEvent(event) {
@@ -3279,7 +3281,7 @@ async function applyListenAlongEvent(event) {
     if (snapshot.is_playing) await requestPlayback();
     else audio.pause();
     if (session.mediaKind === "video" && isInstalledVideoTrack(track)) {
-      if (installedVideoSession) configureInstalledVideoSource(track, projectedPosition);
+      if (installedVideoSession) configureInstalledVideoSource(track);
       else openInstalledVideo(track);
     } else if (installedVideoSession) {
       closeInstalledVideo();
@@ -4029,7 +4031,7 @@ async function deleteStoredTracks(trackIDs) {
   const releasedCurrentTrack = targetIDs.has(currentID)
     ? {
         track: currentTrack(),
-        position: Math.max(0, Number(audio.currentTime) || Number(state.position) || 0),
+        position: Math.max(0, Number(activePlaybackMedia().currentTime) || Number(state.position) || 0),
         wasPlaying: playbackIsActive(),
       }
     : null;
@@ -4655,15 +4657,17 @@ async function activateProfile(profileID, serverURL = state.serverURL) {
   state.playbackQueueIDs = [...activePlaybackQueueIDs];
   state.playbackSourceQueueIDs = [...activePlaybackSourceQueueIDs];
   if (currentID && !visibleTrackIDs.has(currentID)) {
-    audio.pause();
+    activePlaybackMedia().pause();
+    if (installedVideoSession) finishInstalledVideoClose({ session: installedVideoSession });
     audio.removeAttribute("src");
     currentID = null;
     state.currentTrackID = null;
     state.position = 0;
   } else if (currentID) {
+    const media = activePlaybackMedia();
     const range = activeClipRange();
-    if (range && (audio.currentTime < range.startSeconds || audio.currentTime >= range.endSeconds)) {
-      audio.currentTime = range.startSeconds;
+    if (range && (media.currentTime < range.startSeconds || media.currentTime >= range.endSeconds)) {
+      media.currentTime = range.startSeconds;
       state.position = range.startSeconds;
     }
   }
@@ -6874,7 +6878,6 @@ function updateServerTransfer({
   itemCount,
   owner = "server",
   title = null,
-  phase = null,
   autoHide = true,
   dismiss = false,
 }) {
@@ -6889,8 +6892,7 @@ function updateServerTransfer({
     && serverTransferOwner === owner
     && toast.dataset.direction === "download";
   const downloadBytes = Number(itemCompleted === undefined ? completed : itemCompleted) || 0;
-  const isPreparingDownload = direction === "download" && phase === "preparing";
-  if (direction === "download" && downloadBytes <= 0 && !ownsVisibleDownload && !isPreparingDownload) {
+  if (direction === "download" && downloadBytes <= 0 && !ownsVisibleDownload) {
     toast.hidden = true;
     return;
   }
@@ -7042,19 +7044,6 @@ async function serverAction(mode) {
       const songIDs = mode === "selected" ? [...selectedRemoteIDs] : null;
       if (mode === "selected" && !songIDs.length) throw new Error("Select one or more songs first.");
       const selectedSongIDs = songIDs ? new Set(songIDs) : null;
-      const requestedSongs = serverCatalog.filter((song) => !selectedSongIDs || selectedSongIDs.has(song.id));
-      updateServerTransfer({
-        direction: "download",
-        owner: "server",
-        title: "Preparing download",
-        phase: "preparing",
-        currentFile: "Loading song metadata",
-        completed: 0,
-        total: requestedSongs.length || 1,
-        autoHide: false,
-      });
-      await hydrateServerCatalogMetadata(requestedSongs);
-      if (serverTransferCancelRequested || !profileContextIsCurrent(context)) return;
       const songTitles = Object.fromEntries(serverCatalog
         .filter((song) => !selectedSongIDs || selectedSongIDs.has(song.id))
         .map((song) => [song.id, song.title || "Untitled song"]));
@@ -7316,9 +7305,9 @@ async function uploadMissingDownloadedSongs() {
 }
 
 async function requestPlayback() {
+  const media = activePlaybackMedia();
   try {
-    await audio.play();
-    synchronizeInstalledVideoWithAudio({ forceSeek: true });
+    await media.play();
   } catch (error) {
     if (error?.name === "AbortError") return;
     updateChrome();
@@ -7337,28 +7326,29 @@ function clippedPlaybackPosition(value, track = currentTrack()) {
 }
 
 function enforceCurrentClipRange() {
+  const media = activePlaybackMedia();
   const range = activeClipRange();
-  if (!range || (audio.currentTime >= range.startSeconds && audio.currentTime < range.endSeconds)) return;
-  audio.currentTime = range.startSeconds;
+  if (!range || (media.currentTime >= range.startSeconds && media.currentTime < range.endSeconds)) return;
+  media.currentTime = range.startSeconds;
   state.position = range.startSeconds;
 }
 
 function finishClipPlaybackIfNeeded() {
   const track = currentTrack();
+  const media = activePlaybackMedia();
   const range = activeClipRange(track);
-  if (!track || !range || audio.currentTime + 0.02 < range.endSeconds || clipBoundaryTrackID === track.id) return false;
+  if (!track || !range || media.currentTime + 0.02 < range.endSeconds || clipBoundaryTrackID === track.id) return false;
   clipBoundaryTrackID = track.id;
   updateListeningSession();
   scheduleListeningHistorySync();
   if (repeat) {
     finishListeningSessionForReplay();
-    audio.currentTime = range.startSeconds;
+    media.currentTime = range.startSeconds;
     state.position = range.startSeconds;
     void requestPlayback();
-    synchronizeInstalledVideoWithAudio({ forceSeek: true });
   } else if (!move(1)) {
-    audio.pause();
-    audio.currentTime = range.endSeconds;
+    media.pause();
+    media.currentTime = range.endSeconds;
     state.position = range.endSeconds;
     persistInBackground({ refreshSidebar: false });
     updateChrome();
@@ -7427,17 +7417,18 @@ function toggle() {
     if (firstTrack) play(firstTrack);
     return;
   }
-  if (!audio.currentSrc && !audio.src) { play(track); return; }
-  if (audio.paused) {
+  const media = activePlaybackMedia();
+  if (!media.currentSrc && !media.src) { play(track); return; }
+  if (media.paused) {
     const range = activeClipRange(track);
-    if (range && (audio.currentTime < range.startSeconds || audio.currentTime >= range.endSeconds)) {
-      audio.currentTime = range.startSeconds;
+    if (range && (media.currentTime < range.startSeconds || media.currentTime >= range.endSeconds)) {
+      media.currentTime = range.startSeconds;
       state.position = range.startSeconds;
     }
     void requestPlayback();
   } else {
     cancelCrossfade();
-    audio.pause();
+    media.pause();
   }
   if (listenAlongSession?.role === "host") void publishListenAlongSnapshot(track);
   updateChrome();
@@ -7612,8 +7603,9 @@ function previous() {
   if (currentTrack()?.transientStream) return;
   const range = activeClipRange();
   const start = range?.startSeconds ?? 0;
-  if (audio.currentTime > start + 3) {
-    audio.currentTime = start;
+  const media = activePlaybackMedia();
+  if (media.currentTime > start + 3) {
+    media.currentTime = start;
     state.position = start;
     if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
     return;
@@ -7730,7 +7722,7 @@ function renderFullPlayerQueue() {
 }
 
 function updateFullPlayerProgress() {
-  const elapsed = Number(audio.currentTime) || 0;
+  const elapsed = Number(activePlaybackMedia().currentTime) || 0;
   const duration = currentPlaybackDuration();
   const seek = $("#fullPlayerSeek");
   $("#fullPlayerElapsed").textContent = formatTime(elapsed);
@@ -7741,7 +7733,7 @@ function updateFullPlayerProgress() {
 }
 
 function updatePlaybackProgressUI() {
-  const elapsed = Number(audio.currentTime) || 0;
+  const elapsed = Number(activePlaybackMedia().currentTime) || 0;
   const duration = currentPlaybackDuration();
   $("#elapsed").textContent = formatTime(elapsed);
   $("#duration").textContent = formatTime(duration);
@@ -7760,13 +7752,15 @@ function stopPlaybackProgressAnimation() {
 function animatePlaybackProgress() {
   playbackProgressAnimationFrame = null;
   updatePlaybackProgressUI();
-  if (!audio.paused && !audio.ended) {
+  const media = activePlaybackMedia();
+  if (!media.paused && !media.ended) {
     playbackProgressAnimationFrame = requestAnimationFrame(animatePlaybackProgress);
   }
 }
 
 function startPlaybackProgressAnimation() {
-  if (playbackProgressAnimationFrame || audio.paused || audio.ended) return;
+  const media = activePlaybackMedia();
+  if (playbackProgressAnimationFrame || media.paused || media.ended) return;
   playbackProgressAnimationFrame = requestAnimationFrame(animatePlaybackProgress);
 }
 
@@ -7963,7 +7957,7 @@ function syncInstalledVideoVolume() {
 
 function syncInstalledVideoProgress() {
   const { start, end, duration } = installedVideoBounds();
-  const current = Math.max(start, Math.min(Number(audio.currentTime) || 0, end || duration));
+  const current = Math.max(start, Math.min(Number(activePlaybackMedia().currentTime) || 0, end || duration));
   const span = Math.max(0, end - start);
   const seek = $("#installedVideoSeek");
   seek.value = span > 0 ? String(Math.round((current - start) / span * 1000)) : "0";
@@ -7974,7 +7968,8 @@ function syncInstalledVideoProgress() {
 }
 
 function syncInstalledVideoTransport() {
-  const playing = !audio.paused && !audio.ended;
+  const media = activePlaybackMedia();
+  const playing = !media.paused && !media.ended;
   const toggleButton = $("#installedVideoToggle");
   toggleButton.innerHTML = playing ? playbackPauseIcon : playbackPlayIcon;
   toggleButton.setAttribute("aria-label", playing ? "Pause" : "Play");
@@ -7995,7 +7990,7 @@ function hideInstalledVideoControls() {
   const keyboardFocusedControl = dialog.querySelector(
     ".installed-video-return:focus-visible, .installed-video-window-actions :focus-visible, #installedVideoControls :focus-visible",
   );
-  if (audio.paused || keyboardFocusedControl) return;
+  if (activePlaybackMedia().paused || keyboardFocusedControl) return;
   dialog.classList.remove("video-controls-visible");
 }
 
@@ -8003,9 +7998,36 @@ function showInstalledVideoControls({ keepVisible = false } = {}) {
   if (installedVideoControlsTimer) clearTimeout(installedVideoControlsTimer);
   installedVideoControlsTimer = null;
   $("#installedVideoDialog").classList.add("video-controls-visible");
-  if (!keepVisible && !audio.paused) {
+  if (!keepVisible && !activePlaybackMedia().paused) {
     installedVideoControlsTimer = setTimeout(hideInstalledVideoControls, INSTALLED_VIDEO_CONTROLS_TIMEOUT_MS);
   }
+}
+
+function cancelInstalledVideoSynchronization(session = installedVideoSession) {
+  if (!session) return;
+  session.syncGeneration = (Number(session.syncGeneration) || 0) + 1;
+  session.syncInFlight = false;
+}
+
+function completeInstalledVideoSynchronization(session) {
+  if (installedVideoSession !== session || session.closing) return;
+  session.syncInFlight = false;
+  const track = installedVideoTrack();
+  if (!track || session.trackID !== currentID) return;
+  installedVideoPlayer.muted = true;
+  installedVideoPlayer.volume = 0;
+  installedVideoPlayer.playbackRate = Number(audio.playbackRate) || 1;
+  const audioPlaying = !audio.paused && !audio.ended;
+  if (audioPlaying) {
+    void installedVideoPlayer.play().catch((error) => {
+      showInstalledVideoControls({ keepVisible: true });
+      showNotice(error?.message ? `Could not play this video: ${error.message}` : "Resonance could not play this video.");
+    });
+  } else {
+    installedVideoPlayer.pause();
+  }
+  if (!session.firstFrameReady) observeInstalledVideoFirstFrame(session.trackID);
+  syncInstalledVideoTransport();
 }
 
 function synchronizeInstalledVideoWithAudio({ forceSeek = false } = {}) {
@@ -8013,31 +8035,57 @@ function synchronizeInstalledVideoWithAudio({ forceSeek = false } = {}) {
   const track = installedVideoTrack();
   if (!session?.metadataReady || session.closing || !track) return;
   if (session.trackID !== currentID) return;
-  const audioTime = clippedPlaybackPosition(audio.currentTime, track);
-  if (forceSeek
-      || Math.abs((Number(installedVideoPlayer.currentTime) || 0) - audioTime)
-        > INSTALLED_VIDEO_SYNC_TOLERANCE_SECONDS) {
-    installedVideoPlayer.currentTime = audioTime;
-  }
   installedVideoPlayer.muted = true;
   installedVideoPlayer.volume = 0;
-  installedVideoPlayer.playbackRate = Number(audio.playbackRate) || 1;
-  if (audio.paused || audio.ended) {
+  const audioRate = Number(audio.playbackRate) || 1;
+  const audioTime = clippedPlaybackPosition(audio.currentTime, track);
+  const videoTime = Number(installedVideoPlayer.currentTime) || 0;
+  const driftSeconds = videoTime - audioTime;
+  const videoRate = installedVideoCatchUpRate({
+    audioRate,
+    audioPosition: audioTime,
+    videoPosition: videoTime,
+    enabled: !forceSeek && !audio.paused && !audio.ended,
+  });
+  if (Math.abs(installedVideoPlayer.playbackRate - videoRate) > 0.001) {
+    installedVideoPlayer.playbackRate = videoRate;
+  }
+  const decision = installedVideoSyncDecision({
+    audioPlaying: !audio.paused && !audio.ended,
+    videoPlaying: !installedVideoPlayer.paused && !installedVideoPlayer.ended,
+    driftSeconds,
+    forceSeek,
+    syncInFlight: session.syncInFlight,
+  });
+  if (decision === "none") return;
+  if (decision === "pause") {
     installedVideoPlayer.pause();
-  } else if (installedVideoPlayer.paused || installedVideoPlayer.ended) {
+    syncInstalledVideoTransport();
+    return;
+  }
+  if (decision === "play") {
     void installedVideoPlayer.play().catch((error) => {
       showInstalledVideoControls({ keepVisible: true });
       showNotice(error?.message ? `Could not play this video: ${error.message}` : "Resonance could not play this video.");
     });
+    return;
   }
-  syncInstalledVideoTransport();
+  if (session.syncInFlight) cancelInstalledVideoSynchronization(session);
+  session.syncGeneration = (Number(session.syncGeneration) || 0) + 1;
+  session.syncInFlight = true;
+  installedVideoPlayer.pause();
+  installedVideoPlayer.currentTime = audioTime;
+}
+
+function startInstalledVideoPlayback() {
+  synchronizeInstalledVideoWithAudio();
 }
 
 function updateInstalledVideoTime() {
   const session = installedVideoSession;
   const track = installedVideoTrack();
   if (!session || !track || session.closing) return;
-  synchronizeInstalledVideoWithAudio();
+  syncInstalledVideoProgress();
 }
 
 function installedVideoPlaybackStarted() {
@@ -8051,6 +8099,7 @@ function installedVideoPlaybackPlaying() {
   if (!session || session.closing) return;
   installedVideoPlayer.muted = true;
   installedVideoPlayer.volume = 0;
+  if (!session.firstFrameReady) observeInstalledVideoFirstFrame(session.trackID);
   syncInstalledVideoTransport();
   updateChrome();
 }
@@ -8061,11 +8110,51 @@ function installedVideoPlaybackPaused() {
   updateChrome();
 }
 
-function configureInstalledVideoSource(track, startTime) {
+function handleInstalledVideoEnded() {
+  syncInstalledVideoTransport();
+}
+
+function cancelInstalledVideoFirstFrameCallback(session = installedVideoSession) {
+  if (!session || session.videoFrameCallbackID == null) return;
+  if (typeof installedVideoPlayer.cancelVideoFrameCallback === "function") {
+    installedVideoPlayer.cancelVideoFrameCallback(session.videoFrameCallbackID);
+  }
+  session.videoFrameCallbackID = null;
+}
+
+function revealInstalledVideoFirstFrame(trackID) {
+  const session = installedVideoSession;
+  if (!session || session.trackID !== trackID || session.closing || session.firstFrameReady) return;
+  session.firstFrameReady = true;
+  cancelInstalledVideoFirstFrameCallback(session);
+  const dialog = $("#installedVideoDialog");
+  dialog.classList.add("video-revealed", "video-frame-ready");
+  showInstalledVideoControls();
+}
+
+function observeInstalledVideoFirstFrame(trackID) {
+  const session = installedVideoSession;
+  if (!session || session.trackID !== trackID || installedVideoPlayer.seeking) return;
+  cancelInstalledVideoFirstFrameCallback(session);
+  if (typeof installedVideoPlayer.requestVideoFrameCallback === "function") {
+    session.videoFrameCallbackID = installedVideoPlayer.requestVideoFrameCallback(() => {
+      if (installedVideoSession !== session) return;
+      session.videoFrameCallbackID = null;
+      revealInstalledVideoFirstFrame(trackID);
+    });
+  }
+}
+
+function configureInstalledVideoSource(track) {
   const dialog = $("#installedVideoDialog");
   if (!installedVideoSession || !isInstalledVideoTrack(track)) return;
+  dialog.classList.remove("video-frame-ready", "video-artwork-restored");
+  dialog.classList.add("video-revealed");
   installedVideoSession.trackID = track.id;
   installedVideoSession.metadataReady = false;
+  installedVideoSession.firstFrameReady = false;
+  cancelInstalledVideoSynchronization(installedVideoSession);
+  cancelInstalledVideoFirstFrameCallback(installedVideoSession);
   $("#installedVideoArtwork").innerHTML = track.artwork
     ? squareArtworkImageMarkup(track.artwork)
     : '<span aria-hidden="true">♪</span>';
@@ -8087,14 +8176,21 @@ function configureInstalledVideoSource(track, startTime) {
       void persist();
       renderQueue();
     }
-    const { start, end, duration } = installedVideoBounds(track);
-    const requested = Number.isFinite(Number(startTime)) ? Number(startTime) : start;
-    installedVideoPlayer.currentTime = Math.max(start, Math.min(requested, Math.max((end || duration) - 0.05, start)));
     installedVideoSession.metadataReady = true;
     syncInstalledVideoTransport();
-    if (dialog.classList.contains("video-revealed")) synchronizeInstalledVideoWithAudio({ forceSeek: true });
+    synchronizeInstalledVideoWithAudio({ forceSeek: true });
+  };
+  installedVideoPlayer.onloadeddata = () => {
+    if (installedVideoSession?.trackID !== track.id) return;
+    if (typeof installedVideoPlayer.requestVideoFrameCallback === "function") {
+      observeInstalledVideoFirstFrame(track.id);
+    } else if (!installedVideoPlayer.seeking) {
+      revealInstalledVideoFirstFrame(track.id);
+    }
   };
   installedVideoPlayer.onerror = () => {
+    dialog.classList.remove("video-frame-ready");
+    dialog.classList.add("video-revealed", "video-artwork-restored");
     showInstalledVideoControls({ keepVisible: true });
     showNotice("Resonance could not play this installed video.");
   };
@@ -8102,8 +8198,21 @@ function configureInstalledVideoSource(track, startTime) {
   installedVideoPlayer.onplay = installedVideoPlaybackStarted;
   installedVideoPlayer.onplaying = installedVideoPlaybackPlaying;
   installedVideoPlayer.onpause = installedVideoPlaybackPaused;
-  installedVideoPlayer.onseeked = () => synchronizeInstalledVideoWithAudio();
-  installedVideoPlayer.onended = () => synchronizeInstalledVideoWithAudio({ forceSeek: true });
+  installedVideoPlayer.onseeked = () => {
+    const session = installedVideoSession;
+    if (!session || session.trackID !== track.id) return;
+    if (session.syncInFlight) {
+      completeInstalledVideoSynchronization(session);
+    }
+    if (!session.firstFrameReady) {
+      if (typeof installedVideoPlayer.requestVideoFrameCallback === "function") {
+        observeInstalledVideoFirstFrame(session.trackID);
+      } else if (installedVideoPlayer.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        revealInstalledVideoFirstFrame(session.trackID);
+      }
+    }
+  };
+  installedVideoPlayer.onended = handleInstalledVideoEnded;
   installedVideoPlayer.load();
 }
 
@@ -8112,9 +8221,6 @@ function openInstalledVideo(track = currentTrack()) {
   const dialog = $("#installedVideoDialog");
   if (dialog.open) return;
 
-  const startTime = track.id === currentID
-    ? Math.max(0, Number(audio.currentTime) || Number(state.position) || 0)
-    : 0;
   const sourceRect = $("#fullPlayerArtwork").getBoundingClientRect();
   if (installedVideoTransitionTimer) clearTimeout(installedVideoTransitionTimer);
   cancelInstalledVideoGeometryAnimation();
@@ -8129,6 +8235,7 @@ function openInstalledVideo(track = currentTrack()) {
   dialog.classList.remove(
     "video-expanded",
     "video-revealed",
+    "video-frame-ready",
     "video-closing",
     "video-artwork-restored",
     "video-paused",
@@ -8141,44 +8248,62 @@ function openInstalledVideo(track = currentTrack()) {
   installedVideoSession = {
     trackID: track.id,
     metadataReady: false,
+    firstFrameReady: false,
+    syncGeneration: 0,
+    syncInFlight: false,
+    videoFrameCallbackID: null,
     closing: false,
     mini: false,
     geometry,
   };
-  configureInstalledVideoSource(track, startTime);
+  configureInstalledVideoSource(track);
   applyInstalledVideoStageGeometry(geometry.source);
   dialog.classList.add("video-active", "video-from-art");
   $("#nowPlayingDialog").classList.add("video-active");
   void $(".installed-video-stage").offsetWidth;
-  installedVideoTransitionTimer = setTimeout(() => {
-    installedVideoTransitionTimer = null;
-    if (!installedVideoSession || installedVideoSession.closing) return;
-    dialog.classList.remove("video-from-art");
-    dialog.classList.add("video-expanded", "video-revealed");
-    synchronizeInstalledVideoWithAudio({ forceSeek: true });
-    const session = installedVideoSession;
-    animateInstalledVideoStage(geometry.source, geometry.target, () => {
-      if (installedVideoSession !== session || session.closing) return;
-      showInstalledVideoControls();
-      $("#closeInstalledVideo").focus();
-    });
-  }, installedVideoAnimationDuration(INSTALLED_VIDEO_LEAD_IN_MS));
+  dialog.classList.remove("video-from-art");
+  dialog.classList.add("video-expanded", "video-revealed");
+  showInstalledVideoControls();
+  startInstalledVideoPlayback();
+  const session = installedVideoSession;
+  animateInstalledVideoStage(geometry.source, geometry.target, () => {
+    if (installedVideoSession !== session || session.closing) return;
+    $("#closeInstalledVideo").focus();
+  });
 }
 
-function playInstalledVideoTrack(track, { recordHistory = true } = {}) {
+function playInstalledVideoTrack(track, {
+  recordHistory = true,
+  queue = null,
+  playlistID = activePlaybackPlaylistID,
+} = {}) {
   if (!isInstalledVideoTrack(track) || !installedVideoSession) return;
-  play(track, null, { recordHistory });
-  configureInstalledVideoSource(track, playbackRangeForTrack(state, track)?.startSeconds ?? 0);
+  cancelInstalledVideoSynchronization(installedVideoSession);
+  installedVideoPlayer.muted = true;
+  installedVideoPlayer.pause();
+  play(track, queue, {
+    recordHistory,
+    playlistID,
+    installedVideoTransition: true,
+  });
+  configureInstalledVideoSource(track);
   showInstalledVideoControls();
 }
 
-function selectInstalledVideoTarget(track, { recordHistory = true } = {}) {
+function selectInstalledVideoTarget(track, {
+  recordHistory = true,
+  queue = null,
+  playlistID = activePlaybackPlaylistID,
+} = {}) {
   if (!track) return;
   if (isInstalledVideoTrack(track)) {
-    playInstalledVideoTrack(track, { recordHistory });
+    playInstalledVideoTrack(track, { recordHistory, queue, playlistID });
     return;
   }
-  play(track, null, { recordHistory });
+  play(track, queue, { recordHistory, playlistID, installedVideoTransition: true });
+  cancelInstalledVideoSynchronization(installedVideoSession);
+  installedVideoPlayer.muted = true;
+  installedVideoPlayer.pause();
   closeInstalledVideo();
 }
 
@@ -8196,8 +8321,8 @@ function previousInstalledVideo() {
   const { start } = installedVideoBounds();
   if (audio.currentTime > start + 3) {
     audio.currentTime = start;
-    installedVideoPlayer.currentTime = start;
     state.position = start;
+    synchronizeInstalledVideoWithAudio({ forceSeek: true });
     if (listenAlongSession?.role === "host" && !listenAlongApplyInFlight) void publishListenAlongSnapshot();
     syncInstalledVideoProgress();
     return;
@@ -8210,8 +8335,10 @@ function previousInstalledVideo() {
 }
 
 function toggleInstalledVideoPlayback() {
+  if (listenAlongIsGuest()) return;
+  if (!installedVideoSession?.metadataReady) return;
   toggle();
-  synchronizeInstalledVideoWithAudio({ forceSeek: true });
+  synchronizeInstalledVideoWithAudio();
 }
 
 function minimizeInstalledVideo() {
@@ -8242,8 +8369,8 @@ function minimizeInstalledVideo() {
   finishNowPlayingClose();
   dialog.show();
   clearInstalledVideoStageGeometry();
-  synchronizeInstalledVideoWithAudio({ forceSeek: true });
   showInstalledVideoControls();
+  synchronizeInstalledVideoWithAudio();
   requestAnimationFrame(() => $("#restoreInstalledVideo").focus());
 }
 
@@ -8259,15 +8386,17 @@ function restoreInstalledVideo() {
   $("#nowPlayingDialog").classList.add("video-active");
   clearInstalledVideoStageGeometry();
   dialog.showModal();
-  synchronizeInstalledVideoWithAudio({ forceSeek: true });
   showInstalledVideoControls();
+  synchronizeInstalledVideoWithAudio();
   requestAnimationFrame(() => $("#minimizeInstalledVideo").focus());
 }
 
 function finishInstalledVideoClose({ session }) {
   const dialog = $("#installedVideoDialog");
   cancelInstalledVideoGeometryAnimation();
+  cancelInstalledVideoSynchronization(session);
   installedVideoPlayer.onloadedmetadata = null;
+  installedVideoPlayer.onloadeddata = null;
   installedVideoPlayer.onerror = null;
   installedVideoPlayer.ontimeupdate = null;
   installedVideoPlayer.onplay = null;
@@ -8275,6 +8404,7 @@ function finishInstalledVideoClose({ session }) {
   installedVideoPlayer.onpause = null;
   installedVideoPlayer.onseeked = null;
   installedVideoPlayer.onended = null;
+  cancelInstalledVideoFirstFrameCallback(session);
   installedVideoPlayer.removeAttribute("src");
   installedVideoPlayer.load();
   installedVideoPlayer.muted = true;
@@ -8292,6 +8422,7 @@ function finishInstalledVideoClose({ session }) {
     "video-from-art",
     "video-expanded",
     "video-revealed",
+    "video-frame-ready",
     "video-closing",
     "video-artwork-restored",
     "video-controls-visible",
@@ -8310,15 +8441,16 @@ function closeInstalledVideo() {
   const dialog = $("#installedVideoDialog");
   const session = installedVideoSession;
   if (!dialog.open || !session || session.closing) return;
+  cancelInstalledVideoSynchronization(session);
+  installedVideoPlayer.muted = true;
+  installedVideoPlayer.pause();
   if (session.mini) {
     session.closing = true;
-    installedVideoPlayer.pause();
     finishInstalledVideoClose({ session });
     return;
   }
   session.closing = true;
 
-  installedVideoPlayer.pause();
   if (installedVideoTransitionTimer) {
     clearTimeout(installedVideoTransitionTimer);
     installedVideoTransitionTimer = null;
@@ -9177,28 +9309,31 @@ $("#installedVideoVolume").oninput = (event) => {
   showInstalledVideoControls();
 };
 $("#speed").onchange = (event) => {
-  audio.playbackRate = Number(event.target.value);
-  crossfadeAudio.playbackRate = audio.playbackRate;
-  installedVideoPlayer.playbackRate = audio.playbackRate;
-  state.playbackRate = audio.playbackRate;
-  setCustomSelectValue($("#fullPlayerSpeed"), audio.playbackRate);
+  const rate = Number(event.target.value);
+  audio.playbackRate = rate;
+  crossfadeAudio.playbackRate = rate;
+  installedVideoPlayer.playbackRate = rate;
+  state.playbackRate = rate;
+  setCustomSelectValue($("#fullPlayerSpeed"), rate);
   persistInBackground();
 };
 $("#fullPlayerSpeed").onchange = (event) => {
-  audio.playbackRate = Number(event.target.value);
-  crossfadeAudio.playbackRate = audio.playbackRate;
-  installedVideoPlayer.playbackRate = audio.playbackRate;
-  state.playbackRate = audio.playbackRate;
-  setCustomSelectValue($("#speed"), audio.playbackRate);
+  const rate = Number(event.target.value);
+  audio.playbackRate = rate;
+  crossfadeAudio.playbackRate = rate;
+  installedVideoPlayer.playbackRate = rate;
+  state.playbackRate = rate;
+  setCustomSelectValue($("#speed"), rate);
   persistInBackground();
 };
 $("#seek").oninput = (event) => {
   if (listenAlongIsGuest()) return;
   cancelCrossfade();
   const duration = currentPlaybackDuration();
-  if (duration) audio.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
-  event.target.value = duration ? String(Math.round(audio.currentTime / duration * 1000)) : "0";
-  event.target.setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(duration)}`);
+  const media = activePlaybackMedia();
+  if (duration) media.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
+  event.target.value = duration ? String(Math.round(media.currentTime / duration * 1000)) : "0";
+  event.target.setAttribute("aria-valuetext", `${formatTime(media.currentTime)} of ${formatTime(duration)}`);
   paintRange(event.target);
   if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
 };
@@ -9206,11 +9341,12 @@ $("#fullPlayerSeek").oninput = (event) => {
   if (listenAlongIsGuest()) return;
   cancelCrossfade();
   const duration = currentPlaybackDuration();
-  if (duration) audio.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
-  event.target.value = duration ? String(Math.round(audio.currentTime / duration * 1000)) : "0";
+  const media = activePlaybackMedia();
+  if (duration) media.currentTime = clippedPlaybackPosition(duration * Number(event.target.value) / 1000);
+  event.target.value = duration ? String(Math.round(media.currentTime / duration * 1000)) : "0";
   updateFullPlayerProgress();
   $("#seek").value = event.target.value;
-  $("#seek").setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} of ${formatTime(duration)}`);
+  $("#seek").setAttribute("aria-valuetext", `${formatTime(media.currentTime)} of ${formatTime(duration)}`);
   paintRange($("#seek"));
   if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
 };
@@ -9233,7 +9369,7 @@ function bindPrimaryAudioEvents(media) {
     if (media !== audio) return;
     beginListeningSession();
     startPlaybackProgressAnimation();
-    synchronizeInstalledVideoWithAudio({ forceSeek: true });
+    synchronizeInstalledVideoWithAudio();
     updateChrome();
     renderQueue();
     if (listenAlongSession?.role === "host" && !listenAlongApplyInFlight) void publishListenAlongSnapshot();
@@ -9245,7 +9381,7 @@ function bindPrimaryAudioEvents(media) {
     updatePlaybackProgressUI();
     updateListeningSession();
     scheduleListeningHistorySync();
-    synchronizeInstalledVideoWithAudio({ forceSeek: true });
+    synchronizeInstalledVideoWithAudio();
     updateChrome();
     if (playbackProgressTimer) {
       clearTimeout(playbackProgressTimer);
@@ -9364,7 +9500,7 @@ api.onPrepareToClose(async () => {
   await leaveListenAlong({ silent: true });
   releaseActiveServerStream({ stopPlayback: true });
   updateListeningSession();
-  state.position = Number(audio.currentTime) || state.position || 0;
+  state.position = Number(activePlaybackMedia().currentTime) || state.position || 0;
   try {
     await persist({ refreshSidebar: false });
     await Promise.race([

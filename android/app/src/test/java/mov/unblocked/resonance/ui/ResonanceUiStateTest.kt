@@ -91,8 +91,8 @@ class ResonanceUiStateTest {
     @Test
     fun transferPopupOnlyAppearsForDownloadsAndUploads() {
         assertFalse(shouldShowTransferPopup(ResonanceUiState(isRefreshingServer = true, isSyncingPlaylists = true)))
-        assertTrue(shouldShowTransferPopup(ResonanceUiState(isDownloading = true)))
-        assertTrue(shouldShowTransferPopup(ResonanceUiState(
+        assertFalse(shouldShowTransferPopup(ResonanceUiState(isDownloading = true)))
+        assertFalse(shouldShowTransferPopup(ResonanceUiState(
             isDownloading = true,
             downloadBytesTransferred = 0L,
             downloadTotalBytes = 10_000L,
@@ -102,7 +102,7 @@ class ResonanceUiStateTest {
             downloadBytesTransferred = 1L,
             downloadTotalBytes = 10_000L,
         )))
-        assertTrue(shouldShowTransferPopup(ResonanceUiState(
+        assertFalse(shouldShowTransferPopup(ResonanceUiState(
             isDownloading = true,
             downloadProgress = 1f,
             downloadBytesTransferred = 0L,
@@ -186,5 +186,20 @@ class ResonanceUiStateTest {
         assertEquals(stream, state.currentTrack)
         assertEquals("/api/v1/songs/song-1/artwork", state.transientArtworkURL)
         assertFalse(state.copy(currentTrackId = null).isTransientPlayback)
+    }
+
+    @Test
+    fun installedVideoPolicyRecognizesOnlyLocalVideoExtensions() {
+        assertTrue(MobileInstalledVideoPolicy.isVideo("downloaded/clip.mp4"))
+        assertTrue(MobileInstalledVideoPolicy.isVideo("downloaded/CLIP.MOV"))
+        assertFalse(MobileInstalledVideoPolicy.isVideo("downloaded/song.m4a"))
+        assertTrue(MobileInstalledVideoPolicy.audioRemainsAudibleOwner)
+        assertTrue(MobileInstalledVideoPolicy.usesDedicatedMutedCompanionPlayer)
+        assertFalse(MobileInstalledVideoPolicy.allowsSteadyStateReseeking)
+        assertEquals(750L, MobileInstalledVideoPolicy.playbackDiscontinuityThresholdMs)
+        assertEquals(250L, MobileInstalledVideoPolicy.synchronizationPollIntervalMs)
+        assertTrue(MobileInstalledVideoPolicy.catchUpRate(1f, 10_000L, 9_500L) > 1f)
+        assertTrue(MobileInstalledVideoPolicy.catchUpRate(1f, 10_000L, 10_500L) < 1f)
+        assertEquals(1.5f, MobileInstalledVideoPolicy.catchUpRate(1.5f, 10_000L, 10_020L))
     }
 }

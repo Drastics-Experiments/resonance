@@ -17,6 +17,8 @@ import {
   formatHistoryWindowLabel,
   formatTime,
   isInstalledVideoTrack,
+  installedVideoCatchUpRate,
+  installedVideoSyncDecision,
   listeningHistoryEntryQualifiesAsPlay,
   localImportCandidateCanAutoSelect,
   localImportOperationFingerprint,
@@ -140,6 +142,61 @@ test("migrates the legacy production server without losing saved profile state",
   );
 });
 
+test("keeps audio authoritative without steady-state installed-video reseeking", () => {
+  assert.equal(installedVideoCatchUpRate({
+    audioRate: 1.5,
+    audioPosition: 10,
+    videoPosition: 10.02,
+  }), 1.5);
+  assert.ok(installedVideoCatchUpRate({
+    audioRate: 1,
+    audioPosition: 10,
+    videoPosition: 9.5,
+  }) > 1);
+  assert.ok(installedVideoCatchUpRate({
+    audioRate: 1,
+    audioPosition: 10,
+    videoPosition: 10.5,
+  }) < 1);
+  assert.equal(installedVideoCatchUpRate({
+    audioRate: 1,
+    audioPosition: 10,
+    videoPosition: 5,
+  }), 1.2);
+  assert.equal(installedVideoSyncDecision({ audioPlaying: true, videoPlaying: false }), "play");
+  assert.equal(installedVideoSyncDecision({
+    audioPlaying: true,
+    videoPlaying: true,
+    driftSeconds: 0.4,
+  }), "none");
+  assert.equal(installedVideoSyncDecision({
+    audioPlaying: true,
+    videoPlaying: true,
+    driftSeconds: 5,
+  }), "none");
+  assert.equal(installedVideoSyncDecision({
+    audioPlaying: true,
+    videoPlaying: true,
+    driftSeconds: 0.01,
+  }), "none");
+  assert.equal(installedVideoSyncDecision({
+    audioPlaying: false,
+    videoPlaying: true,
+    driftSeconds: 0.01,
+  }), "pause");
+  assert.equal(installedVideoSyncDecision({
+    audioPlaying: true,
+    videoPlaying: true,
+    driftSeconds: 0.01,
+    forceSeek: true,
+  }), "seek");
+  assert.equal(installedVideoSyncDecision({
+    audioPlaying: true,
+    videoPlaying: false,
+    syncInFlight: true,
+  }), "none");
+});
+
 test("uses a custom fullscreen video player with queue, repeat, controls, and shared volume", () => {
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.mp4", fileUrl: "file:///C:/Music/clip.mp4" }), true);
   assert.equal(isInstalledVideoTrack({ filePath: "C:\\Music\\clip.MOV", fileUrl: "file:///C:/Music/clip.MOV" }), true);
@@ -150,6 +207,30 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const htmlSource = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
+  const firstFrameObserver = appSource.slice(
+    appSource.indexOf("function observeInstalledVideoFirstFrame"),
+    appSource.indexOf("function configureInstalledVideoSource"),
+  );
+  const videoSynchronizer = appSource.slice(
+    appSource.indexOf("function synchronizeInstalledVideoWithAudio"),
+    appSource.indexOf("function startInstalledVideoPlayback"),
+  );
+  const synchronizationCompleter = appSource.slice(
+    appSource.indexOf("function completeInstalledVideoSynchronization"),
+    appSource.indexOf("function synchronizeInstalledVideoWithAudio"),
+  );
+  const primaryAudioTimeUpdate = appSource.slice(
+    appSource.indexOf("media.ontimeupdate = () =>"),
+    appSource.indexOf("media.onplay = () =>"),
+  );
+  const openVideo = appSource.slice(
+    appSource.indexOf("function openInstalledVideo"),
+    appSource.indexOf("function playInstalledVideoTrack"),
+  );
+  const closeVideo = appSource.slice(
+    appSource.indexOf("function closeInstalledVideo"),
+    appSource.indexOf("function renderFullPlayer"),
+  );
   assert.doesNotMatch(appSource, /ON DEVICE|fullPlayerMediaBadge/);
   assert.match(appSource, /data-library-filter="video"[^>]*>Video<\/button>/);
   assert.doesNotMatch(htmlSource, /VIDEO • ON DEVICE|fullPlayerMediaBadge/);
@@ -158,7 +239,7 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(appSource, /const videoAvailable = isInstalledVideoTrack\(track\)[\s\S]+classList\.toggle\("video-available", videoAvailable\)[\s\S]+videoLaunch\.hidden = !videoAvailable/);
   assert.match(appSource, /#fullPlayerVideoLaunch"\)\.onclick = \(\) => \{[\s\S]+openInstalledVideo\(track\)/);
   assert.match(styleSource, /\.full-player-artwork\.video-available:hover \.full-player-video-launch[\s\S]+opacity: 1/);
-  assert.match(htmlSource, /id="installedVideoPlayer"[^>]*\smuted(?:\s|>)/);
+  assert.match(htmlSource, /id="installedVideoPlayer"[^>]*preload="auto"[^>]*\smuted(?:\s|>)/);
   assert.doesNotMatch(htmlSource, /id="installedVideoPlayer"[^>]*\scontrols(?:\s|>|=)/);
   assert.match(htmlSource, /id="installedVideoControls"[\s\S]+id="installedVideoSeek"[\s\S]+id="installedVideoPrevious"[\s\S]+id="installedVideoToggle"[\s\S]+id="installedVideoNext"[\s\S]+id="installedVideoRepeat"[\s\S]+id="installedVideoVolume"/);
   assert.match(htmlSource, /id="minimizeInstalledVideo"[\s\S]+id="restoreInstalledVideo"[\s\S]+id="dismissMiniVideo"/);
@@ -167,24 +248,37 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(appSource, /function hasBlockingDialog\(\)[\s\S]+#installedVideoDialog\.video-mini/);
   assert.match(styleSource, /\.installed-video-dialog\.video-mini\s*\{[\s\S]+inset: auto 18px 101px auto[\s\S]+width: min\(390px/);
   assert.match(appSource, /function setInstalledVideoSourceGeometry\(sourceRect, targetRect\)[\s\S]+--video-source-translate-x[\s\S]+--video-source-scale-x[\s\S]+--video-source-radius-x[\s\S]+--video-source-border-color[\s\S]+--video-source-shadow/);
-  assert.match(appSource, /INSTALLED_VIDEO_LEAD_IN_MS = 35[\s\S]+INSTALLED_VIDEO_TRANSITION_MS = 400[\s\S]+INSTALLED_VIDEO_REVEAL_MS = 140[\s\S]+INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS = 190[\s\S]+INSTALLED_VIDEO_CHROME_RESTORE_LEAD_MS = 120/);
+  assert.match(appSource, /INSTALLED_VIDEO_TRANSITION_MS = 400[\s\S]+INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS = 190[\s\S]+INSTALLED_VIDEO_CHROME_RESTORE_LEAD_MS = 120/);
+  assert.doesNotMatch(appSource, /INSTALLED_VIDEO_REVEAL_MS/);
+  assert.doesNotMatch(appSource, /INSTALLED_VIDEO_LEAD_IN_MS/);
   assert.match(appSource, /function openInstalledVideo\([\s\S]+video-from-art[\s\S]+video-expanded[\s\S]+video-revealed/);
-  assert.doesNotMatch(appSource, /function openInstalledVideo\([^]*?if \(!audio\.paused\) audio\.pause\(\)/);
-  assert.match(appSource, /function synchronizeInstalledVideoWithAudio\([^)]*\)[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0[\s\S]+audio\.paused[\s\S]+installedVideoPlayer\.play/);
-  assert.match(appSource, /async function requestPlayback\(\)[\s\S]+await audio\.play\(\)[\s\S]+synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\)/);
-  assert.match(appSource, /function installedVideoPlaybackPlaying\(\)[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0/);
-  assert.doesNotMatch(appSource, /videoOwnsPlayback|waitingForAudioHandoff|handOffInstalledVideoToAudio/);
+  assert.match(appSource, /function activePlaybackMedia\(\) \{\s+return audio;\s+\}/);
+  assert.doesNotMatch(openVideo, /audio\.pause\(\)|audio\.muted\s*=/);
+  assert.match(videoSynchronizer, /installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0/);
+  assert.match(videoSynchronizer, /installedVideoSyncDecision\([\s\S]+installedVideoPlayer\.currentTime = audioTime/);
+  assert.doesNotMatch(videoSynchronizer, /audio\.pause\(\)|audio\.muted\s*=|audio\.currentTime\s*=/);
+  assert.doesNotMatch(synchronizationCompleter, /synchronizeInstalledVideoWithAudio/);
+  assert.match(primaryAudioTimeUpdate, /synchronizeInstalledVideoWithAudio\(\)/);
+  assert.doesNotMatch(primaryAudioTimeUpdate, /forceSeek/);
+  assert.doesNotMatch(appSource, /installedVideoOwnsPlayback|videoOwnsPlayback|handOffInstalledVideoToAudio|audioHandoffPending/);
+  assert.match(appSource, /async function requestPlayback\(\)[\s\S]+const media = activePlaybackMedia\(\)[\s\S]+await media\.play\(\)/);
   assert.match(appSource, /function animateInstalledVideoStage\(from, to, onFinish\)[\s\S]+classList\.add\("video-geometry-animating"\)[\s\S]+applyInstalledVideoStageGeometry\(from\)[\s\S]+\.animate\(\[from, to\],[\s\S]+animation\.cancel\(\)[\s\S]+clearInstalledVideoStageGeometry\(\)[\s\S]+classList\.remove\("video-geometry-animating"\)/);
-  assert.match(appSource, /dialog\.classList\.add\("video-expanded", "video-revealed"\);[\s\S]+synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\);[\s\S]+animateInstalledVideoStage\(geometry\.source, geometry\.target/);
+  assert.match(appSource, /function revealInstalledVideoFirstFrame\([\s\S]+firstFrameReady = true[\s\S]+classList\.add\("video-revealed", "video-frame-ready"\)/);
+  assert.match(appSource, /installedVideoPlayer\.onloadeddata = \(\) => \{[^]*?requestVideoFrameCallback[^]*?observeInstalledVideoFirstFrame\(track\.id\)/);
+  assert.match(firstFrameObserver, /installedVideoPlayer\.seeking\) return;[^]*?requestVideoFrameCallback/);
+  assert.match(appSource, /installedVideoPlayer\.onseeked = \(\) => \{[\s\S]+completeInstalledVideoSynchronization\(session[\s\S]+observeInstalledVideoFirstFrame\(session\.trackID\)/);
+  assert.match(appSource, /dialog\.classList\.add\("video-expanded", "video-revealed"\);[\s\S]+showInstalledVideoControls\(\);[\s\S]+startInstalledVideoPlayback\(\);[\s\S]+animateInstalledVideoStage\(geometry\.source, geometry\.target/);
   assert.match(appSource, /function closeInstalledVideo\([^)]*\)[\s\S]+currentGeometry = installedVideoStageGeometry\(\)[\s\S]+classList\.add\("video-revealed", "video-closing"\)[\s\S]+syncFullPlayerTitleMarquee\(\)[\s\S]+animateInstalledVideoStage\(currentGeometry, geometry\.source[\s\S]+finishInstalledVideoClose/);
+  assert.doesNotMatch(closeVideo, /audio\.pause\(\)|audio\.muted\s*=|audio\.currentTime\s*=/);
   assert.match(appSource, /installedVideoArtworkTimer = setTimeout\([\s\S]+classList\.add\("video-artwork-restored"\)[\s\S]+geometryDuration - installedVideoAnimationDuration\(INSTALLED_VIDEO_EXIT_ARTWORK_LEAD_MS\)/);
   assert.match(appSource, /function advanceInstalledVideo\(direction = 1\)[\s\S]+nextIndex\(tracks, currentID, direction\)[\s\S]+selectInstalledVideoTarget/);
-  assert.match(appSource, /installedVideoPlayer\.onseeked = \(\) => synchronizeInstalledVideoWithAudio\(\)/);
-  assert.match(appSource, /installedVideoPlayer\.onended = \(\) => synchronizeInstalledVideoWithAudio\(\{ forceSeek: true \}\)/);
+  assert.match(appSource, /installedVideoPlayer\.onended = handleInstalledVideoEnded/);
   assert.match(appSource, /function hideInstalledVideoControls\(\)[\s\S]+installed-video-return:focus-visible[\s\S]+#installedVideoControls :focus-visible[\s\S]+classList\.remove\("video-controls-visible"\)/);
   assert.match(appSource, /installedVideoStage\.onpointermove = \(\) => showInstalledVideoControls\(\)[\s\S]+installedVideoControls\.onpointerenter = \(\) => showInstalledVideoControls\(\)/);
   assert.doesNotMatch(appSource, /installedVideoControls\.onpointerenter = \(\) => showInstalledVideoControls\(\{ keepVisible: true \}\)/);
   assert.match(appSource, /function setPlaybackVolume\([\s\S]+audio\.volume = gain[\s\S]+installedVideoPlayer\.muted = true[\s\S]+installedVideoPlayer\.volume = 0[\s\S]+installedVideoVolume/);
+  assert.match(appSource, /function toggleInstalledVideoPlayback\(\)[\s\S]+toggle\(\);[\s\S]+synchronizeInstalledVideoWithAudio\(\)/);
+  assert.doesNotMatch(appSource, /function handleInstalledVideoEnded\(\) \{\s+synchronizeInstalledVideoWithAudio/);
   assert.match(styleSource, /\.full-player-dialog\.video-active \.full-player-details[\s\S]+opacity: 0/);
   assert.doesNotMatch(styleSource, /\.installed-video-dialog\.video-from-art \.installed-video-stage/);
   assert.match(styleSource, /\.installed-video-stage\s*\{[\s\S]+transform: none[\s\S]+will-change: auto[\s\S]+transition: none/);
@@ -192,6 +286,7 @@ test("uses a custom fullscreen video player with queue, repeat, controls, and sh
   assert.match(styleSource, /\.full-player-dialog\.video-active \.full-player-backdrop,[\s\S]+\.full-player-dialog\.video-active \.full-player-shade[\s\S]+visibility: hidden/);
   assert.match(styleSource, /\.installed-video-stage\s*\{[\s\S]+inset: clamp\(12px, 3\.4vw, 38px\)[\s\S]+width: auto[\s\S]+height: auto/);
   assert.match(styleSource, /\.installed-video-dialog\.video-revealed \.installed-video-stage video[\s\S]+opacity: 1/);
+  assert.match(styleSource, /video-revealed:not\(\.video-frame-ready\):not\(\.video-artwork-restored\)[\s\S]+installed-video-loading-spin/);
   assert.match(styleSource, /\.installed-video-artwork,[\s\S]+\.installed-video-stage video[\s\S]+transition: opacity 140ms ease/);
   assert.match(styleSource, /\.installed-video-dialog\.video-revealed\.video-artwork-restored \.installed-video-stage video[\s\S]+opacity: 0[\s\S]+\.installed-video-dialog\.video-revealed\.video-artwork-restored \.installed-video-artwork[\s\S]+opacity: 1/);
   assert.match(styleSource, /\.installed-video-stage video\s*\{[\s\S]*?object-fit: contain;[\s\S]*?object-position: center;/);
@@ -1361,7 +1456,7 @@ test("ports playback reliability, recovery notices, and keyboard operation into 
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   assert.match(appSource, /function activePlaybackTracks\(\)/);
   assert.match(appSource, /state\.playbackQueueIDs = \[\.\.\.activePlaybackQueueIDs\]/);
-  assert.match(appSource, /function previous\(\)[\s\S]+audio\.currentTime > start \+ 3[\s\S]+recordHistory: false/);
+  assert.match(appSource, /function previous\(\)[\s\S]+activePlaybackMedia\(\)[\s\S]+media\.currentTime > start \+ 3[\s\S]+recordHistory: false/);
   assert.match(appSource, /pendingRestorePosition[\s\S]+audio\.currentTime = clippedPlaybackPosition\(Math\.min/);
   assert.match(appSource, /audio\.volume = playbackGainForVolume\(state\.volume\)/);
   assert.match(appSource, /function showNotice\(message, kind = "error"\)/);

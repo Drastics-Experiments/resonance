@@ -2933,6 +2933,22 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .installed-video-dialog.video-revealed .installed-video-artwork {
   opacity: 0;
 }
+.installed-video-dialog.video-revealed:not(.video-frame-ready):not(.video-artwork-restored) .installed-video-stage::after {
+  content: "";
+  position: absolute;
+  z-index: 3;
+  top: 50%;
+  left: 50%;
+  width: 34px;
+  height: 34px;
+  margin: -20px 0 0 -20px;
+  border: 3px solid #ffffff40;
+  border-top-color: #fff;
+  border-radius: 50%;
+  pointer-events: none;
+  animation: installed-video-loading-spin 700ms linear infinite;
+}
+@keyframes installed-video-loading-spin { to { transform: rotate(360deg); } }
 .installed-video-dialog.video-revealed.video-artwork-restored .installed-video-stage video {
   opacity: 0;
 }
