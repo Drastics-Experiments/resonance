@@ -1,17 +1,39 @@
 import SwiftUI
 import UIKit
 
+enum MobileListenAlongCodeInputPolicy {
+    static let maximumLength = 32
+
+    static func normalized(_ value: String) -> String {
+        let filtered = value
+            .uppercased()
+            .filter { $0.isLetter || $0.isNumber || $0 == "-" }
+        return String(filtered.prefix(maximumLength))
+    }
+
+    static func isJoinable(_ value: String) -> Bool {
+        let normalized = normalized(value)
+        return normalized.count >= 5 && normalized.contains("-")
+    }
+}
+
 struct MobileListenAlongCard: View {
     @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var library: MusicLibrary
     @EnvironmentObject private var listenAlong: MobileListenAlongController
     @State private var code = ""
     @State private var didCopyCode = false
+    @State private var copyFeedbackTask: Task<Void, Never>?
+    @FocusState private var codeFieldFocused: Bool
 
     private var canStart: Bool {
         library.currentTrack != nil
             && library.listenAlongCurrentSourceURL != nil
             && !library.serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var canJoin: Bool {
+        MobileListenAlongCodeInputPolicy.isJoinable(code) && !listenAlong.isWorking
     }
 
     var body: some View {
@@ -83,17 +105,26 @@ struct MobileListenAlongCard: View {
                     .tint(palette.accent)
                     .disabled(!canStart || listenAlong.isWorking)
 
-                    TextField("Room code", text: $code)
-                        .textInputAutocapitalization(.characters)
-                        .autocorrectionDisabled()
-                        .textFieldStyle(.roundedBorder)
-                        .submitLabel(.join)
-                        .onSubmit { join() }
+                    TextField(
+                        "Room code",
+                        text: Binding(
+                            get: { code },
+                            set: { code = MobileListenAlongCodeInputPolicy.normalized($0) }
+                        )
+                    )
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .keyboardType(.asciiCapable)
+                    .textContentType(.oneTimeCode)
+                    .textFieldStyle(.roundedBorder)
+                    .submitLabel(.join)
+                    .focused($codeFieldFocused)
+                    .onSubmit(join)
 
                     Button("Join", action: join)
                         .font(.caption.weight(.semibold))
                         .buttonStyle(.bordered)
-                        .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || listenAlong.isWorking)
+                        .disabled(!canJoin)
                 }
             }
 
@@ -111,6 +142,10 @@ struct MobileListenAlongCard: View {
                 .stroke(palette.accent.opacity(0.24), lineWidth: 1)
         }
         .accessibilityElement(children: .contain)
+        .onDisappear {
+            copyFeedbackTask?.cancel()
+            copyFeedbackTask = nil
+        }
     }
 
     private var title: String {
@@ -125,23 +160,36 @@ struct MobileListenAlongCard: View {
                 : "The host controls playback for room \(room.code)."
         }
         return canStart
-            ? "Host your current source or join a friend's room."
-            : "Start with a track imported from a shareable source link."
+            ? "Start a room or enter a code to join."
+            : "Play a track with a shareable source link to start a room."
     }
 
     private func join() {
-        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        Task { await listenAlong.join(code: trimmed) }
+        let normalized = MobileListenAlongCodeInputPolicy.normalized(code)
+        guard MobileListenAlongCodeInputPolicy.isJoinable(normalized), !listenAlong.isWorking else { return }
+        code = normalized
+        Task { @MainActor in
+            await listenAlong.join(code: normalized)
+            guard listenAlong.room != nil else { return }
+            code = ""
+            codeFieldFocused = false
+        }
     }
 
     private func copyCode(_ code: String) {
         UIPasteboard.general.string = code
         didCopyCode = true
 
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
+        copyFeedbackTask?.cancel()
+        copyFeedbackTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(2))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
             didCopyCode = false
+            copyFeedbackTask = nil
         }
     }
 }

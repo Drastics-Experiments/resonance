@@ -1,12 +1,35 @@
 import AppKit
 import SwiftUI
 
+enum MacListenAlongCodeInputPolicy {
+    static let maximumLength = 32
+
+    static func normalized(_ value: String) -> String {
+        let filtered = value
+            .uppercased()
+            .filter { $0.isLetter || $0.isNumber || $0 == "-" }
+        return String(filtered.prefix(maximumLength))
+    }
+
+    static func isJoinable(_ value: String) -> Bool {
+        let normalized = normalized(value)
+        return normalized.count >= 5 && normalized.contains("-")
+    }
+}
+
 struct MacListenAlongPopover: View {
     @Environment(\.resonancePalette) private var palette
     @EnvironmentObject private var model: PlayerModel
     @State private var joinCode = ""
     @State private var isBusy = false
     @State private var didCopyCode = false
+    @State private var copyFeedbackTask: Task<Void, Never>?
+    @FocusState private var joinCodeFocused: Bool
+
+    private var canStartRoom: Bool {
+        model.currentTrack != nil
+            && !model.serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -26,58 +49,64 @@ struct MacListenAlongPopover: View {
                         await model.startListenAlongHost()
                     }
                 } label: {
-                    Label("Start as Host", systemImage: "play.circle.fill")
+                    Label("Start Room", systemImage: "play.circle.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(isBusy || model.currentTrack == nil || model.serverToken.isEmpty)
+                .disabled(isBusy || !canStartRoom)
 
                 Divider()
 
-                Text("Join a friend")
-                    .font(.system(size: 11, weight: .medium))
+                Text("Join a room")
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(palette.muted)
                 HStack(spacing: 8) {
-                    TextField("XXXX-XXXX", text: $joinCode)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit {
-                            run {
-                                await model.joinListenAlong(code: joinCode)
-                            }
-                        }
-                    Button("Join") {
-                        run {
-                            await model.joinListenAlong(code: joinCode)
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(isBusy || joinCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    TextField(
+                        "Room code",
+                        text: Binding(
+                            get: { joinCode },
+                            set: { joinCode = MacListenAlongCodeInputPolicy.normalized($0) }
+                        )
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .focused($joinCodeFocused)
+                    .onSubmit(join)
+
+                    Button("Join", action: join)
+                        .buttonStyle(.bordered)
+                        .disabled(isBusy || !MacListenAlongCodeInputPolicy.isJoinable(joinCode))
                 }
             }
 
             if let error = model.listenAlongError {
                 Text(error)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(palette.accent)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             } else if model.listenAlongRole == nil,
                       model.listenAlongStatus != "Not connected" {
                 Text(model.listenAlongStatus)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(palette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(16)
         .frame(width: 300)
         .foregroundStyle(palette.ink)
         .background(palette.raisedSurface)
+        .onDisappear {
+            copyFeedbackTask?.cancel()
+            copyFeedbackTask = nil
+        }
     }
 
     @ViewBuilder
     private func sessionBody(for role: MacListenAlongRole) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(
-                role == .host ? "You are hosting" : "Following the host",
+                role == .host ? "Hosting" : "Following host",
                 systemImage: role == .host ? "crown.fill" : "headphones"
             )
             .font(.system(size: 12, weight: .medium))
@@ -99,18 +128,18 @@ struct MacListenAlongPopover: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(palette.foregroundAccent)
-                    .help("Copy Listen Along code")
-                    .accessibilityLabel(didCopyCode ? "Listen Along code copied" : "Copy Listen Along code")
+                    .help("Copy room code")
+                    .accessibilityLabel(didCopyCode ? "Room code copied" : "Copy room code")
                     .accessibilityValue(didCopyCode ? "Copied" : code)
                 }
             }
 
             Text(model.listenAlongStatus)
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundStyle(palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Button(role == .host ? "End Session" : "Leave Session") {
+            Button(role == .host ? "End Room" : "Leave Room") {
                 run {
                     await model.leaveListenAlong()
                 }
@@ -120,12 +149,24 @@ struct MacListenAlongPopover: View {
         }
     }
 
-    private func run(_ operation: @escaping () async -> Void) {
+    private func join() {
+        let normalized = MacListenAlongCodeInputPolicy.normalized(joinCode)
+        guard MacListenAlongCodeInputPolicy.isJoinable(normalized) else { return }
+        joinCode = normalized
+        run {
+            await model.joinListenAlong(code: normalized)
+            guard model.listenAlongRole != nil else { return }
+            joinCode = ""
+            joinCodeFocused = false
+        }
+    }
+
+    private func run(_ operation: @escaping @MainActor () async -> Void) {
         guard !isBusy else { return }
         isBusy = true
-        Task {
+        Task { @MainActor in
+            defer { isBusy = false }
             await operation()
-            isBusy = false
         }
     }
 
@@ -134,9 +175,16 @@ struct MacListenAlongPopover: View {
         NSPasteboard.general.setString(code, forType: .string)
         didCopyCode = true
 
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
+        copyFeedbackTask?.cancel()
+        copyFeedbackTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(2))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
             didCopyCode = false
+            copyFeedbackTask = nil
         }
     }
 }

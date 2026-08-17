@@ -4,10 +4,9 @@ import android.graphics.BitmapFactory
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,15 +22,17 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -48,6 +49,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -60,12 +62,12 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import mov.unblocked.resonance.data.Track
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import mov.unblocked.resonance.data.AccountEmailPrivacy
 import mov.unblocked.resonance.data.ProfileImageNetworkPolicy
 import mov.unblocked.resonance.data.ProfileImagePayloadPolicy
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import mov.unblocked.resonance.data.Track
 
 @Composable
 fun LibraryScreen(
@@ -77,17 +79,19 @@ fun LibraryScreen(
 ) {
     var clipEditorOpen by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
-    val query = state.librarySearch.trim()
-    val tracks = if (query.isEmpty()) state.tracks else state.tracks.filter {
-        it.title.contains(query, true) || it.artist.contains(query, true) ||
-            it.album.contains(query, true) || it.relativePath.contains(query, true)
+    val tracks = remember(state.tracks, state.librarySearch) {
+        filteredLibraryTracks(state.tracks, state.librarySearch)
     }
+    val filteredTrackIDs = remember(tracks) { tracks.map(Track::id) }
+    val allTrackIDs = remember(state.tracks) { state.tracks.map(Track::id) }
+    val recentlyAdded = remember(state.tracks) { recentlyAddedTracks(state.tracks) }
+    val hasQuery = state.librarySearch.isNotBlank()
+
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        item {
+        item(key = "library-header") {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -112,12 +116,13 @@ fun LibraryScreen(
                 )
             }
         }
-        item {
+        item { Spacer(Modifier.height(16.dp)) }
+        item(key = "library-search") {
             OutlinedTextField(
                 value = state.librarySearch,
                 onValueChange = actions::setLibrarySearch,
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Search your music") },
+                placeholder = { Text("Search songs, artists, or albums") },
                 leadingIcon = { Icon(Icons.Default.Search, null) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
@@ -130,18 +135,22 @@ fun LibraryScreen(
                 ),
             )
         }
-        val recentlyAdded = recentlyAddedTracks(state.tracks)
-        if (query.isEmpty() && recentlyAdded.isNotEmpty()) {
-            item {
+        item { Spacer(Modifier.height(16.dp)) }
+
+        if (!hasQuery && recentlyAdded.isNotEmpty()) {
+            item(key = "recently-added") {
                 RecentlyAddedSection(
                     tracks = recentlyAdded,
+                    queueIDs = allTrackIDs,
                     state = state,
                     actions = actions,
                 )
             }
+            item { Spacer(Modifier.height(16.dp)) }
         }
+
         if (tracks.isEmpty()) {
-            item {
+            item(key = "library-empty") {
                 Column(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -155,29 +164,30 @@ fun LibraryScreen(
                     )
                     Text(if (state.tracks.isEmpty()) "No songs yet" else "No results", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        if (state.tracks.isEmpty()) "Import audio or video, or sync your music server." else "Try another search term.",
+                        if (state.tracks.isEmpty()) "Import a song or connect to your server." else "Try a different search.",
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
                     )
                 }
             }
         } else {
-            item {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("All Songs", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                        Text(
-                            tracks.size.toString(),
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
-                        )
-                    }
-                    tracks.forEachIndexed { index, track ->
-                        TrackRow(track, state, actions, number = index + 1, queue = tracks)
-                    }
+            item(key = "all-songs-header") {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("All Songs", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text(
+                        tracks.size.toString(),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                    )
                 }
+            }
+            itemsIndexed(
+                items = tracks,
+                key = { _, track -> track.id },
+            ) { index, track ->
+                TrackRow(track, state, actions, number = index + 1, queue = filteredTrackIDs)
             }
         }
         item { Spacer(Modifier.height(8.dp)) }
@@ -216,7 +226,10 @@ private fun ProfileButton(
                     bitmap = profileBitmap,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize().clearAndSetSemantics { },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape)
+                        .clearAndSetSemantics { },
                 )
             } else {
                 Text(
@@ -333,6 +346,7 @@ private val PROFILE_IMAGE_REDIRECT_STATUSES = setOf(
 @Composable
 private fun RecentlyAddedSection(
     tracks: List<Track>,
+    queueIDs: List<String>,
     state: ResonanceUiState,
     actions: ResonanceActions,
 ) {
@@ -346,7 +360,7 @@ private fun RecentlyAddedSection(
                 Column(
                     modifier = Modifier
                         .width(132.dp)
-                        .clickable { actions.playTrack(track.id, state.tracks.map(Track::id)) },
+                        .clickable { actions.playTrack(track.id, queueIDs) },
                     verticalArrangement = Arrangement.spacedBy(7.dp),
                 ) {
                     Artwork(
@@ -374,13 +388,24 @@ private fun RecentlyAddedSection(
     }
 }
 
+internal fun filteredLibraryTracks(tracks: List<Track>, rawQuery: String): List<Track> {
+    val query = rawQuery.trim()
+    if (query.isEmpty()) return tracks
+    return tracks.filter { track ->
+        track.title.contains(query, ignoreCase = true) ||
+            track.artist.contains(query, ignoreCase = true) ||
+            track.album.contains(query, ignoreCase = true) ||
+            track.relativePath.contains(query, ignoreCase = true)
+    }
+}
+
 internal fun activeSyncProfileName(state: ResonanceUiState): String =
     AccountEmailPrivacy.safeDisplayName(
         state.syncProfiles
-        .firstOrNull { it.id == state.syncProfileId }
-        ?.name
-        ?.trim()
-        ?.takeIf(String::isNotEmpty)
+            .firstOrNull { it.id == state.syncProfileId }
+            ?.name
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
             ?: "Default",
         state.accountEmail,
     )
