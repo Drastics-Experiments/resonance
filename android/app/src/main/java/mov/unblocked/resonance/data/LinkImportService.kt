@@ -88,6 +88,7 @@ data class LinkImportPlaylist(
     val artworkURL: String?,
     val sourceURL: String,
     val skippedItems: List<LinkImportSkippedItem>,
+    val truncated: Boolean = false,
 ) {
     val unavailableCount: Int get() = skippedItems.size
 }
@@ -542,7 +543,9 @@ class LinkImportService(context: Context) {
             "text/html",
         )
         val firstPage = YouTubePlaylistParser.parseHTML(html, playlistID)
-        val allItems = firstPage.items.take(MAX_YOUTUBE_PLAYLIST_ITEMS).toMutableList()
+        val initialItems = YouTubePlaylistLimitPolicy.takeInitial(firstPage.items)
+        val allItems = initialItems.items.toMutableList()
+        var truncated = initialItems.overflowed
         var title = firstPage.title
         var author = firstPage.author
         var artwork = firstPage.artworkURL
@@ -558,8 +561,8 @@ class LinkImportService(context: Context) {
             continuation != null &&
             configuration.apiKey != null &&
             configuration.clientVersion != null &&
-            allItems.size < MAX_YOUTUBE_PLAYLIST_ITEMS &&
-            continuationCount < MAX_YOUTUBE_PLAYLIST_CONTINUATIONS &&
+            allItems.size < YouTubePlaylistLimitPolicy.MAX_ITEMS &&
+            continuationCount < YouTubePlaylistLimitPolicy.MAX_CONTINUATIONS &&
             seenTokens.add(continuation)
         ) {
             currentCoroutineContext().ensureActive()
@@ -617,17 +620,14 @@ class LinkImportService(context: Context) {
             artwork = artwork ?: page.artworkURL
             unavailableCount += page.unavailableCount
             fallbackIndexOffset = page.lastPlaylistIndex
-            page.items.forEach { candidate ->
-                if (
-                    allItems.size < MAX_YOUTUBE_PLAYLIST_ITEMS &&
-                    allItems.none { it.videoID == candidate.videoID }
-                ) {
-                    allItems += candidate
-                }
-            }
+            val additions = YouTubePlaylistLimitPolicy.append(allItems, page.items)
+            allItems += additions.items
+            truncated = truncated || additions.overflowed
             continuation = page.continuation
             continuationCount += 1
         }
+
+        truncated = truncated || YouTubePlaylistLimitPolicy.hasRemainingContinuation(continuation)
 
         if (allItems.isEmpty()) throw LinkImportException(
             LinkImportStage.ResolvingMetadata,
@@ -652,6 +652,7 @@ class LinkImportService(context: Context) {
             artworkURL = artwork ?: sorted.firstOrNull()?.thumbnailURL,
             sourceURL = sourceURL,
             skippedItems = skipped,
+            truncated = truncated,
         )
         val summary = LinkImportTrack(
             title = playlist.title,
@@ -2099,8 +2100,6 @@ class LinkImportService(context: Context) {
         artworkHostSuffixes.any { suffix -> host == suffix || host.endsWith(".$suffix") }
 
     private companion object {
-        const val MAX_YOUTUBE_PLAYLIST_ITEMS = 500
-        const val MAX_YOUTUBE_PLAYLIST_CONTINUATIONS = 10
         const val MAX_PROVIDER_REDIRECTS = 5
         const val MAX_ARTWORK_REDIRECTS = 5
         const val ARTWORK_CONNECT_TIMEOUT_MS = 10_000

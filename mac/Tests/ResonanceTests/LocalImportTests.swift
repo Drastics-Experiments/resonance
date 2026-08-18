@@ -218,6 +218,7 @@ struct LocalImportTests {
         #expect(parsed.skippedItems.count == 1)
         #expect(parsed.skippedItems.first?.position == 2)
         #expect(parsed.continuation == "next-page")
+        #expect(parsed.lastPlaylistPosition == 2)
 
         let continuation: [String: Any] = [
             "onResponseReceivedActions": [[
@@ -228,10 +229,13 @@ struct LocalImportTests {
         ]
         let next = try LocalImportParser.youtubePlaylistData(
             continuation,
-            expectedPlaylistID: playlistID
+            expectedPlaylistID: playlistID,
+            positionOffset: parsed.lastPlaylistPosition
         )
         #expect(next.tracks.map(\.trackID) == [secondVideoID])
         #expect(next.tracks.first?.durationSeconds == 245)
+        #expect(next.tracks.first?.trackNumber == 3)
+        #expect(next.lastPlaylistPosition == 3)
 
         let html = "<script>ytcfg.set({\"INNERTUBE_API_KEY\":\"test-key\",\"INNERTUBE_CLIENT_VERSION\":\"2.20260801.00.00\"});</script>"
         #expect(LocalImportParser.youtubeConfigurationValue(html, key: "INNERTUBE_API_KEY") == "test-key")
@@ -241,6 +245,117 @@ struct LocalImportTests {
         #expect(throws: LocalImportError.self) {
             _ = try LocalImportURL.youtubePlaylistID("https://www.youtube.com/playlist?list=short")
         }
+    }
+
+    @Test
+    func keepsGlobalPositionsAcrossMalformedAndDuplicateLockupRows() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let firstVideoID = "jNQXAC9IVRw"
+        let secondVideoID = "dQw4w9WgXcQ"
+        let thirdVideoID = "9bZkp7q19f0"
+
+        func lockup(_ videoID: String, _ title: String) -> [String: Any] {
+            [
+                "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                "contentId": videoID,
+                "metadata": ["lockupMetadataViewModel": [
+                    "title": ["content": title],
+                    "metadata": ["contentMetadataViewModel": [
+                        "metadataRows": [[
+                            "metadataParts": [["text": ["content": "Playlist Artist"]]],
+                        ]],
+                    ]],
+                ]],
+            ]
+        }
+
+        let initial: [String: Any] = [
+            "contents": [
+                ["lockupViewModel": lockup(firstVideoID, "First song")],
+                ["lockupViewModel": lockup("invalid", "Unavailable song")],
+                ["lockupViewModel": lockup(firstVideoID, "Duplicate song")],
+                ["playlistVideoRenderer": [
+                    "videoId": secondVideoID,
+                    "title": ["simpleText": "Second song"],
+                    "shortBylineText": ["simpleText": "Playlist Artist"],
+                    "isPlayable": true,
+                ]],
+            ],
+        ]
+        let firstPage = try LocalImportParser.youtubePlaylistData(
+            initial,
+            expectedPlaylistID: playlistID
+        )
+
+        #expect(firstPage.tracks.map(\.trackID) == [firstVideoID, secondVideoID])
+        #expect(firstPage.tracks.map(\.trackNumber) == [1, 4])
+        #expect(firstPage.skippedItems.map(\.position) == [2, 3])
+        #expect(firstPage.lastPlaylistPosition == 4)
+
+        let continuation: [String: Any] = [
+            "contents": [
+                ["lockupViewModel": lockup(thirdVideoID, "Third song")],
+            ],
+        ]
+        let nextPage = try LocalImportParser.youtubePlaylistData(
+            continuation,
+            expectedPlaylistID: playlistID,
+            positionOffset: firstPage.lastPlaylistPosition
+        )
+
+        #expect(nextPage.tracks.map(\.trackID) == [thirdVideoID])
+        #expect(nextPage.tracks.first?.trackNumber == 5)
+        #expect(nextPage.lastPlaylistPosition == 5)
+    }
+
+    @Test
+    func explicitPlaylistIndicesCannotMoveFallbackCursorBackwards() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let firstVideoID = "jNQXAC9IVRw"
+        let secondVideoID = "dQw4w9WgXcQ"
+        let thirdVideoID = "9bZkp7q19f0"
+        let fourthVideoID = "aqz-KE-bpKQ"
+
+        func video(_ id: String, _ title: String, index: Int? = nil) -> [String: Any] {
+            var result: [String: Any] = [
+                "videoId": id,
+                "title": ["simpleText": title],
+                "shortBylineText": ["simpleText": "Playlist Artist"],
+                "isPlayable": true,
+            ]
+            if let index {
+                result["index"] = ["simpleText": String(index)]
+            }
+            return result
+        }
+
+        let firstPage = try LocalImportParser.youtubePlaylistData(
+            [
+                "contents": [
+                    ["playlistVideoRenderer": video(firstVideoID, "First song", index: 10)],
+                    ["playlistVideoRenderer": video(secondVideoID, "Second song")],
+                ],
+            ] as [String: Any],
+            expectedPlaylistID: playlistID
+        )
+        #expect(firstPage.tracks.map(\.trackNumber) == [10, 11])
+        #expect(firstPage.lastPlaylistPosition == 11)
+
+        let nextPage = try LocalImportParser.youtubePlaylistData(
+            [
+                "contents": [
+                    // This explicit index is stale/page-local. It must not
+                    // move the global cursor behind the previous page.
+                    ["playlistVideoRenderer": video(thirdVideoID, "Third song", index: 2)],
+                    ["playlistVideoRenderer": video(fourthVideoID, "Fourth song")],
+                ],
+            ] as [String: Any],
+            expectedPlaylistID: playlistID,
+            positionOffset: firstPage.lastPlaylistPosition
+        )
+
+        #expect(nextPage.tracks.map(\.trackNumber) == [12, 13])
+        #expect(nextPage.lastPlaylistPosition == 13)
     }
 
     @Test
@@ -285,7 +400,6 @@ struct LocalImportTests {
                         "title": ["runs": [["text": "Second song"]]],
                         "shortBylineText": ["runs": [["text": "Artist"]]],
                         "lengthText": ["simpleText": "4:05"],
-                        "index": ["simpleText": "2"],
                         "isPlayable": true,
                     ]]],
                 ],
@@ -326,6 +440,7 @@ struct LocalImportTests {
         #expect(result.kind == .youtubePlaylist)
         #expect(result.track.title == "Road Trip")
         #expect(result.playlist?.items.map { $0.track.trackID } == [firstVideoID, secondVideoID])
+        #expect(result.playlist?.items.map(\.position) == [1, 2])
         #expect(result.playlist?.items.allSatisfy { $0.candidate.sourceProvider == .youtube } == true)
         #expect(result.playlist?.items.map { $0.candidate.sourceURL } == [
             "https://www.youtube.com/watch?v=\(firstVideoID)",

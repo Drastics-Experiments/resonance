@@ -1495,6 +1495,7 @@ actor LocalDeviceImportService {
         var tracks = firstPage.tracks
         var skippedItems = firstPage.skippedItems
         var continuation = firstPage.continuation
+        var positionOffset = firstPage.lastPlaylistPosition
         let apiKey = LocalImportParser.youtubeConfigurationValue(
             html,
             key: "INNERTUBE_API_KEY",
@@ -1528,8 +1529,13 @@ actor LocalDeviceImportService {
             ) else { break }
             let parsed = try LocalImportParser.youtubePlaylistData(
                 page,
-                expectedPlaylistID: playlistID
+                expectedPlaylistID: playlistID,
+                positionOffset: positionOffset
             )
+            // Keep the source-row cursor independent from deduplication and
+            // the 500-track output cap. Both can discard rows that still
+            // occupy positions in the provider playlist.
+            positionOffset = parsed.lastPlaylistPosition
             for track in parsed.tracks where tracks.count < maxPlaylistItems {
                 guard seenTrackIDs.insert(track.trackID).inserted else { continue }
                 tracks.append(track)

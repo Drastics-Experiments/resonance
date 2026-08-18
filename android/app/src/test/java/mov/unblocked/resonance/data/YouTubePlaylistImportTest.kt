@@ -167,6 +167,51 @@ class YouTubePlaylistImportTest {
         assertEquals(11, page.lastPlaylistIndex)
     }
 
+    @Test
+    fun playlistItemLimitTracksInitialOverflowAndExactBoundary() {
+        val items = (0..YouTubePlaylistLimitPolicy.MAX_ITEMS).map { index -> candidate("video-$index") }
+
+        val result = YouTubePlaylistLimitPolicy.takeInitial(items)
+
+        assertEquals(YouTubePlaylistLimitPolicy.MAX_ITEMS, result.items.size)
+        assertTrue(result.overflowed)
+        assertFalse(
+            YouTubePlaylistLimitPolicy.takeInitial(items.take(YouTubePlaylistLimitPolicy.MAX_ITEMS)).overflowed,
+        )
+    }
+
+    @Test
+    fun playlistItemLimitCountsOnlyNewVideoIDsAgainstRemainingCapacity() {
+        val existing = (0 until YouTubePlaylistLimitPolicy.MAX_ITEMS - 1)
+            .map { index -> candidate("existing-$index") }
+        val incoming = listOf(
+            existing.first(),
+            candidate("new-at-limit"),
+            candidate("new-beyond-limit"),
+        )
+
+        val result = YouTubePlaylistLimitPolicy.append(existing, incoming)
+
+        assertEquals(listOf("new-at-limit"), result.items.map(LinkImportCandidate::videoID))
+        assertTrue(result.overflowed)
+    }
+
+    @Test
+    fun remainingContinuationMarksPlaylistAsIncomplete() {
+        assertTrue(YouTubePlaylistLimitPolicy.hasRemainingContinuation("next"))
+        assertFalse(YouTubePlaylistLimitPolicy.hasRemainingContinuation(null))
+    }
+
+    private fun candidate(videoID: String): LinkImportCandidate = LinkImportCandidate(
+        videoID = videoID,
+        title = videoID,
+        artist = "Artist",
+        durationSeconds = 60,
+        thumbnailURL = null,
+        sourceURL = "https://www.youtube.com/watch?v=$videoID",
+        score = 1.0,
+    )
+
     private fun lockupRow(videoID: String, title: String, artist: String): String = """
         {"lockupViewModel":{
           "contentId":"$videoID",

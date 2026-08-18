@@ -402,3 +402,30 @@ internal object YouTubePlaylistParser {
     private fun JsonObject.long(key: String): Long =
         this[key]?.jsonPrimitive?.longOrNull ?: this[key]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L
 }
+
+internal object YouTubePlaylistLimitPolicy {
+    const val MAX_ITEMS = 500
+    const val MAX_CONTINUATIONS = 10
+
+    data class PageResult(
+        val items: List<LinkImportCandidate>,
+        val overflowed: Boolean,
+    )
+
+    fun takeInitial(items: List<LinkImportCandidate>): PageResult {
+        val limited = items.take(MAX_ITEMS)
+        return PageResult(limited, items.size > limited.size)
+    }
+
+    fun append(
+        existing: List<LinkImportCandidate>,
+        incoming: List<LinkImportCandidate>,
+    ): PageResult {
+        val seen = existing.mapTo(mutableSetOf(), LinkImportCandidate::videoID)
+        val unique = incoming.filter { seen.add(it.videoID) }
+        val remaining = (MAX_ITEMS - existing.size).coerceAtLeast(0)
+        return PageResult(unique.take(remaining), unique.size > remaining)
+    }
+
+    fun hasRemainingContinuation(continuation: String?): Boolean = continuation != null
+}

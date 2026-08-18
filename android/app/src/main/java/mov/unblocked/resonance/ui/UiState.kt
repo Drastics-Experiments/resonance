@@ -6,6 +6,7 @@ import mov.unblocked.resonance.data.Track
 import mov.unblocked.resonance.data.SyncProfile
 import mov.unblocked.resonance.data.ClipRange
 import mov.unblocked.resonance.data.LinkImportResolution
+import mov.unblocked.resonance.data.LinkImportPlaylist
 import mov.unblocked.resonance.data.LinkImportMediaMode
 import mov.unblocked.resonance.data.LinkImportSearchResponse
 import mov.unblocked.resonance.data.LinkImportStage
@@ -45,6 +46,11 @@ data class LinkImportUiState(
             LinkImportStage.Syncing,
         )
 }
+
+internal fun linkImportPlaylistTruncationNotice(playlist: LinkImportPlaylist?): String? =
+    playlist?.takeIf { it.truncated }?.let {
+        "Only part of this playlist could be loaded. Resonance shows at most 500 playable videos across 10 continuation pages, and only the visible items can be selected."
+    }
 
 enum class ResonanceTab(val label: String) {
     Library("Library"),

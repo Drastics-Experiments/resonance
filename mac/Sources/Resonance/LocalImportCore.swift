@@ -865,14 +865,16 @@ enum LocalImportParser {
     /// Continuation responses use the same renderer shape as the initial page.
     static func youtubePlaylistData(
         _ value: Any,
-        expectedPlaylistID: String
+        expectedPlaylistID: String,
+        positionOffset: Int = 0
     ) throws -> (
         title: String?,
         author: String?,
         artworkURL: String?,
         tracks: [LocalImportSpotifyTrack],
         skippedItems: [LocalImportPlaylistSkippedItem],
-        continuation: String?
+        continuation: String?,
+        lastPlaylistPosition: Int
     ) {
         var title: String?
         var author: String?
@@ -882,6 +884,10 @@ enum LocalImportParser {
         var continuation: String?
         var mismatchedPlaylist = false
         var seenTrackIDs = Set<String>()
+        // The cursor is based on source rows, not successful/unique tracks.
+        // Continuation pages can contain unavailable rows and duplicates, and
+        // those rows still occupy positions in the provider playlist.
+        var lastPlaylistPosition = max(positionOffset, 0)
 
         walk(value) { object in
             if let metadata = object["playlistMetadataRenderer"] as? [String: Any] {
@@ -911,15 +917,20 @@ enum LocalImportParser {
             }
 
             if let renderer = object["playlistVideoRenderer"] as? [String: Any] {
-                let fallbackPosition = tracks.count + skippedItems.count + 1
+                let fallbackPosition = nextPlaylistPosition(after: lastPlaylistPosition)
                 let parsedPosition = playlistPosition(renderer["index"])
-                let position = parsedPosition ?? fallbackPosition
+                // Explicit indices are provider-global, but malformed pages
+                // can repeat or move them backwards. Never let one move the
+                // cursor behind the source-row order.
+                let position = max(fallbackPosition, parsedPosition ?? fallbackPosition)
+                lastPlaylistPosition = position
                 let itemTitle = rendererText(renderer["title"])
                 let artist = rendererText(renderer["shortBylineText"])
                     ?? rendererText(renderer["longBylineText"])
                     ?? "Unknown uploader"
                 let videoID = clean(renderer["videoId"] as? String, maxLength: 11)
                 let isPlayable = renderer["isPlayable"] as? Bool != false
+                let isDuplicate = videoID.map { seenTrackIDs.contains($0) } ?? false
                 guard let videoID,
                       isYouTubeVideoID(videoID),
                       let itemTitle,
@@ -929,7 +940,9 @@ enum LocalImportParser {
                         position: position,
                         title: itemTitle ?? "Unavailable item",
                         artist: artist,
-                        reason: isPlayable ? "YouTube did not return a public video for this item" : "Video is unavailable on YouTube"
+                        reason: isDuplicate
+                            ? "Duplicate YouTube playlist item"
+                            : (isPlayable ? "YouTube did not return a public video for this item" : "Video is unavailable on YouTube")
                     ))
                     return
                 }
@@ -950,9 +963,23 @@ enum LocalImportParser {
             }
 
             if let lockup = object["lockupViewModel"] as? [String: Any],
-               let item = lockupPlaylistTrack(lockup, fallbackPosition: tracks.count + skippedItems.count + 1),
-               seenTrackIDs.insert(item.trackID).inserted {
-                tracks.append(item)
+               lockup["contentType"] as? String == "LOCKUP_CONTENT_TYPE_VIDEO" {
+                let position = nextPlaylistPosition(after: lastPlaylistPosition)
+                lastPlaylistPosition = position
+                let item = lockupPlaylistTrack(lockup, fallbackPosition: position)
+                let isDuplicate = item.map { seenTrackIDs.contains($0.trackID) } ?? false
+                if let item, seenTrackIDs.insert(item.trackID).inserted {
+                    tracks.append(item)
+                } else {
+                    skippedItems.append(LocalImportPlaylistSkippedItem(
+                        position: position,
+                        title: item?.title ?? "Unavailable item",
+                        artist: item?.artist,
+                        reason: isDuplicate
+                            ? "Duplicate YouTube playlist item"
+                            : "YouTube did not return a public video for this item"
+                    ))
+                }
             }
 
             if let token = nested(object, [
@@ -980,8 +1007,13 @@ enum LocalImportParser {
             artworkURL: artworkURL,
             tracks: tracks,
             skippedItems: skippedItems,
-            continuation: continuation
+            continuation: continuation,
+            lastPlaylistPosition: lastPlaylistPosition
         )
+    }
+
+    private static func nextPlaylistPosition(after position: Int) -> Int {
+        position == Int.max ? Int.max : position + 1
     }
 
     static func youtubePlaylist(
@@ -993,7 +1025,8 @@ enum LocalImportParser {
         artworkURL: String?,
         tracks: [LocalImportSpotifyTrack],
         skippedItems: [LocalImportPlaylistSkippedItem],
-        continuation: String?
+        continuation: String?,
+        lastPlaylistPosition: Int
     ) {
         guard let root = youtubeInitialData(html) else {
             throw LocalImportError(
@@ -1016,7 +1049,8 @@ enum LocalImportParser {
             artworkURL: parsed.artworkURL ?? parsed.tracks.first?.artworkURL,
             tracks: parsed.tracks,
             skippedItems: parsed.skippedItems,
-            continuation: parsed.continuation
+            continuation: parsed.continuation,
+            lastPlaylistPosition: parsed.lastPlaylistPosition
         )
     }
 

@@ -1770,6 +1770,18 @@ fun LinkImportDialog(
                                 }
                             }
                         }
+                        linkImportPlaylistTruncationNotice(resolution.playlist)?.let { notice ->
+                            Surface(color = Color(0xFFFF9800).copy(alpha = .10f), shape = RoundedCornerShape(13.dp)) {
+                                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    Eyebrow("Playlist limit")
+                                    Text(
+                                        notice,
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .78f),
+                                    )
+                                }
+                            }
+                        }
                         Eyebrow(
                             when {
                                 reviewedMatchPolicyBound -> "Review-only candidates • explicit choice required"

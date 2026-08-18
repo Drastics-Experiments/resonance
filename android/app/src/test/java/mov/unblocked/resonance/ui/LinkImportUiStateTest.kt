@@ -2,6 +2,7 @@ package mov.unblocked.resonance.ui
 
 import mov.unblocked.resonance.data.LinkImportCandidate
 import mov.unblocked.resonance.data.LinkImportResolution
+import mov.unblocked.resonance.data.LinkImportPlaylist
 import mov.unblocked.resonance.data.LinkImportStage
 import mov.unblocked.resonance.data.LinkImportTrack
 import mov.unblocked.resonance.data.LinkImportMediaMode
@@ -60,6 +61,24 @@ class LinkImportUiStateTest {
         assertSame(
             state,
             state.invalidatedForSourceEdit("  https://www.youtube.com/watch?v=jNQXAC9IVRw  "),
+        )
+    }
+
+    @Test
+    fun playlistTruncationNoticeOnlyAppearsForBoundedResolutions() {
+        val playlist = LinkImportPlaylist(
+            id = "PL1234567890",
+            title = "Long playlist",
+            author = "Artist",
+            artworkURL = null,
+            sourceURL = "https://www.youtube.com/playlist?list=PL1234567890",
+            skippedItems = emptyList(),
+        )
+
+        assertNull(linkImportPlaylistTruncationNotice(playlist))
+        assertEquals(
+            "Only part of this playlist could be loaded. Resonance shows at most 500 playable videos across 10 continuation pages, and only the visible items can be selected.",
+            linkImportPlaylistTruncationNotice(playlist.copy(truncated = true)),
         )
     }
 }
