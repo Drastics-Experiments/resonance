@@ -1981,10 +1981,6 @@ function historyChartMarkup(summary) {
     ? `${summary.days.length} hours of hourly`
     : `${summary.days.length} days of daily`;
   return `<div class="history-chart-frame"><div class="history-chart-viewport" data-day-count="${summary.days.length}"><svg class="history-chart-svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" data-plot-left="${left}" data-plot-right="${right}" data-plot-top="${top}" data-plot-bottom="${bottom}" data-axis-maximum="${axisMaximum}" role="img" aria-label="${periodDescription} listening minutes">
-    <defs>
-      <linearGradient id="historyBarGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--history-bar-start)"/><stop offset="1" style="stop-color:var(--history-bar-end)"/></linearGradient>
-      <linearGradient id="historyPeakBarGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--history-peak-start)"/><stop offset="1" style="stop-color:var(--history-peak-end)"/></linearGradient>
-    </defs>
     <g class="history-grid">${grid}</g>
     ${bars}
     <g class="history-x-axis">${xAxis}</g>
