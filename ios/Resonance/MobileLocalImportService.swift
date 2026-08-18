@@ -1400,8 +1400,8 @@ actor LocalDeviceImportService {
             initialData,
             expectedPlaylistID: canonical.playlistID
         )
-        let maxItems = 500
-        let initialRows = takeYouTubePlaylistRows(
+        let maxItems = LocalImportYouTubePlaylistLimitPolicy.maxItems
+        let initialRows = LocalImportYouTubePlaylistLimitPolicy.takeRows(
             items: firstPage.items,
             skippedItems: firstPage.skippedItems,
             maximum: maxItems,
@@ -1424,7 +1424,7 @@ actor LocalDeviceImportService {
         var seenTokens = Set<String>()
         while let token = continuation,
               !token.isEmpty,
-              items.count + skippedItems.count < maxItems,
+              items.count < maxItems,
               continuationCount < maxContinuations,
               !seenTokens.contains(token),
               let apiKey = configuration.apiKey,
@@ -1446,8 +1446,8 @@ actor LocalDeviceImportService {
             if title == nil { title = page.title }
             if author == nil { author = page.author }
             if artworkURL == nil { artworkURL = page.artworkURL }
-            let remaining = maxItems - items.count - skippedItems.count
-            let pageRows = takeYouTubePlaylistRows(
+            let remaining = maxItems - items.count
+            let pageRows = LocalImportYouTubePlaylistLimitPolicy.takeRows(
                 items: page.items,
                 skippedItems: page.skippedItems,
                 maximum: remaining,
@@ -1472,8 +1472,8 @@ actor LocalDeviceImportService {
                 position: (items.count + skippedItems.count) + 1,
                 title: "More playlist items",
                 artist: nil,
-                reason: items.count + skippedItems.count >= maxItems
-                    ? "The playlist is limited to the first 500 items."
+                reason: items.count >= maxItems
+                    ? "The playlist is limited to the first 500 playable videos."
                     : "YouTube did not return the rest of this playlist; the available items can still be downloaded."
             ))
         }
@@ -1484,49 +1484,6 @@ actor LocalDeviceImportService {
             items,
             skippedItems.sorted { $0.position < $1.position },
             truncated
-        )
-    }
-
-    private func takeYouTubePlaylistRows(
-        items: [LocalImportAudioSourceMatch],
-        skippedItems: [LocalImportPlaylistSkippedItem],
-        maximum: Int,
-        startingPosition: Int
-    ) -> (
-        items: [LocalImportAudioSourceMatch],
-        skippedItems: [LocalImportPlaylistSkippedItem],
-        truncated: Bool
-    ) {
-        guard maximum > 0 else {
-            return ([], [], !items.isEmpty || !skippedItems.isEmpty)
-        }
-        var skippedByPosition: [Int: LocalImportPlaylistSkippedItem] = [:]
-        for item in skippedItems where item.position >= startingPosition {
-            skippedByPosition[item.position] = item
-        }
-        var selectedItems: [LocalImportAudioSourceMatch] = []
-        var selectedSkippedItems: [LocalImportPlaylistSkippedItem] = []
-        selectedItems.reserveCapacity(min(items.count, maximum))
-        selectedSkippedItems.reserveCapacity(min(skippedItems.count, maximum))
-        var itemIndex = 0
-        var position = max(startingPosition, 1)
-        while selectedItems.count + selectedSkippedItems.count < maximum {
-            if let skipped = skippedByPosition[position] {
-                selectedSkippedItems.append(skipped)
-            } else if itemIndex < items.count {
-                selectedItems.append(items[itemIndex])
-                itemIndex += 1
-            } else {
-                break
-            }
-            position += 1
-        }
-        let selectedCount = selectedItems.count + selectedSkippedItems.count
-        let sourceCount = items.count + skippedItems.count
-        return (
-            selectedItems,
-            selectedSkippedItems,
-            selectedCount < sourceCount
         )
     }
 

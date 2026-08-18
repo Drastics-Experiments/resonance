@@ -112,6 +112,100 @@ final class MobileLocalImportTests: XCTestCase {
         XCTAssertEqual(result.items.first?.durationSeconds, 19)
     }
 
+    func testYouTubePlaylistLimitKeepsPlayableRowsAfterUnavailableRows() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        var contents: [[String: Any]] = (1...500).map { index in
+            [
+                "playlistVideoRenderer": [
+                    "videoId": "dQw4w9WgXcQ",
+                    "title": ["simpleText": "Unavailable \(index)"],
+                    "isPlayable": false,
+                ],
+            ]
+        }
+        contents.append([
+            "playlistVideoRenderer": [
+                "videoId": "jNQXAC9IVRw",
+                "title": ["simpleText": "Playable continuation"],
+                "shortBylineText": ["simpleText": "Artist"],
+                "isPlayable": true,
+            ],
+        ])
+
+        let page = try LocalImportParser.youtubePlaylistData(
+            ["contents": contents],
+            expectedPlaylistID: playlistID
+        )
+        let rows = LocalImportYouTubePlaylistLimitPolicy.takeRows(
+            items: page.items,
+            skippedItems: page.skippedItems,
+            maximum: LocalImportYouTubePlaylistLimitPolicy.maxItems,
+            startingPosition: 1
+        )
+
+        XCTAssertEqual(page.skippedItems.count, 500)
+        XCTAssertEqual(rows.items.map(\.videoID), ["jNQXAC9IVRw"])
+        XCTAssertEqual(rows.skippedItems.count, 500)
+        XCTAssertFalse(rows.truncated)
+    }
+
+    func testYouTubePlaylistLimitAllowsPlayableContinuationAfterUnavailableRows() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let unavailableRows: [[String: Any]] = (1...500).map { index in
+            [
+                "playlistVideoRenderer": [
+                    "videoId": "dQw4w9WgXcQ",
+                    "title": ["simpleText": "Unavailable \(index)"],
+                    "isPlayable": false,
+                ],
+            ]
+        }
+        var firstContents = unavailableRows
+        firstContents.append([
+            "continuationItemRenderer": [
+                "continuationEndpoint": [
+                    "continuationCommand": ["token": "continuation-token"],
+                ],
+            ],
+        ])
+        let firstPage = try LocalImportParser.youtubePlaylistData(
+            ["contents": firstContents],
+            expectedPlaylistID: playlistID
+        )
+        XCTAssertEqual(firstPage.continuation, "continuation-token")
+        let firstRows = LocalImportYouTubePlaylistLimitPolicy.takeRows(
+            items: firstPage.items,
+            skippedItems: firstPage.skippedItems,
+            maximum: LocalImportYouTubePlaylistLimitPolicy.maxItems,
+            startingPosition: 1
+        )
+        XCTAssertTrue(firstRows.items.isEmpty)
+        XCTAssertEqual(firstRows.skippedItems.count, 500)
+
+        let offset = firstRows.items.count + firstRows.skippedItems.count
+        let continuationPage = try LocalImportParser.youtubePlaylistData(
+            ["contents": [[
+                "playlistVideoRenderer": [
+                    "videoId": "jNQXAC9IVRw",
+                    "title": ["simpleText": "Playable continuation"],
+                    "shortBylineText": ["simpleText": "Artist"],
+                    "isPlayable": true,
+                ],
+            ]]],
+            expectedPlaylistID: playlistID,
+            positionOffset: offset
+        )
+        let continuationRows = LocalImportYouTubePlaylistLimitPolicy.takeRows(
+            items: continuationPage.items,
+            skippedItems: continuationPage.skippedItems,
+            maximum: LocalImportYouTubePlaylistLimitPolicy.maxItems - firstRows.items.count,
+            startingPosition: offset + 1
+        )
+
+        XCTAssertEqual(continuationRows.items.map(\.videoID), ["jNQXAC9IVRw"])
+        XCTAssertEqual(continuationRows.items.first?.title, "Playable continuation")
+    }
+
     func testYouTubePlaylistParserRejectsWrongPlaylist() {
         let data: [String: Any] = [
             "playlistMetadataRenderer": [

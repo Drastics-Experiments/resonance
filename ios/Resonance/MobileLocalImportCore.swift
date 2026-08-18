@@ -150,6 +150,33 @@ struct LocalImportPlaylist: Hashable, Sendable {
     var unavailableCount: Int { skippedItems.count }
 }
 
+enum LocalImportYouTubePlaylistLimitPolicy {
+    static let maxItems = 500
+
+    static func takeRows(
+        items: [LocalImportAudioSourceMatch],
+        skippedItems: [LocalImportPlaylistSkippedItem],
+        maximum: Int,
+        startingPosition: Int
+    ) -> (
+        items: [LocalImportAudioSourceMatch],
+        skippedItems: [LocalImportPlaylistSkippedItem],
+        truncated: Bool
+    ) {
+        guard maximum > 0 else {
+            return ([], [], !items.isEmpty || !skippedItems.isEmpty)
+        }
+        let selectedItems = Array(items.prefix(maximum))
+        let firstPosition = max(startingPosition, 1)
+        let selectedSkippedItems = skippedItems.filter { $0.position >= firstPosition }
+        return (
+            selectedItems,
+            selectedSkippedItems,
+            selectedItems.count < items.count
+        )
+    }
+}
+
 struct LocalImportExistingSongMatch: Equatable {
     let deviceTrackID: UUID?
     let serverSongID: String?
