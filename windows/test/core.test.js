@@ -1057,10 +1057,10 @@ test("defines complete Windows palettes and routes major chrome through theme to
   assert.match(styleSource, /\.settings-nav button\.active svg\s*\{[^}]*#9f82ff[^}]*#805aff/);
   assert.match(styleSource, /\.storage-import-option-icon\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
   assert.match(styleSource, /\.segmented button\.active\s*\{[^}]*#845bff[^}]*#5c2ee8[^}]*color: #fff/);
-  assert.match(styleSource, /\.history-bar\.peak\s*\{[^}]*filter: drop-shadow\([^)]*var\(--history-peak-shadow\)/);
+  assert.match(styleSource, /\.history-bar\.peak\s*\{[^}]*fill: var\(--history-peak-color\)/);
   assert.match(styleSource, /\.local-import-provider-pill\s*\{[^}]*border: 1px solid var\(--accent-border\)/);
   assert.match(styleSource, /\.clip-editor-selection\s*\{[^}]*background: var\(--clip-selection-background\)/);
-  assert.match(styleSource, /--history-bar-start: #9b7aff;[\s\S]+--history-peak-start: #ff806c;[\s\S]+--clip-visualizer-low: #4e1a95/);
+  assert.match(styleSource, /--history-bar-color: #7659d6;[\s\S]+--history-peak-color: #a98cff;[\s\S]+--clip-visualizer-low: #4e1a95/);
   assert.match(styleSource, /\.settings-theme-grid\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(styleSource, /\.settings-theme-card\s*\{[^}]*grid-template-rows: 92px auto/);
   const alternateChrome = styleSource.slice(styleSource.indexOf("@scope (:root[data-theme=\"ocean\"]"));
@@ -1685,6 +1685,14 @@ test("opens a listening-history analytics dialog and records real playback time"
   const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
   const preloadSource = readFileSync(new URL("../preload.cjs", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
+  const historyChartSource = appSource.slice(
+    appSource.indexOf("function historyChartMarkup"),
+    appSource.indexOf("function bindListeningHistoryChartInteractions"),
+  );
+  const historyStyleSource = styleSource.slice(
+    styleSource.indexOf(".listening-history-dialog {"),
+    styleSource.indexOf("@media (max-width: 720px)"),
+  );
   assert.match(htmlSource, /id="profileHistory"[\s\S]+Listening History/);
   assert.match(htmlSource, /id="listeningHistoryDialog"/);
   assert.match(htmlSource, /id="listeningHistoryRange"/);
@@ -1810,15 +1818,18 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.doesNotMatch(appSource, /class="history-area"/);
   assert.doesNotMatch(appSource, /class="history-line"/);
   assert.match(styleSource, /\.listening-history-stats/);
-  assert.match(styleSource, /\.listening-history-panel\s*\{[\s\S]*?--history-ambient-surface:[\s\S]*?radial-gradient\(circle at 16% 12%, #536bff24[\s\S]*?radial-gradient\(circle at 76% 20%, #7547ff20[\s\S]*?radial-gradient\(circle at 88% 100%, #ff806c10/);
+  assert.match(styleSource, /\.listening-history-panel\s*\{[^}]*background: #090b12/);
+  assert.doesNotMatch(styleSource, /--history-ambient-surface/);
+  assert.doesNotMatch(historyStyleSource, /gradient\(/);
+  assert.match(styleSource, /\.listening-history-panel::\-webkit-scrollbar-thumb\s*\{[^}]*background: var\(--history-scrollbar-thumb\)[^}]*box-shadow: none/);
   assert.match(styleSource, /\.history-content-toolbar\s*\{[\s\S]*?background: transparent/);
   assert.match(styleSource, /\.listening-history-stats\s*\{[\s\S]*?background: transparent/);
   assert.match(styleSource, /\.listening-history-chart\s*\{[\s\S]*?background: transparent/);
   assert.match(styleSource, /\.listening-history-day-details\s*\{[\s\S]*?background: transparent/);
   assert.doesNotMatch(styleSource, /\.listening-history-day-details\s*\{[^}]*border-top/);
   assert.match(styleSource, /\.history-window-button\s*\{[\s\S]+\.history-window-button:disabled/);
-  assert.match(styleSource, /\.history-window-button\s*\{[\s\S]*?height: 32px[\s\S]*?border-radius: 999px/);
-  assert.match(styleSource, /\.history-range\s*\{[\s\S]*?height: 32px[\s\S]*?border-radius: 999px/);
+  assert.match(styleSource, /\.history-window-button\s*\{[\s\S]*?height: 32px[\s\S]*?border-radius: 6px/);
+  assert.match(styleSource, /\.history-range\s*\{[\s\S]*?height: 32px[\s\S]*?border-radius: 6px/);
   assert.match(styleSource, /\.history-content-toolbar\s*\{[\s\S]+justify-content: flex-end/);
   assert.match(styleSource, /\.history-window-label\s*\{[\s\S]+margin-right: auto/);
   assert.match(styleSource, /\.history-content-toolbar\[hidden\]\s*\{\s*display: none/);
@@ -1830,8 +1841,10 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(styleSource, /\.history-song-ranking\s*\{[\s\S]*?grid-auto-flow: column[\s\S]*?max-width: 100%[\s\S]*?overflow-x: auto/);
   assert.match(styleSource, /\.history-ranked-song \.row-art\s*\{[\s\S]*?width: 146px[\s\S]*?height: 146px/);
   assert.match(styleSource, /\.listening-history-stats\[hidden\],[\s\S]+\.listening-history-chart\[hidden\][\s\S]+display: none/);
-  assert.match(styleSource, /\.history-bar\s*\{[\s\S]*?fill: url\("#historyBarGradient"\)/);
-  assert.match(styleSource, /\.history-bar\.peak\s*\{[\s\S]*?fill: url\("#historyPeakBarGradient"\)/);
+  assert.match(styleSource, /\.history-bar\s*\{[^}]*fill: var\(--history-bar-color\)/);
+  assert.match(styleSource, /\.history-bar\.peak\s*\{[^}]*fill: var\(--history-peak-color\)/);
+  assert.doesNotMatch(historyChartSource, /gradient/i);
+  assert.doesNotMatch(styleSource, /\.history-bar(?:\.peak)?\s*\{[^}]*filter:/);
   assert.match(styleSource, /\.history-bar\.selected[\s\S]*?stroke: var\(--accent-tertiary\)/);
   assert.doesNotMatch(styleSource, /\.history-song-line|\.history-song-legend|\.history-highlight-label|\.song-mode/);
   assert.match(styleSource, /\.history-chart-viewport\s*\{[\s\S]*?overflow: hidden/);
