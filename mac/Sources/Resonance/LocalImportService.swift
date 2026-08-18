@@ -412,9 +412,6 @@ actor LocalDeviceImportService {
     private let maxAudioBytes: Int64 = 256 * 1_024 * 1_024
     private let maxVideoBytes: Int64 = 1_024 * 1_024 * 1_024
     private let mediaChunkSize: Int64 = 10 * 1_024 * 1_024
-    private let maxPlaylistItems = 500
-    private let maxPlaylistContinuations = 10
-
     init(
         sessions: LocalImportSessions = .production(),
         localRoot: URL? = nil,
@@ -762,7 +759,8 @@ actor LocalDeviceImportService {
                     sourceURL: soundCloudPlaylist.sourceURL,
                     items: matches.items,
                     skippedItems: (matches.skippedItems + soundCloudUnavailableItems(soundCloudPlaylist))
-                        .sorted { $0.position < $1.position }
+                        .sorted { $0.position < $1.position },
+                    truncated: false
                 )
                 let duration = soundCloudPlaylist.tracks.compactMap(\.metadata.durationSeconds).reduce(0, +)
                 let summary = LocalImportSpotifyTrack(
@@ -819,7 +817,8 @@ actor LocalDeviceImportService {
                     sourceURL: canonicalPlaylist.url.absoluteString,
                     items: matches.items,
                     skippedItems: (playlistMetadata.skippedItems + matches.skippedItems)
-                        .sorted { $0.position < $1.position }
+                        .sorted { $0.position < $1.position },
+                    truncated: false
                 )
                 let duration = playlistMetadata.tracks.compactMap(\.durationSeconds).reduce(0, +)
                 let summary = LocalImportSpotifyTrack(
@@ -903,7 +902,8 @@ actor LocalDeviceImportService {
                 artworkURL: playlistMetadata.artworkURL,
                 sourceURL: playlistMetadata.sourceURL,
                 items: items,
-                skippedItems: playlistMetadata.skippedItems.sorted { $0.position < $1.position }
+                skippedItems: playlistMetadata.skippedItems.sorted { $0.position < $1.position },
+                truncated: playlistMetadata.truncated
             )
             let duration = playlistMetadata.tracks.compactMap(\.durationSeconds).reduce(0, +)
             let summary = LocalImportSpotifyTrack(
@@ -1458,7 +1458,8 @@ actor LocalDeviceImportService {
         artworkURL: String?,
         sourceURL: String,
         tracks: [LocalImportSpotifyTrack],
-        skippedItems: [LocalImportPlaylistSkippedItem]
+        skippedItems: [LocalImportPlaylistSkippedItem],
+        truncated: Bool
     ) {
         var components = URLComponents()
         components.scheme = "https"
@@ -1492,7 +1493,9 @@ actor LocalDeviceImportService {
             html,
             expectedPlaylistID: playlistID
         )
-        var tracks = firstPage.tracks
+        let initialItems = LocalImportPlaylistLimitPolicy.takeInitial(firstPage.tracks)
+        var tracks = initialItems.tracks
+        var truncated = initialItems.overflowed
         var skippedItems = firstPage.skippedItems
         var continuation = firstPage.continuation
         var positionOffset = firstPage.lastPlaylistPosition
@@ -1512,14 +1515,13 @@ actor LocalDeviceImportService {
             maxLength: 2_048
         )
         var seenTokens = Set<String>()
-        var seenTrackIDs = Set(tracks.map(\.trackID))
         var continuationCount = 0
         while let token = continuation,
               let apiKey,
               let clientVersion,
               !seenTokens.contains(token),
-              continuationCount < maxPlaylistContinuations,
-              tracks.count < maxPlaylistItems {
+              continuationCount < LocalImportPlaylistLimitPolicy.maxContinuations,
+              tracks.count < LocalImportPlaylistLimitPolicy.maxItems {
             seenTokens.insert(token)
             guard let page = try await youtubePlaylistContinuation(
                 token: token,
@@ -1536,14 +1538,14 @@ actor LocalDeviceImportService {
             // the 500-track output cap. Both can discard rows that still
             // occupy positions in the provider playlist.
             positionOffset = parsed.lastPlaylistPosition
-            for track in parsed.tracks where tracks.count < maxPlaylistItems {
-                guard seenTrackIDs.insert(track.trackID).inserted else { continue }
-                tracks.append(track)
-            }
+            let additions = LocalImportPlaylistLimitPolicy.append(existing: tracks, incoming: parsed.tracks)
+            tracks.append(contentsOf: additions.tracks)
+            truncated = truncated || additions.overflowed
             skippedItems.append(contentsOf: parsed.skippedItems)
             continuation = parsed.continuation
             continuationCount += 1
         }
+        truncated = truncated || LocalImportPlaylistLimitPolicy.hasRemainingContinuation(continuation)
 
         guard !tracks.isEmpty else {
             throw LocalImportError(
@@ -1565,7 +1567,8 @@ actor LocalDeviceImportService {
             artworkURL: artworkURL,
             sourceURL: playlistURL.absoluteString,
             tracks: tracks,
-            skippedItems: skippedItems
+            skippedItems: skippedItems,
+            truncated: truncated
         )
     }
 

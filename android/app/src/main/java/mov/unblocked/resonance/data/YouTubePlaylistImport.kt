@@ -39,6 +39,7 @@ internal object YouTubePlaylistParser {
         val items: List<LinkImportCandidate> = emptyList(),
         val continuation: String? = null,
         val unavailableCount: Int = 0,
+        val skippedItems: List<LinkImportSkippedItem> = emptyList(),
         val rowCount: Int = 0,
         val lastPlaylistIndex: Int = 0,
     )
@@ -122,6 +123,7 @@ internal object YouTubePlaylistParser {
         var artwork: String? = null
         var continuation: String? = null
         var unavailable = 0
+        val skippedItems = mutableListOf<LinkImportSkippedItem>()
         var rowCount = 0
         var lastPlaylistIndex = fallbackIndexOffset
         val items = mutableListOf<LinkImportCandidate>()
@@ -150,13 +152,23 @@ internal object YouTubePlaylistParser {
                     renderer,
                     fallbackIndex,
                 )
+                val explicitIndex = renderer["index"]?.let(::text)?.toIntOrNull()
+                    ?.takeIf { it > 0 }
                 lastPlaylistIndex = maxOf(
                     fallbackIndex,
-                    parsedCandidate?.playlistIndex ?: fallbackIndex,
+                    parsedCandidate?.playlistIndex ?: explicitIndex ?: fallbackIndex,
                 )
                 val candidate = parsedCandidate?.withPlaylistIndex(lastPlaylistIndex)
                 if (candidate == null) {
                     unavailable += 1
+                    skippedItems += LinkImportSkippedItem(
+                        position = lastPlaylistIndex,
+                        title = renderer["title"]?.let(::text)?.takeIf(String::isNotBlank)
+                            ?: "Unavailable YouTube video",
+                        artist = renderer["shortBylineText"]?.let(::text)?.takeIf(String::isNotBlank)
+                            ?: renderer["longBylineText"]?.let(::text)?.takeIf(String::isNotBlank),
+                        reason = "YouTube did not return playable metadata for this playlist item.",
+                    )
                 } else if (seenVideoIDs.add(candidate.videoID)) {
                     items += candidate
                 }
@@ -174,6 +186,13 @@ internal object YouTubePlaylistParser {
                     lastPlaylistIndex = fallbackIndex
                     if (candidate == null) {
                         unavailable += 1
+                        val (title, artist) = lockupMetadata(lockup)
+                        skippedItems += LinkImportSkippedItem(
+                            position = lastPlaylistIndex,
+                            title = title ?: "Unavailable YouTube video",
+                            artist = artist,
+                            reason = "YouTube did not return playable metadata for this playlist item.",
+                        )
                     } else if (seenVideoIDs.add(candidate.videoID)) {
                         items += candidate
                     }
@@ -194,6 +213,7 @@ internal object YouTubePlaylistParser {
             items,
             continuation,
             unavailable,
+            skippedItems,
             rowCount,
             lastPlaylistIndex,
         )
@@ -240,18 +260,9 @@ internal object YouTubePlaylistParser {
     private fun lockupCandidate(lockup: JsonObject, fallbackIndex: Int): LinkImportCandidate? {
         if (lockup.string("contentType") != "LOCKUP_CONTENT_TYPE_VIDEO") return null
         val videoID = lockup.string("contentId")?.takeIf(videoIDPattern::matches) ?: return null
-        val metadata = lockup["metadata"] as? JsonObject
-        val view = metadata?.get("lockupMetadataViewModel") as? JsonObject
-        val title = view?.get("title")?.let(::text)?.takeIf(String::isNotBlank) ?: return null
-        val rows = ((view["metadata"] as? JsonObject)
-            ?.get("contentMetadataViewModel") as? JsonObject)
-            ?.get("metadataRows") as? JsonArray
-        val artist = rows?.firstOrNull()?.let { row ->
-            ((row as? JsonObject)?.get("metadataParts") as? JsonArray)
-                ?.mapNotNull { (it as? JsonObject)?.get("text")?.let(::text) }
-                ?.joinToString(" • ")
-                ?.takeIf(String::isNotBlank)
-        } ?: "Unknown uploader"
+        val (metadataTitle, metadataArtist) = lockupMetadata(lockup)
+        val title = metadataTitle ?: return null
+        val artist = metadataArtist ?: "Unknown uploader"
         val thumbnail = thumbnail(
             ((lockup["contentImage"] as? JsonObject)
                 ?.get("thumbnailViewModel") as? JsonObject)
@@ -278,6 +289,22 @@ internal object YouTubePlaylistParser {
             playlistIndex = fallbackIndex,
             sourceProvider = LinkImportSourceProvider.YouTube,
         )
+    }
+
+    private fun lockupMetadata(lockup: JsonObject): Pair<String?, String?> {
+        val metadata = lockup["metadata"] as? JsonObject
+        val view = metadata?.get("lockupMetadataViewModel") as? JsonObject
+        val title = view?.get("title")?.let(::text)?.takeIf(String::isNotBlank)
+        val rows = ((view?.get("metadata") as? JsonObject)
+            ?.get("contentMetadataViewModel") as? JsonObject)
+            ?.get("metadataRows") as? JsonArray
+        val artist = rows?.firstOrNull()?.let { row ->
+            ((row as? JsonObject)?.get("metadataParts") as? JsonArray)
+                ?.mapNotNull { (it as? JsonObject)?.get("text")?.let(::text) }
+                ?.joinToString(" • ")
+                ?.takeIf(String::isNotBlank)
+        }
+        return title to artist
     }
 
     private fun lockupDuration(lockup: JsonObject): Int? {

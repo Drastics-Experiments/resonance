@@ -549,7 +549,7 @@ class LinkImportService(context: Context) {
         var title = firstPage.title
         var author = firstPage.author
         var artwork = firstPage.artworkURL
-        var unavailableCount = firstPage.unavailableCount
+        val skippedItems = firstPage.skippedItems.toMutableList()
         var continuation = firstPage.continuation
         var fallbackIndexOffset = firstPage.lastPlaylistIndex
         val configuration = YouTubePlaylistParser.configuration(html)
@@ -618,7 +618,7 @@ class LinkImportService(context: Context) {
             title = title ?: page.title
             author = author ?: page.author
             artwork = artwork ?: page.artworkURL
-            unavailableCount += page.unavailableCount
+            skippedItems += page.skippedItems
             fallbackIndexOffset = page.lastPlaylistIndex
             val additions = YouTubePlaylistLimitPolicy.append(allItems, page.items)
             allItems += additions.items
@@ -636,22 +636,13 @@ class LinkImportService(context: Context) {
         )
         val sourceURL = "https://www.youtube.com/playlist?list=" + playlistID
         val sorted = allItems.sortedWith(compareBy<LinkImportCandidate> { it.playlistIndex ?: Int.MAX_VALUE }.thenBy { it.videoID })
-        val maxPosition = sorted.mapNotNull { it.playlistIndex }.maxOrNull() ?: sorted.size
-        val skipped = (0 until unavailableCount).map { offset ->
-            LinkImportSkippedItem(
-                position = maxPosition + offset + 1,
-                title = "Unavailable YouTube video",
-                artist = null,
-                reason = "YouTube did not return playable metadata for this playlist item.",
-            )
-        }
         val playlist = LinkImportPlaylist(
             id = playlistID,
             title = title?.takeIf(String::isNotBlank) ?: "YouTube Playlist",
             author = author?.takeIf(String::isNotBlank) ?: "YouTube",
             artworkURL = artwork ?: sorted.firstOrNull()?.thumbnailURL,
             sourceURL = sourceURL,
-            skippedItems = skipped,
+            skippedItems = skippedItems.sortedBy(LinkImportSkippedItem::position),
             truncated = truncated,
         )
         val summary = LinkImportTrack(

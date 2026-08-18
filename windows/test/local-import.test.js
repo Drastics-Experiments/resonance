@@ -292,6 +292,61 @@ test("resolves YouTube playlist metadata and continuation items without inspecti
   assert.equal(currentRenderer.durationSeconds, 19);
 });
 
+test("carries YouTube lockup playlist positions across continuation pages", async () => {
+  const playlistID = "PL1234567890abcdefghijklmnop";
+  const lockup = (videoID, title, artist) => ({
+    lockupViewModel: {
+      contentId: videoID,
+      contentType: "LOCKUP_CONTENT_TYPE_VIDEO",
+      metadata: {
+        lockupMetadataViewModel: {
+          title: { content: title },
+          metadata: {
+            contentMetadataViewModel: {
+              metadataRows: [{ metadataParts: [{ text: { content: artist } }] }],
+            },
+          },
+        },
+      },
+    },
+  });
+  const initialData = {
+    metadata: { playlistMetadataRenderer: { playlistId: playlistID, title: "Road Trip" } },
+    contents: [
+      lockup("jNQXAC9IVRw", "First Song", "First Artist"),
+      lockup("dQw4w9WgXcQ", "Second Song", "Second Artist"),
+      { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next-page" } } } },
+    ],
+  };
+  const continuationData = {
+    onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [
+      lockup("9bZkp7q19f0", "Third Song", "Third Artist"),
+      lockup("aqz-KE-bpKQ", "Fourth Song", "Fourth Artist"),
+    ] } }],
+  };
+  const html = `<script>var ytInitialData = ${JSON.stringify(initialData)};</script><script>ytcfg.set(${JSON.stringify({
+    INNERTUBE_API_KEY: "test-key",
+    INNERTUBE_CLIENT_VERSION: "2.20260801.00.00",
+    VISITOR_DATA: "test-visitor",
+  })});</script>`;
+  const playlist = await resolveYouTubePlaylist(
+    `https://www.youtube.com/playlist?list=${playlistID}`,
+    new AbortController().signal,
+    async (_url, options = {}) => options.method === "POST"
+      ? new Response(JSON.stringify(continuationData), { status: 200, headers: { "content-type": "application/json" } })
+      : new Response(html, { status: 200, headers: { "content-type": "text/html" } }),
+  );
+
+  assert.deepEqual(playlist.items.map((item) => item.videoID), [
+    "jNQXAC9IVRw",
+    "dQw4w9WgXcQ",
+    "9bZkp7q19f0",
+    "aqz-KE-bpKQ",
+  ]);
+  assert.deepEqual(playlist.items.map((item) => item.playlistIndex), [1, 2, 3, 4]);
+  assert.equal(playlist.truncated, false);
+});
+
 test("bounds oversized YouTube playlist pages and marks the omitted tail", async () => {
   const playlistID = "PL1234567890abcdefghijklmnop";
   const videoRenderer = (index) => ({

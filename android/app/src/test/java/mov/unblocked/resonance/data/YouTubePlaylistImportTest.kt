@@ -71,6 +71,9 @@ class YouTubePlaylistImportTest {
         assertEquals("DJ Example", page.author)
         assertEquals("continue-token", page.continuation)
         assertEquals(1, page.unavailableCount)
+        assertEquals(1, page.skippedItems.size)
+        assertEquals(2, page.skippedItems.single().position)
+        assertEquals("Unavailable", page.skippedItems.single().title)
         assertEquals(1, page.items.size)
         val item = page.items.single()
         assertEquals("jNQXAC9IVRw", item.videoID)
@@ -144,6 +147,8 @@ class YouTubePlaylistImportTest {
         )
         assertEquals(4, firstPage.rowCount)
         assertEquals(1, firstPage.unavailableCount)
+        assertEquals(listOf(2), firstPage.skippedItems.map(LinkImportSkippedItem::position))
+        assertEquals(listOf("Unavailable"), firstPage.skippedItems.map(LinkImportSkippedItem::title))
         assertEquals(listOf(1, 4, 5, 6), ordered.map(LinkImportCandidate::playlistIndex))
     }
 
@@ -164,6 +169,18 @@ class YouTubePlaylistImportTest {
 
         assertEquals(listOf("jNQXAC9IVRw", "dQw4w9WgXcQ"), page.items.map(LinkImportCandidate::videoID))
         assertEquals(listOf(10, 11), page.items.map(LinkImportCandidate::playlistIndex))
+        assertEquals(11, page.lastPlaylistIndex)
+    }
+
+    @Test
+    fun unavailableRendererKeepsItsExplicitProviderPosition() {
+        val page = YouTubePlaylistParser.parsePayload(
+            """{"contents":[${playlistVideoRow("jNQXAC9IVRw", "First Song", 1)},${unavailablePlaylistVideoRow("Unavailable", 10)},${playlistVideoRow("dQw4w9WgXcQ", "Later Song", 11)}]}""",
+            "PL1234567890",
+        )
+
+        assertEquals(listOf(1, 11), page.items.map(LinkImportCandidate::playlistIndex))
+        assertEquals(listOf(10), page.skippedItems.map(LinkImportSkippedItem::position))
         assertEquals(11, page.lastPlaylistIndex)
     }
 
@@ -211,6 +228,25 @@ class YouTubePlaylistImportTest {
         sourceURL = "https://www.youtube.com/watch?v=$videoID",
         score = 1.0,
     )
+
+    private fun playlistVideoRow(videoID: String, title: String, index: Int): String = """
+        {"playlistVideoRenderer":{
+          "videoId":"$videoID",
+          "title":{"simpleText":"$title"},
+          "shortBylineText":{"simpleText":"Artist"},
+          "index":{"simpleText":"$index"},
+          "isPlayable":true
+        }}
+    """.trimIndent()
+
+    private fun unavailablePlaylistVideoRow(title: String, index: Int): String = """
+        {"playlistVideoRenderer":{
+          "videoId":"invalid",
+          "title":{"simpleText":"$title"},
+          "index":{"simpleText":"$index"},
+          "isPlayable":false
+        }}
+    """.trimIndent()
 
     private fun lockupRow(videoID: String, title: String, artist: String): String = """
         {"lockupViewModel":{

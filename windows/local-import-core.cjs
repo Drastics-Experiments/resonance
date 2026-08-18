@@ -885,13 +885,16 @@ function youtubePlaylistThumbnail(record) {
   return safeThumbnail(thumbnail);
 }
 
-function parseYouTubePlaylistData(value, expectedPlaylistID = null) {
+function parseYouTubePlaylistData(value, expectedPlaylistID = null, fallbackIndexOffset = 0) {
   const items = [];
   let title = null;
   let author = null;
   let artworkURL = null;
   let continuation = null;
   let unavailableCount = 0;
+  let lastPlaylistIndex = Number.isSafeInteger(fallbackIndexOffset) && fallbackIndexOffset >= 0
+    ? fallbackIndexOffset
+    : 0;
   walk(value, (record) => {
     const metadata = record.playlistMetadataRenderer;
     if (isRecord(metadata)) {
@@ -909,19 +912,27 @@ function parseYouTubePlaylistData(value, expectedPlaylistID = null) {
     artworkURL ||= youtubePlaylistThumbnail(record);
     const renderer = record.playlistVideoRenderer;
     if (isRecord(renderer)) {
-      const item = playlistVideoCandidate(renderer, items.length);
+      const fallbackIndex = lastPlaylistIndex + 1;
+      const parsed = playlistVideoCandidate(renderer, lastPlaylistIndex);
+      lastPlaylistIndex = Math.max(fallbackIndex, parsed?.playlistIndex || fallbackIndex);
+      const item = parsed ? { ...parsed, playlistIndex: lastPlaylistIndex } : null;
       if (item) items.push(item);
       else unavailableCount += 1;
     }
     const lockup = record.lockupViewModel;
     if (isRecord(lockup)) {
-      const item = lockupPlaylistCandidate(lockup, items.length);
-      if (item) items.push(item);
+      if (lockup.contentType === "LOCKUP_CONTENT_TYPE_VIDEO") {
+        const fallbackIndex = lastPlaylistIndex + 1;
+        const item = lockupPlaylistCandidate(lockup, lastPlaylistIndex);
+        lastPlaylistIndex = fallbackIndex;
+        if (item) items.push({ ...item, playlistIndex: fallbackIndex });
+        else unavailableCount += 1;
+      }
     }
     const token = record.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token;
     if (typeof token === "string" && token.length > 0 && token.length <= 8_192) continuation = token;
   });
-  return { title, author, artworkURL, items, continuation, unavailableCount };
+  return { title, author, artworkURL, items, continuation, unavailableCount, lastPlaylistIndex };
 }
 
 function youtubeConfigurationValue(html, key, maximum = 2_048) {
@@ -997,6 +1008,7 @@ async function resolveYouTubePlaylist(source, signal, fetchImpl = fetch) {
   if (!initialData) throw importError("resolving_metadata", "YOUTUBE_PLAYLIST_INVALID", "YouTube returned invalid playlist metadata.");
   const firstPage = parseYouTubePlaylistData(initialData, playlistID);
   const result = { ...firstPage, items: firstPage.items.slice(0, MAX_PLAYLIST_ITEMS) };
+  let fallbackIndexOffset = firstPage.lastPlaylistIndex;
   let truncated = firstPage.items.length > MAX_PLAYLIST_ITEMS;
   const configuration = {
     apiKey: youtubeConfigurationValue(html, "INNERTUBE_API_KEY", 256),
@@ -1014,11 +1026,12 @@ async function resolveYouTubePlaylist(source, signal, fetchImpl = fetch) {
     seenTokens.add(continuation);
     const response = await youtubePlaylistContinuation(continuation, configuration, signal, fetchImpl);
     if (!response) break;
-    const page = parseYouTubePlaylistData(response, playlistID);
+    const page = parseYouTubePlaylistData(response, playlistID, fallbackIndexOffset);
     const remaining = MAX_PLAYLIST_ITEMS - result.items.length;
     if (page.items.length > remaining) truncated = true;
     result.items.push(...page.items.slice(0, remaining));
     result.unavailableCount += page.unavailableCount;
+    fallbackIndexOffset = page.lastPlaylistIndex;
     continuation = page.continuation;
     continuationCount += 1;
   }

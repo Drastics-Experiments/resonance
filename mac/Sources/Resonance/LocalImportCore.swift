@@ -212,8 +212,41 @@ struct LocalImportPlaylist: Hashable, Sendable {
     let sourceURL: String
     let items: [LocalImportPlaylistItem]
     let skippedItems: [LocalImportPlaylistSkippedItem]
+    let truncated: Bool
 
     var unavailableCount: Int { skippedItems.count }
+}
+
+enum LocalImportPlaylistLimitPolicy {
+    static let maxItems = 500
+    static let maxContinuations = 10
+
+    struct PageResult {
+        let tracks: [LocalImportSpotifyTrack]
+        let overflowed: Bool
+    }
+
+    static func takeInitial(_ tracks: [LocalImportSpotifyTrack]) -> PageResult {
+        let limited = Array(tracks.prefix(maxItems))
+        return PageResult(tracks: limited, overflowed: tracks.count > limited.count)
+    }
+
+    static func append(
+        existing: [LocalImportSpotifyTrack],
+        incoming: [LocalImportSpotifyTrack]
+    ) -> PageResult {
+        var seenTrackIDs = Set(existing.map(\.trackID))
+        let unique = incoming.filter { seenTrackIDs.insert($0.trackID).inserted }
+        let remaining = max(maxItems - existing.count, 0)
+        return PageResult(
+            tracks: Array(unique.prefix(remaining)),
+            overflowed: unique.count > remaining
+        )
+    }
+
+    static func hasRemainingContinuation(_ continuation: String?) -> Bool {
+        continuation != nil
+    }
 }
 
 struct LocalImportExistingSongMatch: Equatable {

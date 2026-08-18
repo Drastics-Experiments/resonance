@@ -1605,6 +1605,23 @@ struct MacLocalImportSheet: View {
                     .font(.system(size: 9))
                     .foregroundStyle(palette.muted)
             }
+            if playlist.truncated {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11, weight: .bold))
+                    Text("Only part of this playlist could be loaded. Resonance shows at most \(LocalImportPlaylistLimitPolicy.maxItems) playable videos across \(LocalImportPlaylistLimitPolicy.maxContinuations) continuation pages, and only the visible items can be selected.")
+                        .font(.system(size: 9, weight: .semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundStyle(Color.orange)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.orange.opacity(0.28))
+                }
+            }
             if let summary = viewModel.existingSummary(for: playlist) {
                 Text(summary)
                     .font(.system(size: 9, weight: .semibold))
