@@ -151,6 +151,27 @@ test("parses ordered public Spotify playlist embed tracks", () => {
   });
 });
 
+test("bounds oversized Spotify playlist embeds and marks the omitted tail", () => {
+  const trackList = Array.from({ length: 501 }, (_, index) => ({
+    uri: `spotify:track:${index % 2 ? "11dFghVXANMlKmJXsNCbNl" : spotifyTrackID}`,
+    title: `Song ${index + 1}`,
+    subtitle: "Playlist Artist",
+    duration: 120_000,
+    entityType: "track",
+    isPlayable: true,
+  }));
+  const parsed = parseSpotifyPlaylistEmbed(spotifyEmbedFixture({
+    type: "playlist",
+    id: spotifyPlaylistID,
+    title: "Long Road Trip",
+    subtitle: "Lily",
+    trackList,
+  }), spotifyPlaylistID);
+  assert.equal(parsed.items.length, 500);
+  assert.equal(parsed.truncated, true);
+  assert.equal(parsed.items.at(-1).trackNumber, 500);
+});
+
 test("hydrates Spotify playlist songs with their individual album artwork", async () => {
   const secondTrackID = "11dFghVXANMlKmJXsNCbNl";
   const playlistArtworkURL = "https://i.scdn.co/image/playlist-cover";
@@ -269,6 +290,30 @@ test("resolves YouTube playlist metadata and continuation items without inspecti
   assert.equal(currentRenderer.title, "Me at the zoo");
   assert.equal(currentRenderer.artist, "jawed");
   assert.equal(currentRenderer.durationSeconds, 19);
+});
+
+test("bounds oversized YouTube playlist pages and marks the omitted tail", async () => {
+  const playlistID = "PL1234567890abcdefghijklmnop";
+  const videoRenderer = (index) => ({
+    videoId: index % 2 ? "jNQXAC9IVRw" : "dQw4w9WgXcQ",
+    title: { runs: [{ text: `Song ${index + 1}` }] },
+    shortBylineText: { runs: [{ text: "Playlist Artist" }] },
+    lengthText: { simpleText: "3:33" },
+    index: { simpleText: String(index + 1) },
+    isPlayable: true,
+  });
+  const initialData = {
+    metadata: { playlistMetadataRenderer: { playlistId: playlistID, title: "Long Road Trip" } },
+    contents: Array.from({ length: 501 }, (_, index) => ({ playlistVideoRenderer: videoRenderer(index) })),
+  };
+  const html = `<script>var ytInitialData = ${JSON.stringify(initialData)};</script>`;
+  const playlist = await resolveYouTubePlaylist(
+    `https://www.youtube.com/playlist?list=${playlistID}`,
+    new AbortController().signal,
+    async () => new Response(html, { status: 200, headers: { "content-type": "text/html" } }),
+  );
+  assert.equal(playlist.items.length, 500);
+  assert.equal(playlist.truncated, true);
 });
 
 test("returns a selectable batch for YouTube playlist imports", async () => {
@@ -894,6 +939,44 @@ test("returns an ordered selectable batch for Spotify playlists", async () => {
   assert.equal(result.track.title, "Road Trip");
   assert.deepEqual(result.candidates.map((candidate) => candidate.importMetadata.title), ["First Song", "Second Song"]);
   assert.deepEqual(result.candidates.map((candidate) => candidate.playlistIndex), [1, 2]);
+});
+
+test("keeps alternate candidates for Spotify playlist items", async () => {
+  const result = await resolveLocalImportSource(
+    `https://open.spotify.com/playlist/${spotifyPlaylistID}`,
+    new AbortController().signal,
+    () => {},
+    {
+      resolveSpotifyPlaylist: async () => ({
+        playlistID: spotifyPlaylistID,
+        title: "Road Trip",
+        author: "Lily",
+        artworkURL: null,
+        sourceURL: `https://open.spotify.com/playlist/${spotifyPlaylistID}`,
+        items: [{
+          provider: "spotify",
+          type: "track",
+          trackID: spotifyTrackID,
+          title: "First Song",
+          artist: "First Artist",
+          trackNumber: 1,
+          durationSeconds: 123,
+          sourceURL: `https://open.spotify.com/track/${spotifyTrackID}`,
+        }],
+        unavailableCount: 0,
+        truncated: false,
+      }),
+      searchYouTubeAudioSources: async () => [
+        { videoID: "jNQXAC9IVRw", sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw", title: "First Song" },
+        { videoID: "dQw4w9WgXcQ", sourceURL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", title: "First Song (alternate)" },
+      ],
+    },
+  );
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].sourceURL, "https://www.youtube.com/watch?v=jNQXAC9IVRw");
+  assert.deepEqual(result.candidates[0].fallbackCandidates.map((candidate) => candidate.sourceURL), [
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  ]);
 });
 
 test("resolves direct YouTube video mode without offering it for Spotify metadata", async () => {

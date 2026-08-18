@@ -474,7 +474,9 @@ async function resolveLocalImportSource(source, signal, onStage = () => {}, adap
           ...candidate,
           importMetadata: track,
           playlistIndex: track.trackNumber,
-          fallbackCandidates: alternatives.slice(1),
+          fallbackCandidates: alternatives.slice(1)
+            .filter((value) => value && typeof value.sourceURL === "string")
+            .slice(0, 2),
         };
       }));
       matched.push(...results.filter(Boolean));
@@ -539,8 +541,20 @@ async function resolveLocalImportSource(source, signal, onStage = () => {}, adap
         const chunk = playlist.items.slice(offset, offset + 4);
         const results = await Promise.all(chunk.map(async (track) => {
           try {
-            const candidates = await candidateSearch(track, signal, undefined, { maxResults: 1, enrich: false });
-            return candidates[0] ? { ...candidates[0], importMetadata: track, playlistIndex: track.trackNumber } : null;
+            // Keep a small ordered fallback set for each item. A metadata
+            // match can fail during the later byte-transfer probe even when a
+            // second provider candidate is usable; dropping it here turns one
+            // bad match into an avoidable playlist failure.
+            const candidates = await candidateSearch(track, signal, undefined, { maxResults: 3, enrich: false });
+            const [candidate, ...fallbackCandidates] = Array.isArray(candidates) ? candidates : [];
+            return candidate
+              ? {
+                ...candidate,
+                importMetadata: track,
+                playlistIndex: track.trackNumber,
+                fallbackCandidates: fallbackCandidates.filter((value) => value && typeof value.sourceURL === "string").slice(0, 2),
+              }
+              : null;
           } catch (error) {
             if (error?.name === "AbortError") throw error;
             return null;

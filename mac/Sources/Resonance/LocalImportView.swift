@@ -153,11 +153,17 @@ final class MacLocalImportViewModel: ObservableObject {
     }
 
     var isPlaylist: Bool {
-        resolution?.kind == .spotifyPlaylist || resolution?.kind == .soundCloudPlaylist
+        resolution?.kind == .spotifyPlaylist
+            || resolution?.kind == .soundCloudPlaylist
+            || resolution?.kind == .youtubePlaylist
     }
 
     var playlistProviderName: String {
-        resolution?.kind == .soundCloudPlaylist ? "SoundCloud" : "Spotify"
+        switch resolution?.kind {
+        case .soundCloudPlaylist: "SoundCloud"
+        case .youtubePlaylist: "YouTube"
+        default: "Spotify"
+        }
     }
 
     var selectedPlaylistItems: [LocalImportPlaylistItem] {
@@ -215,6 +221,9 @@ final class MacLocalImportViewModel: ObservableObject {
         case .reviewedMatch:
             guard model.clientConfiguration.allowsReviewedMatch else {
                 return "Reviewed match is disabled by the verified server configuration."
+            }
+            if isPlaylist {
+                return "Reviewed Match imports one explicitly reviewed song at a time. Turn off upload or choose another upload mode."
             }
         case .localFile:
             break
@@ -648,7 +657,7 @@ final class MacLocalImportViewModel: ObservableObject {
                 reservingUpload: shouldUpload,
                 rawSourceInput: resolvedSourceInput,
                 mediaMode: mediaMode,
-                requiresReviewedMatch: true
+                requiresReviewedMatch: false
             )
         } catch {
             self.error = .init(stage: .syncing, code: "UPLOAD_RESERVATION_FAILED", message: error.localizedDescription)
@@ -664,7 +673,8 @@ final class MacLocalImportViewModel: ObservableObject {
         completedSummary = nil
         completedTrack = nil
         let initialMatchesByTrackID = Dictionary(
-            uniqueKeysWithValues: items.map { ($0.track.trackID, existingMatch(for: $0.track)) }
+            items.map { ($0.track.trackID, existingMatch(for: $0.track)) },
+            uniquingKeysWith: { first, _ in first }
         )
         let plannedDownloadTransfers = LocalImportBatchProgressPolicy.plannedTransferCount(
             matches: Array(initialMatchesByTrackID.values),

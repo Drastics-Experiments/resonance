@@ -1717,7 +1717,11 @@ fun LinkImportDialog(
                         LinkSearchResults(importState.searchResponse, state, actions)
                     } else importState.resolution?.let { resolution ->
                         val isPlaylist = resolution.kind.isPlaylist
-                        val playlistProvider = if (resolution.kind == LinkImportKind.SoundCloudPlaylist) "SoundCloud" else "Spotify"
+                        val playlistProvider = when (resolution.kind) {
+                            LinkImportKind.SoundCloudPlaylist -> "SoundCloud"
+                            LinkImportKind.YouTubePlaylist -> "YouTube"
+                            else -> "Spotify"
+                        }
                         Surface(color = Color.White.copy(alpha = .045f), shape = RoundedCornerShape(13.dp)) {
                             Column(Modifier.fillMaxWidth().padding(14.dp)) {
                                 Eyebrow(if (isPlaylist) "$playlistProvider Playlist" else "Matched Track")
@@ -1804,7 +1808,10 @@ fun LinkImportDialog(
                                                 candidate.playlistIndex?.let { "#$it" },
                                                 metadata?.artist ?: candidate.artist ?: "Unknown uploader",
                                                 (metadata?.durationSeconds ?: candidate.durationSeconds)?.let { clipTime(it * 1_000L) },
-                                                if (candidate.sourceProvider == LinkImportSourceProvider.SoundCloud) "SoundCloud" else "YouTube",
+                                                when (candidate.sourceProvider) {
+                                                    LinkImportSourceProvider.SoundCloud -> "SoundCloud"
+                                                    LinkImportSourceProvider.YouTube -> "YouTube"
+                                                },
                                             ).joinToString(" • "),
                                             fontSize = 12.sp,
                                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),

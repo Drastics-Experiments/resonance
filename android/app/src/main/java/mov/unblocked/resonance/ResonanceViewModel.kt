@@ -999,7 +999,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         } else null
         stopLinkImportPreview()
         if (resolution.kind.isPlaylist) {
-            return confirmSpotifyPlaylistImport(current, resolution, uploadAfterImport, uploadSnapshot)
+            return confirmPlaylistImport(current, resolution, uploadAfterImport, uploadSnapshot)
         }
         val candidate = resolution.candidates.firstOrNull { it.videoID == current.selectedVideoId } ?: return false
         val transferGeneration = beginLinkImportTransfer()
@@ -1106,7 +1106,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         return false
     }
 
-    private fun confirmSpotifyPlaylistImport(
+    private fun confirmPlaylistImport(
         current: LinkImportUiState,
         resolution: LinkImportResolution,
         uploadAfterImport: Boolean,
@@ -1139,7 +1139,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             errorMessage = null,
         )
         linkImportJob = viewModelScope.launch {
-            runSpotifyPlaylistImport(
+            runPlaylistImport(
                 resolution,
                 selected,
                 current.mediaMode,
@@ -1364,7 +1364,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private suspend fun runSpotifyPlaylistImport(
+    private suspend fun runPlaylistImport(
         resolution: LinkImportResolution,
         selected: List<LinkImportCandidate>,
         mediaMode: LinkImportMediaMode,

@@ -2017,7 +2017,7 @@ enum MobileRemoteSourceResolutionCachePolicy {
               resolution.playlist == nil,
               !resolution.candidates.isEmpty else { return false }
         switch resolution.kind {
-        case .spotifyPlaylist, .soundCloudPlaylist:
+        case .spotifyPlaylist, .soundCloudPlaylist, .youtubePlaylist:
             return false
         case .spotify, .soundCloud, .youtube:
             break

@@ -1553,6 +1553,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(htmlSource, /<footer>[\s\S]+id="localImportSyncRow"[\s\S]+Upload to server/);
   assert.match(appSource, /sync\.checked = true/);
   assert.match(appSource, /sync\.disabled = serverBacked/);
+  assert.match(appSource, /input\.onchange = \(\) => \{[\s\S]+updateLocalImportSyncForSelection\(\{ preserveChecked: true \}\)/);
   assert.doesNotMatch(appSource, /sync\.disabled = serverBacked \|\| !canSync/);
   assert.doesNotMatch(htmlSource, /localImportSyncTitle|localImportSyncHelp|Upload after saving locally/);
   assert.match(htmlSource, /Supported links are inspected directly\. Plain text searches Spotify, SoundCloud, and YouTube only after you press Enter/);
@@ -1611,6 +1612,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /candidate\.sourceProvider === "soundcloud"[\s\S]+return "SoundCloud"/);
   assert.match(appSource, /"soundcloud\.com", "www\.soundcloud\.com", "m\.soundcloud\.com", "on\.soundcloud\.com"/);
   assert.match(appSource, /localImportResolution\?\.kind\?\.endsWith\("_playlist"\)/);
+  assert.match(appSource, /kind === "spotify_playlist"[\s\S]+"Spotify"[\s\S]+kind === "soundcloud_playlist"[\s\S]+"SoundCloud"[\s\S]+kind === "youtube_playlist"[\s\S]+"YouTube"/);
   assert.match(appSource, /input\[name="localImportPlaylistItem"\]:checked/);
   assert.match(appSource, /async function confirmPlaylistImport\(\)/);
   assert.match(appSource, /for \(let index = 0; index < selected\.length; index \+= 1\)/);

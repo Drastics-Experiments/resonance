@@ -71,7 +71,7 @@ enum class LinkImportMediaMode(val fileExtension: String) {
     Audio("m4a"), Video("mp4");
 }
 enum class LinkImportKind {
-    Track, SpotifyPlaylist, SoundCloudPlaylist;
+    Track, SpotifyPlaylist, YouTubePlaylist, SoundCloudPlaylist;
 
     val isPlaylist: Boolean get() = this != Track
 }
@@ -353,9 +353,13 @@ class LinkImportService(context: Context) {
                             } else {
                                 if (searchedTrackCount > 0) delay(250)
                                 searchedTrackCount += 1
-                                val alternatives = runCatching {
+                                val alternatives = try {
                                     searchYouTube(soundCloudTrack.metadata, maximumMatches = 4, inspectLimit = 10)
-                                }.getOrElse { emptyList() }.map {
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (_: Exception) {
+                                    emptyList()
+                                }.map {
                                     it.copy(importTrack = soundCloudTrack.metadata, playlistIndex = position)
                                 }
                                 val primary = alternatives.firstOrNull()
@@ -429,14 +433,22 @@ class LinkImportService(context: Context) {
                     playlist.tracks.forEachIndexed { index, track ->
                         currentCoroutineContext().ensureActive()
                         if (index > 0) delay(250)
-                        var candidates = runCatching {
+                        var candidates = try {
                             searchYouTube(track, maximumMatches = 4, inspectLimit = 8)
-                        }.getOrElse { emptyList() }
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            emptyList()
+                        }
                         if (candidates.isEmpty()) {
                             delay(500)
-                            candidates = runCatching {
+                            candidates = try {
                                 searchYouTube(track, maximumMatches = 4, inspectLimit = 10)
-                            }.getOrElse { emptyList() }
+                            } catch (error: CancellationException) {
+                                throw error
+                            } catch (_: Exception) {
+                                emptyList()
+                            }
                         }
                         val position = track.trackNumber ?: index + 1
                         val prepared = candidates.map {
@@ -487,6 +499,14 @@ class LinkImportService(context: Context) {
                 )
                 return@withContext LinkImportResolution(track, matches)
             }
+            val youtubePlaylistID = YouTubePlaylistParser.playlistID(source.trim())
+            if (youtubePlaylistID != null) {
+                return@withContext resolveYouTubePlaylist(
+                    playlistID = youtubePlaylistID,
+                    mediaMode = mediaMode,
+                    progress = progress,
+                )
+            }
             val id = youtubeID(source) ?: throw LinkImportException(
                 LinkImportStage.ResolvingMetadata,
                 "UNSUPPORTED_SOURCE",
@@ -503,6 +523,143 @@ class LinkImportService(context: Context) {
             )
             LinkImportResolution(track, listOf(resolved.candidate))
         }
+
+    /**
+     * Resolve a public YouTube playlist into direct video candidates. Playlist
+     * rows are intentionally treated as independent candidates: an unavailable
+     * or age-gated video is represented in the skipped list and does not prevent
+     * the remaining rows from reaching the download phase.
+     */
+    private suspend fun resolveYouTubePlaylist(
+        playlistID: String,
+        mediaMode: LinkImportMediaMode,
+        progress: (LinkImportProgress) -> Unit,
+    ): LinkImportResolution {
+        progress(LinkImportProgress(LinkImportStage.ResolvingMetadata))
+        val html = request(
+            URL("https://www.youtube.com/playlist?list=" + playlistID),
+            8 * 1_024 * 1_024,
+            "text/html",
+        )
+        val firstPage = YouTubePlaylistParser.parseHTML(html, playlistID)
+        val allItems = firstPage.items.toMutableList()
+        var title = firstPage.title
+        var author = firstPage.author
+        var artwork = firstPage.artworkURL
+        var unavailableCount = firstPage.unavailableCount
+        var continuation = firstPage.continuation
+        val configuration = YouTubePlaylistParser.configuration(html)
+        val seenTokens = mutableSetOf<String>()
+        var continuationCount = 0
+        progress(LinkImportProgress(LinkImportStage.SearchingCandidates))
+
+        while (
+            continuation != null &&
+            configuration.apiKey != null &&
+            configuration.clientVersion != null &&
+            allItems.size < MAX_YOUTUBE_PLAYLIST_ITEMS &&
+            continuationCount < MAX_YOUTUBE_PLAYLIST_CONTINUATIONS &&
+            seenTokens.add(continuation)
+        ) {
+            currentCoroutineContext().ensureActive()
+            val token = requireNotNull(continuation)
+            val endpoint = URL(
+                "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false&key=" +
+                    URLEncoder.encode(requireNotNull(configuration.apiKey), "UTF-8"),
+            )
+            val context = buildJsonObject {
+                put("clientName", "WEB")
+                put("clientVersion", requireNotNull(configuration.clientVersion))
+                put("hl", "en")
+                put("gl", "US")
+                configuration.visitorData?.let { put("visitorData", it) }
+            }
+            val body = buildJsonObject {
+                put("context", buildJsonObject { put("client", context) })
+                put("continuation", token)
+            }.toString().toByteArray()
+            val headers = buildMap {
+                put("Content-Type", "application/json")
+                put("Accept", "application/json")
+                put("User-Agent", LinkImportSearchRequestPolicy.USER_AGENT)
+                put("X-YouTube-Client-Name", "1")
+                put("X-YouTube-Client-Version", requireNotNull(configuration.clientVersion))
+                configuration.visitorData?.takeIf(String::isNotBlank)?.let { put("X-Goog-Visitor-Id", it) }
+            }
+            val payload = try {
+                requestBytes(
+                    endpoint,
+                    8 * 1_024 * 1_024,
+                    "application/json",
+                    "POST",
+                    body,
+                    headers,
+                ).decodeToString()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                break
+            }
+            val page = try {
+                YouTubePlaylistParser.parsePayload(payload, playlistID)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                break
+            }
+            title = title ?: page.title
+            author = author ?: page.author
+            artwork = artwork ?: page.artworkURL
+            unavailableCount += page.unavailableCount
+            page.items.forEach { candidate ->
+                if (allItems.none { it.videoID == candidate.videoID }) {
+                    allItems += candidate
+                }
+            }
+            continuation = page.continuation
+            continuationCount += 1
+        }
+
+        if (allItems.isEmpty()) throw LinkImportException(
+            LinkImportStage.ResolvingMetadata,
+            "YOUTUBE_PLAYLIST_EMPTY",
+            "This playlist has no public, downloadable videos.",
+        )
+        val sourceURL = "https://www.youtube.com/playlist?list=" + playlistID
+        val sorted = allItems.sortedWith(compareBy<LinkImportCandidate> { it.playlistIndex ?: Int.MAX_VALUE }.thenBy { it.videoID })
+        val maxPosition = sorted.mapNotNull { it.playlistIndex }.maxOrNull() ?: sorted.size
+        val skipped = (0 until unavailableCount).map { offset ->
+            LinkImportSkippedItem(
+                position = maxPosition + offset + 1,
+                title = "Unavailable YouTube video",
+                artist = null,
+                reason = "YouTube did not return playable metadata for this playlist item.",
+            )
+        }
+        val playlist = LinkImportPlaylist(
+            id = playlistID,
+            title = title?.takeIf(String::isNotBlank) ?: "YouTube Playlist",
+            author = author?.takeIf(String::isNotBlank) ?: "YouTube",
+            artworkURL = artwork ?: sorted.firstOrNull()?.thumbnailURL,
+            sourceURL = sourceURL,
+            skippedItems = skipped,
+        )
+        val summary = LinkImportTrack(
+            title = playlist.title,
+            artist = playlist.author,
+            durationSeconds = sorted.mapNotNull { it.importTrack?.durationSeconds ?: it.durationSeconds }
+                .sum()
+                .takeIf { it > 0 },
+            artworkURL = playlist.artworkURL,
+            sourceURL = sourceURL,
+        )
+        return LinkImportResolution(
+            track = summary,
+            candidates = sorted,
+            kind = LinkImportKind.YouTubePlaylist,
+            playlist = playlist,
+        )
+    }
 
     suspend fun search(
         value: String,
@@ -1933,6 +2090,8 @@ class LinkImportService(context: Context) {
         artworkHostSuffixes.any { suffix -> host == suffix || host.endsWith(".$suffix") }
 
     private companion object {
+        const val MAX_YOUTUBE_PLAYLIST_ITEMS = 500
+        const val MAX_YOUTUBE_PLAYLIST_CONTINUATIONS = 10
         const val MAX_PROVIDER_REDIRECTS = 5
         const val MAX_ARTWORK_REDIRECTS = 5
         const val ARTWORK_CONNECT_TIMEOUT_MS = 10_000

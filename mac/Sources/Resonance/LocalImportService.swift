@@ -412,6 +412,8 @@ actor LocalDeviceImportService {
     private let maxAudioBytes: Int64 = 256 * 1_024 * 1_024
     private let maxVideoBytes: Int64 = 1_024 * 1_024 * 1_024
     private let mediaChunkSize: Int64 = 10 * 1_024 * 1_024
+    private let maxPlaylistItems = 500
+    private let maxPlaylistContinuations = 10
 
     init(
         sessions: LocalImportSessions = .production(),
@@ -493,6 +495,13 @@ actor LocalDeviceImportService {
             return try await resolveSpotify(canonicalSource.absoluteString)
         }
 
+        if try LocalImportURL.youtubePlaylistID(source) != nil {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "PLAYLIST_METADATA_UNSUPPORTED",
+                message: "A saved server song must identify one track, not a playlist."
+            )
+        }
         guard let videoID = try LocalImportURL.youtubeVideoID(source) else {
             throw LocalImportError(
                 stage: .resolvingMetadata,
@@ -648,6 +657,13 @@ actor LocalDeviceImportService {
             )
         }
 
+        if try LocalImportURL.youtubePlaylistID(source) != nil {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "PLAYLIST_METADATA_UNSUPPORTED",
+                message: "A saved server song must identify one track, not a playlist."
+            )
+        }
         guard let videoID = try LocalImportURL.youtubeVideoID(source) else {
             throw LocalImportError(
                 stage: .resolvingMetadata,
@@ -857,6 +873,58 @@ actor LocalDeviceImportService {
                 candidates: candidates,
                 reviewCandidateVideoIDs: Set(serverCandidates.map(\.videoID)),
                 releases: releases
+            )
+        }
+
+        if let playlistID = try LocalImportURL.youtubePlaylistID(source) {
+            await progress(.init(stage: .resolvingMetadata))
+            let playlistMetadata = try await resolveYouTubePlaylist(
+                source: source,
+                playlistID: playlistID
+            )
+            let items = playlistMetadata.tracks.enumerated().map { index, track in
+                LocalImportPlaylistItem(
+                    position: track.trackNumber ?? index + 1,
+                    track: track,
+                    candidate: youtubePlaylistCandidate(for: track)
+                )
+            }
+            guard !items.isEmpty else {
+                throw LocalImportError(
+                    stage: .resolvingMetadata,
+                    code: "YOUTUBE_PLAYLIST_EMPTY",
+                    message: "This playlist has no public, downloadable videos."
+                )
+            }
+            let playlist = LocalImportPlaylist(
+                playlistID: playlistID,
+                title: playlistMetadata.title,
+                author: playlistMetadata.author,
+                artworkURL: playlistMetadata.artworkURL,
+                sourceURL: playlistMetadata.sourceURL,
+                items: items,
+                skippedItems: playlistMetadata.skippedItems.sorted { $0.position < $1.position }
+            )
+            let duration = playlistMetadata.tracks.compactMap(\.durationSeconds).reduce(0, +)
+            let summary = LocalImportSpotifyTrack(
+                provider: "youtube",
+                type: "playlist",
+                trackID: playlistID,
+                title: playlistMetadata.title,
+                artist: playlistMetadata.author,
+                album: nil,
+                trackNumber: nil,
+                durationSeconds: duration > 0 ? duration : nil,
+                artworkURL: playlistMetadata.artworkURL,
+                embedURL: "",
+                sourceURL: playlistMetadata.sourceURL
+            )
+            return LocalImportResolution(
+                kind: .youtubePlaylist,
+                track: summary,
+                candidates: items.map(\.candidate),
+                releases: [],
+                playlist: playlist
             )
         }
 
@@ -1379,6 +1447,224 @@ actor LocalDeviceImportService {
         let artworkURL = embedded.artworkURL ?? oEmbed.artworkURL
         let tracks = try await hydrateSpotifyPlaylistTrackArtwork(embedded.tracks)
         return (embedded.title, embedded.author, artworkURL, tracks, embedded.skippedItems)
+    }
+
+    private func resolveYouTubePlaylist(
+        source: String,
+        playlistID: String
+    ) async throws -> (
+        title: String,
+        author: String,
+        artworkURL: String?,
+        sourceURL: String,
+        tracks: [LocalImportSpotifyTrack],
+        skippedItems: [LocalImportPlaylistSkippedItem]
+    ) {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "www.youtube.com"
+        components.path = "/playlist"
+        components.queryItems = [URLQueryItem(name: "list", value: playlistID)]
+        guard let playlistURL = components.url else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "YOUTUBE_PLAYLIST_INVALID",
+                message: "YouTube returned invalid playlist metadata."
+            )
+        }
+
+        var request = URLRequest(url: playlistURL)
+        request.setValue(Self.webUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("en-US,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        let (data, response) = try await responseData(
+            session: sessions.youtube,
+            request: request,
+            limit: maxDocumentBytes
+        )
+        guard (200..<300).contains(response.statusCode),
+              response.url.map(LocalImportURL.isYouTubeDocument) == true,
+              let html = String(data: data, encoding: .utf8) else {
+            throw youtubePlaylistFailure(response)
+        }
+
+        let firstPage = try LocalImportParser.youtubePlaylist(
+            html,
+            expectedPlaylistID: playlistID
+        )
+        var tracks = firstPage.tracks
+        var skippedItems = firstPage.skippedItems
+        var continuation = firstPage.continuation
+        let apiKey = LocalImportParser.youtubeConfigurationValue(
+            html,
+            key: "INNERTUBE_API_KEY",
+            maxLength: 256
+        )
+        let clientVersion = LocalImportParser.youtubeConfigurationValue(
+            html,
+            key: "INNERTUBE_CLIENT_VERSION",
+            maxLength: 128
+        )
+        let visitorData = LocalImportParser.youtubeConfigurationValue(
+            html,
+            key: "VISITOR_DATA",
+            maxLength: 2_048
+        )
+        var seenTokens = Set<String>()
+        var seenTrackIDs = Set(tracks.map(\.trackID))
+        var continuationCount = 0
+        while let token = continuation,
+              let apiKey,
+              let clientVersion,
+              !seenTokens.contains(token),
+              continuationCount < maxPlaylistContinuations,
+              tracks.count < maxPlaylistItems {
+            seenTokens.insert(token)
+            guard let page = try await youtubePlaylistContinuation(
+                token: token,
+                apiKey: apiKey,
+                clientVersion: clientVersion,
+                visitorData: visitorData
+            ) else { break }
+            let parsed = try LocalImportParser.youtubePlaylistData(
+                page,
+                expectedPlaylistID: playlistID
+            )
+            for track in parsed.tracks where tracks.count < maxPlaylistItems {
+                guard seenTrackIDs.insert(track.trackID).inserted else { continue }
+                tracks.append(track)
+            }
+            skippedItems.append(contentsOf: parsed.skippedItems)
+            continuation = parsed.continuation
+            continuationCount += 1
+        }
+
+        guard !tracks.isEmpty else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "YOUTUBE_PLAYLIST_EMPTY",
+                message: "This playlist has no public, downloadable videos."
+            )
+        }
+        let title = firstPage.title
+        let author = firstPage.author
+        let artworkURL = firstPage.artworkURL ?? tracks.first?.artworkURL
+        // `source` is intentionally not persisted: a watch URL can include a
+        // selected video and tracking parameters. The playlist-only canonical
+        // URL gives every client one stable source identity.
+        _ = source
+        return (
+            title: title,
+            author: author,
+            artworkURL: artworkURL,
+            sourceURL: playlistURL.absoluteString,
+            tracks: tracks,
+            skippedItems: skippedItems
+        )
+    }
+
+    private func youtubePlaylistContinuation(
+        token: String,
+        apiKey: String,
+        clientVersion: String,
+        visitorData: String?
+    ) async throws -> Any? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "www.youtube.com"
+        components.path = "/youtubei/v1/browse"
+        components.queryItems = [
+            URLQueryItem(name: "prettyPrint", value: "false"),
+            URLQueryItem(name: "key", value: apiKey),
+        ]
+        guard let url = components.url else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("1", forHTTPHeaderField: "X-YouTube-Client-Name")
+        request.setValue(clientVersion, forHTTPHeaderField: "X-YouTube-Client-Version")
+        request.setValue(Self.webUserAgent, forHTTPHeaderField: "User-Agent")
+        if let visitorData { request.setValue(visitorData, forHTTPHeaderField: "X-Goog-Visitor-Id") }
+        var client: [String: Any] = [
+            "clientName": "WEB",
+            "clientVersion": clientVersion,
+            "hl": "en",
+            "gl": "US",
+        ]
+        if let visitorData { client["visitorData"] = visitorData }
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "context": ["client": client],
+            "continuation": token,
+        ])
+        do {
+            let (data, response) = try await responseData(
+                session: sessions.youtube,
+                request: request,
+                limit: maxDocumentBytes
+            )
+            guard (200..<300).contains(response.statusCode),
+                  response.url.map(LocalImportURL.isYouTubeDocument) == true else { return nil }
+            return try JSONSerialization.jsonObject(with: data)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as LocalImportError {
+            if Task.isCancelled { throw CancellationError() }
+            // Continuations are an optional enhancement. Keep the first page
+            // usable when a transient browse request is rejected or malformed.
+            _ = error
+            return nil
+        } catch {
+            if Task.isCancelled { throw CancellationError() }
+            return nil
+        }
+    }
+
+    private func youtubePlaylistCandidate(
+        for track: LocalImportSpotifyTrack
+    ) -> LocalImportAudioSourceMatch {
+        LocalImportAudioSourceMatch(
+            videoID: track.trackID,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            durationSeconds: track.durationSeconds,
+            thumbnailURL: track.artworkURL,
+            sourceProvider: .youtube,
+            officialArtist: false,
+            sourceURL: track.sourceURL,
+            score: 1,
+            confidence: "high",
+            match: .init(
+                title: 1,
+                artist: 1,
+                album: nil,
+                duration: track.durationSeconds == nil ? nil : 1,
+                durationDeltaSeconds: 0
+            )
+        )
+    }
+
+    private func youtubePlaylistFailure(_ response: HTTPURLResponse) -> LocalImportError {
+        if response.statusCode == 404 {
+            return LocalImportError(
+                stage: .resolvingMetadata,
+                code: "YOUTUBE_PLAYLIST_NOT_FOUND",
+                message: "YouTube could not find that playlist."
+            )
+        }
+        if response.statusCode == 429 {
+            return LocalImportError(
+                stage: .resolvingMetadata,
+                code: "YOUTUBE_RATE_LIMITED",
+                message: "YouTube rate-limited this playlist request.",
+                retryAfter: response.value(forHTTPHeaderField: "Retry-After")
+            )
+        }
+        return LocalImportError(
+            stage: .resolvingMetadata,
+            code: "YOUTUBE_PLAYLIST_UNREACHABLE",
+            message: "YouTube could not load that playlist."
+        )
     }
 
     private func hydrateSpotifyPlaylistTrackArtwork(

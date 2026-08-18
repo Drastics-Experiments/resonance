@@ -1439,11 +1439,17 @@ private final class MobileLocalImportViewModel: ObservableObject {
     }
 
     var isPlaylist: Bool {
-        resolution.map { $0.kind == .spotifyPlaylist || $0.kind == .soundCloudPlaylist } ?? false
+        resolution.map {
+            $0.kind == .spotifyPlaylist || $0.kind == .soundCloudPlaylist || $0.kind == .youtubePlaylist
+        } ?? false
     }
 
     var playlistProviderName: String {
-        resolution?.kind == .soundCloudPlaylist ? "SoundCloud" : "Spotify"
+        switch resolution?.kind {
+        case .soundCloudPlaylist: return "SoundCloud"
+        case .youtubePlaylist: return "YouTube"
+        default: return "Spotify"
+        }
     }
 
     var selectedPlaylistItems: [LocalImportPlaylistItem] {

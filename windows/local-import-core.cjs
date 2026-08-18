@@ -362,7 +362,12 @@ function parseSpotifyPlaylistEmbed(html, expectedPlaylistID) {
   const artworkURL = spotifyEntityArtwork(entity);
   const items = [];
   let unavailableCount = 0;
-  for (const [index, item] of entity.trackList.entries()) {
+  // Keep provider responses bounded just like YouTube and SoundCloud. Spotify
+  // can expose very large playlists in one embed document; rendering and
+  // resolving every row at once would make the Windows dialog unresponsive
+  // and would bypass the shared playlist item limit.
+  const trackList = entity.trackList.slice(0, MAX_PLAYLIST_ITEMS);
+  for (const [index, item] of trackList.entries()) {
     const uriMatch = /^spotify:track:([A-Za-z0-9]{22})$/.exec(cleanText(item?.uri, 128) || "");
     const itemTitle = cleanText(item?.title);
     const artist = cleanText(item?.subtitle);
@@ -389,7 +394,14 @@ function parseSpotifyPlaylistEmbed(html, expectedPlaylistID) {
   if (!items.length) {
     throw importError("resolving_metadata", "SPOTIFY_PLAYLIST_EMPTY", "This Spotify playlist has no public, playable tracks.");
   }
-  return { title, author, artworkURL, items, unavailableCount };
+  return {
+    title,
+    author,
+    artworkURL,
+    items,
+    unavailableCount,
+    truncated: entity.trackList.length > MAX_PLAYLIST_ITEMS,
+  };
 }
 
 async function responseTextWithLimit(response, limit, error) {
@@ -635,7 +647,7 @@ async function resolveSpotifyPlaylist(value, signal, fetchImpl = fetch) {
     sourceURL: canonical.url.toString(),
     items,
     unavailableCount: embedded.unavailableCount,
-    truncated: false,
+    truncated: Boolean(embedded.truncated),
   };
 }
 
@@ -984,7 +996,8 @@ async function resolveYouTubePlaylist(source, signal, fetchImpl = fetch) {
   const initialData = extractYouTubeInitialData(html);
   if (!initialData) throw importError("resolving_metadata", "YOUTUBE_PLAYLIST_INVALID", "YouTube returned invalid playlist metadata.");
   const firstPage = parseYouTubePlaylistData(initialData, playlistID);
-  const result = { ...firstPage, items: [...firstPage.items] };
+  const result = { ...firstPage, items: firstPage.items.slice(0, MAX_PLAYLIST_ITEMS) };
+  let truncated = firstPage.items.length > MAX_PLAYLIST_ITEMS;
   const configuration = {
     apiKey: youtubeConfigurationValue(html, "INNERTUBE_API_KEY", 256),
     clientVersion: youtubeConfigurationValue(html, "INNERTUBE_CLIENT_VERSION", 128),
@@ -1002,7 +1015,9 @@ async function resolveYouTubePlaylist(source, signal, fetchImpl = fetch) {
     const response = await youtubePlaylistContinuation(continuation, configuration, signal, fetchImpl);
     if (!response) break;
     const page = parseYouTubePlaylistData(response, playlistID);
-    result.items.push(...page.items.slice(0, MAX_PLAYLIST_ITEMS - result.items.length));
+    const remaining = MAX_PLAYLIST_ITEMS - result.items.length;
+    if (page.items.length > remaining) truncated = true;
+    result.items.push(...page.items.slice(0, remaining));
     result.unavailableCount += page.unavailableCount;
     continuation = page.continuation;
     continuationCount += 1;
@@ -1018,7 +1033,7 @@ async function resolveYouTubePlaylist(source, signal, fetchImpl = fetch) {
     sourceURL: playlistURL.toString(),
     items: result.items,
     unavailableCount: result.unavailableCount,
-    truncated: Boolean(continuation),
+    truncated: truncated || Boolean(continuation),
   };
 }
 
