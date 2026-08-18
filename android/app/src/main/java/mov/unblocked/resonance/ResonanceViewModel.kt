@@ -1414,9 +1414,29 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             var completedDownloads = 0
-            val downloadOutcomes = PlaylistDownloadOutcomePolicy.loadDistinct(
+            val adoptedVideoIDs = mutableSetOf<String>()
+            PlaylistDownloadOutcomePolicy.loadDistinct(
                 selected = downloadCandidates,
                 key = LinkImportCandidate::playlistDownloadKey,
+                onOutcome = { outcome ->
+                    val track = outcome.result.getOrNull() ?: return@loadDistinct
+                    selected.asSequence()
+                        .filter { it.playlistDownloadKey == outcome.key }
+                        .forEach { candidate ->
+                            val downloadCandidate = candidatesByDownloadKey.getValue(outcome.key)
+                            val initial = initialMatches[downloadCandidate]
+                            if (adoptedVideoIDs.add(candidate.videoID)) {
+                                initial?.serverSongID?.let { remoteID ->
+                                    adoptUploadedDownload(
+                                        track.id,
+                                        remoteID,
+                                        client?.baseURL ?: mutableState.value.serverUrl,
+                                    )
+                                }
+                            }
+                            if (imported.none { it.second.id == track.id }) imported += candidate to track
+                        }
+                },
             ) { downloadCandidate ->
                 val metadata = requireNotNull(downloadCandidate.importTrack).copy(
                     artworkURL = downloadCandidate.importTrack.artworkURL ?: downloadCandidate.thumbnailURL,
@@ -1456,22 +1476,6 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         state.copy(downloadProgress = 1f)
                     }
                     result
-                }
-            }
-            val downloadOutcomesByDownloadKey = downloadOutcomes.associateBy { it.key }
-            val adoptedVideoIDs = mutableSetOf<String>()
-            selected.forEach { candidate ->
-                val downloadKey = candidate.playlistDownloadKey
-                val downloadCandidate = candidatesByDownloadKey.getValue(downloadKey)
-                val initial = initialMatches[downloadCandidate]
-                val track = downloadOutcomesByDownloadKey.getValue(downloadKey).result.getOrNull()
-                if (track != null) {
-                    if (adoptedVideoIDs.add(candidate.videoID)) {
-                        initial?.serverSongID?.let { remoteID ->
-                            adoptUploadedDownload(track.id, remoteID, client?.baseURL ?: mutableState.value.serverUrl)
-                        }
-                    }
-                    if (imported.none { it.second.id == track.id }) imported += candidate to track
                 }
             }
             requireLinkImportTransfer(transferGeneration)

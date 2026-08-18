@@ -14,13 +14,16 @@ internal object PlaylistDownloadOutcomePolicy {
     suspend fun <T, K, V> loadDistinct(
         selected: List<T>,
         key: (T) -> K,
+        onOutcome: (PlaylistDownloadOutcome<K, V>) -> Unit = {},
         loader: suspend (T) -> Result<V>,
     ): List<PlaylistDownloadOutcome<K, V>> {
         val outcomes = LinkedHashMap<K, Result<V>>()
         selected.forEach { candidate ->
             val candidateKey = key(candidate)
             if (!outcomes.containsKey(candidateKey)) {
-                outcomes[candidateKey] = loader(candidate)
+                val outcome = PlaylistDownloadOutcome(candidateKey, loader(candidate))
+                outcomes[candidateKey] = outcome.result
+                onOutcome(outcome)
             }
         }
         return outcomes.map { (candidateKey, result) ->

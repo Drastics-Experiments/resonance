@@ -9,6 +9,33 @@ class PlaylistDownloadOutcomePolicyTest {
     private data class Row(val videoID: String, val playlistIndex: Int)
 
     @Test
+    fun reportsCompletedOutcomeBeforeLaterCancellation() = runTest {
+        val selected = listOf(Row("video-a", 1), Row("video-b", 2))
+        val loaderCalls = mutableListOf<String>()
+        val completed = mutableListOf<PlaylistDownloadOutcome<String, String>>()
+
+        val attempted = runCatching {
+            PlaylistDownloadOutcomePolicy.loadDistinct(
+                selected = selected,
+                key = Row::videoID,
+                onOutcome = completed::add,
+            ) { row ->
+                loaderCalls += row.videoID
+                if (row.videoID == "video-a") {
+                    Result.success("track-a")
+                } else {
+                    throw kotlinx.coroutines.CancellationException("cancel after first download")
+                }
+            }
+        }
+
+        assertTrue(attempted.isFailure)
+        assertEquals(listOf("video-a", "video-b"), loaderCalls)
+        assertEquals(listOf("video-a"), completed.map(PlaylistDownloadOutcome<String, String>::key))
+        assertEquals("track-a", completed.single().result.getOrNull())
+    }
+
+    @Test
     fun cachesFailedVideoOutcomeAndKeepsRepeatedRowsMappedToTheSameVideo() = runTest {
         val selected = listOf(
             Row(videoID = "video-a", playlistIndex = 1),
