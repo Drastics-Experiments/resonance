@@ -192,6 +192,18 @@ enum LocalImportPlaylistDownloadPolicy {
 enum LocalImportYouTubePlaylistLimitPolicy {
     static let maxItems = 500
 
+    static func syntheticMoreItemsPosition(
+        offset: Int,
+        items: [LocalImportAudioSourceMatch],
+        skippedItems: [LocalImportPlaylistSkippedItem]
+    ) -> Int {
+        let maxParsedPosition = max(
+            items.compactMap(\.playlistPosition).max() ?? 0,
+            skippedItems.map(\.position).max() ?? 0
+        )
+        return max(max(offset, maxParsedPosition) + 1, 1)
+    }
+
     static func takeRows(
         items: [LocalImportAudioSourceMatch],
         skippedItems: [LocalImportPlaylistSkippedItem],

@@ -316,6 +316,91 @@ final class MobileLocalImportTests: XCTestCase {
         XCTAssertEqual(reconstructedPositions, [7, 9])
     }
 
+    func testYouTubePlaylistSyntheticMoreRowUsesProviderPositionWhenContinuationRemains() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let firstPage = try LocalImportParser.youtubePlaylistData(
+            [
+                "contents": [
+                    ["playlistVideoRenderer": [
+                        "videoId": "jNQXAC9IVRw",
+                        "title": ["simpleText": "Provider position seven"],
+                        "isPlayable": true,
+                        "index": ["simpleText": "7"],
+                    ]],
+                    ["continuationItemRenderer": [
+                        "continuationEndpoint": [
+                            "continuationCommand": ["token": "continuation-token"],
+                        ],
+                    ]],
+                ],
+            ],
+            expectedPlaylistID: playlistID
+        )
+
+        XCTAssertEqual(firstPage.continuation, "continuation-token")
+        XCTAssertEqual(firstPage.items.map(\.playlistPosition), [7])
+
+        let offset = max(
+            firstPage.nextPosition - 1,
+            firstPage.items.count + firstPage.skippedItems.count
+        )
+        let syntheticPosition = LocalImportYouTubePlaylistLimitPolicy.syntheticMoreItemsPosition(
+            offset: offset,
+            items: firstPage.items,
+            skippedItems: firstPage.skippedItems
+        )
+        XCTAssertEqual(offset, 7)
+        XCTAssertEqual(syntheticPosition, 8)
+        XCTAssertGreaterThan(syntheticPosition, try XCTUnwrap(firstPage.items.first?.playlistPosition))
+    }
+
+    func testYouTubePlaylistSyntheticMoreRowDoesNotReuseProviderPosition() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let firstPage = try LocalImportParser.youtubePlaylistData(
+            [
+                "contents": [
+                    ["lockupViewModel": [
+                        "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                        "metadata": [
+                            "lockupMetadataViewModel": [
+                                "title": ["content": "Unavailable row"],
+                            ],
+                        ],
+                    ]],
+                    ["playlistVideoRenderer": [
+                        "videoId": "jNQXAC9IVRw",
+                        "title": ["simpleText": "Provider position three"],
+                        "isPlayable": true,
+                        "index": ["simpleText": "3"],
+                    ]],
+                    ["continuationItemRenderer": [
+                        "continuationEndpoint": [
+                            "continuationCommand": ["token": "continuation-token"],
+                        ],
+                    ]],
+                ],
+            ],
+            expectedPlaylistID: playlistID
+        )
+
+        XCTAssertEqual(firstPage.items.map(\.playlistPosition), [3])
+        XCTAssertEqual(firstPage.skippedItems.map(\.position), [1])
+        let countBasedPosition = firstPage.items.count + firstPage.skippedItems.count + 1
+        XCTAssertEqual(countBasedPosition, 3)
+
+        let offset = max(
+            firstPage.nextPosition - 1,
+            firstPage.items.count + firstPage.skippedItems.count
+        )
+        let syntheticPosition = LocalImportYouTubePlaylistLimitPolicy.syntheticMoreItemsPosition(
+            offset: offset,
+            items: firstPage.items,
+            skippedItems: firstPage.skippedItems
+        )
+        XCTAssertEqual(syntheticPosition, 4)
+        XCTAssertNotEqual(syntheticPosition, try XCTUnwrap(firstPage.items.first?.playlistPosition))
+    }
+
     func testYouTubePlaylistParserRejectsWrongPlaylist() {
         let data: [String: Any] = [
             "playlistMetadataRenderer": [

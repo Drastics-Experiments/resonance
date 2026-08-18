@@ -765,6 +765,71 @@ struct PreviewRegressionTests {
     }
 
     @Test
+    func playlistVideoSelectionDoesNotReuseAudioOnlyExistingSongs() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalImportVideoMatchPolicy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let localFile = root.appendingPathComponent("existing.m4a")
+        try Data("existing".utf8).write(to: localFile)
+        let sourceURL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+        let playlistTrack = LocalImportSpotifyTrack(
+            provider: "youtube",
+            type: "track",
+            trackID: "jNQXAC9IVRw",
+            title: "Existing Song",
+            artist: "Resonance",
+            album: nil,
+            trackNumber: 1,
+            durationSeconds: 60,
+            artworkURL: nil,
+            embedURL: "",
+            sourceURL: sourceURL
+        )
+        let audioLocal = Track(
+            title: playlistTrack.title,
+            artist: playlistTrack.artist,
+            album: "Imported",
+            duration: 60,
+            kind: .audio,
+            artwork: .midnight,
+            fileURL: localFile,
+            sourceURL: sourceURL
+        )
+        let audioServer = try JSONDecoder().decode(RemoteSong.self, from: Data(
+            """
+            {
+              "id": "audio-server-song",
+              "filename": "existing.m4a",
+              "title": "Existing Song",
+              "artist": "Resonance",
+              "album": "Imported",
+              "size": 8,
+              "modified_at": "2026-08-05T00:00:00Z",
+              "content_type": "audio/mp4",
+              "media_kind": "audio",
+              "duration_seconds": 60,
+              "download_url": "/api/v1/songs/audio-server-song/file",
+              "stream_url": "/api/v1/songs/audio-server-song/stream"
+            }
+            """.utf8
+        ))
+
+        let selectedMode: LocalImportMediaMode = .video
+        let match = LocalImportExistingSongPolicy.match(
+            spotifyTrack: playlistTrack,
+            deviceTracks: [audioLocal],
+            activeServerSongs: [audioServer],
+            mediaMode: selectedMode
+        )
+
+        #expect(selectedMode == .video)
+        #expect(match.deviceTrackID == nil)
+        #expect(match.serverSongID == nil)
+    }
+
+    @Test
     func libraryRootUsesWindowsLayoutWhilePlaylistsKeepTheirHero() {
         #expect(!LibraryCollectionLayoutPolicy.showsHero(for: .library))
         #expect(LibraryCollectionLayoutPolicy.showsHero(for: .playlists))

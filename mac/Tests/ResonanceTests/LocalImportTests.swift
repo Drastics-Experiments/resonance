@@ -1674,6 +1674,164 @@ struct LocalImportTests {
         #expect(localFiles.count == 1)
     }
 
+    @MainActor
+    @Test
+    func playlistVideoSelectionUsesVideoTransferMode() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalPlaylistVideoImport-\(UUID().uuidString)", isDirectory: true)
+        let library = root.appendingPathComponent("Library", isDirectory: true)
+        let temporary = root.appendingPathComponent("Temporary", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer {
+            LocalImportMockURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let videoFixtureURL = root.appendingPathComponent("video-only.mp4")
+        try await makeLocalImportVideoFixture(at: videoFixtureURL)
+        let videoFixture = try Data(contentsOf: videoFixtureURL)
+        let audioFixture = try Data(contentsOf: m4a)
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let videoID = self.videoID
+        let initialData: [String: Any] = [
+            "metadata": ["playlistMetadataRenderer": [
+                "playlistId": playlistID,
+                "title": ["simpleText": "Video Playlist"],
+            ]],
+            "header": ["playlistHeaderRenderer": [
+                "ownerText": ["runs": [["text": "Resonance"]]],
+            ]],
+            "contents": [["playlistVideoRenderer": [
+                "videoId": videoID,
+                "title": ["simpleText": "Local Playlist Video"],
+                "shortBylineText": ["simpleText": "Resonance"],
+                "lengthText": ["simpleText": "0:01"],
+                "index": ["simpleText": "1"],
+                "isPlayable": true,
+            ]]],
+        ]
+        let initialJSON = try JSONSerialization.data(withJSONObject: initialData)
+        let initialDocument = String(data: initialJSON, encoding: .utf8)!
+        let html = "<script>var ytInitialData = \(initialDocument);</script><script>ytcfg.set({\"VISITOR_DATA\":\"visitor_playlist_video\"});</script>"
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        LocalImportMockURLProtocol.reset()
+        LocalImportMockURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.host == "www.youtube.com", url.path == "/playlist" {
+                let data = Data(html.utf8)
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!,
+                    data
+                )
+            }
+            if url.host == "www.youtube.com",
+               (url.path == "/watch" || url.path.hasPrefix("/embed/")) {
+                let data = Data("<script>ytcfg.set({\"VISITOR_DATA\":\"visitor_playlist_video\"});</script>".utf8)
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!,
+                    data
+                )
+            }
+            if url.host == "www.youtube.com", url.path == "/youtubei/v1/player" {
+                let player: [String: Any] = [
+                    "playabilityStatus": ["status": "OK"],
+                    "videoDetails": [
+                        "videoId": videoID,
+                        "title": "Local Playlist Video",
+                        "author": "Resonance",
+                        "lengthSeconds": "1",
+                    ],
+                    "streamingData": ["adaptiveFormats": [
+                        [
+                            "itag": 137,
+                            "url": "https://rr1.example.googlevideo.com/video-only",
+                            "mimeType": "video/mp4; codecs=\"avc1.640028\"",
+                            "bitrate": 5_000_000,
+                            "contentLength": String(videoFixture.count),
+                            "qualityLabel": "1080p",
+                            "height": 1080,
+                        ],
+                        [
+                            "itag": 140,
+                            "url": "https://rr1.example.googlevideo.com/audio-only",
+                            "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+                            "bitrate": 129_000,
+                            "contentLength": String(audioFixture.count),
+                            "audioQuality": "AUDIO_QUALITY_MEDIUM",
+                            "audioChannels": 2,
+                        ],
+                    ]],
+                ]
+                let data = try JSONSerialization.data(withJSONObject: player)
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!,
+                    data
+                )
+            }
+            if url.host?.hasSuffix("googlevideo.com") == true {
+                let fixture = url.path == "/audio-only" ? audioFixture : videoFixture
+                let isProbe = request.value(forHTTPHeaderField: "Range") == "bytes=0-0"
+                let end = isProbe ? 0 : fixture.count - 1
+                #expect(request.value(forHTTPHeaderField: "Range") == "bytes=0-\(end)")
+                let body = isProbe ? Data(fixture.prefix(1)) : fixture
+                return (
+                    HTTPURLResponse(
+                        url: url,
+                        statusCode: 206,
+                        httpVersion: nil,
+                        headerFields: [
+                            "Content-Range": "bytes 0-\(end)/\(fixture.count)",
+                            "Content-Length": String(body.count),
+                            "Content-Type": url.path == "/audio-only" ? "audio/mp4" : "video/mp4",
+                        ]
+                    )!,
+                    body
+                )
+            }
+            throw URLError(.unsupportedURL)
+        }
+
+        let suiteName = "LocalPlaylistVideoImport.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        let service = LocalDeviceImportService(
+            sessions: .testing(session),
+            localRoot: library,
+            temporaryRoot: temporary
+        )
+        let viewModel = MacLocalImportViewModel(model: model, service: service)
+        viewModel.source = "https://www.youtube.com/playlist?list=\(playlistID)"
+        viewModel.mediaMode = .video
+        viewModel.syncAfterImport = false
+        viewModel.resolve()
+        for _ in 0..<200 {
+            if viewModel.stage == .awaitingSelection { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(viewModel.stage == .awaitingSelection)
+        #expect(viewModel.selectedPlaylistItems.count == 1)
+        #expect(viewModel.importSelected())
+        for _ in 0..<400 {
+            if !viewModel.isRunning { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(viewModel.stage == .complete)
+        let imported = try #require(model.tracks.first)
+        #expect(imported.kind == .video)
+        #expect(imported.fileURL?.pathExtension == "mp4")
+    }
+
     @Test
     func youtubeVideoModeDownloadsPlayableMP4AndAddsAVideoTrack() async throws {
         let root = FileManager.default.temporaryDirectory

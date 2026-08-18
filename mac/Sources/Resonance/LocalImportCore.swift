@@ -308,9 +308,11 @@ enum LocalImportExistingSongPolicy {
         spotifyTrack: LocalImportSpotifyTrack,
         deviceTracks: [Track],
         activeServerSongs: [RemoteSong],
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        mediaMode: LocalImportMediaMode = .audio
     ) -> LocalImportExistingSongMatch {
         let deviceTrack = deviceTracks.first { candidate in
+            guard candidate.kind == expectedKind(for: mediaMode) else { return false }
             guard let fileURL = candidate.fileURL,
                   fileManager.fileExists(atPath: fileURL.path) else { return false }
             if let expectedSpotifyID = spotifyTrackID(spotifyTrack.sourceURL),
@@ -328,9 +330,12 @@ enum LocalImportExistingSongPolicy {
         }
 
         let serverSong = deviceTrack?.remoteID.flatMap { remoteID in
-            activeServerSongs.first { $0.id == remoteID }
+            activeServerSongs.first {
+                $0.id == remoteID && matchesMediaMode($0, mediaMode: mediaMode)
+            }
         } ?? activeServerSongs.first { candidate in
-            metadataMatches(
+            guard matchesMediaMode(candidate, mediaMode: mediaMode) else { return false }
+            return metadataMatches(
                 expectedTitle: spotifyTrack.title,
                 expectedArtist: spotifyTrack.artist,
                 expectedDuration: spotifyTrack.durationSeconds.map(Double.init),
@@ -344,6 +349,14 @@ enum LocalImportExistingSongPolicy {
             deviceTrackID: deviceTrack?.id,
             serverSongID: serverSong?.id
         )
+    }
+
+    private static func expectedKind(for mediaMode: LocalImportMediaMode) -> SongFilter {
+        mediaMode == .video ? .video : .audio
+    }
+
+    private static func matchesMediaMode(_ song: RemoteSong, mediaMode: LocalImportMediaMode) -> Bool {
+        song.mediaKind == (mediaMode == .video ? "video" : "audio")
     }
 
     private static func metadataMatches(

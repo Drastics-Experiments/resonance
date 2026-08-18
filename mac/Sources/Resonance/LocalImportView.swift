@@ -174,11 +174,15 @@ final class MacLocalImportViewModel: ObservableObject {
         )
     }
 
-    func existingMatch(for track: LocalImportSpotifyTrack) -> LocalImportExistingSongMatch {
+    func existingMatch(
+        for track: LocalImportSpotifyTrack,
+        mediaMode requestedMode: LocalImportMediaMode? = nil
+    ) -> LocalImportExistingSongMatch {
         LocalImportExistingSongPolicy.match(
             spotifyTrack: track,
             deviceTracks: model.visibleTracks,
-            activeServerSongs: model.remoteSongs
+            activeServerSongs: model.remoteSongs,
+            mediaMode: requestedMode ?? mediaMode
         )
     }
 
@@ -544,8 +548,8 @@ final class MacLocalImportViewModel: ObservableObject {
             artworkURL: resolution.track.artworkURL ?? candidate.thumbnailURL,
             sourceURL: resolution.track.sourceURL
         )
-        let existingMatch = existingMatch(for: resolution.track)
         let requestedMode = mediaMode
+        let existingMatch = existingMatch(for: resolution.track, mediaMode: requestedMode)
         let reservedModel = model
         task = Task { [weak self] in
             guard let self else {
@@ -651,6 +655,7 @@ final class MacLocalImportViewModel: ObservableObject {
         let selectedItems = selectedPlaylistItems
         guard let playlist = resolution.playlist, !selectedItems.isEmpty else { return false }
         let items = LocalImportPlaylistDownloadPolicy.uniqueItems(selectedItems)
+        let requestedMode = mediaMode
         let shouldUpload = syncAfterImport
         if shouldUpload, let unavailable = uploadUnavailableMessage {
             error = .init(stage: .syncing, code: "UPLOAD_MODE_UNAVAILABLE", message: unavailable)
@@ -662,7 +667,7 @@ final class MacLocalImportViewModel: ObservableObject {
             transferContext = try model.beginLocalImportTransfer(
                 reservingUpload: shouldUpload,
                 rawSourceInput: resolvedSourceInput,
-                mediaMode: mediaMode,
+                mediaMode: requestedMode,
                 requiresReviewedMatch: false
             )
         } catch {
@@ -679,7 +684,7 @@ final class MacLocalImportViewModel: ObservableObject {
         completedSummary = nil
         completedTrack = nil
         let initialMatchesByTrackID = Dictionary(
-            items.map { ($0.track.trackID, existingMatch(for: $0.track)) },
+            items.map { ($0.track.trackID, existingMatch(for: $0.track, mediaMode: requestedMode)) },
             uniquingKeysWith: { first, _ in first }
         )
         let plannedDownloadTransfers = LocalImportBatchProgressPolicy.plannedTransferCount(
@@ -721,7 +726,7 @@ final class MacLocalImportViewModel: ObservableObject {
                     download: { _, _, item -> Track? in
                         try Task.checkCancellation()
                         let existingMatch = initialMatchesByTrackID[item.track.trackID]
-                            ?? self.existingMatch(for: item.track)
+                            ?? self.existingMatch(for: item.track, mediaMode: requestedMode)
                         var track: Track
                         if let deviceTrackID = existingMatch.deviceTrackID,
                            let deviceTrack = self.model.tracks.first(where: { $0.id == deviceTrackID }) {
@@ -761,7 +766,7 @@ final class MacLocalImportViewModel: ObservableObject {
                                         candidate,
                                         metadata: metadata,
                                         existingTracks: self.model.tracks,
-                                        mediaMode: .audio
+                                        mediaMode: requestedMode
                                     ) { [weak self] progress in self?.apply(progress) }
                                 }
                             } catch is CancellationError {

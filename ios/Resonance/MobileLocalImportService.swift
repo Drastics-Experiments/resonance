@@ -1479,7 +1479,11 @@ actor LocalDeviceImportService {
         truncated = truncated || continuation != nil
         if truncated {
             skippedItems.append(LocalImportPlaylistSkippedItem(
-                position: (items.count + skippedItems.count) + 1,
+                position: LocalImportYouTubePlaylistLimitPolicy.syntheticMoreItemsPosition(
+                    offset: offset,
+                    items: items,
+                    skippedItems: skippedItems
+                ),
                 title: "More playlist items",
                 artist: nil,
                 reason: items.count >= maxItems
