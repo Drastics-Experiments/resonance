@@ -66,3 +66,5 @@ jobs:
           git pull --rebase origin agent/optimize-batched-downloads
           git push origin HEAD:agent/optimize-batched-downloads
           exit 0
+
+# This comment intentionally triggers the already-registered workflow.
