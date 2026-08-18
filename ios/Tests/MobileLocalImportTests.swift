@@ -64,6 +64,56 @@ final class MobileLocalImportTests: XCTestCase {
         XCTAssertEqual(result.continuation, "continuation-token")
     }
 
+    func testYouTubePlaylistParserAdvancesPastExplicitProviderIndex() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let result = try LocalImportParser.youtubePlaylistData(
+            [
+                "contents": [
+                    [
+                        "playlistVideoRenderer": [
+                            "videoId": "jNQXAC9IVRw",
+                            "title": ["simpleText": "Provider position seven"],
+                            "isPlayable": true,
+                            "index": ["simpleText": "7"],
+                        ],
+                    ],
+                    [
+                        "playlistVideoRenderer": [
+                            "videoId": "dQw4w9WgXcQ",
+                            "title": ["simpleText": "Unavailable after explicit position"],
+                            "isPlayable": false,
+                        ],
+                    ],
+                ],
+            ],
+            expectedPlaylistID: playlistID
+        )
+
+        XCTAssertEqual(result.items.count, 1)
+        XCTAssertEqual(result.skippedItems.map(\.position), [8])
+        XCTAssertEqual(result.nextPosition, 9)
+
+        let continuationOffset = max(
+            result.nextPosition - 1,
+            result.items.count + result.skippedItems.count
+        )
+        XCTAssertEqual(continuationOffset, 8)
+        let continuation = try LocalImportParser.youtubePlaylistData(
+            [
+                "contents": [[
+                    "playlistVideoRenderer": [
+                        "videoId": "dQw4w4WgXcQ",
+                        "title": ["simpleText": "Next continuation row"],
+                        "isPlayable": false,
+                    ],
+                ]],
+            ],
+            expectedPlaylistID: playlistID,
+            positionOffset: continuationOffset
+        )
+        XCTAssertEqual(continuation.skippedItems.map(\.position), [9])
+    }
+
     func testYouTubePlaylistParserSupportsModernLockupItems() throws {
         let result = try LocalImportParser.youtubePlaylistData(
             [
@@ -276,6 +326,10 @@ final class MobileLocalImportTests: XCTestCase {
             LocalImportPlaylistSelectionPolicy.selectedItems(in: playlist, itemIDs: selectedItemIDs)
                 .map(\.id),
             [second.id]
+        )
+        XCTAssertEqual(
+            LocalImportPlaylistDownloadPolicy.uniqueItems([first, second]).map(\.position),
+            [1]
         )
     }
 

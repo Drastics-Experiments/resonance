@@ -176,6 +176,15 @@ enum LocalImportPlaylistSelectionPolicy {
     }
 }
 
+enum LocalImportPlaylistDownloadPolicy {
+    // Provider rows remain independently selectable, but repeated rows for
+    // the same source track must not perform duplicate network/storage work.
+    static func uniqueItems(_ items: [LocalImportPlaylistItem]) -> [LocalImportPlaylistItem] {
+        var seenTrackIDs = Set<String>()
+        return items.filter { seenTrackIDs.insert($0.track.trackID).inserted }
+    }
+}
+
 enum LocalImportYouTubePlaylistLimitPolicy {
     static let maxItems = 500
 
@@ -790,8 +799,7 @@ enum LocalImportParser {
               LocalImportURL.isYouTubeVideoID(videoID),
               renderer["isPlayable"] as? Bool != false,
               let title = rendererText(renderer["title"]) else { return nil }
-        let parsedPosition = rendererText(renderer["index"]).flatMap(Int.init)
-        let position = parsedPosition.flatMap { $0 > 0 ? $0 : nil } ?? max(fallbackPosition, 1)
+        let position = youtubePlaylistPosition(renderer, fallbackPosition: fallbackPosition)
         let artist = rendererText(renderer["shortBylineText"])
             ?? rendererText(renderer["longBylineText"])
             ?? "Unknown uploader"
@@ -863,6 +871,15 @@ enum LocalImportParser {
         )
     }
 
+    private static func youtubePlaylistPosition(
+        _ renderer: [String: Any],
+        fallbackPosition: Int
+    ) -> Int {
+        let fallback = max(fallbackPosition, 1)
+        let parsedPosition = rendererText(renderer["index"]).flatMap(Int.init)
+        return max(parsedPosition.flatMap { $0 > 0 ? $0 : nil } ?? fallback, fallback)
+    }
+
     static func youtubePlaylistData(
         _ value: Any,
         expectedPlaylistID: String,
@@ -874,7 +891,8 @@ enum LocalImportParser {
         items: [LocalImportAudioSourceMatch],
         continuation: String?,
         skippedItems: [LocalImportPlaylistSkippedItem],
-        unavailableCount: Int
+        unavailableCount: Int,
+        nextPosition: Int
     ) {
         var title: String?
         var author: String?
@@ -905,12 +923,13 @@ enum LocalImportParser {
                 artworkURL = thumbnail(source?["thumbnail"] as? [String: Any])
             }
             if let renderer = record["playlistVideoRenderer"] as? [String: Any] {
-                if let item = youtubePlaylistCandidate(renderer, fallbackPosition: nextPosition) {
+                let itemPosition = youtubePlaylistPosition(renderer, fallbackPosition: nextPosition)
+                if let item = youtubePlaylistCandidate(renderer, fallbackPosition: itemPosition) {
                     items.append(item)
                 } else {
                     unavailableCount += 1
                     skippedItems.append(LocalImportPlaylistSkippedItem(
-                        position: nextPosition,
+                        position: itemPosition,
                         title: rendererText(renderer["title"]) ?? "Unavailable video",
                         artist: rendererText(renderer["shortBylineText"]) ?? rendererText(renderer["longBylineText"]),
                         reason: renderer["isPlayable"] as? Bool == false
@@ -918,7 +937,7 @@ enum LocalImportParser {
                             : "Missing public video metadata"
                     ))
                 }
-                nextPosition += 1
+                nextPosition = max(nextPosition, itemPosition + 1)
             }
             if let lockup = record["lockupViewModel"] as? [String: Any],
                lockup["contentType"] as? String == "LOCKUP_CONTENT_TYPE_VIDEO" {
@@ -947,7 +966,7 @@ enum LocalImportParser {
                 message: "YouTube returned the wrong playlist."
             )
         }
-        return (title, author, artworkURL, items, continuation, skippedItems, unavailableCount)
+        return (title, author, artworkURL, items, continuation, skippedItems, unavailableCount, nextPosition)
     }
 
     private static func youtubePlaylistCandidate(

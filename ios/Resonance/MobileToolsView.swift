@@ -1757,8 +1757,9 @@ private final class MobileLocalImportViewModel: ObservableObject {
     }
 
     private func importPlaylist(_ resolution: LocalImportResolution, into library: MusicLibrary) {
-        let items = selectedPlaylistItems
-        guard let playlist = resolution.playlist, !items.isEmpty else { return }
+        let selectedItems = selectedPlaylistItems
+        guard let playlist = resolution.playlist, !selectedItems.isEmpty else { return }
+        let items = LocalImportPlaylistDownloadPolicy.uniqueItems(selectedItems)
         task?.cancel()
         error = nil
         completedBytes = 0

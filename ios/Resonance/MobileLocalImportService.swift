@@ -1413,6 +1413,14 @@ actor LocalDeviceImportService {
         var author = firstPage.author
         var artworkURL = firstPage.artworkURL
         var continuation = firstPage.continuation
+        // The provider's cursor is based on every source row, not only the
+        // playable items that survive the output cap. Preserve explicit
+        // provider indices and unavailable-row positions when requesting the
+        // next page so continuation rows cannot restart at a compressed count.
+        var offset = max(
+            firstPage.nextPosition - 1,
+            initialRows.items.count + initialRows.skippedItems.count
+        )
         let configuration = (
             apiKey: youtubeConfigurationValue(html, key: "INNERTUBE_API_KEY", maximum: 256),
             clientVersion: youtubeConfigurationValue(html, key: "INNERTUBE_CLIENT_VERSION", maximum: 128),
@@ -1437,7 +1445,7 @@ actor LocalDeviceImportService {
                 clientVersion: clientVersion,
                 visitorData: configuration.visitorData
             ) else { break }
-            let offset = items.count + skippedItems.count
+            let pageStartPosition = offset + 1
             let page = try LocalImportParser.youtubePlaylistData(
                 response,
                 expectedPlaylistID: canonical.playlistID,
@@ -1451,10 +1459,11 @@ actor LocalDeviceImportService {
                 items: page.items,
                 skippedItems: page.skippedItems,
                 maximum: remaining,
-                startingPosition: offset + 1
+                startingPosition: pageStartPosition
             )
             items.append(contentsOf: pageRows.items)
             skippedItems.append(contentsOf: pageRows.skippedItems)
+            offset = max(offset, page.nextPosition - 1)
             truncated = truncated || pageRows.truncated
             continuation = page.continuation
             continuationCount += 1
