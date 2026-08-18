@@ -98,7 +98,7 @@ final class MacLocalImportViewModel: ObservableObject {
     @Published private(set) var searchResponse: LocalImportSearchResponse?
     @Published private(set) var selectedSearchResultID: String?
     @Published var selectedVideoID: String?
-    @Published var selectedPlaylistTrackIDs: Set<String> = []
+    @Published var selectedPlaylistItemIDs: Set<String> = []
     @Published var selectedReleaseInfoHash: String?
     @Published var mediaMode: LocalImportMediaMode = .audio
     @Published var syncAfterImport = true
@@ -153,22 +153,36 @@ final class MacLocalImportViewModel: ObservableObject {
     }
 
     var isPlaylist: Bool {
-        resolution?.kind == .spotifyPlaylist || resolution?.kind == .soundCloudPlaylist
+        resolution?.kind == .spotifyPlaylist
+            || resolution?.kind == .soundCloudPlaylist
+            || resolution?.kind == .youtubePlaylist
     }
 
     var playlistProviderName: String {
-        resolution?.kind == .soundCloudPlaylist ? "SoundCloud" : "Spotify"
+        switch resolution?.kind {
+        case .soundCloudPlaylist: "SoundCloud"
+        case .youtubePlaylist: "YouTube"
+        default: "Spotify"
+        }
     }
 
     var selectedPlaylistItems: [LocalImportPlaylistItem] {
-        resolution?.playlist?.items.filter { selectedPlaylistTrackIDs.contains($0.track.trackID) } ?? []
+        guard let playlist = resolution?.playlist else { return [] }
+        return LocalImportPlaylistSelectionPolicy.selectedItems(
+            in: playlist,
+            itemIDs: selectedPlaylistItemIDs
+        )
     }
 
-    func existingMatch(for track: LocalImportSpotifyTrack) -> LocalImportExistingSongMatch {
+    func existingMatch(
+        for track: LocalImportSpotifyTrack,
+        mediaMode requestedMode: LocalImportMediaMode? = nil
+    ) -> LocalImportExistingSongMatch {
         LocalImportExistingSongPolicy.match(
             spotifyTrack: track,
             deviceTracks: model.visibleTracks,
-            activeServerSongs: model.remoteSongs
+            activeServerSongs: model.remoteSongs,
+            mediaMode: requestedMode ?? mediaMode
         )
     }
 
@@ -215,6 +229,9 @@ final class MacLocalImportViewModel: ObservableObject {
         case .reviewedMatch:
             guard model.clientConfiguration.allowsReviewedMatch else {
                 return "Reviewed match is disabled by the verified server configuration."
+            }
+            if isPlaylist {
+                return "Reviewed Match imports one explicitly reviewed song at a time. Turn off upload or choose another upload mode."
             }
         case .localFile:
             break
@@ -375,7 +392,7 @@ final class MacLocalImportViewModel: ObservableObject {
         searchResponse = nil
         selectedSearchResultID = nil
         selectedVideoID = nil
-        selectedPlaylistTrackIDs = []
+        selectedPlaylistItemIDs = []
         selectedReleaseInfoHash = nil
         completedTrack = nil
         releaseActionMessage = nil
@@ -418,7 +435,9 @@ final class MacLocalImportViewModel: ObservableObject {
                 selectedVideoID = result.reviewCandidateVideoIDs.isEmpty
                     ? result.candidates.first?.videoID
                     : nil
-                selectedPlaylistTrackIDs = Set(result.playlist?.items.map { $0.track.trackID } ?? [])
+                selectedPlaylistItemIDs = LocalImportPlaylistSelectionPolicy.allItemIDs(
+                    in: result.playlist?.items ?? []
+                )
                 selectedReleaseInfoHash = result.candidates.isEmpty ? result.releases.first?.infoHash : nil
                 stage = .awaitingSelection
                 normalizeUploadSelection()
@@ -445,7 +464,7 @@ final class MacLocalImportViewModel: ObservableObject {
         resolution = result.resolution
         selectedSearchResultID = result.id
         selectedVideoID = result.candidates.first?.videoID
-        selectedPlaylistTrackIDs = []
+        selectedPlaylistItemIDs = []
         selectedReleaseInfoHash = nil
         releaseActionMessage = nil
         previewErrorMessage = nil
@@ -458,7 +477,7 @@ final class MacLocalImportViewModel: ObservableObject {
                 || searchResponse != nil
                 || selectedSearchResultID != nil
                 || selectedVideoID != nil
-                || !selectedPlaylistTrackIDs.isEmpty
+                || !selectedPlaylistItemIDs.isEmpty
                 || selectedReleaseInfoHash != nil else { return }
         stopPreview()
         resolution = nil
@@ -466,7 +485,7 @@ final class MacLocalImportViewModel: ObservableObject {
         searchResponse = nil
         selectedSearchResultID = nil
         selectedVideoID = nil
-        selectedPlaylistTrackIDs = []
+        selectedPlaylistItemIDs = []
         selectedReleaseInfoHash = nil
         releaseActionMessage = nil
         previewErrorMessage = nil
@@ -529,8 +548,8 @@ final class MacLocalImportViewModel: ObservableObject {
             artworkURL: resolution.track.artworkURL ?? candidate.thumbnailURL,
             sourceURL: resolution.track.sourceURL
         )
-        let existingMatch = existingMatch(for: resolution.track)
         let requestedMode = mediaMode
+        let existingMatch = existingMatch(for: resolution.track, mediaMode: requestedMode)
         let reservedModel = model
         task = Task { [weak self] in
             guard let self else {
@@ -626,16 +645,17 @@ final class MacLocalImportViewModel: ObservableObject {
     }
 
     func togglePlaylistItem(_ item: LocalImportPlaylistItem) {
-        if selectedPlaylistTrackIDs.contains(item.track.trackID) {
-            selectedPlaylistTrackIDs.remove(item.track.trackID)
-        } else {
-            selectedPlaylistTrackIDs.insert(item.track.trackID)
-        }
+        selectedPlaylistItemIDs = LocalImportPlaylistSelectionPolicy.toggledItemIDs(
+            selectedPlaylistItemIDs,
+            item: item
+        )
     }
 
     private func importSelectedPlaylist(_ resolution: LocalImportResolution) -> Bool {
-        let items = selectedPlaylistItems
-        guard let playlist = resolution.playlist, !items.isEmpty else { return false }
+        let selectedItems = selectedPlaylistItems
+        guard let playlist = resolution.playlist, !selectedItems.isEmpty else { return false }
+        let items = LocalImportPlaylistDownloadPolicy.uniqueItems(selectedItems)
+        let requestedMode = mediaMode
         let shouldUpload = syncAfterImport
         if shouldUpload, let unavailable = uploadUnavailableMessage {
             error = .init(stage: .syncing, code: "UPLOAD_MODE_UNAVAILABLE", message: unavailable)
@@ -647,8 +667,8 @@ final class MacLocalImportViewModel: ObservableObject {
             transferContext = try model.beginLocalImportTransfer(
                 reservingUpload: shouldUpload,
                 rawSourceInput: resolvedSourceInput,
-                mediaMode: mediaMode,
-                requiresReviewedMatch: true
+                mediaMode: requestedMode,
+                requiresReviewedMatch: false
             )
         } catch {
             self.error = .init(stage: .syncing, code: "UPLOAD_RESERVATION_FAILED", message: error.localizedDescription)
@@ -664,7 +684,8 @@ final class MacLocalImportViewModel: ObservableObject {
         completedSummary = nil
         completedTrack = nil
         let initialMatchesByTrackID = Dictionary(
-            uniqueKeysWithValues: items.map { ($0.track.trackID, existingMatch(for: $0.track)) }
+            items.map { ($0.track.trackID, existingMatch(for: $0.track, mediaMode: requestedMode)) },
+            uniquingKeysWith: { first, _ in first }
         )
         let plannedDownloadTransfers = LocalImportBatchProgressPolicy.plannedTransferCount(
             matches: Array(initialMatchesByTrackID.values),
@@ -705,7 +726,7 @@ final class MacLocalImportViewModel: ObservableObject {
                     download: { _, _, item -> Track? in
                         try Task.checkCancellation()
                         let existingMatch = initialMatchesByTrackID[item.track.trackID]
-                            ?? self.existingMatch(for: item.track)
+                            ?? self.existingMatch(for: item.track, mediaMode: requestedMode)
                         var track: Track
                         if let deviceTrackID = existingMatch.deviceTrackID,
                            let deviceTrack = self.model.tracks.first(where: { $0.id == deviceTrackID }) {
@@ -745,7 +766,7 @@ final class MacLocalImportViewModel: ObservableObject {
                                         candidate,
                                         metadata: metadata,
                                         existingTracks: self.model.tracks,
-                                        mediaMode: .audio
+                                        mediaMode: requestedMode
                                     ) { [weak self] progress in self?.apply(progress) }
                                 }
                             } catch is CancellationError {
@@ -907,7 +928,7 @@ final class MacLocalImportViewModel: ObservableObject {
         stopPreview()
         selectedReleaseInfoHash = release.infoHash
         selectedVideoID = nil
-        selectedPlaylistTrackIDs = []
+        selectedPlaylistItemIDs = []
         mediaMode = .audio
         syncAfterImport = false
         releaseActionMessage = nil
@@ -1595,13 +1616,30 @@ struct MacLocalImportSheet: View {
                     .font(.system(size: 9))
                     .foregroundStyle(palette.muted)
             }
+            if playlist.truncated {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11, weight: .bold))
+                    Text("Only part of this playlist could be loaded. Resonance shows at most \(LocalImportPlaylistLimitPolicy.maxItems) playable videos across \(LocalImportPlaylistLimitPolicy.maxContinuations) continuation pages, and only the visible items can be selected.")
+                        .font(.system(size: 9, weight: .semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundStyle(Color.orange)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.orange.opacity(0.28))
+                }
+            }
             if let summary = viewModel.existingSummary(for: playlist) {
                 Text(summary)
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Color.green)
             }
             ForEach(playlist.items) { item in
-                let selected = viewModel.selectedPlaylistTrackIDs.contains(item.track.trackID)
+                let selected = viewModel.selectedPlaylistItemIDs.contains(item.id)
                 HStack(spacing: 10) {
                     Button { viewModel.togglePlaylistItem(item) } label: {
                         HStack(spacing: 12) {

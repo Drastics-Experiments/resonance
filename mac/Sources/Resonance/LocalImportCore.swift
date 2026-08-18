@@ -145,6 +145,7 @@ struct LocalImportResolution: Hashable, Sendable {
         case soundCloud
         case soundCloudPlaylist
         case youtube
+        case youtubePlaylist
     }
 
     let kind: Kind
@@ -172,7 +173,10 @@ struct LocalImportResolution: Hashable, Sendable {
 }
 
 struct LocalImportPlaylistItem: Hashable, Identifiable, Sendable {
-    var id: String { track.trackID }
+    // Provider playlists may legitimately contain the same track more than
+    // once. Position keeps SwiftUI rows stable while trackID remains the
+    // source identity used for download de-duplication.
+    var id: String { "\(position)-\(track.trackID)" }
     let position: Int
     let track: LocalImportSpotifyTrack
     let candidate: LocalImportAudioSourceMatch
@@ -211,8 +215,84 @@ struct LocalImportPlaylist: Hashable, Sendable {
     let sourceURL: String
     let items: [LocalImportPlaylistItem]
     let skippedItems: [LocalImportPlaylistSkippedItem]
+    let truncated: Bool
 
     var unavailableCount: Int { skippedItems.count }
+}
+
+enum LocalImportPlaylistSelectionPolicy {
+    static func allItemIDs(in items: [LocalImportPlaylistItem]) -> Set<String> {
+        Set(items.map(\.id))
+    }
+
+    static func selectedItems(
+        in playlist: LocalImportPlaylist,
+        itemIDs: Set<String>
+    ) -> [LocalImportPlaylistItem] {
+        playlist.items.filter { itemIDs.contains($0.id) }
+    }
+
+    static func toggledItemIDs(
+        _ itemIDs: Set<String>,
+        item: LocalImportPlaylistItem
+    ) -> Set<String> {
+        var updated = itemIDs
+        if updated.contains(item.id) {
+            updated.remove(item.id)
+        } else {
+            updated.insert(item.id)
+        }
+        return updated
+    }
+}
+
+enum LocalImportPlaylistDownloadPolicy {
+    // A repeated provider row remains selectable, but importing the same
+    // source track twice would perform duplicate network/storage work. Keep
+    // the first selected occurrence for the transfer and let the local
+    // playlist model continue to de-duplicate its UUID membership.
+    static func uniqueItems(_ items: [LocalImportPlaylistItem]) -> [LocalImportPlaylistItem] {
+        var seenTrackIDs = Set<String>()
+        return items.filter { seenTrackIDs.insert($0.track.trackID).inserted }
+    }
+}
+
+enum LocalImportPlaylistLimitPolicy {
+    static let maxItems = 500
+    static let maxContinuations = 10
+
+    struct PageResult {
+        let tracks: [LocalImportSpotifyTrack]
+        let overflowed: Bool
+    }
+
+    static func takeInitial(_ tracks: [LocalImportSpotifyTrack]) -> PageResult {
+        let limited = Array(tracks.prefix(maxItems))
+        return PageResult(tracks: limited, overflowed: tracks.count > limited.count)
+    }
+
+    static func append(
+        existing: [LocalImportSpotifyTrack],
+        incoming: [LocalImportSpotifyTrack]
+    ) -> PageResult {
+        // Track IDs are not row identity: a provider playlist may contain
+        // the same video at multiple positions. Only suppress a repeated
+        // source position when a continuation page is replayed.
+        var seenPositions = Set(existing.compactMap(\.trackNumber))
+        let unique = incoming.filter { track in
+            guard let position = track.trackNumber else { return true }
+            return seenPositions.insert(position).inserted
+        }
+        let remaining = max(maxItems - existing.count, 0)
+        return PageResult(
+            tracks: Array(unique.prefix(remaining)),
+            overflowed: unique.count > remaining
+        )
+    }
+
+    static func hasRemainingContinuation(_ continuation: String?) -> Bool {
+        continuation != nil
+    }
 }
 
 struct LocalImportExistingSongMatch: Equatable {
@@ -228,9 +308,11 @@ enum LocalImportExistingSongPolicy {
         spotifyTrack: LocalImportSpotifyTrack,
         deviceTracks: [Track],
         activeServerSongs: [RemoteSong],
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        mediaMode: LocalImportMediaMode = .audio
     ) -> LocalImportExistingSongMatch {
         let deviceTrack = deviceTracks.first { candidate in
+            guard candidate.kind == expectedKind(for: mediaMode) else { return false }
             guard let fileURL = candidate.fileURL,
                   fileManager.fileExists(atPath: fileURL.path) else { return false }
             if let expectedSpotifyID = spotifyTrackID(spotifyTrack.sourceURL),
@@ -248,9 +330,12 @@ enum LocalImportExistingSongPolicy {
         }
 
         let serverSong = deviceTrack?.remoteID.flatMap { remoteID in
-            activeServerSongs.first { $0.id == remoteID }
+            activeServerSongs.first {
+                $0.id == remoteID && matchesMediaMode($0, mediaMode: mediaMode)
+            }
         } ?? activeServerSongs.first { candidate in
-            metadataMatches(
+            guard matchesMediaMode(candidate, mediaMode: mediaMode) else { return false }
+            return metadataMatches(
                 expectedTitle: spotifyTrack.title,
                 expectedArtist: spotifyTrack.artist,
                 expectedDuration: spotifyTrack.durationSeconds.map(Double.init),
@@ -264,6 +349,14 @@ enum LocalImportExistingSongPolicy {
             deviceTrackID: deviceTrack?.id,
             serverSongID: serverSong?.id
         )
+    }
+
+    private static func expectedKind(for mediaMode: LocalImportMediaMode) -> SongFilter {
+        mediaMode == .video ? .video : .audio
+    }
+
+    private static func matchesMediaMode(_ song: RemoteSong, mediaMode: LocalImportMediaMode) -> Bool {
+        song.mediaKind == (mediaMode == .video ? "video" : "audio")
     }
 
     private static func metadataMatches(
@@ -364,6 +457,11 @@ struct LocalImportError: LocalizedError, Hashable, Sendable {
 enum LocalImportURL {
     private static let spotifyID = try! NSRegularExpression(pattern: "^[A-Za-z0-9]{22}$")
     private static let youtubeID = try! NSRegularExpression(pattern: "^[A-Za-z0-9_-]{11}$")
+    // YouTube playlist IDs are opaque, but public playlist URLs currently use
+    // the same URL-safe alphabet as video IDs and are at least ten characters
+    // long. Keep the upper bound deliberately small so a pasted query cannot
+    // turn into an unbounded provider request.
+    private static let youtubePlaylistID = try! NSRegularExpression(pattern: "^[A-Za-z0-9_-]{10,150}$")
     private static let spotifyHosts = Set(["open.spotify.com", "www.open.spotify.com", "spotify.link", "www.spotify.link"])
     private static let youtubeHosts = Set(["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"])
     private static let youtubeEmbedHosts = Set(["youtube-nocookie.com", "www.youtube-nocookie.com"])
@@ -441,6 +539,46 @@ enum LocalImportURL {
         guard value.hasPrefix(prefix) else { return nil }
         let id = String(value.dropFirst(prefix.count))
         return matches(spotifyID, id) ? id : nil
+    }
+
+    /// Returns the playlist ID for a supported YouTube collection URL.
+    ///
+    /// A watch URL with both `v` and `list` is treated as a playlist import;
+    /// this matches YouTube's own share links and avoids silently downloading
+    /// only the currently selected video.
+    static func youtubePlaylistID(_ value: String) throws -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= 8_192,
+              let components = URLComponents(string: trimmed) else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "INVALID_SOURCE",
+                message: "Enter a Spotify, SoundCloud, or supported YouTube link."
+            )
+        }
+        guard components.scheme?.lowercased() == "https" else { return nil }
+        guard components.user == nil, components.password == nil else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "SOURCE_HAS_CREDENTIALS",
+                message: "Source URLs cannot contain credentials."
+            )
+        }
+        guard let host = components.host?.lowercased(),
+              youtubeHosts.contains(host) || host == "youtu.be" || host == "www.youtu.be" else {
+            return nil
+        }
+        guard let playlistID = components.queryItems?.first(where: { $0.name == "list" })?.value else {
+            return nil
+        }
+        guard matches(youtubePlaylistID, playlistID) else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "INVALID_YOUTUBE_PLAYLIST",
+                message: "The YouTube playlist URL is invalid."
+            )
+        }
+        return playlistID
     }
 
     static func youtubeVideoID(_ value: String) throws -> String? {
@@ -813,6 +951,220 @@ enum LocalImportParser {
         return output
     }
 
+    /// Parses one page of YouTube playlist browse data. YouTube has shipped
+    /// several playlist renderer shapes over time, so this intentionally walks
+    /// the complete response instead of depending on one tab/section path.
+    /// Continuation responses use the same renderer shape as the initial page.
+    static func youtubePlaylistData(
+        _ value: Any,
+        expectedPlaylistID: String,
+        positionOffset: Int = 0
+    ) throws -> (
+        title: String?,
+        author: String?,
+        artworkURL: String?,
+        tracks: [LocalImportSpotifyTrack],
+        skippedItems: [LocalImportPlaylistSkippedItem],
+        continuation: String?,
+        lastPlaylistPosition: Int
+    ) {
+        var title: String?
+        var author: String?
+        var artworkURL: String?
+        var tracks: [LocalImportSpotifyTrack] = []
+        var skippedItems: [LocalImportPlaylistSkippedItem] = []
+        var continuation: String?
+        var mismatchedPlaylist = false
+        // The cursor is based on source rows, not successful/unique tracks.
+        // Continuation pages can contain unavailable rows and repeated tracks,
+        // and those rows still occupy positions in the provider playlist.
+        var lastPlaylistPosition = max(positionOffset, 0)
+
+        walk(value) { object in
+            if let metadata = object["playlistMetadataRenderer"] as? [String: Any] {
+                if let playlistID = clean(metadata["playlistId"] as? String),
+                   playlistID != expectedPlaylistID {
+                    mismatchedPlaylist = true
+                }
+                title = title ?? rendererText(metadata["title"])
+                    ?? clean(metadata["title"] as? String)
+            }
+
+            if let header = object["playlistHeaderRenderer"] as? [String: Any] {
+                if let playlistID = clean(header["playlistId"] as? String),
+                   playlistID != expectedPlaylistID {
+                    mismatchedPlaylist = true
+                }
+                title = title ?? rendererText(header["title"])
+                author = author
+                    ?? rendererText(header["ownerText"])
+                    ?? rendererText(header["bylineText"])
+                    ?? rendererText(header["subtitle"])
+            }
+
+            if let sidebar = object["playlistSidebarPrimaryInfoRenderer"] as? [String: Any] {
+                title = title ?? rendererText(sidebar["title"])
+                artworkURL = artworkURL ?? youtubePlaylistThumbnail(sidebar)
+            }
+
+            if let renderer = object["playlistVideoRenderer"] as? [String: Any] {
+                let fallbackPosition = nextPlaylistPosition(after: lastPlaylistPosition)
+                let parsedPosition = playlistPosition(renderer["index"])
+                // Explicit indices are provider-global, but malformed pages
+                // can repeat or move them backwards. Never let one move the
+                // cursor behind the source-row order.
+                let position = max(fallbackPosition, parsedPosition ?? fallbackPosition)
+                lastPlaylistPosition = position
+                let itemTitle = rendererText(renderer["title"])
+                let artist = rendererText(renderer["shortBylineText"])
+                    ?? rendererText(renderer["longBylineText"])
+                    ?? "Unknown uploader"
+                let videoID = clean(renderer["videoId"] as? String, maxLength: 11)
+                let isPlayable = renderer["isPlayable"] as? Bool != false
+                guard let videoID,
+                      isYouTubeVideoID(videoID),
+                      let itemTitle,
+                      isPlayable else {
+                    skippedItems.append(LocalImportPlaylistSkippedItem(
+                        position: position,
+                        title: itemTitle ?? "Unavailable item",
+                        artist: artist,
+                        reason: isPlayable ? "YouTube did not return a public video for this item" : "Video is unavailable on YouTube"
+                    ))
+                    return
+                }
+                let duration = rendererText(renderer["lengthText"]).flatMap(parseDuration)
+                tracks.append(LocalImportSpotifyTrack(
+                    provider: "youtube",
+                    type: "track",
+                    trackID: videoID,
+                    title: itemTitle,
+                    artist: artist,
+                    album: nil,
+                    trackNumber: position,
+                    durationSeconds: duration,
+                    artworkURL: thumbnail(renderer["thumbnail"] as? [String: Any]),
+                    embedURL: "",
+                    sourceURL: "https://www.youtube.com/watch?v=\(videoID)"
+                ))
+            }
+
+            if let lockup = object["lockupViewModel"] as? [String: Any],
+               lockup["contentType"] as? String == "LOCKUP_CONTENT_TYPE_VIDEO" {
+                let position = nextPlaylistPosition(after: lastPlaylistPosition)
+                lastPlaylistPosition = position
+                let item = lockupPlaylistTrack(lockup, fallbackPosition: position)
+                if let item {
+                    tracks.append(item)
+                } else {
+                    skippedItems.append(LocalImportPlaylistSkippedItem(
+                        position: position,
+                        title: item?.title ?? "Unavailable item",
+                        artist: item?.artist,
+                        reason: "YouTube did not return a public video for this item"
+                    ))
+                }
+            }
+
+            if let token = nested(object, [
+                "continuationItemRenderer",
+                "continuationEndpoint",
+                "continuationCommand",
+                "token",
+            ]) as? String,
+               !token.isEmpty,
+               token.count <= 8_192 {
+                continuation = token
+            }
+        }
+
+        if mismatchedPlaylist {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "YOUTUBE_PLAYLIST_MISMATCH",
+                message: "YouTube returned the wrong playlist."
+            )
+        }
+        return (
+            title: title,
+            author: author,
+            artworkURL: artworkURL,
+            tracks: tracks,
+            skippedItems: skippedItems,
+            continuation: continuation,
+            lastPlaylistPosition: lastPlaylistPosition
+        )
+    }
+
+    private static func nextPlaylistPosition(after position: Int) -> Int {
+        position == Int.max ? Int.max : position + 1
+    }
+
+    static func youtubePlaylist(
+        _ html: String,
+        expectedPlaylistID: String
+    ) throws -> (
+        title: String,
+        author: String,
+        artworkURL: String?,
+        tracks: [LocalImportSpotifyTrack],
+        skippedItems: [LocalImportPlaylistSkippedItem],
+        continuation: String?,
+        lastPlaylistPosition: Int
+    ) {
+        guard let root = youtubeInitialData(html) else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "YOUTUBE_PLAYLIST_INVALID",
+                message: "YouTube returned invalid playlist metadata."
+            )
+        }
+        let parsed = try youtubePlaylistData(root, expectedPlaylistID: expectedPlaylistID)
+        // The first page may contain only unavailable rows while a
+        // continuation still has playable videos. The service owns the
+        // bounded pagination loop, so defer the empty-playable check until
+        // that loop has finished.
+        guard let title = parsed.title else {
+            throw LocalImportError(
+                stage: .resolvingMetadata,
+                code: "YOUTUBE_PLAYLIST_EMPTY",
+                message: "This playlist has no public, downloadable videos."
+            )
+        }
+        return (
+            title: title,
+            author: parsed.author ?? "YouTube",
+            artworkURL: parsed.artworkURL ?? parsed.tracks.first?.artworkURL,
+            tracks: parsed.tracks,
+            skippedItems: parsed.skippedItems,
+            continuation: parsed.continuation,
+            lastPlaylistPosition: parsed.lastPlaylistPosition
+        )
+    }
+
+    /// Reads the public, non-secret YouTube browse configuration embedded in a
+    /// playlist HTML document. It is used only to request continuation pages.
+    static func youtubeConfigurationValue(
+        _ html: String,
+        key: String,
+        maxLength: Int = 2_048
+    ) -> String? {
+        let escapedKey = NSRegularExpression.escapedPattern(for: key)
+        let pattern = "\"\(escapedKey)\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\""
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        for match in expression.matches(in: html, range: range) {
+            guard let capture = Range(match.range(at: 1), in: html) else { continue }
+            let encoded = "\"\(html[capture])\""
+            guard let data = encoded.data(using: .utf8),
+                  let value = try? JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed) as? String,
+                  !value.isEmpty,
+                  value.count <= maxLength else { continue }
+            return value
+        }
+        return nil
+    }
+
     static func youtubeInitialData(_ html: String) -> Any? {
         for marker in ["var ytInitialData =", "window[\"ytInitialData\"] =", "ytInitialData ="] {
             guard let markerRange = html.range(of: marker),
@@ -832,6 +1184,96 @@ enum LocalImportParser {
         guard let data = "{\"value\":\(encoded)}".data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return object["value"] as? String
+    }
+
+    private static func playlistPosition(_ value: Any?) -> Int? {
+        guard let rendered = rendererText(value),
+              let position = Int(rendered.trimmingCharacters(in: .whitespacesAndNewlines)),
+              position > 0,
+              position <= 10_000 else { return nil }
+        return position
+    }
+
+    private static func isYouTubeVideoID(_ value: String) -> Bool {
+        value.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil
+    }
+
+    private static func youtubePlaylistThumbnail(_ record: [String: Any]) -> String? {
+        guard let renderer = record["thumbnailRenderer"] as? [String: Any] else { return nil }
+        let playlist = renderer["playlistVideoThumbnailRenderer"] as? [String: Any]
+            ?? renderer["playlistCustomThumbnailRenderer"] as? [String: Any]
+        return thumbnail(playlist?["thumbnail"] as? [String: Any])
+    }
+
+    private static func lockupPlaylistTrack(
+        _ renderer: [String: Any],
+        fallbackPosition: Int
+    ) -> LocalImportSpotifyTrack? {
+        guard renderer["contentType"] as? String == "LOCKUP_CONTENT_TYPE_VIDEO",
+              let videoID = clean(renderer["contentId"] as? String, maxLength: 11),
+              isYouTubeVideoID(videoID),
+              let metadata = renderer["metadata"] as? [String: Any],
+              let lockupMetadata = metadata["lockupMetadataViewModel"] as? [String: Any],
+              let titleObject = lockupMetadata["title"] as? [String: Any],
+              let title = clean(titleObject["content"] as? String) else { return nil }
+
+        var artist: String?
+        if let metadataObject = lockupMetadata["metadata"] as? [String: Any],
+           let contentMetadata = metadataObject["contentMetadataViewModel"] as? [String: Any],
+           let rows = contentMetadata["metadataRows"] as? [[String: Any]],
+           let parts = rows.first?["metadataParts"] as? [[String: Any]] {
+            artist = clean(parts.compactMap { part in
+                (part["text"] as? [String: Any]).flatMap { $0["content"] as? String }
+            }.joined(separator: " • "))
+        }
+
+        var duration: Int?
+        if let image = renderer["contentImage"] as? [String: Any],
+           let thumbnailView = image["thumbnailViewModel"] as? [String: Any],
+           let overlays = thumbnailView["overlays"] as? [[String: Any]] {
+            for overlay in overlays {
+                guard let bottom = overlay["thumbnailBottomOverlayViewModel"] as? [String: Any],
+                      let badges = bottom["badges"] as? [[String: Any]] else { continue }
+                for badge in badges {
+                    guard let badgeView = badge["thumbnailBadgeViewModel"] as? [String: Any],
+                          let text = badgeView["text"] as? String,
+                          let parsed = parseDuration(text) else { continue }
+                    duration = parsed
+                    break
+                }
+                if duration != nil { break }
+            }
+        }
+
+        let thumbnailURL: String?
+        if let image = renderer["contentImage"] as? [String: Any],
+           let thumbnailView = image["thumbnailViewModel"] as? [String: Any] {
+            thumbnailURL = imageSource(thumbnailView["image"])
+        } else {
+            thumbnailURL = nil
+        }
+        return LocalImportSpotifyTrack(
+            provider: "youtube",
+            type: "track",
+            trackID: videoID,
+            title: title,
+            artist: artist ?? "Unknown uploader",
+            album: nil,
+            trackNumber: fallbackPosition,
+            durationSeconds: duration,
+            artworkURL: thumbnailURL,
+            embedURL: "",
+            sourceURL: "https://www.youtube.com/watch?v=\(videoID)"
+        )
+    }
+
+    private static func imageSource(_ value: Any?) -> String? {
+        guard let image = value as? [String: Any],
+              let sources = image["sources"] as? [[String: Any]] else { return nil }
+        return sources
+            .sorted { number($0["width"]) > number($1["width"]) }
+            .compactMap { LocalImportURL.youtubeArtwork($0["url"] as? String)?.absoluteString }
+            .first
     }
 
     private static func musicCandidate(_ renderer: [String: Any]) -> LocalImportSearchCandidate? {

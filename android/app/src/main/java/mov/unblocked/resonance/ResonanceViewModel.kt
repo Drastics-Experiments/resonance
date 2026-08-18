@@ -89,6 +89,7 @@ import mov.unblocked.resonance.data.LatestValuePersistenceGate
 import mov.unblocked.resonance.data.ReviewedMatchResolutionPolicy
 import mov.unblocked.resonance.data.LibraryRepository
 import mov.unblocked.resonance.data.Playlist
+import mov.unblocked.resonance.data.PlaylistDownloadOutcomePolicy
 import mov.unblocked.resonance.data.PlaylistPutResult
 import mov.unblocked.resonance.data.PlaylistMutationSnapshot
 import mov.unblocked.resonance.data.PlaylistEntryOrderPolicy
@@ -879,7 +880,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                                 selectedSearchResultId = first.id,
                                 resolution = first.resolution,
                                 selectedVideoId = first.candidates.firstOrNull()?.videoID,
-                                selectedVideoIds = first.candidates.firstOrNull()?.videoID?.let(::setOf).orEmpty(),
+                                selectedPlaylistItemIds = emptySet(),
                                 errorCode = null,
                                 errorMessage = null,
                             ),
@@ -893,10 +894,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                                 stage = LinkImportStage.AwaitingSelection,
                                 resolution = resolution,
                                 selectedVideoId = resolution.candidates.firstOrNull()?.videoID,
-                                selectedVideoIds = if (resolution.kind.isPlaylist) {
-                                    resolution.candidates.mapTo(mutableSetOf(), mov.unblocked.resonance.data.LinkImportCandidate::videoID)
+                                selectedPlaylistItemIds = if (resolution.kind.isPlaylist) {
+                                    resolution.candidates.mapTo(
+                                        mutableSetOf(),
+                                        mov.unblocked.resonance.data.LinkImportCandidate::playlistItemID,
+                                    )
                                 } else {
-                                    resolution.candidates.firstOrNull()?.videoID?.let(::setOf).orEmpty()
+                                    emptySet()
                                 },
                                 errorCode = null,
                                 errorMessage = null,
@@ -920,25 +924,31 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 selectedSearchResultId = result.id,
                 resolution = result.resolution,
                 selectedVideoId = candidate?.videoID,
-                selectedVideoIds = candidate?.videoID?.let(::setOf).orEmpty(),
+                selectedPlaylistItemIds = emptySet(),
                 previewError = null,
             ),
         )
     }
 
-    override fun selectLinkImportCandidate(videoId: String) {
+    override fun selectLinkImportCandidate(identity: String) {
         val current = mutableState.value.linkImport
-        if (current.resolution?.candidates?.any { it.videoID == videoId } != true) return
-        val playlist = current.resolution.kind.isPlaylist
+        val resolution = current.resolution ?: return
+        val playlist = resolution.kind.isPlaylist
+        val candidate = resolution.candidates.firstOrNull { candidate ->
+            if (playlist) candidate.playlistItemID == identity else candidate.videoID == identity
+        } ?: return
         val selection = if (playlist) {
-            current.selectedVideoIds.toMutableSet().apply {
-                if (!add(videoId)) remove(videoId)
+            current.selectedPlaylistItemIds.toMutableSet().apply {
+                if (!add(candidate.playlistItemID)) remove(candidate.playlistItemID)
             }
         } else {
-            setOf(videoId)
+            emptySet()
         }
         mutableState.value = mutableState.value.copy(
-            linkImport = current.copy(selectedVideoId = if (playlist) current.selectedVideoId else videoId, selectedVideoIds = selection),
+            linkImport = current.copy(
+                selectedVideoId = if (playlist) current.selectedVideoId else candidate.videoID,
+                selectedPlaylistItemIds = selection,
+            ),
         )
     }
 
@@ -999,7 +1009,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         } else null
         stopLinkImportPreview()
         if (resolution.kind.isPlaylist) {
-            return confirmSpotifyPlaylistImport(current, resolution, uploadAfterImport, uploadSnapshot)
+            return confirmPlaylistImport(current, resolution, uploadAfterImport, uploadSnapshot)
         }
         val candidate = resolution.candidates.firstOrNull { it.videoID == current.selectedVideoId } ?: return false
         val transferGeneration = beginLinkImportTransfer()
@@ -1062,7 +1072,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     // A reviewed upload always needs a fresh explicit selection,
                     // even when the exact YouTube candidate was resolved locally.
                     selectedVideoId = null,
-                    selectedVideoIds = emptySet(),
+                    selectedPlaylistItemIds = emptySet(),
                     errorCode = null,
                     errorMessage = null,
                 ),
@@ -1076,7 +1086,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             linkImport = current.copy(
                 stage = LinkImportStage.SearchingCandidates,
                 selectedVideoId = null,
-                selectedVideoIds = emptySet(),
+                selectedPlaylistItemIds = emptySet(),
                 errorCode = null,
                 errorMessage = null,
             ),
@@ -1095,7 +1105,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         resolution = reviewed,
                         // Never preselect metadata-only server candidates.
                         selectedVideoId = null,
-                        selectedVideoIds = emptySet(),
+                        selectedPlaylistItemIds = emptySet(),
                         errorCode = null,
                         errorMessage = null,
                     ),
@@ -1106,7 +1116,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         return false
     }
 
-    private fun confirmSpotifyPlaylistImport(
+    private fun confirmPlaylistImport(
         current: LinkImportUiState,
         resolution: LinkImportResolution,
         uploadAfterImport: Boolean,
@@ -1114,7 +1124,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     ): Boolean {
         val playlist = resolution.playlist ?: return false
         val selected = resolution.candidates
-            .filter { it.videoID in current.selectedVideoIds }
+            .filter { it.playlistItemID in current.selectedPlaylistItemIds }
             .sortedBy { it.playlistIndex }
         if (selected.isEmpty()) return false
         val transferGeneration = beginLinkImportTransfer()
@@ -1139,7 +1149,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             errorMessage = null,
         )
         linkImportJob = viewModelScope.launch {
-            runSpotifyPlaylistImport(
+            runPlaylistImport(
                 resolution,
                 selected,
                 current.mediaMode,
@@ -1364,7 +1374,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private suspend fun runSpotifyPlaylistImport(
+    private suspend fun runPlaylistImport(
         resolution: LinkImportResolution,
         selected: List<LinkImportCandidate>,
         mediaMode: LinkImportMediaMode,
@@ -1379,7 +1389,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val client = uploadSnapshot?.let { serverClient(it.context) }
         try {
             requireLinkImportTransfer(transferGeneration)
-            val initialMatches = selected.associateWith { candidate ->
+            // A provider video can occur at multiple playlist positions. Keep
+            // those rows selected independently, while repeated YouTube rows
+            // share one transfer and distinct provider rows retain their own
+            // metadata and fallback chain.
+            val downloadCandidates = selected.distinctBy(LinkImportCandidate::playlistDownloadKey)
+            val candidatesByDownloadKey = downloadCandidates.associateBy(LinkImportCandidate::playlistDownloadKey)
+            val initialMatches = downloadCandidates.associateWith { candidate ->
                 LinkImportExistingPolicy.match(
                     requireNotNull(candidate.importTrack),
                     library.tracks,
@@ -1389,7 +1405,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     mediaMode,
                 )
             }
-            val downloadItems = selected.filter { initialMatches[it]?.deviceTrackID == null }
+            val downloadItems = downloadCandidates.filter { initialMatches[it]?.deviceTrackID == null }
             if (downloadItems.isNotEmpty()) {
                 beginLinkDownloads(
                     transferGeneration,
@@ -1398,44 +1414,68 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             var completedDownloads = 0
-            selected.forEach { candidate ->
-                val metadata = requireNotNull(candidate.importTrack).copy(
-                    artworkURL = candidate.importTrack.artworkURL ?: candidate.thumbnailURL,
+            val adoptedVideoIDs = mutableSetOf<String>()
+            PlaylistDownloadOutcomePolicy.loadDistinct(
+                selected = downloadCandidates,
+                key = LinkImportCandidate::playlistDownloadKey,
+                onOutcome = { outcome ->
+                    val track = outcome.result.getOrNull() ?: return@loadDistinct
+                    selected.asSequence()
+                        .filter { it.playlistDownloadKey == outcome.key }
+                        .forEach { candidate ->
+                            val downloadCandidate = candidatesByDownloadKey.getValue(outcome.key)
+                            val initial = initialMatches[downloadCandidate]
+                            if (adoptedVideoIDs.add(candidate.videoID)) {
+                                initial?.serverSongID?.let { remoteID ->
+                                    adoptUploadedDownload(
+                                        track.id,
+                                        remoteID,
+                                        client?.baseURL ?: mutableState.value.serverUrl,
+                                    )
+                                }
+                            }
+                            if (imported.none { it.second.id == track.id }) imported += candidate to track
+                        }
+                },
+            ) { downloadCandidate ->
+                val metadata = requireNotNull(downloadCandidate.importTrack).copy(
+                    artworkURL = downloadCandidate.importTrack.artworkURL ?: downloadCandidate.thumbnailURL,
                 )
-                val initial = initialMatches[candidate]
-                var track = initial?.deviceTrackID
+                val initial = initialMatches.getValue(downloadCandidate)
+                val existingTrack = initial.deviceTrackID
                     ?.let { id -> library.tracks.firstOrNull { it.id == id } }
                     ?.let { existing -> associateLocalImportSource(existing, metadata.sourceURL) }
-                if (track == null) {
+                if (existingTrack != null) {
+                    Result.success(existingTrack)
+                } else {
                     updateOwnedLinkImportTransfer(transferGeneration) { state -> state.copy(
                         linkImport = state.linkImport.copy(
                             batchCurrentTitle = "${completedDownloads + 1} of ${downloadItems.size} • ${metadata.title}",
                         ),
                     ) }
-                    try {
-                        track = downloadLinkTrack(
-                            metadata,
-                            (listOf(candidate) + candidate.fallbackCandidates).distinctBy(LinkImportCandidate::videoID),
-                            mediaMode,
-                            completedDownloads,
-                            downloadItems.size,
-                            linkTransferGeneration = transferGeneration,
+                    val result = try {
+                        Result.success(
+                            downloadLinkTrack(
+                                metadata,
+                                (listOf(downloadCandidate) + downloadCandidate.fallbackCandidates)
+                                    .distinctBy(LinkImportCandidate::videoID),
+                                mediaMode,
+                                completedDownloads,
+                                downloadItems.size,
+                                linkTransferGeneration = transferGeneration,
+                            ),
                         )
                     } catch (error: CancellationException) {
                         throw error
                     } catch (error: Throwable) {
                         downloadFailures += "${metadata.title} — ${metadata.artist} (${error.message ?: "download failed"})"
+                        Result.failure(error)
                     }
                     completedDownloads += 1
                     updateOwnedLinkImportTransfer(transferGeneration) { state ->
                         state.copy(downloadProgress = 1f)
                     }
-                }
-                if (track != null) {
-                    initial?.serverSongID?.let { remoteID ->
-                        adoptUploadedDownload(track.id, remoteID, client?.baseURL ?: mutableState.value.serverUrl)
-                    }
-                    if (imported.none { it.second.id == track.id }) imported += candidate to track
+                    result
                 }
             }
             requireLinkImportTransfer(transferGeneration)

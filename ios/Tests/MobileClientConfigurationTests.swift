@@ -993,6 +993,7 @@ final class MobileTransferDisplayPolicyTests: XCTestCase {
             track: metadata,
             candidates: [LocalImportAudioSourceMatch(
                 videoID: "abcdefghijk",
+                playlistPosition: nil,
                 title: metadata.title,
                 artist: metadata.artist,
                 album: nil,
@@ -1441,6 +1442,7 @@ final class MobileClientConfigurationTests: XCTestCase {
         )
         let alternate = LocalImportAudioSourceMatch(
             videoID: "LIIDh-qI9oI",
+            playlistPosition: nil,
             title: "The Weeknd - Save Your Tears (Official Audio)",
             artist: "The Weeknd",
             album: "After Hours",

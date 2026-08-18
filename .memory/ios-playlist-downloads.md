@@ -1,0 +1,13 @@
+# iOS provider playlist downloads
+
+- iOS Import from Link now accepts Spotify, SoundCloud, and YouTube playlist kinds. YouTube playlist links are canonicalized to an allowlisted `https://www.youtube.com/playlist?list=...` URL before metadata resolution.
+- YouTube metadata parsing supports `playlistVideoRenderer`, modern `lockupViewModel`, bounded continuation requests (500 playable videos, 10 pages), playlist-ID validation, unavailable-item diagnostics, and partial metadata when continuation loading stops. Unavailable rows remain visible but do not consume the playable-video cap or prevent later downloadable continuations from loading.
+- YouTube playlist items use direct watch URLs and the existing sequential playlist importer, so each selected item keeps independent download failure/partial-success semantics. Playlist positions remain aligned with skipped rows.
+- Every `LOCKUP_CONTENT_TYPE_VIDEO` source row consumes a playlist position, including malformed rows without a valid `contentId`; malformed rows become skipped diagnostics so later playable rows retain provider order.
+- Legacy `playlistVideoRenderer` rows now normalize positive provider indices against the monotonic source cursor, so an explicit position advances following unavailable or indexless rows without allowing page-local indices to move the cursor backward.
+- Explicit YouTube provider positions are bounded to 10,000 like macOS; malformed values such as `Int.max` fall back to the source-row cursor before the next-position increment, with a regression covering the overflow case.
+- YouTube playlist candidates carry their parsed provider index through `LocalImportAudioSourceMatch.playlistPosition`; resolution uses that field when rebuilding playlist rows, so sparse playable positions such as 7 and 9 do not collapse to review rows 1 and 2.
+- The synthetic `More playlist items` diagnostic is placed after the maintained provider cursor and every parsed/skipped position, avoiding duplicate SwiftUI row IDs when explicit indices are sparse.
+- Playlist selection is keyed by the position-qualified `LocalImportPlaylistItem.id`, not provider `trackID`, so repeated occurrences can be toggled independently while download deduplication remains track-based.
+- Before transfer, repeated selected rows are reduced to the first occurrence of each provider `trackID`; this preserves row-level selection while preventing a second network download of the same media.
+- The unsigned generic-device `build-for-testing`, the exact CI Simulator build, both focused regressions, and the complete `MobileLocalImportTests` class pass on an iOS Simulator.

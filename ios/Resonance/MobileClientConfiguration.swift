@@ -1046,6 +1046,7 @@ struct MobileReviewedMatchResponse: Decodable, Sendable {
             let matchArtist = match?.artist.flatMap(normalizedScore) ?? score
             return LocalImportAudioSourceMatch(
                 videoID: resolvedVideoID,
+                playlistPosition: nil,
                 title: String(rawTitle.prefix(500)),
                 artist: boundedText(artist),
                 album: boundedText(album),

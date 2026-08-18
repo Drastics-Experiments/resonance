@@ -24,6 +24,7 @@ const MAX_SEARCH_DOCUMENT_BYTES = 6 * 1024 * 1024;
 const MAX_RESULTS = 8;
 const MAX_PLAYLIST_ITEMS = 500;
 const MAX_PLAYLIST_CONTINUATIONS = 10;
+const MAX_PLAYLIST_POSITION = 10_000;
 const SEARCH_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
@@ -362,6 +363,12 @@ function parseSpotifyPlaylistEmbed(html, expectedPlaylistID) {
   const artworkURL = spotifyEntityArtwork(entity);
   const items = [];
   let unavailableCount = 0;
+  let truncated = false;
+  // Keep provider responses bounded just like YouTube and SoundCloud. Spotify
+  // can expose very large playlists in one embed document; rendering and
+  // resolving more than the shared playlist item limit would make the Windows
+  // dialog unresponsive. Filter the provider rows first so skipped entries do
+  // not consume the limit or hide playable tracks later in the playlist.
   for (const [index, item] of entity.trackList.entries()) {
     const uriMatch = /^spotify:track:([A-Za-z0-9]{22})$/.exec(cleanText(item?.uri, 128) || "");
     const itemTitle = cleanText(item?.title);
@@ -372,7 +379,7 @@ function parseSpotifyPlaylistEmbed(html, expectedPlaylistID) {
     }
     const trackID = uriMatch[1];
     const durationMilliseconds = safeNumber(item.duration);
-    items.push({
+    const playableItem = {
       provider: "spotify",
       type: "track",
       trackID,
@@ -384,12 +391,21 @@ function parseSpotifyPlaylistEmbed(html, expectedPlaylistID) {
       artworkURL: null,
       embedURL: `https://open.spotify.com/embed/track/${trackID}`,
       sourceURL: `https://open.spotify.com/track/${trackID}`,
-    });
+    };
+    if (items.length < MAX_PLAYLIST_ITEMS) items.push(playableItem);
+    else truncated = true;
   }
   if (!items.length) {
     throw importError("resolving_metadata", "SPOTIFY_PLAYLIST_EMPTY", "This Spotify playlist has no public, playable tracks.");
   }
-  return { title, author, artworkURL, items, unavailableCount };
+  return {
+    title,
+    author,
+    artworkURL,
+    items,
+    unavailableCount,
+    truncated,
+  };
 }
 
 async function responseTextWithLimit(response, limit, error) {
@@ -635,7 +651,7 @@ async function resolveSpotifyPlaylist(value, signal, fetchImpl = fetch) {
     sourceURL: canonical.url.toString(),
     items,
     unavailableCount: embedded.unavailableCount,
-    truncated: false,
+    truncated: Boolean(embedded.truncated),
   };
 }
 
@@ -788,11 +804,17 @@ function webCandidate(renderer) {
   };
 }
 
+function playlistVideoIndex(renderer, fallbackIndex = 0) {
+  const parsedIndex = Number(rendererText(renderer.index));
+  return Number.isSafeInteger(parsedIndex) && parsedIndex > 0 && parsedIndex <= MAX_PLAYLIST_POSITION
+    ? parsedIndex
+    : fallbackIndex + 1;
+}
+
 function playlistVideoCandidate(renderer, fallbackIndex = 0) {
   const videoID = cleanText(renderer.videoId, 11);
   const title = rendererText(renderer.title);
   if (!videoID || !YOUTUBE_VIDEO_ID.test(videoID) || !title || renderer.isPlayable === false) return null;
-  const parsedIndex = Number(rendererText(renderer.index));
   return {
     videoID,
     title,
@@ -803,7 +825,7 @@ function playlistVideoCandidate(renderer, fallbackIndex = 0) {
     sourceProvider: "youtube",
     officialArtist: false,
     sourceURL: `https://www.youtube.com/watch?v=${videoID}`,
-    playlistIndex: Number.isSafeInteger(parsedIndex) && parsedIndex > 0 ? parsedIndex : fallbackIndex + 1,
+    playlistIndex: playlistVideoIndex(renderer, fallbackIndex),
     score: 1,
     confidence: "high",
     match: { title: 1, artist: 1, album: null, duration: 1, durationDeltaSeconds: 0 },
@@ -873,13 +895,16 @@ function youtubePlaylistThumbnail(record) {
   return safeThumbnail(thumbnail);
 }
 
-function parseYouTubePlaylistData(value, expectedPlaylistID = null) {
+function parseYouTubePlaylistData(value, expectedPlaylistID = null, fallbackIndexOffset = 0) {
   const items = [];
   let title = null;
   let author = null;
   let artworkURL = null;
   let continuation = null;
   let unavailableCount = 0;
+  let lastPlaylistIndex = Number.isSafeInteger(fallbackIndexOffset) && fallbackIndexOffset >= 0
+    ? fallbackIndexOffset
+    : 0;
   walk(value, (record) => {
     const metadata = record.playlistMetadataRenderer;
     if (isRecord(metadata)) {
@@ -897,19 +922,28 @@ function parseYouTubePlaylistData(value, expectedPlaylistID = null) {
     artworkURL ||= youtubePlaylistThumbnail(record);
     const renderer = record.playlistVideoRenderer;
     if (isRecord(renderer)) {
-      const item = playlistVideoCandidate(renderer, items.length);
+      const fallbackIndex = lastPlaylistIndex + 1;
+      const playlistIndex = playlistVideoIndex(renderer, lastPlaylistIndex);
+      const parsed = playlistVideoCandidate(renderer, lastPlaylistIndex);
+      lastPlaylistIndex = Math.max(fallbackIndex, playlistIndex);
+      const item = parsed ? { ...parsed, playlistIndex: lastPlaylistIndex } : null;
       if (item) items.push(item);
       else unavailableCount += 1;
     }
     const lockup = record.lockupViewModel;
     if (isRecord(lockup)) {
-      const item = lockupPlaylistCandidate(lockup, items.length);
-      if (item) items.push(item);
+      if (lockup.contentType === "LOCKUP_CONTENT_TYPE_VIDEO") {
+        const fallbackIndex = lastPlaylistIndex + 1;
+        const item = lockupPlaylistCandidate(lockup, lastPlaylistIndex);
+        lastPlaylistIndex = fallbackIndex;
+        if (item) items.push({ ...item, playlistIndex: fallbackIndex });
+        else unavailableCount += 1;
+      }
     }
     const token = record.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token;
     if (typeof token === "string" && token.length > 0 && token.length <= 8_192) continuation = token;
   });
-  return { title, author, artworkURL, items, continuation, unavailableCount };
+  return { title, author, artworkURL, items, continuation, unavailableCount, lastPlaylistIndex };
 }
 
 function youtubeConfigurationValue(html, key, maximum = 2_048) {
@@ -984,7 +1018,9 @@ async function resolveYouTubePlaylist(source, signal, fetchImpl = fetch) {
   const initialData = extractYouTubeInitialData(html);
   if (!initialData) throw importError("resolving_metadata", "YOUTUBE_PLAYLIST_INVALID", "YouTube returned invalid playlist metadata.");
   const firstPage = parseYouTubePlaylistData(initialData, playlistID);
-  const result = { ...firstPage, items: [...firstPage.items] };
+  const result = { ...firstPage, items: firstPage.items.slice(0, MAX_PLAYLIST_ITEMS) };
+  let fallbackIndexOffset = firstPage.lastPlaylistIndex;
+  let truncated = firstPage.items.length > MAX_PLAYLIST_ITEMS;
   const configuration = {
     apiKey: youtubeConfigurationValue(html, "INNERTUBE_API_KEY", 256),
     clientVersion: youtubeConfigurationValue(html, "INNERTUBE_CLIENT_VERSION", 128),
@@ -1001,9 +1037,12 @@ async function resolveYouTubePlaylist(source, signal, fetchImpl = fetch) {
     seenTokens.add(continuation);
     const response = await youtubePlaylistContinuation(continuation, configuration, signal, fetchImpl);
     if (!response) break;
-    const page = parseYouTubePlaylistData(response, playlistID);
-    result.items.push(...page.items.slice(0, MAX_PLAYLIST_ITEMS - result.items.length));
+    const page = parseYouTubePlaylistData(response, playlistID, fallbackIndexOffset);
+    const remaining = MAX_PLAYLIST_ITEMS - result.items.length;
+    if (page.items.length > remaining) truncated = true;
+    result.items.push(...page.items.slice(0, remaining));
     result.unavailableCount += page.unavailableCount;
+    fallbackIndexOffset = page.lastPlaylistIndex;
     continuation = page.continuation;
     continuationCount += 1;
   }
@@ -1018,7 +1057,7 @@ async function resolveYouTubePlaylist(source, signal, fetchImpl = fetch) {
     sourceURL: playlistURL.toString(),
     items: result.items,
     unavailableCount: result.unavailableCount,
-    truncated: Boolean(continuation),
+    truncated: truncated || Boolean(continuation),
   };
 }
 

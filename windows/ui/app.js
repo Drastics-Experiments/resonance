@@ -25,6 +25,7 @@ import {
   localImportOperationFingerprint,
   localImportOperationIsCurrent,
   localImportNeedsServerContext,
+  uniqueLocalImportPlaylistCandidates,
   mergeListeningHistoryDocument,
   mergePlaylistDocument,
   mergeSyncedTracks,
@@ -6312,6 +6313,13 @@ function renderLocalImportResolution() {
   const { track, candidates } = localImportResolution;
   const mediaKind = localImportResolution.mediaKind === "video" ? "video" : "audio";
   const playlist = localImportResolution.kind?.endsWith("_playlist");
+  const playlistProvider = localImportResolution.kind === "spotify_playlist"
+    ? "Spotify"
+    : localImportResolution.kind === "soundcloud_playlist"
+      ? "SoundCloud"
+      : localImportResolution.kind === "youtube_playlist"
+        ? "YouTube"
+        : null;
   const searchResults = localImportResolution.kind === "search_results";
   const showPreviews = mediaKind === "audio" && (searchResults || candidates.length > 1);
   const selectedKind = document.querySelector(`input[name="localImportMediaKind"][value="${mediaKind}"]`);
@@ -6325,7 +6333,13 @@ function renderLocalImportResolution() {
   $("#localImportTrackMeta").textContent = searchResults
     ? [track.artist, "YouTube • Spotify • SoundCloud"].filter(Boolean).join(" • ")
     : playlist
-    ? [track.artist, `${candidates.length} available video${candidates.length === 1 ? "" : "s"}`, localImportResolution.playlist?.unavailableCount ? `${localImportResolution.playlist.unavailableCount} unavailable` : null].filter(Boolean).join(" • ")
+    ? [
+      playlistProvider,
+      track.artist,
+      `${candidates.length} available ${mediaKind === "video" ? "video" : "song"}${candidates.length === 1 ? "" : "s"}`,
+      localImportResolution.playlist?.unavailableCount ? `${localImportResolution.playlist.unavailableCount} unavailable` : null,
+      localImportResolution.playlist?.truncated ? "first 500 shown" : null,
+    ].filter(Boolean).join(" • ")
     : [track.artist, track.album, track.durationSeconds ? formatTime(track.durationSeconds) : null]
     .filter(Boolean).join(" • ");
   $("#localImportCandidateLegend").textContent = searchResults ? "Search results" : playlist ? "Choose playlist songs to import" : "Choose the source to import";
@@ -6368,7 +6382,7 @@ function renderLocalImportResolution() {
   document.querySelectorAll('input[name="localImportCandidate"], input[name="localImportPlaylistItem"]').forEach((input) => {
     input.onchange = () => {
       localImportInteractionGeneration += 1;
-      updateLocalImportSyncForSelection();
+      updateLocalImportSyncForSelection({ preserveChecked: true });
     };
   });
   document.querySelectorAll("[data-local-import-preview]").forEach((button) => {
@@ -6468,10 +6482,14 @@ async function resolveLinkImport() {
 
 async function confirmPlaylistImport() {
   const resolution = localImportResolution;
+  const mediaKind = resolution?.mediaKind === "video" ? "video" : "audio";
   const selected = [...document.querySelectorAll('input[name="localImportPlaylistItem"]:checked')]
     .map((input) => resolution?.candidates?.[Number(input.value)])
     .filter(Boolean);
-  const mediaKind = resolution?.mediaKind === "video" ? "video" : "audio";
+  // Keep each checked row independently selectable, but transfer a repeated
+  // provider track only once. The unique queue also makes a failed transfer a
+  // single outcome instead of retrying the same bytes for every occurrence.
+  const transferSelected = uniqueLocalImportPlaylistCandidates(selected, mediaKind);
   if (!selected.length) {
     showLocalImportError({ stage: "awaiting_selection", message: `Choose at least one playlist ${mediaKind === "video" ? "video" : "song"} to download.` });
     return;
@@ -6541,10 +6559,10 @@ async function confirmPlaylistImport() {
     if (!uploadQueue.some((queued) => queued.id === track.id)) uploadQueue.push(track);
   };
   try {
-    for (let index = 0; index < selected.length; index += 1) {
+    for (let index = 0; index < transferSelected.length; index += 1) {
       if (serverTransferCancelRequested) { cancelled = true; break; }
-      const candidate = selected[index];
-      localImportBatchContext = { index, total: selected.length, title: candidate.title || `Playlist item ${index + 1}` };
+      const candidate = transferSelected[index];
+      localImportBatchContext = { index, total: transferSelected.length, title: candidate.title || `Playlist item ${index + 1}` };
       updateLocalImportTransfer({ stage: "inspecting_source" });
       const importMetadata = candidate.importMetadata || candidate;
       let response = null;
@@ -6637,21 +6655,21 @@ async function confirmPlaylistImport() {
     }
     const completed = created.length + duplicates;
     if (cancelled) {
-      showNotice(`Playlist download cancelled after ${completed} of ${selected.length} ${mediaKind === "video" ? "videos" : "songs"}.`, "status");
+      showNotice(`Playlist download cancelled after ${completed} of ${transferSelected.length} ${mediaKind === "video" ? "videos" : "songs"}.`, "status");
       setLocalImportStage({ stage: "cancelled" });
     } else if (uploadCancelled) {
-      showNotice(`Downloaded ${created.length} playlist ${mediaKind === "video" ? "video" : "song"}${created.length === 1 ? "" : "s"}. Server upload cancelled; every local file was kept.`, "status");
+      showNotice(`Kept ${completed} playlist ${mediaKind === "video" ? "video" : "song"}${completed === 1 ? "" : "s"} on this device. Server upload cancelled; every local file was kept.`, "status");
       setLocalImportStage({ stage: "cancelled" });
     } else if (failures.length) {
       const uploadText = formatServerUploadFailureNotice(uploadFailures);
-      showNotice(`Downloaded ${created.length} of ${selected.length} playlist ${mediaKind === "video" ? "videos" : "songs"}; failed after retrying: ${failures.map((failure) => failure.title).join("; ")}.${uploadedCount ? ` Uploaded ${uploadedCount} successful song${uploadedCount === 1 ? "" : "s"}.` : ""}${uploadText ? ` ${uploadText}` : ""}`);
+      showNotice(`Kept ${completed} of ${transferSelected.length} playlist ${mediaKind === "video" ? "videos" : "songs"}; failed after retrying: ${failures.map((failure) => failure.title).join("; ")}.${uploadedCount ? ` Uploaded ${uploadedCount} successful song${uploadedCount === 1 ? "" : "s"}.` : ""}${uploadText ? ` ${uploadText}` : ""}`);
       setLocalImportStage({ stage: "failed" });
     } else {
       const duplicateText = duplicates ? ` ${duplicates} already on this device.` : "";
       const uploadedText = uploadedCount ? ` Uploaded ${uploadedCount} to ${importContext.profileName}.` : "";
       const uploadFailureNotice = formatServerUploadFailureNotice(uploadFailures);
       const uploadText = uploadFailureNotice ? ` ${uploadFailureNotice} The local files were kept.` : "";
-      showNotice(`Downloaded ${created.length} playlist ${mediaKind === "video" ? "video" : "song"}${created.length === 1 ? "" : "s"}.${duplicateText}${uploadedText}${uploadText}`, uploadFailures.length ? "error" : "status");
+      showNotice(`Kept ${completed} playlist ${mediaKind === "video" ? "video" : "song"}${completed === 1 ? "" : "s"} on this device.${duplicateText}${uploadedText}${uploadText}`, uploadFailures.length ? "error" : "status");
       setLocalImportStage({ stage: uploadFailures.length ? "failed" : "complete" });
     }
   } catch (error) {

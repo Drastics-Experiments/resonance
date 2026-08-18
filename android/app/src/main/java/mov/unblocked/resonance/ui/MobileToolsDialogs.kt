@@ -1717,7 +1717,11 @@ fun LinkImportDialog(
                         LinkSearchResults(importState.searchResponse, state, actions)
                     } else importState.resolution?.let { resolution ->
                         val isPlaylist = resolution.kind.isPlaylist
-                        val playlistProvider = if (resolution.kind == LinkImportKind.SoundCloudPlaylist) "SoundCloud" else "Spotify"
+                        val playlistProvider = when (resolution.kind) {
+                            LinkImportKind.SoundCloudPlaylist -> "SoundCloud"
+                            LinkImportKind.YouTubePlaylist -> "YouTube"
+                            else -> "Spotify"
+                        }
                         Surface(color = Color.White.copy(alpha = .045f), shape = RoundedCornerShape(13.dp)) {
                             Column(Modifier.fillMaxWidth().padding(14.dp)) {
                                 Eyebrow(if (isPlaylist) "$playlistProvider Playlist" else "Matched Track")
@@ -1766,6 +1770,18 @@ fun LinkImportDialog(
                                 }
                             }
                         }
+                        linkImportPlaylistTruncationNotice(resolution.playlist)?.let { notice ->
+                            Surface(color = Color(0xFFFF9800).copy(alpha = .10f), shape = RoundedCornerShape(13.dp)) {
+                                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    Eyebrow("Playlist limit")
+                                    Text(
+                                        notice,
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .78f),
+                                    )
+                                }
+                            }
+                        }
                         Eyebrow(
                             when {
                                 reviewedMatchPolicyBound -> "Review-only candidates • explicit choice required"
@@ -1776,20 +1792,32 @@ fun LinkImportDialog(
                         resolution.candidates.forEach { candidate ->
                             val metadata = candidate.importTrack
                             val selected = if (isPlaylist) {
-                                candidate.videoID in importState.selectedVideoIds
+                                candidate.playlistItemID in importState.selectedPlaylistItemIds
                             } else {
                                 candidate.videoID == importState.selectedVideoId
                             }
                             Surface(
-                                onClick = { actions.selectLinkImportCandidate(candidate.videoID) },
+                                onClick = {
+                                    actions.selectLinkImportCandidate(
+                                        if (isPlaylist) candidate.playlistItemID else candidate.videoID,
+                                    )
+                                },
                                 color = Color.White.copy(alpha = if (selected) .08f else .035f),
                                 shape = RoundedCornerShape(12.dp),
                             ) {
                                 Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                     if (isPlaylist) {
-                                        Checkbox(checked = selected, onCheckedChange = { actions.selectLinkImportCandidate(candidate.videoID) })
+                                        Checkbox(
+                                            checked = selected,
+                                            onCheckedChange = {
+                                                actions.selectLinkImportCandidate(candidate.playlistItemID)
+                                            },
+                                        )
                                     } else {
-                                        RadioButton(selected = selected, onClick = { actions.selectLinkImportCandidate(candidate.videoID) })
+                                        RadioButton(
+                                            selected = selected,
+                                            onClick = { actions.selectLinkImportCandidate(candidate.videoID) },
+                                        )
                                     }
                                     RemoteArtwork(
                                         metadata?.artworkURL ?: candidate.thumbnailURL,
@@ -1804,7 +1832,10 @@ fun LinkImportDialog(
                                                 candidate.playlistIndex?.let { "#$it" },
                                                 metadata?.artist ?: candidate.artist ?: "Unknown uploader",
                                                 (metadata?.durationSeconds ?: candidate.durationSeconds)?.let { clipTime(it * 1_000L) },
-                                                if (candidate.sourceProvider == LinkImportSourceProvider.SoundCloud) "SoundCloud" else "YouTube",
+                                                when (candidate.sourceProvider) {
+                                                    LinkImportSourceProvider.SoundCloud -> "SoundCloud"
+                                                    LinkImportSourceProvider.YouTube -> "YouTube"
+                                                },
                                             ).joinToString(" • "),
                                             fontSize = 12.sp,
                                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .58f),
@@ -1882,7 +1913,7 @@ fun LinkImportDialog(
                                 if (actions.confirmLinkImport(serverUploadRequested)) onDismiss()
                             },
                             enabled = !importState.isRunning && if (importState.resolution.kind.isPlaylist) {
-                                importState.selectedVideoIds.isNotEmpty()
+                                importState.selectedPlaylistItemIds.isNotEmpty()
                             } else {
                                 importState.selectedVideoId != null
                             },

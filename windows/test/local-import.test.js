@@ -151,6 +151,59 @@ test("parses ordered public Spotify playlist embed tracks", () => {
   });
 });
 
+test("bounds oversized Spotify playlist embeds and marks the omitted tail", () => {
+  const trackList = Array.from({ length: 501 }, (_, index) => ({
+    uri: `spotify:track:${index % 2 ? "11dFghVXANMlKmJXsNCbNl" : spotifyTrackID}`,
+    title: `Song ${index + 1}`,
+    subtitle: "Playlist Artist",
+    duration: 120_000,
+    entityType: "track",
+    isPlayable: true,
+  }));
+  const parsed = parseSpotifyPlaylistEmbed(spotifyEmbedFixture({
+    type: "playlist",
+    id: spotifyPlaylistID,
+    title: "Long Road Trip",
+    subtitle: "Lily",
+    trackList,
+  }), spotifyPlaylistID);
+  assert.equal(parsed.items.length, 500);
+  assert.equal(parsed.truncated, true);
+  assert.equal(parsed.items.at(-1).trackNumber, 500);
+});
+
+test("filters unavailable Spotify rows before applying the playlist cap", () => {
+  const trackList = Array.from({ length: 501 }, (_, index) => index < 500
+    ? {
+      uri: `spotify:episode:unavailable-${index}`,
+      title: `Unavailable ${index + 1}`,
+      subtitle: "Playlist Artist",
+      duration: 120_000,
+      entityType: "episode",
+      isPlayable: true,
+    }
+    : {
+      uri: `spotify:track:${spotifyTrackID}`,
+      title: "Tail Song",
+      subtitle: "Playlist Artist",
+      duration: 120_000,
+      entityType: "track",
+      isPlayable: true,
+    });
+  const parsed = parseSpotifyPlaylistEmbed(spotifyEmbedFixture({
+    type: "playlist",
+    id: spotifyPlaylistID,
+    title: "Skipped Tail Fixture",
+    subtitle: "Lily",
+    trackList,
+  }), spotifyPlaylistID);
+  assert.equal(parsed.items.length, 1);
+  assert.equal(parsed.items[0].trackNumber, 501);
+  assert.equal(parsed.items[0].title, "Tail Song");
+  assert.equal(parsed.unavailableCount, 500);
+  assert.equal(parsed.truncated, false);
+});
+
 test("hydrates Spotify playlist songs with their individual album artwork", async () => {
   const secondTrackID = "11dFghVXANMlKmJXsNCbNl";
   const playlistArtworkURL = "https://i.scdn.co/image/playlist-cover";
@@ -269,6 +322,167 @@ test("resolves YouTube playlist metadata and continuation items without inspecti
   assert.equal(currentRenderer.title, "Me at the zoo");
   assert.equal(currentRenderer.artist, "jawed");
   assert.equal(currentRenderer.durationSeconds, 19);
+});
+
+test("carries YouTube lockup playlist positions across continuation pages", async () => {
+  const playlistID = "PL1234567890abcdefghijklmnop";
+  const lockup = (videoID, title, artist) => ({
+    lockupViewModel: {
+      contentId: videoID,
+      contentType: "LOCKUP_CONTENT_TYPE_VIDEO",
+      metadata: {
+        lockupMetadataViewModel: {
+          title: { content: title },
+          metadata: {
+            contentMetadataViewModel: {
+              metadataRows: [{ metadataParts: [{ text: { content: artist } }] }],
+            },
+          },
+        },
+      },
+    },
+  });
+  const initialData = {
+    metadata: { playlistMetadataRenderer: { playlistId: playlistID, title: "Road Trip" } },
+    contents: [
+      lockup("jNQXAC9IVRw", "First Song", "First Artist"),
+      lockup("dQw4w9WgXcQ", "Second Song", "Second Artist"),
+      { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next-page" } } } },
+    ],
+  };
+  const continuationData = {
+    onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [
+      lockup("9bZkp7q19f0", "Third Song", "Third Artist"),
+      lockup("aqz-KE-bpKQ", "Fourth Song", "Fourth Artist"),
+    ] } }],
+  };
+  const html = `<script>var ytInitialData = ${JSON.stringify(initialData)};</script><script>ytcfg.set(${JSON.stringify({
+    INNERTUBE_API_KEY: "test-key",
+    INNERTUBE_CLIENT_VERSION: "2.20260801.00.00",
+    VISITOR_DATA: "test-visitor",
+  })});</script>`;
+  const playlist = await resolveYouTubePlaylist(
+    `https://www.youtube.com/playlist?list=${playlistID}`,
+    new AbortController().signal,
+    async (_url, options = {}) => options.method === "POST"
+      ? new Response(JSON.stringify(continuationData), { status: 200, headers: { "content-type": "application/json" } })
+      : new Response(html, { status: 200, headers: { "content-type": "text/html" } }),
+  );
+
+  assert.deepEqual(playlist.items.map((item) => item.videoID), [
+    "jNQXAC9IVRw",
+    "dQw4w9WgXcQ",
+    "9bZkp7q19f0",
+    "aqz-KE-bpKQ",
+  ]);
+  assert.deepEqual(playlist.items.map((item) => item.playlistIndex), [1, 2, 3, 4]);
+  assert.equal(playlist.truncated, false);
+});
+
+test("bounds unsafe YouTube playlist positions without resetting the continuation cursor", async () => {
+  const playlistID = "PL1234567890abcdefghijklmnop";
+  const videoRenderer = (videoID, title, index) => ({
+    videoId: videoID,
+    title: { runs: [{ text: title }] },
+    shortBylineText: { runs: [{ text: "Playlist Artist" }] },
+    lengthText: { simpleText: "3:33" },
+    ...(index === undefined ? {} : { index: { simpleText: String(index) } }),
+    isPlayable: true,
+  });
+  const initialData = {
+    metadata: { playlistMetadataRenderer: { playlistId: playlistID, title: "Unsafe Positions" } },
+    contents: [
+      { playlistVideoRenderer: videoRenderer("jNQXAC9IVRw", "First Song", Number.MAX_SAFE_INTEGER) },
+      { playlistVideoRenderer: videoRenderer("dQw4w9WgXcQ", "Second Song") },
+      { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next-page" } } } },
+    ],
+  };
+  const continuationData = {
+    onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [
+      { playlistVideoRenderer: videoRenderer("9bZkp7q19f0", "Third Song") },
+      { playlistVideoRenderer: videoRenderer("aqz-KE-bpKQ", "Fourth Song") },
+    ] } }],
+  };
+  const html = `<script>var ytInitialData = ${JSON.stringify(initialData)};</script><script>ytcfg.set(${JSON.stringify({
+    INNERTUBE_API_KEY: "test-key",
+    INNERTUBE_CLIENT_VERSION: "2.20260801.00.00",
+    VISITOR_DATA: "test-visitor",
+  })});</script>`;
+  const playlist = await resolveYouTubePlaylist(
+    `https://www.youtube.com/playlist?list=${playlistID}`,
+    new AbortController().signal,
+    async (_url, options = {}) => options.method === "POST"
+      ? new Response(JSON.stringify(continuationData), { status: 200, headers: { "content-type": "application/json" } })
+      : new Response(html, { status: 200, headers: { "content-type": "text/html" } }),
+  );
+
+  assert.deepEqual(playlist.items.map((item) => item.playlistIndex), [1, 2, 3, 4]);
+  assert.equal(playlist.items.every((item) => Number.isSafeInteger(item.playlistIndex)), true);
+  assert.equal(playlist.truncated, false);
+});
+
+test("preserves bounded unavailable YouTube playlist positions across continuation pages", async () => {
+  const playlistID = "PL1234567890abcdefghijklmnop";
+  const videoRenderer = (videoID, title, index, isPlayable = true) => ({
+    videoId: videoID,
+    title: { runs: [{ text: title }] },
+    shortBylineText: { runs: [{ text: "Playlist Artist" }] },
+    lengthText: { simpleText: "3:33" },
+    ...(index === undefined ? {} : { index: { simpleText: String(index) } }),
+    isPlayable,
+  });
+  const initialData = {
+    metadata: { playlistMetadataRenderer: { playlistId: playlistID, title: "Unavailable Positions" } },
+    contents: [
+      { playlistVideoRenderer: videoRenderer("jNQXAC9IVRw", "Unavailable at seven", 7, false) },
+      { playlistVideoRenderer: videoRenderer("dQw4w9WgXcQ", "Playable at eight") },
+      { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next-page" } } } },
+    ],
+  };
+  const continuationData = {
+    onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [
+      { playlistVideoRenderer: videoRenderer("9bZkp7q19f0", "Playable at nine") },
+    ] } }],
+  };
+  const html = `<script>var ytInitialData = ${JSON.stringify(initialData)};</script><script>ytcfg.set(${JSON.stringify({
+    INNERTUBE_API_KEY: "test-key",
+    INNERTUBE_CLIENT_VERSION: "2.20260801.00.00",
+  })});</script>`;
+  const playlist = await resolveYouTubePlaylist(
+    `https://www.youtube.com/playlist?list=${playlistID}`,
+    new AbortController().signal,
+    async (_url, options = {}) => options.method === "POST"
+      ? new Response(JSON.stringify(continuationData), { status: 200, headers: { "content-type": "application/json" } })
+      : new Response(html, { status: 200, headers: { "content-type": "text/html" } }),
+  );
+
+  assert.deepEqual(playlist.items.map((item) => item.playlistIndex), [8, 9]);
+  assert.equal(playlist.unavailableCount, 1);
+  assert.equal(playlist.truncated, false);
+});
+
+test("bounds oversized YouTube playlist pages and marks the omitted tail", async () => {
+  const playlistID = "PL1234567890abcdefghijklmnop";
+  const videoRenderer = (index) => ({
+    videoId: index % 2 ? "jNQXAC9IVRw" : "dQw4w9WgXcQ",
+    title: { runs: [{ text: `Song ${index + 1}` }] },
+    shortBylineText: { runs: [{ text: "Playlist Artist" }] },
+    lengthText: { simpleText: "3:33" },
+    index: { simpleText: String(index + 1) },
+    isPlayable: true,
+  });
+  const initialData = {
+    metadata: { playlistMetadataRenderer: { playlistId: playlistID, title: "Long Road Trip" } },
+    contents: Array.from({ length: 501 }, (_, index) => ({ playlistVideoRenderer: videoRenderer(index) })),
+  };
+  const html = `<script>var ytInitialData = ${JSON.stringify(initialData)};</script>`;
+  const playlist = await resolveYouTubePlaylist(
+    `https://www.youtube.com/playlist?list=${playlistID}`,
+    new AbortController().signal,
+    async () => new Response(html, { status: 200, headers: { "content-type": "text/html" } }),
+  );
+  assert.equal(playlist.items.length, 500);
+  assert.equal(playlist.truncated, true);
 });
 
 test("returns a selectable batch for YouTube playlist imports", async () => {
@@ -894,6 +1108,44 @@ test("returns an ordered selectable batch for Spotify playlists", async () => {
   assert.equal(result.track.title, "Road Trip");
   assert.deepEqual(result.candidates.map((candidate) => candidate.importMetadata.title), ["First Song", "Second Song"]);
   assert.deepEqual(result.candidates.map((candidate) => candidate.playlistIndex), [1, 2]);
+});
+
+test("keeps alternate candidates for Spotify playlist items", async () => {
+  const result = await resolveLocalImportSource(
+    `https://open.spotify.com/playlist/${spotifyPlaylistID}`,
+    new AbortController().signal,
+    () => {},
+    {
+      resolveSpotifyPlaylist: async () => ({
+        playlistID: spotifyPlaylistID,
+        title: "Road Trip",
+        author: "Lily",
+        artworkURL: null,
+        sourceURL: `https://open.spotify.com/playlist/${spotifyPlaylistID}`,
+        items: [{
+          provider: "spotify",
+          type: "track",
+          trackID: spotifyTrackID,
+          title: "First Song",
+          artist: "First Artist",
+          trackNumber: 1,
+          durationSeconds: 123,
+          sourceURL: `https://open.spotify.com/track/${spotifyTrackID}`,
+        }],
+        unavailableCount: 0,
+        truncated: false,
+      }),
+      searchYouTubeAudioSources: async () => [
+        { videoID: "jNQXAC9IVRw", sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw", title: "First Song" },
+        { videoID: "dQw4w9WgXcQ", sourceURL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", title: "First Song (alternate)" },
+      ],
+    },
+  );
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].sourceURL, "https://www.youtube.com/watch?v=jNQXAC9IVRw");
+  assert.deepEqual(result.candidates[0].fallbackCandidates.map((candidate) => candidate.sourceURL), [
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  ]);
 });
 
 test("resolves direct YouTube video mode without offering it for Spotify metadata", async () => {

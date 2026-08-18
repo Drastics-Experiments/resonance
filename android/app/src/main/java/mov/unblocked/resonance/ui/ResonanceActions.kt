@@ -34,7 +34,7 @@ interface ResonanceActions {
     fun setLinkImportMediaMode(mode: mov.unblocked.resonance.data.LinkImportMediaMode)
     fun resolveLinkImport(source: String)
     fun selectLinkImportSearchResult(resultId: String)
-    fun selectLinkImportCandidate(videoId: String)
+    fun selectLinkImportCandidate(identity: String)
     fun confirmLinkImport(uploadAfterImport: Boolean): Boolean
     fun toggleLinkImportPreview(videoId: String)
     fun stopLinkImportPreview()

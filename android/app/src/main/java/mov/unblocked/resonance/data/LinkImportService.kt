@@ -64,14 +64,34 @@ data class LinkImportCandidate(
     val playlistIndex: Int? = null,
     val fallbackCandidates: List<LinkImportCandidate> = emptyList(),
     val sourceProvider: LinkImportSourceProvider = LinkImportSourceProvider.YouTube,
-)
+) {
+    /**
+     * Playlist rows need an identity that survives repeated occurrences of the
+     * same provider video. Non-playlist candidates retain their video identity.
+     */
+    val playlistItemID: String
+        get() = playlistIndex?.let { "playlist:$it:$videoID" } ?: videoID
+
+    /**
+     * Identity for one playlist source row when planning transfers. Playlist
+     * rows retain their original provider metadata in [importTrack], so two
+     * Spotify or SoundCloud rows can legitimately resolve to the same YouTube
+     * video while still needing independent fallback chains. Repeated YouTube
+     * rows keep the same canonical source URL and therefore still share one
+     * transfer outcome.
+     */
+    val playlistDownloadKey: String
+        get() = importTrack?.sourceURL?.trim()?.takeIf(String::isNotEmpty)
+            ?.let { "source:$it" }
+            ?: "video:$videoID"
+}
 
 enum class LinkImportSourceProvider { YouTube, SoundCloud }
 enum class LinkImportMediaMode(val fileExtension: String) {
     Audio("m4a"), Video("mp4");
 }
 enum class LinkImportKind {
-    Track, SpotifyPlaylist, SoundCloudPlaylist;
+    Track, SpotifyPlaylist, YouTubePlaylist, SoundCloudPlaylist;
 
     val isPlaylist: Boolean get() = this != Track
 }
@@ -88,6 +108,7 @@ data class LinkImportPlaylist(
     val artworkURL: String?,
     val sourceURL: String,
     val skippedItems: List<LinkImportSkippedItem>,
+    val truncated: Boolean = false,
 ) {
     val unavailableCount: Int get() = skippedItems.size
 }
@@ -353,9 +374,13 @@ class LinkImportService(context: Context) {
                             } else {
                                 if (searchedTrackCount > 0) delay(250)
                                 searchedTrackCount += 1
-                                val alternatives = runCatching {
+                                val alternatives = try {
                                     searchYouTube(soundCloudTrack.metadata, maximumMatches = 4, inspectLimit = 10)
-                                }.getOrElse { emptyList() }.map {
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (_: Exception) {
+                                    emptyList()
+                                }.map {
                                     it.copy(importTrack = soundCloudTrack.metadata, playlistIndex = position)
                                 }
                                 val primary = alternatives.firstOrNull()
@@ -429,14 +454,22 @@ class LinkImportService(context: Context) {
                     playlist.tracks.forEachIndexed { index, track ->
                         currentCoroutineContext().ensureActive()
                         if (index > 0) delay(250)
-                        var candidates = runCatching {
+                        var candidates = try {
                             searchYouTube(track, maximumMatches = 4, inspectLimit = 8)
-                        }.getOrElse { emptyList() }
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            emptyList()
+                        }
                         if (candidates.isEmpty()) {
                             delay(500)
-                            candidates = runCatching {
+                            candidates = try {
                                 searchYouTube(track, maximumMatches = 4, inspectLimit = 10)
-                            }.getOrElse { emptyList() }
+                            } catch (error: CancellationException) {
+                                throw error
+                            } catch (_: Exception) {
+                                emptyList()
+                            }
                         }
                         val position = track.trackNumber ?: index + 1
                         val prepared = candidates.map {
@@ -487,6 +520,14 @@ class LinkImportService(context: Context) {
                 )
                 return@withContext LinkImportResolution(track, matches)
             }
+            val youtubePlaylistID = YouTubePlaylistParser.playlistID(source.trim())
+            if (youtubePlaylistID != null) {
+                return@withContext resolveYouTubePlaylist(
+                    playlistID = youtubePlaylistID,
+                    mediaMode = mediaMode,
+                    progress = progress,
+                )
+            }
             val id = youtubeID(source) ?: throw LinkImportException(
                 LinkImportStage.ResolvingMetadata,
                 "UNSUPPORTED_SOURCE",
@@ -503,6 +544,143 @@ class LinkImportService(context: Context) {
             )
             LinkImportResolution(track, listOf(resolved.candidate))
         }
+
+    /**
+     * Resolve a public YouTube playlist into direct video candidates. Playlist
+     * rows are intentionally treated as independent candidates: an unavailable
+     * or age-gated video is represented in the skipped list and does not prevent
+     * the remaining rows from reaching the download phase.
+     */
+    private suspend fun resolveYouTubePlaylist(
+        playlistID: String,
+        mediaMode: LinkImportMediaMode,
+        progress: (LinkImportProgress) -> Unit,
+    ): LinkImportResolution {
+        progress(LinkImportProgress(LinkImportStage.ResolvingMetadata))
+        val html = request(
+            URL("https://www.youtube.com/playlist?list=" + playlistID),
+            8 * 1_024 * 1_024,
+            "text/html",
+        )
+        val firstPage = YouTubePlaylistParser.parseHTML(html, playlistID)
+        val initialItems = YouTubePlaylistLimitPolicy.takeInitial(firstPage.items)
+        val allItems = initialItems.items.toMutableList()
+        var truncated = initialItems.overflowed
+        var title = firstPage.title
+        var author = firstPage.author
+        var artwork = firstPage.artworkURL
+        val skippedItems = firstPage.skippedItems.toMutableList()
+        var continuation = firstPage.continuation
+        var fallbackIndexOffset = firstPage.lastPlaylistIndex
+        val configuration = YouTubePlaylistParser.configuration(html)
+        val seenTokens = mutableSetOf<String>()
+        var continuationCount = 0
+        progress(LinkImportProgress(LinkImportStage.SearchingCandidates))
+
+        while (
+            continuation != null &&
+            configuration.apiKey != null &&
+            configuration.clientVersion != null &&
+            allItems.size < YouTubePlaylistLimitPolicy.MAX_ITEMS &&
+            continuationCount < YouTubePlaylistLimitPolicy.MAX_CONTINUATIONS &&
+            seenTokens.add(continuation)
+        ) {
+            currentCoroutineContext().ensureActive()
+            val token = requireNotNull(continuation)
+            val endpoint = URL(
+                "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false&key=" +
+                    URLEncoder.encode(requireNotNull(configuration.apiKey), "UTF-8"),
+            )
+            val context = buildJsonObject {
+                put("clientName", "WEB")
+                put("clientVersion", requireNotNull(configuration.clientVersion))
+                put("hl", "en")
+                put("gl", "US")
+                configuration.visitorData?.let { put("visitorData", it) }
+            }
+            val body = buildJsonObject {
+                put("context", buildJsonObject { put("client", context) })
+                put("continuation", token)
+            }.toString().toByteArray()
+            val headers = buildMap {
+                put("Content-Type", "application/json")
+                put("Accept", "application/json")
+                put("User-Agent", LinkImportSearchRequestPolicy.USER_AGENT)
+                put("X-YouTube-Client-Name", "1")
+                put("X-YouTube-Client-Version", requireNotNull(configuration.clientVersion))
+                configuration.visitorData?.takeIf(String::isNotBlank)?.let { put("X-Goog-Visitor-Id", it) }
+            }
+            val payload = try {
+                requestBytes(
+                    endpoint,
+                    8 * 1_024 * 1_024,
+                    "application/json",
+                    "POST",
+                    body,
+                    headers,
+                ).decodeToString()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                break
+            }
+            val page = try {
+                YouTubePlaylistParser.parsePayload(
+                    payload,
+                    playlistID,
+                    fallbackIndexOffset = fallbackIndexOffset,
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                break
+            }
+            title = title ?: page.title
+            author = author ?: page.author
+            artwork = artwork ?: page.artworkURL
+            skippedItems += page.skippedItems
+            fallbackIndexOffset = page.lastPlaylistIndex
+            val additions = YouTubePlaylistLimitPolicy.append(allItems, page.items)
+            allItems += additions.items
+            truncated = truncated || additions.overflowed
+            continuation = page.continuation
+            continuationCount += 1
+        }
+
+        truncated = truncated || YouTubePlaylistLimitPolicy.hasRemainingContinuation(continuation)
+
+        if (allItems.isEmpty()) throw LinkImportException(
+            LinkImportStage.ResolvingMetadata,
+            "YOUTUBE_PLAYLIST_EMPTY",
+            "This playlist has no public, downloadable videos.",
+        )
+        val sourceURL = "https://www.youtube.com/playlist?list=" + playlistID
+        val sorted = allItems.sortedWith(compareBy<LinkImportCandidate> { it.playlistIndex ?: Int.MAX_VALUE }.thenBy { it.videoID })
+        val playlist = LinkImportPlaylist(
+            id = playlistID,
+            title = title?.takeIf(String::isNotBlank) ?: "YouTube Playlist",
+            author = author?.takeIf(String::isNotBlank) ?: "YouTube",
+            artworkURL = artwork ?: sorted.firstOrNull()?.thumbnailURL,
+            sourceURL = sourceURL,
+            skippedItems = skippedItems.sortedBy(LinkImportSkippedItem::position),
+            truncated = truncated,
+        )
+        val summary = LinkImportTrack(
+            title = playlist.title,
+            artist = playlist.author,
+            durationSeconds = sorted.mapNotNull { it.importTrack?.durationSeconds ?: it.durationSeconds }
+                .sum()
+                .takeIf { it > 0 },
+            artworkURL = playlist.artworkURL,
+            sourceURL = sourceURL,
+        )
+        return LinkImportResolution(
+            track = summary,
+            candidates = sorted,
+            kind = LinkImportKind.YouTubePlaylist,
+            playlist = playlist,
+        )
+    }
 
     suspend fun search(
         value: String,

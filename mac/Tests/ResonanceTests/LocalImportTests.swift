@@ -146,6 +146,48 @@ struct LocalImportTests {
     private let videoID = "jNQXAC9IVRw"
     private let m4a = URL(fileURLWithPath: "/System/Library/CoreServices/Language Chooser.app/Contents/Resources/VOInstructions-en.m4a")
 
+    private func playlistTestTrack(_ trackID: String, trackNumber: Int? = nil) -> LocalImportSpotifyTrack {
+        LocalImportSpotifyTrack(
+            provider: "youtube",
+            type: "track",
+            trackID: trackID,
+            title: trackID,
+            artist: "Artist",
+            album: nil,
+            trackNumber: trackNumber,
+            durationSeconds: 60,
+            artworkURL: nil,
+            embedURL: "",
+            sourceURL: "https://www.youtube.com/watch?v=\(trackID)"
+        )
+    }
+
+    private func playlistTestItem(position: Int, trackID: String) -> LocalImportPlaylistItem {
+        let sourceURL = "https://www.youtube.com/watch?v=\(trackID)"
+        let track = playlistTestTrack(trackID, trackNumber: position)
+        let candidate = LocalImportAudioSourceMatch(
+            videoID: trackID,
+            title: track.title,
+            artist: track.artist,
+            album: nil,
+            durationSeconds: track.durationSeconds,
+            thumbnailURL: nil,
+            sourceProvider: .youtube,
+            officialArtist: false,
+            sourceURL: sourceURL,
+            score: 1,
+            confidence: "high",
+            match: .init(
+                title: 1,
+                artist: 1,
+                album: nil,
+                duration: 1,
+                durationDeltaSeconds: 0
+            )
+        )
+        return LocalImportPlaylistItem(position: position, track: track, candidate: candidate)
+    }
+
     @Test
     func validatesExactSpotifyTracksAndIndividualHTTPSYouTubeURLs() throws {
         #expect(LocalImportURL.isSpotify("https://open.spotify.com/track/\(spotifyID)"))
@@ -164,6 +206,590 @@ struct LocalImportTests {
         #expect(throws: LocalImportError.self) {
             _ = try LocalImportURL.youtubeVideoID("https://user:secret@youtube.com/watch?v=\(videoID)")
         }
+    }
+
+    @Test
+    func parsesOrderedYouTubePlaylistItemsAndContinuationMetadata() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let firstVideoID = "jNQXAC9IVRw"
+        let secondVideoID = "dQw4w9WgXcQ"
+        func video(_ id: String, _ title: String, _ index: Int) -> [String: Any] {
+            [
+                "videoId": id,
+                "title": ["runs": [["text": title]]],
+                "shortBylineText": ["runs": [["text": "Playlist Artist"]]],
+                "lengthText": ["simpleText": index == 1 ? "3:33" : "4:05"],
+                "index": ["simpleText": String(index)],
+                "thumbnail": ["thumbnails": [[
+                    "url": "https://i.ytimg.com/vi/\(id)/hqdefault.jpg",
+                    "width": 480,
+                ]]],
+                "isPlayable": true,
+            ]
+        }
+        let initial: [String: Any] = [
+            "metadata": ["playlistMetadataRenderer": [
+                "playlistId": playlistID,
+                "title": ["simpleText": "Road Trip"],
+            ]],
+            "header": ["playlistHeaderRenderer": [
+                "ownerText": ["runs": [["text": "Lily"]]],
+            ]],
+            "contents": [
+                ["playlistVideoRenderer": video(firstVideoID, "Me at the zoo", 1)],
+                ["playlistVideoRenderer": [
+                    "videoId": "private-video",
+                    "title": ["runs": [["text": "Private item"]]],
+                    "index": ["simpleText": "2"],
+                    "isPlayable": false,
+                ]],
+                ["continuationItemRenderer": [
+                    "continuationEndpoint": ["continuationCommand": ["token": "next-page"]],
+                ]],
+            ],
+        ]
+        let parsed = try LocalImportParser.youtubePlaylistData(
+            initial,
+            expectedPlaylistID: playlistID
+        )
+        #expect(parsed.title == "Road Trip")
+        #expect(parsed.author == "Lily")
+        #expect(parsed.tracks.map(\.trackID) == [firstVideoID])
+        #expect(parsed.tracks.first?.durationSeconds == 213)
+        #expect(parsed.tracks.first?.trackNumber == 1)
+        #expect(parsed.skippedItems.count == 1)
+        #expect(parsed.skippedItems.first?.position == 2)
+        #expect(parsed.continuation == "next-page")
+        #expect(parsed.lastPlaylistPosition == 2)
+
+        let continuation: [String: Any] = [
+            "onResponseReceivedActions": [[
+                "appendContinuationItemsAction": [
+                    "continuationItems": [["playlistVideoRenderer": video(secondVideoID, "Never Gonna Give You Up", 3)]],
+                ],
+            ]],
+        ]
+        let next = try LocalImportParser.youtubePlaylistData(
+            continuation,
+            expectedPlaylistID: playlistID,
+            positionOffset: parsed.lastPlaylistPosition
+        )
+        #expect(next.tracks.map(\.trackID) == [secondVideoID])
+        #expect(next.tracks.first?.durationSeconds == 245)
+        #expect(next.tracks.first?.trackNumber == 3)
+        #expect(next.lastPlaylistPosition == 3)
+
+        let html = "<script>ytcfg.set({\"INNERTUBE_API_KEY\":\"test-key\",\"INNERTUBE_CLIENT_VERSION\":\"2.20260801.00.00\"});</script>"
+        #expect(LocalImportParser.youtubeConfigurationValue(html, key: "INNERTUBE_API_KEY") == "test-key")
+        #expect(try LocalImportURL.youtubePlaylistID("https://www.youtube.com/playlist?list=\(playlistID)") == playlistID)
+        #expect(try LocalImportURL.youtubePlaylistID("https://www.youtube.com/watch?v=\(firstVideoID)&list=\(playlistID)") == playlistID)
+        #expect(try LocalImportURL.youtubePlaylistID("https://youtu.be/\(firstVideoID)") == nil)
+        #expect(throws: LocalImportError.self) {
+            _ = try LocalImportURL.youtubePlaylistID("https://www.youtube.com/playlist?list=short")
+        }
+    }
+
+    @Test
+    func keepsGlobalPositionsAcrossMalformedAndRepeatedLockupRows() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let firstVideoID = "jNQXAC9IVRw"
+        let secondVideoID = "dQw4w9WgXcQ"
+        let thirdVideoID = "9bZkp7q19f0"
+
+        func lockup(_ videoID: String, _ title: String) -> [String: Any] {
+            [
+                "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                "contentId": videoID,
+                "metadata": ["lockupMetadataViewModel": [
+                    "title": ["content": title],
+                    "metadata": ["contentMetadataViewModel": [
+                        "metadataRows": [[
+                            "metadataParts": [["text": ["content": "Playlist Artist"]]],
+                        ]],
+                    ]],
+                ]],
+            ]
+        }
+
+        let initial: [String: Any] = [
+            "contents": [
+                ["lockupViewModel": lockup(firstVideoID, "First song")],
+                ["lockupViewModel": lockup("invalid", "Unavailable song")],
+                ["lockupViewModel": lockup(firstVideoID, "Duplicate song")],
+                ["playlistVideoRenderer": [
+                    "videoId": secondVideoID,
+                    "title": ["simpleText": "Second song"],
+                    "shortBylineText": ["simpleText": "Playlist Artist"],
+                    "isPlayable": true,
+                ]],
+            ],
+        ]
+        let firstPage = try LocalImportParser.youtubePlaylistData(
+            initial,
+            expectedPlaylistID: playlistID
+        )
+
+        #expect(firstPage.tracks.map(\.trackID) == [firstVideoID, firstVideoID, secondVideoID])
+        #expect(firstPage.tracks.map(\.trackNumber) == [1, 3, 4])
+        #expect(firstPage.skippedItems.map(\.position) == [2])
+        #expect(firstPage.lastPlaylistPosition == 4)
+
+        let continuation: [String: Any] = [
+            "contents": [
+                ["lockupViewModel": lockup(thirdVideoID, "Third song")],
+            ],
+        ]
+        let nextPage = try LocalImportParser.youtubePlaylistData(
+            continuation,
+            expectedPlaylistID: playlistID,
+            positionOffset: firstPage.lastPlaylistPosition
+        )
+
+        #expect(nextPage.tracks.map(\.trackID) == [thirdVideoID])
+        #expect(nextPage.tracks.first?.trackNumber == 5)
+        #expect(nextPage.lastPlaylistPosition == 5)
+    }
+
+    @Test
+    func preservesRepeatedYouTubeRowsAtDistinctPositions() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let repeatedVideoID = "jNQXAC9IVRw"
+
+        func video(_ title: String, _ index: Int) -> [String: Any] {
+            [
+                "videoId": repeatedVideoID,
+                "title": ["simpleText": title],
+                "shortBylineText": ["simpleText": "Playlist Artist"],
+                "index": ["simpleText": String(index)],
+                "isPlayable": true,
+            ]
+        }
+
+        let parsed = try LocalImportParser.youtubePlaylistData(
+            [
+                "contents": [
+                    ["playlistVideoRenderer": video("First appearance", 1)],
+                    ["playlistVideoRenderer": video("Second appearance", 2)],
+                ],
+            ] as [String: Any],
+            expectedPlaylistID: playlistID
+        )
+
+        #expect(parsed.tracks.map(\.trackID) == [repeatedVideoID, repeatedVideoID])
+        #expect(parsed.tracks.map(\.title) == ["First appearance", "Second appearance"])
+        #expect(parsed.tracks.map(\.trackNumber) == [1, 2])
+        #expect(parsed.skippedItems.isEmpty)
+    }
+
+    @Test
+    func keepsPlaylistRowsSelectableButDeduplicatesDownloadItems() {
+        let first = playlistTestItem(position: 1, trackID: videoID)
+        let second = playlistTestItem(position: 2, trackID: videoID)
+        let playlist = LocalImportPlaylist(
+            playlistID: "PL1234567890abcdefghijklmnop",
+            title: "Repeated",
+            author: "Artist",
+            artworkURL: nil,
+            sourceURL: "https://www.youtube.com/playlist?list=PL1234567890abcdefghijklmnop",
+            items: [first, second],
+            skippedItems: [],
+            truncated: false
+        )
+
+        #expect(first.id != second.id)
+        var selectedIDs = LocalImportPlaylistSelectionPolicy.allItemIDs(in: playlist.items)
+        selectedIDs = LocalImportPlaylistSelectionPolicy.toggledItemIDs(selectedIDs, item: first)
+        #expect(LocalImportPlaylistSelectionPolicy.selectedItems(in: playlist, itemIDs: selectedIDs).map(\.id) == [second.id])
+        #expect(LocalImportPlaylistDownloadPolicy.uniqueItems([first, second]).map(\.position) == [1])
+    }
+
+    @Test
+    func explicitPlaylistIndicesCannotMoveFallbackCursorBackwards() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let firstVideoID = "jNQXAC9IVRw"
+        let secondVideoID = "dQw4w9WgXcQ"
+        let thirdVideoID = "9bZkp7q19f0"
+        let fourthVideoID = "aqz-KE-bpKQ"
+
+        func video(_ id: String, _ title: String, index: Int? = nil) -> [String: Any] {
+            var result: [String: Any] = [
+                "videoId": id,
+                "title": ["simpleText": title],
+                "shortBylineText": ["simpleText": "Playlist Artist"],
+                "isPlayable": true,
+            ]
+            if let index {
+                result["index"] = ["simpleText": String(index)]
+            }
+            return result
+        }
+
+        let firstPage = try LocalImportParser.youtubePlaylistData(
+            [
+                "contents": [
+                    ["playlistVideoRenderer": video(firstVideoID, "First song", index: 10)],
+                    ["playlistVideoRenderer": video(secondVideoID, "Second song")],
+                ],
+            ] as [String: Any],
+            expectedPlaylistID: playlistID
+        )
+        #expect(firstPage.tracks.map(\.trackNumber) == [10, 11])
+        #expect(firstPage.lastPlaylistPosition == 11)
+
+        let nextPage = try LocalImportParser.youtubePlaylistData(
+            [
+                "contents": [
+                    // This explicit index is stale/page-local. It must not
+                    // move the global cursor behind the previous page.
+                    ["playlistVideoRenderer": video(thirdVideoID, "Third song", index: 2)],
+                    ["playlistVideoRenderer": video(fourthVideoID, "Fourth song")],
+                ],
+            ] as [String: Any],
+            expectedPlaylistID: playlistID,
+            positionOffset: firstPage.lastPlaylistPosition
+        )
+
+        #expect(nextPage.tracks.map(\.trackNumber) == [12, 13])
+        #expect(nextPage.lastPlaylistPosition == 13)
+    }
+
+    @Test
+    func playlistLimitReportsOverflowAndRemainingContinuation() {
+        let tracks = (0...LocalImportPlaylistLimitPolicy.maxItems).map { playlistTestTrack("video-\($0)") }
+
+        let initial = LocalImportPlaylistLimitPolicy.takeInitial(tracks)
+        #expect(initial.tracks.count == LocalImportPlaylistLimitPolicy.maxItems)
+        #expect(initial.overflowed)
+        #expect(!LocalImportPlaylistLimitPolicy.takeInitial(Array(tracks.prefix(LocalImportPlaylistLimitPolicy.maxItems))).overflowed)
+
+        let existing = (0..<LocalImportPlaylistLimitPolicy.maxItems - 1).map {
+            playlistTestTrack("existing-\($0)", trackNumber: $0 + 1)
+        }
+        let incoming = [
+            existing[0],
+            playlistTestTrack("new-at-limit", trackNumber: LocalImportPlaylistLimitPolicy.maxItems),
+            playlistTestTrack("new-beyond-limit", trackNumber: LocalImportPlaylistLimitPolicy.maxItems + 1),
+        ]
+        let additions = LocalImportPlaylistLimitPolicy.append(existing: existing, incoming: incoming)
+        #expect(additions.tracks.map(\.trackID) == ["new-at-limit"])
+        #expect(additions.overflowed)
+        #expect(LocalImportPlaylistLimitPolicy.hasRemainingContinuation("next-page"))
+        #expect(!LocalImportPlaylistLimitPolicy.hasRemainingContinuation(nil))
+    }
+
+    @Test
+    func resolvesYouTubePlaylistIntoDirectSelectableAudioItems() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            LocalImportMockURLProtocol.reset()
+        }
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let firstVideoID = "jNQXAC9IVRw"
+        let secondVideoID = "dQw4w9WgXcQ"
+        let firstData: [String: Any] = [
+            "metadata": ["playlistMetadataRenderer": [
+                "playlistId": playlistID,
+                "title": ["simpleText": "Road Trip"],
+            ]],
+            "header": ["playlistHeaderRenderer": [
+                "ownerText": ["runs": [["text": "Lily"]]],
+            ]],
+            "contents": [
+                ["playlistVideoRenderer": [
+                    "videoId": firstVideoID,
+                    "title": ["runs": [["text": "First song"]]],
+                    "shortBylineText": ["runs": [["text": "Artist"]]],
+                    "lengthText": ["simpleText": "3:33"],
+                    "index": ["simpleText": "1"],
+                    "isPlayable": true,
+                ]],
+                ["continuationItemRenderer": [
+                    "continuationEndpoint": ["continuationCommand": ["token": "next-page"]],
+                ]],
+            ],
+        ]
+        let continuationData: [String: Any] = [
+            "onResponseReceivedActions": [[
+                "appendContinuationItemsAction": [
+                    "continuationItems": [["playlistVideoRenderer": [
+                        "videoId": secondVideoID,
+                        "title": ["runs": [["text": "Second song"]]],
+                        "shortBylineText": ["runs": [["text": "Artist"]]],
+                        "lengthText": ["simpleText": "4:05"],
+                        "isPlayable": true,
+                    ]]],
+                ],
+            ]],
+        ]
+        let initialJSON = String(data: try JSONSerialization.data(withJSONObject: firstData), encoding: .utf8)!
+        let continuationJSON = try JSONSerialization.data(withJSONObject: continuationData)
+        let html = "<script>var ytInitialData = \(initialJSON);</script><script>ytcfg.set({\"INNERTUBE_API_KEY\":\"test-key\",\"INNERTUBE_CLIENT_VERSION\":\"2.20260801.00.00\",\"VISITOR_DATA\":\"visitor\"});</script>"
+        LocalImportMockURLProtocol.reset()
+        LocalImportMockURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.host == "www.youtube.com", url.path == "/playlist" {
+                let data = Data(html.utf8)
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!,
+                    data
+                )
+            }
+            if url.host == "www.youtube.com", url.path == "/youtubei/v1/browse" {
+                #expect(request.httpMethod == "POST")
+                #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains { $0.name == "key" && $0.value == "test-key" } == true)
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(continuationJSON.count)])!,
+                    continuationJSON
+                )
+            }
+            Issue.record("Unexpected YouTube playlist request: \(String(describing: request.url))")
+            throw URLError(.unsupportedURL)
+        }
+
+        let service = LocalDeviceImportService(sessions: .testing(session))
+        var stages: [LocalImportStage] = []
+        let result = try await service.resolve(
+            source: "https://www.youtube.com/watch?v=\(firstVideoID)&list=\(playlistID)",
+            progress: { progress in stages.append(progress.stage) }
+        )
+
+        #expect(result.kind == .youtubePlaylist)
+        #expect(result.track.title == "Road Trip")
+        #expect(result.playlist?.items.map { $0.track.trackID } == [firstVideoID, secondVideoID])
+        #expect(result.playlist?.items.map(\.position) == [1, 2])
+        #expect(result.playlist?.truncated == false)
+        #expect(result.playlist?.items.allSatisfy { $0.candidate.sourceProvider == .youtube } == true)
+        #expect(result.playlist?.items.map { $0.candidate.sourceURL } == [
+            "https://www.youtube.com/watch?v=\(firstVideoID)",
+            "https://www.youtube.com/watch?v=\(secondVideoID)",
+        ])
+        #expect(stages == [.resolvingMetadata])
+    }
+
+    @Test
+    func resolvesEmptyInitialYouTubePlaylistPageWithPlayableContinuation() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            LocalImportMockURLProtocol.reset()
+        }
+
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let unavailableVideoID = "jNQXAC9IVRw"
+        let continuationVideoID = "dQw4w9WgXcQ"
+        let firstData: [String: Any] = [
+            "metadata": ["playlistMetadataRenderer": [
+                "playlistId": playlistID,
+                "title": ["simpleText": "Road Trip"],
+            ]],
+            "header": ["playlistHeaderRenderer": [
+                "ownerText": ["runs": [["text": "Lily"]]],
+            ]],
+            "contents": [
+                ["playlistVideoRenderer": [
+                    "videoId": unavailableVideoID,
+                    "title": ["simpleText": "Unavailable song"],
+                    "shortBylineText": ["simpleText": "Artist"],
+                    "isPlayable": false,
+                ]],
+                ["continuationItemRenderer": [
+                    "continuationEndpoint": ["continuationCommand": ["token": "next-page"]],
+                ]],
+            ],
+        ]
+        let continuationData: [String: Any] = [
+            "onResponseReceivedActions": [[
+                "appendContinuationItemsAction": [
+                    "continuationItems": [["playlistVideoRenderer": [
+                        "videoId": continuationVideoID,
+                        "title": ["simpleText": "Second song"],
+                        "shortBylineText": ["simpleText": "Artist"],
+                        "isPlayable": true,
+                    ]]],
+                ],
+            ]],
+        ]
+        let initialJSON = String(data: try JSONSerialization.data(withJSONObject: firstData), encoding: .utf8)!
+        let continuationJSON = try JSONSerialization.data(withJSONObject: continuationData)
+        let html = "<script>var ytInitialData = \(initialJSON);</script><script>ytcfg.set({\"INNERTUBE_API_KEY\":\"test-key\",\"INNERTUBE_CLIENT_VERSION\":\"2.20260801.00.00\"});</script>"
+        let requestCounter = LocalImportRequestCounter()
+        LocalImportMockURLProtocol.handler = { request in
+            _ = requestCounter.increment()
+            let url = try #require(request.url)
+            if url.path == "/playlist" {
+                let data = Data(html.utf8)
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!,
+                    data
+                )
+            }
+            if url.path == "/youtubei/v1/browse" {
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(continuationJSON.count)])!,
+                    continuationJSON
+                )
+            }
+            Issue.record("Unexpected YouTube playlist request: \(String(describing: request.url))")
+            throw URLError(.unsupportedURL)
+        }
+
+        let service = LocalDeviceImportService(sessions: .testing(session))
+        let result = try await service.resolve(
+            source: "https://www.youtube.com/playlist?list=\(playlistID)",
+            progress: { _ in }
+        )
+
+        #expect(result.kind == .youtubePlaylist)
+        #expect(result.track.title == "Road Trip")
+        #expect(result.playlist?.items.map { $0.track.trackID } == [continuationVideoID])
+        #expect(result.playlist?.items.map(\.position) == [2])
+        #expect(result.playlist?.skippedItems.map(\.position) == [1])
+        #expect(result.playlist?.truncated == false)
+        #expect(requestCounter.value == 2)
+    }
+
+    @Test
+    func marksYouTubePlaylistTruncatedWhenContinuationRepeats() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            LocalImportMockURLProtocol.reset()
+        }
+
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let firstVideoID = "jNQXAC9IVRw"
+        let secondVideoID = "dQw4w9WgXcQ"
+        let firstData: [String: Any] = [
+            "metadata": ["playlistMetadataRenderer": [
+                "playlistId": playlistID,
+                "title": ["simpleText": "Road Trip"],
+            ]],
+            "contents": [
+                ["playlistVideoRenderer": [
+                    "videoId": firstVideoID,
+                    "title": ["simpleText": "First song"],
+                    "shortBylineText": ["simpleText": "Artist"],
+                    "isPlayable": true,
+                ]],
+                ["continuationItemRenderer": [
+                    "continuationEndpoint": ["continuationCommand": ["token": "next-page"]],
+                ]],
+            ],
+        ]
+        let continuationData: [String: Any] = [
+            "onResponseReceivedActions": [[
+                "appendContinuationItemsAction": [
+                    "continuationItems": [
+                        ["playlistVideoRenderer": [
+                            "videoId": secondVideoID,
+                            "title": ["simpleText": "Second song"],
+                            "shortBylineText": ["simpleText": "Artist"],
+                            "isPlayable": true,
+                        ]],
+                        ["continuationItemRenderer": [
+                            "continuationEndpoint": ["continuationCommand": ["token": "next-page"]],
+                        ]],
+                    ],
+                ],
+            ]],
+        ]
+        let initialJSON = String(data: try JSONSerialization.data(withJSONObject: firstData), encoding: .utf8)!
+        let continuationJSON = try JSONSerialization.data(withJSONObject: continuationData)
+        let html = "<script>var ytInitialData = \(initialJSON);</script><script>ytcfg.set({\"INNERTUBE_API_KEY\":\"test-key\",\"INNERTUBE_CLIENT_VERSION\":\"2.20260801.00.00\"});</script>"
+        LocalImportMockURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.path == "/playlist" {
+                let data = Data(html.utf8)
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!,
+                    data
+                )
+            }
+            if url.path == "/youtubei/v1/browse" {
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(continuationJSON.count)])!,
+                    continuationJSON
+                )
+            }
+            Issue.record("Unexpected YouTube playlist request: \(String(describing: request.url))")
+            throw URLError(.unsupportedURL)
+        }
+
+        let service = LocalDeviceImportService(sessions: .testing(session))
+        let result = try await service.resolve(
+            source: "https://www.youtube.com/playlist?list=\(playlistID)",
+            progress: { _ in }
+        )
+
+        #expect(result.playlist?.items.map { $0.track.trackID } == [firstVideoID, secondVideoID])
+        #expect(result.playlist?.truncated == true)
+    }
+
+    @Test
+    func marksYouTubePlaylistTruncatedWhenContinuationFetchFails() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            LocalImportMockURLProtocol.reset()
+        }
+
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let videoID = "jNQXAC9IVRw"
+        let firstData: [String: Any] = [
+            "metadata": ["playlistMetadataRenderer": [
+                "playlistId": playlistID,
+                "title": ["simpleText": "Road Trip"],
+            ]],
+            "contents": [
+                ["playlistVideoRenderer": [
+                    "videoId": videoID,
+                    "title": ["simpleText": "First song"],
+                    "shortBylineText": ["simpleText": "Artist"],
+                    "isPlayable": true,
+                ]],
+                ["continuationItemRenderer": [
+                    "continuationEndpoint": ["continuationCommand": ["token": "next-page"]],
+                ]],
+            ],
+        ]
+        let initialJSON = String(data: try JSONSerialization.data(withJSONObject: firstData), encoding: .utf8)!
+        let html = "<script>var ytInitialData = \(initialJSON);</script><script>ytcfg.set({\"INNERTUBE_API_KEY\":\"test-key\",\"INNERTUBE_CLIENT_VERSION\":\"2.20260801.00.00\"});</script>"
+        LocalImportMockURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.path == "/playlist" {
+                let data = Data(html.utf8)
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!,
+                    data
+                )
+            }
+            if url.path == "/youtubei/v1/browse" {
+                return (
+                    HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: ["Content-Length": "0"])!,
+                    Data()
+                )
+            }
+            Issue.record("Unexpected YouTube playlist request: \(String(describing: request.url))")
+            throw URLError(.unsupportedURL)
+        }
+
+        let service = LocalDeviceImportService(sessions: .testing(session))
+        let result = try await service.resolve(
+            source: "https://www.youtube.com/playlist?list=\(playlistID)",
+            progress: { _ in }
+        )
+
+        #expect(result.playlist?.items.map { $0.track.trackID } == [videoID])
+        #expect(result.playlist?.truncated == true)
     }
 
     @Test
@@ -1130,6 +1756,164 @@ struct LocalImportTests {
         #expect(duplicateSource.downloadSourceURL == imported.downloadSourceURL)
         let localFiles = try FileManager.default.contentsOfDirectory(at: library, includingPropertiesForKeys: nil)
         #expect(localFiles.count == 1)
+    }
+
+    @MainActor
+    @Test
+    func playlistVideoSelectionUsesVideoTransferMode() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalPlaylistVideoImport-\(UUID().uuidString)", isDirectory: true)
+        let library = root.appendingPathComponent("Library", isDirectory: true)
+        let temporary = root.appendingPathComponent("Temporary", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer {
+            LocalImportMockURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let videoFixtureURL = root.appendingPathComponent("video-only.mp4")
+        try await makeLocalImportVideoFixture(at: videoFixtureURL)
+        let videoFixture = try Data(contentsOf: videoFixtureURL)
+        let audioFixture = try Data(contentsOf: m4a)
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let videoID = self.videoID
+        let initialData: [String: Any] = [
+            "metadata": ["playlistMetadataRenderer": [
+                "playlistId": playlistID,
+                "title": ["simpleText": "Video Playlist"],
+            ]],
+            "header": ["playlistHeaderRenderer": [
+                "ownerText": ["runs": [["text": "Resonance"]]],
+            ]],
+            "contents": [["playlistVideoRenderer": [
+                "videoId": videoID,
+                "title": ["simpleText": "Local Playlist Video"],
+                "shortBylineText": ["simpleText": "Resonance"],
+                "lengthText": ["simpleText": "0:01"],
+                "index": ["simpleText": "1"],
+                "isPlayable": true,
+            ]]],
+        ]
+        let initialJSON = try JSONSerialization.data(withJSONObject: initialData)
+        let initialDocument = String(data: initialJSON, encoding: .utf8)!
+        let html = "<script>var ytInitialData = \(initialDocument);</script><script>ytcfg.set({\"VISITOR_DATA\":\"visitor_playlist_video\"});</script>"
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalImportMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        LocalImportMockURLProtocol.reset()
+        LocalImportMockURLProtocol.handler = { request in
+            let url = try #require(request.url)
+            if url.host == "www.youtube.com", url.path == "/playlist" {
+                let data = Data(html.utf8)
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!,
+                    data
+                )
+            }
+            if url.host == "www.youtube.com",
+               (url.path == "/watch" || url.path.hasPrefix("/embed/")) {
+                let data = Data("<script>ytcfg.set({\"VISITOR_DATA\":\"visitor_playlist_video\"});</script>".utf8)
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!,
+                    data
+                )
+            }
+            if url.host == "www.youtube.com", url.path == "/youtubei/v1/player" {
+                let player: [String: Any] = [
+                    "playabilityStatus": ["status": "OK"],
+                    "videoDetails": [
+                        "videoId": videoID,
+                        "title": "Local Playlist Video",
+                        "author": "Resonance",
+                        "lengthSeconds": "1",
+                    ],
+                    "streamingData": ["adaptiveFormats": [
+                        [
+                            "itag": 137,
+                            "url": "https://rr1.example.googlevideo.com/video-only",
+                            "mimeType": "video/mp4; codecs=\"avc1.640028\"",
+                            "bitrate": 5_000_000,
+                            "contentLength": String(videoFixture.count),
+                            "qualityLabel": "1080p",
+                            "height": 1080,
+                        ],
+                        [
+                            "itag": 140,
+                            "url": "https://rr1.example.googlevideo.com/audio-only",
+                            "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+                            "bitrate": 129_000,
+                            "contentLength": String(audioFixture.count),
+                            "audioQuality": "AUDIO_QUALITY_MEDIUM",
+                            "audioChannels": 2,
+                        ],
+                    ]],
+                ]
+                let data = try JSONSerialization.data(withJSONObject: player)
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": String(data.count)])!,
+                    data
+                )
+            }
+            if url.host?.hasSuffix("googlevideo.com") == true {
+                let fixture = url.path == "/audio-only" ? audioFixture : videoFixture
+                let isProbe = request.value(forHTTPHeaderField: "Range") == "bytes=0-0"
+                let end = isProbe ? 0 : fixture.count - 1
+                #expect(request.value(forHTTPHeaderField: "Range") == "bytes=0-\(end)")
+                let body = isProbe ? Data(fixture.prefix(1)) : fixture
+                return (
+                    HTTPURLResponse(
+                        url: url,
+                        statusCode: 206,
+                        httpVersion: nil,
+                        headerFields: [
+                            "Content-Range": "bytes 0-\(end)/\(fixture.count)",
+                            "Content-Length": String(body.count),
+                            "Content-Type": url.path == "/audio-only" ? "audio/mp4" : "video/mp4",
+                        ]
+                    )!,
+                    body
+                )
+            }
+            throw URLError(.unsupportedURL)
+        }
+
+        let suiteName = "LocalPlaylistVideoImport.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = PlayerModel(
+            loadPersistedLibrary: false,
+            defaults: defaults,
+            persistServerCredentials: false
+        )
+        let service = LocalDeviceImportService(
+            sessions: .testing(session),
+            localRoot: library,
+            temporaryRoot: temporary
+        )
+        let viewModel = MacLocalImportViewModel(model: model, service: service)
+        viewModel.source = "https://www.youtube.com/playlist?list=\(playlistID)"
+        viewModel.mediaMode = .video
+        viewModel.syncAfterImport = false
+        viewModel.resolve()
+        for _ in 0..<200 {
+            if viewModel.stage == .awaitingSelection { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(viewModel.stage == .awaitingSelection)
+        #expect(viewModel.selectedPlaylistItems.count == 1)
+        #expect(viewModel.importSelected())
+        for _ in 0..<400 {
+            if !viewModel.isRunning { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(viewModel.stage == .complete)
+        let imported = try #require(model.tracks.first)
+        #expect(imported.kind == .video)
+        #expect(imported.fileURL?.pathExtension == "mp4")
     }
 
     @Test
