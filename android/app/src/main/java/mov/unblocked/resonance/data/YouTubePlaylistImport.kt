@@ -31,6 +31,7 @@ internal object YouTubePlaylistParser {
     )
     private const val MAX_HTML_CHARACTERS = 8 * 1_024 * 1_024
     private const val MAX_TOKEN_LENGTH = 8_192
+    private const val MAX_PLAYLIST_POSITION = 10_000
 
     data class Page(
         val title: String? = null,
@@ -146,16 +147,15 @@ internal object YouTubePlaylistParser {
 
             (record["playlistVideoRenderer"] as? JsonObject)?.let { renderer ->
                 rowCount += 1
-                val fallbackIndex = lastPlaylistIndex + 1
+                val fallbackIndex = nextPlaylistIndex(lastPlaylistIndex)
                 val parsedCandidate = playlistCandidate(
                     renderer,
                     fallbackIndex,
                 )
-                val explicitIndex = renderer["index"]?.let(::text)?.toIntOrNull()
-                    ?.takeIf { it > 0 }
+                val parsedIndex = playlistIndex(renderer, fallbackIndex)
                 lastPlaylistIndex = maxOf(
                     fallbackIndex,
-                    parsedCandidate?.playlistIndex ?: explicitIndex ?: fallbackIndex,
+                    parsedCandidate?.playlistIndex ?: parsedIndex,
                 )
                 val candidate = parsedCandidate?.withPlaylistIndex(lastPlaylistIndex)
                 if (candidate == null) {
@@ -179,7 +179,7 @@ internal object YouTubePlaylistParser {
             (record["lockupViewModel"] as? JsonObject)?.let { lockup ->
                 if (lockup.string("contentType") == "LOCKUP_CONTENT_TYPE_VIDEO") {
                     rowCount += 1
-                    val fallbackIndex = lastPlaylistIndex + 1
+                    val fallbackIndex = nextPlaylistIndex(lastPlaylistIndex)
                     val candidate = lockupCandidate(lockup, fallbackIndex)
                         ?.withPlaylistIndex(fallbackIndex)
                     lastPlaylistIndex = fallbackIndex
@@ -223,6 +223,14 @@ internal object YouTubePlaylistParser {
         importTrack = importTrack?.copy(trackNumber = index),
     )
 
+    private fun nextPlaylistIndex(after: Int): Int =
+        if (after == Int.MAX_VALUE) Int.MAX_VALUE else after + 1
+
+    private fun playlistIndex(renderer: JsonObject, fallbackIndex: Int): Int =
+        renderer["index"]?.let(::text)?.toIntOrNull()
+            ?.takeIf { it in 1..MAX_PLAYLIST_POSITION }
+            ?: fallbackIndex
+
     private fun playlistCandidate(renderer: JsonObject, fallbackIndex: Int): LinkImportCandidate? {
         val videoID = renderer.string("videoId")?.takeIf(videoIDPattern::matches) ?: return null
         if (renderer["isPlayable"]?.jsonPrimitive?.booleanOrNull == false) return null
@@ -230,8 +238,7 @@ internal object YouTubePlaylistParser {
         val artist = renderer["shortBylineText"]?.let(::text)?.takeIf(String::isNotBlank)
             ?: renderer["longBylineText"]?.let(::text)?.takeIf(String::isNotBlank)
             ?: "Unknown uploader"
-        val index = renderer["index"]?.let(::text)?.toIntOrNull()
-            ?.takeIf { it > 0 } ?: fallbackIndex
+        val index = playlistIndex(renderer, fallbackIndex)
         val thumbnail = thumbnail(renderer["thumbnail"])
         val sourceURL = "https://www.youtube.com/watch?v=$videoID"
         val metadata = LinkImportTrack(

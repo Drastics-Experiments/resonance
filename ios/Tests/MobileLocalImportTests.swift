@@ -114,6 +114,23 @@ final class MobileLocalImportTests: XCTestCase {
         XCTAssertEqual(continuation.skippedItems.map(\.position), [9])
     }
 
+    func testYouTubePlaylistParserFallsBackForOutOfRangeExplicitProviderIndex() throws {
+        let result = try LocalImportParser.youtubePlaylistData(
+            ["contents": [[
+                "playlistVideoRenderer": [
+                    "videoId": "jNQXAC9IVRw",
+                    "title": ["simpleText": "Out of range provider position"],
+                    "isPlayable": true,
+                    "index": ["simpleText": String(Int.max)],
+                ],
+            ]]],
+            expectedPlaylistID: "PL1234567890abcdefghijklmnop"
+        )
+
+        XCTAssertEqual(result.items.map(\.playlistPosition), [1])
+        XCTAssertEqual(result.nextPosition, 2)
+    }
+
     func testYouTubePlaylistParserSupportsModernLockupItems() throws {
         let result = try LocalImportParser.youtubePlaylistData(
             [

@@ -215,6 +215,16 @@ class YouTubePlaylistImportTest {
     }
 
     @Test
+    fun explicitMaximumIntIndexDoesNotOverflowFollowingFallbackRow() {
+        val page = YouTubePlaylistParser.parsePayload(
+            """{"contents":[${playlistVideoRow("jNQXAC9IVRw", "Huge Position", Int.MAX_VALUE)},${playlistVideoRowWithoutIndex("dQw4w9WgXcQ", "Following Row")}]}""",
+            "PL1234567890",
+        )
+
+        assertEquals(listOf(1, 2), page.items.map(LinkImportCandidate::playlistIndex))
+    }
+
+    @Test
     fun unavailableRendererKeepsItsExplicitProviderPosition() {
         val page = YouTubePlaylistParser.parsePayload(
             """{"contents":[${playlistVideoRow("jNQXAC9IVRw", "First Song", 1)},${unavailablePlaylistVideoRow("Unavailable", 10)},${playlistVideoRow("dQw4w9WgXcQ", "Later Song", 11)}]}""",
@@ -277,6 +287,15 @@ class YouTubePlaylistImportTest {
           "title":{"simpleText":"$title"},
           "shortBylineText":{"simpleText":"Artist"},
           "index":{"simpleText":"$index"},
+          "isPlayable":true
+        }}
+    """.trimIndent()
+
+    private fun playlistVideoRowWithoutIndex(videoID: String, title: String): String = """
+        {"playlistVideoRenderer":{
+          "videoId":"$videoID",
+          "title":{"simpleText":"$title"},
+          "shortBylineText":{"simpleText":"Artist"},
           "isPlayable":true
         }}
     """.trimIndent()

@@ -910,7 +910,10 @@ enum LocalImportParser {
     ) -> Int {
         let fallback = max(fallbackPosition, 1)
         let parsedPosition = rendererText(renderer["index"]).flatMap(Int.init)
-        return max(parsedPosition.flatMap { $0 > 0 ? $0 : nil } ?? fallback, fallback)
+        // Match the macOS parser's bounded provider-position policy. A
+        // malformed index such as Int.max must not reach the increment below
+        // and trap on integer overflow.
+        return max(parsedPosition.flatMap { $0 > 0 && $0 <= 10_000 ? $0 : nil } ?? fallback, fallback)
     }
 
     static func youtubePlaylistData(
