@@ -7,3 +7,4 @@
 - YouTube playlist resolutions now carry `LinkImportPlaylist.truncated` when playable rows overflow the 500-item bound or pagination ends with a continuation token still present; Android shows an orange limit notice and keeps exact-boundary playlists undisclosed.
 - YouTube parser pages retain unavailable-row titles, artists, reasons, and source positions; the resolver merges and sorts those records instead of rebuilding them after the playable tail.
 - Repeated YouTube playlist occurrences now remain separate candidates with position-qualified `playlistItemID` selection state; the batch importer still downloads each provider `videoID` once and reuses the resulting local track.
+- Repeated-video imports cache `Result` outcomes per distinct provider ID, including failures, before expanding selected rows; this keeps failed transfers from retrying and prevents batch progress from exceeding the distinct download count.

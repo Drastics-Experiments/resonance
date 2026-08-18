@@ -89,6 +89,7 @@ import mov.unblocked.resonance.data.LatestValuePersistenceGate
 import mov.unblocked.resonance.data.ReviewedMatchResolutionPolicy
 import mov.unblocked.resonance.data.LibraryRepository
 import mov.unblocked.resonance.data.Playlist
+import mov.unblocked.resonance.data.PlaylistDownloadOutcomePolicy
 import mov.unblocked.resonance.data.PlaylistPutResult
 import mov.unblocked.resonance.data.PlaylistMutationSnapshot
 import mov.unblocked.resonance.data.PlaylistEntryOrderPolicy
@@ -1412,47 +1413,61 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             var completedDownloads = 0
-            val downloadedTracksByVideoID = mutableMapOf<String, Track>()
-            selected.forEach { candidate ->
-                val downloadCandidate = candidatesByVideoID.getValue(candidate.videoID)
+            val downloadOutcomes = PlaylistDownloadOutcomePolicy.loadDistinct(
+                selected = downloadCandidates,
+                key = LinkImportCandidate::videoID,
+            ) { downloadCandidate ->
                 val metadata = requireNotNull(downloadCandidate.importTrack).copy(
                     artworkURL = downloadCandidate.importTrack.artworkURL ?: downloadCandidate.thumbnailURL,
                 )
-                val initial = initialMatches[downloadCandidate]
-                var track = downloadedTracksByVideoID[candidate.videoID]
-                    ?: initial?.deviceTrackID
+                val initial = initialMatches.getValue(downloadCandidate)
+                val existingTrack = initial.deviceTrackID
                     ?.let { id -> library.tracks.firstOrNull { it.id == id } }
                     ?.let { existing -> associateLocalImportSource(existing, metadata.sourceURL) }
-                if (track == null) {
+                if (existingTrack != null) {
+                    Result.success(existingTrack)
+                } else {
                     updateOwnedLinkImportTransfer(transferGeneration) { state -> state.copy(
                         linkImport = state.linkImport.copy(
                             batchCurrentTitle = "${completedDownloads + 1} of ${downloadItems.size} • ${metadata.title}",
                         ),
                     ) }
-                    try {
-                        track = downloadLinkTrack(
-                            metadata,
-                            (listOf(downloadCandidate) + downloadCandidate.fallbackCandidates)
-                                .distinctBy(LinkImportCandidate::videoID),
-                            mediaMode,
-                            completedDownloads,
-                            downloadItems.size,
-                            linkTransferGeneration = transferGeneration,
+                    val result = try {
+                        Result.success(
+                            downloadLinkTrack(
+                                metadata,
+                                (listOf(downloadCandidate) + downloadCandidate.fallbackCandidates)
+                                    .distinctBy(LinkImportCandidate::videoID),
+                                mediaMode,
+                                completedDownloads,
+                                downloadItems.size,
+                                linkTransferGeneration = transferGeneration,
+                            ),
                         )
                     } catch (error: CancellationException) {
                         throw error
                     } catch (error: Throwable) {
                         downloadFailures += "${metadata.title} — ${metadata.artist} (${error.message ?: "download failed"})"
+                        Result.failure(error)
                     }
                     completedDownloads += 1
                     updateOwnedLinkImportTransfer(transferGeneration) { state ->
                         state.copy(downloadProgress = 1f)
                     }
+                    result
                 }
+            }
+            val downloadOutcomesByVideoID = downloadOutcomes.associateBy { it.key }
+            val adoptedVideoIDs = mutableSetOf<String>()
+            selected.forEach { candidate ->
+                val downloadCandidate = candidatesByVideoID.getValue(candidate.videoID)
+                val initial = initialMatches[downloadCandidate]
+                val track = downloadOutcomesByVideoID.getValue(candidate.videoID).result.getOrNull()
                 if (track != null) {
-                    downloadedTracksByVideoID[candidate.videoID] = track
-                    initial?.serverSongID?.let { remoteID ->
-                        adoptUploadedDownload(track.id, remoteID, client?.baseURL ?: mutableState.value.serverUrl)
+                    if (adoptedVideoIDs.add(candidate.videoID)) {
+                        initial?.serverSongID?.let { remoteID ->
+                            adoptUploadedDownload(track.id, remoteID, client?.baseURL ?: mutableState.value.serverUrl)
+                        }
                     }
                     if (imported.none { it.second.id == track.id }) imported += candidate to track
                 }

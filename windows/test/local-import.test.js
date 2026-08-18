@@ -172,6 +172,38 @@ test("bounds oversized Spotify playlist embeds and marks the omitted tail", () =
   assert.equal(parsed.items.at(-1).trackNumber, 500);
 });
 
+test("filters unavailable Spotify rows before applying the playlist cap", () => {
+  const trackList = Array.from({ length: 501 }, (_, index) => index < 500
+    ? {
+      uri: `spotify:episode:unavailable-${index}`,
+      title: `Unavailable ${index + 1}`,
+      subtitle: "Playlist Artist",
+      duration: 120_000,
+      entityType: "episode",
+      isPlayable: true,
+    }
+    : {
+      uri: `spotify:track:${spotifyTrackID}`,
+      title: "Tail Song",
+      subtitle: "Playlist Artist",
+      duration: 120_000,
+      entityType: "track",
+      isPlayable: true,
+    });
+  const parsed = parseSpotifyPlaylistEmbed(spotifyEmbedFixture({
+    type: "playlist",
+    id: spotifyPlaylistID,
+    title: "Skipped Tail Fixture",
+    subtitle: "Lily",
+    trackList,
+  }), spotifyPlaylistID);
+  assert.equal(parsed.items.length, 1);
+  assert.equal(parsed.items[0].trackNumber, 501);
+  assert.equal(parsed.items[0].title, "Tail Song");
+  assert.equal(parsed.unavailableCount, 500);
+  assert.equal(parsed.truncated, false);
+});
+
 test("hydrates Spotify playlist songs with their individual album artwork", async () => {
   const secondTrackID = "11dFghVXANMlKmJXsNCbNl";
   const playlistArtworkURL = "https://i.scdn.co/image/playlist-cover";

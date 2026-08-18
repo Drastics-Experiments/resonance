@@ -362,12 +362,13 @@ function parseSpotifyPlaylistEmbed(html, expectedPlaylistID) {
   const artworkURL = spotifyEntityArtwork(entity);
   const items = [];
   let unavailableCount = 0;
+  let truncated = false;
   // Keep provider responses bounded just like YouTube and SoundCloud. Spotify
   // can expose very large playlists in one embed document; rendering and
-  // resolving every row at once would make the Windows dialog unresponsive
-  // and would bypass the shared playlist item limit.
-  const trackList = entity.trackList.slice(0, MAX_PLAYLIST_ITEMS);
-  for (const [index, item] of trackList.entries()) {
+  // resolving more than the shared playlist item limit would make the Windows
+  // dialog unresponsive. Filter the provider rows first so skipped entries do
+  // not consume the limit or hide playable tracks later in the playlist.
+  for (const [index, item] of entity.trackList.entries()) {
     const uriMatch = /^spotify:track:([A-Za-z0-9]{22})$/.exec(cleanText(item?.uri, 128) || "");
     const itemTitle = cleanText(item?.title);
     const artist = cleanText(item?.subtitle);
@@ -377,7 +378,7 @@ function parseSpotifyPlaylistEmbed(html, expectedPlaylistID) {
     }
     const trackID = uriMatch[1];
     const durationMilliseconds = safeNumber(item.duration);
-    items.push({
+    const playableItem = {
       provider: "spotify",
       type: "track",
       trackID,
@@ -389,7 +390,9 @@ function parseSpotifyPlaylistEmbed(html, expectedPlaylistID) {
       artworkURL: null,
       embedURL: `https://open.spotify.com/embed/track/${trackID}`,
       sourceURL: `https://open.spotify.com/track/${trackID}`,
-    });
+    };
+    if (items.length < MAX_PLAYLIST_ITEMS) items.push(playableItem);
+    else truncated = true;
   }
   if (!items.length) {
     throw importError("resolving_metadata", "SPOTIFY_PLAYLIST_EMPTY", "This Spotify playlist has no public, playable tracks.");
@@ -400,7 +403,7 @@ function parseSpotifyPlaylistEmbed(html, expectedPlaylistID) {
     artworkURL,
     items,
     unavailableCount,
-    truncated: entity.trackList.length > MAX_PLAYLIST_ITEMS,
+    truncated,
   };
 }
 
