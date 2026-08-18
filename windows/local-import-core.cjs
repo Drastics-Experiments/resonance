@@ -804,11 +804,17 @@ function webCandidate(renderer) {
   };
 }
 
+function playlistVideoIndex(renderer, fallbackIndex = 0) {
+  const parsedIndex = Number(rendererText(renderer.index));
+  return Number.isSafeInteger(parsedIndex) && parsedIndex > 0 && parsedIndex <= MAX_PLAYLIST_POSITION
+    ? parsedIndex
+    : fallbackIndex + 1;
+}
+
 function playlistVideoCandidate(renderer, fallbackIndex = 0) {
   const videoID = cleanText(renderer.videoId, 11);
   const title = rendererText(renderer.title);
   if (!videoID || !YOUTUBE_VIDEO_ID.test(videoID) || !title || renderer.isPlayable === false) return null;
-  const parsedIndex = Number(rendererText(renderer.index));
   return {
     videoID,
     title,
@@ -819,9 +825,7 @@ function playlistVideoCandidate(renderer, fallbackIndex = 0) {
     sourceProvider: "youtube",
     officialArtist: false,
     sourceURL: `https://www.youtube.com/watch?v=${videoID}`,
-    playlistIndex: Number.isSafeInteger(parsedIndex) && parsedIndex > 0 && parsedIndex <= MAX_PLAYLIST_POSITION
-      ? parsedIndex
-      : fallbackIndex + 1,
+    playlistIndex: playlistVideoIndex(renderer, fallbackIndex),
     score: 1,
     confidence: "high",
     match: { title: 1, artist: 1, album: null, duration: 1, durationDeltaSeconds: 0 },
@@ -919,8 +923,9 @@ function parseYouTubePlaylistData(value, expectedPlaylistID = null, fallbackInde
     const renderer = record.playlistVideoRenderer;
     if (isRecord(renderer)) {
       const fallbackIndex = lastPlaylistIndex + 1;
+      const playlistIndex = playlistVideoIndex(renderer, lastPlaylistIndex);
       const parsed = playlistVideoCandidate(renderer, lastPlaylistIndex);
-      lastPlaylistIndex = Math.max(fallbackIndex, parsed?.playlistIndex || fallbackIndex);
+      lastPlaylistIndex = Math.max(fallbackIndex, playlistIndex);
       const item = parsed ? { ...parsed, playlistIndex: lastPlaylistIndex } : null;
       if (item) items.push(item);
       else unavailableCount += 1;

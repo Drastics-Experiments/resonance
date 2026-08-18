@@ -421,6 +421,46 @@ test("bounds unsafe YouTube playlist positions without resetting the continuatio
   assert.equal(playlist.truncated, false);
 });
 
+test("preserves bounded unavailable YouTube playlist positions across continuation pages", async () => {
+  const playlistID = "PL1234567890abcdefghijklmnop";
+  const videoRenderer = (videoID, title, index, isPlayable = true) => ({
+    videoId: videoID,
+    title: { runs: [{ text: title }] },
+    shortBylineText: { runs: [{ text: "Playlist Artist" }] },
+    lengthText: { simpleText: "3:33" },
+    ...(index === undefined ? {} : { index: { simpleText: String(index) } }),
+    isPlayable,
+  });
+  const initialData = {
+    metadata: { playlistMetadataRenderer: { playlistId: playlistID, title: "Unavailable Positions" } },
+    contents: [
+      { playlistVideoRenderer: videoRenderer("jNQXAC9IVRw", "Unavailable at seven", 7, false) },
+      { playlistVideoRenderer: videoRenderer("dQw4w9WgXcQ", "Playable at eight") },
+      { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next-page" } } } },
+    ],
+  };
+  const continuationData = {
+    onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [
+      { playlistVideoRenderer: videoRenderer("9bZkp7q19f0", "Playable at nine") },
+    ] } }],
+  };
+  const html = `<script>var ytInitialData = ${JSON.stringify(initialData)};</script><script>ytcfg.set(${JSON.stringify({
+    INNERTUBE_API_KEY: "test-key",
+    INNERTUBE_CLIENT_VERSION: "2.20260801.00.00",
+  })});</script>`;
+  const playlist = await resolveYouTubePlaylist(
+    `https://www.youtube.com/playlist?list=${playlistID}`,
+    new AbortController().signal,
+    async (_url, options = {}) => options.method === "POST"
+      ? new Response(JSON.stringify(continuationData), { status: 200, headers: { "content-type": "application/json" } })
+      : new Response(html, { status: 200, headers: { "content-type": "text/html" } }),
+  );
+
+  assert.deepEqual(playlist.items.map((item) => item.playlistIndex), [8, 9]);
+  assert.equal(playlist.unavailableCount, 1);
+  assert.equal(playlist.truncated, false);
+});
+
 test("bounds oversized YouTube playlist pages and marks the omitted tail", async () => {
   const playlistID = "PL1234567890abcdefghijklmnop";
   const videoRenderer = (index) => ({
