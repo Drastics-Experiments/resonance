@@ -78,19 +78,11 @@ fun LibraryScreen(
 ) {
     var clipEditorOpen by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
+    val trackIndex = remember(state.tracks) { LibraryTrackIndex(state.tracks) }
     val query = remember(state.librarySearch) { state.librarySearch.trim() }
-    val tracks = remember(state.tracks, query) {
-        if (query.isEmpty()) {
-            state.tracks
-        } else {
-            state.tracks.filter {
-                it.title.contains(query, true) || it.artist.contains(query, true) ||
-                    it.album.contains(query, true) || it.relativePath.contains(query, true)
-            }
-        }
-    }
+    val tracks = remember(trackIndex, query) { trackIndex.search(query) }
     val recentlyAdded = remember(state.tracks) { recentlyAddedTracks(state.tracks) }
-    val queueIDs = remember(state.tracks) { state.tracks.map(Track::id) }
+    val queueIDs = trackIndex.queueIDs
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
