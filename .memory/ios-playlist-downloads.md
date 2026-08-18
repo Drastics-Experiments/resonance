@@ -5,6 +5,7 @@
 - YouTube playlist items use direct watch URLs and the existing sequential playlist importer, so each selected item keeps independent download failure/partial-success semantics. Playlist positions remain aligned with skipped rows.
 - Every `LOCKUP_CONTENT_TYPE_VIDEO` source row consumes a playlist position, including malformed rows without a valid `contentId`; malformed rows become skipped diagnostics so later playable rows retain provider order.
 - Legacy `playlistVideoRenderer` rows now normalize positive provider indices against the monotonic source cursor, so an explicit position advances following unavailable or indexless rows without allowing page-local indices to move the cursor backward.
+- YouTube playlist candidates carry their parsed provider index through `LocalImportAudioSourceMatch.playlistPosition`; resolution uses that field when rebuilding playlist rows, so sparse playable positions such as 7 and 9 do not collapse to review rows 1 and 2.
 - Playlist selection is keyed by the position-qualified `LocalImportPlaylistItem.id`, not provider `trackID`, so repeated occurrences can be toggled independently while download deduplication remains track-based.
 - Before transfer, repeated selected rows are reduced to the first occurrence of each provider `trackID`; this preserves row-level selection while preventing a second network download of the same media.
 - The unsigned generic-device `build-for-testing`, the exact CI Simulator build, both focused regressions, and the complete `MobileLocalImportTests` class pass on an iOS Simulator.

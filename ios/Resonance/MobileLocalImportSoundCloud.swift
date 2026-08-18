@@ -9,6 +9,7 @@ struct LocalImportSoundCloudTrack: Hashable, Sendable {
         guard directlyImportable else { return nil }
         return LocalImportAudioSourceMatch(
             videoID: "soundcloud:\(metadata.trackID)",
+            playlistPosition: nil,
             title: metadata.title,
             artist: metadata.artist,
             album: metadata.album,

@@ -310,6 +310,7 @@ struct LocalImportSearchEngine: Sendable {
     private func directCandidate(_ candidate: LocalImportSearchCandidate) -> LocalImportAudioSourceMatch {
         LocalImportAudioSourceMatch(
             videoID: candidate.videoID,
+            playlistPosition: nil,
             title: candidate.title,
             artist: candidate.artist,
             album: candidate.album,

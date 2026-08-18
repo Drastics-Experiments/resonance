@@ -40,6 +40,10 @@ struct LocalImportAudioSourceMatch: Codable, Hashable, Identifiable, Sendable {
 
     var id: String { videoID }
     let videoID: String
+    // YouTube playlist parsing can expose a provider index that must survive
+    // source matching and playlist-row reconstruction. Search candidates do
+    // not have a playlist position, so this remains nil for those matches.
+    let playlistPosition: Int?
     let title: String
     let artist: String?
     let album: String?
@@ -209,6 +213,23 @@ enum LocalImportYouTubePlaylistLimitPolicy {
             selectedSkippedItems,
             selectedItems.count < items.count
         )
+    }
+}
+
+enum LocalImportYouTubePlaylistPositionPolicy {
+    static func positions(
+        for candidates: [LocalImportAudioSourceMatch],
+        skippedPositions: Set<Int>
+    ) -> [Int] {
+        var nextPosition = 1
+        return candidates.map { candidate in
+            while skippedPositions.contains(nextPosition) {
+                nextPosition += 1
+            }
+            let position = max(candidate.playlistPosition ?? nextPosition, nextPosition)
+            nextPosition = position + 1
+            return position
+        }
     }
 }
 
@@ -980,6 +1001,7 @@ enum LocalImportParser {
         let sourceURL = "https://www.youtube.com/watch?v=\(videoID)"
         return LocalImportAudioSourceMatch(
             videoID: videoID,
+            playlistPosition: position,
             title: title,
             artist: artist,
             album: nil,
@@ -1257,6 +1279,7 @@ enum LocalImportMatcher {
         let roundedScore = rounded(score)
         return LocalImportAudioSourceMatch(
             videoID: candidate.videoID,
+            playlistPosition: nil,
             title: candidate.title,
             artist: candidate.artist,
             album: candidate.album,

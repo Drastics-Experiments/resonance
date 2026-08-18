@@ -286,6 +286,36 @@ final class MobileLocalImportTests: XCTestCase {
         XCTAssertEqual(continuationRows.items.first?.title, "Playable continuation")
     }
 
+    func testYouTubePlaylistResolutionPreservesExplicitProviderPositions() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let page = try LocalImportParser.youtubePlaylistData(
+            ["contents": [
+                ["playlistVideoRenderer": [
+                    "videoId": "jNQXAC9IVRw",
+                    "title": ["simpleText": "Provider position seven"],
+                    "isPlayable": true,
+                    "index": ["simpleText": "7"],
+                ]],
+                ["playlistVideoRenderer": [
+                    "videoId": "9bZkp7q19f0",
+                    "title": ["simpleText": "Provider position nine"],
+                    "isPlayable": true,
+                    "index": ["simpleText": "9"],
+                ]],
+            ]],
+            expectedPlaylistID: playlistID
+        )
+
+        let skippedPositions = Set(page.skippedItems.map(\.position))
+        XCTAssertEqual(page.items.map(\.playlistPosition), [7, 9])
+        let reconstructedPositions = LocalImportYouTubePlaylistPositionPolicy.positions(
+            for: page.items,
+            skippedPositions: skippedPositions
+        )
+
+        XCTAssertEqual(reconstructedPositions, [7, 9])
+    }
+
     func testYouTubePlaylistParserRejectsWrongPlaylist() {
         let data: [String: Any] = [
             "playlistMetadataRenderer": [
@@ -350,6 +380,7 @@ final class MobileLocalImportTests: XCTestCase {
         )
         let candidate = LocalImportAudioSourceMatch(
             videoID: "video\(position)",
+            playlistPosition: nil,
             title: "Song \(position)",
             artist: "Artist",
             album: nil,

@@ -526,6 +526,7 @@ actor LocalDeviceImportService {
             }
             let candidate = LocalImportAudioSourceMatch(
                 videoID: metadata.trackID,
+                playlistPosition: nil,
                 title: metadata.title,
                 artist: metadata.artist,
                 album: metadata.album,
@@ -626,6 +627,7 @@ actor LocalDeviceImportService {
         )
         let candidate = LocalImportAudioSourceMatch(
             videoID: videoID,
+            playlistPosition: nil,
             title: metadata.title,
             artist: metadata.artist,
             album: metadata.album,
@@ -800,13 +802,11 @@ actor LocalDeviceImportService {
             // were filtered out during metadata resolution. This keeps the
             // visible order aligned with the skipped-item diagnostics.
             let skippedPositions = Set(playlistMetadata.skippedItems.map(\LocalImportPlaylistSkippedItem.position))
-            var nextPlaylistPosition = 1
-            let playlistItems = playlistMetadata.items.map { candidate in
-                while skippedPositions.contains(nextPlaylistPosition) {
-                    nextPlaylistPosition += 1
-                }
-                let position = nextPlaylistPosition
-                nextPlaylistPosition += 1
+            let playlistPositions = LocalImportYouTubePlaylistPositionPolicy.positions(
+                for: playlistMetadata.items,
+                skippedPositions: skippedPositions
+            )
+            let playlistItems = zip(playlistMetadata.items, playlistPositions).map { candidate, position in
                 let track = LocalImportSpotifyTrack(
                     provider: "youtube",
                     type: "track",
@@ -878,6 +878,7 @@ actor LocalDeviceImportService {
         )
         let candidate = LocalImportAudioSourceMatch(
             videoID: preview.videoID,
+            playlistPosition: nil,
             title: preview.title,
             artist: preview.author,
             album: nil,
