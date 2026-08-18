@@ -112,6 +112,36 @@ final class MobileLocalImportTests: XCTestCase {
         XCTAssertEqual(result.items.first?.durationSeconds, 19)
     }
 
+    func testYouTubePlaylistParserSkipsMalformedLockupAndAdvancesPosition() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let validID = "jNQXAC9IVRw"
+
+        func lockup(_ contentID: String?) -> [String: Any] {
+            var viewModel: [String: Any] = [
+                "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                "metadata": [
+                    "lockupMetadataViewModel": [
+                        "title": ["content": "Lockup song"],
+                    ],
+                ],
+            ]
+            if let contentID {
+                viewModel["contentId"] = contentID
+            }
+            return ["lockupViewModel": viewModel]
+        }
+
+        let result = try LocalImportParser.youtubePlaylistData(
+            ["contents": [lockup(nil), lockup(validID)]],
+            expectedPlaylistID: playlistID
+        )
+
+        XCTAssertEqual(result.items.map(\.videoID), [validID])
+        XCTAssertEqual(result.skippedItems.map(\.position), [1])
+        XCTAssertEqual(result.skippedItems.first?.reason, "Missing public video metadata")
+        XCTAssertEqual(result.unavailableCount, 1)
+    }
+
     func testYouTubePlaylistLimitKeepsPlayableRowsAfterUnavailableRows() throws {
         let playlistID = "PL1234567890abcdefghijklmnop"
         var contents: [[String: Any]] = (1...500).map { index in
@@ -221,5 +251,69 @@ final class MobileLocalImportTests: XCTestCase {
         ) { error in
             XCTAssertEqual((error as? LocalImportError)?.code, "YOUTUBE_PLAYLIST_MISMATCH")
         }
+    }
+
+    func testPlaylistSelectionTogglesRepeatedTrackOccurrencesIndependently() {
+        let first = playlistItem(position: 1, trackID: "repeated-track")
+        let second = playlistItem(position: 2, trackID: "repeated-track")
+        let playlist = LocalImportPlaylist(
+            playlistID: "playlist",
+            title: "Playlist",
+            author: "Artist",
+            artworkURL: nil,
+            sourceURL: "https://www.youtube.com/playlist?list=playlist",
+            items: [first, second],
+            skippedItems: []
+        )
+
+        var selectedItemIDs = LocalImportPlaylistSelectionPolicy.allItemIDs(in: playlist.items)
+        selectedItemIDs = LocalImportPlaylistSelectionPolicy.toggledItemIDs(
+            selectedItemIDs,
+            item: first
+        )
+
+        XCTAssertEqual(
+            LocalImportPlaylistSelectionPolicy.selectedItems(in: playlist, itemIDs: selectedItemIDs)
+                .map(\.id),
+            [second.id]
+        )
+    }
+
+    private func playlistItem(position: Int, trackID: String) -> LocalImportPlaylistItem {
+        let sourceURL = "https://www.youtube.com/watch?v=video\(position)"
+        let track = LocalImportSpotifyTrack(
+            provider: "youtube",
+            type: "track",
+            trackID: trackID,
+            title: "Song \(position)",
+            artist: "Artist",
+            album: nil,
+            trackNumber: position,
+            durationSeconds: 180,
+            artworkURL: nil,
+            embedURL: "",
+            sourceURL: sourceURL
+        )
+        let candidate = LocalImportAudioSourceMatch(
+            videoID: "video\(position)",
+            title: "Song \(position)",
+            artist: "Artist",
+            album: nil,
+            durationSeconds: 180,
+            thumbnailURL: nil,
+            sourceProvider: .youtube,
+            officialArtist: false,
+            sourceURL: sourceURL,
+            score: 1,
+            confidence: "high",
+            match: .init(
+                title: 1,
+                artist: 1,
+                album: nil,
+                duration: 1,
+                durationDeltaSeconds: 0
+            )
+        )
+        return LocalImportPlaylistItem(position: position, track: track, candidate: candidate)
     }
 }

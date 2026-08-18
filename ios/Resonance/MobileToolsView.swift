@@ -1402,7 +1402,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
     @Published private(set) var selectedSearchResultID: String?
     @Published private(set) var selectedVideoID: String?
     @Published private(set) var hasExplicitCandidateSelection = false
-    @Published var selectedPlaylistTrackIDs: Set<String> = []
+    @Published var selectedPlaylistItemIDs: Set<String> = []
     @Published private(set) var error: LocalImportError?
     @Published private(set) var completedTrack: MobileTrack?
     @Published private(set) var completedSummary: String?
@@ -1453,7 +1453,11 @@ private final class MobileLocalImportViewModel: ObservableObject {
     }
 
     var selectedPlaylistItems: [LocalImportPlaylistItem] {
-        resolution?.playlist?.items.filter { selectedPlaylistTrackIDs.contains($0.track.trackID) } ?? []
+        guard let playlist = resolution?.playlist else { return [] }
+        return LocalImportPlaylistSelectionPolicy.selectedItems(
+            in: playlist,
+            itemIDs: selectedPlaylistItemIDs
+        )
     }
 
     var resolveButtonTitle: String {
@@ -1497,7 +1501,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
         selectedSearchResultID = nil
         selectedVideoID = nil
         hasExplicitCandidateSelection = false
-        selectedPlaylistTrackIDs = []
+        selectedPlaylistItemIDs = []
         reviewedMatchLease = nil
         resolvedSourceIdentity = nil
         completedTrack = nil
@@ -1549,7 +1553,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
                     reviewedMatchLease = lease
                     resolvedSourceIdentity = rawInput
                     selectedVideoID = nil
-                    selectedPlaylistTrackIDs = []
+                    selectedPlaylistItemIDs = []
                     stage = .awaitingSelection
                     task = nil
                     return
@@ -1584,7 +1588,9 @@ private final class MobileLocalImportViewModel: ObservableObject {
                 resolution = result
                 resolvedSourceIdentity = rawInput
                 selectedVideoID = result.candidates.first?.videoID
-                selectedPlaylistTrackIDs = Set(result.playlist?.items.map { $0.track.trackID } ?? [])
+                selectedPlaylistItemIDs = LocalImportPlaylistSelectionPolicy.allItemIDs(
+                    in: result.playlist?.items ?? []
+                )
                 stage = .awaitingSelection
             } catch is CancellationError {
                 if generation == sourceGeneration { stage = .cancelled }
@@ -1609,7 +1615,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
         selectedSearchResultID = result.id
         selectedVideoID = result.candidates.first?.videoID
         hasExplicitCandidateSelection = selectedVideoID != nil
-        selectedPlaylistTrackIDs = []
+        selectedPlaylistItemIDs = []
         previewError = nil
     }
 
@@ -1744,11 +1750,10 @@ private final class MobileLocalImportViewModel: ObservableObject {
     }
 
     func togglePlaylistItem(_ item: LocalImportPlaylistItem) {
-        if selectedPlaylistTrackIDs.contains(item.track.trackID) {
-            selectedPlaylistTrackIDs.remove(item.track.trackID)
-        } else {
-            selectedPlaylistTrackIDs.insert(item.track.trackID)
-        }
+        selectedPlaylistItemIDs = LocalImportPlaylistSelectionPolicy.toggledItemIDs(
+            selectedPlaylistItemIDs,
+            item: item
+        )
     }
 
     private func importPlaylist(_ resolution: LocalImportResolution, into library: MusicLibrary) {
@@ -1805,7 +1810,7 @@ private final class MobileLocalImportViewModel: ObservableObject {
         selectedSearchResultID = nil
         selectedVideoID = nil
         hasExplicitCandidateSelection = false
-        selectedPlaylistTrackIDs = []
+        selectedPlaylistItemIDs = []
         reviewedMatchLease = nil
         resolvedSourceIdentity = nil
         completedTrack = nil
@@ -2843,7 +2848,7 @@ struct MobileLocalImportSheet: View {
                 .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
             }
             ForEach(playlist.items) { item in
-                let selected = viewModel.selectedPlaylistTrackIDs.contains(item.track.trackID)
+                let selected = viewModel.selectedPlaylistItemIDs.contains(item.id)
                 HStack(spacing: 8) {
                     Button { viewModel.togglePlaylistItem(item) } label: {
                         HStack(spacing: 11) {

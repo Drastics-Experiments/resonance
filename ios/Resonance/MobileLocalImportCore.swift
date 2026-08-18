@@ -150,6 +150,32 @@ struct LocalImportPlaylist: Hashable, Sendable {
     var unavailableCount: Int { skippedItems.count }
 }
 
+enum LocalImportPlaylistSelectionPolicy {
+    static func allItemIDs(in items: [LocalImportPlaylistItem]) -> Set<String> {
+        Set(items.map(\.id))
+    }
+
+    static func selectedItems(
+        in playlist: LocalImportPlaylist,
+        itemIDs: Set<String>
+    ) -> [LocalImportPlaylistItem] {
+        playlist.items.filter { itemIDs.contains($0.id) }
+    }
+
+    static func toggledItemIDs(
+        _ itemIDs: Set<String>,
+        item: LocalImportPlaylistItem
+    ) -> Set<String> {
+        var updated = itemIDs
+        if updated.contains(item.id) {
+            updated.remove(item.id)
+        } else {
+            updated.insert(item.id)
+        }
+        return updated
+    }
+}
+
 enum LocalImportYouTubePlaylistLimitPolicy {
     static let maxItems = 500
 
@@ -895,9 +921,7 @@ enum LocalImportParser {
                 nextPosition += 1
             }
             if let lockup = record["lockupViewModel"] as? [String: Any],
-               lockup["contentType"] as? String == "LOCKUP_CONTENT_TYPE_VIDEO",
-               let videoID = clean(lockup["contentId"] as? String),
-               LocalImportURL.isYouTubeVideoID(videoID) {
+               lockup["contentType"] as? String == "LOCKUP_CONTENT_TYPE_VIDEO" {
                 if let item = youtubeLockupPlaylistCandidate(lockup, fallbackPosition: nextPosition) {
                     items.append(item)
                 } else {
