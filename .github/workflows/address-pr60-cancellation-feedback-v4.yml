@@ -20,9 +20,14 @@ jobs:
         with:
           ref: agent/optimize-batched-downloads
           fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.7.0
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+          cache: pnpm
+          cache-dependency-path: windows/pnpm-lock.yaml
       - name: Patch and validate
         shell: bash
         run: |
@@ -38,9 +43,9 @@ jobs:
             node --check windows/main.cjs >> "$REPORT" 2>&1; MAIN=$?
             node --check windows/server-download.cjs >> "$REPORT" 2>&1; SERVER=$?
             if [[ $DIFF -eq 0 && $MAIN -eq 0 && $SERVER -eq 0 ]]; then
-              (cd windows && npm ci --no-audit --no-fund) >> "$REPORT" 2>&1; INSTALL=$?
+              (cd windows && pnpm install --frozen-lockfile) >> "$REPORT" 2>&1; INSTALL=$?
               if [[ $INSTALL -eq 0 ]]; then
-                (cd windows && npm test) >> "$REPORT" 2>&1; TEST=$?
+                (cd windows && pnpm test) >> "$REPORT" 2>&1; TEST=$?
               fi
             fi
           fi
@@ -67,4 +72,4 @@ jobs:
           git push origin HEAD:agent/optimize-batched-downloads
           exit 0
 
-# This comment intentionally triggers the already-registered workflow.
+# This comment intentionally triggers the already-registered workflow with pnpm.
