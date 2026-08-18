@@ -29,3 +29,4 @@ jobs:
           path: resonance-source.zip
           if-no-files-found: error
           retention-days: 1
+          compression-level: 0
