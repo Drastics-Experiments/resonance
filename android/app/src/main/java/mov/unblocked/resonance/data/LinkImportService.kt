@@ -542,12 +542,13 @@ class LinkImportService(context: Context) {
             "text/html",
         )
         val firstPage = YouTubePlaylistParser.parseHTML(html, playlistID)
-        val allItems = firstPage.items.toMutableList()
+        val allItems = firstPage.items.take(MAX_YOUTUBE_PLAYLIST_ITEMS).toMutableList()
         var title = firstPage.title
         var author = firstPage.author
         var artwork = firstPage.artworkURL
         var unavailableCount = firstPage.unavailableCount
         var continuation = firstPage.continuation
+        var fallbackIndexOffset = firstPage.lastPlaylistIndex
         val configuration = YouTubePlaylistParser.configuration(html)
         val seenTokens = mutableSetOf<String>()
         var continuationCount = 0
@@ -601,7 +602,11 @@ class LinkImportService(context: Context) {
                 break
             }
             val page = try {
-                YouTubePlaylistParser.parsePayload(payload, playlistID)
+                YouTubePlaylistParser.parsePayload(
+                    payload,
+                    playlistID,
+                    fallbackIndexOffset = fallbackIndexOffset,
+                )
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
@@ -611,8 +616,12 @@ class LinkImportService(context: Context) {
             author = author ?: page.author
             artwork = artwork ?: page.artworkURL
             unavailableCount += page.unavailableCount
+            fallbackIndexOffset = page.lastPlaylistIndex
             page.items.forEach { candidate ->
-                if (allItems.none { it.videoID == candidate.videoID }) {
+                if (
+                    allItems.size < MAX_YOUTUBE_PLAYLIST_ITEMS &&
+                    allItems.none { it.videoID == candidate.videoID }
+                ) {
                     allItems += candidate
                 }
             }

@@ -111,4 +111,80 @@ class YouTubePlaylistImportTest {
         assertEquals("2.20260101.01.00", config.clientVersion)
         assertEquals("visitor", config.visitorData)
     }
+
+    @Test
+    fun parsesModernLockupRowsWithContentText() {
+        val page = YouTubePlaylistParser.parsePayload(
+            """{"contents":[${lockupRow("jNQXAC9IVRw", "Me at the zoo", "Jawed Karim")},${lockupRow("dQw4w9WgXcQ", "Second Song", "Second Artist") }]}""",
+            "PL1234567890",
+        )
+
+        assertEquals(listOf("jNQXAC9IVRw", "dQw4w9WgXcQ"), page.items.map(LinkImportCandidate::videoID))
+        assertEquals("Me at the zoo", page.items.first().title)
+        assertEquals("Jawed Karim", page.items.first().artist)
+        assertEquals(listOf(1, 2), page.items.map(LinkImportCandidate::playlistIndex))
+    }
+
+    @Test
+    fun continuationFallbackIndexesRemainGlobalAcrossPages() {
+        val firstPage = YouTubePlaylistParser.parsePayload(
+            """{"contents":[${lockupRow("jNQXAC9IVRw", "First Song", "Artist")},${invalidLockupRow()},${lockupRow("jNQXAC9IVRw", "Duplicate Song", "Artist")},${lockupRow("dQw4w9WgXcQ", "Second Song", "Artist") }]}""",
+            "PL1234567890",
+        )
+        val continuationPage = YouTubePlaylistParser.parsePayload(
+            """{"contents":[${lockupRow("9bZkp7q19f0", "Third Song", "Artist")},${lockupRow("aqz-KE-bpKQ", "Fourth Song", "Artist") }]}""",
+            "PL1234567890",
+            fallbackIndexOffset = firstPage.lastPlaylistIndex,
+        )
+
+        val ordered = (firstPage.items + continuationPage.items).sortedBy(LinkImportCandidate::playlistIndex)
+        assertEquals(
+            listOf("jNQXAC9IVRw", "dQw4w9WgXcQ", "9bZkp7q19f0", "aqz-KE-bpKQ"),
+            ordered.map(LinkImportCandidate::videoID),
+        )
+        assertEquals(4, firstPage.rowCount)
+        assertEquals(1, firstPage.unavailableCount)
+        assertEquals(listOf(1, 4, 5, 6), ordered.map(LinkImportCandidate::playlistIndex))
+    }
+
+    @Test
+    fun mixedExplicitAndFallbackIndexesPreserveEncounterOrder() {
+        val explicit = """
+            {"playlistVideoRenderer":{
+              "videoId":"jNQXAC9IVRw",
+              "title":{"simpleText":"Explicit Song"},
+              "shortBylineText":{"simpleText":"Artist"},
+              "index":{"simpleText":"10"}
+            }}
+        """.trimIndent()
+        val page = YouTubePlaylistParser.parsePayload(
+            """{"contents":[$explicit,${lockupRow("dQw4w9WgXcQ", "Fallback Song", "Artist")}]}""",
+            "PL1234567890",
+        )
+
+        assertEquals(listOf("jNQXAC9IVRw", "dQw4w9WgXcQ"), page.items.map(LinkImportCandidate::videoID))
+        assertEquals(listOf(10, 11), page.items.map(LinkImportCandidate::playlistIndex))
+        assertEquals(11, page.lastPlaylistIndex)
+    }
+
+    private fun lockupRow(videoID: String, title: String, artist: String): String = """
+        {"lockupViewModel":{
+          "contentId":"$videoID",
+          "contentType":"LOCKUP_CONTENT_TYPE_VIDEO",
+          "metadata":{"lockupMetadataViewModel":{
+            "title":{"content":"$title"},
+            "metadata":{"contentMetadataViewModel":{
+              "metadataRows":[{"metadataParts":[{"text":{"content":"$artist"}}]}]
+            }}
+          }}
+        }}
+    """.trimIndent()
+
+    private fun invalidLockupRow(): String = """
+        {"lockupViewModel":{
+          "contentId":"invalid",
+          "contentType":"LOCKUP_CONTENT_TYPE_VIDEO",
+          "metadata":{"lockupMetadataViewModel":{"title":{"content":"Unavailable"}}}
+        }}
+    """.trimIndent()
 }

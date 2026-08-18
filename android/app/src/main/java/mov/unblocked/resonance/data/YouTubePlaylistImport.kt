@@ -39,6 +39,8 @@ internal object YouTubePlaylistParser {
         val items: List<LinkImportCandidate> = emptyList(),
         val continuation: String? = null,
         val unavailableCount: Int = 0,
+        val rowCount: Int = 0,
+        val lastPlaylistIndex: Int = 0,
     )
 
     data class Configuration(
@@ -65,7 +67,11 @@ internal object YouTubePlaylistParser {
         return listValue
     }
 
-    fun parseHTML(html: String, expectedPlaylistID: String): Page {
+    fun parseHTML(
+        html: String,
+        expectedPlaylistID: String,
+        fallbackIndexOffset: Int = 0,
+    ): Page {
         if (html.length > MAX_HTML_CHARACTERS) throw LinkImportException(
             LinkImportStage.ResolvingMetadata,
             "YOUTUBE_PLAYLIST_RESPONSE_TOO_LARGE",
@@ -78,10 +84,14 @@ internal object YouTubePlaylistParser {
             "YOUTUBE_PLAYLIST_INVALID",
             "YouTube returned invalid playlist metadata.",
         )
-        return parse(initialData, expectedPlaylistID)
+        return parse(initialData, expectedPlaylistID, fallbackIndexOffset)
     }
 
-    fun parsePayload(payload: String, expectedPlaylistID: String): Page {
+    fun parsePayload(
+        payload: String,
+        expectedPlaylistID: String,
+        fallbackIndexOffset: Int = 0,
+    ): Page {
         if (payload.length > MAX_HTML_CHARACTERS) throw LinkImportException(
             LinkImportStage.ResolvingMetadata,
             "YOUTUBE_PLAYLIST_RESPONSE_TOO_LARGE",
@@ -93,7 +103,7 @@ internal object YouTubePlaylistParser {
                 "YOUTUBE_PLAYLIST_INVALID",
                 "YouTube returned invalid playlist metadata.",
             )
-        return parse(element, expectedPlaylistID)
+        return parse(element, expectedPlaylistID, fallbackIndexOffset)
     }
 
     fun configuration(html: String): Configuration = Configuration(
@@ -102,12 +112,18 @@ internal object YouTubePlaylistParser {
         visitorData = configurationValue(html, "VISITOR_DATA", 2_048),
     )
 
-    private fun parse(element: JsonElement, expectedPlaylistID: String): Page {
+    private fun parse(
+        element: JsonElement,
+        expectedPlaylistID: String,
+        fallbackIndexOffset: Int,
+    ): Page {
         var title: String? = null
         var author: String? = null
         var artwork: String? = null
         var continuation: String? = null
         var unavailable = 0
+        var rowCount = 0
+        var lastPlaylistIndex = fallbackIndexOffset
         val items = mutableListOf<LinkImportCandidate>()
         val seenVideoIDs = mutableSetOf<String>()
 
@@ -128,7 +144,17 @@ internal object YouTubePlaylistParser {
             artwork = artwork ?: playlistArtwork(record)
 
             (record["playlistVideoRenderer"] as? JsonObject)?.let { renderer ->
-                val candidate = playlistCandidate(renderer, items.size + unavailable + 1)
+                rowCount += 1
+                val fallbackIndex = lastPlaylistIndex + 1
+                val parsedCandidate = playlistCandidate(
+                    renderer,
+                    fallbackIndex,
+                )
+                lastPlaylistIndex = maxOf(
+                    fallbackIndex,
+                    parsedCandidate?.playlistIndex ?: fallbackIndex,
+                )
+                val candidate = parsedCandidate?.withPlaylistIndex(lastPlaylistIndex)
                 if (candidate == null) {
                     unavailable += 1
                 } else if (seenVideoIDs.add(candidate.videoID)) {
@@ -140,8 +166,17 @@ internal object YouTubePlaylistParser {
             // Parse the same stable fields when present, while keeping the
             // legacy playlistVideoRenderer path above for older responses.
             (record["lockupViewModel"] as? JsonObject)?.let { lockup ->
-                lockupCandidate(lockup, items.size + unavailable + 1)?.let { candidate ->
-                    if (seenVideoIDs.add(candidate.videoID)) items += candidate
+                if (lockup.string("contentType") == "LOCKUP_CONTENT_TYPE_VIDEO") {
+                    rowCount += 1
+                    val fallbackIndex = lastPlaylistIndex + 1
+                    val candidate = lockupCandidate(lockup, fallbackIndex)
+                        ?.withPlaylistIndex(fallbackIndex)
+                    lastPlaylistIndex = fallbackIndex
+                    if (candidate == null) {
+                        unavailable += 1
+                    } else if (seenVideoIDs.add(candidate.videoID)) {
+                        items += candidate
+                    }
                 }
             }
 
@@ -152,8 +187,22 @@ internal object YouTubePlaylistParser {
                 ?.takeIf { it.length in 1..MAX_TOKEN_LENGTH }
             if (token != null) continuation = token
         }
-        return Page(title, author, artwork, items, continuation, unavailable)
+        return Page(
+            title,
+            author,
+            artwork,
+            items,
+            continuation,
+            unavailable,
+            rowCount,
+            lastPlaylistIndex,
+        )
     }
+
+    private fun LinkImportCandidate.withPlaylistIndex(index: Int): LinkImportCandidate = copy(
+        playlistIndex = index,
+        importTrack = importTrack?.copy(trackNumber = index),
+    )
 
     private fun playlistCandidate(renderer: JsonObject, fallbackIndex: Int): LinkImportCandidate? {
         val videoID = renderer.string("videoId")?.takeIf(videoIDPattern::matches) ?: return null
@@ -340,7 +389,8 @@ internal object YouTubePlaylistParser {
     private fun text(element: JsonElement): String = when (element) {
         is JsonPrimitive -> element.contentOrNull.orEmpty()
         is JsonObject -> {
-            element["simpleText"]?.let(::text)?.takeIf(String::isNotBlank)
+            element["content"]?.let(::text)?.takeIf(String::isNotBlank)
+                ?: element["simpleText"]?.let(::text)?.takeIf(String::isNotBlank)
                 ?: (element["runs"] as? JsonArray)?.mapNotNull { run ->
                     (run as? JsonObject)?.get("text")?.let(::text)
                 }?.joinToString("").orEmpty()
