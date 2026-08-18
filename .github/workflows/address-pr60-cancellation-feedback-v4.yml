@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/address-pr60-cancellation-feedback-v4.yml
       - .github/workbench/pr60-cancellation-fix.py
+      - .github/workbench/pr60-cancellation-test-fix.py
 
 permissions:
   contents: write
@@ -37,6 +38,10 @@ jobs:
           echo "source=$(git rev-parse HEAD)" >> "$REPORT"
           python3 .github/workbench/pr60-cancellation-fix.py >> "$REPORT" 2>&1
           PATCH=$?
+          if [[ $PATCH -eq 0 ]]; then
+            python3 .github/workbench/pr60-cancellation-test-fix.py >> "$REPORT" 2>&1
+            PATCH=$?
+          fi
           DIFF=125; INSTALL=125; TEST=125
           if [[ $PATCH -eq 0 ]]; then
             git diff --check >> "$REPORT" 2>&1; DIFF=$?
@@ -59,6 +64,7 @@ jobs:
               .github/address-pr60-cancellation-feedback-v3-report.txt \
               .github/address-pr60-cancellation-feedback-v4-report.txt \
               .github/workbench/pr60-cancellation-fix.py \
+              .github/workbench/pr60-cancellation-test-fix.py \
               .github/workflows/address-pr60-cancellation-feedback-v2.yml \
               .github/workflows/address-pr60-cancellation-feedback-v3.yml \
               .github/workflows/address-pr60-cancellation-feedback-v4.yml
@@ -72,4 +78,4 @@ jobs:
           git push origin HEAD:agent/optimize-batched-downloads
           exit 0
 
-# This comment intentionally triggers the already-registered workflow with pnpm.
+# This comment intentionally triggers validation after updating the regression expectation.
