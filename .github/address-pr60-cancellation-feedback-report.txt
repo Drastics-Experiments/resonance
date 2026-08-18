@@ -1,0 +1,7 @@
+source=90aea2f0c31a714702f4c9812decf14ca3dd4180
+Traceback (most recent call last):
+  File "<stdin>", line 74, in <module>
+RuntimeError: outer batch-result state was not recognized
+patch_status=1
+
+summary patch=1 diff_check=125 install=125 test=125
