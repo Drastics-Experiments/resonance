@@ -1120,7 +1120,11 @@ enum LocalImportParser {
             )
         }
         let parsed = try youtubePlaylistData(root, expectedPlaylistID: expectedPlaylistID)
-        guard let title = parsed.title, !parsed.tracks.isEmpty else {
+        // The first page may contain only unavailable rows while a
+        // continuation still has playable videos. The service owns the
+        // bounded pagination loop, so defer the empty-playable check until
+        // that loop has finished.
+        guard let title = parsed.title else {
             throw LocalImportError(
                 stage: .resolvingMetadata,
                 code: "YOUTUBE_PLAYLIST_EMPTY",

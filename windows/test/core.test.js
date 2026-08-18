@@ -25,6 +25,7 @@ import {
   localImportOperationFingerprint,
   localImportOperationIsCurrent,
   localImportNeedsServerContext,
+  localImportPlaylistTransferKey,
   mergeListeningHistoryDocument,
   mergePlaylistOrderWithPreservedItems,
   mergePlaylistDocument,
@@ -80,6 +81,7 @@ import {
   titleMarqueeMetrics,
   tracksForActiveProfile,
   tracksForPlaylist,
+  uniqueLocalImportPlaylistCandidates,
   updatePlaylistRemoteSongIDs,
 } from "../ui/core.js";
 import metadata from "../metadata.cjs";
@@ -451,6 +453,29 @@ test("requires explicit review before selecting metadata-only audio matches", ()
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   assert.match(appSource, /localImportCandidateCanAutoSelect\(candidate\) \? "checked" : ""/);
   assert.doesNotMatch(appSource, /localImportResolution\.candidates\[Number\(selected\?\.value\) \|\| 0\]/);
+});
+
+test("deduplicates playlist transfers while preserving independent row selection", async () => {
+  const selectedRows = [
+    { videoID: "jNQXAC9IVRw", sourceProvider: "youtube", sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw" },
+    { videoID: "jNQXAC9IVRw", sourceProvider: "youtube", sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw" },
+    { videoID: "9bZkp7q19f0", sourceProvider: "youtube", sourceURL: "https://www.youtube.com/watch?v=9bZkp7q19f0" },
+  ];
+  const transferQueue = uniqueLocalImportPlaylistCandidates(selectedRows, "audio");
+  const calls = [];
+  const startLocalImport = async (candidate) => {
+    calls.push(candidate.videoID);
+    if (candidate.videoID === "jNQXAC9IVRw") throw new Error("deterministic transfer failure");
+    return { ok: true };
+  };
+  for (const candidate of transferQueue) {
+    try { await startLocalImport(candidate); } catch { /* one unique failure is enough */ }
+  }
+  assert.equal(selectedRows.length, 3);
+  assert.deepEqual(transferQueue.map((candidate) => candidate.videoID), ["jNQXAC9IVRw", "9bZkp7q19f0"]);
+  assert.deepEqual(calls, ["jNQXAC9IVRw", "9bZkp7q19f0"]);
+  assert.equal(localImportPlaylistTransferKey(selectedRows[0]), localImportPlaylistTransferKey(selectedRows[1]));
+  assert.notEqual(localImportPlaylistTransferKey(selectedRows[0]), localImportPlaylistTransferKey(selectedRows[2]));
 });
 
 test("rejects stale link-import operations after source, media, or selection mutation", () => {
@@ -1615,13 +1640,14 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /kind === "spotify_playlist"[\s\S]+"Spotify"[\s\S]+kind === "soundcloud_playlist"[\s\S]+"SoundCloud"[\s\S]+kind === "youtube_playlist"[\s\S]+"YouTube"/);
   assert.match(appSource, /input\[name="localImportPlaylistItem"\]:checked/);
   assert.match(appSource, /async function confirmPlaylistImport\(\)/);
-  assert.match(appSource, /for \(let index = 0; index < selected\.length; index \+= 1\)/);
+  assert.match(appSource, /const transferSelected = uniqueLocalImportPlaylistCandidates\(selected, mediaKind\)/);
+  assert.match(appSource, /for \(let index = 0; index < transferSelected\.length; index \+= 1\)/);
   const playlistImportSource = appSource.slice(
     appSource.indexOf("async function confirmPlaylistImport()"),
     appSource.indexOf("async function confirmLinkImport()"),
   );
   const downloadPhase = playlistImportSource.slice(
-    playlistImportSource.indexOf("for (let index = 0; index < selected.length; index += 1)"),
+    playlistImportSource.indexOf("for (let index = 0; index < transferSelected.length; index += 1)"),
     playlistImportSource.indexOf("await saveImportedPlaylist();"),
   );
   assert.doesNotMatch(downloadPhase, /uploadLocalImportTrack|uploadLocalImportTracks|api\.uploadServer/);

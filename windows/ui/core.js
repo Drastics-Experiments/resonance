@@ -2028,6 +2028,49 @@ export function localImportCandidateCanAutoSelect(candidate) {
     && candidate.actionable !== false;
 }
 
+function localImportPlaylistCandidateIdentity(candidate) {
+  if (!candidate || typeof candidate !== "object") return null;
+  const providerID = [candidate.videoID, candidate.providerID, candidate.candidateID, candidate.trackID]
+    .find((value) => typeof value === "string" && value.trim());
+  if (providerID) {
+    const normalizedID = providerID.trim();
+    if (normalizedID.toLocaleLowerCase().startsWith("soundcloud:")) {
+      return { provider: "soundcloud", id: normalizedID };
+    }
+    const declaredProvider = String(candidate.sourceProvider || candidate.searchProvider || candidate.provider || "")
+      .trim()
+      .toLocaleLowerCase();
+    const provider = /^[A-Za-z0-9_-]{11}$/.test(normalizedID) || declaredProvider.includes("youtube")
+      ? "youtube"
+      : declaredProvider || "source";
+    return { provider, id: normalizedID };
+  }
+  const sourcePageURL = canonicalYouTubeSourcePageURL(candidate.sourceURL, candidate.sourcePageURL);
+  return sourcePageURL ? { provider: "youtube", id: sourcePageURL } : null;
+}
+
+export function localImportPlaylistTransferKey(candidate, mediaKind = "audio") {
+  const identity = localImportPlaylistCandidateIdentity(candidate);
+  if (!identity) return null;
+  const kind = mediaKind === "video" ? "video" : "audio";
+  return `${kind}:${identity.provider}:${identity.id}`;
+}
+
+// Playlist rows remain independently selectable, but one provider track should
+// only occupy one transfer slot. This keeps repeated rows visible to the user
+// while preventing duplicate downloads and retries (including failed transfers).
+export function uniqueLocalImportPlaylistCandidates(candidates, mediaKind = "audio") {
+  if (!Array.isArray(candidates)) return [];
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const key = localImportPlaylistTransferKey(candidate, mediaKind);
+    if (!key) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function buildLocalImportSourceIdentity(candidate, metadata = {}) {
   if (candidate?.sourceIdentity && typeof candidate.sourceIdentity === "object") return candidate.sourceIdentity;
   const match = candidate?.match && typeof candidate.match === "object" ? candidate.match : {};
