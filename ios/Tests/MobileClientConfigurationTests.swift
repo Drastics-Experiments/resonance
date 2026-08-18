@@ -683,6 +683,34 @@ final class MobileLocalTrackRemovalPlaylistPolicyTests: XCTestCase {
 }
 
 final class MobileTransferDisplayPolicyTests: XCTestCase {
+    func testPreparationStagesKeepTheIndeterminateCardAliveUntilLocalProcessing() {
+        for stage: LocalImportStage in [
+            .idle,
+            .resolvingMetadata,
+            .searchingCandidates,
+            .awaitingSelection,
+            .inspectingSource,
+            .downloading,
+        ] {
+            XCTAssertFalse(MobileDownloadTransferPresentationPolicy.shouldEndBytePresentation(for: stage))
+        }
+        for stage: LocalImportStage in [
+            .processing,
+            .savingLocal,
+            .localComplete,
+            .syncing,
+            .complete,
+            .failed,
+            .cancelled,
+        ] {
+            XCTAssertTrue(MobileDownloadTransferPresentationPolicy.shouldEndBytePresentation(for: stage))
+        }
+        XCTAssertNil(MobileTransferDisplayPolicy.progress(
+            completedBytes: 0,
+            totalBytes: 1_000,
+            fallbackProgress: nil
+        ))
+    }
     func testSubOnePercentProgressNeverDisplaysAsZero() {
         XCTAssertEqual(MobileTransferDisplayPolicy.percentageLabel(0.001), "<1%")
         XCTAssertEqual(MobileTransferDisplayPolicy.percentageLabel(0.42), "42%")
@@ -3276,5 +3304,138 @@ private final class MobileChunkedDownloadProtocol: URLProtocol, @unchecked Senda
         lifecycleLock.unlock()
         delayedChunk?.cancel()
         Self.state.didStop()
+    }
+}
+
+
+private actor MobileBatchConcurrencyProbe {
+    private var active = 0
+    private var peak = 0
+
+    func begin() {
+        active += 1
+        peak = max(peak, active)
+    }
+
+    func end() {
+        active -= 1
+    }
+
+    func maximum() -> Int { peak }
+}
+
+final class MobileBatchDownloadPolicyTests: XCTestCase {
+    func testBoundedPoolPreservesOrderAndCapsConcurrency() async {
+        let probe = MobileBatchConcurrencyProbe()
+        let values = Array(0..<12)
+        let results = await MobileBatchDownloadPolicy.orderedMap(
+            values,
+            maximumConcurrent: 3
+        ) { value in
+            await probe.begin()
+            try? await Task.sleep(for: .milliseconds(5 + value % 3))
+            await probe.end()
+            return value * 2
+        }
+        let peak = await probe.maximum()
+        XCTAssertEqual(peak, 3)
+        XCTAssertEqual(results, values.map { $0 * 2 })
+    }
+
+    func testCatalogFastPathRequiresUsefulMetadataAndDuration() {
+        XCTAssertEqual(MobileBatchDownloadPolicy.maximumConcurrentDownloads, 3)
+        XCTAssertTrue(MobileBatchDownloadPolicy.canUseCatalogMetadata(
+            title: "Catalog title",
+            artist: "Catalog artist",
+            duration: 211,
+            isMetadataLoading: false
+        ))
+        XCTAssertFalse(MobileBatchDownloadPolicy.canUseCatalogMetadata(
+            title: "Catalog title",
+            artist: "Catalog artist",
+            duration: nil,
+            isMetadataLoading: false
+        ))
+        XCTAssertFalse(MobileBatchDownloadPolicy.canUseCatalogMetadata(
+            title: "Resolving metadata…",
+            artist: "On-device lookup",
+            duration: 211,
+            isMetadataLoading: true
+        ))
+    }
+}
+
+
+final class MobileMixedProviderDownloadPolicyTests: XCTestCase {
+    func testByteActiveItemReplacesEarlierProviderPreparation() {
+        let preparing = MobileTransferDisplayState(
+            kind: .download,
+            itemID: "youtube-a",
+            songTitle: "Slow YouTube song",
+            detail: "Inspecting YouTube",
+            currentItem: 1,
+            totalItems: 3,
+            completedBytes: 0,
+            totalBytes: 0,
+            fallbackProgress: nil
+        )
+        let downloading = MobileTransferDisplayState(
+            kind: .download,
+            itemID: "direct-b",
+            songTitle: "Direct song",
+            detail: "Downloading from server",
+            currentItem: 2,
+            totalItems: 3,
+            completedBytes: 512,
+            totalBytes: 1_024,
+            fallbackProgress: nil
+        )
+        XCTAssertTrue(MobileMixedDownloadPresentationPolicy.shouldPromote(
+            current: preparing,
+            candidate: downloading
+        ))
+        XCTAssertFalse(MobileMixedDownloadPresentationPolicy.shouldPromote(
+            current: downloading,
+            candidate: preparing
+        ))
+    }
+
+    func testProviderPreparationNamesEverySupportedSource() {
+        XCTAssertEqual(
+            MobileProviderDownloadPreparationPolicy.detail(
+                sourceURL: "https://www.youtube.com/watch?v=abcdefghijk",
+                stage: .inspectingSource
+            ),
+            "Inspecting YouTube"
+        )
+        XCTAssertEqual(
+            MobileProviderDownloadPreparationPolicy.detail(
+                sourceURL: "https://soundcloud.com/artist/song",
+                stage: .resolvingMetadata
+            ),
+            "Resolving SoundCloud"
+        )
+        XCTAssertEqual(
+            MobileProviderDownloadPreparationPolicy.detail(
+                sourceURL: "https://open.spotify.com/track/0123456789012345678901",
+                stage: .searchingCandidates
+            ),
+            "Finding a YouTube match"
+        )
+    }
+}
+
+
+final class MobileProviderPreparationVisibilityTests: XCTestCase {
+    func testExplicitProviderPreparationCanReserveAnIndeterminateCard() {
+        XCTAssertTrue(MobileDownloadTransferPresentationPolicy.shouldPresent(
+            completedBytes: 0,
+            fallbackProgress: nil,
+            allowsPreparation: true
+        ))
+        XCTAssertFalse(MobileDownloadTransferPresentationPolicy.shouldPresent(
+            completedBytes: 0,
+            fallbackProgress: nil
+        ))
     }
 }

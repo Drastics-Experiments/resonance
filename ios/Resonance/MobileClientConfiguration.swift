@@ -888,7 +888,14 @@ private final class MobileSensitiveRedirectDelegate: NSObject, URLSessionTaskDel
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
-        completionHandler(MobileSameOriginPolicy.matches(request.url, origin) ? request : nil)
+        if MobileSameOriginPolicy.matches(request.url, origin) {
+            completionHandler(request)
+        } else {
+            // Passing nil rejects the redirect, but a custom URLProtocol can
+            // otherwise leave the task alive until its request timeout.
+            completionHandler(nil)
+            task.cancel()
+        }
     }
 }
 

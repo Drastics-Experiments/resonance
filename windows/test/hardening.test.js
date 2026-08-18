@@ -783,6 +783,8 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(rawUploadHandler, /if \(error\?\.retryable === false\) throw error;[\s\S]+policyBlockedUploadEntries\([\s\S]+completedRetryIDs[\s\S]+rememberRetry\(item\);[\s\S]+failed\.push\(failure\);[\s\S]+return \{ uploaded, duplicates, results, failed, policyBlocked: true \}/);
   assert.match(serverSyncHandler, /clientConfigContext\(base\.href, profileID\)/);
   assert.match(serverSyncHandler, /const downloadHeaders = \{[\s\S]+\.\.\.profileHeaders\(token, profileID\),[\s\S]+\.\.\.requestContext\.expected\.request_headers/);
+  assert.match(serverSyncHandler, /const reservedDownloadDestinations = new Set\(\);[\s\S]+for \(const pending of pendingDownloads\)[\s\S]+pending\.destination = destination/);
+  assert.match(serverSyncHandler, /runServerDownloadPool\(pendingDownloads,[\s\S]+concurrency: SERVER_DOWNLOAD_DESKTOP_CONCURRENCY/);
   assert.equal([...serverSyncHandler.matchAll(/headers: downloadHeaders/g)].length, 2);
   assert.match(serverSyncHandler, /catalog = serverCatalogSnapshot\(event\.sender\.id, base, token, profileID\)[\s\S]+if \(!catalog\)[\s\S]+fetchServerCatalogDocument/);
   assert.match(mainSource, /function serverCatalogSnapshot\([\s\S]+serverCatalogSnapshots\.read\(ownerID,[\s\S]+origin: base\.origin[\s\S]+profileID: String\(profileID \|\| "default"\)[\s\S]+credentialFingerprint: serverCatalogCredentialFingerprint\(token\)/);
@@ -815,12 +817,12 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(serverSyncHandler, /if \(!serverTransferIsActive\(event, controller, transferGeneration\)\) return;[\s\S]+event\.sender\.send\("server:transfer-progress", progressEvent\)/);
   assert.match(serverSyncHandler, /let itemTransferStarted = false;[\s\S]+if \(!itemTransferStarted\) return;[\s\S]+if \(itemCompletedBytes <= 0\) return;[\s\S]+itemTransferStarted = true/);
   assert.match(mainSource, /const imported = await importConfirmedSource\([\s\S]+options\.onProgress\?\.\(\{ stage: "transfer_complete" \}\);[\s\S]+await options\.finalizeAuthorization\?\.\(\)/);
-  assert.match(serverSyncHandler, /\["transfer_complete", "processing", "saving_local", "local_complete"\][\s\S]+itemTotalBytes = itemTotalBytes \|\| itemCompletedBytes;[\s\S]+transferEnd\.autoHide = itemIndex >= itemCount/);
-  assert.match(serverSyncHandler, /event\.autoHide = itemIndex >= itemCount && itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;/);
+  assert.match(serverSyncHandler, /\["transfer_complete", "processing", "saving_local", "local_complete"\][\s\S]+itemTotalBytes = itemTotalBytes \|\| itemCompletedBytes;[\s\S]+transferEnd\.autoHide = completed >= itemCount/);
+  assert.match(serverSyncHandler, /event\.autoHide = completed >= itemCount && itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;/);
   assert.match(serverSyncHandler, /const resetItemTransfer = \(\) => \{[\s\S]+progressEvent\(\{ completedBytes: 0, totalBytes: itemTotalBytes \}\)[\s\S]+autoHide: false[\s\S]+itemTransferStarted = false;[\s\S]+itemCompletedBytes = 0;[\s\S]+publishProgress\.reset\(\)/);
   assert.doesNotMatch(serverSyncHandler, /direction: "download",[\s\S]{0,120}dismiss: true/);
   assert.match(serverSyncHandler, /onRetry: resetItemTransfer/);
-  assert.match(serverSyncHandler, /\} catch \(error\) \{[\s\S]+resetItemTransfer\(\);[\s\S]+if \(error\?\.name === "AbortError"\) throw error;[\s\S]+failed\.push/);
+  assert.match(serverSyncHandler, /\} catch \(error\) \{[\s\S]+resetItemTransfer\(\);[\s\S]+if \(error\?\.name === "AbortError"\) throw error;[\s\S]+failedByIndex\[pendingIndex\] =/);
   assert.match(serverSyncHandler, /completed \+= 1;[\s\S]+if \(itemSucceeded\) \{/);
   assert.doesNotMatch(serverSyncHandler, /title: `Retrying download|onRetry:[\s\S]{0,300}completedBytes: itemCompletedBytes|if \(itemSucceeded \|\| itemCompletedBytes > 0\)/);
   assert.match(serverDownloadSource, /publishProgress\.reset = \(\) => \{[\s\S]+lastPublishedAt = Number\.NEGATIVE_INFINITY;[\s\S]+publishedInitial = false;[\s\S]+publishedFinal = false/);
@@ -831,7 +833,8 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.doesNotMatch(appSource, /await hydrateServerCatalogMetadata\(/);
   assert.doesNotMatch(htmlSource, /Preparing transfer|Preparing download|id="serverTransferPercent">0%<|id="serverTransferProgress"[^>]+value="0"/);
   assert.match(htmlSource, /id="serverTransferToast"[^>]+hidden[\s\S]+id="serverTransferTitle"><\/strong>[\s\S]+id="serverTransferDetail"><\/small>[\s\S]+id="serverTransferProgress" max="1"[\s\S]+id="serverTransferPercent"><\/span>/);
-  assert.match(appSource, /if \(direction === "download" && downloadBytes <= 0 && !ownsVisibleDownload\) \{[\s\S]+toast\.hidden = true;[\s\S]+return;/);
+  assert.doesNotMatch(appSource, /direction === "download" && downloadBytes <= 0/);
+  assert.match(serverSyncHandler, /downloadPresentation\.update\(pendingIndex, progressEvent\(\{\s+title: serverDownloadPreparationTitle\(savedSourceURL, "starting"\),\s+\}\)\)/);
   assert.match(appSource, /const displayedTransferComplete = itemTotal !== undefined[\s\S]+Number\(itemCompleted\) >= Number\(itemTotal\)/);
   assert.match(appSource, /const ownsVisibleDownload = serverTransferActive[\s\S]+if \(!ownsVisibleDownload && !\(stage === "downloading" && completed > 0\)\) return;/);
   assert.match(appSource, /if \(ownsVisibleDownload && stage === "downloading" && completed <= 0\) return;/);

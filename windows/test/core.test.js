@@ -92,9 +92,13 @@ const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdat
 const { isManagedLibraryFile } = libraryPaths;
 const {
   SERVER_DOWNLOAD_ATTEMPTS,
+  SERVER_DOWNLOAD_DESKTOP_CONCURRENCY,
   createServerCatalogSnapshotStore,
+  createServerDownloadPresentationCoordinator,
   createServerDownloadProgressPublisher,
+  runServerDownloadPool,
   retryServerDownload,
+  serverDownloadCanUseCatalogMetadata,
   serverDownloadDisplayName,
   serverDownloadImportedMetadata,
   serverDownloadMetadata,
@@ -2542,7 +2546,7 @@ test("retries individual server downloads and reports every song that still fail
   const syncSource = mainSource.slice(mainSource.indexOf('ipcMain.handle("server:sync"'), mainSource.indexOf('ipcMain.handle("server:upload"'));
   assert.match(syncSource, /retryServerDownload/);
   assert.match(syncSource, /const pendingDownloads = \[\][\s\S]+if \(alreadyDownloaded\) continue;[\s\S]+itemCount = pendingDownloads\.length/);
-  assert.match(syncSource, /failed\.push\(\{/);
+  assert.match(syncSource, /failedByIndex\[pendingIndex\] = \{/);
   assert.match(syncSource, /return \{ catalog, downloaded, replacedTrackIDs, failed \}/);
   assert.match(appSource, /showNotice\(formatServerDownloadFailureNotice\(failedDownloads\)\)/);
   assert.ok(packageJSON.build.files.includes("server-download.cjs"));
@@ -3689,4 +3693,97 @@ test("merges only locally changed likes over concurrent server likes", () => {
     liked_song_ids: ["song-a", "song-b", "song-c"],
   });
   assert.deepEqual(merge.document.liked_song_ids.sort(), ["song-b", "song-c"]);
+});
+
+
+test("server download pool caps active work and preserves input order", async () => {
+  let active = 0;
+  let peak = 0;
+  const values = Array.from({ length: 12 }, (_, index) => index);
+  const results = await runServerDownloadPool(values, async (value) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 4 + (value % 3)));
+    active -= 1;
+    return value * 2;
+  }, { concurrency: 4 });
+
+  assert.equal(peak, 4);
+  assert.deepEqual(results, values.map((value) => value * 2));
+});
+
+test("server download pool drains active workers and stops scheduling after failure", async () => {
+  const started = [];
+  let active = 0;
+  let finished = 0;
+  await assert.rejects(
+    runServerDownloadPool([0, 1, 2, 3, 4, 5], async (value) => {
+      started.push(value);
+      active += 1;
+      try {
+        if (value === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          throw new Error("boom");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        return value;
+      } finally {
+        active -= 1;
+        finished += 1;
+      }
+    }, { concurrency: 2 }),
+    /boom/,
+  );
+  assert.equal(active, 0);
+  assert.equal(finished, 2);
+  assert.deepEqual(started.sort((a, b) => a - b), [0, 1]);
+});
+
+test("catalog metadata fast path requires resolved context and duration", () => {
+  const song = {
+    title: "Catalog title",
+    artist: "Catalog artist",
+    album: "Catalog album",
+    duration_seconds: 211,
+    source_url: null,
+    media_kind: "audio",
+  };
+  const preferred = {
+    title: song.title,
+    artist: song.artist,
+    album: song.album,
+    durationSeconds: song.duration_seconds,
+    resolved: true,
+    sourceURL: null,
+    mediaKind: "audio",
+  };
+  assert.equal(SERVER_DOWNLOAD_DESKTOP_CONCURRENCY, 4);
+  assert.equal(serverDownloadCanUseCatalogMetadata(song, preferred), true);
+  assert.equal(serverDownloadCanUseCatalogMetadata(song, { ...preferred, durationSeconds: null }), true);
+  assert.equal(serverDownloadCanUseCatalogMetadata({ ...song, duration_seconds: null }, { ...preferred, durationSeconds: null }), false);
+  assert.equal(serverDownloadCanUseCatalogMetadata(song, { ...preferred, resolved: false }), false);
+  assert.equal(serverDownloadCanUseCatalogMetadata(song, { ...preferred, sourceURL: undefined }), false);
+});
+
+
+test("concurrent downloads keep the first byte-active progress owner stable", () => {
+  const published = [];
+  const coordinator = createServerDownloadPresentationCoordinator(4, (event) => published.push(event));
+
+  coordinator.update(1, { currentFile: "second", itemCompleted: 40, itemTotal: 100 });
+  coordinator.update(0, { currentFile: "first", itemCompleted: 10, itemTotal: 100 });
+  coordinator.update(2, { currentFile: "third", itemCompleted: 70, itemTotal: 100 });
+  assert.deepEqual(published.map((event) => event.currentFile), ["second"]);
+  assert.equal(coordinator.currentIndex(), 1);
+
+  coordinator.complete(1);
+  assert.equal(coordinator.currentIndex(), 0);
+  assert.deepEqual(published.map((event) => event.currentFile), ["second", "first"]);
+  coordinator.complete(0);
+  assert.equal(coordinator.currentIndex(), 2);
+  assert.deepEqual(published.map((event) => event.currentFile), ["second", "first", "third"]);
+
+  assert.equal(coordinator.update(0, { currentFile: "late" }), false);
+  coordinator.complete(2);
+  assert.equal(coordinator.currentIndex(), 3);
 });

@@ -93,9 +93,192 @@ enum PlaylistPresentationEntryID: Hashable {
     }
 }
 
+
+enum MacBatchDownloadPolicy {
+    static let maximumConcurrentDownloads = 4
+
+    static func canUseCatalogMetadata(
+        title: String,
+        artist: String,
+        duration: TimeInterval?,
+        isMetadataLoading: Bool
+    ) -> Bool {
+        func usable(_ value: String, placeholders: Set<String>) -> Bool {
+            let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return !normalized.isEmpty && !placeholders.contains(normalized)
+        }
+        return !isMetadataLoading
+            && MacPlayableMediaDurationPolicy.remoteDuration(duration) != nil
+            && usable(title, placeholders: ["resolving metadata…", "metadata unavailable"])
+            && usable(artist, placeholders: [
+                "automatic lookup", "on-device lookup", "unknown artist",
+            ])
+    }
+
+    static func canUseCatalogMetadata(_ song: RemoteSong) -> Bool {
+        canUseCatalogMetadata(
+            title: song.title,
+            artist: song.artist,
+            duration: song.durationSeconds,
+            isMetadataLoading: song.isMetadataLoading
+        )
+    }
+
+    static func orderedMap<Input: Sendable, Output: Sendable>(
+        _ values: [Input],
+        maximumConcurrent: Int = maximumConcurrentDownloads,
+        operation: @escaping @Sendable (Input) async -> Output
+    ) async -> [Output] {
+        guard !values.isEmpty else { return [] }
+        let limit = min(max(maximumConcurrent, 1), values.count)
+        return await withTaskGroup(of: (Int, Output).self) { group in
+            var nextIndex = 0
+            var results = [Output?](repeating: nil, count: values.count)
+
+            for _ in 0..<limit {
+                let index = nextIndex
+                let value = values[index]
+                nextIndex += 1
+                group.addTask { (index, await operation(value)) }
+            }
+
+            while let (index, result) = await group.next() {
+                results[index] = result
+                if nextIndex < values.count {
+                    let index = nextIndex
+                    let value = values[index]
+                    nextIndex += 1
+                    group.addTask { (index, await operation(value)) }
+                }
+            }
+            return results.compactMap { $0 }
+        }
+    }
+}
+
+
+struct MacBatchDownloadPreparationDisplay: Equatable, Sendable {
+    let index: Int
+    let title: String
+    let detail: String
+    let completedBytes: Int64
+    let totalBytes: Int64
+
+    var progress: Double? {
+        guard completedBytes > 0, totalBytes > 0 else { return nil }
+        return min(max(Double(completedBytes) / Double(totalBytes), 0), 1)
+    }
+}
+
+enum MacMixedDownloadPresentationPolicy {
+    static func shouldPromote(
+        current: MacBatchDownloadPreparationDisplay?,
+        candidate: MacBatchDownloadPreparationDisplay
+    ) -> Bool {
+        guard let current else { return true }
+        let currentHasBytes = current.completedBytes > 0
+        let candidateHasBytes = candidate.completedBytes > 0
+        if currentHasBytes != candidateHasBytes { return candidateHasBytes }
+        return !currentHasBytes && candidate.index < current.index
+    }
+}
+
+@MainActor
+final class MacBatchDownloadPresentationCoordinator {
+    private var active: Set<Int>
+    private var latest: [Int: MacBatchDownloadPreparationDisplay] = [:]
+    private var presentedIndex: Int?
+    private let publish: (MacBatchDownloadPreparationDisplay?) -> Void
+
+    init(
+        itemCount: Int,
+        publish: @escaping (MacBatchDownloadPreparationDisplay?) -> Void
+    ) {
+        active = Set(0..<max(itemCount, 0))
+        self.publish = publish
+    }
+
+    private func bestIndex() -> Int? {
+        let started = active.filter { latest[$0] != nil }.sorted()
+        return started.first(where: { (latest[$0]?.completedBytes ?? 0) > 0 })
+            ?? started.first
+            ?? active.min()
+    }
+
+    func update(_ display: MacBatchDownloadPreparationDisplay) {
+        guard active.contains(display.index) else { return }
+        latest[display.index] = display
+        let current = presentedIndex.flatMap { latest[$0] }
+        if presentedIndex == nil
+            || presentedIndex.map(active.contains) == false
+            || MacMixedDownloadPresentationPolicy.shouldPromote(
+                current: current,
+                candidate: display
+            ) {
+            presentedIndex = display.index
+        }
+        if presentedIndex == display.index { publish(display) }
+    }
+
+    func complete(index: Int) {
+        guard active.remove(index) != nil else { return }
+        latest.removeValue(forKey: index)
+        guard presentedIndex == index else { return }
+        presentedIndex = bestIndex()
+        publish(presentedIndex.flatMap { latest[$0] })
+    }
+
+    var currentIndex: Int? { presentedIndex }
+}
+
+enum MacProviderDownloadPreparationPolicy {
+    static func provider(sourceURL: String?) -> String {
+        let value = sourceURL?.lowercased() ?? ""
+        if value.contains("soundcloud.com") { return "SoundCloud" }
+        if value.contains("spotify.com") || value.contains("spotify.link") { return "Spotify" }
+        if value.contains("youtube.com") || value.contains("youtu.be") { return "YouTube" }
+        return "provider"
+    }
+
+    static func detail(sourceURL: String?, stage: LocalImportStage) -> String {
+        let provider = provider(sourceURL: sourceURL)
+        switch stage {
+        case .idle:
+            return "Preparing \(provider)"
+        case .resolvingMetadata:
+            return "Resolving \(provider)"
+        case .searchingCandidates:
+            return provider == "Spotify" ? "Finding a YouTube match" : "Finding \(provider) media"
+        case .awaitingSelection:
+            return "Choosing a playable source"
+        case .inspectingSource:
+            return "Inspecting \(provider)"
+        case .downloading:
+            return "Downloading \(provider)"
+        case .processing, .savingLocal, .localComplete:
+            return "Finishing download"
+        case .syncing:
+            return "Saving server association"
+        case .complete:
+            return "Download complete"
+        case .failed:
+            return "Download failed"
+        case .cancelled:
+            return "Download cancelled"
+        }
+    }
+}
+
 enum MacServerDownloadProgressPolicy {
     static func transferHasStarted(completedBytes: Int64) -> Bool {
         completedBytes > 0
+    }
+
+    static func shouldShowTransfer(
+        isPendingDownload: Bool,
+        completedBytes: Int64
+    ) -> Bool {
+        isPendingDownload || transferHasStarted(completedBytes: completedBytes)
     }
 
     static func fraction(completedBytes: Int64, totalBytes: Int64) -> Double {
@@ -250,7 +433,7 @@ enum MacServerCatalogMutationPolicy {
     }
 }
 
-struct MacServerDownloadFileSnapshot: Equatable {
+struct MacServerDownloadFileSnapshot: Equatable, Sendable {
     let size: Int64
     let modificationDate: Date
     let systemNumber: UInt64
@@ -3489,19 +3672,44 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         try Task.checkCancellation()
     }
 
-    private struct ValidatedCachedServerSong {
+    private struct ValidatedCachedServerSong: Sendable {
         let destination: URL
         let snapshot: MacServerDownloadFileSnapshot
         let contentSHA256: String
+        let downloadedThisSync: Bool
+    }
+
+    private struct ServerSongPrefetchWorkItem: Sendable {
+        let index: Int
+        let remote: RemoteSong
+    }
+
+    private enum ServerSongPrefetchOutcome: Sendable {
+        case direct(ValidatedCachedServerSong)
+        case sourcePrepared
+        case failed
+    }
+
+    private struct ServerSongPrefetchResult: Sendable {
+        let index: Int
+        let outcome: ServerSongPrefetchOutcome
     }
 
     private struct ServerSongDownloadPlan {
         let requiresDownload: Bool
         let validatedCache: ValidatedCachedServerSong?
+        let prefetchFailed: Bool
 
         static let download = ServerSongDownloadPlan(
             requiresDownload: true,
-            validatedCache: nil
+            validatedCache: nil,
+            prefetchFailed: false
+        )
+
+        static let failedPrefetch = ServerSongDownloadPlan(
+            requiresDownload: false,
+            validatedCache: nil,
+            prefetchFailed: true
         )
     }
 
@@ -3555,7 +3763,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     base: base,
                     profileID: profileID
                 ),
-                validatedCache: nil
+                validatedCache: nil,
+                prefetchFailed: false
             )
         }
 
@@ -3583,13 +3792,93 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 validatedCache: ValidatedCachedServerSong(
                     destination: destination,
                     snapshot: initialSnapshot,
-                    contentSHA256: localHash
-                )
+                    contentSHA256: localHash,
+                    downloadedThisSync: false
+                ),
+                prefetchFailed: false
             )
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             return .download
+        }
+    }
+
+    private func prefetchServerSong(
+        _ remote: RemoteSong,
+        base: URL,
+        cache: URL,
+        requestHeaders: [String: String],
+        authorizationLease: MacAuthenticatedStreamAuthorizationLease,
+        authorizationRefresh: Task<Void, Never>?,
+        progress: MacLeaseBoundDownloader.ProgressHandler? = nil
+    ) async -> ValidatedCachedServerSong? {
+        var stagingURL: URL?
+        do {
+            try Task.checkCancellation()
+            guard !remote.isSourceLinkRecord else { return nil }
+            let maximumDownloadSize: Int64 = remote.kind == .video
+                ? 1_024 * 1_024 * 1_024
+                : 256 * 1_024 * 1_024
+            guard remote.size > 0, remote.size <= maximumDownloadSize else { return nil }
+
+            let destination = try Self.cachedDestination(for: remote, in: cache)
+            let expectedContentSHA256 = try Self.catalogSHA256(remote.contentSHA256)
+            let downloadURL = try remoteURL(remote.downloadURL, relativeTo: base)
+            var request = URLRequest(url: downloadURL)
+            for (header, value) in requestHeaders {
+                request.setValue(value, forHTTPHeaderField: header)
+            }
+            request.timeoutInterval = 120
+            let ext = PathExtension.safe(remote.filename)
+            let staging = cache.appendingPathComponent(".download-\(UUID().uuidString)\(ext)")
+            guard Self.isDescendant(staging, of: cache) else {
+                throw ServerSyncError.invalidSongIdentifier
+            }
+            stagingURL = staging
+
+            _ = try await MacLeaseBoundDownloader.download(
+                request: request,
+                to: staging,
+                expectedContentLength: remote.size,
+                authorizationLease: authorizationLease,
+                session: networkSession,
+                progress: progress
+            )
+            try Task.checkCancellation()
+            let stagedSize = (try? staging.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+                .map(Int64.init)
+            guard stagedSize == remote.size else {
+                throw ServerSyncError.unexpectedDownloadSize
+            }
+            let stagedHash = try await Self.fileSHA256Detached(at: staging)
+            try Task.checkCancellation()
+            guard expectedContentSHA256 == nil || stagedHash == expectedContentSHA256 else {
+                throw ServerSyncError.downloadHashMismatch
+            }
+            guard (try? AVAudioPlayer(contentsOf: staging)) != nil else {
+                throw ServerSyncError.invalidMedia
+            }
+            try await Self.awaitServerDownloadAuthorizationRefresh(authorizationRefresh)
+            try authorizationLease.authorize()
+            try MacAuthorizedDownloadFinalizer.finalize(
+                authorizationLease: authorizationLease
+            ) {
+                try Self.installValidatedDownload(from: staging, at: destination)
+            }
+            stagingURL = nil
+            guard let snapshot = Self.serverDownloadFileSnapshot(at: destination) else {
+                throw ServerSyncError.invalidMedia
+            }
+            return ValidatedCachedServerSong(
+                destination: destination,
+                snapshot: snapshot,
+                contentSHA256: stagedHash,
+                downloadedThisSync: true
+            )
+        } catch {
+            if let stagingURL { try? FileManager.default.removeItem(at: stagingURL) }
+            return nil
         }
     }
 
@@ -3702,6 +3991,142 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     == Self.serverContextKey(base: base, profileID: catalogProfileID) else {
                 throw CancellationError()
             }
+            var requestTemplate = URLRequest(url: base)
+            requestTemplate.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            setProfileHeader(on: &requestTemplate, profileID: catalogProfileID)
+            applyCurrentClientConfigHeaders(
+                to: &requestTemplate,
+                base: base,
+                fallbackToken: accessToken
+            )
+            requestTemplate.setValue("application/json", forHTTPHeaderField: "Accept")
+            let downloadRequestHeaders = requestTemplate.allHTTPHeaderFields ?? [:]
+            let authorizationRefreshTask = authorizationRefresh
+
+            let preparationPresentation = MacBatchDownloadPresentationCoordinator(
+                itemCount: songs.count
+            ) { [weak self] display in
+                guard let self else { return }
+                guard let display else {
+                    self.isServerDownloadTransferVisible = false
+                    self.downloadProgress = nil
+                    return
+                }
+                self.downloadBatchPosition = display.index + 1
+                self.downloadBatchTotal = max(pendingSongIDs.count, 1)
+                self.downloadCurrentFile = display.title
+                self.downloadStatus = display.detail
+                self.isServerDownloadTransferVisible = true
+                self.downloadProgress = display.progress
+            }
+            let prefetchWork = zip(songs.indices, zip(songs, downloadPlans)).compactMap {
+                index, pair -> ServerSongPrefetchWorkItem? in
+                let (remote, plan) = pair
+                guard plan.requiresDownload else { return nil }
+                if remote.isSourceLinkRecord,
+                   let source = remote.sourceURL,
+                   remote.isMetadataLoading,
+                   LocalImportURL.isSpotify(source) {
+                    // Spotify needs hydrated search terms. Its existing metadata
+                    // task remains concurrent, but the media preparation starts
+                    // once those exact terms are available in the sequential pass.
+                    return nil
+                }
+                return ServerSongPrefetchWorkItem(index: index, remote: remote)
+            }
+            if !prefetchWork.isEmpty {
+                downloadStatus = "Preparing \(prefetchWork.count) songs"
+                let prefetchResults = await MacBatchDownloadPolicy.orderedMap(prefetchWork) {
+                    [weak self] item in
+                    guard let self else {
+                        return ServerSongPrefetchResult(index: item.index, outcome: .failed)
+                    }
+                    let remote = item.remote
+                    let initialDetail = remote.isSourceLinkRecord
+                        ? MacProviderDownloadPreparationPolicy.detail(
+                            sourceURL: remote.sourceURL,
+                            stage: .idle
+                        )
+                        : "Connecting to server"
+                    await preparationPresentation.update(MacBatchDownloadPreparationDisplay(
+                        index: item.index,
+                        title: remote.title,
+                        detail: initialDetail,
+                        completedBytes: 0,
+                        totalBytes: remote.size
+                    ))
+                    let outcome: ServerSongPrefetchOutcome
+                    if remote.isSourceLinkRecord {
+                        do {
+                            _ = try await self.remoteSourceResolution(
+                                for: remote,
+                                base: base,
+                                profileID: catalogProfileID,
+                                progress: { progress in
+                                    preparationPresentation.update(
+                                        MacBatchDownloadPreparationDisplay(
+                                            index: item.index,
+                                            title: remote.title,
+                                            detail: MacProviderDownloadPreparationPolicy.detail(
+                                                sourceURL: remote.sourceURL,
+                                                stage: progress.stage
+                                            ),
+                                            completedBytes: progress.completed,
+                                            totalBytes: progress.total
+                                        )
+                                    )
+                                }
+                            )
+                            outcome = .sourcePrepared
+                        } catch {
+                            outcome = .failed
+                        }
+                    } else {
+                        let validation = await self.prefetchServerSong(
+                            remote,
+                            base: base,
+                            cache: cache,
+                            requestHeaders: downloadRequestHeaders,
+                            authorizationLease: lease,
+                            authorizationRefresh: authorizationRefreshTask,
+                            progress: { completedBytes, totalBytes in
+                                preparationPresentation.update(
+                                    MacBatchDownloadPreparationDisplay(
+                                        index: item.index,
+                                        title: remote.title,
+                                        detail: completedBytes > 0
+                                            ? "Downloading from server"
+                                            : "Connecting to server",
+                                        completedBytes: completedBytes,
+                                        totalBytes: totalBytes
+                                    )
+                                )
+                            }
+                        )
+                        outcome = validation.map(ServerSongPrefetchOutcome.direct) ?? .failed
+                    }
+                    await preparationPresentation.complete(index: item.index)
+                    return ServerSongPrefetchResult(index: item.index, outcome: outcome)
+                }
+                for result in prefetchResults {
+                    switch result.outcome {
+                    case .direct(let validation):
+                        downloadPlans[result.index] = ServerSongDownloadPlan(
+                            requiresDownload: false,
+                            validatedCache: validation,
+                            prefetchFailed: false
+                        )
+                        pendingSongIDs.remove(songs[result.index].id)
+                    case .sourcePrepared:
+                        break
+                    case .failed:
+                        // Preparation already spent this item's batch attempt.
+                        // Do not immediately issue a duplicate provider/server request.
+                        downloadPlans[result.index] = .failedPrefetch
+                    }
+                }
+            }
+
             downloadBatchTotal = pendingSongIDs.count
             var changedCount = 0
             var failedCount = 0
@@ -3715,6 +4140,12 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                       Self.serverContextKey(base: currentBase, profileID: catalogProfileID)
                         == Self.serverContextKey(base: base, profileID: catalogProfileID) else {
                     throw CancellationError()
+                }
+                if plan.prefetchFailed {
+                    failedCount += 1
+                    pendingSongIDs.remove(remote.id)
+                    downloadBatchTotal = pendingSongIDs.count
+                    continue
                 }
                 var isPendingDownload = plan.requiresDownload
                 var reusableCachedValidation: ValidatedCachedServerSong?
@@ -3751,6 +4182,13 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     downloadCurrentFile = remote.title
                     downloadStatus = "Downloading \(pendingPosition) of \(pendingSongIDs.count)"
                     downloadProgress = nil
+                    // Source discovery, TLS setup, and provider resolution can take
+                    // noticeably longer than the first byte. Show this song now with
+                    // an indeterminate bar, then replace it with real byte progress.
+                    isServerDownloadTransferVisible = MacServerDownloadProgressPolicy.shouldShowTransfer(
+                        isPendingDownload: true,
+                        completedBytes: 0
+                    )
                 }
                 var stagingURL: URL?
                 do {
@@ -3823,6 +4261,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     if let existingIndex,
                        localSize == remote.size,
                        cachedPlayer != nil,
+                       reusableCachedValidation?.downloadedThisSync != true,
                        tracks[existingIndex].fileURL?.standardizedFileURL == destination.standardizedFileURL {
                         tracks[existingIndex].contentSHA256 = resolvedContentSHA256
                         if isPendingDownload { downloadProgress = 1 }
@@ -3834,7 +4273,10 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         player = cachedPlayer
                     } else {
                         let downloadURL = try remoteURL(remote.downloadURL, relativeTo: base)
-                        var request = authenticatedRequest(url: downloadURL)
+                        var request = URLRequest(url: downloadURL)
+                        for (header, value) in downloadRequestHeaders {
+                            request.setValue(value, forHTTPHeaderField: header)
+                        }
                         request.timeoutInterval = 120
                         let ext = PathExtension.safe(remote.filename)
                         let staging = cache.appendingPathComponent(".download-\(UUID().uuidString)\(ext)")
@@ -3894,7 +4336,18 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         resolvedContentSHA256 = stagedHash
                     }
 
-                    let metadata = await Self.metadata(for: destination)
+                    let usesCatalogMetadata = MacBatchDownloadPolicy.canUseCatalogMetadata(remote)
+                    let metadata: (title: String, artist: String, album: String, artworkData: Data?)
+                    if usesCatalogMetadata {
+                        metadata = (
+                            remote.title,
+                            remote.artist,
+                            remote.album,
+                            existingIndex.flatMap { tracks[$0].artworkData }
+                        )
+                    } else {
+                        metadata = await Self.metadata(for: destination)
+                    }
                     if let validation = reusableCachedValidation,
                        !MacServerDownloadValidationPolicy.isReusable(
                         validated: validation.snapshot,
@@ -7021,7 +7474,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         for song: RemoteSong,
         base: URL,
         profileID: String,
-        metadataOverride: LocalImportMetadata? = nil
+        metadataOverride: LocalImportMetadata? = nil,
+        progress: @escaping LocalImportProgressHandler = { _ in }
     ) async throws -> LocalImportResolution {
         guard let source = song.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
               !source.isEmpty else { throw ServerSyncError.missingSourceLink }
@@ -7068,7 +7522,6 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             embedURL: "",
             sourceURL: source
         )
-        let progress: LocalImportProgressHandler = { _ in }
         let resolution = try await serverLinkImportService.resolveSavedDownload(
             source: source,
             metadata: knownMetadata,
@@ -7470,12 +7923,50 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
         } else {
             resolutionMetadata = nil
         }
+        let presentProviderProgress: LocalImportProgressHandler = { [weak self] progress in
+            guard let self,
+                  MacServerDownloadTransferStatePolicy.owns(
+                    stateGeneration: stateGeneration,
+                    currentStateGeneration: self.serverDownloadStateGeneration,
+                    transferGeneration: transferGeneration,
+                    currentTransferGeneration: self.serverDownloadTransferGeneration
+                  ) else { return }
+            let detail = MacProviderDownloadPreparationPolicy.detail(
+                sourceURL: source,
+                stage: progress.stage
+            )
+            self.downloadStatus = detail
+            if progress.stage == .downloading {
+                self.publishServerDownloadTransfer(
+                    completedBytes: progress.completed,
+                    totalBytes: progress.total,
+                    stateGeneration: stateGeneration,
+                    transferGeneration: transferGeneration
+                )
+            } else if progress.stage == .processing
+                || progress.stage == .savingLocal
+                || progress.stage == .localComplete
+                || progress.stage == .syncing
+                || progress.stage == .complete {
+                self.releaseServerDownloadTransfer(
+                    stateGeneration: stateGeneration,
+                    transferGeneration: transferGeneration
+                )
+            } else {
+                self.isServerDownloadTransferVisible = true
+                self.downloadProgress = nil
+            }
+        }
+        if remote.isMetadataLoading, LocalImportURL.isSpotify(source) {
+            presentProviderProgress(LocalImportProgress(stage: .resolvingMetadata))
+        }
         try Task.checkCancellation()
         let resolution = try await remoteSourceResolution(
             for: remote,
             base: base,
             profileID: profileID,
-            metadataOverride: resolutionMetadata
+            metadataOverride: resolutionMetadata,
+            progress: presentProviderProgress
         )
         guard let candidate = resolution.candidates.first else { throw ServerSyncError.invalidMedia }
         let metadata = LocalImportMetadata(
@@ -7497,23 +7988,8 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
             existingTracks: tracks,
             mediaMode: mediaMode,
             preparationContext: preparationContext
-        ) { [weak self] progress in
-            if progress.stage == .downloading {
-                self?.downloadStatus = "Downloading \(remote.title)"
-                self?.publishServerDownloadTransfer(
-                    completedBytes: progress.completed,
-                    totalBytes: progress.total,
-                    stateGeneration: stateGeneration,
-                    transferGeneration: transferGeneration
-                )
-            } else if progress.stage == .processing
-                || progress.stage == .savingLocal
-                || progress.stage == .localComplete {
-                self?.releaseServerDownloadTransfer(
-                    stateGeneration: stateGeneration,
-                    transferGeneration: transferGeneration
-                )
-            }
+        ) { progress in
+            presentProviderProgress(progress)
         }
         releaseServerDownloadTransfer(
             stateGeneration: stateGeneration,

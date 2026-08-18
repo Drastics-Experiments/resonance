@@ -571,6 +571,29 @@ struct AuthenticatedStreamTests {
         #expect(!FileManager.default.fileExists(atPath: destination.path))
     }
 
+    @Test("one lease invalidation reaches every concurrent download registration")
+    func leaseInvalidationFansOutToConcurrentDownloads() throws {
+        let now = Date.now
+        let first = StreamCancellationProbe()
+        let second = StreamCancellationProbe()
+        let lease = try MacAuthenticatedStreamAuthorizationLease(
+            context: makeContext(),
+            expiresAt: now.addingTimeInterval(30),
+            now: now
+        )
+        let firstID = try #require(lease.registerInvalidationHandler { first.cancel() })
+        _ = try #require(lease.registerInvalidationHandler { second.cancel() })
+
+        lease.invalidate()
+
+        #expect(first.count == 1)
+        #expect(second.count == 1)
+        lease.unregisterInvalidationHandler(firstID)
+        #expect(throws: MacAuthenticatedStreamError.authorizationExpired) {
+            try lease.authorize()
+        }
+    }
+
     private func makeContext() -> MacClientConfigContext {
         let cohort = "AAECAwQFBgcICQoLDA0ODw"
         return MacClientConfigContext(
@@ -638,4 +661,5 @@ private final class StreamCancellationProbe: @unchecked Sendable {
     func cancel() {
         lock.withLock { value += 1 }
     }
+
 }

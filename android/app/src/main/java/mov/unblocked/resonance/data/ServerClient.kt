@@ -3,8 +3,13 @@ package mov.unblocked.resonance.data
 import mov.unblocked.resonance.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.encodeToString
@@ -20,6 +25,7 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.coroutineContext
 
 internal object ServerUploadNaming {
@@ -62,6 +68,28 @@ data class ServerDownloadFailure(
 data class ServerDownloadBatchResult(
     val tracks: List<Track>,
     val failures: List<ServerDownloadFailure>,
+)
+
+
+internal object BatchDownloadPolicy {
+    const val MobileConcurrency = 3
+
+    fun canUseCatalogMetadata(song: RemoteSong): Boolean {
+        fun usable(value: String, placeholders: Set<String>): Boolean {
+            val normalized = value.trim().lowercase()
+            return normalized.isNotEmpty() && normalized !in placeholders
+        }
+        val duration = MediaDurationPolicy.remoteSeconds(song.durationSeconds)
+        return !song.isMetadataLoading &&
+            duration != null &&
+            usable(song.title, setOf("resolving metadata…", "metadata unavailable")) &&
+            usable(song.artist, setOf("automatic lookup", "on-device lookup", "unknown artist"))
+    }
+}
+
+private data class MediaDownloadRequestContext(
+    val accessToken: String,
+    val installationCohortKey: String,
 )
 
 private data class ServerDownloadItemResult(
@@ -325,12 +353,14 @@ class ServerClient(
         repository: LibraryRepository,
         existingRemoteIDs: Set<String> = emptySet(),
         onProgress: (TransferProgress) -> Unit = {},
+        maximumConcurrency: Int = BatchDownloadPolicy.MobileConcurrency,
         beforeEach: () -> Unit,
     ): ServerDownloadBatchResult = downloadSongs(
         songs = catalog.songs.filter { it.id in selectedIDs },
         repository = repository,
         existingRemoteIDs = existingRemoteIDs,
         onProgress = onProgress,
+        maximumConcurrency = maximumConcurrency,
         beforeEach = beforeEach,
     )
 
@@ -339,12 +369,14 @@ class ServerClient(
         repository: LibraryRepository,
         existingRemoteIDs: Set<String> = emptySet(),
         onProgress: (TransferProgress) -> Unit = {},
+        maximumConcurrency: Int = BatchDownloadPolicy.MobileConcurrency,
         beforeEach: () -> Unit,
     ): ServerDownloadBatchResult = downloadSongs(
         songs = catalog.songs,
         repository = repository,
         existingRemoteIDs = existingRemoteIDs,
         onProgress = onProgress,
+        maximumConcurrency = maximumConcurrency,
         beforeEach = beforeEach,
     )
 
@@ -599,21 +631,38 @@ class ServerClient(
         repository: LibraryRepository,
         existingRemoteIDs: Set<String>,
         onProgress: (TransferProgress) -> Unit,
+        maximumConcurrency: Int,
         beforeEach: () -> Unit,
     ): ServerDownloadBatchResult {
         val allocatedDownloads = mutableListOf<File>()
         return try {
             withContext(Dispatchers.IO) {
                 val pending = PendingDownloadBatchPolicy.songs(songs, existingRemoteIDs)
-                var processed = 0
+                val processed = AtomicInteger(0)
+                val progressLock = Any()
+                val allocationLock = Any()
+                val requestContext = MediaDownloadRequestContext(
+                    accessToken = requireAccessToken(),
+                    installationCohortKey = requireInstallationCohortKey(),
+                )
+
+                val presentation = BatchDownloadPresentationCoordinator(pending.size)
+                fun publish(index: Int, progress: TransferProgress) {
+                    synchronized(progressLock) {
+                        presentation.update(index, progress)?.let(onProgress)
+                    }
+                }
+                fun completePresentation(index: Int) {
+                    synchronized(progressLock) {
+                        presentation.complete(index)?.let(onProgress)
+                    }
+                }
 
                 suspend fun downloadItem(index: Int, song: RemoteSong): ServerDownloadItemResult {
                     coroutineContext.ensureActive()
-                    // Re-evaluate the exact snapshotted client policy immediately
-                    // before each file allocation and authenticated media request.
                     beforeEach()
                     val itemProgress = TransferProgress(
-                        completed = processed,
+                        completed = processed.get(),
                         total = pending.size,
                         currentFilename = song.filename,
                         currentItem = index + 1,
@@ -622,19 +671,23 @@ class ServerClient(
                         bytesTransferred = 0L,
                         totalBytes = song.size.takeIf { it > 0L },
                     )
-                    onProgress(itemProgress)
-                    val destination = repository.newDownloadFile(song.filename)
+                    publish(index, itemProgress)
+                    val destination = synchronized(allocationLock) {
+                        repository.newDownloadFile(song.filename)
+                    }
                     synchronized(allocatedDownloads) { allocatedDownloads += destination }
                     val result = try {
                         val verifiedContentSHA256 = downloadToFile(
                             song,
                             destination,
                             repository,
+                            requestContext = requestContext,
                             beforeRead = beforeEach,
                         ) { transferred, totalBytes ->
-                            onProgress(
+                            publish(
+                                index,
                                 TransferProgress(
-                                    completed = processed,
+                                    completed = processed.get(),
                                     total = pending.size,
                                     currentFilename = song.filename,
                                     currentItem = index + 1,
@@ -645,9 +698,7 @@ class ServerClient(
                                 ),
                             )
                         }
-                        // The media stream is complete. Hide its byte card before local media
-                        // inspection/tag extraction, which may take time but is not downloading.
-                        onProgress(TransferProgressBoundaryPolicy.hidden(itemProgress))
+                        publish(index, TransferProgressBoundaryPolicy.hidden(itemProgress))
                         ServerDownloadItemResult(
                             index = index,
                             track = repository.registerDownloadedFile(
@@ -655,10 +706,9 @@ class ServerClient(
                                 song,
                                 baseURL,
                                 profileID,
-                                // Artwork is intentionally backfilled after the media batch so
-                                // a slow image host cannot block the next song download.
                                 fallbackArtwork = null,
                                 verifiedContentSHA256 = verifiedContentSHA256,
+                                useCatalogMetadata = BatchDownloadPolicy.canUseCatalogMetadata(song),
                             ),
                         )
                     } catch (error: CancellationException) {
@@ -666,9 +716,6 @@ class ServerClient(
                         throw error
                     } catch (error: Throwable) {
                         repository.discardUncommittedDownload(destination)
-                        // A transient item failure should not discard completed
-                        // downloads, but a policy/profile change must stop the
-                        // batch immediately instead of becoming an item error.
                         beforeEach()
                         ServerDownloadItemResult(
                             index = index,
@@ -680,22 +727,32 @@ class ServerClient(
                         )
                     }
                     beforeEach()
-                    processed += 1
-                    onProgress(
+                    val completed = processed.incrementAndGet()
+                    publish(
+                        index,
                         TransferProgressBoundaryPolicy.hidden(
                             itemProgress.copy(
-                                completed = processed,
+                                completed = completed,
                                 currentItemComplete = result.track != null,
                             ),
                         ),
                     )
+                    completePresentation(index)
                     return result
                 }
 
-                // A single popup can only truthfully represent one active item. Keep catalog
-                // downloads sequential so its title, byte count, and progress bar cannot race.
-                val results = pending.mapIndexed { index, song ->
-                    downloadItem(index, song)
+                val results = coroutineScope {
+                    val semaphore = Semaphore(
+                        permits = minOf(
+                            maximumConcurrency.coerceIn(1, BatchDownloadPolicy.MobileConcurrency),
+                            pending.size.coerceAtLeast(1),
+                        ),
+                    )
+                    pending.mapIndexed { index, song ->
+                        async {
+                            semaphore.withPermit { downloadItem(index, song) }
+                        }
+                    }.awaitAll()
                 }
 
                 ServerDownloadBatchResult(
@@ -704,8 +761,6 @@ class ServerClient(
                 )
             }
         } catch (error: Throwable) {
-            // A cancellation or policy/profile interruption means the caller
-            // cannot commit this result, so remove every uncommitted allocation.
             synchronized(allocatedDownloads) {
                 allocatedDownloads.forEach(repository::discardUncommittedDownload)
             }
@@ -717,6 +772,7 @@ class ServerClient(
         song: RemoteSong,
         destination: File,
         repository: LibraryRepository,
+        requestContext: MediaDownloadRequestContext,
         beforeRead: () -> Unit,
         onBytes: (Long, Long?) -> Unit,
     ): String = withContext(Dispatchers.IO) {
@@ -727,6 +783,7 @@ class ServerClient(
         val connection = openAuthorizedMediaConnection(
             url = resolveRemoteURL(song.downloadURL),
             readTimeoutMs = DOWNLOAD_TIMEOUT_MS,
+            requestContext = requestContext,
         )
         try {
             val status = connection.responseCode
@@ -847,6 +904,7 @@ class ServerClient(
     private fun openAuthorizedMediaConnection(
         url: URL,
         readTimeoutMs: Int,
+        requestContext: MediaDownloadRequestContext,
     ): HttpURLConnection {
         var currentURL = ServerNetworkPolicy.requireAuthorizedURL(
             baseURL,
@@ -857,11 +915,11 @@ class ServerClient(
             val connection = open(
                 url = currentURL,
                 method = "GET",
-                token = requireAccessToken(),
+                token = requestContext.accessToken,
             ).apply {
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = readTimeoutMs
-                applyClientContextHeaders(requireInstallationCohortKey())
+                applyClientContextHeaders(requestContext.installationCohortKey)
             }
             if (connection.responseCode !in REDIRECT_STATUSES) return connection
             if (redirectCount == MAX_MEDIA_REDIRECTS) {

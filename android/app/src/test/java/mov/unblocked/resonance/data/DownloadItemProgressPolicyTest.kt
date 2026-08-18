@@ -356,4 +356,103 @@ class DownloadItemProgressPolicyTest {
             0f,
         )
     }
+
+    @Test fun concurrentTransfersKeepTheFirstByteActivePresentationOwnerStable() {
+        val coordinator = BatchDownloadPresentationCoordinator(4)
+        val second = TransferProgress(
+            completed = 0,
+            total = 4,
+            currentFilename = "second.m4a",
+            currentItem = 2,
+            currentTitle = "Second",
+            bytesTransferred = 40L,
+            totalBytes = 100L,
+        )
+        val first = second.copy(
+            currentFilename = "first.m4a",
+            currentItem = 1,
+            currentTitle = "First",
+            bytesTransferred = 10L,
+        )
+        val third = second.copy(
+            currentFilename = "third.m4a",
+            currentItem = 3,
+            currentTitle = "Third",
+            bytesTransferred = 70L,
+        )
+
+        assertEquals(second, coordinator.update(1, second))
+        assertNull(coordinator.update(0, first))
+        assertNull(coordinator.update(2, third))
+        assertEquals(1, coordinator.currentIndex())
+
+        assertEquals(first, coordinator.complete(1))
+        assertEquals(0, coordinator.currentIndex())
+        assertEquals(third, coordinator.complete(0))
+        assertEquals(2, coordinator.currentIndex())
+        assertNull(coordinator.update(0, first.copy(bytesTransferred = 90L)))
+    }
+
+
+
+    @Test fun mixedProviderBudgetKeepsDirectFilesMoving() {
+        assertEquals(
+            MixedProviderConcurrencyBudget(sourceConcurrency = 2, directConcurrency = 1),
+            MixedProviderDownloadPolicy.budget(sourceCount = 8, directCount = 5),
+        )
+        assertEquals(
+            MixedProviderConcurrencyBudget(sourceConcurrency = 0, directConcurrency = 3),
+            MixedProviderDownloadPolicy.budget(sourceCount = 0, directCount = 5),
+        )
+        assertEquals(
+            MixedProviderConcurrencyBudget(sourceConcurrency = 3, directConcurrency = 0),
+            MixedProviderDownloadPolicy.budget(sourceCount = 5, directCount = 0),
+        )
+    }
+
+    @Test fun byteActiveDirectSongCanReplaceEarlierProviderPreparation() {
+        val coordinator = DownloadItemPresentationCoordinator(3)
+        coordinator.update(0, DownloadItemProgressPolicy.fromBytes(
+            currentItem = 1,
+            totalItems = 3,
+            title = "Slow YouTube song",
+            bytesTransferred = 0L,
+            totalBytes = null,
+            detail = "Inspecting YouTube",
+        ))
+        val direct = DownloadItemProgressPolicy.fromBytes(
+            currentItem = 2,
+            totalItems = 3,
+            title = "Direct song",
+            bytesTransferred = 100L,
+            totalBytes = 1_000L,
+            detail = "Downloading from server",
+        )
+        assertEquals(direct, coordinator.update(1, direct))
+        assertEquals(1, coordinator.currentIndex())
+    }
+
+    @Test fun providerPreparationNamesYouTubeSoundCloudAndSpotify() {
+        assertEquals(
+            "Inspecting YouTube",
+            ProviderDownloadPreparationPolicy.detail(
+                "https://www.youtube.com/watch?v=abcdefghijk",
+                LinkImportStage.InspectingSource,
+            ),
+        )
+        assertEquals(
+            "Resolving SoundCloud",
+            ProviderDownloadPreparationPolicy.detail(
+                "https://soundcloud.com/artist/song",
+                LinkImportStage.ResolvingMetadata,
+            ),
+        )
+        assertEquals(
+            "Finding a YouTube match",
+            ProviderDownloadPreparationPolicy.detail(
+                "https://open.spotify.com/track/0123456789012345678901",
+                LinkImportStage.SearchingCandidates,
+            ),
+        )
+    }
 }

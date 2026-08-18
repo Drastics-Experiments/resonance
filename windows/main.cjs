@@ -45,14 +45,19 @@ const { readResponseJSON, readResponseText } = require("./response-body.cjs");
 const { createRenewablePolicyLease } = require("./policy-lease.cjs");
 const {
   SERVER_DOWNLOAD_ATTEMPTS,
+  SERVER_DOWNLOAD_DESKTOP_CONCURRENCY,
   createServerCatalogSnapshotStore,
+  createServerDownloadPresentationCoordinator,
   createServerDownloadProgressPublisher,
   retryServerDownload,
+  runServerDownloadPool,
+  serverDownloadCanUseCatalogMetadata,
   serverDownloadImportedMetadata,
   serverDownloadMetadata,
   serverDownloadMetadataContextMatches,
   serverDownloadMetadataIsResolved,
   serverDownloadMetadataSnapshot,
+  serverDownloadPreparationTitle,
   serverDownloadProgressEvent,
 } = require("./server-download.cjs");
 const { fetchSameOrigin } = require("./server-request.cjs");
@@ -1295,6 +1300,12 @@ async function enrichedTrack(filePath, details = {}) {
     duration: metadata.duration || details.duration,
     artwork: metadata.artwork || details.artwork,
   });
+}
+
+function serverDownloadedTrack(filePath, details = {}, useCatalogMetadata = false) {
+  return useCatalogMetadata
+    ? Promise.resolve(publicTrack(filePath, details))
+    : enrichedTrack(filePath, details);
 }
 
 function normalizeBaseURL(value) {
@@ -4062,7 +4073,7 @@ async function downloadSavedSourceSong(song, options) {
   const duplicate = imported.kind === "duplicate" ? imported.track : null;
   const filePath = duplicate?.filePath || imported.filePath;
   if (!filePath) throw new Error("The resolved song did not produce a local file.");
-  return enrichedTrack(filePath, {
+  return serverDownloadedTrack(filePath, {
     ...(duplicate || {}),
     title: metadata.title,
     artist: metadata.artist,
@@ -4083,7 +4094,7 @@ async function downloadSavedSourceSong(song, options) {
     preservesUnlinkedImport: typeof duplicate?.preservesUnlinkedImport === "boolean"
       ? duplicate.preservesUnlinkedImport
       : storageLocationForPath(filePath) !== "server-cache",
-  });
+  }, options.metadataIsResolved && Number(metadata.durationSeconds) > 0);
   } finally {
     metadataController.abort();
     void metadataEnrichment.then(() => undefined, () => undefined);
@@ -4217,7 +4228,43 @@ ipcMain.handle("server:sync", async (event, {
   }
 
   let completed = 0;
-  for (const [pendingIndex, pending] of pendingDownloads.entries()) {
+  const downloadedByIndex = new Array(pendingDownloads.length);
+  const replacedTrackIDsByIndex = new Array(pendingDownloads.length);
+  const failedByIndex = new Array(pendingDownloads.length);
+  const reservedDownloadDestinations = new Set();
+  const downloadPresentation = createServerDownloadPresentationCoordinator(
+    pendingDownloads.length,
+    (progressEvent) => {
+      if (!serverTransferIsActive(event, controller, transferGeneration)) return;
+      event.sender.send("server:transfer-progress", progressEvent);
+    },
+  );
+  for (const pending of pendingDownloads) {
+    const reusable = pending.matching?.filePath
+      && path.dirname(path.resolve(pending.matching.filePath)) === path.resolve(paths.remote)
+      ? pending.matching.filePath
+      : null;
+    let destination = reusable;
+    let collision = 1;
+    while (true) {
+      if (!destination) {
+        const candidateName = collision === 1
+          ? pending.remoteName
+          : windowsCollisionFilename(pending.remoteName, collision);
+        destination = await uniqueDestination(paths.remote, candidateName);
+      }
+      const key = path.resolve(destination).toLowerCase();
+      if (!reservedDownloadDestinations.has(key)) {
+        reservedDownloadDestinations.add(key);
+        pending.destination = destination;
+        break;
+      }
+      collision += 1;
+      destination = null;
+    }
+  }
+
+  await runServerDownloadPool(pendingDownloads, async (pending, pendingIndex) => {
     signal.throwIfAborted();
     const {
       song,
@@ -4231,6 +4278,7 @@ ipcMain.handle("server:sync", async (event, {
       matching,
       displayMetadata,
       metadataIsResolved,
+      destination,
     } = pending;
     const itemIndex = pendingIndex + 1;
     const itemCount = pendingDownloads.length;
@@ -4239,8 +4287,7 @@ ipcMain.handle("server:sync", async (event, {
     let itemTransferStarted = false;
     const publishProgress = createServerDownloadProgressPublisher((progressEvent) => {
       if (!itemTransferStarted) return;
-      if (!serverTransferIsActive(event, controller, transferGeneration)) return;
-      event.sender.send("server:transfer-progress", progressEvent);
+      downloadPresentation.update(pendingIndex, progressEvent);
     });
     const progressEvent = (overrides = {}) => serverDownloadProgressEvent({
       song,
@@ -4252,9 +4299,15 @@ ipcMain.handle("server:sync", async (event, {
       completedItems: completed,
       ...overrides,
     });
+    // Publish ownership before provider lookup, DNS/TLS setup, or the first
+    // response chunk. The renderer shows an indeterminate bar until real bytes
+    // replace this event, while the coordinator keeps one song stable.
+    downloadPresentation.update(pendingIndex, progressEvent({
+      title: serverDownloadPreparationTitle(savedSourceURL, "starting"),
+    }));
     const resetItemTransfer = () => {
-      if (itemTransferStarted && serverTransferIsActive(event, controller, transferGeneration)) {
-        event.sender.send("server:transfer-progress", {
+      if (itemTransferStarted) {
+        downloadPresentation.update(pendingIndex, {
           ...progressEvent({ completedBytes: 0, totalBytes: itemTotalBytes }),
           autoHide: false,
         });
@@ -4281,14 +4334,27 @@ ipcMain.handle("server:sync", async (event, {
           },
           onProgress: (progress) => {
             if (progress?.stage !== "downloading") {
-              if (itemTransferStarted && ["transfer_complete", "processing", "saving_local", "local_complete"].includes(progress?.stage)) {
+              const phase = String(progress?.stage || "starting");
+              const postTransfer = ["transfer_complete", "processing", "saving_local", "local_complete"].includes(phase);
+              if (itemTransferStarted && postTransfer) {
                 itemTotalBytes = itemTotalBytes || itemCompletedBytes;
                 const transferEnd = progressEvent({
                   completedBytes: itemCompletedBytes,
                   totalBytes: itemTotalBytes,
+                  title: serverDownloadPreparationTitle(savedSourceURL, phase),
                 });
-                transferEnd.autoHide = itemIndex >= itemCount;
+                transferEnd.phase = phase;
+                transferEnd.autoHide = completed >= itemCount;
                 publishProgress(transferEnd, { force: true });
+              } else {
+                const preparation = progressEvent({
+                  completedBytes: 0,
+                  totalBytes: itemTotalBytes,
+                  title: serverDownloadPreparationTitle(savedSourceURL, phase),
+                });
+                preparation.phase = phase;
+                preparation.autoHide = false;
+                downloadPresentation.update(pendingIndex, preparation);
               }
               return;
             }
@@ -4297,15 +4363,15 @@ ipcMain.handle("server:sync", async (event, {
             if (itemCompletedBytes <= 0) return;
             itemTransferStarted = true;
             const event = progressEvent();
-            event.autoHide = itemIndex >= itemCount && itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;
+            event.autoHide = completed >= itemCount && itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;
             publishProgress(event);
           },
         });
         policyLease.assertAuthorized();
         if (matching?.id || existing.some((item) => item.id === downloadedTrack.id)) {
-          replacedTrackIDs.push(matching?.id || downloadedTrack.id);
+          replacedTrackIDsByIndex[pendingIndex] = matching?.id || downloadedTrack.id;
         }
-        downloaded.push(downloadedTrack);
+        downloadedByIndex[pendingIndex] = downloadedTrack;
         itemSucceeded = true;
         completed += 1;
         const completionEvent = progressEvent({
@@ -4313,15 +4379,13 @@ ipcMain.handle("server:sync", async (event, {
           totalBytes: itemTotalBytes || itemCompletedBytes,
           completedItems: completed,
         });
-        completionEvent.autoHide = itemIndex >= itemCount;
+        completionEvent.autoHide = completed >= itemCount;
         publishProgress(completionEvent, { force: true });
-        continue;
+        downloadPresentation.complete(pendingIndex);
+        return;
       }
       let fileURL = sameOriginServerMediaURL(mediaLocation?.download_url || song.download_url, base, "download");
       let refreshedMediaLocation = false;
-      const destination = matching?.filePath && path.dirname(path.resolve(matching.filePath)) === path.resolve(paths.remote)
-        ? matching.filePath
-        : await uniqueDestination(paths.remote, remoteName);
       let downloadedSize = 0;
       let downloadedSHA256 = null;
       await retryServerDownload(async () => {
@@ -4356,7 +4420,7 @@ ipcMain.handle("server:sync", async (event, {
                 const isFirstAttemptByte = !itemTransferStarted;
                 itemTransferStarted = true;
                 const event = progressEvent();
-                event.autoHide = itemIndex >= itemCount && itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;
+                event.autoHide = completed >= itemCount && itemTotalBytes > 0 && itemCompletedBytes >= itemTotalBytes;
                 publishProgress(event, { force: isFirstAttemptByte });
               },
             });
@@ -4375,12 +4439,13 @@ ipcMain.handle("server:sync", async (event, {
         signal: policyLease.signal,
         onRetry: resetItemTransfer,
       });
-      if (matching?.id) replacedTrackIDs.push(matching.id);
-      downloaded.push(await enrichedTrack(destination, {
+      if (matching?.id) replacedTrackIDsByIndex[pendingIndex] = matching.id;
+      downloadedByIndex[pendingIndex] = await serverDownloadedTrack(destination, {
         id: matching?.id,
         title: displayMetadata.title,
         artist: displayMetadata.artist,
         album: displayMetadata.album,
+        duration: displayMetadata.durationSeconds,
         artworkURL: displayMetadata.artworkURL,
         remoteID: song.id,
         sourceServer: base.origin,
@@ -4394,6 +4459,11 @@ ipcMain.handle("server:sync", async (event, {
         preservesUnlinkedImport: typeof matching?.preservesUnlinkedImport === "boolean"
           ? matching.preservesUnlinkedImport
           : false,
+      }, serverDownloadCanUseCatalogMetadata(song, {
+        ...displayMetadata,
+        resolved: metadataIsResolved,
+        sourceURL: song.source_url == null ? null : song.source_url,
+        mediaKind: song.media_kind === "video" ? "video" : "audio",
       }));
       itemSucceeded = true;
     } catch (error) {
@@ -4402,14 +4472,14 @@ ipcMain.handle("server:sync", async (event, {
       resetItemTransfer();
       if (error?.name === "AbortError") throw error;
       if (error instanceof OfflineDownloadPolicyError) throw error;
-      failed.push({
+      failedByIndex[pendingIndex] = {
         id: song.id,
         title: song.title || song.name || path.basename(remoteName, path.extname(remoteName)),
         artist: song.artist || "",
         filename: remoteName,
         attempts: SERVER_DOWNLOAD_ATTEMPTS,
         message: error?.message || "Download failed.",
-      });
+      };
     }
     completed += 1;
     if (itemSucceeded) {
@@ -4418,10 +4488,18 @@ ipcMain.handle("server:sync", async (event, {
         totalBytes: itemTotalBytes || itemCompletedBytes,
         completedItems: completed,
       });
-      completionEvent.autoHide = itemIndex >= itemCount;
+      completionEvent.autoHide = completed >= itemCount;
       publishProgress(completionEvent, { force: true });
     }
-  }
+    downloadPresentation.complete(pendingIndex);
+
+  }, {
+    concurrency: SERVER_DOWNLOAD_DESKTOP_CONCURRENCY,
+    signal,
+  });
+  downloaded.push(...downloadedByIndex.filter(Boolean));
+  replacedTrackIDs.push(...replacedTrackIDsByIndex.filter(Boolean));
+  failed.push(...failedByIndex.filter(Boolean));
   return { catalog, downloaded, replacedTrackIDs, failed };
   } catch (error) {
     if (error?.name === "AbortError") return { catalog, downloaded, replacedTrackIDs, failed, cancelled: true };

@@ -265,6 +265,7 @@ class LibraryRepository(
         syncProfileID: String,
         fallbackArtwork: ByteArray? = null,
         verifiedContentSHA256: String,
+        useCatalogMetadata: Boolean = false,
     ): Track = withContext(Dispatchers.IO) {
         require(file.parentFile?.canonicalFile == musicDirectory.canonicalFile) {
             "Downloaded audio must be inside the Resonance Music directory"
@@ -273,24 +274,36 @@ class LibraryRepository(
             "Downloaded audio must use an app-owned random filename"
         }
         try {
-            trackFromFile(
-                file = file,
-                trackID = trackID,
-                fallbackTitle = song.title.ifBlank { file.nameWithoutExtension },
-                fallbackArtist = usefulFallback(song.artist, "Unknown Artist"),
-                fallbackAlbum = usefulFallback(song.album, "Server Library"),
-                remoteID = song.id,
-                sourceServer = sourceServer,
-                syncProfileID = syncProfileID,
-                sourceURL = song.sourceURL,
-                downloadSourceURL = ProviderMediaURLPolicy.persistableDownloadURL(song.sourceURL),
-                fallbackArtwork = fallbackArtwork,
-                contentSHA256 = verifiedContentSHA256,
-                preservesUnlinkedImport = false,
-            ).copy(
-                // Catalog artwork is authoritative for a server song. Preserve embedded artwork
-                // only as a temporary fallback until the non-blocking catalog backfill completes.
-                artworkScanComplete = song.artworkURL.isNullOrBlank(),
+            val registered = if (useCatalogMetadata) {
+                trackFromCatalogFile(
+                    file = file,
+                    trackID = trackID,
+                    song = song,
+                    sourceServer = sourceServer,
+                    syncProfileID = syncProfileID,
+                    fallbackArtwork = fallbackArtwork,
+                    contentSHA256 = verifiedContentSHA256,
+                )
+            } else {
+                trackFromFile(
+                    file = file,
+                    trackID = trackID,
+                    fallbackTitle = song.title.ifBlank { file.nameWithoutExtension },
+                    fallbackArtist = usefulFallback(song.artist, "Unknown Artist"),
+                    fallbackAlbum = usefulFallback(song.album, "Server Library"),
+                    remoteID = song.id,
+                    sourceServer = sourceServer,
+                    syncProfileID = syncProfileID,
+                    sourceURL = song.sourceURL,
+                    downloadSourceURL = ProviderMediaURLPolicy.persistableDownloadURL(song.sourceURL),
+                    fallbackArtwork = fallbackArtwork,
+                    contentSHA256 = verifiedContentSHA256,
+                    preservesUnlinkedImport = false,
+                )
+            }
+            registered.copy(
+                // Fast catalog registration intentionally defers embedded artwork inspection.
+                artworkScanComplete = if (useCatalogMetadata) false else song.artworkURL.isNullOrBlank(),
             )
         } catch (error: Throwable) {
             discardUncommittedDownload(file)
@@ -480,6 +493,50 @@ class LibraryRepository(
         )
         if (likedIndex >= 0) playlists[likedIndex] = liked else playlists.add(0, liked)
         return state.copy(playlists = playlists, favorites = favorites)
+    }
+
+    private fun trackFromCatalogFile(
+        file: File,
+        trackID: String,
+        song: RemoteSong,
+        sourceServer: String,
+        syncProfileID: String,
+        fallbackArtwork: ByteArray?,
+        contentSHA256: String,
+    ): Track {
+        val playableDurationMs = requireNotNull(readPlayableDurationMs(file)) {
+            "The downloaded media does not contain a playable audio or video track"
+        }
+        val catalogDurationMs = MediaDurationPolicy.remoteSeconds(song.durationSeconds)
+            ?.times(1_000.0)
+            ?.toLong()
+        var artworkFilename: String? = null
+        return try {
+            artworkFilename = fallbackArtwork?.let { writeArtwork(trackID, it) }
+            Track(
+                id = trackID,
+                title = song.title.ifBlank { file.nameWithoutExtension },
+                artist = usefulFallback(song.artist, "Unknown Artist"),
+                album = usefulFallback(song.album, "Server Library"),
+                durationMs = MediaDurationPolicy.preferredMilliseconds(
+                    stored = catalogDurationMs,
+                    playable = listOf(playableDurationMs),
+                ) ?: playableDurationMs,
+                relativePath = file.name,
+                remoteID = song.id,
+                sourceServer = sourceServer,
+                syncProfileID = syncProfileID,
+                sourceURL = ProviderMediaURLPolicy.persistableSourceURL(song.sourceURL),
+                downloadSourceURL = ProviderMediaURLPolicy.persistableDownloadURL(song.sourceURL),
+                artworkFilename = artworkFilename,
+                artworkScanComplete = false,
+                contentSHA256 = contentSHA256,
+                preservesUnlinkedImport = false,
+            )
+        } catch (error: Throwable) {
+            artworkFilename?.let { File(artworkDirectory, it).delete() }
+            throw error
+        }
     }
 
     private fun trackFromFile(
