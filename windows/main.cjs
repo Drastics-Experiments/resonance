@@ -51,6 +51,7 @@ const {
   createServerDownloadProgressPublisher,
   retryServerDownload,
   runServerDownloadPool,
+  serverDownloadBatchResultSnapshot,
   serverDownloadCanUseCatalogMetadata,
   serverDownloadImportedMetadata,
   serverDownloadMetadata,
@@ -4117,9 +4118,14 @@ ipcMain.handle("server:sync", async (event, {
   const transferGeneration = controller.resonanceGeneration;
   let policyLease = null;
   let catalog = null;
-  const downloaded = [];
-  const replacedTrackIDs = [];
-  const failed = [];
+  let downloadedByIndex = [];
+  let replacedTrackIDsByIndex = [];
+  let failedByIndex = [];
+  const completedBatchResult = () => serverDownloadBatchResultSnapshot({
+    downloadedByIndex,
+    replacedTrackIDsByIndex,
+    failedByIndex,
+  });
   try {
   policyLease = await beginOfflineDownloadPolicyLease({
     baseURL: base.href,
@@ -4228,9 +4234,9 @@ ipcMain.handle("server:sync", async (event, {
   }
 
   let completed = 0;
-  const downloadedByIndex = new Array(pendingDownloads.length);
-  const replacedTrackIDsByIndex = new Array(pendingDownloads.length);
-  const failedByIndex = new Array(pendingDownloads.length);
+  downloadedByIndex = new Array(pendingDownloads.length);
+  replacedTrackIDsByIndex = new Array(pendingDownloads.length);
+  failedByIndex = new Array(pendingDownloads.length);
   const reservedDownloadDestinations = new Set();
   const downloadPresentation = createServerDownloadPresentationCoordinator(
     pendingDownloads.length,
@@ -4497,12 +4503,11 @@ ipcMain.handle("server:sync", async (event, {
     concurrency: SERVER_DOWNLOAD_DESKTOP_CONCURRENCY,
     signal,
   });
-  downloaded.push(...downloadedByIndex.filter(Boolean));
-  replacedTrackIDs.push(...replacedTrackIDsByIndex.filter(Boolean));
-  failed.push(...failedByIndex.filter(Boolean));
-  return { catalog, downloaded, replacedTrackIDs, failed };
+  return { catalog, ...completedBatchResult() };
   } catch (error) {
-    if (error?.name === "AbortError") return { catalog, downloaded, replacedTrackIDs, failed, cancelled: true };
+    if (error?.name === "AbortError") {
+      return { catalog, ...completedBatchResult(), cancelled: true };
+    }
     throw error;
   } finally {
     policyLease?.close();

@@ -158,6 +158,20 @@ async function runServerDownloadPool(items, worker, options = {}) {
 }
 
 
+function serverDownloadBatchResultSnapshot({
+  downloadedByIndex = [],
+  replacedTrackIDsByIndex = [],
+  failedByIndex = [],
+} = {}) {
+  const compact = (values) => Array.isArray(values) ? values.filter(Boolean) : [];
+  return {
+    downloaded: compact(downloadedByIndex),
+    replacedTrackIDs: compact(replacedTrackIDsByIndex),
+    failed: compact(failedByIndex),
+  };
+}
+
+
 function createServerDownloadPresentationCoordinator(itemCount, publish) {
   if (typeof publish !== "function") throw new TypeError("A progress publisher is required.");
   const count = Math.max(0, Math.floor(Number(itemCount) || 0));
@@ -414,6 +428,7 @@ module.exports = {
   createServerDownloadPresentationCoordinator,
   createServerDownloadProgressPublisher,
   runServerDownloadPool,
+  serverDownloadBatchResultSnapshot,
   createServerCatalogSnapshotStore,
   retryServerDownload,
   serverDownloadCanUseCatalogMetadata,

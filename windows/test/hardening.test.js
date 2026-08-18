@@ -835,6 +835,8 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(htmlSource, /id="serverTransferToast"[^>]+hidden[\s\S]+id="serverTransferTitle"><\/strong>[\s\S]+id="serverTransferDetail"><\/small>[\s\S]+id="serverTransferProgress" max="1"[\s\S]+id="serverTransferPercent"><\/span>/);
   assert.doesNotMatch(appSource, /direction === "download" && downloadBytes <= 0/);
   assert.match(serverSyncHandler, /downloadPresentation\.update\(pendingIndex, progressEvent\(\{\s+title: serverDownloadPreparationTitle\(savedSourceURL, "starting"\),\s+\}\)\)/);
+  assert.match(serverSyncHandler, /const completedBatchResult = \(\) => serverDownloadBatchResultSnapshot\(\{[\s\S]+downloadedByIndex,[\s\S]+replacedTrackIDsByIndex,[\s\S]+failedByIndex/);
+  assert.match(serverSyncHandler, /if \(error\?\.name === "AbortError"\) \{\s+return \{ catalog, \.\.\.completedBatchResult\(\), cancelled: true \};/);
   assert.match(appSource, /const displayedTransferComplete = itemTotal !== undefined[\s\S]+Number\(itemCompleted\) >= Number\(itemTotal\)/);
   assert.match(appSource, /const ownsVisibleDownload = serverTransferActive[\s\S]+if \(!ownsVisibleDownload && !\(stage === "downloading" && completed > 0\)\) return;/);
   assert.match(appSource, /if \(ownsVisibleDownload && stage === "downloading" && completed <= 0\) return;/);

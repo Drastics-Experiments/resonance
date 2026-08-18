@@ -97,6 +97,7 @@ const {
   createServerDownloadPresentationCoordinator,
   createServerDownloadProgressPublisher,
   runServerDownloadPool,
+  serverDownloadBatchResultSnapshot,
   retryServerDownload,
   serverDownloadCanUseCatalogMetadata,
   serverDownloadDisplayName,
@@ -2547,7 +2548,8 @@ test("retries individual server downloads and reports every song that still fail
   assert.match(syncSource, /retryServerDownload/);
   assert.match(syncSource, /const pendingDownloads = \[\][\s\S]+if \(alreadyDownloaded\) continue;[\s\S]+itemCount = pendingDownloads\.length/);
   assert.match(syncSource, /failedByIndex\[pendingIndex\] = \{/);
-  assert.match(syncSource, /return \{ catalog, downloaded, replacedTrackIDs, failed \}/);
+  assert.match(syncSource, /return \{ catalog, \.\.\.completedBatchResult\(\) \}/);
+  assert.match(syncSource, /return \{ catalog, \.\.\.completedBatchResult\(\), cancelled: true \}/);
   assert.match(appSource, /showNotice\(formatServerDownloadFailureNotice\(failedDownloads\)\)/);
   assert.ok(packageJSON.build.files.includes("server-download.cjs"));
 });
@@ -3737,6 +3739,40 @@ test("server download pool drains active workers and stops scheduling after fail
   assert.equal(active, 0);
   assert.equal(finished, 2);
   assert.deepEqual(started.sort((a, b) => a - b), [0, 1]);
+});
+
+test("cancelled download pools retain every completed result bucket", async () => {
+  const controller = new AbortController();
+  const downloadedByIndex = new Array(2);
+  const replacedTrackIDsByIndex = new Array(2);
+  const failedByIndex = new Array(2);
+  let markFirstComplete;
+  const firstComplete = new Promise((resolve) => { markFirstComplete = resolve; });
+
+  await assert.rejects(
+    runServerDownloadPool([0, 1], async (_value, index) => {
+      if (index === 0) {
+        downloadedByIndex[index] = { id: "downloaded-a" };
+        replacedTrackIDsByIndex[index] = "replaced-a";
+        markFirstComplete();
+        return;
+      }
+      await firstComplete;
+      failedByIndex[index] = { id: "failed-b", message: "failed before cancellation" };
+      controller.abort();
+    }, { concurrency: 2, signal: controller.signal }),
+    { name: "AbortError" },
+  );
+
+  assert.deepEqual(serverDownloadBatchResultSnapshot({
+    downloadedByIndex,
+    replacedTrackIDsByIndex,
+    failedByIndex,
+  }), {
+    downloaded: [{ id: "downloaded-a" }],
+    replacedTrackIDs: ["replaced-a"],
+    failed: [{ id: "failed-b", message: "failed before cancellation" }],
+  });
 });
 
 test("catalog metadata fast path requires resolved context and duration", () => {
