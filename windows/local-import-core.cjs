@@ -24,6 +24,7 @@ const MAX_SEARCH_DOCUMENT_BYTES = 6 * 1024 * 1024;
 const MAX_RESULTS = 8;
 const MAX_PLAYLIST_ITEMS = 500;
 const MAX_PLAYLIST_CONTINUATIONS = 10;
+const MAX_PLAYLIST_POSITION = 10_000;
 const SEARCH_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
@@ -818,7 +819,9 @@ function playlistVideoCandidate(renderer, fallbackIndex = 0) {
     sourceProvider: "youtube",
     officialArtist: false,
     sourceURL: `https://www.youtube.com/watch?v=${videoID}`,
-    playlistIndex: Number.isSafeInteger(parsedIndex) && parsedIndex > 0 ? parsedIndex : fallbackIndex + 1,
+    playlistIndex: Number.isSafeInteger(parsedIndex) && parsedIndex > 0 && parsedIndex <= MAX_PLAYLIST_POSITION
+      ? parsedIndex
+      : fallbackIndex + 1,
     score: 1,
     confidence: "high",
     match: { title: 1, artist: 1, album: null, duration: 1, durationDeltaSeconds: 0 },
