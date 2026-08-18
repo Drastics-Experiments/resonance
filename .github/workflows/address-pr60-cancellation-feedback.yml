@@ -1,0 +1,215 @@
+name: Address PR 60 cancellation feedback
+
+on:
+  push:
+    branches:
+      - agent/optimize-batched-downloads
+    paths:
+      - .github/workflows/address-pr60-cancellation-feedback.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/optimize-batched-downloads
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Apply cancellation reconciliation fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str, label: str) -> None:
+              source = path.read_text(encoding="utf-8")
+              count = source.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected one match, found {count}")
+              path.write_text(source.replace(old, new, 1), encoding="utf-8")
+
+          server_download = Path("windows/server-download.cjs")
+          helper = '''
+          function serverDownloadBatchResultSnapshot({
+            downloadedByIndex = [],
+            replacedTrackIDsByIndex = [],
+            failedByIndex = [],
+          } = {}) {
+            const compact = (values) => Array.isArray(values) ? values.filter(Boolean) : [];
+            return {
+              downloaded: compact(downloadedByIndex),
+              replacedTrackIDs: compact(replacedTrackIDsByIndex),
+              failed: compact(failedByIndex),
+            };
+          }
+
+          '''.replace("          ", "")
+          replace_once(
+              server_download,
+              "\n\nfunction createServerDownloadPresentationCoordinator(itemCount, publish) {",
+              "\n\n" + helper + "function createServerDownloadPresentationCoordinator(itemCount, publish) {",
+              "server result snapshot helper",
+          )
+          replace_once(
+              server_download,
+              "  runServerDownloadPool,\n  createServerCatalogSnapshotStore,",
+              "  runServerDownloadPool,\n  serverDownloadBatchResultSnapshot,\n  createServerCatalogSnapshotStore,",
+              "server result snapshot export",
+          )
+
+          main = Path("windows/main.cjs")
+          replace_once(
+              main,
+              "  retryServerDownload,\n  runServerDownloadPool,\n  serverDownloadCanUseCatalogMetadata,",
+              "  retryServerDownload,\n  runServerDownloadPool,\n  serverDownloadBatchResultSnapshot,\n  serverDownloadCanUseCatalogMetadata,",
+              "main result snapshot import",
+          )
+          replace_once(
+              main,
+              '''  let policyLease = null;
+          let catalog = null;
+          const downloaded = [];
+          const replacedTrackIDs = [];
+          const failed = [];
+          try {
+          '''.replace("          ", ""),
+              '''  let policyLease = null;
+          let catalog = null;
+          let downloadedByIndex = [];
+          let replacedTrackIDsByIndex = [];
+          let failedByIndex = [];
+          const completedBatchResult = () => serverDownloadBatchResultSnapshot({
+            downloadedByIndex,
+            replacedTrackIDsByIndex,
+            failedByIndex,
+          });
+          try {
+          '''.replace("          ", ""),
+              "outer partial result storage",
+          )
+          replace_once(
+              main,
+              '''  const downloadedByIndex = new Array(pendingDownloads.length);
+          const replacedTrackIDsByIndex = new Array(pendingDownloads.length);
+          const failedByIndex = new Array(pendingDownloads.length);
+          '''.replace("          ", ""),
+              '''  downloadedByIndex = new Array(pendingDownloads.length);
+          replacedTrackIDsByIndex = new Array(pendingDownloads.length);
+          failedByIndex = new Array(pendingDownloads.length);
+          '''.replace("          ", ""),
+              "initialize partial result storage",
+          )
+          replace_once(
+              main,
+              '''  downloaded.push(...downloadedByIndex.filter(Boolean));
+          replacedTrackIDs.push(...replacedTrackIDsByIndex.filter(Boolean));
+          failed.push(...failedByIndex.filter(Boolean));
+          return { catalog, downloaded, replacedTrackIDs, failed };
+          } catch (error) {
+            if (error?.name === "AbortError") return { catalog, downloaded, replacedTrackIDs, failed, cancelled: true };
+          '''.replace("          ", ""),
+              '''  return { catalog, ...completedBatchResult() };
+          } catch (error) {
+            if (error?.name === "AbortError") {
+              return { catalog, ...completedBatchResult(), cancelled: true };
+            }
+          '''.replace("          ", ""),
+              "normal and cancelled result reconciliation",
+          )
+
+          core_test = Path("windows/test/core.test.js")
+          replace_once(
+              core_test,
+              "  runServerDownloadPool,\n  retryServerDownload,",
+              "  runServerDownloadPool,\n  serverDownloadBatchResultSnapshot,\n  retryServerDownload,",
+              "core test snapshot import",
+          )
+          regression = '''
+          test("cancelled download pools retain completed per-item results", async () => {
+            const controller = new AbortController();
+            const downloadedByIndex = new Array(3);
+            const replacedTrackIDsByIndex = new Array(3);
+            const failedByIndex = new Array(3);
+
+            await assert.rejects(
+              runServerDownloadPool([0, 1, 2], async (_value, index) => {
+                if (index === 0) {
+                  downloadedByIndex[index] = { id: "downloaded-a" };
+                  replacedTrackIDsByIndex[index] = "replaced-a";
+                  controller.abort();
+                  return;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 5));
+                controller.signal.throwIfAborted();
+              }, { concurrency: 2, signal: controller.signal }),
+              { name: "AbortError" },
+            );
+
+            assert.deepEqual(serverDownloadBatchResultSnapshot({
+              downloadedByIndex,
+              replacedTrackIDsByIndex,
+              failedByIndex,
+            }), {
+              downloaded: [{ id: "downloaded-a" }],
+              replacedTrackIDs: ["replaced-a"],
+              failed: [],
+            });
+          });
+
+          '''.replace("          ", "")
+          replace_once(
+              core_test,
+              'test("catalog metadata fast path requires resolved context and duration", () => {',
+              regression + 'test("catalog metadata fast path requires resolved context and duration", () => {',
+              "cancellation result regression",
+          )
+
+          hardening_test = Path("windows/test/hardening.test.js")
+          anchor = '''  assert.match(serverSyncHandler, /\\} catch \\(error\\) \\{[\\s\\S]+resetItemTransfer\\(\\);[\\s\\S]+if \\(error\\?\\.name === "AbortError"\\) throw error;[\\s\\S]+failedByIndex\\[pendingIndex\\] =/);
+          '''.replace("          ", "")
+          addition = anchor + '''  assert.match(serverSyncHandler, /const completedBatchResult = \\(\\) => serverDownloadBatchResultSnapshot\\(\\{[\\s\\S]+downloadedByIndex,[\\s\\S]+replacedTrackIDsByIndex,[\\s\\S]+failedByIndex/);
+            assert.match(serverSyncHandler, /if \\(error\\?\\.name === "AbortError"\\) \\{\\s+return \\{ catalog, \\.\\.\\.completedBatchResult\\(\\), cancelled: true \\};/);
+          '''.replace("          ", "")
+          replace_once(
+              hardening_test,
+              anchor,
+              addition,
+              "cancellation reconciliation hardening assertions",
+          )
+          PY
+          git diff --check
+
+      - name: Run Windows tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd windows
+          npm ci --no-audit --no-fund
+          npm test
+
+      - name: Commit and push fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            windows/main.cjs \
+            windows/server-download.cjs \
+            windows/test/core.test.js \
+            windows/test/hardening.test.js
+          git commit -m 'Fix cancellation reconciliation for completed downloads'
+          git pull --rebase origin agent/optimize-batched-downloads
+          git push origin HEAD:agent/optimize-batched-downloads
