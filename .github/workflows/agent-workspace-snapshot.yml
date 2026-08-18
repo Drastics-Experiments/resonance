@@ -1,4 +1,4 @@
-name: Agent workspace snapshot
+name: Agent source context
 
 on:
   push:
@@ -7,19 +7,58 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  snapshot:
+  context:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Package source tree
-        run: git archive --format=zip --output=resonance-source.zip HEAD
-      - name: Upload source snapshot
-        uses: actions/upload-artifact@v4
         with:
-          name: resonance-source
-          path: resonance-source.zip
-          if-no-files-found: error
-          retention-days: 1
+          ref: agent/batched-download-speed
+      - name: Capture exact download pipeline context
+        shell: python
+        run: |
+          from pathlib import Path
+
+          requests = [
+              ("windows/main.cjs", "async function enrichedTrack", 25, 90),
+              ("windows/main.cjs", "ipcMain.handle(\"server:sync\"", 60, 650),
+              ("windows/server-download.cjs", "const SERVER_DOWNLOAD_ATTEMPTS", 20, 360),
+              ("android/app/src/main/java/mov/unblocked/resonance/data/ServerClient.kt", "private suspend fun downloadSongs", 40, 520),
+              ("android/app/src/main/java/mov/unblocked/resonance/data/LibraryRepository.kt", "suspend fun registerDownloadedFile", 25, 125),
+              ("android/app/src/main/java/mov/unblocked/resonance/data/LibraryRepository.kt", "private fun trackFromFile", 30, 180),
+              ("ios/Resonance/MusicLibrary.swift", "private func downloadRemoteSongs", 60, 460),
+              ("ios/Resonance/MusicLibrary.swift", "private func downloadRemoteSong", 60, 620),
+              ("ios/Resonance/MusicLibrary.swift", "private func completeRemoteDownloadBatch", 40, 220),
+              ("mac/Sources/Resonance/PlayerModel.swift", "func syncServerLibrary", 80, 780),
+              ("mac/Sources/Resonance/PlayerModel.swift", "private nonisolated static func metadata", 30, 180),
+          ]
+
+          output = []
+          for filename, marker, before, after in requests:
+              path = Path(filename)
+              lines = path.read_text(encoding="utf-8").splitlines()
+              matches = [index for index, line in enumerate(lines) if marker in line]
+              output.append(f"\n===== {filename} :: {marker} =====\n")
+              if not matches:
+                  output.append("MARKER NOT FOUND\n")
+                  continue
+              for match in matches:
+                  start = max(0, match - before)
+                  end = min(len(lines), match + after)
+                  output.extend(f"{index + 1:06d}: {lines[index]}\n" for index in range(start, end))
+
+          destination = Path(".agent/source-context.txt")
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          destination.write_text("".join(output), encoding="utf-8")
+      - name: Commit context snapshot
+        run: |
+          git config user.name "Resonance Agent"
+          git config user.email "resonance-agent@users.noreply.github.com"
+          git add .agent/source-context.txt
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore: capture batch download source context [skip ci]"
+          git push origin HEAD:agent/batched-download-speed
