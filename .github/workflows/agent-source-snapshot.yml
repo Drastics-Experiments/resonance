@@ -1,0 +1,31 @@
+name: Agent source snapshot
+
+on:
+  push:
+    branches:
+      - agent/batch-download-performance
+    paths:
+      - .github/workflows/agent-source-snapshot.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Archive source tree
+        run: git archive --format=zip --output=resonance-source.zip HEAD
+
+      - name: Upload source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: resonance-source
+          path: resonance-source.zip
+          if-no-files-found: error
+          retention-days: 1
