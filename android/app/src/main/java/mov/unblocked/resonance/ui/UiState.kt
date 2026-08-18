@@ -24,7 +24,7 @@ data class LinkImportUiState(
     val searchResponse: LinkImportSearchResponse? = null,
     val selectedSearchResultId: String? = null,
     val selectedVideoId: String? = null,
-    val selectedVideoIds: Set<String> = emptySet(),
+    val selectedPlaylistItemIds: Set<String> = emptySet(),
     val completedBytes: Long = 0L,
     val totalBytes: Long = 0L,
     val errorCode: String? = null,

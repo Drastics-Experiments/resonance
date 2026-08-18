@@ -116,6 +116,21 @@ class YouTubePlaylistImportTest {
     }
 
     @Test
+    fun preservesRepeatedLegacyPlaylistRowsWithDistinctPositions() {
+        val page = YouTubePlaylistParser.parsePayload(
+            """{"contents":[${playlistVideoRow("jNQXAC9IVRw", "First Occurrence", 1)},${playlistVideoRow("jNQXAC9IVRw", "Second Occurrence", 2)}]}""",
+            "PL1234567890",
+        )
+
+        assertEquals(listOf("jNQXAC9IVRw", "jNQXAC9IVRw"), page.items.map(LinkImportCandidate::videoID))
+        assertEquals(listOf(1, 2), page.items.map(LinkImportCandidate::playlistIndex))
+        assertEquals(
+            listOf("playlist:1:jNQXAC9IVRw", "playlist:2:jNQXAC9IVRw"),
+            page.items.map(LinkImportCandidate::playlistItemID),
+        )
+    }
+
+    @Test
     fun parsesModernLockupRowsWithContentText() {
         val page = YouTubePlaylistParser.parsePayload(
             """{"contents":[${lockupRow("jNQXAC9IVRw", "Me at the zoo", "Jawed Karim")},${lockupRow("dQw4w9WgXcQ", "Second Song", "Second Artist") }]}""",
@@ -142,14 +157,24 @@ class YouTubePlaylistImportTest {
 
         val ordered = (firstPage.items + continuationPage.items).sortedBy(LinkImportCandidate::playlistIndex)
         assertEquals(
-            listOf("jNQXAC9IVRw", "dQw4w9WgXcQ", "9bZkp7q19f0", "aqz-KE-bpKQ"),
+            listOf("jNQXAC9IVRw", "jNQXAC9IVRw", "dQw4w9WgXcQ", "9bZkp7q19f0", "aqz-KE-bpKQ"),
             ordered.map(LinkImportCandidate::videoID),
         )
         assertEquals(4, firstPage.rowCount)
         assertEquals(1, firstPage.unavailableCount)
         assertEquals(listOf(2), firstPage.skippedItems.map(LinkImportSkippedItem::position))
         assertEquals(listOf("Unavailable"), firstPage.skippedItems.map(LinkImportSkippedItem::title))
-        assertEquals(listOf(1, 4, 5, 6), ordered.map(LinkImportCandidate::playlistIndex))
+        assertEquals(listOf(1, 3, 4, 5, 6), ordered.map(LinkImportCandidate::playlistIndex))
+        assertEquals(
+            listOf(
+                "playlist:1:jNQXAC9IVRw",
+                "playlist:3:jNQXAC9IVRw",
+                "playlist:4:dQw4w9WgXcQ",
+                "playlist:5:9bZkp7q19f0",
+                "playlist:6:aqz-KE-bpKQ",
+            ),
+            ordered.map(LinkImportCandidate::playlistItemID),
+        )
     }
 
     @Test
@@ -198,7 +223,7 @@ class YouTubePlaylistImportTest {
     }
 
     @Test
-    fun playlistItemLimitCountsOnlyNewVideoIDsAgainstRemainingCapacity() {
+    fun playlistItemLimitCountsRepeatedRowsAgainstRemainingCapacity() {
         val existing = (0 until YouTubePlaylistLimitPolicy.MAX_ITEMS - 1)
             .map { index -> candidate("existing-$index") }
         val incoming = listOf(
@@ -209,7 +234,7 @@ class YouTubePlaylistImportTest {
 
         val result = YouTubePlaylistLimitPolicy.append(existing, incoming)
 
-        assertEquals(listOf("new-at-limit"), result.items.map(LinkImportCandidate::videoID))
+        assertEquals(listOf(existing.first().videoID), result.items.map(LinkImportCandidate::videoID))
         assertTrue(result.overflowed)
     }
 

@@ -98,7 +98,7 @@ final class MacLocalImportViewModel: ObservableObject {
     @Published private(set) var searchResponse: LocalImportSearchResponse?
     @Published private(set) var selectedSearchResultID: String?
     @Published var selectedVideoID: String?
-    @Published var selectedPlaylistTrackIDs: Set<String> = []
+    @Published var selectedPlaylistItemIDs: Set<String> = []
     @Published var selectedReleaseInfoHash: String?
     @Published var mediaMode: LocalImportMediaMode = .audio
     @Published var syncAfterImport = true
@@ -167,7 +167,11 @@ final class MacLocalImportViewModel: ObservableObject {
     }
 
     var selectedPlaylistItems: [LocalImportPlaylistItem] {
-        resolution?.playlist?.items.filter { selectedPlaylistTrackIDs.contains($0.track.trackID) } ?? []
+        guard let playlist = resolution?.playlist else { return [] }
+        return LocalImportPlaylistSelectionPolicy.selectedItems(
+            in: playlist,
+            itemIDs: selectedPlaylistItemIDs
+        )
     }
 
     func existingMatch(for track: LocalImportSpotifyTrack) -> LocalImportExistingSongMatch {
@@ -384,7 +388,7 @@ final class MacLocalImportViewModel: ObservableObject {
         searchResponse = nil
         selectedSearchResultID = nil
         selectedVideoID = nil
-        selectedPlaylistTrackIDs = []
+        selectedPlaylistItemIDs = []
         selectedReleaseInfoHash = nil
         completedTrack = nil
         releaseActionMessage = nil
@@ -427,7 +431,9 @@ final class MacLocalImportViewModel: ObservableObject {
                 selectedVideoID = result.reviewCandidateVideoIDs.isEmpty
                     ? result.candidates.first?.videoID
                     : nil
-                selectedPlaylistTrackIDs = Set(result.playlist?.items.map { $0.track.trackID } ?? [])
+                selectedPlaylistItemIDs = LocalImportPlaylistSelectionPolicy.allItemIDs(
+                    in: result.playlist?.items ?? []
+                )
                 selectedReleaseInfoHash = result.candidates.isEmpty ? result.releases.first?.infoHash : nil
                 stage = .awaitingSelection
                 normalizeUploadSelection()
@@ -454,7 +460,7 @@ final class MacLocalImportViewModel: ObservableObject {
         resolution = result.resolution
         selectedSearchResultID = result.id
         selectedVideoID = result.candidates.first?.videoID
-        selectedPlaylistTrackIDs = []
+        selectedPlaylistItemIDs = []
         selectedReleaseInfoHash = nil
         releaseActionMessage = nil
         previewErrorMessage = nil
@@ -467,7 +473,7 @@ final class MacLocalImportViewModel: ObservableObject {
                 || searchResponse != nil
                 || selectedSearchResultID != nil
                 || selectedVideoID != nil
-                || !selectedPlaylistTrackIDs.isEmpty
+                || !selectedPlaylistItemIDs.isEmpty
                 || selectedReleaseInfoHash != nil else { return }
         stopPreview()
         resolution = nil
@@ -475,7 +481,7 @@ final class MacLocalImportViewModel: ObservableObject {
         searchResponse = nil
         selectedSearchResultID = nil
         selectedVideoID = nil
-        selectedPlaylistTrackIDs = []
+        selectedPlaylistItemIDs = []
         selectedReleaseInfoHash = nil
         releaseActionMessage = nil
         previewErrorMessage = nil
@@ -635,16 +641,16 @@ final class MacLocalImportViewModel: ObservableObject {
     }
 
     func togglePlaylistItem(_ item: LocalImportPlaylistItem) {
-        if selectedPlaylistTrackIDs.contains(item.track.trackID) {
-            selectedPlaylistTrackIDs.remove(item.track.trackID)
-        } else {
-            selectedPlaylistTrackIDs.insert(item.track.trackID)
-        }
+        selectedPlaylistItemIDs = LocalImportPlaylistSelectionPolicy.toggledItemIDs(
+            selectedPlaylistItemIDs,
+            item: item
+        )
     }
 
     private func importSelectedPlaylist(_ resolution: LocalImportResolution) -> Bool {
-        let items = selectedPlaylistItems
-        guard let playlist = resolution.playlist, !items.isEmpty else { return false }
+        let selectedItems = selectedPlaylistItems
+        guard let playlist = resolution.playlist, !selectedItems.isEmpty else { return false }
+        let items = LocalImportPlaylistDownloadPolicy.uniqueItems(selectedItems)
         let shouldUpload = syncAfterImport
         if shouldUpload, let unavailable = uploadUnavailableMessage {
             error = .init(stage: .syncing, code: "UPLOAD_MODE_UNAVAILABLE", message: unavailable)
@@ -917,7 +923,7 @@ final class MacLocalImportViewModel: ObservableObject {
         stopPreview()
         selectedReleaseInfoHash = release.infoHash
         selectedVideoID = nil
-        selectedPlaylistTrackIDs = []
+        selectedPlaylistItemIDs = []
         mediaMode = .audio
         syncAfterImport = false
         releaseActionMessage = nil
@@ -1628,7 +1634,7 @@ struct MacLocalImportSheet: View {
                     .foregroundStyle(Color.green)
             }
             ForEach(playlist.items) { item in
-                let selected = viewModel.selectedPlaylistTrackIDs.contains(item.track.trackID)
+                let selected = viewModel.selectedPlaylistItemIDs.contains(item.id)
                 HStack(spacing: 10) {
                     Button { viewModel.togglePlaylistItem(item) } label: {
                         HStack(spacing: 12) {

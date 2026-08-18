@@ -1792,20 +1792,32 @@ fun LinkImportDialog(
                         resolution.candidates.forEach { candidate ->
                             val metadata = candidate.importTrack
                             val selected = if (isPlaylist) {
-                                candidate.videoID in importState.selectedVideoIds
+                                candidate.playlistItemID in importState.selectedPlaylistItemIds
                             } else {
                                 candidate.videoID == importState.selectedVideoId
                             }
                             Surface(
-                                onClick = { actions.selectLinkImportCandidate(candidate.videoID) },
+                                onClick = {
+                                    actions.selectLinkImportCandidate(
+                                        if (isPlaylist) candidate.playlistItemID else candidate.videoID,
+                                    )
+                                },
                                 color = Color.White.copy(alpha = if (selected) .08f else .035f),
                                 shape = RoundedCornerShape(12.dp),
                             ) {
                                 Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                     if (isPlaylist) {
-                                        Checkbox(checked = selected, onCheckedChange = { actions.selectLinkImportCandidate(candidate.videoID) })
+                                        Checkbox(
+                                            checked = selected,
+                                            onCheckedChange = {
+                                                actions.selectLinkImportCandidate(candidate.playlistItemID)
+                                            },
+                                        )
                                     } else {
-                                        RadioButton(selected = selected, onClick = { actions.selectLinkImportCandidate(candidate.videoID) })
+                                        RadioButton(
+                                            selected = selected,
+                                            onClick = { actions.selectLinkImportCandidate(candidate.videoID) },
+                                        )
                                     }
                                     RemoteArtwork(
                                         metadata?.artworkURL ?: candidate.thumbnailURL,
@@ -1901,7 +1913,7 @@ fun LinkImportDialog(
                                 if (actions.confirmLinkImport(serverUploadRequested)) onDismiss()
                             },
                             enabled = !importState.isRunning && if (importState.resolution.kind.isPlaylist) {
-                                importState.selectedVideoIds.isNotEmpty()
+                                importState.selectedPlaylistItemIds.isNotEmpty()
                             } else {
                                 importState.selectedVideoId != null
                             },

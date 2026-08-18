@@ -146,7 +146,7 @@ struct LocalImportTests {
     private let videoID = "jNQXAC9IVRw"
     private let m4a = URL(fileURLWithPath: "/System/Library/CoreServices/Language Chooser.app/Contents/Resources/VOInstructions-en.m4a")
 
-    private func playlistTestTrack(_ trackID: String) -> LocalImportSpotifyTrack {
+    private func playlistTestTrack(_ trackID: String, trackNumber: Int? = nil) -> LocalImportSpotifyTrack {
         LocalImportSpotifyTrack(
             provider: "youtube",
             type: "track",
@@ -154,12 +154,38 @@ struct LocalImportTests {
             title: trackID,
             artist: "Artist",
             album: nil,
-            trackNumber: nil,
+            trackNumber: trackNumber,
             durationSeconds: 60,
             artworkURL: nil,
             embedURL: "",
             sourceURL: "https://www.youtube.com/watch?v=\(trackID)"
         )
+    }
+
+    private func playlistTestItem(position: Int, trackID: String) -> LocalImportPlaylistItem {
+        let sourceURL = "https://www.youtube.com/watch?v=\(trackID)"
+        let track = playlistTestTrack(trackID, trackNumber: position)
+        let candidate = LocalImportAudioSourceMatch(
+            videoID: trackID,
+            title: track.title,
+            artist: track.artist,
+            album: nil,
+            durationSeconds: track.durationSeconds,
+            thumbnailURL: nil,
+            sourceProvider: .youtube,
+            officialArtist: false,
+            sourceURL: sourceURL,
+            score: 1,
+            confidence: "high",
+            match: .init(
+                title: 1,
+                artist: 1,
+                album: nil,
+                duration: 1,
+                durationDeltaSeconds: 0
+            )
+        )
+        return LocalImportPlaylistItem(position: position, track: track, candidate: candidate)
     }
 
     @Test
@@ -264,7 +290,7 @@ struct LocalImportTests {
     }
 
     @Test
-    func keepsGlobalPositionsAcrossMalformedAndDuplicateLockupRows() throws {
+    func keepsGlobalPositionsAcrossMalformedAndRepeatedLockupRows() throws {
         let playlistID = "PL1234567890abcdefghijklmnop"
         let firstVideoID = "jNQXAC9IVRw"
         let secondVideoID = "dQw4w9WgXcQ"
@@ -303,9 +329,9 @@ struct LocalImportTests {
             expectedPlaylistID: playlistID
         )
 
-        #expect(firstPage.tracks.map(\.trackID) == [firstVideoID, secondVideoID])
-        #expect(firstPage.tracks.map(\.trackNumber) == [1, 4])
-        #expect(firstPage.skippedItems.map(\.position) == [2, 3])
+        #expect(firstPage.tracks.map(\.trackID) == [firstVideoID, firstVideoID, secondVideoID])
+        #expect(firstPage.tracks.map(\.trackNumber) == [1, 3, 4])
+        #expect(firstPage.skippedItems.map(\.position) == [2])
         #expect(firstPage.lastPlaylistPosition == 4)
 
         let continuation: [String: Any] = [
@@ -322,6 +348,59 @@ struct LocalImportTests {
         #expect(nextPage.tracks.map(\.trackID) == [thirdVideoID])
         #expect(nextPage.tracks.first?.trackNumber == 5)
         #expect(nextPage.lastPlaylistPosition == 5)
+    }
+
+    @Test
+    func preservesRepeatedYouTubeRowsAtDistinctPositions() throws {
+        let playlistID = "PL1234567890abcdefghijklmnop"
+        let repeatedVideoID = "jNQXAC9IVRw"
+
+        func video(_ title: String, _ index: Int) -> [String: Any] {
+            [
+                "videoId": repeatedVideoID,
+                "title": ["simpleText": title],
+                "shortBylineText": ["simpleText": "Playlist Artist"],
+                "index": ["simpleText": String(index)],
+                "isPlayable": true,
+            ]
+        }
+
+        let parsed = try LocalImportParser.youtubePlaylistData(
+            [
+                "contents": [
+                    ["playlistVideoRenderer": video("First appearance", 1)],
+                    ["playlistVideoRenderer": video("Second appearance", 2)],
+                ],
+            ] as [String: Any],
+            expectedPlaylistID: playlistID
+        )
+
+        #expect(parsed.tracks.map(\.trackID) == [repeatedVideoID, repeatedVideoID])
+        #expect(parsed.tracks.map(\.title) == ["First appearance", "Second appearance"])
+        #expect(parsed.tracks.map(\.trackNumber) == [1, 2])
+        #expect(parsed.skippedItems.isEmpty)
+    }
+
+    @Test
+    func keepsPlaylistRowsSelectableButDeduplicatesDownloadItems() {
+        let first = playlistTestItem(position: 1, trackID: videoID)
+        let second = playlistTestItem(position: 2, trackID: videoID)
+        let playlist = LocalImportPlaylist(
+            playlistID: "PL1234567890abcdefghijklmnop",
+            title: "Repeated",
+            author: "Artist",
+            artworkURL: nil,
+            sourceURL: "https://www.youtube.com/playlist?list=PL1234567890abcdefghijklmnop",
+            items: [first, second],
+            skippedItems: [],
+            truncated: false
+        )
+
+        #expect(first.id != second.id)
+        var selectedIDs = LocalImportPlaylistSelectionPolicy.allItemIDs(in: playlist.items)
+        selectedIDs = LocalImportPlaylistSelectionPolicy.toggledItemIDs(selectedIDs, item: first)
+        #expect(LocalImportPlaylistSelectionPolicy.selectedItems(in: playlist, itemIDs: selectedIDs).map(\.id) == [second.id])
+        #expect(LocalImportPlaylistDownloadPolicy.uniqueItems([first, second]).map(\.position) == [1])
     }
 
     @Test
@@ -383,11 +462,13 @@ struct LocalImportTests {
         #expect(initial.overflowed)
         #expect(!LocalImportPlaylistLimitPolicy.takeInitial(Array(tracks.prefix(LocalImportPlaylistLimitPolicy.maxItems))).overflowed)
 
-        let existing = (0..<LocalImportPlaylistLimitPolicy.maxItems - 1).map { playlistTestTrack("existing-\($0)") }
+        let existing = (0..<LocalImportPlaylistLimitPolicy.maxItems - 1).map {
+            playlistTestTrack("existing-\($0)", trackNumber: $0 + 1)
+        }
         let incoming = [
             existing[0],
-            playlistTestTrack("new-at-limit"),
-            playlistTestTrack("new-beyond-limit"),
+            playlistTestTrack("new-at-limit", trackNumber: LocalImportPlaylistLimitPolicy.maxItems),
+            playlistTestTrack("new-beyond-limit", trackNumber: LocalImportPlaylistLimitPolicy.maxItems + 1),
         ]
         let additions = LocalImportPlaylistLimitPolicy.append(existing: existing, incoming: incoming)
         #expect(additions.tracks.map(\.trackID) == ["new-at-limit"])

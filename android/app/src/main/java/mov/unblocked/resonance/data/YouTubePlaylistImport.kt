@@ -127,7 +127,6 @@ internal object YouTubePlaylistParser {
         var rowCount = 0
         var lastPlaylistIndex = fallbackIndexOffset
         val items = mutableListOf<LinkImportCandidate>()
-        val seenVideoIDs = mutableSetOf<String>()
 
         walk(element) { record ->
             val metadata = record["playlistMetadataRenderer"] as? JsonObject
@@ -169,7 +168,7 @@ internal object YouTubePlaylistParser {
                             ?: renderer["longBylineText"]?.let(::text)?.takeIf(String::isNotBlank),
                         reason = "YouTube did not return playable metadata for this playlist item.",
                     )
-                } else if (seenVideoIDs.add(candidate.videoID)) {
+                } else {
                     items += candidate
                 }
             }
@@ -193,7 +192,7 @@ internal object YouTubePlaylistParser {
                             artist = artist,
                             reason = "YouTube did not return playable metadata for this playlist item.",
                         )
-                    } else if (seenVideoIDs.add(candidate.videoID)) {
+                    } else {
                         items += candidate
                     }
                 }
@@ -448,10 +447,8 @@ internal object YouTubePlaylistLimitPolicy {
         existing: List<LinkImportCandidate>,
         incoming: List<LinkImportCandidate>,
     ): PageResult {
-        val seen = existing.mapTo(mutableSetOf(), LinkImportCandidate::videoID)
-        val unique = incoming.filter { seen.add(it.videoID) }
         val remaining = (MAX_ITEMS - existing.size).coerceAtLeast(0)
-        return PageResult(unique.take(remaining), unique.size > remaining)
+        return PageResult(incoming.take(remaining), incoming.size > remaining)
     }
 
     fun hasRemainingContinuation(continuation: String?): Boolean = continuation != null

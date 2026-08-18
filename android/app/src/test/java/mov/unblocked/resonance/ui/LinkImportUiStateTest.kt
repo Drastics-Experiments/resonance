@@ -34,7 +34,7 @@ class LinkImportUiStateTest {
                 candidates = listOf(candidate),
             ),
             selectedVideoId = candidate.videoID,
-            selectedVideoIds = setOf(candidate.videoID),
+            selectedPlaylistItemIds = setOf(candidate.playlistItemID),
             previewingVideoId = candidate.videoID,
         )
 
@@ -46,7 +46,7 @@ class LinkImportUiStateTest {
         assertNull(invalidated.requestedSource)
         assertNull(invalidated.resolution)
         assertNull(invalidated.selectedVideoId)
-        assertTrue(invalidated.selectedVideoIds.isEmpty())
+        assertTrue(invalidated.selectedPlaylistItemIds.isEmpty())
         assertNull(invalidated.previewingVideoId)
         assertEquals(LinkImportMediaMode.Video, invalidated.mediaMode)
     }

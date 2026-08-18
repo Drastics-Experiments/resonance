@@ -879,7 +879,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                                 selectedSearchResultId = first.id,
                                 resolution = first.resolution,
                                 selectedVideoId = first.candidates.firstOrNull()?.videoID,
-                                selectedVideoIds = first.candidates.firstOrNull()?.videoID?.let(::setOf).orEmpty(),
+                                selectedPlaylistItemIds = emptySet(),
                                 errorCode = null,
                                 errorMessage = null,
                             ),
@@ -893,10 +893,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                                 stage = LinkImportStage.AwaitingSelection,
                                 resolution = resolution,
                                 selectedVideoId = resolution.candidates.firstOrNull()?.videoID,
-                                selectedVideoIds = if (resolution.kind.isPlaylist) {
-                                    resolution.candidates.mapTo(mutableSetOf(), mov.unblocked.resonance.data.LinkImportCandidate::videoID)
+                                selectedPlaylistItemIds = if (resolution.kind.isPlaylist) {
+                                    resolution.candidates.mapTo(
+                                        mutableSetOf(),
+                                        mov.unblocked.resonance.data.LinkImportCandidate::playlistItemID,
+                                    )
                                 } else {
-                                    resolution.candidates.firstOrNull()?.videoID?.let(::setOf).orEmpty()
+                                    emptySet()
                                 },
                                 errorCode = null,
                                 errorMessage = null,
@@ -920,25 +923,31 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 selectedSearchResultId = result.id,
                 resolution = result.resolution,
                 selectedVideoId = candidate?.videoID,
-                selectedVideoIds = candidate?.videoID?.let(::setOf).orEmpty(),
+                selectedPlaylistItemIds = emptySet(),
                 previewError = null,
             ),
         )
     }
 
-    override fun selectLinkImportCandidate(videoId: String) {
+    override fun selectLinkImportCandidate(identity: String) {
         val current = mutableState.value.linkImport
-        if (current.resolution?.candidates?.any { it.videoID == videoId } != true) return
-        val playlist = current.resolution.kind.isPlaylist
+        val resolution = current.resolution ?: return
+        val playlist = resolution.kind.isPlaylist
+        val candidate = resolution.candidates.firstOrNull { candidate ->
+            if (playlist) candidate.playlistItemID == identity else candidate.videoID == identity
+        } ?: return
         val selection = if (playlist) {
-            current.selectedVideoIds.toMutableSet().apply {
-                if (!add(videoId)) remove(videoId)
+            current.selectedPlaylistItemIds.toMutableSet().apply {
+                if (!add(candidate.playlistItemID)) remove(candidate.playlistItemID)
             }
         } else {
-            setOf(videoId)
+            emptySet()
         }
         mutableState.value = mutableState.value.copy(
-            linkImport = current.copy(selectedVideoId = if (playlist) current.selectedVideoId else videoId, selectedVideoIds = selection),
+            linkImport = current.copy(
+                selectedVideoId = if (playlist) current.selectedVideoId else candidate.videoID,
+                selectedPlaylistItemIds = selection,
+            ),
         )
     }
 
@@ -1062,7 +1071,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     // A reviewed upload always needs a fresh explicit selection,
                     // even when the exact YouTube candidate was resolved locally.
                     selectedVideoId = null,
-                    selectedVideoIds = emptySet(),
+                    selectedPlaylistItemIds = emptySet(),
                     errorCode = null,
                     errorMessage = null,
                 ),
@@ -1076,7 +1085,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             linkImport = current.copy(
                 stage = LinkImportStage.SearchingCandidates,
                 selectedVideoId = null,
-                selectedVideoIds = emptySet(),
+                selectedPlaylistItemIds = emptySet(),
                 errorCode = null,
                 errorMessage = null,
             ),
@@ -1095,7 +1104,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                         resolution = reviewed,
                         // Never preselect metadata-only server candidates.
                         selectedVideoId = null,
-                        selectedVideoIds = emptySet(),
+                        selectedPlaylistItemIds = emptySet(),
                         errorCode = null,
                         errorMessage = null,
                     ),
@@ -1114,7 +1123,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     ): Boolean {
         val playlist = resolution.playlist ?: return false
         val selected = resolution.candidates
-            .filter { it.videoID in current.selectedVideoIds }
+            .filter { it.playlistItemID in current.selectedPlaylistItemIds }
             .sortedBy { it.playlistIndex }
         if (selected.isEmpty()) return false
         val transferGeneration = beginLinkImportTransfer()
@@ -1379,7 +1388,12 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val client = uploadSnapshot?.let { serverClient(it.context) }
         try {
             requireLinkImportTransfer(transferGeneration)
-            val initialMatches = selected.associateWith { candidate ->
+            // A provider video can occur at multiple playlist positions. Keep
+            // those rows selected independently, but resolve/download each
+            // source video once and reuse the resulting local track.
+            val downloadCandidates = selected.distinctBy(LinkImportCandidate::videoID)
+            val candidatesByVideoID = downloadCandidates.associateBy(LinkImportCandidate::videoID)
+            val initialMatches = downloadCandidates.associateWith { candidate ->
                 LinkImportExistingPolicy.match(
                     requireNotNull(candidate.importTrack),
                     library.tracks,
@@ -1389,7 +1403,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     mediaMode,
                 )
             }
-            val downloadItems = selected.filter { initialMatches[it]?.deviceTrackID == null }
+            val downloadItems = downloadCandidates.filter { initialMatches[it]?.deviceTrackID == null }
             if (downloadItems.isNotEmpty()) {
                 beginLinkDownloads(
                     transferGeneration,
@@ -1398,12 +1412,15 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             var completedDownloads = 0
+            val downloadedTracksByVideoID = mutableMapOf<String, Track>()
             selected.forEach { candidate ->
-                val metadata = requireNotNull(candidate.importTrack).copy(
-                    artworkURL = candidate.importTrack.artworkURL ?: candidate.thumbnailURL,
+                val downloadCandidate = candidatesByVideoID.getValue(candidate.videoID)
+                val metadata = requireNotNull(downloadCandidate.importTrack).copy(
+                    artworkURL = downloadCandidate.importTrack.artworkURL ?: downloadCandidate.thumbnailURL,
                 )
-                val initial = initialMatches[candidate]
-                var track = initial?.deviceTrackID
+                val initial = initialMatches[downloadCandidate]
+                var track = downloadedTracksByVideoID[candidate.videoID]
+                    ?: initial?.deviceTrackID
                     ?.let { id -> library.tracks.firstOrNull { it.id == id } }
                     ?.let { existing -> associateLocalImportSource(existing, metadata.sourceURL) }
                 if (track == null) {
@@ -1415,7 +1432,8 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     try {
                         track = downloadLinkTrack(
                             metadata,
-                            (listOf(candidate) + candidate.fallbackCandidates).distinctBy(LinkImportCandidate::videoID),
+                            (listOf(downloadCandidate) + downloadCandidate.fallbackCandidates)
+                                .distinctBy(LinkImportCandidate::videoID),
                             mediaMode,
                             completedDownloads,
                             downloadItems.size,
@@ -1432,6 +1450,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                 }
                 if (track != null) {
+                    downloadedTracksByVideoID[candidate.videoID] = track
                     initial?.serverSongID?.let { remoteID ->
                         adoptUploadedDownload(track.id, remoteID, client?.baseURL ?: mutableState.value.serverUrl)
                     }

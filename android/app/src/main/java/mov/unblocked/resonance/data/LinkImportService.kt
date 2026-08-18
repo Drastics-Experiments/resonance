@@ -64,7 +64,14 @@ data class LinkImportCandidate(
     val playlistIndex: Int? = null,
     val fallbackCandidates: List<LinkImportCandidate> = emptyList(),
     val sourceProvider: LinkImportSourceProvider = LinkImportSourceProvider.YouTube,
-)
+) {
+    /**
+     * Playlist rows need an identity that survives repeated occurrences of the
+     * same provider video. Non-playlist candidates retain their video identity.
+     */
+    val playlistItemID: String
+        get() = playlistIndex?.let { "playlist:$it:$videoID" } ?: videoID
+}
 
 enum class LinkImportSourceProvider { YouTube, SoundCloud }
 enum class LinkImportMediaMode(val fileExtension: String) {

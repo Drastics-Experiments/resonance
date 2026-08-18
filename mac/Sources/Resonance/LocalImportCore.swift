@@ -173,7 +173,10 @@ struct LocalImportResolution: Hashable, Sendable {
 }
 
 struct LocalImportPlaylistItem: Hashable, Identifiable, Sendable {
-    var id: String { track.trackID }
+    // Provider playlists may legitimately contain the same track more than
+    // once. Position keeps SwiftUI rows stable while trackID remains the
+    // source identity used for download de-duplication.
+    var id: String { "\(position)-\(track.trackID)" }
     let position: Int
     let track: LocalImportSpotifyTrack
     let candidate: LocalImportAudioSourceMatch
@@ -217,6 +220,43 @@ struct LocalImportPlaylist: Hashable, Sendable {
     var unavailableCount: Int { skippedItems.count }
 }
 
+enum LocalImportPlaylistSelectionPolicy {
+    static func allItemIDs(in items: [LocalImportPlaylistItem]) -> Set<String> {
+        Set(items.map(\.id))
+    }
+
+    static func selectedItems(
+        in playlist: LocalImportPlaylist,
+        itemIDs: Set<String>
+    ) -> [LocalImportPlaylistItem] {
+        playlist.items.filter { itemIDs.contains($0.id) }
+    }
+
+    static func toggledItemIDs(
+        _ itemIDs: Set<String>,
+        item: LocalImportPlaylistItem
+    ) -> Set<String> {
+        var updated = itemIDs
+        if updated.contains(item.id) {
+            updated.remove(item.id)
+        } else {
+            updated.insert(item.id)
+        }
+        return updated
+    }
+}
+
+enum LocalImportPlaylistDownloadPolicy {
+    // A repeated provider row remains selectable, but importing the same
+    // source track twice would perform duplicate network/storage work. Keep
+    // the first selected occurrence for the transfer and let the local
+    // playlist model continue to de-duplicate its UUID membership.
+    static func uniqueItems(_ items: [LocalImportPlaylistItem]) -> [LocalImportPlaylistItem] {
+        var seenTrackIDs = Set<String>()
+        return items.filter { seenTrackIDs.insert($0.track.trackID).inserted }
+    }
+}
+
 enum LocalImportPlaylistLimitPolicy {
     static let maxItems = 500
     static let maxContinuations = 10
@@ -235,8 +275,14 @@ enum LocalImportPlaylistLimitPolicy {
         existing: [LocalImportSpotifyTrack],
         incoming: [LocalImportSpotifyTrack]
     ) -> PageResult {
-        var seenTrackIDs = Set(existing.map(\.trackID))
-        let unique = incoming.filter { seenTrackIDs.insert($0.trackID).inserted }
+        // Track IDs are not row identity: a provider playlist may contain
+        // the same video at multiple positions. Only suppress a repeated
+        // source position when a continuation page is replayed.
+        var seenPositions = Set(existing.compactMap(\.trackNumber))
+        let unique = incoming.filter { track in
+            guard let position = track.trackNumber else { return true }
+            return seenPositions.insert(position).inserted
+        }
         let remaining = max(maxItems - existing.count, 0)
         return PageResult(
             tracks: Array(unique.prefix(remaining)),
@@ -916,10 +962,9 @@ enum LocalImportParser {
         var skippedItems: [LocalImportPlaylistSkippedItem] = []
         var continuation: String?
         var mismatchedPlaylist = false
-        var seenTrackIDs = Set<String>()
         // The cursor is based on source rows, not successful/unique tracks.
-        // Continuation pages can contain unavailable rows and duplicates, and
-        // those rows still occupy positions in the provider playlist.
+        // Continuation pages can contain unavailable rows and repeated tracks,
+        // and those rows still occupy positions in the provider playlist.
         var lastPlaylistPosition = max(positionOffset, 0)
 
         walk(value) { object in
@@ -963,19 +1008,15 @@ enum LocalImportParser {
                     ?? "Unknown uploader"
                 let videoID = clean(renderer["videoId"] as? String, maxLength: 11)
                 let isPlayable = renderer["isPlayable"] as? Bool != false
-                let isDuplicate = videoID.map { seenTrackIDs.contains($0) } ?? false
                 guard let videoID,
                       isYouTubeVideoID(videoID),
                       let itemTitle,
-                      isPlayable,
-                      seenTrackIDs.insert(videoID).inserted else {
+                      isPlayable else {
                     skippedItems.append(LocalImportPlaylistSkippedItem(
                         position: position,
                         title: itemTitle ?? "Unavailable item",
                         artist: artist,
-                        reason: isDuplicate
-                            ? "Duplicate YouTube playlist item"
-                            : (isPlayable ? "YouTube did not return a public video for this item" : "Video is unavailable on YouTube")
+                        reason: isPlayable ? "YouTube did not return a public video for this item" : "Video is unavailable on YouTube"
                     ))
                     return
                 }
@@ -1000,17 +1041,14 @@ enum LocalImportParser {
                 let position = nextPlaylistPosition(after: lastPlaylistPosition)
                 lastPlaylistPosition = position
                 let item = lockupPlaylistTrack(lockup, fallbackPosition: position)
-                let isDuplicate = item.map { seenTrackIDs.contains($0.trackID) } ?? false
-                if let item, seenTrackIDs.insert(item.trackID).inserted {
+                if let item {
                     tracks.append(item)
                 } else {
                     skippedItems.append(LocalImportPlaylistSkippedItem(
                         position: position,
                         title: item?.title ?? "Unavailable item",
                         artist: item?.artist,
-                        reason: isDuplicate
-                            ? "Duplicate YouTube playlist item"
-                            : "YouTube did not return a public video for this item"
+                        reason: "YouTube did not return a public video for this item"
                     ))
                 }
             }
