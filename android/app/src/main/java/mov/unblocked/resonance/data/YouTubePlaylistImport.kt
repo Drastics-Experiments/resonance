@@ -330,7 +330,11 @@ internal object YouTubePlaylistParser {
     }
 
     private fun thumbnail(value: JsonElement?): String? {
-        val values = (value as? JsonObject)?.get("thumbnails") as? JsonArray ?: return null
+        val image = value as? JsonObject ?: return null
+        val values = (image["thumbnails"] as? JsonArray)
+            ?.takeIf { it.isNotEmpty() }
+            ?: (image["sources"] as? JsonArray)
+            ?: return null
         return values.mapNotNull { item ->
             val source = item as? JsonObject ?: return@mapNotNull null
             val url = source.string("url") ?: return@mapNotNull null

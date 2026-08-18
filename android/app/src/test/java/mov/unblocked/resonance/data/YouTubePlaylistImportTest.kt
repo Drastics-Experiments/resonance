@@ -144,6 +144,23 @@ class YouTubePlaylistImportTest {
     }
 
     @Test
+    fun parsesModernLockupArtworkSources() {
+        val page = YouTubePlaylistParser.parsePayload(
+            """{"contents":[${lockupRowWithArtwork("jNQXAC9IVRw", "Me at the zoo", "Jawed Karim") }]}""",
+            "PL1234567890",
+        )
+
+        assertEquals(
+            "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg",
+            page.items.single().thumbnailURL,
+        )
+        assertEquals(
+            "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg",
+            page.items.single().importTrack?.artworkURL,
+        )
+    }
+
+    @Test
     fun continuationFallbackIndexesRemainGlobalAcrossPages() {
         val firstPage = YouTubePlaylistParser.parsePayload(
             """{"contents":[${lockupRow("jNQXAC9IVRw", "First Song", "Artist")},${invalidLockupRow()},${lockupRow("jNQXAC9IVRw", "Duplicate Song", "Artist")},${lockupRow("dQw4w9WgXcQ", "Second Song", "Artist") }]}""",
@@ -277,6 +294,22 @@ class YouTubePlaylistImportTest {
         {"lockupViewModel":{
           "contentId":"$videoID",
           "contentType":"LOCKUP_CONTENT_TYPE_VIDEO",
+          "metadata":{"lockupMetadataViewModel":{
+            "title":{"content":"$title"},
+            "metadata":{"contentMetadataViewModel":{
+              "metadataRows":[{"metadataParts":[{"text":{"content":"$artist"}}]}]
+            }}
+          }}
+        }}
+    """.trimIndent()
+
+    private fun lockupRowWithArtwork(videoID: String, title: String, artist: String): String = """
+        {"lockupViewModel":{
+          "contentId":"$videoID",
+          "contentType":"LOCKUP_CONTENT_TYPE_VIDEO",
+          "contentImage":{"thumbnailViewModel":{
+            "image":{"sources":[{"url":"https://i.ytimg.com/vi/$videoID/hqdefault.jpg","width":480}]}
+          }},
           "metadata":{"lockupMetadataViewModel":{
             "title":{"content":"$title"},
             "metadata":{"contentMetadataViewModel":{
