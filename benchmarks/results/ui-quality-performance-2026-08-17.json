@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "date": "2026-08-17",
+  "methodology": {
+    "fresh_processes_node": 5,
+    "fresh_processes_kotlin": 7,
+    "reported_value": "median of process medians"
+  },
+  "environment": {
+    "node": "v22.16.0",
+    "java": "21.0.11",
+    "os": "Linux x86_64"
+  },
+  "node_model": [
+    {"name":"recently_added_top6","dataset_size":1000,"variant":"baseline","median_of_process_medians_ns":108457},
+    {"name":"recently_added_top6","dataset_size":1000,"variant":"candidate","median_of_process_medians_ns":10364},
+    {"name":"recently_added_top6","dataset_size":10000,"variant":"baseline","median_of_process_medians_ns":1530176},
+    {"name":"recently_added_top6","dataset_size":10000,"variant":"candidate","median_of_process_medians_ns":90588},
+    {"name":"recently_added_top6","dataset_size":50000,"variant":"baseline","median_of_process_medians_ns":16446318},
+    {"name":"recently_added_top6","dataset_size":50000,"variant":"candidate","median_of_process_medians_ns":508339},
+    {"name":"row_presentation_work","dataset_size":1000,"variant":"baseline","median_of_process_medians_ns":89962},
+    {"name":"row_presentation_work","dataset_size":1000,"variant":"candidate","median_of_process_medians_ns":2307},
+    {"name":"row_presentation_work","dataset_size":10000,"variant":"baseline","median_of_process_medians_ns":1268139},
+    {"name":"row_presentation_work","dataset_size":10000,"variant":"candidate","median_of_process_medians_ns":3261},
+    {"name":"row_presentation_work","dataset_size":50000,"variant":"baseline","median_of_process_medians_ns":6371739},
+    {"name":"row_presentation_work","dataset_size":50000,"variant":"candidate","median_of_process_medians_ns":4300},
+    {"name":"storage_filter_sort_batch","dataset_size":1000,"variant":"baseline","median_of_process_medians_ns":767184},
+    {"name":"storage_filter_sort_batch","dataset_size":1000,"variant":"candidate","median_of_process_medians_ns":134710},
+    {"name":"storage_filter_sort_batch","dataset_size":10000,"variant":"baseline","median_of_process_medians_ns":10232609},
+    {"name":"storage_filter_sort_batch","dataset_size":10000,"variant":"candidate","median_of_process_medians_ns":1585582},
+    {"name":"storage_filter_sort_batch","dataset_size":50000,"variant":"baseline","median_of_process_medians_ns":76267739},
+    {"name":"storage_filter_sort_batch","dataset_size":50000,"variant":"candidate","median_of_process_medians_ns":14802415}
+  ],
+  "android_library_index_entry_prototype": [
+    {"dataset_size":1000,"index_build_median_ns":888466,"baseline_query_batch_median_ns":624532,"indexed_query_batch_median_ns":161814},
+    {"dataset_size":10000,"index_build_median_ns":1758594,"baseline_query_batch_median_ns":5787938,"indexed_query_batch_median_ns":1007263},
+    {"dataset_size":50000,"index_build_median_ns":6225409,"baseline_query_batch_median_ns":28945292,"indexed_query_batch_median_ns":5778147}
+  ],
+  "android_library_index_parallel_array_final": [
+    {"dataset_size":1000,"index_build_median_ns":739750,"baseline_query_batch_median_ns":680894,"indexed_query_batch_median_ns":127528},
+    {"dataset_size":10000,"index_build_median_ns":2529517,"baseline_query_batch_median_ns":5843131,"indexed_query_batch_median_ns":957327},
+    {"dataset_size":50000,"index_build_median_ns":7392305,"baseline_query_batch_median_ns":28909526,"indexed_query_batch_median_ns":6133112}
+  ],
+  "android_library_index_parallel_array_memory": [
+    {"dataset_size":10000,"retained_heap_delta_median_bytes":728096},
+    {"dataset_size":50000,"retained_heap_delta_median_bytes":5240840}
+  ]
+}

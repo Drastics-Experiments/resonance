@@ -41,7 +41,7 @@ jobs:
         with:
           cache-read-only: true
 
-      - name: Run algorithm benchmarks
+      - name: Run renderer model benchmarks
         run: |
           mkdir -p benchmark-results
           node benchmarks/run-ui-data-benchmarks.mjs benchmark-results/ui-data.json
@@ -50,6 +50,14 @@ jobs:
         working-directory: android
         run: ./gradlew --no-daemon testDebugUnitTest
 
+      - name: Run Android library index benchmark
+        working-directory: android
+        env:
+          RESONANCE_BENCHMARK_OUTPUT: ../benchmark-results/android-library-index.json
+        run: >-
+          ./gradlew --no-daemon testDebugUnitTest
+          --tests mov.unblocked.resonance.ui.LibraryTrackIndexBenchmarkTest
+
       - name: Validate Windows renderer quality layer
         working-directory: windows
         run: node --test test/ui-quality.test.js
@@ -57,6 +65,7 @@ jobs:
       - name: Print benchmark results
         run: |
           jq . benchmark-results/ui-data.json
+          jq . benchmark-results/android-library-index.json
           node benchmarks/summarize-ui-benchmarks.mjs benchmark-results/ui-data.json \
             | tee benchmark-results/summary.md
           cat benchmark-results/summary.md >> "$GITHUB_STEP_SUMMARY"

@@ -7,31 +7,25 @@ import mov.unblocked.resonance.data.Track
  * Immutable search index for one library snapshot.
  *
  * Building it is linear in the number of tracks. Subsequent searches reuse folded metadata instead
- * of performing four case-insensitive scans for every row on every keystroke.
+ * of performing four case-insensitive scans for every row on every keystroke. Parallel arrays avoid
+ * retaining one wrapper object per track while preserving the library's original ordering.
  */
 internal class LibraryTrackIndex(
     private val tracks: List<Track>,
 ) {
-    private data class Entry(
-        val track: Track,
-        val searchText: String,
-    )
-
-    private val entries: List<Entry> = tracks.map { track ->
-        Entry(
-            track = track,
-            searchText = buildString(
-                track.title.length + track.artist.length + track.album.length + track.relativePath.length + 3,
-            ) {
-                append(track.title)
-                append(FIELD_SEPARATOR)
-                append(track.artist)
-                append(FIELD_SEPARATOR)
-                append(track.album)
-                append(FIELD_SEPARATOR)
-                append(track.relativePath)
-            }.lowercase(Locale.ROOT),
-        )
+    private val searchTexts: Array<String> = Array(tracks.size) { index ->
+        val track = tracks[index]
+        buildString(
+            track.title.length + track.artist.length + track.album.length + track.relativePath.length + 3,
+        ) {
+            append(track.title)
+            append(FIELD_SEPARATOR)
+            append(track.artist)
+            append(FIELD_SEPARATOR)
+            append(track.album)
+            append(FIELD_SEPARATOR)
+            append(track.relativePath)
+        }.lowercase(Locale.ROOT)
     }
 
     val queueIDs: List<String> = tracks.map(Track::id)
@@ -42,8 +36,8 @@ internal class LibraryTrackIndex(
 
         val foldedQuery = query.lowercase(Locale.ROOT)
         val matches = ArrayList<Track>()
-        for (entry in entries) {
-            if (entry.searchText.contains(foldedQuery)) matches.add(entry.track)
+        for (index in searchTexts.indices) {
+            if (searchTexts[index].contains(foldedQuery)) matches.add(tracks[index])
         }
         return matches
     }
