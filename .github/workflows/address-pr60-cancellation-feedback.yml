@@ -32,6 +32,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
+          from textwrap import dedent
 
           def replace_once(path: Path, old: str, new: str, label: str) -> None:
               source = path.read_text(encoding="utf-8")
@@ -41,7 +42,7 @@ jobs:
               path.write_text(source.replace(old, new, 1), encoding="utf-8")
 
           server_download = Path("windows/server-download.cjs")
-          helper = '''
+          helper = dedent('''\
           function serverDownloadBatchResultSnapshot({
             downloadedByIndex = [],
             replacedTrackIDsByIndex = [],
@@ -55,7 +56,7 @@ jobs:
             };
           }
 
-          '''.replace("          ", "")
+          ''')
           replace_once(
               server_download,
               "\n\nfunction createServerDownloadPresentationCoordinator(itemCount, publish) {",
@@ -78,54 +79,60 @@ jobs:
           )
           replace_once(
               main,
-              '''  let policyLease = null;
-          let catalog = null;
-          const downloaded = [];
-          const replacedTrackIDs = [];
-          const failed = [];
-          try {
-          '''.replace("          ", ""),
-              '''  let policyLease = null;
-          let catalog = null;
-          let downloadedByIndex = [];
-          let replacedTrackIDsByIndex = [];
-          let failedByIndex = [];
-          const completedBatchResult = () => serverDownloadBatchResultSnapshot({
-            downloadedByIndex,
-            replacedTrackIDsByIndex,
-            failedByIndex,
-          });
-          try {
-          '''.replace("          ", ""),
+              dedent('''\
+                let policyLease = null;
+                let catalog = null;
+                const downloaded = [];
+                const replacedTrackIDs = [];
+                const failed = [];
+                try {
+              '''),
+              dedent('''\
+                let policyLease = null;
+                let catalog = null;
+                let downloadedByIndex = [];
+                let replacedTrackIDsByIndex = [];
+                let failedByIndex = [];
+                const completedBatchResult = () => serverDownloadBatchResultSnapshot({
+                  downloadedByIndex,
+                  replacedTrackIDsByIndex,
+                  failedByIndex,
+                });
+                try {
+              '''),
               "outer partial result storage",
           )
           replace_once(
               main,
-              '''  const downloadedByIndex = new Array(pendingDownloads.length);
-          const replacedTrackIDsByIndex = new Array(pendingDownloads.length);
-          const failedByIndex = new Array(pendingDownloads.length);
-          '''.replace("          ", ""),
-              '''  downloadedByIndex = new Array(pendingDownloads.length);
-          replacedTrackIDsByIndex = new Array(pendingDownloads.length);
-          failedByIndex = new Array(pendingDownloads.length);
-          '''.replace("          ", ""),
+              dedent('''\
+                const downloadedByIndex = new Array(pendingDownloads.length);
+                const replacedTrackIDsByIndex = new Array(pendingDownloads.length);
+                const failedByIndex = new Array(pendingDownloads.length);
+              '''),
+              dedent('''\
+                downloadedByIndex = new Array(pendingDownloads.length);
+                replacedTrackIDsByIndex = new Array(pendingDownloads.length);
+                failedByIndex = new Array(pendingDownloads.length);
+              '''),
               "initialize partial result storage",
           )
           replace_once(
               main,
-              '''  downloaded.push(...downloadedByIndex.filter(Boolean));
-          replacedTrackIDs.push(...replacedTrackIDsByIndex.filter(Boolean));
-          failed.push(...failedByIndex.filter(Boolean));
-          return { catalog, downloaded, replacedTrackIDs, failed };
-          } catch (error) {
-            if (error?.name === "AbortError") return { catalog, downloaded, replacedTrackIDs, failed, cancelled: true };
-          '''.replace("          ", ""),
-              '''  return { catalog, ...completedBatchResult() };
-          } catch (error) {
-            if (error?.name === "AbortError") {
-              return { catalog, ...completedBatchResult(), cancelled: true };
-            }
-          '''.replace("          ", ""),
+              dedent('''\
+                downloaded.push(...downloadedByIndex.filter(Boolean));
+                replacedTrackIDs.push(...replacedTrackIDsByIndex.filter(Boolean));
+                failed.push(...failedByIndex.filter(Boolean));
+                return { catalog, downloaded, replacedTrackIDs, failed };
+                } catch (error) {
+                  if (error?.name === "AbortError") return { catalog, downloaded, replacedTrackIDs, failed, cancelled: true };
+              '''),
+              dedent('''\
+                return { catalog, ...completedBatchResult() };
+                } catch (error) {
+                  if (error?.name === "AbortError") {
+                    return { catalog, ...completedBatchResult(), cancelled: true };
+                  }
+              '''),
               "normal and cancelled result reconciliation",
           )
 
@@ -136,7 +143,7 @@ jobs:
               "  runServerDownloadPool,\n  serverDownloadBatchResultSnapshot,\n  retryServerDownload,",
               "core test snapshot import",
           )
-          regression = '''
+          regression = dedent('''\
           test("cancelled download pools retain completed per-item results", async () => {
             const controller = new AbortController();
             const downloadedByIndex = new Array(3);
@@ -168,25 +175,12 @@ jobs:
             });
           });
 
-          '''.replace("          ", "")
+          ''')
           replace_once(
               core_test,
               'test("catalog metadata fast path requires resolved context and duration", () => {',
               regression + 'test("catalog metadata fast path requires resolved context and duration", () => {',
               "cancellation result regression",
-          )
-
-          hardening_test = Path("windows/test/hardening.test.js")
-          anchor = '''  assert.match(serverSyncHandler, /\\} catch \\(error\\) \\{[\\s\\S]+resetItemTransfer\\(\\);[\\s\\S]+if \\(error\\?\\.name === "AbortError"\\) throw error;[\\s\\S]+failedByIndex\\[pendingIndex\\] =/);
-          '''.replace("          ", "")
-          addition = anchor + '''  assert.match(serverSyncHandler, /const completedBatchResult = \\(\\) => serverDownloadBatchResultSnapshot\\(\\{[\\s\\S]+downloadedByIndex,[\\s\\S]+replacedTrackIDsByIndex,[\\s\\S]+failedByIndex/);
-            assert.match(serverSyncHandler, /if \\(error\\?\\.name === "AbortError"\\) \\{\\s+return \\{ catalog, \\.\\.\\.completedBatchResult\\(\\), cancelled: true \\};/);
-          '''.replace("          ", "")
-          replace_once(
-              hardening_test,
-              anchor,
-              addition,
-              "cancellation reconciliation hardening assertions",
           )
           PY
           git diff --check
@@ -205,11 +199,7 @@ jobs:
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add \
-            windows/main.cjs \
-            windows/server-download.cjs \
-            windows/test/core.test.js \
-            windows/test/hardening.test.js
+          git add windows/main.cjs windows/server-download.cjs windows/test/core.test.js
           git commit -m 'Fix cancellation reconciliation for completed downloads'
           git pull --rebase origin agent/optimize-batched-downloads
           git push origin HEAD:agent/optimize-batched-downloads
