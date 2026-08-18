@@ -71,6 +71,19 @@ data class LinkImportCandidate(
      */
     val playlistItemID: String
         get() = playlistIndex?.let { "playlist:$it:$videoID" } ?: videoID
+
+    /**
+     * Identity for one playlist source row when planning transfers. Playlist
+     * rows retain their original provider metadata in [importTrack], so two
+     * Spotify or SoundCloud rows can legitimately resolve to the same YouTube
+     * video while still needing independent fallback chains. Repeated YouTube
+     * rows keep the same canonical source URL and therefore still share one
+     * transfer outcome.
+     */
+    val playlistDownloadKey: String
+        get() = importTrack?.sourceURL?.trim()?.takeIf(String::isNotEmpty)
+            ?.let { "source:$it" }
+            ?: "video:$videoID"
 }
 
 enum class LinkImportSourceProvider { YouTube, SoundCloud }

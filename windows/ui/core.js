@@ -2030,6 +2030,22 @@ export function localImportCandidateCanAutoSelect(candidate) {
 
 function localImportPlaylistCandidateIdentity(candidate) {
   if (!candidate || typeof candidate !== "object") return null;
+  const importMetadata = candidate.importMetadata && typeof candidate.importMetadata === "object"
+    ? candidate.importMetadata
+    : null;
+  const metadataProvider = String(importMetadata?.provider || importMetadata?.searchProvider || "")
+    .trim()
+    .toLocaleLowerCase();
+  if (metadataProvider && !metadataProvider.includes("youtube")) {
+    const metadataID = [
+      importMetadata.trackID,
+      importMetadata.providerID,
+      importMetadata.providerId,
+      importMetadata.sourcePageURL,
+      importMetadata.sourceURL,
+    ].find((value) => typeof value === "string" && value.trim());
+    if (metadataID) return { provider: metadataProvider, id: metadataID.trim() };
+  }
   const providerID = [candidate.videoID, candidate.providerID, candidate.candidateID, candidate.trackID]
     .find((value) => typeof value === "string" && value.trim());
   if (providerID) {

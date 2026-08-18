@@ -478,6 +478,53 @@ test("deduplicates playlist transfers while preserving independent row selection
   assert.notEqual(localImportPlaylistTransferKey(selectedRows[0]), localImportPlaylistTransferKey(selectedRows[2]));
 });
 
+test("keeps distinct provider playlist rows with the same YouTube fallback", () => {
+  const selectedRows = [
+    {
+      videoID: "jNQXAC9IVRw",
+      sourceProvider: "youtube",
+      sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+      importMetadata: {
+        provider: "spotify",
+        trackID: "spotify-track-a",
+        sourceURL: "https://open.spotify.com/track/spotify-track-a",
+      },
+      fallbackCandidates: [{ videoID: "dQw4w9WgXcQ" }],
+    },
+    {
+      videoID: "jNQXAC9IVRw",
+      sourceProvider: "youtube",
+      sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+      importMetadata: {
+        provider: "spotify",
+        trackID: "spotify-track-b",
+        sourceURL: "https://open.spotify.com/track/spotify-track-b",
+      },
+      fallbackCandidates: [{ videoID: "9bZkp7q19f0" }],
+    },
+    {
+      videoID: "jNQXAC9IVRw",
+      sourceProvider: "youtube",
+      sourceURL: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+      importMetadata: {
+        provider: "soundcloud",
+        trackID: "soundcloud-track-c",
+        sourceURL: "https://soundcloud.com/artist/track-c",
+      },
+      fallbackCandidates: [{ videoID: "LIIDh-qI9oI" }],
+    },
+  ];
+  const transferQueue = uniqueLocalImportPlaylistCandidates(selectedRows, "audio");
+  assert.equal(transferQueue.length, 3);
+  assert.deepEqual(transferQueue.map((candidate) => candidate.importMetadata.trackID), [
+    "spotify-track-a",
+    "spotify-track-b",
+    "soundcloud-track-c",
+  ]);
+  assert.notEqual(localImportPlaylistTransferKey(selectedRows[0]), localImportPlaylistTransferKey(selectedRows[1]));
+  assert.notEqual(localImportPlaylistTransferKey(selectedRows[1]), localImportPlaylistTransferKey(selectedRows[2]));
+});
+
 test("rejects stale link-import operations after source, media, or selection mutation", () => {
   const snapshot = {
     generation: 4,

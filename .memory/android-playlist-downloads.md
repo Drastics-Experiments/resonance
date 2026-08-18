@@ -9,3 +9,4 @@
 - Repeated YouTube playlist occurrences now remain separate candidates with position-qualified `playlistItemID` selection state; the batch importer still downloads each provider `videoID` once and reuses the resulting local track.
 - Repeated-video imports cache `Result` outcomes per distinct provider ID, including failures, before expanding selected rows; this keeps failed transfers from retrying and prevents batch progress from exceeding the distinct download count.
 - Modern YouTube `lockupViewModel` artwork is under `contentImage.thumbnailViewModel.image.sources`, while legacy rows use `thumbnail.thumbnails`; the Android parser accepts both shapes and retains the safe host/size selection.
+- Playlist transfer dedupe keys the original `importTrack.sourceURL` when present, so Spotify/SoundCloud rows that resolve to the same YouTube candidate retain independent fallback chains while repeated YouTube rows with the same canonical source still share one outcome.

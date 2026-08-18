@@ -1390,10 +1390,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         try {
             requireLinkImportTransfer(transferGeneration)
             // A provider video can occur at multiple playlist positions. Keep
-            // those rows selected independently, but resolve/download each
-            // source video once and reuse the resulting local track.
-            val downloadCandidates = selected.distinctBy(LinkImportCandidate::videoID)
-            val candidatesByVideoID = downloadCandidates.associateBy(LinkImportCandidate::videoID)
+            // those rows selected independently, while repeated YouTube rows
+            // share one transfer and distinct provider rows retain their own
+            // metadata and fallback chain.
+            val downloadCandidates = selected.distinctBy(LinkImportCandidate::playlistDownloadKey)
+            val candidatesByDownloadKey = downloadCandidates.associateBy(LinkImportCandidate::playlistDownloadKey)
             val initialMatches = downloadCandidates.associateWith { candidate ->
                 LinkImportExistingPolicy.match(
                     requireNotNull(candidate.importTrack),
@@ -1415,7 +1416,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
             var completedDownloads = 0
             val downloadOutcomes = PlaylistDownloadOutcomePolicy.loadDistinct(
                 selected = downloadCandidates,
-                key = LinkImportCandidate::videoID,
+                key = LinkImportCandidate::playlistDownloadKey,
             ) { downloadCandidate ->
                 val metadata = requireNotNull(downloadCandidate.importTrack).copy(
                     artworkURL = downloadCandidate.importTrack.artworkURL ?: downloadCandidate.thumbnailURL,
@@ -1457,12 +1458,13 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                     result
                 }
             }
-            val downloadOutcomesByVideoID = downloadOutcomes.associateBy { it.key }
+            val downloadOutcomesByDownloadKey = downloadOutcomes.associateBy { it.key }
             val adoptedVideoIDs = mutableSetOf<String>()
             selected.forEach { candidate ->
-                val downloadCandidate = candidatesByVideoID.getValue(candidate.videoID)
+                val downloadKey = candidate.playlistDownloadKey
+                val downloadCandidate = candidatesByDownloadKey.getValue(downloadKey)
                 val initial = initialMatches[downloadCandidate]
-                val track = downloadOutcomesByVideoID.getValue(candidate.videoID).result.getOrNull()
+                val track = downloadOutcomesByDownloadKey.getValue(downloadKey).result.getOrNull()
                 if (track != null) {
                     if (adoptedVideoIDs.add(candidate.videoID)) {
                         initial?.serverSongID?.let { remoteID ->

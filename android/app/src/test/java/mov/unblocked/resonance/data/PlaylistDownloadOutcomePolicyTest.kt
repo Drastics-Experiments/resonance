@@ -39,4 +39,111 @@ class PlaylistDownloadOutcomePolicyTest {
             selected.map { outcomesByVideoID.getValue(it.videoID).key },
         )
     }
+
+    @Test
+    fun doesNotCollapseDistinctNonYouTubeMetadataRowsSharingYouTubeCandidate() = runTest {
+        val selected = listOf(
+            candidate(
+                videoID = "shared-youtube-id",
+                sourceURL = "https://open.spotify.com/track/spotify-row",
+            ),
+            candidate(
+                videoID = "shared-youtube-id",
+                sourceURL = "https://soundcloud.com/artist/soundcloud-row",
+            ),
+        )
+        val calls = mutableListOf<String>()
+
+        val outcomes = PlaylistDownloadOutcomePolicy.loadDistinct(
+            selected = selected,
+            key = LinkImportCandidate::playlistDownloadKey,
+        ) { row ->
+            calls += requireNotNull(row.importTrack).sourceURL
+            Result.success(row.sourceURL)
+        }
+
+        assertEquals(
+            listOf(
+                "https://open.spotify.com/track/spotify-row",
+                "https://soundcloud.com/artist/soundcloud-row",
+            ),
+            calls,
+        )
+        assertEquals(2, outcomes.size)
+    }
+
+    @Test
+    fun deduplicatesRepeatedYouTubeRowsButKeepsProviderFallbackChainsIndependent() = runTest {
+        val repeatedYouTube = listOf(
+            candidate(
+                videoID = "youtube-row",
+                sourceURL = "https://www.youtube.com/watch?v=youtube-row",
+            ),
+            candidate(
+                videoID = "youtube-row",
+                sourceURL = "https://www.youtube.com/watch?v=youtube-row",
+            ),
+        )
+        val spotify = candidate(
+            videoID = "shared-youtube-id",
+            sourceURL = "https://open.spotify.com/track/spotify-row",
+            fallbackCandidates = listOf(candidate("spotify-fallback", "https://www.youtube.com/watch?v=spotify-fallback")),
+        )
+        val soundCloud = candidate(
+            videoID = "shared-youtube-id",
+            sourceURL = "https://soundcloud.com/artist/soundcloud-row",
+            fallbackCandidates = listOf(candidate("soundcloud-fallback", "https://www.youtube.com/watch?v=soundcloud-fallback")),
+        )
+        val selected = repeatedYouTube + listOf(spotify, soundCloud)
+        val calls = mutableListOf<String>()
+
+        val outcomes = PlaylistDownloadOutcomePolicy.loadDistinct(
+            selected = selected,
+            key = LinkImportCandidate::playlistDownloadKey,
+        ) { row ->
+            calls += requireNotNull(row.importTrack).sourceURL
+            val playableIDs = setOf("youtube-row", "soundcloud-fallback")
+            (listOf(row) + row.fallbackCandidates)
+                .firstOrNull { it.videoID in playableIDs }
+                ?.let { Result.success(it.videoID) }
+                ?: Result.failure(IllegalStateException("no playable candidate"))
+        }
+
+        assertEquals(
+            listOf(
+                "https://www.youtube.com/watch?v=youtube-row",
+                "https://open.spotify.com/track/spotify-row",
+                "https://soundcloud.com/artist/soundcloud-row",
+            ),
+            calls,
+        )
+        assertEquals(3, outcomes.size)
+        assertEquals("youtube-row", outcomes[0].result.getOrNull())
+        assertTrue(outcomes[1].result.isFailure)
+        assertEquals("soundcloud-fallback", outcomes[2].result.getOrNull())
+    }
+
+    private fun candidate(
+        videoID: String,
+        sourceURL: String,
+        fallbackCandidates: List<LinkImportCandidate> = emptyList(),
+    ): LinkImportCandidate {
+        val metadata = LinkImportTrack(
+            title = sourceURL,
+            artist = "Artist",
+            sourceURL = sourceURL,
+        )
+        return LinkImportCandidate(
+            videoID = videoID,
+            title = metadata.title,
+            artist = metadata.artist,
+            durationSeconds = null,
+            thumbnailURL = null,
+            sourceURL = "https://www.youtube.com/watch?v=$videoID",
+            score = 1.0,
+            importTrack = metadata,
+            playlistIndex = 1,
+            fallbackCandidates = fallbackCandidates,
+        )
+    }
 }
