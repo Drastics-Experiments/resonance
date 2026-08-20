@@ -1,4 +1,5 @@
 const SERVER_DOWNLOAD_ATTEMPTS = 3;
+const SERVER_DOWNLOAD_DESKTOP_CONCURRENCY = 4;
 const SERVER_DOWNLOAD_RETRY_DELAYS_MS = Object.freeze([400, 1_200]);
 const SERVER_DOWNLOAD_PROGRESS_INTERVAL_MS = 100;
 
@@ -106,6 +107,165 @@ function serverDownloadMetadataIsResolved(song, preferred = {}) {
   if (!serverDownloadMetadataContextMatches(song, preferred)) return false;
   return preferred?.resolved === true
     && (usable(preferred.title, preferred.artist) || usable(song?.title || song?.name, song?.artist));
+}
+
+
+function serverDownloadCanUseCatalogMetadata(song, preferred = {}) {
+  const metadata = serverDownloadMetadata(song, preferred);
+  return serverDownloadMetadataIsResolved(song, preferred)
+    && Number.isFinite(metadata.durationSeconds)
+    && metadata.durationSeconds > 0;
+}
+
+async function runServerDownloadPool(items, worker, options = {}) {
+  if (!Array.isArray(items)) throw new TypeError("Download pool items must be an array.");
+  if (typeof worker !== "function") throw new TypeError("A download pool worker is required.");
+  if (!items.length) return [];
+
+  const requestedConcurrency = Math.floor(Number(options.concurrency) || SERVER_DOWNLOAD_DESKTOP_CONCURRENCY);
+  const concurrency = Math.max(1, Math.min(items.length, requestedConcurrency));
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  let firstError = null;
+  let stopped = false;
+
+  async function consume() {
+    while (!stopped) {
+      try {
+        options.signal?.throwIfAborted();
+      } catch (error) {
+        firstError ||= error;
+        stopped = true;
+        return;
+      }
+      const index = nextIndex;
+      if (index >= items.length) return;
+      nextIndex += 1;
+      try {
+        results[index] = await worker(items[index], index);
+      } catch (error) {
+        firstError ||= error;
+        stopped = true;
+        return;
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, consume));
+  if (options.signal?.aborted) options.signal.throwIfAborted();
+  if (firstError) throw firstError;
+  return results;
+}
+
+
+function serverDownloadBatchResultSnapshot({
+  downloadedByIndex = [],
+  replacedTrackIDsByIndex = [],
+  failedByIndex = [],
+} = {}) {
+  const compact = (values) => Array.isArray(values) ? values.filter(Boolean) : [];
+  return {
+    downloaded: compact(downloadedByIndex),
+    replacedTrackIDs: compact(replacedTrackIDsByIndex),
+    failed: compact(failedByIndex),
+  };
+}
+
+
+function createServerDownloadPresentationCoordinator(itemCount, publish) {
+  if (typeof publish !== "function") throw new TypeError("A progress publisher is required.");
+  const count = Math.max(0, Math.floor(Number(itemCount) || 0));
+  const active = new Set(Array.from({ length: count }, (_, index) => index));
+  const latest = new Map();
+  let presentedIndex = null;
+
+  const bestIndex = () => {
+    const started = [...active].filter((index) => latest.has(index)).sort((left, right) => left - right);
+    return started.find((index) => serverDownloadProgressHasBytes(latest.get(index)))
+      ?? started[0]
+      ?? (active.size ? Math.min(...active) : null);
+  };
+  const publishCurrent = () => {
+    if (presentedIndex === null) return false;
+    const event = latest.get(presentedIndex);
+    if (!event) return false;
+    publish(event);
+    return true;
+  };
+
+  return Object.freeze({
+    update(index, event) {
+      if (!Number.isInteger(index) || !active.has(index) || !event) return false;
+      latest.set(index, event);
+      if (presentedIndex === null || !active.has(presentedIndex)) {
+        presentedIndex = bestIndex();
+      } else if (index !== presentedIndex) {
+        const current = latest.get(presentedIndex);
+        const currentHasBytes = serverDownloadProgressHasBytes(current);
+        const candidateHasBytes = serverDownloadProgressHasBytes(event);
+        if ((!currentHasBytes && candidateHasBytes)
+            || (!currentHasBytes && !candidateHasBytes && index < presentedIndex)) {
+          presentedIndex = index;
+        }
+      }
+      return index === presentedIndex ? publishCurrent() : false;
+    },
+    complete(index) {
+      if (!Number.isInteger(index) || !active.delete(index)) return false;
+      latest.delete(index);
+      if (index !== presentedIndex) return false;
+      presentedIndex = bestIndex();
+      return publishCurrent();
+    },
+    currentIndex() {
+      return presentedIndex;
+    },
+  });
+}
+
+function serverDownloadProviderName(sourceURL, stage = "") {
+  const normalizedStage = String(stage || "").trim().toLowerCase();
+  if (["preparing_external", "waiting_external"].includes(normalizedStage)) return "debrid";
+  try {
+    const parsed = new URL(String(sourceURL || ""));
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    if (host === "youtu.be" || host === "youtube.com" || host.endsWith(".youtube.com")) return "YouTube";
+    if (host === "soundcloud.com" || host.endsWith(".soundcloud.com")) return "SoundCloud";
+    if (host === "spotify.com" || host.endsWith(".spotify.com")) return "Spotify";
+  } catch {
+    // A missing or malformed optional source is presented as a generic provider.
+  }
+  return "provider";
+}
+
+function serverDownloadPreparationTitle(sourceURL, stage = "starting") {
+  const normalizedStage = String(stage || "starting").trim().toLowerCase();
+  const provider = serverDownloadProviderName(sourceURL, normalizedStage);
+  switch (normalizedStage) {
+    case "resolving_metadata":
+      return `Resolving ${provider}`;
+    case "searching_candidates":
+      return provider === "Spotify" ? "Finding a YouTube match" : `Finding ${provider} media`;
+    case "inspecting_source":
+      return `Inspecting ${provider}`;
+    case "preparing_external":
+      return "Preparing debrid transfer";
+    case "waiting_external":
+      return "Waiting for debrid";
+    case "processing":
+    case "saving_local":
+    case "local_complete":
+    case "transfer_complete":
+      return "Finishing download";
+    case "downloading":
+      return `Downloading ${provider}`;
+    default:
+      return sourceURL ? `Preparing ${provider}` : "Connecting to server";
+  }
+}
+
+function serverDownloadProgressHasBytes(event) {
+  return Math.max(0, Number(event?.itemCompleted) || 0) > 0;
 }
 
 function serverDownloadImportedMetadata(resolvedMetadata, preferredMetadata, metadataIsResolved, sourceURL) {
@@ -262,13 +422,21 @@ async function retryServerDownload(operation, options = {}) {
 
 module.exports = {
   SERVER_DOWNLOAD_ATTEMPTS,
+  SERVER_DOWNLOAD_DESKTOP_CONCURRENCY,
   SERVER_DOWNLOAD_PROGRESS_INTERVAL_MS,
   SERVER_DOWNLOAD_RETRY_DELAYS_MS,
+  createServerDownloadPresentationCoordinator,
   createServerDownloadProgressPublisher,
+  runServerDownloadPool,
+  serverDownloadBatchResultSnapshot,
   createServerCatalogSnapshotStore,
   retryServerDownload,
+  serverDownloadCanUseCatalogMetadata,
   serverDownloadDisplayName,
   serverDownloadImportedMetadata,
+  serverDownloadPreparationTitle,
+  serverDownloadProgressHasBytes,
+  serverDownloadProviderName,
   serverDownloadMetadata,
   serverDownloadMetadataContextMatches,
   serverDownloadMetadataIsResolved,

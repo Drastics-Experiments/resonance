@@ -47,6 +47,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import mov.unblocked.resonance.data.CredentialStore
@@ -63,6 +65,7 @@ import mov.unblocked.resonance.data.ClientConfigStore
 import mov.unblocked.resonance.data.EffectiveClientConfig
 import mov.unblocked.resonance.data.DownloadItemProgressPolicy
 import mov.unblocked.resonance.data.DownloadItemProgressPresentation
+import mov.unblocked.resonance.data.DownloadItemPresentationCoordinator
 import mov.unblocked.resonance.data.DownloadedSongMetadataRefreshPolicy
 import mov.unblocked.resonance.data.LinkImportException
 import mov.unblocked.resonance.data.LinkImportCandidate
@@ -83,6 +86,7 @@ import mov.unblocked.resonance.data.ListenAlongPollPolicy
 import mov.unblocked.resonance.data.ListenAlongArtworkPolicy
 import mov.unblocked.resonance.data.ListenAlongPlaybackPolicy
 import mov.unblocked.resonance.data.ListenAlongRevisionConflictException
+import mov.unblocked.resonance.data.MixedProviderDownloadPolicy
 import mov.unblocked.resonance.data.ListeningHistoryPlaybackPolicy
 import mov.unblocked.resonance.data.ListeningHistoryRetentionPolicy
 import mov.unblocked.resonance.data.LatestValuePersistenceGate
@@ -99,10 +103,12 @@ import mov.unblocked.resonance.data.PlaylistSyncMutationPolicy
 import mov.unblocked.resonance.data.PendingDownloadBatchPolicy
 import mov.unblocked.resonance.data.RemoteSongDownloadMetadataPolicy
 import mov.unblocked.resonance.data.RemoteDownloadContextChangePolicy
+import mov.unblocked.resonance.data.RemoteSourceAdoptionGate
 import mov.unblocked.resonance.data.RemoteSourceDownloadCoordinator
 import mov.unblocked.resonance.data.RemoteSourceResolutionCacheKey
 import mov.unblocked.resonance.data.RemoteSourceResolutionCachePolicy
 import mov.unblocked.resonance.data.ProfileLibraryStatePolicy
+import mov.unblocked.resonance.data.ProviderDownloadPreparationPolicy
 import mov.unblocked.resonance.data.ProfileLibraryState
 import mov.unblocked.resonance.data.RemotePlaylist
 import mov.unblocked.resonance.data.RemoteClipRange
@@ -120,6 +126,7 @@ import mov.unblocked.resonance.data.ServerRefreshPresentationPolicy
 import mov.unblocked.resonance.data.RemoteTrackIdentityPolicy
 import mov.unblocked.resonance.data.ServerSongIdentityPolicy
 import mov.unblocked.resonance.data.ServerDownloadMode
+import mov.unblocked.resonance.data.ServerDownloadBatchResult
 import mov.unblocked.resonance.data.ServerTransferModePolicy
 import mov.unblocked.resonance.data.ServerUploadMode
 import mov.unblocked.resonance.data.ServerUploadTransportPolicy
@@ -215,6 +222,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private val repository = LibraryRepository(context)
     private val linkImportService = LinkImportService(context)
     private val remoteSourceResolutions = mutableMapOf<RemoteSourceResolutionCacheKey, LinkImportResolution>()
+    private val remoteSourceAdoptionGate = RemoteSourceAdoptionGate()
     private val credentials = CredentialStore(context)
     private var accountSession: AccountSession? = credentials.accountSession
     private val clientConfigStore = ClientConfigStore(context)
@@ -1712,32 +1720,34 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                             ?: downloaded.durationMs,
                     )
                 } ?: downloaded
-                linkTransferGeneration?.let(::requireLinkImportTransfer)
-                val duplicate = library.tracks.firstOrNull {
-                    it.sourceSHA256 == download.sourceSHA256 ||
-                        it.contentSHA256 == download.sourceSHA256 ||
-                        it.contentSHA256 == download.contentSHA256
-                }
-                val track = if (duplicate != null) {
-                    download.file.parentFile?.deleteRecursively()
-                    associateLocalImportSource(
-                        duplicate,
-                        download.metadata.sourceURL,
-                        download.downloadSourceURL,
-                        persistImmediately,
-                    )
-                } else {
-                    if (linkTransferGeneration != null) {
-                        applyLinkImportProgress(
-                            LinkImportProgress(LinkImportStage.SavingLocal),
-                            linkTransferGeneration,
+                val track = remoteSourceAdoptionGate.run {
+                    linkTransferGeneration?.let(::requireLinkImportTransfer)
+                    val duplicate = library.tracks.firstOrNull {
+                        it.sourceSHA256 == download.sourceSHA256 ||
+                            it.contentSHA256 == download.sourceSHA256 ||
+                            it.contentSHA256 == download.contentSHA256
+                    }
+                    if (duplicate != null) {
+                        download.file.parentFile?.deleteRecursively()
+                        associateLocalImportSource(
+                            duplicate,
+                            download.metadata.sourceURL,
+                            download.downloadSourceURL,
+                            persistImmediately = false,
                         )
-                    }
-                    repository.registerLocalImport(download).also { imported ->
-                        library = normalizeLiked(library.copy(tracks = library.tracks + imported))
-                        if (persistImmediately) persistLibrary()
+                    } else {
+                        if (linkTransferGeneration != null) {
+                            applyLinkImportProgress(
+                                LinkImportProgress(LinkImportStage.SavingLocal),
+                                linkTransferGeneration,
+                            )
+                        }
+                        repository.registerLocalImport(download).also { imported ->
+                            library = normalizeLiked(library.copy(tracks = library.tracks + imported))
+                        }
                     }
                 }
+                if (persistImmediately) persistLibrary()
                 return track
             } catch (error: CancellationException) {
                 throw error
@@ -1894,7 +1904,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                 (expectedTitle != null && state.downloadCurrentTitle != expectedTitle)
             ) state else state.copy(
                 downloadProgress = progress.fraction,
-                downloadDetail = "${progress.currentItem}/${progress.totalItems} • ${progress.title}",
+                downloadDetail = progress.detail ?: "${progress.currentItem}/${progress.totalItems} • ${progress.title}",
                 downloadCurrentItem = progress.currentItem,
                 downloadTotalItems = progress.totalItems,
                 downloadCurrentTitle = progress.title,
@@ -3768,158 +3778,226 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val downloadClient = serverClient(transferContext)
         val job = viewModelScope.launch {
             try {
-                val sourceSongs = pendingSourceSongs
-                var sourceDownloads = 0
-                var sourceProcessed = 0
-                val sourceFailures = mutableListOf<String>()
-                val downloadedRemoteIDs = mutableSetOf<String>()
-                if (sourceSongs.isNotEmpty()) {
-                    try {
-                        // The popup represents one song, so source-link items are intentionally
-                        // serialized too; retries reset the same catalog title to zero bytes.
-                        for (song in sourceSongs) {
-                            requireDownloadPolicySnapshot(snapshot)
-                            publishDownloadItemProgress(
-                                DownloadItemProgressPolicy.fromBytes(
-                                    currentItem = sourceProcessed + 1,
-                                    totalItems = pendingSongs.size,
-                                    title = song.title,
-                                    bytesTransferred = 0L,
-                                    totalBytes = song.size.takeIf { it > 0L },
-                                ),
-                            )
-                            val itemResult = try {
-                                val source = requireNotNull(song.sourceURL)
-                                val mediaMode = if (song.isVideoMedia) {
-                                    LinkImportMediaMode.Video
-                                } else {
-                                    LinkImportMediaMode.Audio
-                                }
-                                val knownCatalogMetadata = RemoteSongDownloadMetadataPolicy.knownTrack(song)
-                                val concurrentMetadata = if (
-                                    knownCatalogMetadata == null &&
-                                    remoteSongMetadataHydrationJob?.isActive == true
-                                ) {
-                                    remoteSongMetadataTask(song, snapshot.context)
-                                } else {
-                                    null
-                                }
-                                val resolutionKey = requireNotNull(
-                                    RemoteSourceResolutionCachePolicy.key(
-                                        context = snapshot.context,
-                                        mediaMode = mediaMode,
-                                        sourceURL = source,
-                                        accountScope = accountSession?.accountID,
-                                    ),
-                                ) { "The saved song source is not a valid HTTPS track URL." }
-                                val acquisition = RemoteSourceDownloadCoordinator.acquireMedia(
-                                    metadata = concurrentMetadata,
-                                ) {
-                                    val cachedResolution = remoteSourceResolutions[resolutionKey]
-                                    cachedResolution?.takeIf { cached ->
-                                        RemoteSourceResolutionCachePolicy.canReuse(
-                                            resolution = cached,
-                                            cachedKey = resolutionKey,
-                                            expectedKey = resolutionKey,
-                                            knownCatalogMetadata = knownCatalogMetadata,
-                                        )
-                                    } ?: linkImportService.resolveForDownload(
-                                            source = source,
-                                            mediaMode = mediaMode,
-                                            knownTrackMetadata = knownCatalogMetadata,
-                                        ) { }
-                                            .also { remoteSourceResolutions[resolutionKey] = it }
-                                }
-                                val resolution = acquisition.media
-                                check(resolution.kind == LinkImportKind.Track) {
-                                    "A saved song link resolved to a playlist instead of one song."
-                                }
-                                val transferTitle = knownCatalogMetadata?.title ?: resolution.track.title
-                                val track = downloadLinkTrack(
-                                    metadata = resolution.track,
-                                    candidates = resolution.candidates,
-                                    mediaMode = mediaMode,
-                                    completedBefore = sourceProcessed,
-                                    total = pendingSongs.size,
-                                    deferArtwork = true,
-                                    persistImmediately = false,
-                                    batchProgress = { progress ->
-                                        requireDownloadPolicySnapshot(snapshot)
-                                        publishDownloadItemProgress(
-                                            DownloadItemProgressPolicy.fromBytes(
-                                                currentItem = sourceProcessed + 1,
-                                                totalItems = pendingSongs.size,
-                                                title = transferTitle,
-                                                bytesTransferred = progress.completedBytes,
-                                                totalBytes = progress.totalBytes.takeIf { it > 0L },
-                                                isComplete = progress.totalBytes > 0L &&
-                                                    progress.completedBytes >= progress.totalBytes,
-                                            ),
-                                        )
-                                    },
-                                    finalMetadata = {
-                                        requireDownloadPolicySnapshot(snapshot)
-                                        val currentCatalogMetadata = mutableState.value.remoteSongs
-                                            .firstOrNull { current -> current.id == song.id }
-                                            ?.let(RemoteSongDownloadMetadataPolicy::knownTrack)
-                                        if (currentCatalogMetadata != null) {
-                                            currentCatalogMetadata
-                                        } else {
-                                            RemoteSourceDownloadCoordinator.completedMetadataOrNull(
-                                                acquisition.metadata,
-                                            )?.also { enriched ->
-                                                recordRemoteSongMetadata(song.id, enriched, snapshot.context)
-                                            }
-                                        }
-                                    },
-                                )
-                                requireDownloadPolicySnapshot(snapshot)
-                                adoptUploadedDownload(track.id, song.id, transferContext.serverURL)
-                                RemoteSourceDownloadResult(remoteID = song.id)
-                            } catch (error: CancellationException) {
-                                throw error
-                            } catch (error: Throwable) {
-                                // A changed policy or profile is a batch interruption,
-                                // not an item-level failure that should be skipped.
-                                requireDownloadPolicySnapshot(snapshot)
-                                RemoteSourceDownloadResult(
-                                    failure = "${song.title}: ${error.message ?: "download failed"}",
-                                )
-                            }
-                            itemResult.remoteID?.let {
-                                downloadedRemoteIDs += it
-                                sourceDownloads += 1
-                            }
-                            itemResult.failure?.let(sourceFailures::add)
-                            sourceProcessed += 1
-                        }
-                    } finally {
-                        // Source imports, provenance, and remote associations are
-                        // checkpointed once for the batch (also on cancellation).
-                        persistLibrary()
-                    }
+                val pendingIndexByID = pendingSongs.mapIndexed { index, song -> song.id to index }.toMap()
+                val presentation = DownloadItemPresentationCoordinator(pendingSongs.size)
+                val presentationLock = Any()
+                fun publishBatch(index: Int, item: DownloadItemProgressPresentation) {
+                    val visible = synchronized(presentationLock) { presentation.update(index, item) }
+                    visible?.let(::publishDownloadItemProgress)
                 }
-                val catalog = mov.unblocked.resonance.data.RemoteCatalog(
-                    pendingFileSongs,
+                fun completeBatch(index: Int) {
+                    val visible = synchronized(presentationLock) { presentation.complete(index) }
+                    visible?.let(::publishDownloadItemProgress)
+                }
+
+                val budget = MixedProviderDownloadPolicy.budget(
+                    sourceCount = pendingSourceSongs.size,
+                    directCount = pendingFileSongs.size,
                 )
-                val catalogTitlesByID = pendingSongs.associate { it.id to it.title }
-                val result = downloadClient.downloadSelected(
-                    catalog = catalog,
-                    selectedIDs = catalog.songs.mapTo(mutableSetOf(), RemoteSong::id),
-                    repository = repository,
-                    existingRemoteIDs = existingRemoteIDs,
-                    onProgress = { progress ->
-                        publishDownloadItemProgress(
-                            DownloadItemProgressPolicy.fromCatalogTransfer(
-                                progress = progress,
-                                completedBefore = sourceProcessed,
-                                batchTotal = pendingSongs.size,
-                                catalogTitlesByID = catalogTitlesByID,
-                            ),
+                val (sourceResults, result) = try {
+                    coroutineScope {
+                    val sourceTask = async {
+                        if (pendingSourceSongs.isEmpty()) return@async emptyList<RemoteSourceDownloadResult>()
+                        val semaphore = Semaphore(budget.sourceConcurrency)
+                        pendingSourceSongs.map { song ->
+                            async {
+                                semaphore.withPermit {
+                                    val overallIndex = requireNotNull(pendingIndexByID[song.id])
+                                    val source = requireNotNull(song.sourceURL)
+                                    val initialTitle = RemoteSongDownloadMetadataPolicy.knownTrack(song)?.title
+                                        ?: song.title
+                                    publishBatch(
+                                        overallIndex,
+                                        DownloadItemProgressPolicy.fromBytes(
+                                            currentItem = overallIndex + 1,
+                                            totalItems = pendingSongs.size,
+                                            title = initialTitle,
+                                            bytesTransferred = 0L,
+                                            totalBytes = null,
+                                            detail = ProviderDownloadPreparationPolicy.detail(
+                                                source,
+                                                LinkImportStage.Idle,
+                                            ),
+                                        ),
+                                    )
+                                    val itemResult = try {
+                                        requireDownloadPolicySnapshot(snapshot)
+                                        val mediaMode = if (song.isVideoMedia) {
+                                            LinkImportMediaMode.Video
+                                        } else {
+                                            LinkImportMediaMode.Audio
+                                        }
+                                        val knownCatalogMetadata = RemoteSongDownloadMetadataPolicy.knownTrack(song)
+                                        val concurrentMetadata = if (
+                                            knownCatalogMetadata == null &&
+                                            remoteSongMetadataHydrationJob?.isActive == true
+                                        ) {
+                                            remoteSongMetadataTask(song, snapshot.context)
+                                        } else {
+                                            null
+                                        }
+                                        val resolutionKey = requireNotNull(
+                                            RemoteSourceResolutionCachePolicy.key(
+                                                context = snapshot.context,
+                                                mediaMode = mediaMode,
+                                                sourceURL = source,
+                                                accountScope = accountSession?.accountID,
+                                            ),
+                                        ) { "The saved song source is not a valid HTTPS track URL." }
+                                        val acquisition = RemoteSourceDownloadCoordinator.acquireMedia(
+                                            metadata = concurrentMetadata,
+                                        ) {
+                                            val cachedResolution = remoteSourceResolutions[resolutionKey]
+                                            cachedResolution?.takeIf { cached ->
+                                                RemoteSourceResolutionCachePolicy.canReuse(
+                                                    resolution = cached,
+                                                    cachedKey = resolutionKey,
+                                                    expectedKey = resolutionKey,
+                                                    knownCatalogMetadata = knownCatalogMetadata,
+                                                )
+                                            } ?: linkImportService.resolveForDownload(
+                                                source = source,
+                                                mediaMode = mediaMode,
+                                                knownTrackMetadata = knownCatalogMetadata,
+                                            ) { progress ->
+                                                requireDownloadPolicySnapshot(snapshot)
+                                                publishBatch(
+                                                    overallIndex,
+                                                    DownloadItemProgressPolicy.fromBytes(
+                                                        currentItem = overallIndex + 1,
+                                                        totalItems = pendingSongs.size,
+                                                        title = initialTitle,
+                                                        bytesTransferred = progress.completedBytes,
+                                                        totalBytes = progress.totalBytes.takeIf { it > 0L },
+                                                        detail = ProviderDownloadPreparationPolicy.detail(
+                                                            source,
+                                                            progress.stage,
+                                                        ),
+                                                    ),
+                                                )
+                                            }.also { remoteSourceResolutions[resolutionKey] = it }
+                                        }
+                                        val resolution = acquisition.media
+                                        check(resolution.kind == LinkImportKind.Track) {
+                                            "A saved song link resolved to a playlist instead of one song."
+                                        }
+                                        val transferTitle = knownCatalogMetadata?.title ?: resolution.track.title
+                                        val track = downloadLinkTrack(
+                                            metadata = resolution.track,
+                                            candidates = resolution.candidates,
+                                            mediaMode = mediaMode,
+                                            completedBefore = overallIndex,
+                                            total = pendingSongs.size,
+                                            deferArtwork = true,
+                                            persistImmediately = false,
+                                            batchProgress = { progress ->
+                                                requireDownloadPolicySnapshot(snapshot)
+                                                publishBatch(
+                                                    overallIndex,
+                                                    DownloadItemProgressPolicy.fromBytes(
+                                                        currentItem = overallIndex + 1,
+                                                        totalItems = pendingSongs.size,
+                                                        title = transferTitle,
+                                                        bytesTransferred = progress.completedBytes,
+                                                        totalBytes = progress.totalBytes.takeIf { it > 0L },
+                                                        isComplete = progress.totalBytes > 0L &&
+                                                            progress.completedBytes >= progress.totalBytes,
+                                                        detail = ProviderDownloadPreparationPolicy.detail(
+                                                            source,
+                                                            progress.stage,
+                                                        ),
+                                                    ),
+                                                )
+                                            },
+                                            finalMetadata = {
+                                                requireDownloadPolicySnapshot(snapshot)
+                                                val currentCatalogMetadata = mutableState.value.remoteSongs
+                                                    .firstOrNull { current -> current.id == song.id }
+                                                    ?.let(RemoteSongDownloadMetadataPolicy::knownTrack)
+                                                if (currentCatalogMetadata != null) {
+                                                    currentCatalogMetadata
+                                                } else {
+                                                    RemoteSourceDownloadCoordinator.completedMetadataOrNull(
+                                                        acquisition.metadata,
+                                                    )?.also { enriched ->
+                                                        recordRemoteSongMetadata(song.id, enriched, snapshot.context)
+                                                    }
+                                                }
+                                            },
+                                        )
+                                        requireDownloadPolicySnapshot(snapshot)
+                                        adoptUploadedDownload(track.id, song.id, transferContext.serverURL)
+                                        RemoteSourceDownloadResult(remoteID = song.id)
+                                    } catch (error: CancellationException) {
+                                        throw error
+                                    } catch (error: Throwable) {
+                                        requireDownloadPolicySnapshot(snapshot)
+                                        RemoteSourceDownloadResult(
+                                            failure = "${song.title}: ${error.message ?: "download failed"}",
+                                        )
+                                    } finally {
+                                        completeBatch(overallIndex)
+                                    }
+                                    itemResult
+                                }
+                            }
+                        }.awaitAll()
+                    }
+
+                    val directTask = async {
+                        if (pendingFileSongs.isEmpty()) {
+                            return@async ServerDownloadBatchResult(emptyList(), emptyList())
+                        }
+                        val directCatalog = mov.unblocked.resonance.data.RemoteCatalog(pendingFileSongs)
+                        downloadClient.downloadSelected(
+                            catalog = directCatalog,
+                            selectedIDs = directCatalog.songs.mapTo(mutableSetOf(), RemoteSong::id),
+                            repository = repository,
+                            existingRemoteIDs = existingRemoteIDs,
+                            maximumConcurrency = budget.directConcurrency,
+                            onProgress = { progress ->
+                                val overallIndex = progress.currentSongID
+                                    ?.let(pendingIndexByID::get)
+                                    ?: return@downloadSelected
+                                if (progress.currentItemComplete) {
+                                    completeBatch(overallIndex)
+                                } else {
+                                    val title = pendingSongs[overallIndex].title
+                                    publishBatch(
+                                        overallIndex,
+                                        DownloadItemProgressPolicy.fromBytes(
+                                            currentItem = overallIndex + 1,
+                                            totalItems = pendingSongs.size,
+                                            title = title,
+                                            bytesTransferred = progress.bytesTransferred,
+                                            totalBytes = progress.totalBytes?.takeIf { it > 0L },
+                                            detail = if (progress.bytesTransferred > 0L) {
+                                                "Downloading from server"
+                                            } else {
+                                                "Connecting to server"
+                                            },
+                                        ),
+                                    )
+                                }
+                            },
+                            beforeEach = { requireDownloadPolicySnapshot(snapshot) },
                         )
-                    },
-                    beforeEach = { requireDownloadPolicySnapshot(snapshot) },
-                )
+                    }
+
+                    sourceTask.await() to directTask.await()
+                    }
+                } finally {
+                    // A completed provider import already moved media into the
+                    // managed library. Persist it even if another worker or a
+                    // policy change cancels the remainder of the mixed batch.
+                    if (pendingSourceSongs.isNotEmpty()) persistLibrary()
+                }
+                pendingFileSongs.forEach { song ->
+                    pendingIndexByID[song.id]?.let(::completeBatch)
+                }
+                val sourceDownloads = sourceResults.count { it.remoteID != null }
+                val sourceFailures = sourceResults.mapNotNull(RemoteSourceDownloadResult::failure)
+                val downloadedRemoteIDs = sourceResults.mapNotNullTo(mutableSetOf(), RemoteSourceDownloadResult::remoteID)
                 requireDownloadPolicySnapshot(snapshot)
                 downloadedRemoteIDs += result.tracks.mapNotNull(Track::remoteID)
                 library = hydrateRemoteLikes(hydrateRemotePlaylists(

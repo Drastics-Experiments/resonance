@@ -2558,3 +2558,135 @@ struct PlayerModelRegressionTests {
         #expect(!relaunched.tracks.contains { $0.id == removed.id })
     }
 }
+
+
+private actor MacBatchConcurrencyProbe {
+    private var active = 0
+    private var peak = 0
+
+    func begin() {
+        active += 1
+        peak = max(peak, active)
+    }
+
+    func end() {
+        active -= 1
+    }
+
+    func maximum() -> Int { peak }
+}
+
+@Suite
+struct MacBatchDownloadPolicyTests {
+    @Test("desktop batch pool preserves order and caps active downloads")
+    func boundedPool() async {
+        let probe = MacBatchConcurrencyProbe()
+        let values = Array(0..<16)
+        let results = await MacBatchDownloadPolicy.orderedMap(
+            values,
+            maximumConcurrent: 4
+        ) { value in
+            await probe.begin()
+            try? await Task.sleep(for: .milliseconds(5 + value % 3))
+            await probe.end()
+            return value * 2
+        }
+        let peak = await probe.maximum()
+        #expect(peak == 4)
+        #expect(results == values.map { $0 * 2 })
+    }
+
+    @Test("catalog fast path requires resolved descriptive metadata")
+    func catalogFastPath() {
+        #expect(MacBatchDownloadPolicy.maximumConcurrentDownloads == 4)
+        #expect(MacBatchDownloadPolicy.canUseCatalogMetadata(
+            title: "Catalog title",
+            artist: "Catalog artist",
+            duration: 211,
+            isMetadataLoading: false
+        ))
+        #expect(!MacBatchDownloadPolicy.canUseCatalogMetadata(
+            title: "Catalog title",
+            artist: "Catalog artist",
+            duration: nil,
+            isMetadataLoading: false
+        ))
+        #expect(!MacBatchDownloadPolicy.canUseCatalogMetadata(
+            title: "Resolving metadata…",
+            artist: "On-device lookup",
+            duration: 211,
+            isMetadataLoading: true
+        ))
+    }
+}
+
+
+@MainActor
+@Suite(.serialized)
+struct MacMixedProviderDownloadPolicyTests {
+    @Test
+    func byteActiveItemReplacesEarlierProviderPreparation() {
+        let preparing = MacBatchDownloadPreparationDisplay(
+            index: 0,
+            title: "Slow YouTube song",
+            detail: "Inspecting YouTube",
+            completedBytes: 0,
+            totalBytes: 0
+        )
+        let downloading = MacBatchDownloadPreparationDisplay(
+            index: 1,
+            title: "Direct song",
+            detail: "Downloading from server",
+            completedBytes: 512,
+            totalBytes: 1_024
+        )
+        #expect(MacMixedDownloadPresentationPolicy.shouldPromote(
+            current: preparing,
+            candidate: downloading
+        ))
+        #expect(!MacMixedDownloadPresentationPolicy.shouldPromote(
+            current: downloading,
+            candidate: preparing
+        ))
+    }
+
+    @Test
+    func providerPreparationNamesEverySupportedSource() {
+        #expect(MacProviderDownloadPreparationPolicy.detail(
+            sourceURL: "https://www.youtube.com/watch?v=abcdefghijk",
+            stage: .inspectingSource
+        ) == "Inspecting YouTube")
+        #expect(MacProviderDownloadPreparationPolicy.detail(
+            sourceURL: "https://soundcloud.com/artist/song",
+            stage: .resolvingMetadata
+        ) == "Resolving SoundCloud")
+        #expect(MacProviderDownloadPreparationPolicy.detail(
+            sourceURL: "https://open.spotify.com/track/0123456789012345678901",
+            stage: .searchingCandidates
+        ) == "Finding a YouTube match")
+    }
+
+    @Test
+    func preparationCoordinatorPrioritizesRealBytes() {
+        var published: [MacBatchDownloadPreparationDisplay?] = []
+        let coordinator = MacBatchDownloadPresentationCoordinator(itemCount: 3) {
+            published.append($0)
+        }
+        coordinator.update(MacBatchDownloadPreparationDisplay(
+            index: 0,
+            title: "YouTube",
+            detail: "Inspecting YouTube",
+            completedBytes: 0,
+            totalBytes: 0
+        ))
+        coordinator.update(MacBatchDownloadPreparationDisplay(
+            index: 1,
+            title: "Direct",
+            detail: "Downloading from server",
+            completedBytes: 256,
+            totalBytes: 1_024
+        ))
+        #expect(coordinator.currentIndex == 1)
+        #expect(published.compactMap { $0 }.last?.title == "Direct")
+    }
+}

@@ -162,6 +162,22 @@ async function uniqueDestination(directory, preferred) {
   }
 }
 
+async function reservedImportDestination(input, preferred) {
+  if (typeof input?.reservedDestination !== "string" || !input.reservedDestination.trim()) {
+    return uniqueDestination(input.destinationDirectory, preferred);
+  }
+  const directory = path.resolve(input.destinationDirectory);
+  const destination = path.resolve(input.reservedDestination);
+  if (path.dirname(destination) !== directory) {
+    throw localImportError(
+      "saving_local",
+      "INVALID_RESERVED_DESTINATION",
+      "The reserved provider download path is outside the managed library.",
+    );
+  }
+  return destination;
+}
+
 async function hashFile(filePath) {
   return new Promise((resolve, reject) => {
     const hash = createHash("sha256");
@@ -931,7 +947,7 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
       const artwork = await artworkFileDataURL(artworkPath).catch(() => null);
       await fs.mkdir(input.destinationDirectory, { recursive: true });
       const preferred = `${safeFilename(`${metadata.artist} - ${metadata.title}`) || `Video-${randomUUID()}`}.mp4`;
-      savedPath = await uniqueDestination(input.destinationDirectory, preferred);
+      savedPath = await reservedImportDestination(input, preferred);
       await fileMove(sourcePath, savedPath);
       assertNotAborted(signal);
       const information = await fs.stat(savedPath);
@@ -970,7 +986,7 @@ async function importConfirmedSource(input, signal, onStage = () => {}, adapters
     onStage({ stage: "saving_local" });
     await fs.mkdir(input.destinationDirectory, { recursive: true });
     const preferred = `${safeFilename(`${metadata.artist} - ${metadata.title}`) || `Track-${randomUUID()}`}.m4a`;
-    savedPath = await uniqueDestination(input.destinationDirectory, preferred);
+    savedPath = await reservedImportDestination(input, preferred);
     await fileMove(outputPath, savedPath);
     assertNotAborted(signal);
     const information = await fs.stat(savedPath);
@@ -1007,6 +1023,7 @@ module.exports = {
   resolveLocalImportDownloadSource,
   resolveLocalImportMetadata,
   resolveLocalImportSource,
+  reservedImportDestination,
   runFFmpeg,
   safeArtworkURL,
   tagM4A,

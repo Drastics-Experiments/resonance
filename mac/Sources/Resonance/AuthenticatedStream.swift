@@ -35,12 +35,14 @@ enum MacAuthenticatedStreamError: LocalizedError, Equatable {
 }
 
 final class MacAuthenticatedStreamAuthorizationLease: @unchecked Sendable {
+    typealias InvalidationHandler = @Sendable () -> Void
     private let lock = NSLock()
     private let timer: DispatchSourceTimer
     private let context: MacClientConfigContext
     private var expiresAt: Date
     private var invalidated = false
-    private var invalidationHandler: (@Sendable () -> Void)?
+    private var invalidationHandler: InvalidationHandler?
+    private var invalidationHandlers: [UUID: InvalidationHandler] = [:]
 
     init(
         context: MacClientConfigContext,
@@ -65,31 +67,49 @@ final class MacAuthenticatedStreamAuthorizationLease: @unchecked Sendable {
         timer.cancel()
     }
 
-    func setInvalidationHandler(_ handler: (@Sendable () -> Void)?) {
+    func setInvalidationHandler(_ handler: InvalidationHandler?) {
         let callImmediately: Bool = lock.withLock {
+            guard !invalidated else { return handler != nil }
             invalidationHandler = handler
-            return invalidated && handler != nil
+            return false
         }
         if callImmediately { handler?() }
     }
 
-    func authorize(at now: Date = .now) throws {
-        let handler: (@Sendable () -> Void)? = lock.withLock {
-            guard !invalidated else { return nil }
-            guard now < expiresAt else {
-                invalidated = true
-                let callback = invalidationHandler
-                invalidationHandler = nil
-                return callback
-            }
+    @discardableResult
+    func registerInvalidationHandler(_ handler: @escaping InvalidationHandler) -> UUID? {
+        let id = UUID()
+        let callImmediately: Bool = lock.withLock {
+            guard !invalidated else { return true }
+            invalidationHandlers[id] = handler
+            return false
+        }
+        if callImmediately {
+            handler()
             return nil
         }
-        if let handler {
-            handler()
+        return id
+    }
+
+    func unregisterInvalidationHandler(_ id: UUID) {
+        _ = lock.withLock {
+            invalidationHandlers.removeValue(forKey: id)
+        }
+    }
+
+    func authorize(at now: Date = .now) throws {
+        let callbacks: [InvalidationHandler] = lock.withLock {
+            guard !invalidated else { return [] }
+            guard now < expiresAt else {
+                invalidated = true
+                return takeInvalidationHandlersLocked()
+            }
+            return []
+        }
+        callbacks.forEach { $0() }
+        if lock.withLock({ invalidated }) {
             throw MacAuthenticatedStreamError.authorizationExpired
         }
-        let isInvalid = lock.withLock { invalidated }
-        if isInvalid { throw MacAuthenticatedStreamError.authorizationExpired }
     }
 
     func matches(context candidate: MacClientConfigContext) -> Bool {
@@ -102,7 +122,7 @@ final class MacAuthenticatedStreamAuthorizationLease: @unchecked Sendable {
         expiresAt newExpiration: Date,
         now: Date = .now
     ) -> Bool {
-        var callback: (@Sendable () -> Void)?
+        var callbacks: [InvalidationHandler] = []
         let renewed: Bool = lock.withLock {
             guard !invalidated,
                   now < expiresAt,
@@ -110,8 +130,7 @@ final class MacAuthenticatedStreamAuthorizationLease: @unchecked Sendable {
                   newExpiration > now else {
                 if !invalidated {
                     invalidated = true
-                    callback = invalidationHandler
-                    invalidationHandler = nil
+                    callbacks = takeInvalidationHandlersLocked()
                 }
                 return false
             }
@@ -119,7 +138,7 @@ final class MacAuthenticatedStreamAuthorizationLease: @unchecked Sendable {
             scheduleTimer(now: now)
             return true
         }
-        callback?()
+        callbacks.forEach { $0() }
         return renewed
     }
 
@@ -129,7 +148,7 @@ final class MacAuthenticatedStreamAuthorizationLease: @unchecked Sendable {
         expiresAt newExpiration: Date,
         now: Date = .now
     ) -> Bool {
-        var callback: (@Sendable () -> Void)?
+        var callbacks: [InvalidationHandler] = []
         let remainsAuthorized: Bool = lock.withLock {
             guard !invalidated,
                   now < expiresAt,
@@ -137,8 +156,7 @@ final class MacAuthenticatedStreamAuthorizationLease: @unchecked Sendable {
                   newExpiration > now else {
                 if !invalidated {
                     invalidated = true
-                    callback = invalidationHandler
-                    invalidationHandler = nil
+                    callbacks = takeInvalidationHandlersLocked()
                 }
                 return false
             }
@@ -146,23 +164,21 @@ final class MacAuthenticatedStreamAuthorizationLease: @unchecked Sendable {
             scheduleTimer(now: now)
             return true
         }
-        callback?()
+        callbacks.forEach { $0() }
         return remainsAuthorized
     }
 
     func invalidate() {
-        let callback: (@Sendable () -> Void)? = lock.withLock {
-            guard !invalidated else { return nil }
+        let callbacks: [InvalidationHandler] = lock.withLock {
+            guard !invalidated else { return [] }
             invalidated = true
-            let callback = invalidationHandler
-            invalidationHandler = nil
-            return callback
+            return takeInvalidationHandlersLocked()
         }
-        callback?()
+        callbacks.forEach { $0() }
     }
 
     private func expireIfNeeded() {
-        var callback: (@Sendable () -> Void)?
+        var callbacks: [InvalidationHandler] = []
         lock.withLock {
             guard !invalidated else { return }
             let now = Date.now
@@ -171,10 +187,19 @@ final class MacAuthenticatedStreamAuthorizationLease: @unchecked Sendable {
                 return
             }
             invalidated = true
-            callback = invalidationHandler
-            invalidationHandler = nil
+            callbacks = takeInvalidationHandlersLocked()
         }
-        callback?()
+        callbacks.forEach { $0() }
+    }
+
+    private func takeInvalidationHandlersLocked() -> [InvalidationHandler] {
+        var callbacks = Array(invalidationHandlers.values)
+        invalidationHandlers.removeAll()
+        if let invalidationHandler {
+            callbacks.append(invalidationHandler)
+            self.invalidationHandler = nil
+        }
+        return callbacks
     }
 
     private func scheduleTimer(now: Date) {
@@ -322,8 +347,15 @@ enum MacLeaseBoundDownloader {
                 progress: progress
             )
         }
-        authorizationLease.setInvalidationHandler { worker.cancel() }
-        defer { authorizationLease.setInvalidationHandler(nil) }
+        guard let invalidationRegistration = authorizationLease.registerInvalidationHandler({
+            worker.cancel()
+        }) else {
+            worker.cancel()
+            throw MacAuthenticatedStreamError.authorizationExpired
+        }
+        defer {
+            authorizationLease.unregisterInvalidationHandler(invalidationRegistration)
+        }
         return try await withTaskCancellationHandler(
             operation: { try await worker.value },
             onCancel: { worker.cancel() }

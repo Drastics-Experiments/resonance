@@ -2,6 +2,7 @@ package mov.unblocked.resonance.data
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.sync.Mutex
 
 data class DownloadItemProgressPresentation(
     val currentItem: Int,
@@ -10,6 +11,7 @@ data class DownloadItemProgressPresentation(
     val bytesTransferred: Long,
     val totalBytes: Long?,
     val isComplete: Boolean = false,
+    val detail: String? = null,
 ) {
     val fraction: Float
         get() = totalBytes
@@ -23,7 +25,7 @@ enum class DownloadProgressDisplayMode {
     DeterminateTransfer,
 }
 
-/** The popup is hidden before the first byte, so every displayed mode represents real transfer. */
+/** Zero-byte source preparation is indeterminate; received bytes become determinate progress. */
 object DownloadProgressDisplayPolicy {
     fun mode(bytesTransferred: Long, totalBytes: Long?): DownloadProgressDisplayMode = when {
         bytesTransferred <= 0L -> DownloadProgressDisplayMode.IndeterminateTransfer
@@ -34,6 +36,166 @@ object DownloadProgressDisplayPolicy {
     fun percentageLabel(fraction: Float): String = when {
         fraction > 0f && fraction < .01f -> "<1%"
         else -> "${(fraction.coerceIn(0f, 1f) * 100).toInt()}%"
+    }
+}
+
+
+/** Keeps a single-song popup stable while multiple downloads run underneath it. */
+internal class BatchDownloadPresentationCoordinator(itemCount: Int) {
+    private val active = BooleanArray(itemCount.coerceAtLeast(0)) { true }
+    private val latest = arrayOfNulls<TransferProgress>(active.size)
+    private var presentedIndex = -1
+
+    private fun hasBytes(progress: TransferProgress?): Boolean =
+        (progress?.bytesTransferred ?: 0L) > 0L
+
+    private fun bestIndex(): Int {
+        val started = active.indices.filter { active[it] && latest[it] != null }
+        return started.firstOrNull { hasBytes(latest[it]) }
+            ?: started.firstOrNull()
+            ?: active.indexOfFirst { it }
+    }
+
+    fun update(index: Int, progress: TransferProgress): TransferProgress? {
+        if (index !in active.indices || !active[index]) return null
+        latest[index] = progress
+        if (presentedIndex !in active.indices || !active[presentedIndex]) {
+            presentedIndex = bestIndex()
+        } else if (index != presentedIndex) {
+            val currentHasBytes = hasBytes(latest[presentedIndex])
+            val candidateHasBytes = hasBytes(progress)
+            if ((!currentHasBytes && candidateHasBytes) ||
+                (!currentHasBytes && !candidateHasBytes && index < presentedIndex)
+            ) {
+                presentedIndex = index
+            }
+        }
+        return progress.takeIf { index == presentedIndex }
+    }
+
+    fun complete(index: Int): TransferProgress? {
+        if (index !in active.indices || !active[index]) return null
+        active[index] = false
+        latest[index] = null
+        if (index != presentedIndex) return null
+        presentedIndex = bestIndex()
+        return presentedIndex.takeIf { it >= 0 }?.let(latest::get)
+    }
+
+    fun currentIndex(): Int? = presentedIndex.takeIf { it >= 0 }
+}
+
+/** Coordinates source-provider and direct-file progress using original batch order. */
+internal class DownloadItemPresentationCoordinator(itemCount: Int) {
+    private val active = BooleanArray(itemCount.coerceAtLeast(0)) { true }
+    private val latest = arrayOfNulls<DownloadItemProgressPresentation>(active.size)
+    private var presentedIndex = -1
+
+    private fun hasBytes(progress: DownloadItemProgressPresentation?): Boolean =
+        (progress?.bytesTransferred ?: 0L) > 0L
+
+    private fun bestIndex(): Int {
+        val started = active.indices.filter { active[it] && latest[it] != null }
+        return started.firstOrNull { hasBytes(latest[it]) }
+            ?: started.firstOrNull()
+            ?: active.indexOfFirst { it }
+    }
+
+    fun update(index: Int, progress: DownloadItemProgressPresentation): DownloadItemProgressPresentation? {
+        if (index !in active.indices || !active[index]) return null
+        latest[index] = progress
+        if (presentedIndex !in active.indices || !active[presentedIndex]) {
+            presentedIndex = bestIndex()
+        } else if (index != presentedIndex) {
+            val currentHasBytes = hasBytes(latest[presentedIndex])
+            val candidateHasBytes = hasBytes(progress)
+            if ((!currentHasBytes && candidateHasBytes) ||
+                (!currentHasBytes && !candidateHasBytes && index < presentedIndex)
+            ) {
+                presentedIndex = index
+            }
+        }
+        return progress.takeIf { index == presentedIndex }
+    }
+
+    fun complete(index: Int): DownloadItemProgressPresentation? {
+        if (index !in active.indices || !active[index]) return null
+        active[index] = false
+        latest[index] = null
+        if (index != presentedIndex) return null
+        presentedIndex = bestIndex()
+        return presentedIndex.takeIf { it >= 0 }?.let(latest::get)
+    }
+
+    fun currentIndex(): Int? = presentedIndex.takeIf { it >= 0 }
+}
+
+data class MixedProviderConcurrencyBudget(
+    val sourceConcurrency: Int,
+    val directConcurrency: Int,
+)
+
+/** Shares the mobile worker budget instead of running every provider before server files. */
+internal object MixedProviderDownloadPolicy {
+    fun budget(
+        sourceCount: Int,
+        directCount: Int,
+        maximumConcurrency: Int = BatchDownloadPolicy.MobileConcurrency,
+    ): MixedProviderConcurrencyBudget {
+        val source = sourceCount.coerceAtLeast(0)
+        val direct = directCount.coerceAtLeast(0)
+        val maximum = maximumConcurrency.coerceAtLeast(1)
+        if (source == 0) return MixedProviderConcurrencyBudget(0, minOf(maximum, direct))
+        if (direct == 0) return MixedProviderConcurrencyBudget(minOf(maximum, source), 0)
+        val sourceWorkers = minOf(source, maxOf(1, maximum - 1))
+        return MixedProviderConcurrencyBudget(
+            sourceConcurrency = sourceWorkers,
+            directConcurrency = minOf(direct, maxOf(1, maximum - sourceWorkers)),
+        )
+    }
+}
+
+/** Serializes only the duplicate-check and managed-file adoption critical section. */
+internal class RemoteSourceAdoptionGate {
+    private val mutex = Mutex()
+
+    suspend fun <Value> run(operation: suspend () -> Value): Value {
+        mutex.lock()
+        return try {
+            operation()
+        } finally {
+            mutex.unlock()
+        }
+    }
+}
+
+internal object ProviderDownloadPreparationPolicy {
+    fun provider(sourceURL: String?): String {
+        val value = sourceURL.orEmpty().lowercase()
+        return when {
+            "soundcloud.com" in value -> "SoundCloud"
+            "spotify.com" in value || "spotify.link" in value -> "Spotify"
+            "youtube.com" in value || "youtu.be" in value -> "YouTube"
+            else -> "provider"
+        }
+    }
+
+    fun detail(sourceURL: String?, stage: LinkImportStage): String {
+        val provider = provider(sourceURL)
+        return when (stage) {
+            LinkImportStage.ResolvingMetadata -> "Resolving $provider"
+            LinkImportStage.SearchingCandidates ->
+                if (provider == "Spotify") "Finding a YouTube match" else "Finding $provider media"
+            LinkImportStage.AwaitingSelection -> "Choosing a playable source"
+            LinkImportStage.InspectingSource -> "Inspecting $provider"
+            LinkImportStage.Downloading -> "Downloading $provider"
+            LinkImportStage.SavingLocal -> "Finishing download"
+            LinkImportStage.Syncing -> "Saving server association"
+            LinkImportStage.Complete -> "Download complete"
+            LinkImportStage.Failed -> "Download failed"
+            LinkImportStage.Cancelled -> "Download cancelled"
+            LinkImportStage.Idle -> "Preparing $provider"
+        }
     }
 }
 
@@ -191,6 +353,7 @@ object DownloadItemProgressPolicy {
         bytesTransferred: Long,
         totalBytes: Long?,
         isComplete: Boolean = false,
+        detail: String? = null,
     ): DownloadItemProgressPresentation = DownloadItemProgressPresentation(
         currentItem = currentItem.coerceIn(1, totalItems.coerceAtLeast(1)),
         totalItems = totalItems.coerceAtLeast(1),
@@ -198,6 +361,7 @@ object DownloadItemProgressPolicy {
         bytesTransferred = bytesTransferred.coerceAtLeast(0L),
         totalBytes = totalBytes?.takeIf { it > 0L },
         isComplete = isComplete,
+        detail = detail,
     )
 }
 

@@ -636,6 +636,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         let request: RemoteSongMetadataRequest
         let metadata: LocalImportSpotifyTrack?
     }
+    private struct RemoteDownloadWorkItem: Sendable {
+        let index: Int
+        let song: MobileRemoteSong
+    }
     private enum RemoteDownloadItemResult: Sendable {
         case downloaded(songID: String)
         case failed(songID: String, title: String, reason: String)
@@ -846,7 +850,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var activeDownloadBatch: (id: UUID, task: Task<Void, Never>)?
     private var activeTransferSessionID: UUID?
     private var byteGatedDownloadSessionID: UUID?
-    private var activeNativeDownloadOperationID: UUID?
+    private var activeNativeDownloadOperationIDs: Set<UUID> = []
+    private var activeNativeDownloadPresentations: [UUID: MobileTransferDisplayState] = [:]
     private var activeNativeDownloadPresentationOperationID: UUID?
     private var remoteLikedSongIDs: Set<String> = []
     private var dirtyRemoteLikeSongIDs: Set<String> = []
@@ -3154,7 +3159,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func beginDownloadTransfer() -> UUID? {
-        reserveTransferSession(kind: .download, requiresReceivedBytes: true)
+        // Reserve the card immediately. It stays indeterminate during provider
+        // lookup and connection setup, then becomes byte-driven on first data.
+        reserveTransferSession(kind: .download)
     }
 
     private func pendingLoadedCatalogSongs(
@@ -3330,7 +3337,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         await downloadSerialGate.release()
     }
 
-    private func remoteSourceResolution(for song: MobileRemoteSong) async throws -> LocalImportResolution {
+    private func remoteSourceResolution(
+        for song: MobileRemoteSong,
+        progress: @escaping LocalImportProgressHandler = { _ in }
+    ) async throws -> LocalImportResolution {
         guard let source = song.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
               !source.isEmpty else { throw SourceLinkRequiredError() }
         let mediaMode = LocalImportMediaMode(rawValue: song.mediaKind) ?? .audio
@@ -3364,6 +3374,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         if let knownCatalogMetadata {
             acquisitionMetadata = knownCatalogMetadata
         } else if LocalImportURL.isSpotify(source) {
+            progress(LocalImportProgress(stage: .resolvingMetadata))
             // Spotify's audio search needs exact title/artist terms. Share only
             // that necessary provider request when the server row has not been
             // hydrated yet; the transfer remains invisible until audio bytes.
@@ -3393,8 +3404,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         resolution = try await serverLinkImportService.resolveUsingCatalogMetadata(
             source: source,
             metadata: acquisitionMetadata,
-            mediaMode: mediaMode
-        ) { _ in }
+            mediaMode: mediaMode,
+            progress: progress
+        )
         guard resolution.playlist == nil else { throw URLError(.cannotParseResponse) }
         remoteSourceResolutions[cacheKey] = resolution
         return resolution
@@ -3784,14 +3796,60 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             sessionID: transferSessionID,
             operationID: operationID
         ) else { throw CancellationError() }
-        let resolution = try await remoteSourceResolution(for: song)
+        guard let source = song.sourceURL else { throw URLError(.cannotParseResponse) }
+        let presentProviderProgress: LocalImportProgressHandler = { [weak self] progress in
+            guard let self,
+                  accessToken == self.serverToken,
+                  self.ownsNativeDownloadOperation(
+                    sessionID: transferSessionID,
+                    operationID: operationID
+                  ) else { return }
+            if MobileDownloadTransferPresentationPolicy.shouldEndBytePresentation(for: progress.stage) {
+                if self.transferDisplay?.itemID == song.id {
+                    self.endNativeDownloadBytePresentation(
+                        sessionID: transferSessionID,
+                        operationID: operationID,
+                        preserveForNextItem: MobileDownloadTransferPresentationPolicy.shouldPreserveBetweenItems(
+                            currentItem: currentItem,
+                            totalItems: totalItems
+                        )
+                    )
+                }
+                return
+            }
+            let displaySong = self.remoteSongs.first(where: { $0.id == song.id }) ?? song
+            let detail = MobileProviderDownloadPreparationPolicy.detail(
+                sourceURL: source,
+                stage: progress.stage
+            )
+            self.downloadDetail = detail
+            self.presentTransfer(
+                sessionID: transferSessionID,
+                operationID: operationID,
+                kind: .download,
+                itemID: song.id,
+                songTitle: displaySong.title,
+                detail: detail,
+                currentItem: currentItem,
+                totalItems: totalItems,
+                completedBytes: progress.completed,
+                totalBytes: progress.total,
+                fallbackProgress: nil,
+                allowsPreparationPresentation: true
+            )
+        }
+        let resolution = try await remoteSourceResolution(
+            for: song,
+            progress: presentProviderProgress
+        )
         guard accessToken == serverToken,
               ownsNativeDownloadOperation(
             sessionID: transferSessionID,
             operationID: operationID
         ) else { throw CancellationError() }
-        guard let candidate = resolution.candidates.first,
-              let source = song.sourceURL else { throw URLError(.cannotParseResponse) }
+        guard let candidate = resolution.candidates.first else {
+            throw URLError(.cannotParseResponse)
+        }
         let metadata = LocalImportMetadata(
             title: resolution.track.title,
             artist: resolution.track.artist,
@@ -3806,47 +3864,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             mediaMode: LocalImportMediaMode(rawValue: song.mediaKind) ?? .audio,
             includeArtwork: false,
             preferResolvedMetadata: song.isMetadataLoading && !LocalImportURL.isSpotify(source)
-        ) { [weak self] progress in
-            guard let self,
-                  accessToken == self.serverToken,
-                  self.ownsNativeDownloadOperation(
-                sessionID: transferSessionID,
-                operationID: operationID
-            ) else { return }
-            if MobileDownloadTransferPresentationPolicy.shouldEndBytePresentation(
-                for: progress.stage
-            ) {
-                if self.transferDisplay?.itemID == song.id {
-                    self.endNativeDownloadBytePresentation(
-                        sessionID: transferSessionID,
-                        operationID: operationID,
-                        preserveForNextItem: MobileDownloadTransferPresentationPolicy.shouldPreserveBetweenItems(
-                            currentItem: currentItem,
-                            totalItems: totalItems
-                        )
-                    )
-                }
-                return
-            }
-            guard MobileDownloadTransferPresentationPolicy.shouldPresent(
-                     completedBytes: progress.completed,
-                     fallbackProgress: nil
-                  ) else { return }
-            let displaySong = self.remoteSongs.first(where: { $0.id == song.id }) ?? song
-            self.downloadDetail = "Downloading \(displaySong.title)"
-            self.presentTransfer(
-                sessionID: transferSessionID,
-                operationID: operationID,
-                kind: .download,
-                itemID: song.id,
-                songTitle: displaySong.title,
-                detail: "Downloading song",
-                currentItem: currentItem,
-                totalItems: totalItems,
-                completedBytes: progress.completed,
-                totalBytes: progress.total,
-                fallbackProgress: nil
-            )
+        ) { progress in
+            presentProviderProgress(progress)
         }
         guard accessToken == serverToken,
               ownsNativeDownloadOperation(
@@ -3953,6 +3972,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         baseURL: URL,
         profileID: String,
         accessToken: String,
+        requestHeaders: [String: String],
         downloadPolicyLease: MobileTransferPolicyLease,
         transferSessionID: UUID,
         currentItem: Int,
@@ -3974,6 +3994,25 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 operationID: operationID
             )
         }
+        let displaySong = remoteSongs.first(where: { $0.id == song.id }) ?? song
+        let initialDetail = song.isSourceLinkRecord
+            ? MobileProviderDownloadPreparationPolicy.detail(
+                sourceURL: song.sourceURL,
+                stage: .idle
+            )
+            : "Connecting to server"
+        downloadDetail = initialDetail
+        presentTransfer(
+            sessionID: transferSessionID,
+            operationID: operationID,
+            kind: .download,
+            itemID: song.id,
+            songTitle: displaySong.title,
+            detail: initialDetail,
+            currentItem: currentItem,
+            totalItems: totalItems,
+            allowsPreparationPresentation: true
+        )
         if song.isSourceLinkRecord {
             do {
                 _ = try await importSavedRemoteSource(
@@ -4040,9 +4079,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
 
         var request = URLRequest(url: remoteURL)
-        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        setClientConfigContextHeaders(on: &request, profileID: profileID)
+        for (header, value) in requestHeaders {
+            request.setValue(value, forHTTPHeaderField: header)
+        }
         let progressSongID = song.id
         let catalogByteCount = song.size
         do {
@@ -4129,7 +4168,20 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             } else {
                 mediaDuration = try AVAudioPlayer(contentsOf: temporaryURL).duration
             }
-            let metadata = await embeddedMetadata(at: temporaryURL)
+            let catalogSong = remoteSongs.first(where: { $0.id == song.id }) ?? song
+            let usesCatalogMetadata = MobileBatchDownloadPolicy.canUseCatalogMetadata(catalogSong)
+            let metadata: EmbeddedMetadata
+            if usesCatalogMetadata {
+                metadata = EmbeddedMetadata(
+                    title: catalogSong.title,
+                    artist: catalogSong.artist,
+                    album: catalogSong.album,
+                    duration: catalogSong.duration,
+                    artworkData: nil
+                )
+            } else {
+                metadata = await embeddedMetadata(at: temporaryURL)
+            }
             let artworkData = metadata.artworkData
             try Task.checkCancellation()
             guard accessToken == serverToken,
@@ -4152,7 +4204,6 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 try? fileManager.removeItem(at: destination)
                 throw error
             }
-            let catalogSong = remoteSongs.first(where: { $0.id == song.id }) ?? song
             let trackID = UUID()
             let persistedSourceURL = MobileTrackPersistencePolicy.canonicalSourceURL(song.sourceURL)
             let persistedDownloadSourceURL = MobileTrackPersistencePolicy.persistedDownloadSourceURL(
@@ -4175,7 +4226,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 sourceURL: persistedSourceURL,
                 downloadSourceURL: persistedDownloadSourceURL,
                 artworkFilename: saveArtwork(artworkData, for: trackID),
-                artworkScanComplete: artworkData != nil,
+                artworkScanComplete: usesCatalogMetadata ? false : artworkData != nil,
                 contentSHA256: downloaded.sha256,
                 preservesUnlinkedImport: false
             ))
@@ -4204,33 +4255,28 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         downloadPolicyLease: MobileTransferPolicyLease,
         transferSessionID: UUID
     ) async -> [RemoteDownloadItemResult] {
-        var results: [RemoteDownloadItemResult] = []
-
-        func isInterrupted(_ result: RemoteDownloadItemResult) -> Bool {
-            switch result {
-            case .policyChanged, .cancelled: true
-            case .downloaded, .failed: false
-            }
+        var requestTemplate = URLRequest(url: baseURL)
+        requestTemplate.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        requestTemplate.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        setClientConfigContextHeaders(on: &requestTemplate, profileID: profileID)
+        let requestHeaders = requestTemplate.allHTTPHeaderFields ?? [:]
+        let workItems = songs.enumerated().map {
+            RemoteDownloadWorkItem(index: $0.offset, song: $0.element)
         }
-
-        for (index, song) in songs.enumerated() {
-            let result = await downloadRemoteSong(
-                song,
+        return await MobileBatchDownloadPolicy.orderedMap(workItems) { [weak self] item in
+            guard let self else { return .cancelled }
+            return await self.downloadRemoteSong(
+                item.song,
                 baseURL: baseURL,
                 profileID: profileID,
                 accessToken: accessToken,
+                requestHeaders: requestHeaders,
                 downloadPolicyLease: downloadPolicyLease,
                 transferSessionID: transferSessionID,
-                currentItem: index + 1,
-                totalItems: songs.count
+                currentItem: item.index + 1,
+                totalItems: workItems.count
             )
-            results.append(result)
-            if isInterrupted(result) { break }
-            if index + 1 < songs.count {
-                hideTransferPresentation(sessionID: transferSessionID)
-            }
         }
-        return results
     }
 
     private func performCatalogSync() async {
@@ -5594,7 +5640,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         let sessionID = UUID()
         activeTransferSessionID = sessionID
         byteGatedDownloadSessionID = kind == .download && requiresReceivedBytes ? sessionID : nil
-        activeNativeDownloadOperationID = nil
+        activeNativeDownloadOperationIDs.removeAll()
+        activeNativeDownloadPresentations.removeAll()
         activeNativeDownloadPresentationOperationID = nil
         transferDisplay = nil
         isDownloading = kind == .download
@@ -5616,7 +5663,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         ) else { return }
         activeTransferSessionID = nil
         byteGatedDownloadSessionID = nil
-        activeNativeDownloadOperationID = nil
+        activeNativeDownloadOperationIDs.removeAll()
+        activeNativeDownloadPresentations.removeAll()
         activeNativeDownloadPresentationOperationID = nil
         isDownloading = false
         isUploading = false
@@ -5646,23 +5694,45 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         guard MobileTransferSessionPolicy.accepts(
             sessionID,
             activeSessionID: activeTransferSessionID
-        ), activeNativeDownloadOperationID == nil else { return nil }
+        ) else { return nil }
         let operationID = UUID()
-        activeNativeDownloadOperationID = operationID
-        activeNativeDownloadPresentationOperationID = operationID
+        activeNativeDownloadOperationIDs.insert(operationID)
         return operationID
     }
 
-    private func finishNativeDownloadOperation(sessionID: UUID, operationID: UUID) {
-        guard MobileTransferSessionPolicy.acceptsOperation(
-            sessionID: sessionID,
-            operationID: operationID,
-            activeSessionID: activeTransferSessionID,
-            activeOperationID: activeNativeDownloadOperationID
-        ) else { return }
-        activeNativeDownloadOperationID = nil
-        if activeNativeDownloadPresentationOperationID == operationID {
+    private func bestNativeDownloadPresentationOperationID() -> UUID? {
+        activeNativeDownloadOperationIDs.compactMap { operationID -> (UUID, MobileTransferDisplayState)? in
+            activeNativeDownloadPresentations[operationID].map { (operationID, $0) }
+        }.sorted { left, right in
+            let leftHasBytes = left.1.completedBytes > 0
+            let rightHasBytes = right.1.completedBytes > 0
+            if leftHasBytes != rightHasBytes { return leftHasBytes && !rightHasBytes }
+            if left.1.currentItem != right.1.currentItem {
+                return left.1.currentItem < right.1.currentItem
+            }
+            return left.0.uuidString < right.0.uuidString
+        }.first?.0
+    }
+
+    private func publishBestNativeDownloadPresentation(sessionID: UUID) -> Bool {
+        guard let nextOperationID = bestNativeDownloadPresentationOperationID(),
+              let display = activeNativeDownloadPresentations[nextOperationID] else {
             activeNativeDownloadPresentationOperationID = nil
+            return false
+        }
+        activeNativeDownloadPresentationOperationID = nextOperationID
+        applyTransferSession(display, sessionID: sessionID)
+        return true
+    }
+
+    private func finishNativeDownloadOperation(sessionID: UUID, operationID: UUID) {
+        guard MobileTransferSessionPolicy.accepts(
+            sessionID,
+            activeSessionID: activeTransferSessionID
+        ), activeNativeDownloadOperationIDs.remove(operationID) != nil else { return }
+        activeNativeDownloadPresentations.removeValue(forKey: operationID)
+        if activeNativeDownloadPresentationOperationID == operationID {
+            _ = publishBestNativeDownloadPresentation(sessionID: sessionID)
         }
     }
 
@@ -5671,9 +5741,16 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         operationID: UUID,
         preserveForNextItem: Bool = false
     ) {
-        guard ownsNativeDownloadOperation(sessionID: sessionID, operationID: operationID) else { return }
-        activeNativeDownloadPresentationOperationID = nil
-        if !preserveForNextItem {
+        guard ownsNativeDownloadOperation(
+            sessionID: sessionID,
+            operationID: operationID
+        ) else { return }
+        // A background operation can finish while another item owns the card.
+        // Remove its snapshot immediately so stale progress cannot reappear.
+        activeNativeDownloadPresentations.removeValue(forKey: operationID)
+        guard activeNativeDownloadPresentationOperationID == operationID else { return }
+        if publishBestNativeDownloadPresentation(sessionID: sessionID) { return }
+        if !preserveForNextItem && activeNativeDownloadOperationIDs.count <= 1 {
             hideTransferPresentation(sessionID: sessionID)
         }
     }
@@ -5688,12 +5765,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func ownsNativeDownloadOperation(sessionID: UUID, operationID: UUID) -> Bool {
-        MobileTransferSessionPolicy.acceptsOperation(
-            sessionID: sessionID,
-            operationID: operationID,
-            activeSessionID: activeTransferSessionID,
-            activeOperationID: activeNativeDownloadOperationID
-        )
+        MobileTransferSessionPolicy.accepts(
+            sessionID,
+            activeSessionID: activeTransferSessionID
+        ) && activeNativeDownloadOperationIDs.contains(operationID)
     }
 
     private func presentTransfer(
@@ -5707,7 +5782,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         totalItems: Int,
         completedBytes: Int64 = 0,
         totalBytes: Int64 = 0,
-        fallbackProgress: Double? = nil
+        fallbackProgress: Double? = nil,
+        allowsPreparationPresentation: Bool = false
     ) {
         guard MobileTransferSessionPolicy.accepts(
             sessionID,
@@ -5716,24 +5792,6 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         if let operationID,
            !ownsNativeDownloadOperation(sessionID: sessionID, operationID: operationID) {
             return
-        }
-        if kind == .download,
-           let operationID,
-           !MobileTransferSessionPolicy.acceptsBytePresentation(
-            operationID: operationID,
-            activePresentationOperationID: activeNativeDownloadPresentationOperationID
-           ) {
-            return
-        }
-        if kind == .download, byteGatedDownloadSessionID == sessionID {
-            let hasReceivedBytes = transferDisplay?.kind == .download
-                && transferDisplay?.itemID == itemID
-                && (transferDisplay?.completedBytes ?? 0) > 0
-            guard MobileDownloadTransferPresentationPolicy.shouldPresent(
-                completedBytes: completedBytes,
-                fallbackProgress: fallbackProgress,
-                hasReceivedBytes: hasReceivedBytes
-            ) else { return }
         }
         let display = MobileTransferDisplayState(
             kind: kind,
@@ -5746,6 +5804,34 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             totalBytes: totalBytes,
             fallbackProgress: fallbackProgress
         )
+        if kind == .download, let operationID {
+            activeNativeDownloadPresentations[operationID] = display
+            let currentDisplay = activeNativeDownloadPresentationOperationID
+                .flatMap { activeNativeDownloadPresentations[$0] }
+            if activeNativeDownloadPresentationOperationID == nil
+                || activeNativeDownloadOperationIDs.contains(activeNativeDownloadPresentationOperationID!) == false
+                || MobileMixedDownloadPresentationPolicy.shouldPromote(
+                    current: currentDisplay,
+                    candidate: display
+                ) {
+                activeNativeDownloadPresentationOperationID = operationID
+            }
+            guard MobileTransferSessionPolicy.acceptsBytePresentation(
+                operationID: operationID,
+                activePresentationOperationID: activeNativeDownloadPresentationOperationID
+            ) else { return }
+        }
+        if kind == .download, byteGatedDownloadSessionID == sessionID {
+            let hasReceivedBytes = transferDisplay?.kind == .download
+                && transferDisplay?.itemID == itemID
+                && (transferDisplay?.completedBytes ?? 0) > 0
+            guard MobileDownloadTransferPresentationPolicy.shouldPresent(
+                completedBytes: completedBytes,
+                fallbackProgress: fallbackProgress,
+                hasReceivedBytes: hasReceivedBytes,
+                allowsPreparation: allowsPreparationPresentation
+            ) else { return }
+        }
         applyTransferSession(display, sessionID: sessionID)
     }
 

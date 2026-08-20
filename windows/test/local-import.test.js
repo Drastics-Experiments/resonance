@@ -37,6 +37,7 @@ const {
   resolveLocalImportDownloadSource,
   resolveLocalImportMetadata,
   resolveLocalImportSource,
+  reservedImportDestination,
   safeArtworkURL,
 } = platform;
 const {
@@ -50,6 +51,28 @@ const {
   resolveYouTubeAudio,
   verifiedContentRange,
 } = youtube;
+
+test("provider imports consume distinct batch-reserved destinations", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "resonance-reserved-provider-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const library = path.join(root, "Music");
+  await fs.mkdir(library, { recursive: true });
+  const first = path.join(library, "same-song.m4a");
+  const second = path.join(library, "same-song 2.m4a");
+
+  const resolved = await Promise.all([
+    reservedImportDestination({ destinationDirectory: library, reservedDestination: first }, "same-song.m4a"),
+    reservedImportDestination({ destinationDirectory: library, reservedDestination: second }, "same-song.m4a"),
+  ]);
+  assert.deepEqual(resolved, [first, second]);
+  await assert.rejects(
+    reservedImportDestination({
+      destinationDirectory: library,
+      reservedDestination: path.join(root, "outside.m4a"),
+    }, "same-song.m4a"),
+    /outside the managed library/i,
+  );
+});
 
 test("selects the largest YouTube artwork regardless of provider array order", () => {
   const highest = "https://i.ytimg.com/vi/jNQXAC9IVRw/maxresdefault.jpg";

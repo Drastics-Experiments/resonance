@@ -7032,14 +7032,6 @@ function updateServerTransfer({
   }
   const toast = $("#serverTransferToast");
   if (!toast) return;
-  const ownsVisibleDownload = serverTransferActive
-    && serverTransferOwner === owner
-    && toast.dataset.direction === "download";
-  const downloadBytes = Number(itemCompleted === undefined ? completed : itemCompleted) || 0;
-  if (direction === "download" && downloadBytes <= 0 && !ownsVisibleDownload) {
-    toast.hidden = true;
-    return;
-  }
   const presentation = serverTransferProgressPresentation({
     completed,
     total,

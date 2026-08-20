@@ -91,8 +91,8 @@ class ResonanceUiStateTest {
     @Test
     fun transferPopupOnlyAppearsForDownloadsAndUploads() {
         assertFalse(shouldShowTransferPopup(ResonanceUiState(isRefreshingServer = true, isSyncingPlaylists = true)))
-        assertFalse(shouldShowTransferPopup(ResonanceUiState(isDownloading = true)))
-        assertFalse(shouldShowTransferPopup(ResonanceUiState(
+        assertTrue(shouldShowTransferPopup(ResonanceUiState(isDownloading = true)))
+        assertTrue(shouldShowTransferPopup(ResonanceUiState(
             isDownloading = true,
             downloadBytesTransferred = 0L,
             downloadTotalBytes = 10_000L,
@@ -102,7 +102,7 @@ class ResonanceUiStateTest {
             downloadBytesTransferred = 1L,
             downloadTotalBytes = 10_000L,
         )))
-        assertFalse(shouldShowTransferPopup(ResonanceUiState(
+        assertTrue(shouldShowTransferPopup(ResonanceUiState(
             isDownloading = true,
             downloadProgress = 1f,
             downloadBytesTransferred = 0L,

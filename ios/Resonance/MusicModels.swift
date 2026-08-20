@@ -1030,6 +1030,69 @@ struct MobileSyncProfilesResponse: Codable {
     }
 }
 
+
+enum MobileBatchDownloadPolicy {
+    static let maximumConcurrentDownloads = 3
+
+    static func canUseCatalogMetadata(
+        title: String,
+        artist: String,
+        duration: TimeInterval?,
+        isMetadataLoading: Bool
+    ) -> Bool {
+        func usable(_ value: String, placeholders: Set<String>) -> Bool {
+            let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return !normalized.isEmpty && !placeholders.contains(normalized)
+        }
+        return !isMetadataLoading
+            && MobilePlayableMediaDurationPolicy.remoteDuration(duration) != nil
+            && usable(title, placeholders: ["resolving metadata…", "metadata unavailable"])
+            && usable(artist, placeholders: [
+                "automatic lookup", "on-device lookup", "unknown artist",
+            ])
+    }
+
+    static func canUseCatalogMetadata(_ song: MobileRemoteSong) -> Bool {
+        canUseCatalogMetadata(
+            title: song.title,
+            artist: song.artist,
+            duration: song.duration,
+            isMetadataLoading: song.isMetadataLoading
+        )
+    }
+
+    static func orderedMap<Input: Sendable, Output: Sendable>(
+        _ values: [Input],
+        maximumConcurrent: Int = maximumConcurrentDownloads,
+        operation: @escaping @Sendable (Input) async -> Output
+    ) async -> [Output] {
+        guard !values.isEmpty else { return [] }
+        let limit = min(max(maximumConcurrent, 1), values.count)
+        return await withTaskGroup(of: (Int, Output).self) { group in
+            var nextIndex = 0
+            var results = [Output?](repeating: nil, count: values.count)
+
+            for _ in 0..<limit {
+                let index = nextIndex
+                let value = values[index]
+                nextIndex += 1
+                group.addTask { (index, await operation(value)) }
+            }
+
+            while let (index, result) = await group.next() {
+                results[index] = result
+                if nextIndex < values.count {
+                    let index = nextIndex
+                    let value = values[index]
+                    nextIndex += 1
+                    group.addTask { (index, await operation(value)) }
+                }
+            }
+            return results.compactMap { $0 }
+        }
+    }
+}
+
 struct MobileRemoteSong: Identifiable, Decodable, Hashable, Sendable {
     let id: String
     let filename: String
@@ -1776,26 +1839,84 @@ enum MobileTransferDisplayPolicy {
     }
 }
 
-/// Download reservations are intentionally invisible. A transfer card becomes
-/// truthful only once the downloader has received media bytes. A terminal
-/// update may keep an already-visible card alive, but cannot create one.
+/// Byte progress remains truthful, while source discovery and connection setup
+/// may keep an already-reserved transfer card alive with an indeterminate bar.
 enum MobileDownloadTransferPresentationPolicy {
     static func shouldPresent(
         completedBytes: Int64,
         fallbackProgress: Double?,
-        hasReceivedBytes: Bool = false
+        hasReceivedBytes: Bool = false,
+        allowsPreparation: Bool = false
     ) -> Bool {
+        if allowsPreparation { return true }
         if completedBytes > 0 { return true }
         guard let fallbackProgress, fallbackProgress.isFinite else { return false }
         return hasReceivedBytes && fallbackProgress > 0
     }
 
     static func shouldEndBytePresentation(for stage: LocalImportStage) -> Bool {
-        stage != .downloading
+        switch stage {
+        case .processing, .savingLocal, .localComplete, .syncing, .complete, .failed, .cancelled:
+            return true
+        case .idle, .resolvingMetadata, .searchingCandidates, .awaitingSelection, .inspectingSource, .downloading:
+            return false
+        }
     }
 
     static func shouldPreserveBetweenItems(currentItem: Int, totalItems: Int) -> Bool {
         currentItem > 0 && currentItem < totalItems
+    }
+}
+
+
+enum MobileProviderDownloadPreparationPolicy {
+    static func provider(sourceURL: String?) -> String {
+        let value = sourceURL?.lowercased() ?? ""
+        if value.contains("soundcloud.com") { return "SoundCloud" }
+        if value.contains("spotify.com") || value.contains("spotify.link") { return "Spotify" }
+        if value.contains("youtube.com") || value.contains("youtu.be") { return "YouTube" }
+        return "provider"
+    }
+
+    static func detail(sourceURL: String?, stage: LocalImportStage) -> String {
+        let provider = provider(sourceURL: sourceURL)
+        switch stage {
+        case .idle:
+            return "Preparing \(provider)"
+        case .resolvingMetadata:
+            return "Resolving \(provider)"
+        case .searchingCandidates:
+            return provider == "Spotify" ? "Finding a YouTube match" : "Finding \(provider) media"
+        case .awaitingSelection:
+            return "Choosing a playable source"
+        case .inspectingSource:
+            return "Inspecting \(provider)"
+        case .downloading:
+            return "Downloading \(provider)"
+        case .processing, .savingLocal, .localComplete:
+            return "Finishing download"
+        case .syncing:
+            return "Saving server association"
+        case .complete:
+            return "Download complete"
+        case .failed:
+            return "Download failed"
+        case .cancelled:
+            return "Download cancelled"
+        }
+    }
+}
+
+enum MobileMixedDownloadPresentationPolicy {
+    static func shouldPromote(
+        current: MobileTransferDisplayState?,
+        candidate: MobileTransferDisplayState
+    ) -> Bool {
+        guard let current else { return true }
+        let currentHasBytes = current.completedBytes > 0
+        let candidateHasBytes = candidate.completedBytes > 0
+        if currentHasBytes != candidateHasBytes { return candidateHasBytes }
+        return !currentHasBytes && candidate.currentItem < current.currentItem
     }
 }
 
