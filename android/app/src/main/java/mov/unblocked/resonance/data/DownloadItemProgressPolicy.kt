@@ -2,6 +2,7 @@ package mov.unblocked.resonance.data
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.sync.Mutex
 
 data class DownloadItemProgressPresentation(
     val currentItem: Int,
@@ -151,6 +152,20 @@ internal object MixedProviderDownloadPolicy {
             sourceConcurrency = sourceWorkers,
             directConcurrency = minOf(direct, maxOf(1, maximum - sourceWorkers)),
         )
+    }
+}
+
+/** Serializes only the duplicate-check and managed-file adoption critical section. */
+internal class RemoteSourceAdoptionGate {
+    private val mutex = Mutex()
+
+    suspend fun <Value> run(operation: suspend () -> Value): Value {
+        mutex.lock()
+        return try {
+            operation()
+        } finally {
+            mutex.unlock()
+        }
     }
 }
 

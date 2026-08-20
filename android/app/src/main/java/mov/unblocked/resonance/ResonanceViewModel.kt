@@ -102,6 +102,7 @@ import mov.unblocked.resonance.data.PlaylistSyncMutationPolicy
 import mov.unblocked.resonance.data.PendingDownloadBatchPolicy
 import mov.unblocked.resonance.data.RemoteSongDownloadMetadataPolicy
 import mov.unblocked.resonance.data.RemoteDownloadContextChangePolicy
+import mov.unblocked.resonance.data.RemoteSourceAdoptionGate
 import mov.unblocked.resonance.data.RemoteSourceDownloadCoordinator
 import mov.unblocked.resonance.data.RemoteSourceResolutionCacheKey
 import mov.unblocked.resonance.data.RemoteSourceResolutionCachePolicy
@@ -220,6 +221,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private val repository = LibraryRepository(context)
     private val linkImportService = LinkImportService(context)
     private val remoteSourceResolutions = mutableMapOf<RemoteSourceResolutionCacheKey, LinkImportResolution>()
+    private val remoteSourceAdoptionGate = RemoteSourceAdoptionGate()
     private val credentials = CredentialStore(context)
     private var accountSession: AccountSession? = credentials.accountSession
     private val clientConfigStore = ClientConfigStore(context)
@@ -1678,32 +1680,34 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
                             ?: downloaded.durationMs,
                     )
                 } ?: downloaded
-                linkTransferGeneration?.let(::requireLinkImportTransfer)
-                val duplicate = library.tracks.firstOrNull {
-                    it.sourceSHA256 == download.sourceSHA256 ||
-                        it.contentSHA256 == download.sourceSHA256 ||
-                        it.contentSHA256 == download.contentSHA256
-                }
-                val track = if (duplicate != null) {
-                    download.file.parentFile?.deleteRecursively()
-                    associateLocalImportSource(
-                        duplicate,
-                        download.metadata.sourceURL,
-                        download.downloadSourceURL,
-                        persistImmediately,
-                    )
-                } else {
-                    if (linkTransferGeneration != null) {
-                        applyLinkImportProgress(
-                            LinkImportProgress(LinkImportStage.SavingLocal),
-                            linkTransferGeneration,
+                val track = remoteSourceAdoptionGate.run {
+                    linkTransferGeneration?.let(::requireLinkImportTransfer)
+                    val duplicate = library.tracks.firstOrNull {
+                        it.sourceSHA256 == download.sourceSHA256 ||
+                            it.contentSHA256 == download.sourceSHA256 ||
+                            it.contentSHA256 == download.contentSHA256
+                    }
+                    if (duplicate != null) {
+                        download.file.parentFile?.deleteRecursively()
+                        associateLocalImportSource(
+                            duplicate,
+                            download.metadata.sourceURL,
+                            download.downloadSourceURL,
+                            persistImmediately = false,
                         )
-                    }
-                    repository.registerLocalImport(download).also { imported ->
-                        library = normalizeLiked(library.copy(tracks = library.tracks + imported))
-                        if (persistImmediately) persistLibrary()
+                    } else {
+                        if (linkTransferGeneration != null) {
+                            applyLinkImportProgress(
+                                LinkImportProgress(LinkImportStage.SavingLocal),
+                                linkTransferGeneration,
+                            )
+                        }
+                        repository.registerLocalImport(download).also { imported ->
+                            library = normalizeLiked(library.copy(tracks = library.tracks + imported))
+                        }
                     }
                 }
+                if (persistImmediately) persistLibrary()
                 return track
             } catch (error: CancellationException) {
                 throw error

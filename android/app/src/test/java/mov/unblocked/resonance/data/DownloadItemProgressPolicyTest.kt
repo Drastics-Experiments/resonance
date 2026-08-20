@@ -1,6 +1,8 @@
 package mov.unblocked.resonance.data
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -25,6 +27,35 @@ class DownloadItemProgressPolicyTest {
         )
         assertEquals("<1%", DownloadProgressDisplayPolicy.percentageLabel(.001f))
         assertEquals("1%", DownloadProgressDisplayPolicy.percentageLabel(.01f))
+    }
+
+    @Test fun sourceAdoptionGateSerializesDuplicateDetectionAndRegistration() = runTest {
+        val gate = RemoteSourceAdoptionGate()
+        val firstEntered = CompletableDeferred<Unit>()
+        val releaseFirst = CompletableDeferred<Unit>()
+        val secondEntered = CompletableDeferred<Unit>()
+
+        val first = async {
+            gate.run {
+                firstEntered.complete(Unit)
+                releaseFirst.await()
+                "first"
+            }
+        }
+        firstEntered.await()
+        val second = async {
+            gate.run {
+                secondEntered.complete(Unit)
+                "second"
+            }
+        }
+        yield()
+        assertFalse(secondEntered.isCompleted)
+
+        releaseFirst.complete(Unit)
+        assertEquals("first", first.await())
+        assertEquals("second", second.await())
+        assertTrue(secondEntered.isCompleted)
     }
 
     @Test fun mediaAcquisitionDoesNotAwaitMetadataEnrichment() = runTest {

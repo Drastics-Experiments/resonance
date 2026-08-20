@@ -26,4 +26,20 @@ struct DownloadPreparationProgressTests {
             completedBytes: 1
         ))
     }
+
+    @Test("installed prefetches reconcile before cancelled or unfinished work")
+    func installedPrefetchesReconcileBeforeCancelledWork() {
+        #expect(MacBatchDownloadPolicy.shouldCheckpointInstalledPrefetch(
+            isSourceLinkRecord: false,
+            downloadedThisSync: true
+        ))
+        #expect(!MacBatchDownloadPolicy.shouldCheckpointInstalledPrefetch(
+            isSourceLinkRecord: true,
+            downloadedThisSync: true
+        ))
+        #expect(MacBatchDownloadPolicy.reconciliationOrder(
+            itemCount: 5,
+            checkpointIndices: [3, 1]
+        ) == [1, 3, 0, 2, 4])
+    }
 }

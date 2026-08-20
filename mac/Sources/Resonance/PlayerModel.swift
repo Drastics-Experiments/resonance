@@ -97,6 +97,22 @@ enum PlaylistPresentationEntryID: Hashable {
 enum MacBatchDownloadPolicy {
     static let maximumConcurrentDownloads = 4
 
+    static func shouldCheckpointInstalledPrefetch(
+        isSourceLinkRecord: Bool,
+        downloadedThisSync: Bool
+    ) -> Bool {
+        !isSourceLinkRecord && downloadedThisSync
+    }
+
+    static func reconciliationOrder(
+        itemCount: Int,
+        checkpointIndices: Set<Int>
+    ) -> [Int] {
+        let indices = Array(0..<max(itemCount, 0))
+        let checkpointed = indices.filter(checkpointIndices.contains)
+        return checkpointed + indices.filter { !checkpointIndices.contains($0) }
+    }
+
     static func canUseCatalogMetadata(
         title: String,
         artist: String,
@@ -4127,18 +4143,36 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                 }
             }
 
+            let checkpointPrefetchIndices = Set(songs.indices.filter { index in
+                MacBatchDownloadPolicy.shouldCheckpointInstalledPrefetch(
+                    isSourceLinkRecord: songs[index].isSourceLinkRecord,
+                    downloadedThisSync: downloadPlans[index].validatedCache?.downloadedThisSync == true
+                )
+            })
+            let reconciliationOrder = MacBatchDownloadPolicy.reconciliationOrder(
+                itemCount: songs.count,
+                checkpointIndices: checkpointPrefetchIndices
+            )
+
             downloadBatchTotal = pendingSongIDs.count
             var changedCount = 0
             var failedCount = 0
             var pendingPosition = 0
 
-            for (remote, plan) in zip(songs, downloadPlans) {
-                try Task.checkCancellation()
-                guard catalogProfileID == syncProfileID,
-                      credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken),
-                      let currentBase = try? normalizedServerURL(),
-                      Self.serverContextKey(base: currentBase, profileID: catalogProfileID)
-                        == Self.serverContextKey(base: base, profileID: catalogProfileID) else {
+            for index in reconciliationOrder {
+                let remote = songs[index]
+                let plan = downloadPlans[index]
+                let checkpointsInstalledPrefetch = checkpointPrefetchIndices.contains(index)
+                if !checkpointsInstalledPrefetch {
+                    try Task.checkCancellation()
+                }
+                let currentContextMatches = (try? normalizedServerURL()).map { currentBase in
+                    catalogProfileID == syncProfileID
+                        && credentialFingerprint == MacClientConfigContext.tokenFingerprint(serverToken)
+                        && Self.serverContextKey(base: currentBase, profileID: catalogProfileID)
+                            == Self.serverContextKey(base: base, profileID: catalogProfileID)
+                } == true
+                guard checkpointsInstalledPrefetch || currentContextMatches else {
                     throw CancellationError()
                 }
                 if plan.prefetchFailed {
@@ -4247,7 +4281,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                     let expectedContentSHA256 = try Self.catalogSHA256(remote.contentSHA256)
                     let remoteIdentity = ServerSongIdentity(
                         serverURL: base,
-                        profileID: syncProfileID,
+                        profileID: catalogProfileID,
                         songID: remote.id
                     )
                     let existingIndex = tracks.firstIndex {
@@ -4369,7 +4403,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         fileURL: destination,
                         remoteID: remote.id,
                         sourceServer: ServerSongIdentity.normalizedOrigin(base),
-                        syncProfileID: syncProfileID,
+                        syncProfileID: catalogProfileID,
                         sourceURL: MacPersistentMediaURLPolicy.persistentString(
                             remote.sourceURL ?? existingIndex.flatMap { tracks[$0].sourceURL }
                         ),
@@ -4392,6 +4426,7 @@ final class PlayerModel: NSObject, ObservableObject, @preconcurrency AVAudioPlay
                         tracks.append(track)
                     }
                     changedCount += 1
+                    if checkpointsInstalledPrefetch { persistLibrary() }
                     if isPendingDownload { downloadProgress = 1 }
                 } catch is CancellationError {
                     if let stagingURL { try? FileManager.default.removeItem(at: stagingURL) }

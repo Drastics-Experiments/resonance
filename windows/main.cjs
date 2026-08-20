@@ -4052,6 +4052,7 @@ async function downloadSavedSourceSong(song, options) {
     preparationContext,
     existing: options.existing,
     destinationDirectory: options.destinationDirectory,
+    reservedDestination: options.reservedDestination,
     temporaryRoot: app.getPath("temp"),
   }, options.signal, options.onProgress);
   options.onProgress?.({ stage: "transfer_complete" });
@@ -4246,17 +4247,22 @@ ipcMain.handle("server:sync", async (event, {
     },
   );
   for (const pending of pendingDownloads) {
-    const reusable = pending.matching?.filePath
+    const reusable = !pending.savedSourceURL
+      && pending.matching?.filePath
       && path.dirname(path.resolve(pending.matching.filePath)) === path.resolve(paths.remote)
       ? pending.matching.filePath
       : null;
     let destination = reusable;
+    const reservedName = pending.savedSourceURL
+      ? `${safeFilename(`${pending.displayMetadata.artist} - ${pending.displayMetadata.title}`)
+        || `Track-${pending.song.id}`}.${pending.song.media_kind === "video" ? "mp4" : "m4a"}`
+      : pending.remoteName;
     let collision = 1;
     while (true) {
       if (!destination) {
         const candidateName = collision === 1
-          ? pending.remoteName
-          : windowsCollisionFilename(pending.remoteName, collision);
+          ? reservedName
+          : windowsCollisionFilename(reservedName, collision);
         destination = await uniqueDestination(paths.remote, candidateName);
       }
       const key = path.resolve(destination).toLowerCase();
@@ -4330,6 +4336,7 @@ ipcMain.handle("server:sync", async (event, {
           signal: policyLease.signal,
           existing,
           destinationDirectory: paths.remote,
+          reservedDestination: destination,
           serverOrigin: base.origin,
           profileID: profileID || "default",
           metadata: displayMetadata,
