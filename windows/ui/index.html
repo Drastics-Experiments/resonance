@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self'; style-src 'self'; media-src 'self' file: blob: resonance-stream:; img-src 'self' data: file: https:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; media-src 'self' file: blob: resonance-stream:; img-src 'self' data: file: https:; connect-src blob:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Resonance</title>
   <script src="theme-bootstrap.js"></script>
   <link rel="stylesheet" href="styles.css">
@@ -419,6 +419,7 @@
   <audio id="localImportPreview" preload="metadata"></audio>
   <audio id="audio"></audio>
   <audio id="crossfadeAudio" preload="auto"></audio>
+  <script type="module" src="browser-runtime.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

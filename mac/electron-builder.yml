@@ -1,0 +1,54 @@
+# macOS packaging for the shared Electron desktop client.
+#
+# The project directory for this config is windows/, because the Electron
+# entrypoint and renderer are shared with the Windows client. Keep this file
+# separate from windows/package.json so the Windows installer configuration
+# cannot accidentally change the macOS bundle identity or artifact names.
+appId: com.gavindietrich.LikedSongsFocus
+productName: Resonance
+asar: true
+directories:
+  output: ../installers/macos/dist
+files:
+  - "**/*"
+  - "!test{,/**}"
+  - "!pnpm-lock.yaml"
+  - "!pnpm-workspace.yaml"
+  - "!README.md"
+  - "!*.log"
+  - "!dist{,/**}"
+asarUnpack:
+  - "node_modules/ffmpeg-static/**"
+extraResources:
+  - from: ../mac/scripts/install-update.sh
+    to: install-update.sh
+artifactName: Resonance-macOS.${ext}
+extraMetadata:
+  # Local/macOS packages use the development update channel. A release job
+  # may override this value when it has a production signing identity. The
+  # build helper also mirrors the mode/team/requirement into mac.extendInfo.
+  resonanceUpdateAuthenticity: development
+protocols:
+  - name: Resonance Account Sign-In
+    schemes:
+      - resonance
+mac:
+  category: public.app-category.music
+  darkModeSupport: true
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  icon: ../ios/Resonance/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+  # ffmpeg-static is a downloaded, architecture-specific executable rather
+  # than a Node native module. Keep the x64 copy intact while electron-builder
+  # merges the universal ASAR; the packaging preflight verifies both slices.
+  x64ArchFiles: node_modules/ffmpeg-static/ffmpeg
+  extendInfo:
+    ResonanceUpdateAuthenticity: development
+    ResonanceUpdateBundleIdentifier: com.gavindietrich.LikedSongsFocus
+  target:
+    - zip
+    - pkg
+pkg:
+  # electron-builder gives both mac targets the global artifactName. The
+  # helper renames this one output to the established Installer.pkg name.
+  installLocation: /Applications

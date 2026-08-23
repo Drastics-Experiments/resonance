@@ -13,6 +13,11 @@
       "icon": "test"
     },
     {
+      "name": "Launch Desktop Browser UI",
+      "command": "zsh -c 'set -euo pipefail; cd \"$PWD/windows\"; corepack pnpm ui:browser'",
+      "icon": "play"
+    },
+    {
       "name": "Launch macOS Preview",
       "command": "zsh -c 'set -euo pipefail; source \"$PWD/.launcher-terminal.zsh\"; res_launch_macos \"$PWD\"'",
       "icon": "play"

@@ -17,6 +17,7 @@ const CLIENT_CONTEXT_HEADER_NAMES = Object.freeze([
   "X-Resonance-Cohort-Key",
 ]);
 const SEMANTIC_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const CLIENT_CONTEXT_PLATFORMS = new Set(["windows", "macos"]);
 const YOUTUBE_REVIEW_SOURCE = /^https:\/\/www\.youtube\.com\/watch\?v=([A-Za-z0-9_-]{11})$/;
 const AUDIO_EXTENSIONS = new Set([".aac", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".wav"]);
 const CONTENT_TYPE_EXTENSIONS = new Map([
@@ -62,7 +63,7 @@ function providerHeaders(settings) {
   };
 }
 
-function snapshottedClientContextHeaders(value) {
+function snapshottedClientContextHeaders(value, expectedPlatform = "windows") {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw externalError("searching_candidates", "INVALID_CLIENT_CONTEXT", "The reviewed-match request is missing its client context.");
   }
@@ -74,9 +75,11 @@ function snapshottedClientContextHeaders(value) {
     }
     snapshot[name] = headerValue;
   }
-  if (
+  const platform = String(expectedPlatform || "").trim().toLowerCase();
+  if (!CLIENT_CONTEXT_PLATFORMS.has(platform)
+    || (
     snapshot["X-Resonance-Config-Protocol"] !== "1"
-    || snapshot["X-Resonance-Client-Platform"] !== "windows"
+    || snapshot["X-Resonance-Client-Platform"] !== platform
     || snapshot["X-Resonance-App-Version"].length > 64
     || !SEMANTIC_VERSION.test(snapshot["X-Resonance-App-Version"])
     || !/^\d{1,10}$/.test(snapshot["X-Resonance-App-Build"])
@@ -84,7 +87,7 @@ function snapshottedClientContextHeaders(value) {
     || Number(snapshot["X-Resonance-App-Build"]) > 2_147_483_647
     || !/^[A-Za-z0-9_-]{22}$/.test(snapshot["X-Resonance-Cohort-Key"])
     || Buffer.from(snapshot["X-Resonance-Cohort-Key"], "base64url").toString("base64url") !== snapshot["X-Resonance-Cohort-Key"]
-  ) {
+    )) {
     throw externalError("searching_candidates", "INVALID_CLIENT_CONTEXT", "The reviewed-match request has an invalid client context.");
   }
   return Object.freeze(snapshot);
@@ -92,7 +95,7 @@ function snapshottedClientContextHeaders(value) {
 
 function reviewedLookupHeaders(settings, clientContextHeaders) {
   return {
-    ...snapshottedClientContextHeaders(clientContextHeaders),
+    ...snapshottedClientContextHeaders(clientContextHeaders, settings?.clientPlatform),
     ...providerHeaders(settings),
   };
 }

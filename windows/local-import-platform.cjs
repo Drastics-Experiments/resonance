@@ -285,7 +285,9 @@ function ffmpegExecutable() {
 async function runFFmpeg(args, signal) {
   assertNotAborted(signal);
   return new Promise((resolve, reject) => {
-    const child = spawn(ffmpegExecutable(), args, { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+    const spawnOptions = { stdio: ["ignore", "ignore", "pipe"] };
+    if (process.platform === "win32") spawnOptions.windowsHide = true;
+    const child = spawn(ffmpegExecutable(), args, spawnOptions);
     let stderr = "";
     let settled = false;
     const finish = (callback, value) => {

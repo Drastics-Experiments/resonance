@@ -651,7 +651,8 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(mainSource, /ipcMain\.handle\("library:storage"[\s\S]+sumDirectory\(paths\.local\)[\s\S]+sumDirectory\(paths\.remote\)/);
   assert.match(mainSource, /encodedSongID = encodeURIComponent\(String\(songID \|\| ""\)\)[\s\S]+api\/v1\/admin\/songs\/\$\{encodedSongID\}/);
   assert.match(mainSource, /setWindowOpenHandler\(\(\) => \(\{ action: "deny" \}\)\)[\s\S]+will-navigate[\s\S]+targetURL !== trustedRendererURL[\s\S]+will-attach-webview/);
-  assert.match(mainSource, /openAccountSignInBrowser\(destination\)[\s\S]+shell\.openExternal\(destination\.href\)/);
+  assert.match(mainSource, /openAccountSignInBrowser\(destination\)[\s\S]+openExternalURL\(destination\)/);
+  assert.match(mainSource, /function openExternalURL\(value\)[\s\S]+shell\.openExternal\(safeExternalURL\(value\)\.href\)/);
   assert.match(mainSource, /fetchAccountAvatar\([\s\S]+decodeAccountAvatar/);
   assert.match(mainSource, /nativeImage\.createFromBuffer\([\s\S]+image\.toPNG\(\)/);
   assert.match(mainSource, /persistAccountSession\([\s\S]+isSafeAccountAvatarDataURL/);
@@ -875,14 +876,16 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(appSource, /context = currentProfileContext\(\)[\s\S]+api\.postListeningHistory\(\{[\s\S]+baseURL: context\.serverURL,[\s\S]+token: context\.token/);
   assert.match(appSource, /api\.fetchListeningHistory\(\{[\s\S]+profileID: context\.profileID[\s\S]+profileContextIsCurrent\(context\)[\s\S]+mergeListeningHistoryDocument\(state, remoteDocument, context\.profileID, context\.serverURL, serverCatalog\)/);
   assert.match(appSource, /row\.onkeydown = \(event\) => \{[\s\S]+event\.key === "Enter" \|\| event\.key === " "/);
-  assert.match(appSource, /function bindRemoteRows\(\)[\s\S]+const activate = \(\) => \{[\s\S]+playRemoteStream\(song\)[\s\S]+row\.onclick = \(event\)[\s\S]+activate\(\)[\s\S]+row\.onkeydown/);
+  assert.match(appSource, /function bindRemoteRows\(\)[\s\S]+const primaryAction = row\.querySelector\("\[data-remote-activate\]"\)[\s\S]+const activate = \(\) => \{[\s\S]+playRemoteStream\(song\)[\s\S]+primaryAction\.onclick = activate[\s\S]+primaryAction\.onkeydown/);
   assert.match(appSource, /button\.tabIndex = active \? 0 : -1/);
   assert.match(appSource, /\["ArrowLeft", "ArrowRight", "Home", "End"\]\.includes\(event\.key\)/);
   assert.match(appSource, /function focusSearchSortOption[\s\S]+\["ArrowDown", "ArrowUp", "Home", "End"\]\.includes\(event\.key\)/);
   assert.match(htmlSource, /class="full-player-queue-tabs" role="tablist"/);
   assert.match(htmlSource, /object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'/);
   assert.doesNotMatch(appSource, /id="serverUploadMode"|id="serverDownloadMode"|serverTransferModeHelp/);
+  assert.match(htmlSource, /style-src 'self'; style-src-attr 'unsafe-inline'/);
   assert.match(htmlSource, /media-src 'self' file: blob: resonance-stream:/);
+  assert.match(htmlSource, /connect-src blob:/);
   assert.match(mainSource, /protocol\.registerSchemesAsPrivileged[\s\S]+standard: true,[\s\S]+secure: true,[\s\S]+stream: true/);
   assert.doesNotMatch(mainSource, /supportFetchAPI/);
   assert.match(mainSource, /protocol\.handle\(SERVER_STREAM_SCHEME, handleServerStreamRequest\)/);

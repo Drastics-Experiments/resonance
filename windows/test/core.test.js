@@ -926,11 +926,11 @@ test("renders every Windows select through the themed custom dropdown", () => {
   assert.doesNotMatch(styleSource, /\.resonance-select-native\s*\{/);
 });
 
-test("persists source Preview credentials without system credential commands", () => {
+test("persists macOS credentials without system credential commands", () => {
   const mainSource = readFileSync(new URL("../main.cjs", import.meta.url), "utf8");
   const retiredStorageName = ["Liked", " Songs"].join("");
   assert.doesNotMatch(mainSource, /\{ app, BrowserWindow, dialog, ipcMain, safeStorage, shell \}/);
-  assert.match(mainSource, /function usesPreviewCredentialStore\(\)[\s\S]+process\.platform === "darwin" && !app\.isPackaged/);
+  assert.match(mainSource, /function usesPreviewCredentialStore\(\)[\s\S]+return process\.platform === "darwin"/);
   assert.match(mainSource, /previewCredentialStorePath[\s\S]+app\.getPath\("userData"\), "server-credentials\.json"/);
   assert.match(mainSource, /previewAccountSessionPath[\s\S]+app\.getPath\("userData"\), "account-session\.json"/);
   assert.doesNotMatch(
@@ -1260,7 +1260,7 @@ test("stores profile-menu clip ranges as playback metadata without exporting fil
   assert.match(appSource, /async function loadClipEditorVideoFrames\(track, count = 12\)[\s\S]+drawImage[\s\S]+toDataURL\("image\/jpeg"/);
   assert.match(appSource, /api\.videoFrames\(\{[\s\S]+filePath: track\.filePath[\s\S]+duration: clipEditorDuration\(track\)/);
   assert.match(preloadSource, /videoFrames: \(value\) => ipcRenderer\.invoke\("library:video-frames", value\)/);
-  assert.match(mainSource, /ipcMain\.handle\("library:video-frames"[\s\S]+isManagedLibraryFile\(filePath, managedRoots\)[\s\S]+captureVideoFrame/);
+  assert.match(mainSource, /ipcMain\.handle\("library:video-frames"[\s\S]+rendererReadableMediaPath\(filePath, managedRoots\)[\s\S]+captureVideoFrame/);
   assert.match(appSource, /function finishClipPlaybackIfNeeded\(\)/);
   assert.match(appSource, /currentPlaybackDuration\(\)[\s\S]{0,180}clippedPlaybackPosition\(duration \* Number/);
   assert.match(appSource, /async function toggleClipRangePreview\(\)[\s\S]+prepareClipRangePreviewMedia\(track\)[\s\S]+clipEditorPreviewAudio\.play\(\)/);
@@ -1500,6 +1500,22 @@ test("hides inline playlist row buttons while preserving drag and context contro
   assert.match(styleSource, /\.context-action-icon svg/);
 });
 
+test("gives interactive rows real primary buttons alongside secondary controls", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  assert.match(appSource, /data-track="\$\{escapeHTML\(track\.id\)\}" role="group" aria-label=/);
+  assert.match(appSource, /data-track-activate="\$\{escapeHTML\(track\.id\)\}" aria-label=/);
+  assert.match(appSource, /const keyboardActionLabel = unavailable/);
+  assert.match(appSource, /Press Enter or Space to play/);
+  assert.match(appSource, /aria-keyshortcuts="Enter Space Alt\+ArrowUp Alt\+ArrowDown Shift\+F10"/);
+  assert.match(appSource, /data-storage-track="\$\{escapeHTML\(track\.id\)\}" role="group" aria-label=/);
+  assert.match(appSource, /data-storage-activate="\$\{escapeHTML\(track\.id\)\}" aria-label=/);
+  assert.match(appSource, /data-remote-activate="\$\{escapeHTML\(song\.id\)\}" aria-label=/);
+  assert.match(appSource, /const storageActionLabel = storageEditing/);
+  assert.match(appSource, /aria-disabled="\$\{!storageEditing && unavailable\}"/);
+  assert.match(appSource, /primaryAction\.onclick/);
+  assert.match(appSource, /document\.querySelectorAll\("\[data-storage-select\]"\)/);
+});
+
 test("uses the playlist dropdown treatment across app popup menus", () => {
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   const shuffleStyleSource = readFileSync(new URL("../ui/shuffle-icon.css", import.meta.url), "utf8");
@@ -1541,7 +1557,7 @@ test("ports playback reliability, recovery notices, and keyboard operation into 
   assert.match(appSource, /replace\(\/\^Error invoking remote method/);
   assert.match(appSource, /const deleted = \[\];[\s\S]+const failed = \[\];[\s\S]+The files remain in your library/);
   assert.match(appSource, /Alt\+Up or Alt\+Down/);
-  assert.match(appSource, /row\.onkeydown = async[\s\S]+dataset\.playlistEntry[\s\S]+CSS\.escape\(entryKey\)/);
+  assert.match(appSource, /primaryAction\.onkeydown = async[\s\S]+dataset\.playlistEntry[\s\S]+CSS\.escape\(entryKey\)/);
   assert.match(appSource, /menu\.onkeydown = \(keyEvent\)[\s\S]+ArrowDown[\s\S]+Home[\s\S]+End/);
   assert.match(mainSource, /\.corrupt-\$\{Date\.now\(\)\}/);
   assert.match(mainSource, /sanitizePersistedJSON\(rawBackup\)/);
@@ -1631,7 +1647,8 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(htmlSource, /Supported links are inspected directly\. Plain text searches Spotify, SoundCloud, and YouTube only after you press Enter/);
   assert.match(htmlSource, /id="chooseLocalFiles"[\s\S]+Choose files instead/);
   assert.match(htmlSource, /id="confirmLocalImport"[\s\S]+Import selected/);
-  assert.match(htmlSource, /connect-src 'none'/);
+  assert.match(htmlSource, /style-src 'self'; style-src-attr 'unsafe-inline'/);
+  assert.match(htmlSource, /connect-src blob:/);
   assert.match(appSource, /function resolveLinkImport\(\)/);
   assert.match(appSource, /const LOCAL_IMPORT_AUTO_RESOLVE_DELAY = 450/);
   assert.match(appSource, /function localImportSourceIsReady\(value\)/);
@@ -1810,13 +1827,13 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(mainSource, /ipcMain\.handle\("server:listening-history:get"[\s\S]+url\.searchParams\.set\("limit"[\s\S]+Accept: "application\/json"/);
   assert.match(mainSource, /api\/v1\/listening-history/);
   assert.match(mainSource, /normalizeListeningHistoryUploadEntries/);
-  assert.match(mainSource, /JSON\.stringify\(\{ entries: minimalEntries, client: "windows" \}\)/);
+  assert.match(mainSource, /JSON\.stringify\(\{ entries: minimalEntries, client: DESKTOP_CLIENT_PLATFORM \}\)/);
   assert.match(
     mainSource.slice(
       mainSource.indexOf('ipcMain.handle("server:listening-history:post"'),
       mainSource.indexOf('ipcMain.handle("server:listening-history:get"'),
     ),
-    /normalizeListeningHistoryUploadEntries[\s\S]+client: "windows"/,
+    /normalizeListeningHistoryUploadEntries[\s\S]+client: DESKTOP_CLIENT_PLATFORM/,
   );
   assert.match(mainSource, /response\.status === 404[\s\S]+supported: false/);
   assert.match(appSource, /const LISTENING_HISTORY_BATCH_SIZE = 500/);
@@ -2350,7 +2367,7 @@ test("installs downloaded Windows updates silently in place", () => {
   assert.deepEqual(installArguments, [true, true]);
   assert.match(mainSource, /autoUpdater\.autoDownload = true/);
   assert.match(mainSource, /autoUpdater\.autoInstallOnAppQuit = false/);
-  assert.match(mainSource, /verifyDownloadedWindowsUpdate\(\{[\s\S]+downloadedFile: information\?\.downloadedFile[\s\S]+authenticityMode: windowsPackage\.resonanceUpdateAuthenticity/);
+  assert.match(mainSource, /verifyDownloadedWindowsUpdate\(\{[\s\S]+downloadedFile: information\?\.downloadedFile[\s\S]+authenticityMode: desktopPackage\.resonanceUpdateAuthenticity/);
   assert.match(mainSource, /if \(!verifiedWindowsUpdate \|\| windowsUpdateVerificationPromise\) return false/);
   assert.match(mainSource, /installDownloadedWindowsUpdate\(autoUpdater\)/);
   assert.doesNotMatch(mainSource, /autoUpdater\.quitAndInstall\(false, true\)/);

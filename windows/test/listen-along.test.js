@@ -176,7 +176,8 @@ test("keeps listen-along network and provider capabilities out of the renderer",
   assert.match(renderer, /api\.fetchLocalImportArtwork\(source\)/);
   assert.match(renderer, /!\/\^file:/i);
   assert.doesNotMatch(renderer, /audio\.src\s*=\s*event\??\.snapshot\??\.source_url/);
-  assert.match(index, /connect-src 'none'/);
+  assert.match(index, /style-src 'self'; style-src-attr 'unsafe-inline'/);
+  assert.match(index, /connect-src blob:/);
   assert.match(index, /media-src[^;]*file:/);
   assert.match(index, /id="openListenAlong"/);
   assert.match(index, /id="copyListenAlongCode"[^>]*disabled/);

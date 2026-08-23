@@ -97,17 +97,6 @@ function check({ quiet = false } = {}) {
     matches("ios/Resonance/Info.plist", /<key>CFBundleVersion<\/key><string>([^<]+)<\/string>/g),
     build,
   );
-  expectValues(
-    "macOS default version",
-    matches("mac/scripts/build-release.sh", /^APP_VERSION="\$\{APP_VERSION:-([^}]+)\}"$/gm),
-    version,
-  );
-  expectValues(
-    "macOS default build",
-    matches("mac/scripts/build-release.sh", /^BUILD_NUMBER="\$\{BUILD_NUMBER:-([^}]+)\}"$/gm),
-    build,
-  );
-
   if (!quiet) {
     console.log(`Release versions agree: ${version} (${build})`);
   }
@@ -173,17 +162,6 @@ function setVersion(version, buildText) {
     /(<key>CFBundleVersion<\/key><string>)[^<]+(<\/string>)/,
     (_match, prefix, suffix) => `${prefix}${build}${suffix}`,
   );
-  replace(
-    "mac/scripts/build-release.sh",
-    /(^APP_VERSION="\$\{APP_VERSION:-)[^}]+(\}"$)/m,
-    (_match, prefix, suffix) => `${prefix}${version}${suffix}`,
-  );
-  replace(
-    "mac/scripts/build-release.sh",
-    /(^BUILD_NUMBER="\$\{BUILD_NUMBER:-)[^}]+(\}"$)/m,
-    (_match, prefix, suffix) => `${prefix}${build}${suffix}`,
-  );
-
   fs.writeFileSync(manifestPath, `${JSON.stringify({ version, build }, null, 2)}\n`);
   check();
 }

@@ -44,8 +44,8 @@ Both are sent as `Authorization: Bearer <value>`. Read them from each app's secu
 Resonance/
 ├── android/                 Kotlin + Jetpack Compose Android app
 ├── ios/                     SwiftUI iPhone/iPad app and Xcode project
-├── mac/                     SwiftUI macOS app, updater, tests, scripts
-├── windows/                 Electron Windows app
+├── mac/                     macOS Electron packaging, updater helper, and release scripts
+├── windows/                 Shared Electron desktop app for Windows and macOS
 ├── release/version.json     Shared release version and build number
 ├── scripts/                 Release metadata and artifact validators
 ├── installers/macos/        macOS PKG/ZIP/update-manifest assets
@@ -112,8 +112,8 @@ Current workflows:
 ```
 
 - The four platform workflows remain independent native builds. They run normal path-filtered PR CI and can also be called by `release-candidate.yml`; they do not publish GitHub Releases and no longer rebuild on a pushed tag.
-- Relevant pushes to `main` also run the platform workflows to populate trusted Gradle, Swift, Xcode DerivedData, pnpm, and Electron packaging caches. Pull requests restore these default-branch caches but do not update the shared cache. Do not remove this warm-cache path when optimizing CI.
-- macOS PRs run Swift tests and build the app ZIP, checksum, installer PKG, and updater manifest.
+- Relevant pushes to `main` also run the platform workflows to populate trusted Gradle, Xcode DerivedData, pnpm, and Electron packaging caches. Pull requests restore these default-branch caches but do not update the shared cache. Do not remove this warm-cache path when optimizing CI.
+- macOS PRs run the shared Electron desktop tests and build the app ZIP, checksum, installer PKG, and updater manifest.
 - Windows PRs install with pnpm, run tests, and build the NSIS EXE, blockmap, and `latest.yml`.
 - iOS PRs build an unsigned Simulator `.app`; the candidate workflow packages it as a Simulator ZIP. This is not an installable App Store, Ad Hoc, or physical-device release.
 - Android PRs run lint/tests/build. The candidate workflow packages the release-signed APK and its Android updater manifest; it is not a Play Store bundle.

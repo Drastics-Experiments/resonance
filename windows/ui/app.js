@@ -89,6 +89,7 @@ import {
   tracksForPlaylist,
   updatePlaylistRemoteSongIDs,
 } from "./core.js";
+import { createMediaSessionController } from "./media-session.js";
 
 const api = window.resonance;
 let audio = document.querySelector("#audio");
@@ -242,6 +243,8 @@ let localImportProviderFocus = "youtube";
 let availableWindowsUpdateVersion = null;
 let dismissedWindowsUpdateVersion = null;
 let windowsUpdateReady = false;
+let mediaSessionController = null;
+let mediaSessionConfigured = false;
 const LOCAL_IMPORT_AUTO_RESOLVE_DELAY = 450;
 const LOCAL_IMPORT_PROVIDER_ORDER = Object.freeze([
   ["youtube", "YouTube"],
@@ -2243,6 +2246,76 @@ function playbackIsActive() {
   return Boolean(currentTrack() && !media.paused && !media.ended);
 }
 
+function mediaSessionSeekTo(seconds, { fastSeek = false } = {}) {
+  if (listenAlongIsGuest() || !currentTrack()) return;
+  const media = activePlaybackMedia();
+  const duration = currentPlaybackDuration();
+  const requestedPosition = Number(seconds);
+  if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(requestedPosition)) return;
+  cancelCrossfade();
+  const position = clippedPlaybackPosition(requestedPosition);
+  if (fastSeek && typeof media.fastSeek === "function") media.fastSeek(position);
+  else media.currentTime = position;
+  state.position = position;
+  updatePlaybackProgressUI();
+  syncMediaSessionPlayback();
+  if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
+}
+
+function ensureMediaSessionController() {
+  if (mediaSessionConfigured) return mediaSessionController;
+  mediaSessionConfigured = true;
+  mediaSessionController = createMediaSessionController({
+    actionHandlers: {
+      play: () => {
+        const media = activePlaybackMedia();
+        if (!currentTrack() || media.paused || media.ended) toggle();
+      },
+      pause: () => {
+        if (listenAlongIsGuest()) return;
+        const media = activePlaybackMedia();
+        if (!media.paused && !media.ended) media.pause();
+      },
+      seekbackward: (details = {}) => mediaSessionSeekTo(
+        (Number(activePlaybackMedia().currentTime) || 0) - (Number(details.seekOffset) || 10),
+      ),
+      seekforward: (details = {}) => mediaSessionSeekTo(
+        (Number(activePlaybackMedia().currentTime) || 0) + (Number(details.seekOffset) || 10),
+      ),
+      seekto: (details = {}) => mediaSessionSeekTo(details.seekTime, { fastSeek: details.fastSeek }),
+      nexttrack: () => move(1),
+      previoustrack: () => previous(),
+    },
+  });
+  return mediaSessionController;
+}
+
+function syncMediaSession() {
+  const controller = ensureMediaSessionController();
+  if (!controller) return;
+  const media = activePlaybackMedia();
+  controller.sync({
+    track: currentTrack(),
+    isPlaying: playbackIsActive(),
+    position: Number(media.currentTime) || 0,
+    duration: currentPlaybackDuration(),
+    playbackRate: Number(media.playbackRate) || Number(state.playbackRate) || 1,
+  });
+}
+
+function syncMediaSessionPlayback() {
+  const controller = ensureMediaSessionController();
+  if (!controller) return;
+  const media = activePlaybackMedia();
+  controller.syncPlayback({
+    hasTrack: Boolean(currentTrack()),
+    isPlaying: playbackIsActive(),
+    position: Number(media.currentTime) || 0,
+    duration: currentPlaybackDuration(),
+    playbackRate: Number(media.playbackRate) || Number(state.playbackRate) || 1,
+  });
+}
+
 function beginListeningSession() {
   const track = currentTrack();
   if (!track) return;
@@ -2749,7 +2822,7 @@ async function playRemoteStream(song) {
     return;
   }
   if (serverSongRequiresDownload(song)) {
-    showNotice("Windows stream-only playback supports audio songs. Switch to Verified file cache and download this video to watch it.");
+    showNotice("Desktop stream-only playback supports audio songs. Switch to Verified file cache and download this video to watch it.");
     return;
   }
   if (currentServerTransferModes().downloadMode !== "stream_only") {
@@ -3981,10 +4054,14 @@ function trackRow(track, index) {
   const canReorder = Boolean(editablePlaylist && entryKey
     && (notDownloaded || editablePlaylist.trackIDs.includes(track.id)));
   const reorderLabel = canReorder ? ". Press Alt+Up or Alt+Down to reorder" : "";
+  const keyboardActionLabel = unavailable
+    ? ". Press Enter or Space for availability information"
+    : ". Press Enter or Space to play";
   const draggableAttributes = canReorder
-    ? ` data-playlist-draggable="true" data-playlist-entry="${escapeHTML(entryKey)}" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Shift+F10"`
+    ? ` aria-keyshortcuts="Enter Space Alt+ArrowUp Alt+ArrowDown Shift+F10"`
     : ` aria-keyshortcuts="Enter Space Shift+F10"`;
-  return `<div class="track-row ${track.id === currentID ? "playing" : ""}${canReorder ? " playlist-draggable" : ""}${unavailable ? " unavailable" : ""}${notDownloaded ? " playlist-unavailable" : ""}" data-track="${escapeHTML(track.id)}" tabindex="0" aria-label="${escapeHTML(actionLabel + reorderLabel)}" aria-disabled="${unavailable}"${draggableAttributes}>
+  return `<div class="track-row ${track.id === currentID ? "playing" : ""}${canReorder ? " playlist-draggable" : ""}${unavailable ? " unavailable" : ""}${notDownloaded ? " playlist-unavailable" : ""}" data-track="${escapeHTML(track.id)}" role="group" aria-label="${escapeHTML(`${track.title || "Untitled"} actions`)}"${canReorder ? ' data-playlist-draggable="true"' : ""}${canReorder ? ` data-playlist-entry="${escapeHTML(entryKey)}"` : ""}>
+    <button type="button" class="row-primary-action" data-track-activate="${escapeHTML(track.id)}" aria-label="${escapeHTML(actionLabel + keyboardActionLabel + reorderLabel)}" aria-disabled="${unavailable}"${draggableAttributes}></button>
     <span class="track-number" title="${track.id === currentID && !audio.paused ? "Now playing" : `Track ${index + 1}`}">${track.id === currentID && !audio.paused ? nowPlayingIcon : index + 1}</span>${artwork(track)}
     <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / ${notDownloaded ? "Not downloaded" : unavailable ? "File unavailable" : mediaKind}</small></div>
     <span class="album">${escapeHTML(displayAlbum(track))}</span><span class="track-time">${notDownloaded ? "Not saved" : unavailable ? "Missing" : formatTime(track.duration)}</span>
@@ -4137,7 +4214,7 @@ function storageTracks() {
   return tracks;
 }
 
-async function deleteStoredTracks(trackIDs) {
+async function deleteStoredTracks(trackIDs, { deleteExternal = false } = {}) {
   const tracks = state.tracks.filter((track) => trackIDs.includes(track.id));
   if (!tracks.length) return;
   const targetIDs = new Set(tracks.map((track) => track.id));
@@ -4170,7 +4247,11 @@ async function deleteStoredTracks(trackIDs) {
   const failed = [];
   for (const track of tracks) {
     try {
-      if (track.available !== false && track.filePath) await api.deleteAudio(track.filePath);
+      if (track.available !== false && track.filePath) {
+        const external = physicalStorageClassForTrack(track) === "external";
+        if (!external) await api.deleteAudio(track.filePath);
+        else if (deleteExternal) await api.deleteAudio(track.filePath, { deleteOriginal: true });
+      }
       deleted.push(track);
     } catch (error) {
       failed.push({ track, error });
@@ -4211,6 +4292,8 @@ async function deleteStoredTracks(trackIDs) {
   if (failed.length) {
     const names = failed.slice(0, 3).map(({ track }) => track.title).join(", ");
     showNotice(`Could not remove ${names}${failed.length > 3 ? ` and ${failed.length - 3} more` : ""}. The files remain in your library.`);
+  } else if (deleted.some((track) => physicalStorageClassForTrack(track) === "external") && !deleteExternal) {
+    showNotice("Removed from Resonance. The original files remain where you keep them.", "status");
   }
 }
 
@@ -4218,7 +4301,7 @@ function renderStorage() {
   updateTopSearch();
   const tracks = storageTracks();
   const visibleTracks = tracksForActiveProfile(state);
-  const localTracks = visibleTracks.filter((track) => physicalStorageClassForTrack(track) === "files" && track.available !== false);
+  const localTracks = visibleTracks.filter((track) => ["files", "external"].includes(physicalStorageClassForTrack(track)) && track.available !== false);
   const remoteTracks = visibleTracks.filter((track) => physicalStorageClassForTrack(track) === "downloads" && track.available !== false);
   const localBytes = localTracks.reduce((sum, track) => sum + (track.size || 0), 0);
   const remoteBytes = remoteTracks.reduce((sum, track) => sum + (track.size || 0), 0);
@@ -4234,7 +4317,13 @@ function renderStorage() {
     <div class="storage-section-heading"><strong>${storageScope === "downloads" ? "DOWNLOADED FROM SERVER" : storageScope === "files" ? "IMPORTED ON THIS PC" : "ALL SONGS"}</strong><span>${tracks.length} songs</span></div>
     <div class="storage-list redesigned">${tracks.map((track) => {
       const unavailable = track.available === false || track.missing;
-      return `<div class="storage-row ${storageEditing ? "selecting" : ""}${unavailable ? " unavailable" : ""}" data-storage-track="${escapeHTML(track.id)}" tabindex="0" aria-keyshortcuts="Enter Space Shift+F10" aria-disabled="${unavailable}"><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${escapeHTML(track.id)}" aria-label="${selectedStorageIDs.has(track.id) ? "Deselect" : "Select"} ${escapeHTML(track.title || "song")}" aria-pressed="${selectedStorageIDs.has(track.id)}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${unavailable ? "File unavailable on this device" : `${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(displayAlbum(track))}`}</small></span><span class="storage-size">${unavailable ? "Missing" : formatBytes(track.size)}</span><button class="row-menu" data-storage-menu="${escapeHTML(track.id)}" title="More options" aria-label="More options for ${escapeHTML(track.title || "song")}">•••</button></div>`;
+      const title = track.title || "Untitled";
+      const storageActionLabel = storageEditing
+        ? `${selectedStorageIDs.has(track.id) ? "Deselect" : "Select"} ${title}. Press Enter or Space to ${selectedStorageIDs.has(track.id) ? "deselect" : "select"}`
+        : unavailable
+          ? `${title} by ${track.artist || "Unknown artist"}. Press Enter or Space for availability information`
+          : `Play ${title} by ${track.artist || "Unknown artist"}. Press Enter or Space to play`;
+      return `<div class="storage-row ${storageEditing ? "selecting" : ""}${unavailable ? " unavailable" : ""}" data-storage-track="${escapeHTML(track.id)}" role="group" aria-label="${escapeHTML(`${title} actions`)}"><button type="button" class="row-primary-action" data-storage-activate="${escapeHTML(track.id)}" aria-label="${escapeHTML(storageActionLabel)}" aria-keyshortcuts="Enter Space Shift+F10" aria-disabled="${!storageEditing && unavailable}"></button><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${escapeHTML(track.id)}" aria-label="${selectedStorageIDs.has(track.id) ? "Deselect" : "Select"} ${escapeHTML(title)}" aria-pressed="${selectedStorageIDs.has(track.id)}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${unavailable ? "File unavailable on this device" : `${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(displayAlbum(track))}`}</small></span><span class="storage-size">${unavailable ? "Missing" : formatBytes(track.size)}</span><button class="row-menu" data-storage-menu="${escapeHTML(track.id)}" title="More options" aria-label="More options for ${escapeHTML(title)}">•••</button></div>`;
     }).join("") || `<div class="empty"><b>${storageEmptyTitle}</b><span>${storageEmptyHelp}</span></div>`}</div></div>`;
   const importControl = $("#storageImportControl");
   const importButton = $("#storageImportMenuButton");
@@ -4290,23 +4379,25 @@ function renderStorage() {
   });
   document.querySelectorAll("[data-storage-select]").forEach((button) => button.onclick = () => { selectedStorageIDs.has(button.dataset.storageSelect) ? selectedStorageIDs.delete(button.dataset.storageSelect) : selectedStorageIDs.add(button.dataset.storageSelect); renderStorage(); });
   if ($("#deleteSelectedStorage")) $("#deleteSelectedStorage").onclick = async () => {
-    if (selectedStorageIDs.size && confirm(`Remove ${selectedStorageIDs.size} selected song${selectedStorageIDs.size === 1 ? "" : "s"} from this device?`)) await deleteStoredTracks([...selectedStorageIDs]);
+    if (selectedStorageIDs.size && confirm(`Delete ${selectedStorageIDs.size} selected file${selectedStorageIDs.size === 1 ? "" : "s"} from this device?`)) await deleteStoredTracks([...selectedStorageIDs], { deleteExternal: true });
   };
   document.querySelectorAll("[data-storage-track]").forEach((row) => {
+    const primaryAction = row.querySelector("[data-storage-activate]");
     const openMenu = (event) => openTrackContextMenu(event, row.dataset.storageTrack, { source: "storage", playbackTracks: tracks, playlistID: null });
     row.oncontextmenu = openMenu;
-    row.onkeydown = (event) => {
-      if (event.target !== row) return;
+    primaryAction.onclick = () => {
+      if (storageEditing) {
+        selectedStorageIDs.has(row.dataset.storageTrack)
+          ? selectedStorageIDs.delete(row.dataset.storageTrack)
+          : selectedStorageIDs.add(row.dataset.storageTrack);
+        renderStorage();
+      } else {
+        play(state.tracks.find((track) => track.id === row.dataset.storageTrack), tracks, { playlistID: null });
+      }
+    };
+    primaryAction.onkeydown = (event) => {
       if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        if (storageEditing) {
-          selectedStorageIDs.has(row.dataset.storageTrack)
-            ? selectedStorageIDs.delete(row.dataset.storageTrack)
-            : selectedStorageIDs.add(row.dataset.storageTrack);
-          renderStorage();
-        } else {
-          play(state.tracks.find((track) => track.id === row.dataset.storageTrack), tracks, { playlistID: null });
-        }
+        // Native button activation handles Enter and Space.
         return;
       }
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
@@ -4656,7 +4747,13 @@ function remoteRows() {
     const artworkLoading = metadataLoading || Boolean(song.metadataArtworkLoading);
     const songTitle = song.title || song.name || "server song";
     const duration = Number(song.duration) > 0 ? formatTime(Number(song.duration)) : "—";
-    return `<div class="remote-row ${serverSelecting ? "selecting" : ""} ${selected ? "selected" : ""} ${metadataLoading ? "metadata-loading" : ""}" data-remote-row="${escapeHTML(song.id)}" tabindex="0" aria-keyshortcuts="Enter Space Shift+F10" ${metadataLoading ? 'aria-busy="true" aria-label="Loading song metadata"' : ""}>
+    const remoteActionLabel = metadataLoading
+      ? `Loading metadata for ${songTitle}`
+      : serverSelecting
+        ? `${selected ? "Deselect" : "Select"} ${songTitle}`
+        : `Play or download ${songTitle}`;
+    return `<div class="remote-row ${serverSelecting ? "selecting" : ""} ${selected ? "selected" : ""} ${metadataLoading ? "metadata-loading" : ""}" data-remote-row="${escapeHTML(song.id)}" role="group" aria-label="${escapeHTML(`${songTitle} actions`)}" ${metadataLoading ? 'aria-busy="true"' : ""}>
+      <button type="button" class="row-primary-action" data-remote-activate="${escapeHTML(song.id)}" aria-label="${escapeHTML(remoteActionLabel)}" aria-keyshortcuts="Enter Space Shift+F10"></button>
       <button class="remote-check ${selected ? "selected" : ""}" data-select-remote="${escapeHTML(song.id)}" ${serverSelecting ? "" : "hidden"} aria-label="${selected ? "Deselect" : "Select"} ${escapeHTML(songTitle)}">${selected ? "✓" : ""}</button>
       ${artwork(song, { animateLoading: true, forceLoading: artworkLoading })}
       ${metadataLoading ? `<span class="server-song-title server-metadata-copy">${serverMetadataPlaceholder("server-metadata-title")}${serverMetadataPlaceholder("server-metadata-subtitle")}</span>` : `<span class="server-song-title"><strong>${escapeHTML(songTitle)}</strong>${onDevice ? '<small>On device</small>' : serverSongRequiresDownload(song) && currentServerTransferModes().downloadMode === "stream_only" ? '<small>Video · download required</small>' : ""}</span>`}
@@ -4671,6 +4768,7 @@ function remoteRows() {
 function bindRemoteRows() {
   document.querySelectorAll("[data-select-remote]").forEach((button) => button.onclick = () => { selectedRemoteIDs.has(button.dataset.selectRemote) ? selectedRemoteIDs.delete(button.dataset.selectRemote) : selectedRemoteIDs.add(button.dataset.selectRemote); renderServer(); });
   document.querySelectorAll("[data-remote-row]").forEach((row) => {
+    const primaryAction = row.querySelector("[data-remote-activate]");
     const activate = () => {
       const id = row.dataset.remoteRow;
       if (serverSelecting) {
@@ -4689,16 +4787,11 @@ function bindRemoteRows() {
         renderServer();
       }
     };
-    row.onclick = (event) => {
-      if (event.target.closest("button")) return;
-      activate();
-    };
+    primaryAction.onclick = activate;
     row.oncontextmenu = (event) => openServerTrackContextMenu(event, row.dataset.remoteRow);
-    row.onkeydown = (event) => {
-      if (event.target !== row) return;
+    primaryAction.onkeydown = (event) => {
       if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        activate();
+        // Native button activation handles Enter and Space.
         return;
       }
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
@@ -4875,7 +4968,7 @@ function renderSettings() {
   }).join("");
   const settingsRoot = $("#settingsDialogContent");
   disposeCustomSelects(settingsRoot);
-  settingsRoot.innerHTML = `<div class="settings-heading"><div><span class="eyebrow">RESONANCE</span><h1 id="settingsDialogTitle">Settings</h1><p>Manage how Resonance behaves on this Windows device.</p></div><button id="closeSettings" class="history-close" type="button" aria-label="Close settings">×</button></div>
+  settingsRoot.innerHTML = `<div class="settings-heading"><div><span class="eyebrow">RESONANCE</span><h1 id="settingsDialogTitle">Settings</h1><p>Manage how Resonance behaves on this desktop device.</p></div><button id="closeSettings" class="history-close" type="button" aria-label="Close settings">×</button></div>
     <div class="settings-shell">
       <nav class="settings-nav" aria-label="Settings sections">
         <button class="${settingsPanel === "general" ? "active" : ""}" type="button" data-settings-panel="general" aria-current="${settingsPanel === "general" ? "page" : "false"}">${settingsIcons.general}<span>General</span></button>
@@ -4929,7 +5022,7 @@ function renderSettings() {
           </div>
         </section>
         <section class="settings-panel settings-appearance-panel" data-settings-content="appearance" ${settingsPanel === "appearance" ? "" : "hidden"}>
-          <div class="settings-panel-title"><div><span class="eyebrow">THEME</span><h2>Appearance</h2><p>Choose a dark palette for this Windows device. Changes apply immediately.</p></div></div>
+          <div class="settings-panel-title"><div><span class="eyebrow">THEME</span><h2>Appearance</h2><p>Choose a dark palette for this desktop device. Changes apply immediately.</p></div></div>
           <fieldset class="settings-theme-fieldset">
             <legend class="sr-only">Resonance theme</legend>
             <div class="settings-theme-grid">
@@ -5232,13 +5325,13 @@ function render() {
 function bindTrackRows(playbackTracks = playlistTracks()) {
   const trackTable = document.querySelector(".track-table");
   document.querySelectorAll("[data-track]").forEach((row) => {
-    row.onclick = (event) => {
+    const primaryAction = row.querySelector("[data-track-activate]");
+    primaryAction.onclick = (event) => {
       if (performance.now() < suppressPlaylistRowClickUntil) {
         event.preventDefault();
         return;
       }
-      if (event.target.closest("button, select, input, a")) return;
-      if (row.getAttribute("aria-disabled") === "true") {
+      if (primaryAction.getAttribute("aria-disabled") === "true") {
         if (row.classList.contains("playlist-unavailable")) showNotice("This song is in the playlist but is not downloaded on this device.", "status");
         return;
       }
@@ -5248,20 +5341,14 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       if (row.getAttribute("aria-disabled") === "true") return;
       openTrackContextMenu(event, row.dataset.track, { playbackTracks, playlistID: selectedPlaylistID });
     };
-    row.onkeydown = async (event) => {
-      if (event.target !== row) return;
+    primaryAction.onkeydown = async (event) => {
       if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        if (row.getAttribute("aria-disabled") === "true") {
-          if (row.classList.contains("playlist-unavailable")) showNotice("This song is in the playlist but is not downloaded on this device.", "status");
-          return;
-        }
-        play(state.tracks.find((track) => track.id === row.dataset.track), playbackTracks, { playlistID: selectedPlaylistID });
+        // Native button activation handles Enter and Space.
         return;
       }
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
         event.preventDefault();
-        if (row.getAttribute("aria-disabled") === "true") return;
+        if (primaryAction.getAttribute("aria-disabled") === "true") return;
         openTrackContextMenu(event, row.dataset.track, { playbackTracks, playlistID: selectedPlaylistID });
         return;
       }
@@ -5276,12 +5363,12 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       const entryKey = row.dataset.playlistEntry;
       const targetKey = reorderRows[to].dataset.playlistEntry;
       await commitPlaylistTrackReorder(entryKey, targetKey, event.key === "ArrowDown");
-      document.querySelector(`[data-playlist-entry="${CSS.escape(entryKey)}"]`)?.focus();
+      document.querySelector(`[data-playlist-entry="${CSS.escape(entryKey)}"] [data-track-activate]`)?.focus();
     };
     if (row.dataset.playlistDraggable === "true") {
       // Capture mouse pointers too so crossing header controls cannot strand a drag.
       row.onpointerdown = (event) => {
-        if (!event.isPrimary || event.button !== 0 || event.target.closest("button, select, input, a")) return;
+        if (!event.isPrimary || event.button !== 0 || event.target.closest("button:not(.row-primary-action), select, input, a")) return;
         clearPlaylistPointerDrag();
         playlistPointerDrag = {
           pointerID: event.pointerId,
@@ -5463,6 +5550,13 @@ function renderTrackContextMenu(track, options = {}) {
       onSelect: () => openClipEditor(track.id),
     });
   }
+  if (track.filePath && typeof api.revealAudio === "function") {
+    actions.push({
+      label: "Show in folder",
+      icon: contextOpenIcon,
+      onSelect: () => api.revealAudio(track.filePath),
+    });
+  }
   if (options.source === "full-player" && isInstalledVideoTrack(track)) {
     actions.unshift(
       {
@@ -5500,7 +5594,9 @@ function renderTrackContextMenu(track, options = {}) {
       icon: contextTrashIcon,
       danger: true,
       onSelect: async () => {
-        if (confirm(`Remove ${track.title || "this song"} from this device?`)) await deleteStoredTracks([track.id]);
+        if (!confirm(`${options.source === "storage" ? "Delete" : "Remove"} ${track.title || "this song"} ${options.source === "storage" ? "from this device" : "from Resonance"}?`)) return;
+        if (options.source === "storage") await deleteStoredTracks([track.id], { deleteExternal: true });
+        else await deleteStoredTracks([track.id]);
       },
     },
   );
@@ -8790,6 +8886,7 @@ function updateChrome() {
     if (listenAlongGuest) button.title = "The Listen Along host controls playback";
   }
   if ($("#installedVideoDialog").open) syncInstalledVideoTransport();
+  syncMediaSession();
   renderFullPlayer();
   bindSquareArtworkImages();
   scheduleDiscordPresenceUpdate();
@@ -9452,6 +9549,7 @@ $("#speed").onchange = (event) => {
   installedVideoPlayer.playbackRate = rate;
   state.playbackRate = rate;
   setCustomSelectValue($("#fullPlayerSpeed"), rate);
+  syncMediaSessionPlayback();
   persistInBackground();
 };
 $("#fullPlayerSpeed").onchange = (event) => {
@@ -9461,6 +9559,7 @@ $("#fullPlayerSpeed").onchange = (event) => {
   installedVideoPlayer.playbackRate = rate;
   state.playbackRate = rate;
   setCustomSelectValue($("#speed"), rate);
+  syncMediaSessionPlayback();
   persistInBackground();
 };
 $("#seek").oninput = (event) => {
@@ -9472,6 +9571,7 @@ $("#seek").oninput = (event) => {
   event.target.value = duration ? String(Math.round(media.currentTime / duration * 1000)) : "0";
   event.target.setAttribute("aria-valuetext", `${formatTime(media.currentTime)} of ${formatTime(duration)}`);
   paintRange(event.target);
+  syncMediaSessionPlayback();
   if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
 };
 $("#fullPlayerSeek").oninput = (event) => {
@@ -9485,6 +9585,7 @@ $("#fullPlayerSeek").oninput = (event) => {
   $("#seek").value = event.target.value;
   $("#seek").setAttribute("aria-valuetext", `${formatTime(media.currentTime)} of ${formatTime(duration)}`);
   paintRange($("#seek"));
+  syncMediaSessionPlayback();
   if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
 };
 function bindPrimaryAudioEvents(media) {
@@ -9498,6 +9599,7 @@ function bindPrimaryAudioEvents(media) {
     if (finishClipPlaybackIfNeeded()) return;
     updatePlaybackProgressUI();
     state.position = audio.currentTime;
+    syncMediaSessionPlayback();
     updateListeningSession();
     schedulePlaybackProgressSave();
     synchronizeInstalledVideoWithAudio();
@@ -9594,7 +9696,10 @@ function bindPrimaryAudioEvents(media) {
       }
       renderQueue();
     }
-    if (track.id === currentID) updateFullPlayerProgress();
+    if (track.id === currentID) {
+      updateFullPlayerProgress();
+      syncMediaSession();
+    }
   };
 }
 
