@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createBrowserPreviewServer } from "../ui/browser-server.mjs";
+import {
+  commandLineHost,
+  createBrowserPreviewServer,
+  isTailscaleIPv4,
+  tailscaleIPv4Host,
+} from "../ui/browser-server.mjs";
 
 async function withPreview(testContext, callback) {
   const preview = createBrowserPreviewServer({ port: 0 });
@@ -74,9 +79,32 @@ test("browser preview stays loopback-scoped to the UI tree", async (t) => {
   });
 });
 
-test("browser preview rejects non-loopback bindings", () => {
+test("browser preview allows only loopback or Tailscale IPv4 bindings", () => {
+  assert.equal(createBrowserPreviewServer({ host: "100.64.0.1" }).host, "100.64.0.1");
   assert.throws(
     () => createBrowserPreviewServer({ host: "0.0.0.0" }),
-    /must bind to 127\.0\.0\.1/,
+    /must bind to 127\.0\.0\.1 or a Tailscale IPv4 address/,
+  );
+  assert.throws(() => createBrowserPreviewServer({ host: "192.168.1.20" }), /must bind/);
+});
+
+test("Tailscale host discovery selects an active CGNAT address", () => {
+  assert.equal(isTailscaleIPv4("100.64.0.1"), true);
+  assert.equal(isTailscaleIPv4("100.127.255.254"), true);
+  assert.equal(isTailscaleIPv4("100.128.0.1"), false);
+  assert.equal(isTailscaleIPv4("192.168.1.20"), false);
+  assert.equal(tailscaleIPv4Host({
+    ethernet: [{ address: "192.168.1.20", family: "IPv4", internal: false }],
+    tailscale0: [{ address: "100.71.104.87", family: "IPv4", internal: false }],
+  }), "100.71.104.87");
+  assert.throws(() => tailscaleIPv4Host({
+    ethernet: [{ address: "192.168.1.20", family: "IPv4", internal: false }],
+  }), /No active Tailscale IPv4 address/);
+});
+
+test("Tailscale command-line mode rejects conflicting host selection", () => {
+  assert.throws(
+    () => commandLineHost(["--tailscale", "--host", "100.71.104.87"]),
+    /either --tailscale or --host/,
   );
 });

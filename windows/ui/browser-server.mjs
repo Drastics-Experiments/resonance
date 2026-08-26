@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
+import { networkInterfaces } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 
@@ -29,6 +30,28 @@ const CONTENT_TYPES = Object.freeze({
   ".woff": "font/woff",
   ".woff2": "font/woff2",
 });
+
+function isTailscaleIPv4(address) {
+  const octets = String(address).split(".").map(Number);
+  return octets.length === 4
+    && octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255)
+    && octets[0] === 100
+    && octets[1] >= 64
+    && octets[1] <= 127;
+}
+
+function tailscaleIPv4Host(interfaces = networkInterfaces()) {
+  const candidates = Object.values(interfaces)
+    .flatMap((addresses) => addresses || [])
+    .filter((entry) => (entry.family === "IPv4" || entry.family === 4) && !entry.internal)
+    .map((entry) => entry.address)
+    .filter(isTailscaleIPv4)
+    .sort();
+  if (!candidates.length) {
+    throw new Error("No active Tailscale IPv4 address was found.");
+  }
+  return candidates[0];
+}
 
 function responseHeaders(contentType, length = null) {
   return {
@@ -82,7 +105,9 @@ export function createBrowserPreviewServer({
   port = DEFAULT_PORT,
   uiRoot = UI_ROOT,
 } = {}) {
-  if (host !== DEFAULT_HOST) throw new Error(`Browser preview must bind to ${DEFAULT_HOST}.`);
+  if (host !== DEFAULT_HOST && !isTailscaleIPv4(host)) {
+    throw new Error(`Browser preview must bind to ${DEFAULT_HOST} or a Tailscale IPv4 address.`);
+  }
   const root = path.resolve(uiRoot);
   const server = createServer(async (request, response) => {
     if (!request.url || !["GET", "HEAD"].includes(request.method)) {
@@ -186,9 +211,23 @@ function commandLinePort(argv) {
   return port;
 }
 
+function commandLineHost(argv) {
+  const hostIndex = argv.findIndex((argument) => argument === "--host");
+  const requestedHost = hostIndex >= 0 ? argv[hostIndex + 1] : process.env.RESONANCE_UI_BROWSER_HOST;
+  const useTailscale = argv.includes("--tailscale");
+  if (useTailscale && requestedHost) {
+    throw new Error("Use either --tailscale or --host, not both.");
+  }
+  if (useTailscale) return tailscaleIPv4Host();
+  if (hostIndex >= 0 && !requestedHost) throw new Error("--host requires an address.");
+  return requestedHost || DEFAULT_HOST;
+}
+
 async function run() {
-  const port = commandLinePort(process.argv.slice(2));
-  const preview = createBrowserPreviewServer({ port });
+  const argv = process.argv.slice(2);
+  const port = commandLinePort(argv);
+  const host = commandLineHost(argv);
+  const preview = createBrowserPreviewServer({ host, port });
   const address = await preview.listen();
   console.log(`Resonance browser UI: ${address.url}`);
   const shutdown = () => { void preview.close().finally(() => process.exit(0)); };
@@ -204,4 +243,13 @@ if (invokedPath === import.meta.url) {
   });
 }
 
-export { BROWSER_CSP, CONTENT_TYPES, DEFAULT_HOST, DEFAULT_PORT, UI_ROOT };
+export {
+  BROWSER_CSP,
+  CONTENT_TYPES,
+  DEFAULT_HOST,
+  DEFAULT_PORT,
+  UI_ROOT,
+  commandLineHost,
+  isTailscaleIPv4,
+  tailscaleIPv4Host,
+};

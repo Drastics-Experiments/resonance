@@ -111,6 +111,26 @@ function sampleTracks(audioURLs) {
   }));
 }
 
+function sampleRemoteSongs() {
+  return [
+    { id: "remote-aurora", title: "Aurora Circuit", artist: "Glass Meridian", album: "Remote Signals", duration: 233, size: 2_450_000, artwork_url: browserArtwork("AURORA", "#4338ca", "#0891b2"), source_url: "https://example.com/resonance/aurora", media_kind: "audio" },
+    { id: "remote-tide", title: "Neon Tide", artist: "Mira Vale", album: "Remote Signals", duration: 208, size: 2_120_000, artwork_url: browserArtwork("TIDE", "#be185d", "#7c3aed"), source_url: "https://example.com/resonance/tide", media_kind: "audio" },
+    { id: "remote-echo", title: "Echo Pattern", artist: "Northline", album: "Relay", duration: 196, size: 1_980_000, artwork_url: browserArtwork("ECHO", "#166534", "#0369a1"), source_url: "https://example.com/resonance/echo", media_kind: "audio" },
+  ];
+}
+
+function browserAccountSession() {
+  return {
+    accessToken: "browser-fixture-token",
+    baseURL: "https://resonance-core.blithe-haven-9710.chatgpt.site",
+    profileID: "default",
+    displayName: "Browser Tester",
+    email: "browser@example.test",
+    role: "admin",
+    imageURL: null,
+  };
+}
+
 function createFixtureState(audioURLs) {
   const state = createEmptyState();
   const tracks = sampleTracks(audioURLs);
@@ -244,6 +264,31 @@ export function createBrowserResonanceAPI(options = {}) {
   let state = loadStoredState(browserStorage, audioURLs);
   const events = listenerRegistry();
   let closeHandler = null;
+  let importSequence = 0;
+
+  const browserImportedTrack = (metadata = {}, prefix = "browser-import") => {
+    importSequence += 1;
+    const duration = Math.max(1, Math.round(Number(metadata.durationSeconds) || 214));
+    const id = `${prefix}-${Date.now().toString(36)}-${importSequence}`;
+    const sourceURL = metadata.sourceURL || `https://example.com/resonance/${id}`;
+    return {
+      id,
+      title: metadata.title || "Browser Import",
+      artist: metadata.artist || "Fixture Artist",
+      album: metadata.album || "Browser Imports",
+      duration,
+      size: duration * 10_000,
+      filePath: null,
+      fileUrl: createBrowserAudioURL(duration),
+      sourceURL,
+      artwork: metadata.artworkURL || browserArtwork("IMPORT", "#6d28d9", "#0f766e"),
+      artworkURL: metadata.artworkURL || browserArtwork("IMPORT", "#6d28d9", "#0f766e"),
+      dateAdded: new Date().toISOString(),
+      available: true,
+      missing: false,
+      storageLocation: "local",
+    };
+  };
 
   const persist = (nextState) => {
     state = clone(nextState || state);
@@ -266,16 +311,34 @@ export function createBrowserResonanceAPI(options = {}) {
     updateDiscordPresence: async () => ({ state: "disabled", message: "Rich Presence is unavailable in a browser preview.", applicationConfigured: false }),
     getDiscordPresenceStatus: async () => ({ state: "disabled", message: "Rich Presence is unavailable in a browser preview.", applicationConfigured: false }),
     onDiscordPresenceStatus: (callback) => events.subscribe("discordPresenceStatus", callback),
-    importAudio: async () => [],
+    importAudio: async () => [browserImportedTrack({ title: "Chosen Browser File", artist: "Fixture Artist", album: "Browser Imports", durationSeconds: 172 })],
     loadProfilePicture: async () => null,
     chooseProfilePicture: async () => null,
     removeProfilePicture: async () => true,
     localImportCapabilities: async () => ({ enabled: true, browser: true, providers: ["youtube", "spotify", "soundcloud"] }),
-    fetchLocalImportArtwork: async () => null,
-    previewLocalImport: async () => ({ ok: false, error: { message: "Preview playback is unavailable in a browser fixture." } }),
+    fetchLocalImportArtwork: async (source) => typeof source === "string" && source.startsWith("data:image/") ? source : null,
+    previewLocalImport: async () => ({ ok: true, result: { fileURL: createBrowserAudioURL(30), durationSeconds: 30 } }),
     cancelLocalImportPreview: async () => true,
-    resolveLocalImport: async () => ({ ok: false, error: { stage: "resolving_metadata", message: "Web import is unavailable in a browser fixture." } }),
-    startLocalImport: async () => ({ ok: false, error: { stage: "downloading", message: "Web import is unavailable in a browser fixture." } }),
+    resolveLocalImport: async ({ source, mediaKind = "audio" } = {}) => {
+      const title = String(source || "Browser Search").trim().replace(/^https?:\/\//, "") || "Browser Search";
+      const artworkURL = browserArtwork("FOUND", "#7c3aed", "#0e7490");
+      const track = { title: title.slice(0, 54), artist: "Browser Search", album: "Fixture Results", durationSeconds: 214, artworkURL, sourceURL: String(source || "") };
+      return { ok: true, result: { kind: "search_results", mediaKind, track, candidates: [
+        { ...track, title: `${track.title} — Studio`, searchProvider: "youtube", sourceProvider: "youtube", sourceURL: "https://example.com/browser/studio", thumbnailURL: artworkURL, confidence: "best match", actionable: true },
+        { ...track, title: `${track.title} — Live`, searchProvider: "spotify", sourceProvider: "spotify", sourceURL: "https://example.com/browser/live", thumbnailURL: artworkURL, confidence: "alternate", actionable: true },
+        { ...track, title: `${track.title} — Acoustic`, searchProvider: "soundcloud", sourceProvider: "soundcloud", sourceURL: "https://example.com/browser/acoustic", thumbnailURL: artworkURL, confidence: "alternate", actionable: true },
+      ] } };
+    },
+    startLocalImport: async ({ metadata = {}, sourceURL } = {}) => {
+      const duplicate = state.tracks.find((track) => track.sourceURL === sourceURL);
+      if (duplicate) return { ok: true, result: { kind: "duplicate", trackID: duplicate.id, sourceIdentity: { sourceURL } } };
+      events.emit("localImportProgress", { stage: "downloading", completed: 1, total: 3, currentFile: metadata.title || "Browser import" });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      events.emit("localImportProgress", { stage: "processing", completed: 2, total: 3, currentFile: metadata.title || "Browser import" });
+      const track = browserImportedTrack({ ...metadata, sourceURL });
+      events.emit("localImportProgress", { stage: "complete", completed: 3, total: 3, currentFile: track.title });
+      return { ok: true, result: { kind: "created", track, sourceIdentity: { sourceURL } } };
+    },
     startExternalImport: async () => ({ ok: false, error: { stage: "downloading", message: "Web import is unavailable in a browser fixture." } }),
     cancelLocalImport: async () => true,
     uploadLocalImport: async () => ({ ok: false, error: { message: "Uploads are unavailable in a browser fixture." } }),
@@ -300,7 +363,7 @@ export function createBrowserResonanceAPI(options = {}) {
       } catch { /* Use deterministic fallback. */ }
       return { localBytes, remoteBytes, availableBytes: Math.max(0, availableBytes), capacityBytes };
     },
-    fetchCatalog: async () => ({ songs: [], count: 0 }),
+    fetchCatalog: async () => ({ songs: clone(sampleRemoteSongs()), count: sampleRemoteSongs().length }),
     resolveServerSourceMetadata: async () => null,
     fetchClientConfig: async () => ({ config: clone(SAFE_CLIENT_CONFIG), source: "browser" }),
     createServerStream: async () => null,
@@ -324,7 +387,19 @@ export function createBrowserResonanceAPI(options = {}) {
     putPlaylists: async () => ({ revision: state.playlistRevision || 0, playlists: [], liked_song_ids: [], clip_ranges: [] }),
     postListeningHistory: async () => ({ accepted: 0 }),
     fetchListeningHistory: async () => ({ entries: [] }),
-    syncServer: async () => ({ catalog: { songs: [], count: 0 }, downloaded: [], failed: [], results: [], cancelled: false }),
+    syncServer: async ({ songIDs } = {}) => {
+      const catalogSongs = sampleRemoteSongs();
+      const selected = Array.isArray(songIDs) ? new Set(songIDs) : null;
+      const chosen = catalogSongs.filter((song) => !selected || selected.has(song.id));
+      for (let index = 0; index < chosen.length; index += 1) {
+        const song = chosen[index];
+        events.emit("transferProgress", { direction: "download", owner: "server", title: "Downloading", currentFile: song.title, completed: index, total: chosen.length, autoHide: false });
+        await new Promise((resolve) => setTimeout(resolve, 160));
+      }
+      const downloaded = chosen.map((song) => ({ ...browserImportedTrack({ title: song.title, artist: song.artist, album: song.album, durationSeconds: song.duration, artworkURL: song.artwork_url, sourceURL: song.source_url }, "browser-server"), remoteID: song.id, sourceServer: browserAccountSession().baseURL, syncProfileID: "default", storageLocation: "server-cache" }));
+      events.emit("transferProgress", { direction: "download", owner: "server", title: "Download complete", currentFile: `${downloaded.length} songs`, completed: downloaded.length, total: downloaded.length, autoHide: true });
+      return { catalog: { songs: clone(catalogSongs), count: catalogSongs.length }, downloaded, replacedTrackIDs: [], failed: [], results: [], cancelled: false };
+    },
     uploadServer: async () => ({ selectionCancelled: true, uploaded: 0, results: [], failed: [] }),
     importServerSource: async () => ({ ok: false, error: { message: "Server imports are unavailable in a browser fixture." } }),
     discardServerUploadRetries: async () => true,
@@ -332,7 +407,7 @@ export function createBrowserResonanceAPI(options = {}) {
     deleteServerSong: async () => true,
     loadServerCredentials: async () => ({ clientToken: "", adminToken: "" }),
     saveServerCredentials: async () => true,
-    loadAccountSession: async () => null,
+    loadAccountSession: async () => clone(browserAccountSession()),
     signInAccount: async () => ({ ok: false, error: { message: "Account sign-in is unavailable in a browser fixture." } }),
     refreshAccountSession: async () => null,
     signOutAccount: async () => true,

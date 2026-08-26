@@ -13,6 +13,7 @@
     "start": "electron .",
     "test": "node --test",
     "ui:browser": "node ui/browser-server.mjs",
+    "ui:tailscale": "node ui/browser-server.mjs --tailscale",
     "package:win": "electron-builder --dir --win --x64 --publish never --config.directories.output=dist --config.extraMetadata.resonanceUpdateAuthenticity=unsigned",
     "installer:win": "electron-builder --win nsis --x64 --publish never --config.extraMetadata.resonanceUpdateAuthenticity=unsigned",
     "release:win": "electron-builder --win nsis --x64 --publish always --config.forceCodeSigning=true --config.extraMetadata.resonanceUpdateAuthenticity=production"
