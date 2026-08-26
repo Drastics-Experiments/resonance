@@ -1,6 +1,6 @@
-# Resonance for Windows
+# Resonance Desktop
 
-The Windows client is an Electron application with local playback, ordered playlists, search and filters, authenticated song and playlist sync, encrypted server credentials, and GitHub Release updates.
+Windows and macOS share this Electron application and renderer. It provides local playback, ordered playlists, search and filters, authenticated song and playlist sync, platform-appropriate credential persistence, and GitHub Release updates.
 
 Custom playlists use the same revisioned server document as the macOS and iOS clients. They sync at launch, when the window returns to the foreground, every 60 seconds while open, and shortly after local edits. Liked Songs remains device-local, local-only tracks stay in their playlists, and hosted-song memberships hydrate as those songs are downloaded.
 
@@ -10,9 +10,24 @@ Custom playlists use the same revisioned server document as the macOS and iOS cl
 pnpm install --frozen-lockfile
 pnpm test
 pnpm start
+pnpm ui:browser
+pnpm ui:tailscale
 pnpm run package:win
 pnpm run installer:win
 ```
+
+`pnpm ui:browser` starts a dependency-free, loopback-only renderer preview at
+`http://127.0.0.1:4173/ui/`. It serves only the `ui/` tree, keeps the renderer
+CSP active, and uses the browser fixture bridge rather than credentials or
+server requests. Set `RESONANCE_UI_BROWSER_PORT` or pass `-- --port <port>` to
+choose another local port. Stop the preview with Ctrl+C.
+
+`pnpm ui:tailscale` starts the same credential-free fixture preview on the
+machine's Tailscale IPv4 address. Other devices on the same tailnet can open
+the printed `http://100.x.y.z:4173/ui/` URL, subject to the tailnet ACLs. The
+server binds only to that Tailscale address: wildcard and ordinary LAN
+bindings are rejected. Set `RESONANCE_UI_BROWSER_PORT` or pass
+`-- --port <port>` to choose another port.
 
 `package:win` creates a portable x64 folder in `windows/dist/`. `installer:win` creates the per-user NSIS installer under `installers/windows/dist/`.
 

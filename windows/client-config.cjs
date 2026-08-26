@@ -1,7 +1,11 @@
 const { createHash, createHmac, timingSafeEqual } = require("node:crypto");
 
 const CLIENT_CONFIG_PROTOCOL_VERSION = 1;
+// Keep the historical default for callers that construct a context outside
+// the desktop runtime.  The shared Electron main process supplies the actual
+// platform explicitly so the same renderer can serve Windows and macOS.
 const CLIENT_CONFIG_PLATFORM = "windows";
+const CLIENT_CONFIG_PLATFORMS = new Set(["windows", "macos"]);
 const CLIENT_CONFIG_COHORT_BUCKETS = 10_000;
 const CLIENT_CONFIG_MAX_TTL_MS = 15 * 60 * 1_000;
 const CLIENT_CONFIG_MAX_BYTES = 128 * 1_024;
@@ -100,6 +104,14 @@ function canonicalCohortKey(value) {
   return key;
 }
 
+function canonicalClientConfigPlatform(value = CLIENT_CONFIG_PLATFORM) {
+  const platform = String(value || "").trim().toLowerCase();
+  if (!CLIENT_CONFIG_PLATFORMS.has(platform)) {
+    fail("INVALID_CONTEXT", "platform must be windows or macos.");
+  }
+  return platform;
+}
+
 function deriveCohortBucket(cohortKey) {
   const key = canonicalCohortKey(cohortKey);
   const digest = createHash("sha256")
@@ -108,12 +120,12 @@ function deriveCohortBucket(cohortKey) {
   return digest.readUInt32BE(0) % CLIENT_CONFIG_COHORT_BUCKETS;
 }
 
-function clientConfigRequestContext({ origin, profileID, appVersion, appBuild, cohortKey }) {
+function clientConfigRequestContext({ origin, profileID, appVersion, appBuild, cohortKey, platform = CLIENT_CONFIG_PLATFORM }) {
   const stableCohortKey = canonicalCohortKey(cohortKey);
   const expected = {
     origin: canonicalOrigin(origin),
     profile_id: requireNonEmptyString(profileID, "profileID"),
-    platform: CLIENT_CONFIG_PLATFORM,
+    platform: canonicalClientConfigPlatform(platform),
     app_version: requireNonEmptyString(appVersion, "appVersion"),
     app_build: positiveBuild(appBuild),
     cohort_bucket: deriveCohortBucket(stableCohortKey),
@@ -558,12 +570,14 @@ module.exports = {
   CLIENT_CONFIG_MAX_BYTES,
   CLIENT_CONFIG_MAX_TTL_MS,
   CLIENT_CONFIG_PLATFORM,
+  CLIENT_CONFIG_PLATFORMS,
   CLIENT_CONFIG_PROTOCOL_VERSION,
   CLIENT_CONFIG_REQUEST_HEADER_NAMES,
   CLIENT_CONFIG_RESPONSE_HEADER_NAMES,
   ClientConfigVerificationError,
   SAFE_CLIENT_CONFIG,
   clientConfigRequestContext,
+  canonicalClientConfigPlatform,
   configCacheKey,
   contentDigestForBody,
   createClientConfigCacheRecord,

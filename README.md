@@ -1,13 +1,13 @@
 # Resonance
 
-Resonance is a cross-platform music player. Platform implementations and their installers live in separate folders so Windows, macOS, iOS, and Android can evolve independently.
+Resonance is a cross-platform music player. Windows and macOS share one Electron desktop implementation, while iOS and Android remain native clients.
 
 ## Repository layout
 
 | Path | Purpose |
 | --- | --- |
-| `windows/` | Electron-based Windows application source |
-| `mac/` | Native SwiftUI macOS application, updater, tests, and release tooling |
+| `windows/` | Shared Electron source for Windows, macOS, and browser UI testing |
+| `mac/` | macOS Electron packaging configuration, updater helper, and release tooling (shared source in `windows/`) |
 | `ios/` | Native SwiftUI iOS application |
 | `android/` | Native Kotlin and Jetpack Compose Android application |
 | `release/version.json` | Shared release version and build number |
@@ -26,6 +26,7 @@ The launch and test actions in `t3.json` are worktree-aware:
 ```text
 Launch macOS Preview
 Launch Windows Preview
+Launch Desktop Browser UI
 Launch iOS Simulator
 Launch Android Emulator
 Test macOS
@@ -91,20 +92,22 @@ It automatically increments the patch version and build number, creates one `rel
 
 Use `--dry-run` for a read-only preflight. If a network interruption or fixable Actions failure stops the command, rerun it from the existing release branch; add `--retry-failed` to rerun failed jobs. The command refuses a dirty tree and never stages arbitrary app changes.
 
-Release PRs remain the publication approval boundary. Trusted `main` builds warm the Gradle, Swift, Xcode DerivedData, pnpm, and Electron packaging caches; release PRs restore those caches read-only. The candidate validator checks the complete asset set and provenance, while the publisher downloads the four validated platform artifacts directly instead of rebuilding or re-uploading a combined binary bundle. Do not manually push the version tag. Installed builds continue to use the GitHub Release update feeds.
+Release PRs remain the publication approval boundary. Trusted `main` builds warm the Gradle, Xcode, pnpm, and Electron packaging caches; release PRs restore those caches read-only. The candidate validator checks the complete asset set and provenance, while the publisher downloads the four validated platform artifacts directly instead of rebuilding or re-uploading a combined binary bundle. Do not manually push the version tag. Installed builds continue to use the GitHub Release update feeds.
 
 ## macOS development
 
 ```bash
-cd mac
-swift test
-swift run Resonance
+cd windows
+pnpm install --frozen-lockfile
+pnpm test
+pnpm start
 ```
 
 Build the packaged application, `/Applications` installer, checksums, and updater manifest with:
 
 ```bash
-mac/scripts/build-release.sh
+MAC_ARCH=universal APP_VERSION=1.0.1 BUILD_NUMBER=1 \
+  bash mac/scripts/build-electron.sh
 ```
 
 The packaged app checks `latest-mac.json` on GitHub Releases, verifies the downloaded app archive with SHA-256, validates its bundle identity and code signature, replaces the installed app atomically, and relaunches it. The centralized publish workflow releases both Windows and macOS update assets together with Android and iOS Simulator artifacts.

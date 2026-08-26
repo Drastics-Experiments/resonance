@@ -89,6 +89,7 @@ import {
   tracksForPlaylist,
   updatePlaylistRemoteSongIDs,
 } from "./core.js";
+import { createMediaSessionController } from "./media-session.js";
 
 const api = window.resonance;
 let audio = document.querySelector("#audio");
@@ -147,6 +148,8 @@ let selectedListeningHistoryDayKey = null;
 let listeningHistorySongsExpanded = false;
 let appNoticeDismissTimer = null;
 const APP_NOTICE_LIFETIME_MS = 5000;
+const transitionCleanupTimers = new WeakMap();
+let fullPlayerQueueCloseTimer = null;
 let nowPlayingCloseTimer = null;
 let fullPlayerTitleMarqueeFrame = null;
 let audioSourceTrackID = null;
@@ -242,6 +245,8 @@ let localImportProviderFocus = "youtube";
 let availableWindowsUpdateVersion = null;
 let dismissedWindowsUpdateVersion = null;
 let windowsUpdateReady = false;
+let mediaSessionController = null;
+let mediaSessionConfigured = false;
 const LOCAL_IMPORT_AUTO_RESOLVE_DELAY = 450;
 const LOCAL_IMPORT_PROVIDER_ORDER = Object.freeze([
   ["youtube", "YouTube"],
@@ -831,11 +836,89 @@ function showNotice(message, kind = "error") {
   notice.dataset.kind = kind;
   notice.setAttribute("role", kind === "error" ? "alert" : "status");
   notice.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
-  notice.hidden = false;
+  showTransitionToast(notice);
   appNoticeDismissTimer = setTimeout(() => {
     appNoticeDismissTimer = null;
-    notice.hidden = true;
+    hideTransitionToast(notice);
   }, APP_NOTICE_LIFETIME_MS);
+}
+
+function transitionDuration(variable, fallback) {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(variable).trim();
+  const number = Number.parseFloat(value);
+  if (!Number.isFinite(number)) return fallback;
+  return value.endsWith("s") && !value.endsWith("ms") ? number * 1000 : number;
+}
+
+function clearTransitionCleanup(element) {
+  const timer = transitionCleanupTimers.get(element);
+  if (timer) clearTimeout(timer);
+  transitionCleanupTimers.delete(element);
+}
+
+function showTransitionToast(toast) {
+  if (!toast) return;
+  clearTransitionCleanup(toast);
+  toast.hidden = false;
+  requestAnimationFrame(() => toast.classList.add("is-open"));
+}
+
+function hideTransitionToast(toast, cleanup = null) {
+  if (!toast || toast.hidden) return;
+  clearTransitionCleanup(toast);
+  toast.classList.remove("is-open");
+  const finish = () => {
+    toast.hidden = true;
+    cleanup?.();
+    transitionCleanupTimers.delete(toast);
+  };
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) finish();
+  else transitionCleanupTimers.set(toast, setTimeout(finish, transitionDuration("--toast-close", 250)));
+}
+
+function openTransitionDropdown(menu) {
+  if (!menu) return;
+  clearTransitionCleanup(menu);
+  menu.classList.remove("is-closing");
+  menu.hidden = false;
+  requestAnimationFrame(() => menu.classList.add("is-open"));
+}
+
+function closeTransitionDropdown(menu, cleanup = null) {
+  if (!menu || menu.hidden) { cleanup?.(); return; }
+  clearTransitionCleanup(menu);
+  menu.classList.remove("is-open");
+  menu.classList.add("is-closing");
+  const finish = () => {
+    menu.hidden = true;
+    menu.classList.remove("is-closing");
+    cleanup?.();
+    transitionCleanupTimers.delete(menu);
+  };
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) finish();
+  else transitionCleanupTimers.set(menu, setTimeout(finish, transitionDuration("--dropdown-close-dur", 150)));
+}
+
+function openTransitionModal(dialog) {
+  if (!dialog) return;
+  clearTransitionCleanup(dialog);
+  dialog.classList.remove("is-closing");
+  if (!dialog.open) dialog.showModal();
+  requestAnimationFrame(() => dialog.classList.add("is-open"));
+}
+
+function closeTransitionModal(dialog) {
+  if (!dialog?.open || dialog.classList.contains("is-closing")) return;
+  clearTransitionCleanup(dialog);
+  dialog.classList.remove("is-open");
+  dialog.classList.add("is-closing");
+  const finish = () => {
+    if (dialog.open) dialog.close();
+    dialog.classList.remove("is-closing");
+    transitionCleanupTimers.delete(dialog);
+  };
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) finish();
+  else transitionCleanupTimers.set(dialog, setTimeout(finish, transitionDuration("--modal-close-dur", 150)));
 }
 
 function friendlyIPCError(error, fallback) {
@@ -849,7 +932,8 @@ function dismissNotice() {
     clearTimeout(appNoticeDismissTimer);
     appNoticeDismissTimer = null;
   }
-  if (notice) notice.hidden = true;
+  if (notice && window.matchMedia("(prefers-reduced-motion: reduce)").matches) notice.hidden = true;
+  else hideTransitionToast(notice);
 }
 
 function clearPlaylistDragPreview() {
@@ -1026,10 +1110,9 @@ function closeProfileMenu({ restoreFocus = false } = {}) {
   const menu = $("#profileMenu");
   const button = $("#profileButton");
   if (!menu || !button || menu.hidden) return;
-  menu.hidden = true;
   button.setAttribute("aria-expanded", "false");
   $("#profileControl")?.classList.remove("open");
-  if (restoreFocus) button.focus();
+  closeTransitionDropdown(menu, () => { if (restoreFocus) button.focus(); });
 }
 
 function toggleProfileMenu() {
@@ -1041,7 +1124,7 @@ function toggleProfileMenu() {
     return;
   }
   updateProfileControl();
-  menu.hidden = false;
+  openTransitionDropdown(menu);
   button.setAttribute("aria-expanded", "true");
   $("#profileControl")?.classList.add("open");
 }
@@ -2209,7 +2292,7 @@ function openListeningHistory() {
   listeningHistorySongsExpanded = false;
   ensureListeningHistorySelection();
   renderListeningHistory();
-  $("#listeningHistoryDialog").showModal();
+  openTransitionModal($("#listeningHistoryDialog"));
   void prepareListeningHistoryMetadata();
 }
 
@@ -2241,6 +2324,76 @@ function activePlaybackMedia() {
 function playbackIsActive() {
   const media = activePlaybackMedia();
   return Boolean(currentTrack() && !media.paused && !media.ended);
+}
+
+function mediaSessionSeekTo(seconds, { fastSeek = false } = {}) {
+  if (listenAlongIsGuest() || !currentTrack()) return;
+  const media = activePlaybackMedia();
+  const duration = currentPlaybackDuration();
+  const requestedPosition = Number(seconds);
+  if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(requestedPosition)) return;
+  cancelCrossfade();
+  const position = clippedPlaybackPosition(requestedPosition);
+  if (fastSeek && typeof media.fastSeek === "function") media.fastSeek(position);
+  else media.currentTime = position;
+  state.position = position;
+  updatePlaybackProgressUI();
+  syncMediaSessionPlayback();
+  if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
+}
+
+function ensureMediaSessionController() {
+  if (mediaSessionConfigured) return mediaSessionController;
+  mediaSessionConfigured = true;
+  mediaSessionController = createMediaSessionController({
+    actionHandlers: {
+      play: () => {
+        const media = activePlaybackMedia();
+        if (!currentTrack() || media.paused || media.ended) toggle();
+      },
+      pause: () => {
+        if (listenAlongIsGuest()) return;
+        const media = activePlaybackMedia();
+        if (!media.paused && !media.ended) media.pause();
+      },
+      seekbackward: (details = {}) => mediaSessionSeekTo(
+        (Number(activePlaybackMedia().currentTime) || 0) - (Number(details.seekOffset) || 10),
+      ),
+      seekforward: (details = {}) => mediaSessionSeekTo(
+        (Number(activePlaybackMedia().currentTime) || 0) + (Number(details.seekOffset) || 10),
+      ),
+      seekto: (details = {}) => mediaSessionSeekTo(details.seekTime, { fastSeek: details.fastSeek }),
+      nexttrack: () => move(1),
+      previoustrack: () => previous(),
+    },
+  });
+  return mediaSessionController;
+}
+
+function syncMediaSession() {
+  const controller = ensureMediaSessionController();
+  if (!controller) return;
+  const media = activePlaybackMedia();
+  controller.sync({
+    track: currentTrack(),
+    isPlaying: playbackIsActive(),
+    position: Number(media.currentTime) || 0,
+    duration: currentPlaybackDuration(),
+    playbackRate: Number(media.playbackRate) || Number(state.playbackRate) || 1,
+  });
+}
+
+function syncMediaSessionPlayback() {
+  const controller = ensureMediaSessionController();
+  if (!controller) return;
+  const media = activePlaybackMedia();
+  controller.syncPlayback({
+    hasTrack: Boolean(currentTrack()),
+    isPlaying: playbackIsActive(),
+    position: Number(media.currentTime) || 0,
+    duration: currentPlaybackDuration(),
+    playbackRate: Number(media.playbackRate) || Number(state.playbackRate) || 1,
+  });
 }
 
 function beginListeningSession() {
@@ -2749,7 +2902,7 @@ async function playRemoteStream(song) {
     return;
   }
   if (serverSongRequiresDownload(song)) {
-    showNotice("Windows stream-only playback supports audio songs. Switch to Verified file cache and download this video to watch it.");
+    showNotice("Desktop stream-only playback supports audio songs. Switch to Verified file cache and download this video to watch it.");
     return;
   }
   if (currentServerTransferModes().downloadMode !== "stream_only") {
@@ -3908,9 +4061,9 @@ function artwork(track, { animateLoading = false, forceLoading = false } = {}) {
   if (!hasRemoteArtwork) {
     return `<div class="row-art">${source ? squareArtworkImageMarkup(source) : "♪"}</div>`;
   }
-  return `<div class="row-art server-artwork-loading${forceLoading ? " server-metadata-artwork" : ""}${canRenderImage ? " has-image" : ""}" data-server-artwork-id="${escapeHTML(track?.id || "")}" aria-busy="true">
-    <span class="server-artwork-placeholder" aria-hidden="true">${forceLoading ? "" : "♪"}</span>
-    ${canRenderImage ? squareArtworkImageMarkup(source) : ""}
+  return `<div class="row-art server-artwork-loading t-skel${forceLoading ? " server-metadata-artwork" : ""}${canRenderImage ? " has-image" : ""}" data-server-artwork-id="${escapeHTML(track?.id || "")}" aria-busy="true">
+    <span class="t-skel-skeleton is-pulsing" aria-hidden="true"><span class="server-artwork-placeholder">${forceLoading ? "" : "♪"}</span></span>
+    ${canRenderImage ? `<span class="t-skel-content">${squareArtworkImageMarkup(source)}</span>` : ""}
   </div>`;
 }
 
@@ -3940,7 +4093,7 @@ function bindServerArtworkLoadState(container) {
   if (!image || image.dataset.loadStateBound === "true") return;
   image.dataset.loadStateBound = "true";
   const reveal = () => {
-    container.classList.add("loaded");
+    container.classList.add("loaded", "is-revealed");
     container.classList.remove("failed");
     container.setAttribute("aria-busy", "false");
   };
@@ -3981,10 +4134,14 @@ function trackRow(track, index) {
   const canReorder = Boolean(editablePlaylist && entryKey
     && (notDownloaded || editablePlaylist.trackIDs.includes(track.id)));
   const reorderLabel = canReorder ? ". Press Alt+Up or Alt+Down to reorder" : "";
+  const keyboardActionLabel = unavailable
+    ? ". Press Enter or Space for availability information"
+    : ". Press Enter or Space to play";
   const draggableAttributes = canReorder
-    ? ` data-playlist-draggable="true" data-playlist-entry="${escapeHTML(entryKey)}" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Shift+F10"`
+    ? ` aria-keyshortcuts="Enter Space Alt+ArrowUp Alt+ArrowDown Shift+F10"`
     : ` aria-keyshortcuts="Enter Space Shift+F10"`;
-  return `<div class="track-row ${track.id === currentID ? "playing" : ""}${canReorder ? " playlist-draggable" : ""}${unavailable ? " unavailable" : ""}${notDownloaded ? " playlist-unavailable" : ""}" data-track="${escapeHTML(track.id)}" tabindex="0" aria-label="${escapeHTML(actionLabel + reorderLabel)}" aria-disabled="${unavailable}"${draggableAttributes}>
+  return `<div class="track-row ${track.id === currentID ? "playing" : ""}${canReorder ? " playlist-draggable" : ""}${unavailable ? " unavailable" : ""}${notDownloaded ? " playlist-unavailable" : ""}" data-track="${escapeHTML(track.id)}" role="group" aria-label="${escapeHTML(`${track.title || "Untitled"} actions`)}"${canReorder ? ' data-playlist-draggable="true"' : ""}${canReorder ? ` data-playlist-entry="${escapeHTML(entryKey)}"` : ""}>
+    <button type="button" class="row-primary-action" data-track-activate="${escapeHTML(track.id)}" aria-label="${escapeHTML(actionLabel + keyboardActionLabel + reorderLabel)}" aria-disabled="${unavailable}"${draggableAttributes}></button>
     <span class="track-number" title="${track.id === currentID && !audio.paused ? "Now playing" : `Track ${index + 1}`}">${track.id === currentID && !audio.paused ? nowPlayingIcon : index + 1}</span>${artwork(track)}
     <div class="track-copy"><strong>${escapeHTML(track.title)}</strong><small>${escapeHTML(track.artist)} / ${notDownloaded ? "Not downloaded" : unavailable ? "File unavailable" : mediaKind}</small></div>
     <span class="album">${escapeHTML(displayAlbum(track))}</span><span class="track-time">${notDownloaded ? "Not saved" : unavailable ? "Missing" : formatTime(track.duration)}</span>
@@ -4137,7 +4294,7 @@ function storageTracks() {
   return tracks;
 }
 
-async function deleteStoredTracks(trackIDs) {
+async function deleteStoredTracks(trackIDs, { deleteExternal = false } = {}) {
   const tracks = state.tracks.filter((track) => trackIDs.includes(track.id));
   if (!tracks.length) return;
   const targetIDs = new Set(tracks.map((track) => track.id));
@@ -4170,7 +4327,11 @@ async function deleteStoredTracks(trackIDs) {
   const failed = [];
   for (const track of tracks) {
     try {
-      if (track.available !== false && track.filePath) await api.deleteAudio(track.filePath);
+      if (track.available !== false && track.filePath) {
+        const external = physicalStorageClassForTrack(track) === "external";
+        if (!external) await api.deleteAudio(track.filePath);
+        else if (deleteExternal) await api.deleteAudio(track.filePath, { deleteOriginal: true });
+      }
       deleted.push(track);
     } catch (error) {
       failed.push({ track, error });
@@ -4211,6 +4372,8 @@ async function deleteStoredTracks(trackIDs) {
   if (failed.length) {
     const names = failed.slice(0, 3).map(({ track }) => track.title).join(", ");
     showNotice(`Could not remove ${names}${failed.length > 3 ? ` and ${failed.length - 3} more` : ""}. The files remain in your library.`);
+  } else if (deleted.some((track) => physicalStorageClassForTrack(track) === "external") && !deleteExternal) {
+    showNotice("Removed from Resonance. The original files remain where you keep them.", "status");
   }
 }
 
@@ -4218,7 +4381,7 @@ function renderStorage() {
   updateTopSearch();
   const tracks = storageTracks();
   const visibleTracks = tracksForActiveProfile(state);
-  const localTracks = visibleTracks.filter((track) => physicalStorageClassForTrack(track) === "files" && track.available !== false);
+  const localTracks = visibleTracks.filter((track) => ["files", "external"].includes(physicalStorageClassForTrack(track)) && track.available !== false);
   const remoteTracks = visibleTracks.filter((track) => physicalStorageClassForTrack(track) === "downloads" && track.available !== false);
   const localBytes = localTracks.reduce((sum, track) => sum + (track.size || 0), 0);
   const remoteBytes = remoteTracks.reduce((sum, track) => sum + (track.size || 0), 0);
@@ -4234,7 +4397,13 @@ function renderStorage() {
     <div class="storage-section-heading"><strong>${storageScope === "downloads" ? "DOWNLOADED FROM SERVER" : storageScope === "files" ? "IMPORTED ON THIS PC" : "ALL SONGS"}</strong><span>${tracks.length} songs</span></div>
     <div class="storage-list redesigned">${tracks.map((track) => {
       const unavailable = track.available === false || track.missing;
-      return `<div class="storage-row ${storageEditing ? "selecting" : ""}${unavailable ? " unavailable" : ""}" data-storage-track="${escapeHTML(track.id)}" tabindex="0" aria-keyshortcuts="Enter Space Shift+F10" aria-disabled="${unavailable}"><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${escapeHTML(track.id)}" aria-label="${selectedStorageIDs.has(track.id) ? "Deselect" : "Select"} ${escapeHTML(track.title || "song")}" aria-pressed="${selectedStorageIDs.has(track.id)}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${unavailable ? "File unavailable on this device" : `${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(displayAlbum(track))}`}</small></span><span class="storage-size">${unavailable ? "Missing" : formatBytes(track.size)}</span><button class="row-menu" data-storage-menu="${escapeHTML(track.id)}" title="More options" aria-label="More options for ${escapeHTML(track.title || "song")}">•••</button></div>`;
+      const title = track.title || "Untitled";
+      const storageActionLabel = storageEditing
+        ? `${selectedStorageIDs.has(track.id) ? "Deselect" : "Select"} ${title}. Press Enter or Space to ${selectedStorageIDs.has(track.id) ? "deselect" : "select"}`
+        : unavailable
+          ? `${title} by ${track.artist || "Unknown artist"}. Press Enter or Space for availability information`
+          : `Play ${title} by ${track.artist || "Unknown artist"}. Press Enter or Space to play`;
+      return `<div class="storage-row ${storageEditing ? "selecting" : ""}${unavailable ? " unavailable" : ""}" data-storage-track="${escapeHTML(track.id)}" role="group" aria-label="${escapeHTML(`${title} actions`)}"><button type="button" class="row-primary-action" data-storage-activate="${escapeHTML(track.id)}" aria-label="${escapeHTML(storageActionLabel)}" aria-keyshortcuts="Enter Space Shift+F10" aria-disabled="${!storageEditing && unavailable}"></button><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${escapeHTML(track.id)}" aria-label="${selectedStorageIDs.has(track.id) ? "Deselect" : "Select"} ${escapeHTML(title)}" aria-pressed="${selectedStorageIDs.has(track.id)}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${unavailable ? "File unavailable on this device" : `${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(displayAlbum(track))}`}</small></span><span class="storage-size">${unavailable ? "Missing" : formatBytes(track.size)}</span><button class="row-menu" data-storage-menu="${escapeHTML(track.id)}" title="More options" aria-label="More options for ${escapeHTML(title)}">•••</button></div>`;
     }).join("") || `<div class="empty"><b>${storageEmptyTitle}</b><span>${storageEmptyHelp}</span></div>`}</div></div>`;
   const importControl = $("#storageImportControl");
   const importButton = $("#storageImportMenuButton");
@@ -4290,23 +4459,25 @@ function renderStorage() {
   });
   document.querySelectorAll("[data-storage-select]").forEach((button) => button.onclick = () => { selectedStorageIDs.has(button.dataset.storageSelect) ? selectedStorageIDs.delete(button.dataset.storageSelect) : selectedStorageIDs.add(button.dataset.storageSelect); renderStorage(); });
   if ($("#deleteSelectedStorage")) $("#deleteSelectedStorage").onclick = async () => {
-    if (selectedStorageIDs.size && confirm(`Remove ${selectedStorageIDs.size} selected song${selectedStorageIDs.size === 1 ? "" : "s"} from this device?`)) await deleteStoredTracks([...selectedStorageIDs]);
+    if (selectedStorageIDs.size && confirm(`Delete ${selectedStorageIDs.size} selected file${selectedStorageIDs.size === 1 ? "" : "s"} from this device?`)) await deleteStoredTracks([...selectedStorageIDs], { deleteExternal: true });
   };
   document.querySelectorAll("[data-storage-track]").forEach((row) => {
+    const primaryAction = row.querySelector("[data-storage-activate]");
     const openMenu = (event) => openTrackContextMenu(event, row.dataset.storageTrack, { source: "storage", playbackTracks: tracks, playlistID: null });
     row.oncontextmenu = openMenu;
-    row.onkeydown = (event) => {
-      if (event.target !== row) return;
+    primaryAction.onclick = () => {
+      if (storageEditing) {
+        selectedStorageIDs.has(row.dataset.storageTrack)
+          ? selectedStorageIDs.delete(row.dataset.storageTrack)
+          : selectedStorageIDs.add(row.dataset.storageTrack);
+        renderStorage();
+      } else {
+        play(state.tracks.find((track) => track.id === row.dataset.storageTrack), tracks, { playlistID: null });
+      }
+    };
+    primaryAction.onkeydown = (event) => {
       if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        if (storageEditing) {
-          selectedStorageIDs.has(row.dataset.storageTrack)
-            ? selectedStorageIDs.delete(row.dataset.storageTrack)
-            : selectedStorageIDs.add(row.dataset.storageTrack);
-          renderStorage();
-        } else {
-          play(state.tracks.find((track) => track.id === row.dataset.storageTrack), tracks, { playlistID: null });
-        }
+        // Native button activation handles Enter and Space.
         return;
       }
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
@@ -4656,7 +4827,13 @@ function remoteRows() {
     const artworkLoading = metadataLoading || Boolean(song.metadataArtworkLoading);
     const songTitle = song.title || song.name || "server song";
     const duration = Number(song.duration) > 0 ? formatTime(Number(song.duration)) : "—";
-    return `<div class="remote-row ${serverSelecting ? "selecting" : ""} ${selected ? "selected" : ""} ${metadataLoading ? "metadata-loading" : ""}" data-remote-row="${escapeHTML(song.id)}" tabindex="0" aria-keyshortcuts="Enter Space Shift+F10" ${metadataLoading ? 'aria-busy="true" aria-label="Loading song metadata"' : ""}>
+    const remoteActionLabel = metadataLoading
+      ? `Loading metadata for ${songTitle}`
+      : serverSelecting
+        ? `${selected ? "Deselect" : "Select"} ${songTitle}`
+        : `Play or download ${songTitle}`;
+    return `<div class="remote-row ${serverSelecting ? "selecting" : ""} ${selected ? "selected" : ""} ${metadataLoading ? "metadata-loading" : ""}" data-remote-row="${escapeHTML(song.id)}" role="group" aria-label="${escapeHTML(`${songTitle} actions`)}" ${metadataLoading ? 'aria-busy="true"' : ""}>
+      <button type="button" class="row-primary-action" data-remote-activate="${escapeHTML(song.id)}" aria-label="${escapeHTML(remoteActionLabel)}" aria-keyshortcuts="Enter Space Shift+F10"></button>
       <button class="remote-check ${selected ? "selected" : ""}" data-select-remote="${escapeHTML(song.id)}" ${serverSelecting ? "" : "hidden"} aria-label="${selected ? "Deselect" : "Select"} ${escapeHTML(songTitle)}">${selected ? "✓" : ""}</button>
       ${artwork(song, { animateLoading: true, forceLoading: artworkLoading })}
       ${metadataLoading ? `<span class="server-song-title server-metadata-copy">${serverMetadataPlaceholder("server-metadata-title")}${serverMetadataPlaceholder("server-metadata-subtitle")}</span>` : `<span class="server-song-title"><strong>${escapeHTML(songTitle)}</strong>${onDevice ? '<small>On device</small>' : serverSongRequiresDownload(song) && currentServerTransferModes().downloadMode === "stream_only" ? '<small>Video · download required</small>' : ""}</span>`}
@@ -4671,6 +4848,7 @@ function remoteRows() {
 function bindRemoteRows() {
   document.querySelectorAll("[data-select-remote]").forEach((button) => button.onclick = () => { selectedRemoteIDs.has(button.dataset.selectRemote) ? selectedRemoteIDs.delete(button.dataset.selectRemote) : selectedRemoteIDs.add(button.dataset.selectRemote); renderServer(); });
   document.querySelectorAll("[data-remote-row]").forEach((row) => {
+    const primaryAction = row.querySelector("[data-remote-activate]");
     const activate = () => {
       const id = row.dataset.remoteRow;
       if (serverSelecting) {
@@ -4689,16 +4867,11 @@ function bindRemoteRows() {
         renderServer();
       }
     };
-    row.onclick = (event) => {
-      if (event.target.closest("button")) return;
-      activate();
-    };
+    primaryAction.onclick = activate;
     row.oncontextmenu = (event) => openServerTrackContextMenu(event, row.dataset.remoteRow);
-    row.onkeydown = (event) => {
-      if (event.target !== row) return;
+    primaryAction.onkeydown = (event) => {
       if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        activate();
+        // Native button activation handles Enter and Space.
         return;
       }
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
@@ -4875,7 +5048,7 @@ function renderSettings() {
   }).join("");
   const settingsRoot = $("#settingsDialogContent");
   disposeCustomSelects(settingsRoot);
-  settingsRoot.innerHTML = `<div class="settings-heading"><div><span class="eyebrow">RESONANCE</span><h1 id="settingsDialogTitle">Settings</h1><p>Manage how Resonance behaves on this Windows device.</p></div><button id="closeSettings" class="history-close" type="button" aria-label="Close settings">×</button></div>
+  settingsRoot.innerHTML = `<div class="settings-heading"><div><span class="eyebrow">RESONANCE</span><h1 id="settingsDialogTitle">Settings</h1><p>Manage how Resonance behaves on this desktop device.</p></div><button id="closeSettings" class="history-close" type="button" aria-label="Close settings">×</button></div>
     <div class="settings-shell">
       <nav class="settings-nav" aria-label="Settings sections">
         <button class="${settingsPanel === "general" ? "active" : ""}" type="button" data-settings-panel="general" aria-current="${settingsPanel === "general" ? "page" : "false"}">${settingsIcons.general}<span>General</span></button>
@@ -4891,19 +5064,19 @@ function renderSettings() {
               <label class="settings-row" for="settingsRunInBackground">
                 <span class="settings-row-icon" aria-hidden="true">${settingsIcons.background}</span>
                 <span class="settings-row-copy"><strong>Running in the background</strong><small>Keep playback active in the system tray when the window closes.</small></span>
-                <span class="settings-toggle"><input id="settingsRunInBackground" type="checkbox" ${preferences.runInBackground ? "checked" : ""}><span aria-hidden="true"></span></span>
+                <span class="settings-toggle"><input id="settingsRunInBackground" type="checkbox" ${preferences.runInBackground ? "checked" : ""}><span class="t-toggle" data-on="${preferences.runInBackground}" aria-hidden="true"><span class="t-toggle-thumb"></span></span></span>
               </label>
               <label class="settings-row" for="settingsDiscordPresence">
                 <span class="settings-row-icon discord" aria-hidden="true">${settingsIcons.discord}</span>
                 <span class="settings-row-copy"><strong>Discord Rich Presence</strong><small id="settingsDiscordStatus">${escapeHTML(discordPresenceStatus.message || "Show Resonance playback on your signed-in Discord profile.")}</small></span>
-                <span class="settings-toggle"><input id="settingsDiscordPresence" type="checkbox" ${preferences.discordRichPresence && discordPresenceStatus.applicationConfigured ? "checked" : ""} ${discordPresenceStatus.applicationConfigured ? "" : "disabled"}><span aria-hidden="true"></span></span>
+                <span class="settings-toggle"><input id="settingsDiscordPresence" type="checkbox" ${preferences.discordRichPresence && discordPresenceStatus.applicationConfigured ? "checked" : ""} ${discordPresenceStatus.applicationConfigured ? "" : "disabled"}><span class="t-toggle" data-on="${preferences.discordRichPresence && discordPresenceStatus.applicationConfigured}" aria-hidden="true"><span class="t-toggle-thumb"></span></span></span>
               </label>
               <div class="settings-row settings-crossfade-row">
                 <span class="settings-row-icon" aria-hidden="true">${settingsIcons.playback}</span>
                 <span class="settings-row-copy"><strong>Crossfade</strong><small id="settingsCrossfadeDescription">${preferences.crossfadeEnabled ? `Overlap songs by ${preferences.crossfadeSeconds} seconds.` : "Start the next song early while fading between both."}</small></span>
                 <span class="settings-crossfade-controls">
                   <span id="settingsCrossfadeValue">${preferences.crossfadeSeconds} sec</span>
-                  <label class="settings-toggle"><input id="settingsCrossfadeEnabled" type="checkbox" aria-label="Enable crossfade" ${preferences.crossfadeEnabled ? "checked" : ""}><span aria-hidden="true"></span></label>
+                  <label class="settings-toggle"><input id="settingsCrossfadeEnabled" type="checkbox" aria-label="Enable crossfade" ${preferences.crossfadeEnabled ? "checked" : ""}><span class="t-toggle" data-on="${preferences.crossfadeEnabled}" aria-hidden="true"><span class="t-toggle-thumb"></span></span></label>
                 </span>
                 <input id="settingsCrossfadeSeconds" class="settings-crossfade-slider" type="range" min="1" max="12" step="1" value="${preferences.crossfadeSeconds}" aria-label="Crossfade duration" aria-valuetext="${preferences.crossfadeSeconds} seconds" ${preferences.crossfadeEnabled ? "" : "disabled"}>
               </div>
@@ -4929,7 +5102,7 @@ function renderSettings() {
           </div>
         </section>
         <section class="settings-panel settings-appearance-panel" data-settings-content="appearance" ${settingsPanel === "appearance" ? "" : "hidden"}>
-          <div class="settings-panel-title"><div><span class="eyebrow">THEME</span><h2>Appearance</h2><p>Choose a dark palette for this Windows device. Changes apply immediately.</p></div></div>
+          <div class="settings-panel-title"><div><span class="eyebrow">THEME</span><h2>Appearance</h2><p>Choose a dark palette for this desktop device. Changes apply immediately.</p></div></div>
           <fieldset class="settings-theme-fieldset">
             <legend class="sr-only">Resonance theme</legend>
             <div class="settings-theme-grid">
@@ -4967,9 +5140,12 @@ function renderSettings() {
       </div>
     </div>
     <footer class="settings-footer"><button id="doneSettings" class="primary" type="button">Done</button></footer>`;
-  const closeSettings = () => $("#settingsDialog").close();
+  const closeSettings = () => closeTransitionModal($("#settingsDialog"));
   $("#closeSettings").onclick = closeSettings;
   $("#doneSettings").onclick = closeSettings;
+  settingsRoot.querySelectorAll(".settings-toggle input").forEach((input) => {
+    input.addEventListener("change", () => syncTransitionToggle(input, { interacted: true }));
+  });
   document.querySelectorAll("[data-settings-panel]").forEach((button) => {
     button.onclick = () => {
       settingsPanel = button.dataset.settingsPanel;
@@ -5182,12 +5358,19 @@ async function updateAppPreference(key, value) {
   await api.updateAppPreferences(state.appPreferences).catch(() => undefined);
 }
 
+function syncTransitionToggle(input, { interacted = false } = {}) {
+  const visual = input?.nextElementSibling;
+  if (!visual?.classList.contains("t-toggle")) return;
+  if (interacted) visual.classList.add("is-init");
+  visual.dataset.on = String(Boolean(input.checked));
+}
+
 function openSettings(initialPanel = "general") {
   closeProfileMenu();
   settingsPanel = initialPanel;
   settingsRecordingAction = null;
   renderSettings();
-  if (!$("#settingsDialog").open) $("#settingsDialog").showModal();
+  openTransitionModal($("#settingsDialog"));
   if (settingsPanel === "server") void refreshServerSettingsControls();
 }
 
@@ -5232,13 +5415,13 @@ function render() {
 function bindTrackRows(playbackTracks = playlistTracks()) {
   const trackTable = document.querySelector(".track-table");
   document.querySelectorAll("[data-track]").forEach((row) => {
-    row.onclick = (event) => {
+    const primaryAction = row.querySelector("[data-track-activate]");
+    primaryAction.onclick = (event) => {
       if (performance.now() < suppressPlaylistRowClickUntil) {
         event.preventDefault();
         return;
       }
-      if (event.target.closest("button, select, input, a")) return;
-      if (row.getAttribute("aria-disabled") === "true") {
+      if (primaryAction.getAttribute("aria-disabled") === "true") {
         if (row.classList.contains("playlist-unavailable")) showNotice("This song is in the playlist but is not downloaded on this device.", "status");
         return;
       }
@@ -5248,20 +5431,14 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       if (row.getAttribute("aria-disabled") === "true") return;
       openTrackContextMenu(event, row.dataset.track, { playbackTracks, playlistID: selectedPlaylistID });
     };
-    row.onkeydown = async (event) => {
-      if (event.target !== row) return;
+    primaryAction.onkeydown = async (event) => {
       if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        if (row.getAttribute("aria-disabled") === "true") {
-          if (row.classList.contains("playlist-unavailable")) showNotice("This song is in the playlist but is not downloaded on this device.", "status");
-          return;
-        }
-        play(state.tracks.find((track) => track.id === row.dataset.track), playbackTracks, { playlistID: selectedPlaylistID });
+        // Native button activation handles Enter and Space.
         return;
       }
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
         event.preventDefault();
-        if (row.getAttribute("aria-disabled") === "true") return;
+        if (primaryAction.getAttribute("aria-disabled") === "true") return;
         openTrackContextMenu(event, row.dataset.track, { playbackTracks, playlistID: selectedPlaylistID });
         return;
       }
@@ -5276,12 +5453,12 @@ function bindTrackRows(playbackTracks = playlistTracks()) {
       const entryKey = row.dataset.playlistEntry;
       const targetKey = reorderRows[to].dataset.playlistEntry;
       await commitPlaylistTrackReorder(entryKey, targetKey, event.key === "ArrowDown");
-      document.querySelector(`[data-playlist-entry="${CSS.escape(entryKey)}"]`)?.focus();
+      document.querySelector(`[data-playlist-entry="${CSS.escape(entryKey)}"] [data-track-activate]`)?.focus();
     };
     if (row.dataset.playlistDraggable === "true") {
       // Capture mouse pointers too so crossing header controls cannot strand a drag.
       row.onpointerdown = (event) => {
-        if (!event.isPrimary || event.button !== 0 || event.target.closest("button, select, input, a")) return;
+        if (!event.isPrimary || event.button !== 0 || event.target.closest("button:not(.row-primary-action), select, input, a")) return;
         clearPlaylistPointerDrag();
         playlistPointerDrag = {
           pointerID: event.pointerId,
@@ -5335,11 +5512,13 @@ let activeContextMenuAlignEnd = false;
 function closeTrackContextMenu({ restoreFocus = false } = {}) {
   const menu = $("#trackContextMenu");
   if (!menu) return;
-  menu.hidden = true;
-  menu.innerHTML = "";
-  menu.onkeydown = null;
-  menu.classList.remove("full-player-context");
-  if (restoreFocus) activeContextMenuReturnFocus?.focus?.();
+  const returnFocus = activeContextMenuReturnFocus;
+  closeTransitionDropdown(menu, () => {
+    menu.innerHTML = "";
+    menu.onkeydown = null;
+    menu.classList.remove("full-player-context");
+    if (restoreFocus) returnFocus?.focus?.();
+  });
   activeContextMenuReturnFocus = null;
   activeContextMenuAlignEnd = false;
 }
@@ -5373,7 +5552,7 @@ function renderContextMenu({ title, subtitle, actions }) {
   }).join("");
   const headerMarkup = showHeader ? `<div class="context-menu-header"><strong>${escapeHTML(title || "Untitled")}</strong><small>${escapeHTML(subtitle || "Unknown artist")}</small></div>` : "";
   menu.innerHTML = `${headerMarkup}${actionMarkup}`;
-  menu.hidden = false;
+  openTransitionDropdown(menu);
   const positionMenu = () => {
     const requestedLeft = activeContextMenuAlignEnd ? activeContextMenuPosition.x - menu.offsetWidth : activeContextMenuPosition.x;
     menu.style.left = `${Math.max(8, Math.min(requestedLeft, innerWidth - menu.offsetWidth - 8))}px`;
@@ -5463,6 +5642,13 @@ function renderTrackContextMenu(track, options = {}) {
       onSelect: () => openClipEditor(track.id),
     });
   }
+  if (track.filePath && typeof api.revealAudio === "function") {
+    actions.push({
+      label: "Show in folder",
+      icon: contextOpenIcon,
+      onSelect: () => api.revealAudio(track.filePath),
+    });
+  }
   if (options.source === "full-player" && isInstalledVideoTrack(track)) {
     actions.unshift(
       {
@@ -5500,7 +5686,9 @@ function renderTrackContextMenu(track, options = {}) {
       icon: contextTrashIcon,
       danger: true,
       onSelect: async () => {
-        if (confirm(`Remove ${track.title || "this song"} from this device?`)) await deleteStoredTracks([track.id]);
+        if (!confirm(`${options.source === "storage" ? "Delete" : "Remove"} ${track.title || "this song"} ${options.source === "storage" ? "from this device" : "from Resonance"}?`)) return;
+        if (options.source === "storage") await deleteStoredTracks([track.id], { deleteExternal: true });
+        else await deleteStoredTracks([track.id]);
       },
     },
   );
@@ -5873,7 +6061,7 @@ function openLocalImport({ serverUploadMode = null } = {}) {
     $("#localImportSync").checked = true;
   }
   $("#localImportSource").value = "";
-  $("#localImportDialog").showModal();
+  openTransitionModal($("#localImportDialog"));
   requestAnimationFrame(() => $("#localImportSource").focus());
 }
 
@@ -6040,12 +6228,18 @@ function updateLocalImportSyncForSelection({ preserveChecked = false } = {}) {
   const canSync = Boolean(serverAdminToken.trim() && state.serverURL);
   const sync = $("#localImportSync");
   const row = $("#localImportSyncRow");
-  if (!preserveChecked) sync.checked = true;
+  if (!preserveChecked) {
+    sync.checked = true;
+    if (api["browser"]) sync.checked = false;
+  }
   sync.disabled = serverBacked;
+  syncTransitionToggle(sync);
   row.classList.toggle("disabled", serverBacked);
   row.title = serverBacked
     ? "This source is already saved to the active server profile."
-    : canSync
+      : api["browser"]
+        ? "Browser test mode keeps imports on this device fixture."
+      : canSync
       ? "Upload a copy to the active server profile after downloading."
       : "Sign in to your Resonance account before importing to upload this copy.";
   updateLocalImportConfirmLabel();
@@ -6887,7 +7081,7 @@ async function confirmLinkImport() {
       setLocalImportStage({ stage: "awaiting_selection" });
       hideServerTransfer("local-import");
       serverTransferCancelRequested = false;
-      $("#localImportDialog").showModal();
+      openTransitionModal($("#localImportDialog"));
       return;
     }
     let importedTrack = null;
@@ -6983,7 +7177,7 @@ async function closeLocalImport() {
   localImportInteractionGeneration += 1;
   await stopLocalImportPreview({ release: true, resumeMain: true });
   if (localImportRunning) await api.cancelLocalImport();
-  $("#localImportDialog").close();
+  closeTransitionModal($("#localImportDialog"));
 }
 
 function renderAddSongsDialog() {
@@ -7007,7 +7201,7 @@ function openAddSongsDialog(playlist) {
   addSongsPlaylistID = playlist.id;
   $("#addSongsSearch").value = "";
   renderAddSongsDialog();
-  $("#addSongsDialog").showModal();
+  openTransitionModal($("#addSongsDialog"));
   requestAnimationFrame(() => $("#addSongsSearch").focus());
 }
 
@@ -7058,7 +7252,7 @@ function updateServerTransfer({
   if (presentation.determinate) progress.value = presentation.ratio;
   else progress.removeAttribute("value");
   $("#serverTransferPercent").textContent = presentation.label;
-  toast.hidden = false;
+  showTransitionToast(toast);
   const displayedTransferComplete = itemTotal !== undefined
     ? Number(itemTotal) > 0 && Number(itemCompleted) >= Number(itemTotal)
     : total > 0 && completed >= total;
@@ -7069,8 +7263,7 @@ function hideServerTransfer(owner = null) {
   if (owner && serverTransferOwner && owner !== serverTransferOwner) return;
   const toast = $("#serverTransferToast");
   if (toast) {
-    toast.hidden = true;
-    toast.removeAttribute("data-direction");
+    hideTransitionToast(toast, () => toast.removeAttribute("data-direction"));
   }
   const progress = $("#serverTransferProgress");
   if (progress) progress.removeAttribute("value");
@@ -7774,6 +7967,24 @@ function toggleFavorite(id) {
     state.likesDirty = true;
   }
   persistInBackground(); schedulePlaylistSync(); render(); updateChrome();
+  if (willLike) burstFavoriteTransition();
+}
+
+function burstFavoriteTransition() {
+  const vectors = [[0, -22], [15, -16], [22, 0], [15, 16], [0, 22], [-15, 16], [-22, 0], [-15, -16]];
+  document.querySelectorAll(".t-like[data-liked=\"true\"]").forEach((button) => {
+    button.querySelectorAll(".t-like-particles i").forEach((particle, index) => {
+      const [x, y] = vectors[index % vectors.length];
+      particle.style.setProperty("--px", `${x}px`);
+      particle.style.setProperty("--py", `${y}px`);
+      particle.style.setProperty("--pdelay", `${index * 12}ms`);
+      particle.style.setProperty("--psize", String(.8 + (index % 3) * .2));
+    });
+    button.classList.remove("is-bursting");
+    void button.offsetWidth;
+    button.classList.add("is-bursting");
+    setTimeout(() => button.classList.remove("is-bursting"), transitionDuration("--like-particle-dur", 600) + 100);
+  });
 }
 
 function newPlaylist(trackID = null) {
@@ -7781,7 +7992,7 @@ function newPlaylist(trackID = null) {
   const dialog = $("#playlistDialog");
   $("#playlistName").value = "";
   $("#createPlaylist").disabled = true;
-  dialog.showModal();
+  openTransitionModal(dialog);
   requestAnimationFrame(() => $("#playlistName").focus());
 }
 
@@ -7842,6 +8053,21 @@ function fullPlayerHistoryTracks() {
   return [...history].reverse().map((trackID) => tracksByID.get(trackID)).filter(Boolean);
 }
 
+function moveFullPlayerQueueTabPill({ animate = true } = {}) {
+  const bar = $('.full-player-queue-tabs[data-transition="t-tabs"]');
+  const pill = bar?.querySelector(".t-tabs-pill");
+  const tab = bar?.querySelector('[aria-selected="true"]');
+  if (!pill || !tab) return;
+  const shouldAnimate = animate && Boolean(pill.style.width);
+  if (!shouldAnimate) pill.style.transition = "none";
+  pill.style.transform = `translateX(${tab.offsetLeft}px)`;
+  pill.style.width = `${tab.offsetWidth}px`;
+  if (!shouldAnimate) {
+    void pill.offsetWidth;
+    pill.style.removeProperty("transition");
+  }
+}
+
 function renderFullPlayerQueue() {
   const queue = fullPlayerQueueTab === "history" ? fullPlayerHistoryTracks() : fullPlayerQueueTracks();
   const count = queue.length;
@@ -7852,6 +8078,7 @@ function renderFullPlayerQueue() {
     button.setAttribute("aria-selected", String(active));
     button.tabIndex = active ? 0 : -1;
   });
+  requestAnimationFrame(() => moveFullPlayerQueueTabPill());
   $("#fullPlayerQueue").setAttribute("aria-labelledby", fullPlayerQueueTab === "history" ? "fullPlayerQueueHistoryTab" : "fullPlayerQueueUpNextTab");
   $("#fullPlayerQueue").innerHTML = queue.length ? queue.map((track) => `<button class="full-player-queue-item" type="button" data-full-player-queue="${escapeHTML(track.id)}" aria-label="${track.historyOnly ? "Not downloaded: " : "Play "}${escapeHTML(track.title || "Untitled")} by ${escapeHTML(track.artist || "Unknown Artist")}" ${track.historyOnly ? "disabled" : ""}>
     ${artwork(track)}<span><strong>${escapeHTML(track.title || "Untitled")}</strong><small>${escapeHTML(track.artist || "Unknown Artist")}</small></span><time>${track.historyOnly ? "Not downloaded" : formatTime(track.duration)}</time>
@@ -8674,6 +8901,7 @@ function renderFullPlayer() {
   backdropNode.innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : "";
   const favorite = $("#fullPlayerFavorite");
   favorite.classList.toggle("active", liked);
+  favorite.dataset.liked = String(liked);
   favorite.disabled = Boolean(track.transientStream);
   favorite.setAttribute("aria-pressed", String(liked));
   favorite.setAttribute("aria-label", liked ? "Remove current song from Liked Songs" : "Add current song to Liked Songs");
@@ -8692,7 +8920,23 @@ function renderFullPlayer() {
 }
 
 function setFullPlayerQueueVisible(visible) {
-  $("#fullPlayerQueuePanel").hidden = !visible;
+  const panel = $("#fullPlayerQueuePanel");
+  if (fullPlayerQueueCloseTimer) {
+    clearTimeout(fullPlayerQueueCloseTimer);
+    fullPlayerQueueCloseTimer = null;
+  }
+  if (visible) {
+    panel.hidden = false;
+    requestAnimationFrame(() => {
+      panel.dataset.open = "true";
+      moveFullPlayerQueueTabPill({ animate: false });
+    });
+  } else {
+    panel.dataset.open = "false";
+    const finish = () => { panel.hidden = true; fullPlayerQueueCloseTimer = null; };
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) finish();
+    else fullPlayerQueueCloseTimer = setTimeout(finish, transitionDuration("--panel-close-dur", 350));
+  }
   $("#fullPlayerQueueToggle").setAttribute("aria-expanded", String(visible));
   if (visible) {
     renderFullPlayerQueue();
@@ -8754,7 +8998,13 @@ function updateChrome() {
   $("#bottomMeta").textContent = track ? `${track.artist} / ${playing ? "Now playing" : "Paused"}` : "Local library";
   $(".mini-art").innerHTML = track?.artwork ? squareArtworkImageMarkup(track.artwork) : "♪";
   document.querySelectorAll("[data-action=toggle]").forEach((button) => {
-    button.innerHTML = playing ? playbackPauseIcon : playbackPlayIcon;
+    let iconSwap = button.querySelector(".t-icon-swap");
+    if (!iconSwap && button.classList.contains("play-main")) {
+      button.innerHTML = `<span class="t-icon-swap" data-state="a"><span class="t-icon" data-icon="a">${playbackPlayIcon}</span><span class="t-icon" data-icon="b">${playbackPauseIcon}</span></span>`;
+      iconSwap = button.querySelector(".t-icon-swap");
+    }
+    if (iconSwap) iconSwap.dataset.state = playing ? "b" : "a";
+    else button.innerHTML = playing ? playbackPauseIcon : playbackPlayIcon;
     button.setAttribute("aria-label", playing ? "Pause" : "Play");
     button.title = playing ? "Pause" : "Play";
   });
@@ -8790,6 +9040,7 @@ function updateChrome() {
     if (listenAlongGuest) button.title = "The Listen Along host controls playback";
   }
   if ($("#installedVideoDialog").open) syncInstalledVideoTransport();
+  syncMediaSession();
   renderFullPlayer();
   bindSquareArtworkImages();
   scheduleDiscordPresenceUpdate();
@@ -8900,6 +9151,21 @@ $("#nowPlayingDialog").addEventListener("cancel", (event) => {
   event.preventDefault();
   closeNowPlaying();
 });
+document.querySelectorAll("dialog.t-modal").forEach((dialog) => {
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeTransitionModal(dialog);
+  });
+  dialog.addEventListener("close", () => {
+    clearTransitionCleanup(dialog);
+    dialog.classList.remove("is-open", "is-closing");
+  });
+});
+if (api["browser"]) {
+  $("#browserPreviewBar").hidden = false;
+  $("#resetBrowserPreview").onclick = () => api.resetBrowserState();
+}
+
 $("#nowPlayingDialog").addEventListener("animationend", (event) => {
   if (event.target === $("#nowPlayingDialog") && event.animationName === "full-player-slide-out") {
     finishNowPlayingClose();
@@ -8914,6 +9180,7 @@ $("#nowPlayingDialog").addEventListener("close", () => {
   const menu = $("#trackContextMenu");
   document.body.insertBefore(menu, $("#localImportPreview"));
   $("#fullPlayerQueuePanel").hidden = true;
+  $("#fullPlayerQueuePanel").dataset.open = "false";
   $("#fullPlayerQueueToggle").setAttribute("aria-expanded", "false");
   $("#openNowPlaying").focus();
 });
@@ -8928,7 +9195,7 @@ $("#fullPlayerMore").onclick = (event) => currentID && openTrackContextMenu(even
   source: "full-player",
   alignToEnd: true,
 });
-$("#fullPlayerQueueToggle").onclick = () => setFullPlayerQueueVisible($("#fullPlayerQueuePanel").hidden);
+$("#fullPlayerQueueToggle").onclick = () => setFullPlayerQueueVisible($("#fullPlayerQueuePanel").dataset.open !== "true");
 $("#closeFullPlayerQueue").onclick = () => setFullPlayerQueueVisible(false);
 const fullPlayerQueueTabs = [...document.querySelectorAll("[data-full-player-queue-tab]")];
 fullPlayerQueueTabs.forEach((button) => {
@@ -8984,9 +9251,9 @@ $("#listenAlongJoinCode").onkeydown = (event) => {
 $("#leaveListenAlong").onclick = () => { void leaveListenAlong(); };
 $("#dismissServerTransfer").onclick = cancelServerTransfer;
 $("#dismissAppNotice").onclick = dismissNotice;
-$("#cancelPlaylist").onclick = () => { pendingPlaylistTrackID = null; $("#playlistDialog").close(); };
+$("#cancelPlaylist").onclick = () => { pendingPlaylistTrackID = null; closeTransitionModal($("#playlistDialog")); };
 $("#playlistName").oninput = () => { $("#createPlaylist").disabled = !$("#playlistName").value.trim(); };
-$("#closeAddSongs").onclick = () => $("#addSongsDialog").close();
+$("#closeAddSongs").onclick = () => closeTransitionModal($("#addSongsDialog"));
 $("#previewClipRange").onclick = toggleClipRangePreview;
 $("#saveClipRange").onclick = saveClipRange;
 $("#closeClipEditor").onclick = () => { void stopClipRangePreview().then(() => $("#clipEditorDialog").close()); };
@@ -9128,6 +9395,7 @@ $("#localImportSource").oninput = () => {
 };
 $("#localImportSync").onchange = () => {
   localImportInteractionGeneration += 1;
+  syncTransitionToggle($("#localImportSync"), { interacted: true });
   updateLocalImportConfirmLabel();
 };
 document.querySelectorAll('input[name="localImportMediaKind"]').forEach((input) => {
@@ -9152,7 +9420,7 @@ document.querySelectorAll("[data-local-import-provider]").forEach((button) => {
   button.onclick = () => setLocalImportProviderFocus(button.dataset.localImportProvider, { scroll: true });
 });
 $("#localImportDialog").onclick = (event) => {
-  if (event.target === $("#localImportDialog") && !localImportRunning) $("#localImportDialog").close();
+  if (event.target === $("#localImportDialog") && !localImportRunning) closeTransitionModal($("#localImportDialog"));
 };
 $("#localImportDialog").addEventListener("close", () => {
   void stopLocalImportPreview({ release: true, resumeMain: true });
@@ -9188,7 +9456,7 @@ $("#addSongsDialog").addEventListener("close", () => {
   addSongsPlaylistID = null;
   if (section === "library" && selectedPlaylistID) renderLibrary();
 });
-$("#closeListeningHistory").onclick = () => $("#listeningHistoryDialog").close();
+$("#closeListeningHistory").onclick = () => closeTransitionModal($("#listeningHistoryDialog"));
 $("#listeningHistoryRange").onchange = () => {
   listeningHistoryWindowOffset = 0;
   ensureListeningHistorySelection();
@@ -9204,7 +9472,7 @@ $("#listeningHistoryMode").onclick = (event) => {
   renderListeningHistory();
 };
 $("#listeningHistoryDialog").onclick = (event) => {
-  if (event.target === $("#listeningHistoryDialog")) $("#listeningHistoryDialog").close();
+  if (event.target === $("#listeningHistoryDialog")) closeTransitionModal($("#listeningHistoryDialog"));
 };
 $("#listeningHistoryDialog").addEventListener("close", () => {
   selectedListeningHistoryDayKey = null;
@@ -9297,7 +9565,10 @@ document.addEventListener("keydown", (event) => {
     closeListenAlongPopover({ restoreFocus: true });
   }
 });
-window.addEventListener("resize", positionListenAlongPopover);
+window.addEventListener("resize", () => {
+  positionListenAlongPopover();
+  moveFullPlayerQueueTabPill({ animate: false });
+});
 window.addEventListener("blur", () => {
   document.querySelectorAll(".recent-track-item.hovering").forEach((button) => button.classList.remove("hovering"));
 });
@@ -9316,7 +9587,7 @@ $("#playlistForm").onsubmit = async (event) => {
   markPlaylistDirty(playlist);
   state.playlists.push(playlist);
   pendingPlaylistTrackID = null;
-  $("#playlistDialog").close();
+  closeTransitionModal($("#playlistDialog"));
   await persist();
   schedulePlaylistSync();
   render();
@@ -9452,6 +9723,7 @@ $("#speed").onchange = (event) => {
   installedVideoPlayer.playbackRate = rate;
   state.playbackRate = rate;
   setCustomSelectValue($("#fullPlayerSpeed"), rate);
+  syncMediaSessionPlayback();
   persistInBackground();
 };
 $("#fullPlayerSpeed").onchange = (event) => {
@@ -9461,6 +9733,7 @@ $("#fullPlayerSpeed").onchange = (event) => {
   installedVideoPlayer.playbackRate = rate;
   state.playbackRate = rate;
   setCustomSelectValue($("#speed"), rate);
+  syncMediaSessionPlayback();
   persistInBackground();
 };
 $("#seek").oninput = (event) => {
@@ -9472,6 +9745,7 @@ $("#seek").oninput = (event) => {
   event.target.value = duration ? String(Math.round(media.currentTime / duration * 1000)) : "0";
   event.target.setAttribute("aria-valuetext", `${formatTime(media.currentTime)} of ${formatTime(duration)}`);
   paintRange(event.target);
+  syncMediaSessionPlayback();
   if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
 };
 $("#fullPlayerSeek").oninput = (event) => {
@@ -9485,6 +9759,7 @@ $("#fullPlayerSeek").oninput = (event) => {
   $("#seek").value = event.target.value;
   $("#seek").setAttribute("aria-valuetext", `${formatTime(media.currentTime)} of ${formatTime(duration)}`);
   paintRange($("#seek"));
+  syncMediaSessionPlayback();
   if (listenAlongSession?.role === "host") void publishListenAlongSnapshot();
 };
 function bindPrimaryAudioEvents(media) {
@@ -9498,6 +9773,7 @@ function bindPrimaryAudioEvents(media) {
     if (finishClipPlaybackIfNeeded()) return;
     updatePlaybackProgressUI();
     state.position = audio.currentTime;
+    syncMediaSessionPlayback();
     updateListeningSession();
     schedulePlaybackProgressSave();
     synchronizeInstalledVideoWithAudio();
@@ -9594,7 +9870,10 @@ function bindPrimaryAudioEvents(media) {
       }
       renderQueue();
     }
-    if (track.id === currentID) updateFullPlayerProgress();
+    if (track.id === currentID) {
+      updateFullPlayerProgress();
+      syncMediaSession();
+    }
   };
 }
 

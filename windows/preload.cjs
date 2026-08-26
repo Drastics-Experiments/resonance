@@ -1,16 +1,23 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+function subscribe(channel, callback, transform = (_event, value) => value) {
+  if (typeof callback !== "function") return () => {};
+  const listener = (event, value) => callback(transform(event, value));
+  ipcRenderer.on(channel, listener);
+  return () => ipcRenderer.removeListener(channel, listener);
+}
+
 contextBridge.exposeInMainWorld("resonance", {
   loadLibrary: () => ipcRenderer.invoke("library:load"),
   saveLibrary: (state) => ipcRenderer.invoke("library:save", state),
   refreshLibraryMetadata: (tracks) => ipcRenderer.invoke("library:refresh-metadata", tracks),
   videoFrames: (value) => ipcRenderer.invoke("library:video-frames", value),
-  onPrepareToClose: (callback) => ipcRenderer.on("app:prepare-close", () => callback()),
+  onPrepareToClose: (callback) => subscribe("app:prepare-close", callback, () => undefined),
   readyToClose: () => ipcRenderer.send("app:close-ready"),
   updateAppPreferences: (preferences) => ipcRenderer.invoke("app:preferences:update", preferences),
   updateDiscordPresence: (activity) => ipcRenderer.invoke("app:discord-presence:update", activity),
   getDiscordPresenceStatus: () => ipcRenderer.invoke("app:discord-presence:status"),
-  onDiscordPresenceStatus: (callback) => ipcRenderer.on("app:discord-presence:status", (_event, value) => callback(value)),
+  onDiscordPresenceStatus: (callback) => subscribe("app:discord-presence:status", callback),
   importAudio: () => ipcRenderer.invoke("library:import"),
   loadProfilePicture: (context) => ipcRenderer.invoke("profile-picture:load", context),
   chooseProfilePicture: (context) => ipcRenderer.invoke("profile-picture:choose", context),
@@ -24,8 +31,9 @@ contextBridge.exposeInMainWorld("resonance", {
   startExternalImport: (value) => ipcRenderer.invoke("local-import:start-external", value),
   cancelLocalImport: () => ipcRenderer.invoke("local-import:cancel"),
   uploadLocalImport: (value) => ipcRenderer.invoke("local-import:upload", value),
-  onLocalImportProgress: (callback) => ipcRenderer.on("local-import:progress", (_event, value) => callback(value)),
-  deleteAudio: (filePath) => ipcRenderer.invoke("library:delete", filePath),
+  onLocalImportProgress: (callback) => subscribe("local-import:progress", callback),
+  deleteAudio: (filePath, options = {}) => ipcRenderer.invoke("library:delete", { filePath, ...options }),
+  revealAudio: (filePath) => ipcRenderer.invoke("library:reveal", { filePath }),
   storageSummary: () => ipcRenderer.invoke("library:storage"),
   fetchCatalog: (settings) => ipcRenderer.invoke("server:catalog", settings),
   resolveServerSourceMetadata: (settings) => ipcRenderer.invoke("server:source-metadata", settings),
@@ -39,8 +47,8 @@ contextBridge.exposeInMainWorld("resonance", {
   copyListenAlongCode: (code) => ipcRenderer.invoke("listen-along:copy-code", code),
   createListenAlongSource: (settings) => ipcRenderer.invoke("listen-along:source:create", settings),
   releaseListenAlongSource: (settings) => ipcRenderer.invoke("listen-along:source:release", settings),
-  onListenAlongEvent: (callback) => ipcRenderer.on("listen-along:event", (_event, value) => callback(value)),
-  onListenAlongStatus: (callback) => ipcRenderer.on("listen-along:status", (_event, value) => callback(value)),
+  onListenAlongEvent: (callback) => subscribe("listen-along:event", callback),
+  onListenAlongStatus: (callback) => subscribe("listen-along:status", callback),
   fetchServerArtwork: (settings) => ipcRenderer.invoke("server:artwork", settings),
   fetchProfiles: (settings) => ipcRenderer.invoke("server:profiles:get", settings),
   createProfile: (settings) => ipcRenderer.invoke("server:profiles:create", settings),
@@ -60,11 +68,11 @@ contextBridge.exposeInMainWorld("resonance", {
   signInAccount: (value) => ipcRenderer.invoke("account:sign-in", value),
   refreshAccountSession: () => ipcRenderer.invoke("account:session:refresh"),
   signOutAccount: () => ipcRenderer.invoke("account:sign-out"),
-  onAccountSession: (callback) => ipcRenderer.on("account:session-changed", (_event, value) => callback(value)),
-  onTransferProgress: (callback) => ipcRenderer.on("server:transfer-progress", (_event, value) => callback(value)),
+  onAccountSession: (callback) => subscribe("account:session-changed", callback),
+  onTransferProgress: (callback) => subscribe("server:transfer-progress", callback),
   openAdmin: (baseURL) => ipcRenderer.invoke("server:open-admin", baseURL),
   checkForUpdates: () => ipcRenderer.invoke("update:check"),
   getUpdateStatus: () => ipcRenderer.invoke("update:state"),
   installUpdate: () => ipcRenderer.invoke("update:install"),
-  onUpdateStatus: (callback) => ipcRenderer.on("update:status", (_event, value) => callback(value)),
+  onUpdateStatus: (callback) => subscribe("update:status", callback),
 });

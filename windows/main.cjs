@@ -27,6 +27,14 @@ const {
 const { MAX_SERVER_MEDIA_BYTES, adoptDownloadedFile, writeResponseToFile } = require("./download-file.cjs");
 const { sanitizeWindowsFilename, windowsCollisionFilename } = require("./filename-policy.cjs");
 const { isManagedLibraryFile } = require("./library-paths.cjs");
+const {
+  AUDIO_EXTENSIONS: LOCAL_AUDIO_EXTENSIONS,
+  VIDEO_EXTENSIONS: LOCAL_VIDEO_EXTENSIONS,
+  createScopedMediaPathTrust,
+  expandSelectedMediaFiles,
+  isSupportedMediaFile,
+  normalizedMediaPath,
+} = require("./local-files.cjs");
 const { normalizeListeningHistoryUploadEntries } = require("./listening-history.cjs");
 const {
   UNLINKED_DOWNLOAD_MIGRATION_ID,
@@ -80,6 +88,15 @@ const {
 const { catalogSHA256, normalizeServerBaseURL } = require("./server-policy.cjs");
 const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
 const {
+  MAC_UPDATE_MANIFEST_URL,
+  downloadMacUpdate,
+  fetchMacUpdateManifest,
+  isMacUpdateAvailable,
+  launchMacUpdateInstaller,
+  updateArchiveFilename,
+  validateMacUpdateArchive,
+} = require("./mac-update.cjs");
+const {
   verifyDownloadedWindowsUpdate,
 } = require("./updater-auth.cjs");
 const { LocalImportError, isSpotifyURL, searchYouTubeAudioSources, youtubeVideoID } = require("./local-import-core.cjs");
@@ -113,7 +130,21 @@ const {
   fetchAccountAvatar,
   isSafeAccountAvatarDataURL,
 } = require("./account-avatar.cjs");
-const windowsPackage = require("./package.json");
+const {
+  cleanupMacNativeData,
+  electronCredentialDocument,
+  mergeMacNativeState,
+  migrateMacNativeData,
+  nativeCredentialDocument,
+} = require("./mac-app-migration.cjs");
+const desktopPackage = require("./package.json");
+
+const DESKTOP_CLIENT_PLATFORM = process.env.RESONANCE_CLIENT_PLATFORM === "macos"
+  || (process.env.RESONANCE_CLIENT_PLATFORM !== "windows" && process.platform === "darwin")
+  ? "macos"
+  : "windows";
+const DESKTOP_PLATFORM_LABEL = DESKTOP_CLIENT_PLATFORM === "macos" ? "macOS" : "Windows";
+const DESKTOP_PLATFORM_DIRECTORY = DESKTOP_CLIENT_PLATFORM === "macos" ? "macos" : "windows";
 
 function developmentInstanceMetadata() {
   if (app.isPackaged) return null;
@@ -122,7 +153,7 @@ function developmentInstanceMetadata() {
   const requestedName = String(process.env.RESONANCE_INSTANCE_NAME || "").trim();
   const displayName = /^[A-Za-z0-9 ._\-\[\]]{1,100}$/.test(requestedName)
     ? requestedName
-    : `Resonance Windows [${worktreeID}]`;
+    : `Resonance ${DESKTOP_PLATFORM_LABEL} [${worktreeID}]`;
   return { displayName, worktreeID };
 }
 
@@ -134,7 +165,7 @@ if (developmentInstance) {
     app.getPath("appData"),
     "Resonance Worktrees",
     developmentInstance.worktreeID,
-    "windows",
+    DESKTOP_PLATFORM_DIRECTORY,
   ));
 }
 
@@ -161,8 +192,8 @@ function protectDetachedOutput(stream) {
 protectDetachedOutput(process.stdout);
 protectDetachedOutput(process.stderr);
 
-const AUDIO_EXTENSIONS = new Set([".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".wav"]);
-const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v", ".webm"]);
+const AUDIO_EXTENSIONS = LOCAL_AUDIO_EXTENSIONS;
+const VIDEO_EXTENSIONS = LOCAL_VIDEO_EXTENSIONS;
 const SERVER_ARTWORK_TYPES = new Set(["image/avif", "image/gif", "image/jpeg", "image/png", "image/webp"]);
 const MAX_SERVER_ARTWORK_BYTES = 8 * 1024 * 1024;
 const MAX_PROFILE_PICTURE_SOURCE_BYTES = 32 * 1024 * 1024;
@@ -197,9 +228,9 @@ const LISTEN_ALONG_POLL_INTERVAL_MS = 250;
 const LISTEN_ALONG_POLL_MAX_BACKOFF_MS = 30_000;
 const LISTEN_ALONG_REQUEST_TIMEOUT_MS = 15_000;
 const LISTEN_ALONG_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
-const WINDOWS_APP_BUILD = Number(windowsPackage.resonanceBuild);
-if (!Number.isSafeInteger(WINDOWS_APP_BUILD) || WINDOWS_APP_BUILD < 1) {
-  throw new Error("windows/package.json must contain a positive resonanceBuild for client-config audience targeting.");
+const DESKTOP_APP_BUILD = Number(desktopPackage.resonanceBuild);
+if (!Number.isSafeInteger(DESKTOP_APP_BUILD) || DESKTOP_APP_BUILD < 1) {
+  throw new Error("The desktop package must contain a positive resonanceBuild for client-config audience targeting.");
 }
 
 let mainWindow;
@@ -215,12 +246,18 @@ const activeLocalImports = new Map();
 const activeLocalImportPreviews = new Map();
 const cachedLocalImportPreviews = new Map();
 const pendingExternalImports = new Map();
+// External files are usable by metadata refresh and video-frame extraction
+// only after the native picker selected the exact path (or a persisted track
+// carrying that selection is restored). This keeps arbitrary renderer paths
+// outside the managed roots from becoming a file-read capability.
+const trustedExternalMediaPaths = createScopedMediaPathTrust();
 let librarySaveQueue = Promise.resolve();
 let credentialSaveQueue = Promise.resolve();
 let accountSessionSaveQueue = Promise.resolve();
 let accountSession = null;
 let accountSessionGeneration = 0;
 let pendingAccountSignIn = null;
+const pendingAccountAuthCallbacks = [];
 let accountSessionRefreshTimer = null;
 let accountSessionRefreshInFlight = null;
 let serverUploadRetrySaveQueue = Promise.resolve();
@@ -242,11 +279,16 @@ let currentWindowsUpdateStatus = { type: "idle" };
 let windowsUpdateCheckPromise = null;
 let verifiedWindowsUpdate = null;
 let windowsUpdateVerificationPromise = null;
+let macUpdateCheckPromise = null;
+let macUpdateDownloadPromise = null;
+let macUpdateManifest = null;
+let macUpdateArchivePath = null;
 let automaticUpdateCheckTimer = null;
 let automaticUpdateCheckInterval = null;
+let macNativeMigrationPromise = null;
 
 const bundledDiscordApplicationID = validDiscordApplicationID(
-  process.env.RESONANCE_DISCORD_CLIENT_ID || windowsPackage.resonanceDiscordApplicationID,
+  process.env.RESONANCE_DISCORD_CLIENT_ID || desktopPackage.resonanceDiscordApplicationID,
 );
 const discordRPC = new DiscordRPCClient({
   onStatus(status) {
@@ -294,6 +336,8 @@ function bundledFFmpegPath() {
 
 function captureVideoFrame(filePath, seconds) {
   return new Promise((resolve, reject) => {
+    const spawnOptions = { stdio: ["ignore", "pipe", "pipe"] };
+    if (process.platform === "win32") spawnOptions.windowsHide = true;
     const child = spawn(bundledFFmpegPath(), [
       "-hide_banner", "-loglevel", "error",
       "-ss", Math.max(0, seconds).toFixed(3),
@@ -301,7 +345,7 @@ function captureVideoFrame(filePath, seconds) {
       "-frames:v", "1",
       "-vf", "scale=240:135:force_original_aspect_ratio=increase,crop=240:135",
       "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
-    ], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    ], spawnOptions);
     const chunks = [];
     let byteCount = 0;
     let stderr = "";
@@ -332,7 +376,11 @@ function captureVideoFrame(filePath, seconds) {
 }
 
 function usesPreviewCredentialStore() {
-  return process.platform === "darwin" && !app.isPackaged;
+  // macOS account/server secrets remain in Resonance's private files for both
+  // source previews and packaged builds. Electron safeStorage may delegate to
+  // the macOS Keychain, which is not an allowed runtime credential store for
+  // this app. Windows continues to use encrypted OS-backed storage below.
+  return process.platform === "darwin";
 }
 
 function canonicalCredentialToken(value) {
@@ -356,10 +404,10 @@ function previewCredentialStorePath() {
 
 async function readPreviewCredentials() {
   try {
-    const payload = JSON.parse(await fs.readFile(previewCredentialStorePath(), "utf8"));
+    const payload = nativeCredentialDocument(JSON.parse(await fs.readFile(previewCredentialStorePath(), "utf8")));
     return {
-      clientToken: String(payload?.clientToken || ""),
-      adminToken: String(payload?.adminToken || ""),
+      clientToken: String(payload.clientToken || ""),
+      adminToken: String(payload.adminToken || ""),
     };
   } catch {
     return { clientToken: "", adminToken: "" };
@@ -371,9 +419,24 @@ async function writePreviewCredentials(credentials) {
   const directory = path.dirname(destination);
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   await fs.chmod(directory, 0o700);
+  let existingValues = {};
+  let existingAccountSession = null;
+  try {
+    const existing = nativeCredentialDocument(JSON.parse(await fs.readFile(destination, "utf8")));
+    existingValues = existing.values;
+    existingAccountSession = existing.accountSession;
+  } catch {
+    // A missing or corrupt file is replaced by the canonical keyed shape.
+  }
+  const payload = electronCredentialDocument({
+    clientToken: credentials?.clientToken,
+    adminToken: credentials?.adminToken,
+    accountSession: existingAccountSession,
+    extraValues: existingValues,
+  });
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    await fs.writeFile(temporary, JSON.stringify(credentials), { encoding: "utf8", mode: 0o600 });
+    await fs.writeFile(temporary, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
     await fs.chmod(temporary, 0o600);
     await fs.rename(temporary, destination);
     await fs.chmod(destination, 0o600);
@@ -464,8 +527,20 @@ function canonicalStoredAccountSession(value) {
 async function readAccountSession() {
   let rawValue = null;
   if (usesPreviewCredentialStore()) {
-    try { rawValue = JSON.parse(await fs.readFile(previewAccountSessionPath(), "utf8")); }
-    catch { return null; }
+    try {
+      rawValue = JSON.parse(await fs.readFile(previewAccountSessionPath(), "utf8"));
+    } catch {
+      // Native macOS releases kept the account session in the keyed
+      // server-credentials.json document. Accept that shape once so a user
+      // can move directly from the native client into Electron.
+      try {
+        rawValue = nativeCredentialDocument(
+          JSON.parse(await fs.readFile(previewCredentialStorePath(), "utf8")),
+        ).accountSession;
+      } catch {
+        return null;
+      }
+    }
   } else {
     const { accountSession: destination, accountSessionBackup } = await ensureDirectories();
     const safeStorage = encryptedCredentialStorage();
@@ -491,9 +566,29 @@ async function persistAccountSession(value) {
     .then(async () => {
       if (usesPreviewCredentialStore()) {
         const destination = previewAccountSessionPath();
-        await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+        const directory = path.dirname(destination);
+        await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+        await fs.chmod(directory, 0o700);
         await atomicWriteFile(destination, JSON.stringify(session), { encoding: "utf8", mode: 0o600 });
         await fs.chmod(destination, 0o600);
+        // Keep the native keyed document compatible for a downgrade/recovery
+        // path while the separate Electron session file remains the primary
+        // runtime read location.
+        try {
+          const credentialPath = previewCredentialStorePath();
+          const existing = nativeCredentialDocument(JSON.parse(await fs.readFile(credentialPath, "utf8")));
+          const payload = electronCredentialDocument({
+            clientToken: existing.clientToken,
+            adminToken: existing.adminToken,
+            accountSession: session,
+            extraValues: existing.values,
+          });
+          await atomicWriteFile(credentialPath, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
+          await fs.chmod(credentialPath, 0o600);
+        } catch {
+          // The dedicated session file was written successfully; a legacy
+          // compatibility mirror is best effort.
+        }
         return;
       }
       const safeStorage = encryptedCredentialStorage();
@@ -517,11 +612,29 @@ async function clearPersistedAccountSession() {
   const paths = applicationPaths();
   const clear = accountSessionSaveQueue
     .catch(() => {})
-    .then(() => Promise.all([
-      fs.rm(previewAccountSessionPath(), { force: true }).catch(() => undefined),
-      fs.rm(paths.accountSession, { force: true }).catch(() => undefined),
-      fs.rm(paths.accountSessionBackup, { force: true }).catch(() => undefined),
-    ]));
+    .then(async () => {
+      await Promise.all([
+        fs.rm(previewAccountSessionPath(), { force: true }).catch(() => undefined),
+        fs.rm(paths.accountSession, { force: true }).catch(() => undefined),
+        fs.rm(paths.accountSessionBackup, { force: true }).catch(() => undefined),
+      ]);
+      if (usesPreviewCredentialStore()) {
+        try {
+          const credentialPath = previewCredentialStorePath();
+          const existing = nativeCredentialDocument(JSON.parse(await fs.readFile(credentialPath, "utf8")));
+          const payload = electronCredentialDocument({
+            clientToken: existing.clientToken,
+            adminToken: existing.adminToken,
+            accountSession: null,
+            extraValues: existing.values,
+          });
+          await atomicWriteFile(credentialPath, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
+          await fs.chmod(credentialPath, 0o600);
+        } catch {
+          // Missing legacy credentials are already equivalent to a signed-out state.
+        }
+      }
+    });
   accountSessionSaveQueue = clear;
   await clear;
 }
@@ -596,11 +709,52 @@ async function refreshCurrentAccountSession(migrationProfileID = null) {
 
 function authCallbackFromArguments(argumentsList) {
   return (Array.isArray(argumentsList) ? argumentsList : [])
-    .find((value) => typeof value === "string" && value.startsWith("resonance://auth/callback"));
+    .map((value) => {
+      try {
+        const callback = new URL(String(value || ""));
+        return callback.protocol === "resonance:"
+          && callback.hostname === "auth"
+          && callback.pathname === "/callback"
+          ? callback.href
+          : null;
+      } catch {
+        return null;
+      }
+    })
+    .find(Boolean) || null;
 }
 
 async function openAccountSignInBrowser(destination) {
-  await shell.openExternal(destination.href);
+  await openExternalURL(destination);
+}
+
+function safeExternalURL(value) {
+  let url;
+  try { url = value instanceof URL ? new URL(value.href) : new URL(String(value || "")); }
+  catch { throw new Error("The external browser URL is invalid."); }
+  if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.hash) {
+    throw new Error("The external browser URL is unsafe.");
+  }
+  return url;
+}
+
+async function openExternalURL(value) {
+  await shell.openExternal(safeExternalURL(value).href);
+}
+
+function dispatchAccountAuthCallback(value) {
+  const callback = authCallbackFromArguments([value]);
+  if (!callback) return false;
+  if (!app.isReady() || !mainWindow || mainWindow.isDestroyed()) {
+    if (pendingAccountAuthCallbacks.length < 4) pendingAccountAuthCallbacks.push(callback);
+    return true;
+  }
+  void handleAccountAuthCallback(callback).catch(publishAccountSession);
+  return true;
+}
+
+function drainAccountAuthCallbacks() {
+  while (pendingAccountAuthCallbacks.length) dispatchAccountAuthCallback(pendingAccountAuthCallbacks.shift());
 }
 
 async function handleAccountAuthCallback(value) {
@@ -710,6 +864,10 @@ autoUpdater.autoDownload = true;
 // Authenticode publisher check below has completed and the user has opted in.
 autoUpdater.autoInstallOnAppQuit = false;
 
+function desktopUpdatesSupported() {
+  return app.isPackaged && (process.platform === "win32" || process.platform === "darwin");
+}
+
 function publishUpdateStatus(type, details = {}) {
   const previousVersion = currentWindowsUpdateStatus.version;
   currentWindowsUpdateStatus = {
@@ -728,11 +886,14 @@ autoUpdater.on("update-available", (information) => {
 autoUpdater.on("update-not-available", () => publishUpdateStatus("current"));
 autoUpdater.on("download-progress", (progress) => publishUpdateStatus("downloading", { percent: Math.round(progress.percent || 0) }));
 autoUpdater.on("update-downloaded", (information) => {
+  // electron-updater is retained for the Windows NSIS channel only.  macOS
+  // uses latest-mac.json and its signed zip/helper contract below.
+  if (process.platform !== "win32") return;
   windowsUpdateVerificationPromise = (async () => {
     const verification = await verifyDownloadedWindowsUpdate({
       downloadedFile: information?.downloadedFile,
       currentExecutable: process.execPath,
-      authenticityMode: windowsPackage.resonanceUpdateAuthenticity,
+      authenticityMode: desktopPackage.resonanceUpdateAuthenticity,
       packaged: app.isPackaged,
     });
     verifiedWindowsUpdate = Object.freeze({
@@ -756,6 +917,7 @@ autoUpdater.on("error", (error) => {
 });
 
 async function checkForWindowsUpdates() {
+  if (process.platform !== "win32" || !app.isPackaged) return null;
   if (windowsUpdateCheckPromise) return windowsUpdateCheckPromise;
   windowsUpdateCheckPromise = (async () => {
     const { feedURL } = await resolveWindowsUpdateFeed();
@@ -769,13 +931,150 @@ async function checkForWindowsUpdates() {
   }
 }
 
+function macUpdateDirectory() {
+  return path.join(app.getPath("userData"), "Updates");
+}
+
+function macUpdateManifestURL() {
+  const requested = String(process.env.RESONANCE_MAC_UPDATE_MANIFEST_URL || MAC_UPDATE_MANIFEST_URL).trim();
+  return requested || MAC_UPDATE_MANIFEST_URL;
+}
+
+function macApplicationBundlePath() {
+  const resources = String(process.resourcesPath || "");
+  if (resources) {
+    const candidate = path.resolve(resources, "../..");
+    if (candidate.endsWith(".app")) return candidate;
+  }
+  let candidate = path.resolve(app.getAppPath());
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (candidate.endsWith(".app")) return candidate;
+    candidate = path.dirname(candidate);
+  }
+  return null;
+}
+
+function bundledMacUpdateHelperPath() {
+  const candidates = [
+    path.join(String(process.resourcesPath || ""), "install-update.sh"),
+    path.join(app.getAppPath(), "install-update.sh"),
+    path.join(__dirname, "install-update.sh"),
+  ].filter((value) => value && value !== "install-update.sh");
+  return candidates.find((value) => {
+    try { return require("node:fs").existsSync(value); } catch { return false; }
+  }) || null;
+}
+
+async function cachedMacUpdateArchive(manifest) {
+  const archivePath = path.join(macUpdateDirectory(), updateArchiveFilename(manifest.version));
+  return await validateMacUpdateArchive(archivePath, manifest) ? archivePath : null;
+}
+
+async function downloadMacUpdateArchive(manifest) {
+  if (macUpdateDownloadPromise) return macUpdateDownloadPromise;
+  macUpdateDownloadPromise = (async () => {
+    publishUpdateStatus("downloading", { version: manifest.version, percent: 0 });
+    const downloaded = await downloadMacUpdate({
+      manifest,
+      destinationDirectory: macUpdateDirectory(),
+      onProgress(progress) {
+        publishUpdateStatus("downloading", {
+          version: manifest.version,
+          ...(Number.isFinite(progress.percent) ? { percent: progress.percent } : {}),
+        });
+      },
+    });
+    macUpdateArchivePath = downloaded.path;
+    publishUpdateStatus("ready", { version: manifest.version });
+    return downloaded.path;
+  })();
+  try {
+    return await macUpdateDownloadPromise;
+  } finally {
+    macUpdateDownloadPromise = null;
+  }
+}
+
+async function checkForMacUpdates() {
+  if (process.platform !== "darwin" || !app.isPackaged) return null;
+  if (macUpdateCheckPromise) return macUpdateCheckPromise;
+  macUpdateCheckPromise = (async () => {
+    publishUpdateStatus("checking");
+    const manifest = await fetchMacUpdateManifest({ manifestURL: macUpdateManifestURL() });
+    const currentBuild = Number(desktopPackage.resonanceBuild);
+    const available = isMacUpdateAvailable({
+      currentVersion: app.getVersion(),
+      currentBuild,
+      candidateVersion: manifest.version,
+      candidateBuild: manifest.build,
+    });
+    if (!available) {
+      macUpdateManifest = null;
+      macUpdateArchivePath = null;
+      publishUpdateStatus("current");
+      return null;
+    }
+    macUpdateManifest = manifest;
+    macUpdateArchivePath = await cachedMacUpdateArchive(manifest);
+    if (macUpdateArchivePath) {
+      publishUpdateStatus("ready", { version: manifest.version });
+      return macUpdateArchivePath;
+    }
+    return await downloadMacUpdateArchive(manifest);
+  })();
+  try {
+    return await macUpdateCheckPromise;
+  } catch (error) {
+    publishUpdateStatus("error", { message: String(error?.message || error) });
+    throw error;
+  } finally {
+    macUpdateCheckPromise = null;
+  }
+}
+
+async function checkForDesktopUpdates() {
+  return process.platform === "darwin" ? checkForMacUpdates() : checkForWindowsUpdates();
+}
+
+async function installMacUpdate() {
+  if (process.platform !== "darwin" || !app.isPackaged || !macUpdateManifest || !macUpdateArchivePath) return false;
+  const archivePath = macUpdateArchivePath;
+  if (!await validateMacUpdateArchive(archivePath, macUpdateManifest)) {
+    macUpdateArchivePath = null;
+    publishUpdateStatus("error", { version: macUpdateManifest.version, message: "The downloaded macOS update is no longer valid." });
+    return false;
+  }
+  const destinationPath = macApplicationBundlePath();
+  const helperPath = bundledMacUpdateHelperPath();
+  if (!destinationPath || !helperPath) {
+    publishUpdateStatus("error", { version: macUpdateManifest.version, message: "The macOS update installer is missing from this build." });
+    return false;
+  }
+  const started = await launchMacUpdateInstaller({
+    archivePath,
+    destinationPath,
+    helperPath,
+    processID: process.pid,
+    version: macUpdateManifest.version,
+  });
+  if (!started) {
+    publishUpdateStatus("error", { version: macUpdateManifest.version, message: "The macOS update installer could not be started." });
+    return false;
+  }
+  applicationQuitRequested = true;
+  app.quit();
+  return true;
+}
+
 function runAutomaticUpdateCheck() {
-  if (!app.isPackaged || ["available", "downloading", "ready"].includes(currentWindowsUpdateStatus.type)) return;
-  void checkForWindowsUpdates().catch((error) => publishUpdateStatus("error", { message: conciseUpdaterError(error) }));
+  if (!desktopUpdatesSupported() || ["available", "downloading", "ready"].includes(currentWindowsUpdateStatus.type)) return;
+  void checkForDesktopUpdates().catch((error) => publishUpdateStatus("error", {
+    message: process.platform === "win32" ? conciseUpdaterError(error) : String(error?.message || error),
+  }));
 }
 
 function startAutomaticUpdateChecks() {
-  if (!app.isPackaged || automaticUpdateCheckTimer || automaticUpdateCheckInterval) return;
+  if (!desktopUpdatesSupported() || automaticUpdateCheckTimer || automaticUpdateCheckInterval) return;
   automaticUpdateCheckTimer = setTimeout(() => {
     automaticUpdateCheckTimer = null;
     runAutomaticUpdateCheck();
@@ -801,6 +1100,76 @@ function applicationPaths() {
     local: path.join(root, "LocalMusic"),
     remote: path.join(root, "ServerCache"),
   };
+}
+
+async function pathExists(candidate) {
+  try {
+    await fs.access(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function migrateMacNativeUserData() {
+  if (process.platform !== "darwin") return null;
+  if (macNativeMigrationPromise) return macNativeMigrationPromise;
+  macNativeMigrationPromise = (async () => {
+    const migration = await migrateMacNativeData({
+      homeDirectory: app.getPath("home"),
+      targetUserData: app.getPath("userData"),
+      platform: process.platform,
+      preserveSources: !app.isPackaged,
+      deferSourceDeletion: app.isPackaged,
+    });
+    const paths = applicationPaths();
+    await fs.mkdir(path.dirname(paths.state), { recursive: true, mode: 0o700 });
+    let persistenceReady = Boolean(migration.state && migration.copyVerified !== false);
+    if (migration.state) {
+      const existingState = await pathExists(paths.state)
+        ? JSON.parse(await fs.readFile(paths.state, "utf8"))
+        : null;
+      const mergedState = mergeMacNativeState(existingState, migration.state);
+      await atomicWriteFile(paths.state, JSON.stringify(mergedState, null, 2), "utf8");
+      await fs.chmod(paths.state, 0o600).catch(() => undefined);
+      // Read back the atomically replaced file before allowing a packaged
+      // migration to remove its only native source copy.
+      JSON.parse(await fs.readFile(paths.state, "utf8"));
+    }
+    if (migration.credentials && !(await pathExists(previewCredentialStorePath()))) {
+      try {
+        await writePreviewCredentials(migration.credentials);
+      } catch (error) {
+        persistenceReady = false;
+        console.error("Could not persist migrated macOS credentials", error);
+      }
+    }
+    if (migration.accountSession && !(await pathExists(previewAccountSessionPath()))) {
+      // Validation is intentionally delegated to persistAccountSession so a
+      // stale or malformed native session cannot prevent the app from opening.
+      try {
+        await persistAccountSession(migration.accountSession);
+      } catch (error) {
+        persistenceReady = false;
+        console.error("Could not persist migrated macOS account session", error);
+      }
+    }
+    if (persistenceReady && migration.sourceCleanupPaths?.length) {
+      try {
+        await cleanupMacNativeData(migration);
+      } catch (error) {
+        // Source cleanup is deliberately retryable. The copied and persisted
+        // Electron state remains usable even if deletion is interrupted.
+        console.error("Could not finalize native macOS data migration", error);
+      }
+    }
+    return migration;
+  })();
+  try {
+    return await macNativeMigrationPromise;
+  } finally {
+    macNativeMigrationPromise = null;
+  }
 }
 
 function boundedText(value, maximumLength = 500) {
@@ -1097,6 +1466,30 @@ function storageLocationForPath(filePath) {
   if (absolute === local || absolute.startsWith(local + path.sep)) return "local";
   if (absolute === remote || absolute.startsWith(remote + path.sep)) return "server-cache";
   return "external";
+}
+
+function rememberTrustedExternalMediaPath(filePath) {
+  const candidate = normalizedMediaPath(filePath);
+  if (!candidate || storageLocationForPath(candidate) !== "external" || !isSupportedMediaFile(candidate)) return false;
+  trustedExternalMediaPaths.add(candidate);
+  return true;
+}
+
+function rememberTrustedExternalMediaPaths(filePaths) {
+  for (const filePath of Array.isArray(filePaths) ? filePaths : [filePaths]) {
+    rememberTrustedExternalMediaPath(filePath);
+  }
+}
+
+function trustedExternalMediaPath(filePath) {
+  const candidate = normalizedMediaPath(filePath);
+  return Boolean(candidate && trustedExternalMediaPaths.has(candidate));
+}
+
+function rendererReadableMediaPath(filePath, managedRoots) {
+  const candidate = normalizedMediaPath(filePath);
+  if (!candidate) return false;
+  return isManagedLibraryFile(candidate, managedRoots) || trustedExternalMediaPath(candidate);
 }
 
 function isDirectServerCacheFile(filePath) {
@@ -1922,8 +2315,9 @@ function createWindow() {
     minHeight: 650,
     backgroundColor: "#05060a",
     title: resonanceApplicationName,
-    icon: path.join(__dirname, "resonance.ico"),
-    autoHideMenuBar: true,
+    ...(process.platform === "win32" ? { icon: path.join(__dirname, "resonance.ico") } : {}),
+    ...(process.platform === "darwin" ? { titleBarStyle: "hiddenInset" } : {}),
+    autoHideMenuBar: process.platform !== "darwin",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -1976,6 +2370,12 @@ function createWindow() {
     if (mainWindow === window) mainWindow = null;
   });
   window.loadFile(path.join(__dirname, "ui", "index.html"));
+}
+
+function dialogParentWindow(event) {
+  const senderWindow = event?.sender ? BrowserWindow.fromWebContents(event.sender) : null;
+  if (senderWindow && !senderWindow.isDestroyed()) return senderWindow;
+  return mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
 }
 
 ipcMain.on("app:close-ready", (event) => {
@@ -2126,59 +2526,84 @@ app.on("before-quit", () => {
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
-if (process.platform === "win32") {
-  if (process.defaultApp && process.argv[1]) {
-    app.setAsDefaultProtocolClient("resonance", process.execPath, [path.resolve(process.argv[1])]);
-  } else {
-    app.setAsDefaultProtocolClient("resonance");
+function registerAccountProtocolClient() {
+  if (!["win32", "darwin"].includes(process.platform)) return;
+  try {
+    if (process.platform === "win32" && process.defaultApp && process.argv[1]) {
+      app.setAsDefaultProtocolClient("resonance", process.execPath, [path.resolve(process.argv[1])]);
+    } else {
+      app.setAsDefaultProtocolClient("resonance");
+    }
+  } catch {
+    // Protocol registration is best effort; packaged macOS bundles also
+    // declare the scheme in their Info.plist/packager metadata.
   }
-} else if (process.platform === "darwin" && !app.isPackaged) {
-  app.setAsDefaultProtocolClient("resonance");
 }
+registerAccountProtocolClient();
 
 app.on("second-instance", (_event, commandLine) => {
   showMainWindow();
   const callback = authCallbackFromArguments(commandLine);
-  if (callback) void handleAccountAuthCallback(callback).catch(publishAccountSession);
+  if (callback) dispatchAccountAuthCallback(callback);
 });
 
 app.on("open-url", (event, value) => {
-  if (!String(value || "").startsWith("resonance://auth/callback")) return;
+  if (!authCallbackFromArguments([value])) return;
   event.preventDefault();
-  void handleAccountAuthCallback(value).catch(publishAccountSession);
+  dispatchAccountAuthCallback(value);
 });
 
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
+  await migrateMacNativeUserData().catch((error) => {
+    // A migration failure must not make the shared desktop client unusable;
+    // the native source remains intact and can be retried on the next launch.
+    console.error("Could not migrate native macOS Resonance data", error);
+  });
   await cleanupLocalImportTemporaryFiles();
   await ensureDirectories();
   protocol.handle(SERVER_STREAM_SCHEME, handleServerStreamRequest);
   createWindow();
   startAutomaticUpdateChecks();
   const startupCallback = authCallbackFromArguments(process.argv);
-  if (startupCallback) void handleAccountAuthCallback(startupCallback).catch(publishAccountSession);
-  app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  if (startupCallback) dispatchAccountAuthCallback(startupCallback);
+  drainAccountAuthCallbacks();
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    else showMainWindow();
+    drainAccountAuthCallbacks();
+  });
 });
 
-// This is the Windows client even when it is previewed from macOS. Closing its
-// only window should terminate the preview instead of leaving a hidden process
-// that can recreate the window on activation.
-app.on("window-all-closed", () => app.quit());
+function shouldQuitWhenAllWindowsClosed() {
+  // Source previews should not leave a hidden process in the worktree, while
+  // a packaged macOS app follows native lifecycle semantics and reopens on
+  // Dock activation. Windows exits when its final window closes.
+  return process.platform !== "darwin" || !app.isPackaged;
+}
+
+if (shouldQuitWhenAllWindowsClosed()) {
+  app.on("window-all-closed", () => app.quit());
+} else {
+  app.on("window-all-closed", () => {});
+}
 app.on("before-quit", () => {
   applicationQuitRequested = true;
   stopAllListenAlong("app_closed");
+  pendingAccountAuthCallbacks.length = 0;
 });
 
 ipcMain.handle("update:check", async () => {
-  if (!app.isPackaged) return { supported: false };
-  await checkForWindowsUpdates();
+  if (!desktopUpdatesSupported()) return { supported: false };
+  await checkForDesktopUpdates();
   return { supported: true };
 });
 
 ipcMain.handle("update:state", () => currentWindowsUpdateStatus);
 
-ipcMain.handle("update:install", () => {
-  if (!app.isPackaged) return false;
+ipcMain.handle("update:install", async () => {
+  if (!desktopUpdatesSupported()) return false;
+  if (process.platform === "darwin") return installMacUpdate();
   if (!verifiedWindowsUpdate || windowsUpdateVerificationPromise) return false;
   // The assisted NSIS UI is useful for a first install, but an update already
   // knows the existing install directory. Apply it silently and relaunch the
@@ -2222,6 +2647,13 @@ ipcMain.handle("library:load", async () => {
     });
     stored = migration.state;
     const storedTracks = Array.isArray(stored.tracks) ? stored.tracks.filter(persistableLibraryTrack) : [];
+    // A previously imported macOS file remains eligible for metadata and
+    // thumbnails after restart. Native Swift migration records predate the
+    // storageLocation field, so classify only non-remote paths outside the
+    // managed roots here; arbitrary renderer paths are still rejected below.
+    rememberTrustedExternalMediaPaths(storedTracks
+      .filter((track) => track?.filePath && storageLocationForPath(track.filePath) === "external")
+      .map((track) => track.filePath));
     const localUploadSizes = new Set(storedTracks
       .filter((track) => !track?.remoteID && track?.contentSha256 && Number.isFinite(Number(track?.size)))
       .map((track) => Number(track.size)));
@@ -2362,7 +2794,7 @@ ipcMain.handle("library:refresh-metadata", async (_event, value) => {
   for (const item of requested) {
     const id = boundedText(item?.id, 200);
     const filePath = typeof item?.filePath === "string" ? path.resolve(item.filePath) : "";
-    if (!id || !filePath || !isManagedLibraryFile(filePath, managedRoots)) continue;
+    if (!id || !filePath || !rendererReadableMediaPath(filePath, managedRoots)) continue;
     try {
       const information = await fs.stat(filePath);
       if (!information.isFile()) continue;
@@ -2381,8 +2813,8 @@ ipcMain.handle("library:video-frames", async (_event, value = {}) => {
   const paths = applicationPaths();
   const managedRoots = [paths.local, paths.remote];
   if (!VIDEO_EXTENSIONS.has(path.extname(filePath).toLowerCase())
-      || !isManagedLibraryFile(filePath, managedRoots)) {
-    throw new Error("Video thumbnails are limited to installed Resonance videos.");
+      || !rendererReadableMediaPath(filePath, managedRoots)) {
+    throw new Error("Video thumbnails are limited to installed or explicitly imported Resonance videos.");
   }
   const information = await fs.stat(filePath);
   if (!information.isFile() || !duration) throw new Error("The video is unavailable.");
@@ -2526,21 +2958,39 @@ ipcMain.handle("account:sign-out", async () => {
   return true;
 });
 
-ipcMain.handle("library:import", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Import audio",
-    properties: ["openFile", "multiSelections"],
-    filters: [{ name: "Audio", extensions: [...AUDIO_EXTENSIONS].map((item) => item.slice(1)) }],
+ipcMain.handle("library:import", async (event) => {
+  const result = await dialog.showOpenDialog(dialogParentWindow(event), {
+    title: "Add Music to Your Library",
+    message: DESKTOP_CLIENT_PLATFORM === "macos"
+      ? "Choose audio or video files and folders. Your files stay where they are on this Mac."
+      : "Choose audio or video files and folders.",
+    properties: ["openFile", "openDirectory", "multiSelections"],
+    filters: [{
+      name: "Audio and video",
+      extensions: [...new Set([...AUDIO_EXTENSIONS, ...VIDEO_EXTENSIONS])].map((item) => item.slice(1)),
+    }],
   });
   if (result.canceled) return [];
   const paths = await ensureDirectories();
+  const selectedFiles = await expandSelectedMediaFiles(result.filePaths);
   const tracks = [];
-  for (const source of result.filePaths) {
+  for (const source of selectedFiles) {
+    const information = await fs.stat(source).catch(() => null);
+    if (!information?.isFile() || !isSupportedMediaFile(source)) continue;
+    if (DESKTOP_CLIENT_PLATFORM === "macos") {
+      rememberTrustedExternalMediaPath(source);
+      tracks.push(await enrichedTrack(source, {
+        size: information.size,
+        storageLocation: "external",
+        preservesUnlinkedImport: true,
+      }));
+      continue;
+    }
     const destination = await uniqueDestination(paths.local, path.basename(source));
     await fs.copyFile(source, destination);
-    const information = await fs.stat(destination);
+    const copiedInformation = await fs.stat(destination);
     tracks.push(await enrichedTrack(destination, {
-      size: information.size,
+      size: copiedInformation.size,
       preservesUnlinkedImport: true,
     }));
   }
@@ -2557,8 +3007,8 @@ ipcMain.handle("profile-picture:load", async (_event, { serverURL, profileID } =
   }
 });
 
-ipcMain.handle("profile-picture:choose", async (_event, { serverURL, profileID } = {}) => {
-  const result = await dialog.showOpenDialog(mainWindow, {
+ipcMain.handle("profile-picture:choose", async (event, { serverURL, profileID } = {}) => {
+  const result = await dialog.showOpenDialog(dialogParentWindow(event), {
     title: "Choose a profile picture",
     properties: ["openFile"],
     filters: [{ name: "Pictures", extensions: ["avif", "gif", "jpeg", "jpg", "png", "webp"] }],
@@ -2682,6 +3132,7 @@ ipcMain.handle("local-import:resolve", async (event, { source, mediaKind, baseUR
             baseURL: requestContext.base.href,
             adminToken: exactAdminToken,
             profileID,
+            clientPlatform: DESKTOP_CLIENT_PLATFORM,
             clientContextHeaders: { ...requestContext.expected.request_headers },
           }, signal);
         })();
@@ -2941,12 +3392,32 @@ ipcMain.handle("local-import:upload", async (event, {
   }
 });
 
-ipcMain.handle("library:delete", async (_event, filePath) => {
+ipcMain.handle("library:delete", async (_event, value) => {
   const paths = await ensureDirectories();
-  const absolute = path.resolve(String(filePath || ""));
-  const allowed = [paths.local, paths.remote].some((directory) => absolute.startsWith(path.resolve(directory) + path.sep));
-  if (!allowed) throw new Error("The selected file is outside the app library.");
+  const request = typeof value === "string" ? { filePath: value } : (value || {});
+  const absolute = normalizedMediaPath(request.filePath);
+  if (!absolute) throw new Error("The selected file path is invalid.");
+  const managed = isManagedLibraryFile(absolute, [paths.local, paths.remote]);
+  const external = trustedExternalMediaPath(absolute);
+  if (!managed && !external) throw new Error("The selected file is outside the app library.");
+  // The normal library action removes an external file from Resonance while
+  // preserving the user's original. File deletion is opt-in and is used by
+  // the storage surface's explicit Delete action only.
+  if (external && request.deleteOriginal !== true) return { deleted: false, preserved: true };
   await fs.rm(absolute, { force: true });
+  if (external) trustedExternalMediaPaths.delete(absolute);
+  return true;
+});
+
+ipcMain.handle("library:reveal", async (_event, value) => {
+  const paths = await ensureDirectories();
+  const filePath = typeof value === "string" ? value : value?.filePath;
+  const absolute = normalizedMediaPath(filePath);
+  if (!absolute) throw new Error("The selected file path is invalid.");
+  const allowed = isManagedLibraryFile(absolute, [paths.local, paths.remote])
+    || trustedExternalMediaPath(absolute);
+  if (!allowed) throw new Error("The selected file is outside the app library.");
+  shell.showItemInFolder(absolute);
   return true;
 });
 
@@ -2960,11 +3431,23 @@ ipcMain.handle("library:storage", async () => {
     }
     return total;
   };
-  const [localBytes, remoteBytes, disk] = await Promise.all([
+  const sumTrustedExternalFiles = async () => {
+    let total = 0;
+    for (const filePath of trustedExternalMediaPaths.values()) {
+      try {
+        const information = await fs.stat(filePath);
+        if (information.isFile()) total += information.size;
+      } catch { /* an external original may have moved since import */ }
+    }
+    return total;
+  };
+  const [managedLocalBytes, remoteBytes, externalBytes, disk] = await Promise.all([
     sumDirectory(paths.local),
     sumDirectory(paths.remote),
+    sumTrustedExternalFiles(),
     fs.statfs(paths.local),
   ]);
+  const localBytes = managedLocalBytes + externalBytes;
   return {
     localBytes,
     remoteBytes,
@@ -3014,8 +3497,9 @@ async function clientConfigContext(baseURL, profileID) {
   const expected = clientConfigRequestContext({
     origin: base.origin,
     profileID: String(profileID || "default"),
+    platform: DESKTOP_CLIENT_PLATFORM,
     appVersion: app.getVersion(),
-    appBuild: WINDOWS_APP_BUILD,
+    appBuild: DESKTOP_APP_BUILD,
     cohortKey: stored.cohort_key,
   });
   return { base, stored, expected };
@@ -3483,7 +3967,7 @@ ipcMain.handle("server:listening-history:post", async (_event, { baseURL, token,
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body: JSON.stringify({ entries: minimalEntries, client: "windows" }),
+    body: JSON.stringify({ entries: minimalEntries, client: DESKTOP_CLIENT_PLATFORM }),
   });
   if (response.status === 404 || response.status === 405) return { supported: false, accepted: 0 };
   if (!response.ok) throw await serverResponseError(response);
@@ -3921,7 +4405,7 @@ ipcMain.handle("server:stream:create", async (event, settings = {}) => {
     if (serverStreamSongIsVideo(song)) {
       throw new ServerStreamValidationError(
         "VIDEO_DOWNLOAD_REQUIRED",
-        "Windows stream-only playback supports audio songs. Download this video before playing it.",
+        `${DESKTOP_PLATFORM_LABEL} stream-only playback supports audio songs. Download this video before playing it.`,
         415,
       );
     }
@@ -4660,7 +5144,7 @@ ipcMain.handle("server:delete", async (_event, { baseURL, adminToken, profileID,
 
 ipcMain.handle("server:open-admin", async (_event, baseURL) => {
   const base = normalizeBaseURL(baseURL);
-  await shell.openExternal(new URL("admin", base).href);
+  await openExternalURL(new URL("admin", base));
 });
 
 module.exports = { safeFilename, normalizeBaseURL, publicTrack };

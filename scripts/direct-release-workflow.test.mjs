@@ -64,6 +64,30 @@ test("Windows packages embed the update authenticity policy selected by the buil
   );
 });
 
+test("macOS builds the shared Electron client and keeps the release asset contract", () => {
+  const workflow = read(".github/workflows/macos.yml");
+  assert.match(workflow, /windows\/pnpm-lock\.yaml/);
+  assert.match(workflow, /pnpm install --frozen-lockfile/);
+  assert.match(workflow, /working-directory: windows/);
+  assert.match(workflow, /pnpm test/);
+  assert.match(workflow, /mac\/scripts\/build-electron\.sh/);
+  assert.match(workflow, /MAC_ARCH=universal/);
+  assert.match(workflow, /com\.gavindietrich\.LikedSongsFocus/);
+  assert.match(workflow, /Resonance-macOS\.zip/);
+  assert.match(workflow, /Resonance-Installer\.pkg/);
+  assert.match(workflow, /latest-mac\.json/);
+  assert.doesNotMatch(workflow, /swift (?:build|package|test|--version)/i);
+  assert.doesNotMatch(workflow, /mac\/scripts\/(?:build-release|test)\.sh/);
+});
+
+test("release version synchronization uses the shared Electron package for macOS", () => {
+  const versionScript = read("scripts/release-version.mjs");
+  const legacyReleaseScript = read("scripts/release-now.mjs");
+  assert.match(versionScript, /windows\/package\.json/);
+  assert.doesNotMatch(versionScript, /mac\/scripts\/build-release\.sh/);
+  assert.doesNotMatch(legacyReleaseScript, /mac\/scripts\/build-release\.sh/);
+});
+
 test("publish workflow is trusted-dispatch-only and fails closed on unsigned policy", () => {
   const workflow = read(".github/workflows/publish-release.yml");
   assert.doesNotMatch(workflow, /^\s+pull_request:/m);
@@ -115,7 +139,6 @@ test("direct version override synchronizes every platform only in an isolated wo
     "android/app/build.gradle.kts",
     "ios/Resonance.xcodeproj/project.pbxproj",
     "ios/Resonance/Info.plist",
-    "mac/scripts/build-release.sh",
   ];
   try {
     for (const relativePath of files) {

@@ -21,11 +21,11 @@ Local builds and ordinary pull-request/main CI artifacts remain ad-hoc signed so
 contributors can build without Apple credentials. They are development artifacts
 and cannot be promoted by the release-candidate workflow.
 
-A production candidate fails closed unless the app has a timestamped Developer ID
-Application signature with hardened runtime, the PKG has a trusted Developer ID
-Installer signature, and Apple notarization is stapled and validated on both. The
-native macOS job records hash-bound verification evidence; the candidate bundler
-and publisher both require that evidence.
+A production candidate fails closed unless the Electron app has a timestamped
+Developer ID Application signature with hardened runtime, the PKG has a trusted
+Developer ID Installer signature, and Apple notarization is stapled and validated
+on both. The macOS Electron job records hash-bound verification evidence; the
+candidate bundler and publisher both require that evidence.
 
 Configure these GitHub Actions repository secrets before starting a release. The
 values themselves must never be committed:
@@ -40,6 +40,10 @@ values themselves must never be committed:
 - `RESONANCE_MACOS_NOTARY_KEY_ID` — API key ID
 - `RESONANCE_MACOS_NOTARY_ISSUER_ID` — API issuer ID
 
-`mac/scripts/build-release.sh` still supports `NOTARY_PROFILE` for an explicitly
-configured local build. Set `RESONANCE_REQUIRE_PRODUCTION_SIGNING=1` to apply the
-same fail-closed production policy locally.
+The local packaging command is run from `windows/` with Electron-builder:
+
+```bash
+pnpm install --frozen-lockfile
+MAC_ARCH=universal APP_VERSION=1.0.1 BUILD_NUMBER=1 \
+  bash ../mac/scripts/build-electron.sh
+```
