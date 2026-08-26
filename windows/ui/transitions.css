@@ -1,0 +1,138 @@
+/* transitions.dev recipes used by the Resonance desktop renderer. */
+:root {
+  --dropdown-open-dur: 250ms;
+  --dropdown-close-dur: 150ms;
+  --dropdown-pre-scale: 0.97;
+  --dropdown-closing-scale: 0.99;
+  --dropdown-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --modal-open-dur: 250ms;
+  --modal-close-dur: 150ms;
+  --modal-scale: 0.96;
+  --modal-scale-close: 0.96;
+  --modal-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --panel-open-dur: 400ms;
+  --panel-close-dur: 350ms;
+  --panel-translate-y: 36px;
+  --panel-blur: 2px;
+  --panel-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --icon-swap-dur: 250ms;
+  --icon-swap-blur: 2px;
+  --icon-swap-start-scale: 0.25;
+  --icon-swap-ease: ease-in-out;
+  --pulse-dur: 1000ms;
+  --pulse-count: 1;
+  --pulse-min: 0.5;
+  --reveal-dur: 400ms;
+  --reveal-blur: 2px;
+  --reveal-ease: ease-in-out;
+  --tabs-dur: 250ms;
+  --tabs-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --tabs-text-muted: #9b97a5;
+  --tabs-text-active: #fff;
+  --tabs-bar-bg: #ffffff08;
+  --tabs-pill-bg: #6041c9;
+  --toast-open: 350ms;
+  --toast-close: 250ms;
+  --toast-distance: 16px;
+  --toast-blur: 2px;
+  --toast-scale: 0.97;
+  --toast-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --like-color: #f40051;
+  --like-fill: 150ms;
+  --like-pop: 350ms;
+  --like-pop-ease: cubic-bezier(0.34, 1.96, 0.64, 1);
+  --like-particle-dur: 600ms;
+  --like-particle-dist: 20px;
+  --like-particle-size: 2.5px;
+  --like-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --toggle-dur: 350ms;
+  --toggle-travel: 20px;
+  --toggle-ov1: 1px;
+  --toggle-ov2: 0px;
+  --toggle-track: 150ms;
+  --toggle-ease: cubic-bezier(0.34, 1.35, 0.64, 1);
+}
+
+.t-dropdown { transform-origin: top left; transform: scale(var(--dropdown-pre-scale)); opacity: 0; pointer-events: none; transition: transform var(--dropdown-open-dur) var(--dropdown-ease), opacity var(--dropdown-open-dur) var(--dropdown-ease); will-change: transform, opacity; }
+.t-dropdown[data-origin="top-right"] { transform-origin: top right; }
+.t-dropdown[data-origin="top-center"] { transform-origin: top center; }
+.t-dropdown[data-origin="bottom-left"] { transform-origin: bottom left; }
+.t-dropdown[data-origin="bottom-center"] { transform-origin: bottom center; }
+.t-dropdown[data-origin="bottom-right"] { transform-origin: bottom right; }
+.t-dropdown.is-open { transform: scale(1); opacity: 1; pointer-events: auto; }
+.t-dropdown.is-closing { transform: scale(var(--dropdown-closing-scale)); opacity: 0; pointer-events: none; transition: transform var(--dropdown-close-dur) var(--dropdown-ease), opacity var(--dropdown-close-dur) var(--dropdown-ease); }
+
+.t-modal { transform-origin: center; transform: scale(var(--modal-scale)); opacity: 0; pointer-events: none; transition: transform var(--modal-open-dur) var(--modal-ease), opacity var(--modal-open-dur) var(--modal-ease); will-change: transform, opacity; }
+.t-modal.is-open { transform: scale(1); opacity: 1; pointer-events: auto; }
+.t-modal.is-closing { transform: scale(var(--modal-scale-close)); opacity: 0; pointer-events: none; transition: transform var(--modal-close-dur) var(--modal-ease), opacity var(--modal-close-dur) var(--modal-ease); }
+
+.t-panel-slide { transform: translateY(var(--panel-translate-y)); opacity: 0; filter: blur(var(--panel-blur)); pointer-events: none; transition: transform var(--panel-close-dur) var(--panel-ease), opacity var(--panel-close-dur) var(--panel-ease), filter var(--panel-close-dur) var(--panel-ease); will-change: transform, opacity, filter; }
+.t-panel-slide[data-open="true"] { transform: translateY(0); opacity: 1; filter: blur(0); pointer-events: auto; transition: transform var(--panel-open-dur) var(--panel-ease), opacity var(--panel-open-dur) var(--panel-ease), filter var(--panel-open-dur) var(--panel-ease); }
+
+.t-icon-swap { position: relative; display: inline-grid; }
+.t-icon-swap .t-icon { grid-area: 1 / 1; transition: opacity var(--icon-swap-dur) var(--icon-swap-ease), filter var(--icon-swap-dur) var(--icon-swap-ease), transform var(--icon-swap-dur) var(--icon-swap-ease); will-change: opacity, filter, transform; }
+.t-icon-swap[data-state="a"] .t-icon[data-icon="a"], .t-icon-swap[data-state="b"] .t-icon[data-icon="b"] { opacity: 1; filter: blur(0); transform: scale(1); }
+.t-icon-swap[data-state="a"] .t-icon[data-icon="b"], .t-icon-swap[data-state="b"] .t-icon[data-icon="a"] { opacity: 0; filter: blur(var(--icon-swap-blur)); transform: scale(var(--icon-swap-start-scale)); }
+
+.t-skel { position: relative; }
+.t-skel-skeleton, .t-skel-content { position: absolute; inset: 0; }
+.t-skel-skeleton { z-index: 1; opacity: 1; filter: blur(0); transition: opacity var(--reveal-dur) var(--reveal-ease), filter var(--reveal-dur) var(--reveal-ease); }
+.t-skel-content { z-index: 2; opacity: 0; filter: blur(var(--reveal-blur)); transition: opacity var(--reveal-dur) var(--reveal-ease), filter var(--reveal-dur) var(--reveal-ease); }
+.t-skel.is-revealed .t-skel-skeleton { opacity: 0; filter: blur(var(--reveal-blur)); }
+.t-skel.is-revealed .t-skel-content { opacity: 1; filter: blur(0); }
+.t-skel.is-resetting .t-skel-skeleton, .t-skel.is-resetting .t-skel-content { transition: none !important; }
+.t-skel-skeleton.is-pulsing > * { animation: t-skel-pulse var(--pulse-dur) ease-in-out var(--pulse-count); }
+@keyframes t-skel-pulse { 0%, 100% { opacity: 1; } 50% { opacity: var(--pulse-min); } }
+
+.t-tabs { position: relative; display: inline-flex; align-items: center; gap: 3px; padding: 3px; border-radius: 48px; background: var(--tabs-bar-bg); }
+.t-tab { position: relative; appearance: none; border: 0; background: transparent; height: 30px; padding: 4px 12px; color: var(--tabs-text-muted); cursor: pointer; border-radius: 48px; z-index: 1; transition: color var(--tabs-dur) var(--tabs-ease); }
+.t-tab:not([aria-selected="true"]):hover, .t-tab[aria-selected="true"] { color: var(--tabs-text-active); }
+.t-tabs-pill { position: absolute; top: 3px; left: 0; height: 30px; width: 0; background: var(--tabs-pill-bg); border-radius: 48px; transform: translateX(0); transition: transform var(--tabs-dur) var(--tabs-ease), width var(--tabs-dur) var(--tabs-ease); will-change: transform, width; z-index: 0; pointer-events: none; }
+
+.t-toast { opacity: 0; transform: translateY(var(--toast-distance)) scale(var(--toast-scale)); filter: blur(var(--toast-blur)); will-change: transform, opacity, filter; transition: opacity var(--toast-close) var(--toast-ease), transform var(--toast-close) var(--toast-ease), filter var(--toast-close) var(--toast-ease); }
+.t-toast.is-open { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); transition: opacity var(--toast-open) var(--toast-ease), transform var(--toast-open) var(--toast-ease), filter var(--toast-open) var(--toast-ease); }
+
+.t-like-heart { color: currentColor; transition: color var(--like-fill) var(--like-ease); }
+.t-like-heart path { fill: transparent; stroke: currentColor; transition: fill var(--like-fill) var(--like-ease), stroke var(--like-fill) var(--like-ease); }
+.t-like[data-liked="true"] .t-like-heart { color: var(--like-color); }
+.t-like[data-liked="true"] .t-like-heart path { fill: currentColor; }
+.t-like[data-liked="true"] .t-like-icon { animation: t-like-pop var(--like-pop) var(--like-pop-ease); }
+@keyframes t-like-pop { 0% { transform: scale(1); } 30% { transform: scale(0.82); } 100% { transform: scale(1); } }
+.t-like-particles { position: absolute; left: 50%; top: 50%; width: 0; height: 0; pointer-events: none; color: var(--like-color); }
+.t-like-particles i { position: absolute; left: calc(var(--like-particle-size) * var(--psize, 1) / -2); top: calc(var(--like-particle-size) * var(--psize, 1) / -2); width: calc(var(--like-particle-size) * var(--psize, 1)); height: calc(var(--like-particle-size) * var(--psize, 1)); border-radius: 50%; background: currentColor; opacity: 0; }
+@keyframes t-like-burst { 0% { opacity: 0; transform: translate(0, 0) scale(0.4); } 20% { opacity: 1; transform: translate(calc(var(--px) * 0.25), calc(var(--py) * 0.25)) scale(1); } 100% { opacity: 0; transform: translate(var(--px), var(--py)) scale(var(--p-end-scale, 0.6)); } }
+.t-like.is-bursting .t-like-particles i { animation: t-like-burst var(--pdur, var(--like-particle-dur)) ease-out var(--pdelay, 0ms) forwards; }
+
+.t-toggle { transition: background var(--toggle-track) var(--toggle-ease); }
+.t-toggle-thumb { translate: 0 0; will-change: translate; }
+.t-toggle[data-on="true"] .t-toggle-thumb { translate: var(--toggle-travel) 0; }
+.t-toggle.is-init[data-on="true"] .t-toggle-thumb { animation: t-toggle-on var(--toggle-dur) var(--toggle-ease) both; }
+.t-toggle.is-init[data-on="false"] .t-toggle-thumb { animation: t-toggle-off var(--toggle-dur) var(--toggle-ease) both; }
+@keyframes t-toggle-on { 0% { translate: 0 0; } 55% { translate: calc(var(--toggle-travel) + var(--toggle-ov1)) 0; } 80% { translate: calc(var(--toggle-travel) - var(--toggle-ov2)) 0; } 100% { translate: var(--toggle-travel) 0; } }
+@keyframes t-toggle-off { 0% { translate: var(--toggle-travel) 0; } 55% { translate: calc(0px - var(--toggle-ov1)) 0; } 80% { translate: var(--toggle-ov2) 0; } 100% { translate: 0 0; } }
+
+/* Resonance adapters. Horizontal centering uses the individual translate property. */
+.app-notice, .server-transfer-toast { translate: -50% 0; transform: none; }
+.server-transfer-toast.t-toast { animation: none; }
+.full-player-queue-panel.t-panel-slide { --panel-translate-y: 36px; }
+.full-player-queue-tabs[data-transition="t-tabs"] { position: relative; display: inline-flex; align-items: center; gap: 3px; padding: 3px; border-radius: 48px; background: var(--tabs-bar-bg); flex: 0 0 42px; align-self: center; width: calc(100% - 28px); border-bottom: 0; }
+.full-player-queue-tabs[data-transition="t-tabs"] .t-tab { flex: 1 1 0; min-width: 0; }
+.full-player-queue-tabs[data-transition="t-tabs"] .t-tab::after { display: none; }
+.t-like { position: relative; }
+.t-like-icon { display: grid; place-items: center; }
+.t-like-heart { width: 22px; height: 22px; fill: none; stroke-width: 1.8; }
+.settings-toggle > .t-toggle, .local-import-sync-toggle.t-toggle { position: relative; display: block; }
+.settings-toggle > .t-toggle::before, .local-import-sync-toggle.t-toggle::before { display: none; }
+.settings-toggle .t-toggle-thumb { position: absolute; top: 4px; left: 4px; width: 18px; height: 18px; border-radius: 50%; background: #b8b8c1; box-shadow: 0 2px 6px #0008; }
+.local-import-sync-toggle .t-toggle-thumb { top: 3px; left: 3px; width: 16px; height: 16px; }
+.local-import-sync input:checked + .local-import-sync-toggle .t-toggle-thumb, .settings-toggle input:checked + .t-toggle .t-toggle-thumb { background: #fff; }
+.server-artwork-loading.t-skel img.t-skel-content { width: 100%; height: 100%; object-fit: cover; }
+.browser-preview-bar { position: fixed; z-index: 90; right: 18px; bottom: 108px; display: flex; align-items: center; gap: 10px; padding: 9px 10px 9px 13px; border: 1px solid #9b7aff55; border-radius: 999px; background: #11121bea; box-shadow: 0 12px 36px #0009; color: #d8d1ef; backdrop-filter: blur(18px); }
+.browser-preview-bar strong { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.browser-preview-bar button { min-height: 30px; padding: 0 11px; border-radius: 999px; background: #6d4bec; color: #fff; font-size: 10px; font-weight: 700; }
+
+@media (prefers-reduced-motion: reduce) {
+  .t-dropdown, .t-modal, .t-panel-slide, .t-icon-swap .t-icon, .t-tabs-pill, .t-tab, .t-toast { transition: none !important; }
+  .t-skel-skeleton, .t-skel-content { transition: none !important; }
+  .t-skel-skeleton.is-pulsing > *, .t-like-icon, .t-like-particles i, .t-toggle-thumb { animation: none !important; }
+}

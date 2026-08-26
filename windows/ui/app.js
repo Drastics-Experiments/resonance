@@ -148,6 +148,8 @@ let selectedListeningHistoryDayKey = null;
 let listeningHistorySongsExpanded = false;
 let appNoticeDismissTimer = null;
 const APP_NOTICE_LIFETIME_MS = 5000;
+const transitionCleanupTimers = new WeakMap();
+let fullPlayerQueueCloseTimer = null;
 let nowPlayingCloseTimer = null;
 let fullPlayerTitleMarqueeFrame = null;
 let audioSourceTrackID = null;
@@ -834,11 +836,89 @@ function showNotice(message, kind = "error") {
   notice.dataset.kind = kind;
   notice.setAttribute("role", kind === "error" ? "alert" : "status");
   notice.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
-  notice.hidden = false;
+  showTransitionToast(notice);
   appNoticeDismissTimer = setTimeout(() => {
     appNoticeDismissTimer = null;
-    notice.hidden = true;
+    hideTransitionToast(notice);
   }, APP_NOTICE_LIFETIME_MS);
+}
+
+function transitionDuration(variable, fallback) {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(variable).trim();
+  const number = Number.parseFloat(value);
+  if (!Number.isFinite(number)) return fallback;
+  return value.endsWith("s") && !value.endsWith("ms") ? number * 1000 : number;
+}
+
+function clearTransitionCleanup(element) {
+  const timer = transitionCleanupTimers.get(element);
+  if (timer) clearTimeout(timer);
+  transitionCleanupTimers.delete(element);
+}
+
+function showTransitionToast(toast) {
+  if (!toast) return;
+  clearTransitionCleanup(toast);
+  toast.hidden = false;
+  requestAnimationFrame(() => toast.classList.add("is-open"));
+}
+
+function hideTransitionToast(toast, cleanup = null) {
+  if (!toast || toast.hidden) return;
+  clearTransitionCleanup(toast);
+  toast.classList.remove("is-open");
+  const finish = () => {
+    toast.hidden = true;
+    cleanup?.();
+    transitionCleanupTimers.delete(toast);
+  };
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) finish();
+  else transitionCleanupTimers.set(toast, setTimeout(finish, transitionDuration("--toast-close", 250)));
+}
+
+function openTransitionDropdown(menu) {
+  if (!menu) return;
+  clearTransitionCleanup(menu);
+  menu.classList.remove("is-closing");
+  menu.hidden = false;
+  requestAnimationFrame(() => menu.classList.add("is-open"));
+}
+
+function closeTransitionDropdown(menu, cleanup = null) {
+  if (!menu || menu.hidden) { cleanup?.(); return; }
+  clearTransitionCleanup(menu);
+  menu.classList.remove("is-open");
+  menu.classList.add("is-closing");
+  const finish = () => {
+    menu.hidden = true;
+    menu.classList.remove("is-closing");
+    cleanup?.();
+    transitionCleanupTimers.delete(menu);
+  };
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) finish();
+  else transitionCleanupTimers.set(menu, setTimeout(finish, transitionDuration("--dropdown-close-dur", 150)));
+}
+
+function openTransitionModal(dialog) {
+  if (!dialog) return;
+  clearTransitionCleanup(dialog);
+  dialog.classList.remove("is-closing");
+  if (!dialog.open) dialog.showModal();
+  requestAnimationFrame(() => dialog.classList.add("is-open"));
+}
+
+function closeTransitionModal(dialog) {
+  if (!dialog?.open || dialog.classList.contains("is-closing")) return;
+  clearTransitionCleanup(dialog);
+  dialog.classList.remove("is-open");
+  dialog.classList.add("is-closing");
+  const finish = () => {
+    if (dialog.open) dialog.close();
+    dialog.classList.remove("is-closing");
+    transitionCleanupTimers.delete(dialog);
+  };
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) finish();
+  else transitionCleanupTimers.set(dialog, setTimeout(finish, transitionDuration("--modal-close-dur", 150)));
 }
 
 function friendlyIPCError(error, fallback) {
@@ -852,7 +932,8 @@ function dismissNotice() {
     clearTimeout(appNoticeDismissTimer);
     appNoticeDismissTimer = null;
   }
-  if (notice) notice.hidden = true;
+  if (notice && window.matchMedia("(prefers-reduced-motion: reduce)").matches) notice.hidden = true;
+  else hideTransitionToast(notice);
 }
 
 function clearPlaylistDragPreview() {
@@ -1029,10 +1110,9 @@ function closeProfileMenu({ restoreFocus = false } = {}) {
   const menu = $("#profileMenu");
   const button = $("#profileButton");
   if (!menu || !button || menu.hidden) return;
-  menu.hidden = true;
   button.setAttribute("aria-expanded", "false");
   $("#profileControl")?.classList.remove("open");
-  if (restoreFocus) button.focus();
+  closeTransitionDropdown(menu, () => { if (restoreFocus) button.focus(); });
 }
 
 function toggleProfileMenu() {
@@ -1044,7 +1124,7 @@ function toggleProfileMenu() {
     return;
   }
   updateProfileControl();
-  menu.hidden = false;
+  openTransitionDropdown(menu);
   button.setAttribute("aria-expanded", "true");
   $("#profileControl")?.classList.add("open");
 }
@@ -2212,7 +2292,7 @@ function openListeningHistory() {
   listeningHistorySongsExpanded = false;
   ensureListeningHistorySelection();
   renderListeningHistory();
-  $("#listeningHistoryDialog").showModal();
+  openTransitionModal($("#listeningHistoryDialog"));
   void prepareListeningHistoryMetadata();
 }
 
@@ -3981,9 +4061,9 @@ function artwork(track, { animateLoading = false, forceLoading = false } = {}) {
   if (!hasRemoteArtwork) {
     return `<div class="row-art">${source ? squareArtworkImageMarkup(source) : "♪"}</div>`;
   }
-  return `<div class="row-art server-artwork-loading${forceLoading ? " server-metadata-artwork" : ""}${canRenderImage ? " has-image" : ""}" data-server-artwork-id="${escapeHTML(track?.id || "")}" aria-busy="true">
-    <span class="server-artwork-placeholder" aria-hidden="true">${forceLoading ? "" : "♪"}</span>
-    ${canRenderImage ? squareArtworkImageMarkup(source) : ""}
+  return `<div class="row-art server-artwork-loading t-skel${forceLoading ? " server-metadata-artwork" : ""}${canRenderImage ? " has-image" : ""}" data-server-artwork-id="${escapeHTML(track?.id || "")}" aria-busy="true">
+    <span class="t-skel-skeleton is-pulsing" aria-hidden="true"><span class="server-artwork-placeholder">${forceLoading ? "" : "♪"}</span></span>
+    ${canRenderImage ? `<span class="t-skel-content">${squareArtworkImageMarkup(source)}</span>` : ""}
   </div>`;
 }
 
@@ -4013,7 +4093,7 @@ function bindServerArtworkLoadState(container) {
   if (!image || image.dataset.loadStateBound === "true") return;
   image.dataset.loadStateBound = "true";
   const reveal = () => {
-    container.classList.add("loaded");
+    container.classList.add("loaded", "is-revealed");
     container.classList.remove("failed");
     container.setAttribute("aria-busy", "false");
   };
@@ -4984,19 +5064,19 @@ function renderSettings() {
               <label class="settings-row" for="settingsRunInBackground">
                 <span class="settings-row-icon" aria-hidden="true">${settingsIcons.background}</span>
                 <span class="settings-row-copy"><strong>Running in the background</strong><small>Keep playback active in the system tray when the window closes.</small></span>
-                <span class="settings-toggle"><input id="settingsRunInBackground" type="checkbox" ${preferences.runInBackground ? "checked" : ""}><span aria-hidden="true"></span></span>
+                <span class="settings-toggle"><input id="settingsRunInBackground" type="checkbox" ${preferences.runInBackground ? "checked" : ""}><span class="t-toggle" data-on="${preferences.runInBackground}" aria-hidden="true"><span class="t-toggle-thumb"></span></span></span>
               </label>
               <label class="settings-row" for="settingsDiscordPresence">
                 <span class="settings-row-icon discord" aria-hidden="true">${settingsIcons.discord}</span>
                 <span class="settings-row-copy"><strong>Discord Rich Presence</strong><small id="settingsDiscordStatus">${escapeHTML(discordPresenceStatus.message || "Show Resonance playback on your signed-in Discord profile.")}</small></span>
-                <span class="settings-toggle"><input id="settingsDiscordPresence" type="checkbox" ${preferences.discordRichPresence && discordPresenceStatus.applicationConfigured ? "checked" : ""} ${discordPresenceStatus.applicationConfigured ? "" : "disabled"}><span aria-hidden="true"></span></span>
+                <span class="settings-toggle"><input id="settingsDiscordPresence" type="checkbox" ${preferences.discordRichPresence && discordPresenceStatus.applicationConfigured ? "checked" : ""} ${discordPresenceStatus.applicationConfigured ? "" : "disabled"}><span class="t-toggle" data-on="${preferences.discordRichPresence && discordPresenceStatus.applicationConfigured}" aria-hidden="true"><span class="t-toggle-thumb"></span></span></span>
               </label>
               <div class="settings-row settings-crossfade-row">
                 <span class="settings-row-icon" aria-hidden="true">${settingsIcons.playback}</span>
                 <span class="settings-row-copy"><strong>Crossfade</strong><small id="settingsCrossfadeDescription">${preferences.crossfadeEnabled ? `Overlap songs by ${preferences.crossfadeSeconds} seconds.` : "Start the next song early while fading between both."}</small></span>
                 <span class="settings-crossfade-controls">
                   <span id="settingsCrossfadeValue">${preferences.crossfadeSeconds} sec</span>
-                  <label class="settings-toggle"><input id="settingsCrossfadeEnabled" type="checkbox" aria-label="Enable crossfade" ${preferences.crossfadeEnabled ? "checked" : ""}><span aria-hidden="true"></span></label>
+                  <label class="settings-toggle"><input id="settingsCrossfadeEnabled" type="checkbox" aria-label="Enable crossfade" ${preferences.crossfadeEnabled ? "checked" : ""}><span class="t-toggle" data-on="${preferences.crossfadeEnabled}" aria-hidden="true"><span class="t-toggle-thumb"></span></span></label>
                 </span>
                 <input id="settingsCrossfadeSeconds" class="settings-crossfade-slider" type="range" min="1" max="12" step="1" value="${preferences.crossfadeSeconds}" aria-label="Crossfade duration" aria-valuetext="${preferences.crossfadeSeconds} seconds" ${preferences.crossfadeEnabled ? "" : "disabled"}>
               </div>
@@ -5060,9 +5140,12 @@ function renderSettings() {
       </div>
     </div>
     <footer class="settings-footer"><button id="doneSettings" class="primary" type="button">Done</button></footer>`;
-  const closeSettings = () => $("#settingsDialog").close();
+  const closeSettings = () => closeTransitionModal($("#settingsDialog"));
   $("#closeSettings").onclick = closeSettings;
   $("#doneSettings").onclick = closeSettings;
+  settingsRoot.querySelectorAll(".settings-toggle input").forEach((input) => {
+    input.addEventListener("change", () => syncTransitionToggle(input, { interacted: true }));
+  });
   document.querySelectorAll("[data-settings-panel]").forEach((button) => {
     button.onclick = () => {
       settingsPanel = button.dataset.settingsPanel;
@@ -5275,12 +5358,19 @@ async function updateAppPreference(key, value) {
   await api.updateAppPreferences(state.appPreferences).catch(() => undefined);
 }
 
+function syncTransitionToggle(input, { interacted = false } = {}) {
+  const visual = input?.nextElementSibling;
+  if (!visual?.classList.contains("t-toggle")) return;
+  if (interacted) visual.classList.add("is-init");
+  visual.dataset.on = String(Boolean(input.checked));
+}
+
 function openSettings(initialPanel = "general") {
   closeProfileMenu();
   settingsPanel = initialPanel;
   settingsRecordingAction = null;
   renderSettings();
-  if (!$("#settingsDialog").open) $("#settingsDialog").showModal();
+  openTransitionModal($("#settingsDialog"));
   if (settingsPanel === "server") void refreshServerSettingsControls();
 }
 
@@ -5422,11 +5512,13 @@ let activeContextMenuAlignEnd = false;
 function closeTrackContextMenu({ restoreFocus = false } = {}) {
   const menu = $("#trackContextMenu");
   if (!menu) return;
-  menu.hidden = true;
-  menu.innerHTML = "";
-  menu.onkeydown = null;
-  menu.classList.remove("full-player-context");
-  if (restoreFocus) activeContextMenuReturnFocus?.focus?.();
+  const returnFocus = activeContextMenuReturnFocus;
+  closeTransitionDropdown(menu, () => {
+    menu.innerHTML = "";
+    menu.onkeydown = null;
+    menu.classList.remove("full-player-context");
+    if (restoreFocus) returnFocus?.focus?.();
+  });
   activeContextMenuReturnFocus = null;
   activeContextMenuAlignEnd = false;
 }
@@ -5460,7 +5552,7 @@ function renderContextMenu({ title, subtitle, actions }) {
   }).join("");
   const headerMarkup = showHeader ? `<div class="context-menu-header"><strong>${escapeHTML(title || "Untitled")}</strong><small>${escapeHTML(subtitle || "Unknown artist")}</small></div>` : "";
   menu.innerHTML = `${headerMarkup}${actionMarkup}`;
-  menu.hidden = false;
+  openTransitionDropdown(menu);
   const positionMenu = () => {
     const requestedLeft = activeContextMenuAlignEnd ? activeContextMenuPosition.x - menu.offsetWidth : activeContextMenuPosition.x;
     menu.style.left = `${Math.max(8, Math.min(requestedLeft, innerWidth - menu.offsetWidth - 8))}px`;
@@ -5969,7 +6061,7 @@ function openLocalImport({ serverUploadMode = null } = {}) {
     $("#localImportSync").checked = true;
   }
   $("#localImportSource").value = "";
-  $("#localImportDialog").showModal();
+  openTransitionModal($("#localImportDialog"));
   requestAnimationFrame(() => $("#localImportSource").focus());
 }
 
@@ -6136,12 +6228,18 @@ function updateLocalImportSyncForSelection({ preserveChecked = false } = {}) {
   const canSync = Boolean(serverAdminToken.trim() && state.serverURL);
   const sync = $("#localImportSync");
   const row = $("#localImportSyncRow");
-  if (!preserveChecked) sync.checked = true;
+  if (!preserveChecked) {
+    sync.checked = true;
+    if (api["browser"]) sync.checked = false;
+  }
   sync.disabled = serverBacked;
+  syncTransitionToggle(sync);
   row.classList.toggle("disabled", serverBacked);
   row.title = serverBacked
     ? "This source is already saved to the active server profile."
-    : canSync
+      : api["browser"]
+        ? "Browser test mode keeps imports on this device fixture."
+      : canSync
       ? "Upload a copy to the active server profile after downloading."
       : "Sign in to your Resonance account before importing to upload this copy.";
   updateLocalImportConfirmLabel();
@@ -6983,7 +7081,7 @@ async function confirmLinkImport() {
       setLocalImportStage({ stage: "awaiting_selection" });
       hideServerTransfer("local-import");
       serverTransferCancelRequested = false;
-      $("#localImportDialog").showModal();
+      openTransitionModal($("#localImportDialog"));
       return;
     }
     let importedTrack = null;
@@ -7079,7 +7177,7 @@ async function closeLocalImport() {
   localImportInteractionGeneration += 1;
   await stopLocalImportPreview({ release: true, resumeMain: true });
   if (localImportRunning) await api.cancelLocalImport();
-  $("#localImportDialog").close();
+  closeTransitionModal($("#localImportDialog"));
 }
 
 function renderAddSongsDialog() {
@@ -7103,7 +7201,7 @@ function openAddSongsDialog(playlist) {
   addSongsPlaylistID = playlist.id;
   $("#addSongsSearch").value = "";
   renderAddSongsDialog();
-  $("#addSongsDialog").showModal();
+  openTransitionModal($("#addSongsDialog"));
   requestAnimationFrame(() => $("#addSongsSearch").focus());
 }
 
@@ -7154,7 +7252,7 @@ function updateServerTransfer({
   if (presentation.determinate) progress.value = presentation.ratio;
   else progress.removeAttribute("value");
   $("#serverTransferPercent").textContent = presentation.label;
-  toast.hidden = false;
+  showTransitionToast(toast);
   const displayedTransferComplete = itemTotal !== undefined
     ? Number(itemTotal) > 0 && Number(itemCompleted) >= Number(itemTotal)
     : total > 0 && completed >= total;
@@ -7165,8 +7263,7 @@ function hideServerTransfer(owner = null) {
   if (owner && serverTransferOwner && owner !== serverTransferOwner) return;
   const toast = $("#serverTransferToast");
   if (toast) {
-    toast.hidden = true;
-    toast.removeAttribute("data-direction");
+    hideTransitionToast(toast, () => toast.removeAttribute("data-direction"));
   }
   const progress = $("#serverTransferProgress");
   if (progress) progress.removeAttribute("value");
@@ -7870,6 +7967,24 @@ function toggleFavorite(id) {
     state.likesDirty = true;
   }
   persistInBackground(); schedulePlaylistSync(); render(); updateChrome();
+  if (willLike) burstFavoriteTransition();
+}
+
+function burstFavoriteTransition() {
+  const vectors = [[0, -22], [15, -16], [22, 0], [15, 16], [0, 22], [-15, 16], [-22, 0], [-15, -16]];
+  document.querySelectorAll(".t-like[data-liked=\"true\"]").forEach((button) => {
+    button.querySelectorAll(".t-like-particles i").forEach((particle, index) => {
+      const [x, y] = vectors[index % vectors.length];
+      particle.style.setProperty("--px", `${x}px`);
+      particle.style.setProperty("--py", `${y}px`);
+      particle.style.setProperty("--pdelay", `${index * 12}ms`);
+      particle.style.setProperty("--psize", String(.8 + (index % 3) * .2));
+    });
+    button.classList.remove("is-bursting");
+    void button.offsetWidth;
+    button.classList.add("is-bursting");
+    setTimeout(() => button.classList.remove("is-bursting"), transitionDuration("--like-particle-dur", 600) + 100);
+  });
 }
 
 function newPlaylist(trackID = null) {
@@ -7877,7 +7992,7 @@ function newPlaylist(trackID = null) {
   const dialog = $("#playlistDialog");
   $("#playlistName").value = "";
   $("#createPlaylist").disabled = true;
-  dialog.showModal();
+  openTransitionModal(dialog);
   requestAnimationFrame(() => $("#playlistName").focus());
 }
 
@@ -7938,6 +8053,21 @@ function fullPlayerHistoryTracks() {
   return [...history].reverse().map((trackID) => tracksByID.get(trackID)).filter(Boolean);
 }
 
+function moveFullPlayerQueueTabPill({ animate = true } = {}) {
+  const bar = $('.full-player-queue-tabs[data-transition="t-tabs"]');
+  const pill = bar?.querySelector(".t-tabs-pill");
+  const tab = bar?.querySelector('[aria-selected="true"]');
+  if (!pill || !tab) return;
+  const shouldAnimate = animate && Boolean(pill.style.width);
+  if (!shouldAnimate) pill.style.transition = "none";
+  pill.style.transform = `translateX(${tab.offsetLeft}px)`;
+  pill.style.width = `${tab.offsetWidth}px`;
+  if (!shouldAnimate) {
+    void pill.offsetWidth;
+    pill.style.removeProperty("transition");
+  }
+}
+
 function renderFullPlayerQueue() {
   const queue = fullPlayerQueueTab === "history" ? fullPlayerHistoryTracks() : fullPlayerQueueTracks();
   const count = queue.length;
@@ -7948,6 +8078,7 @@ function renderFullPlayerQueue() {
     button.setAttribute("aria-selected", String(active));
     button.tabIndex = active ? 0 : -1;
   });
+  requestAnimationFrame(() => moveFullPlayerQueueTabPill());
   $("#fullPlayerQueue").setAttribute("aria-labelledby", fullPlayerQueueTab === "history" ? "fullPlayerQueueHistoryTab" : "fullPlayerQueueUpNextTab");
   $("#fullPlayerQueue").innerHTML = queue.length ? queue.map((track) => `<button class="full-player-queue-item" type="button" data-full-player-queue="${escapeHTML(track.id)}" aria-label="${track.historyOnly ? "Not downloaded: " : "Play "}${escapeHTML(track.title || "Untitled")} by ${escapeHTML(track.artist || "Unknown Artist")}" ${track.historyOnly ? "disabled" : ""}>
     ${artwork(track)}<span><strong>${escapeHTML(track.title || "Untitled")}</strong><small>${escapeHTML(track.artist || "Unknown Artist")}</small></span><time>${track.historyOnly ? "Not downloaded" : formatTime(track.duration)}</time>
@@ -8770,6 +8901,7 @@ function renderFullPlayer() {
   backdropNode.innerHTML = track.artwork ? squareArtworkImageMarkup(track.artwork) : "";
   const favorite = $("#fullPlayerFavorite");
   favorite.classList.toggle("active", liked);
+  favorite.dataset.liked = String(liked);
   favorite.disabled = Boolean(track.transientStream);
   favorite.setAttribute("aria-pressed", String(liked));
   favorite.setAttribute("aria-label", liked ? "Remove current song from Liked Songs" : "Add current song to Liked Songs");
@@ -8788,7 +8920,23 @@ function renderFullPlayer() {
 }
 
 function setFullPlayerQueueVisible(visible) {
-  $("#fullPlayerQueuePanel").hidden = !visible;
+  const panel = $("#fullPlayerQueuePanel");
+  if (fullPlayerQueueCloseTimer) {
+    clearTimeout(fullPlayerQueueCloseTimer);
+    fullPlayerQueueCloseTimer = null;
+  }
+  if (visible) {
+    panel.hidden = false;
+    requestAnimationFrame(() => {
+      panel.dataset.open = "true";
+      moveFullPlayerQueueTabPill({ animate: false });
+    });
+  } else {
+    panel.dataset.open = "false";
+    const finish = () => { panel.hidden = true; fullPlayerQueueCloseTimer = null; };
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) finish();
+    else fullPlayerQueueCloseTimer = setTimeout(finish, transitionDuration("--panel-close-dur", 350));
+  }
   $("#fullPlayerQueueToggle").setAttribute("aria-expanded", String(visible));
   if (visible) {
     renderFullPlayerQueue();
@@ -8850,7 +8998,13 @@ function updateChrome() {
   $("#bottomMeta").textContent = track ? `${track.artist} / ${playing ? "Now playing" : "Paused"}` : "Local library";
   $(".mini-art").innerHTML = track?.artwork ? squareArtworkImageMarkup(track.artwork) : "♪";
   document.querySelectorAll("[data-action=toggle]").forEach((button) => {
-    button.innerHTML = playing ? playbackPauseIcon : playbackPlayIcon;
+    let iconSwap = button.querySelector(".t-icon-swap");
+    if (!iconSwap && button.classList.contains("play-main")) {
+      button.innerHTML = `<span class="t-icon-swap" data-state="a"><span class="t-icon" data-icon="a">${playbackPlayIcon}</span><span class="t-icon" data-icon="b">${playbackPauseIcon}</span></span>`;
+      iconSwap = button.querySelector(".t-icon-swap");
+    }
+    if (iconSwap) iconSwap.dataset.state = playing ? "b" : "a";
+    else button.innerHTML = playing ? playbackPauseIcon : playbackPlayIcon;
     button.setAttribute("aria-label", playing ? "Pause" : "Play");
     button.title = playing ? "Pause" : "Play";
   });
@@ -8997,6 +9151,21 @@ $("#nowPlayingDialog").addEventListener("cancel", (event) => {
   event.preventDefault();
   closeNowPlaying();
 });
+document.querySelectorAll("dialog.t-modal").forEach((dialog) => {
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeTransitionModal(dialog);
+  });
+  dialog.addEventListener("close", () => {
+    clearTransitionCleanup(dialog);
+    dialog.classList.remove("is-open", "is-closing");
+  });
+});
+if (api["browser"]) {
+  $("#browserPreviewBar").hidden = false;
+  $("#resetBrowserPreview").onclick = () => api.resetBrowserState();
+}
+
 $("#nowPlayingDialog").addEventListener("animationend", (event) => {
   if (event.target === $("#nowPlayingDialog") && event.animationName === "full-player-slide-out") {
     finishNowPlayingClose();
@@ -9011,6 +9180,7 @@ $("#nowPlayingDialog").addEventListener("close", () => {
   const menu = $("#trackContextMenu");
   document.body.insertBefore(menu, $("#localImportPreview"));
   $("#fullPlayerQueuePanel").hidden = true;
+  $("#fullPlayerQueuePanel").dataset.open = "false";
   $("#fullPlayerQueueToggle").setAttribute("aria-expanded", "false");
   $("#openNowPlaying").focus();
 });
@@ -9025,7 +9195,7 @@ $("#fullPlayerMore").onclick = (event) => currentID && openTrackContextMenu(even
   source: "full-player",
   alignToEnd: true,
 });
-$("#fullPlayerQueueToggle").onclick = () => setFullPlayerQueueVisible($("#fullPlayerQueuePanel").hidden);
+$("#fullPlayerQueueToggle").onclick = () => setFullPlayerQueueVisible($("#fullPlayerQueuePanel").dataset.open !== "true");
 $("#closeFullPlayerQueue").onclick = () => setFullPlayerQueueVisible(false);
 const fullPlayerQueueTabs = [...document.querySelectorAll("[data-full-player-queue-tab]")];
 fullPlayerQueueTabs.forEach((button) => {
@@ -9081,9 +9251,9 @@ $("#listenAlongJoinCode").onkeydown = (event) => {
 $("#leaveListenAlong").onclick = () => { void leaveListenAlong(); };
 $("#dismissServerTransfer").onclick = cancelServerTransfer;
 $("#dismissAppNotice").onclick = dismissNotice;
-$("#cancelPlaylist").onclick = () => { pendingPlaylistTrackID = null; $("#playlistDialog").close(); };
+$("#cancelPlaylist").onclick = () => { pendingPlaylistTrackID = null; closeTransitionModal($("#playlistDialog")); };
 $("#playlistName").oninput = () => { $("#createPlaylist").disabled = !$("#playlistName").value.trim(); };
-$("#closeAddSongs").onclick = () => $("#addSongsDialog").close();
+$("#closeAddSongs").onclick = () => closeTransitionModal($("#addSongsDialog"));
 $("#previewClipRange").onclick = toggleClipRangePreview;
 $("#saveClipRange").onclick = saveClipRange;
 $("#closeClipEditor").onclick = () => { void stopClipRangePreview().then(() => $("#clipEditorDialog").close()); };
@@ -9225,6 +9395,7 @@ $("#localImportSource").oninput = () => {
 };
 $("#localImportSync").onchange = () => {
   localImportInteractionGeneration += 1;
+  syncTransitionToggle($("#localImportSync"), { interacted: true });
   updateLocalImportConfirmLabel();
 };
 document.querySelectorAll('input[name="localImportMediaKind"]').forEach((input) => {
@@ -9249,7 +9420,7 @@ document.querySelectorAll("[data-local-import-provider]").forEach((button) => {
   button.onclick = () => setLocalImportProviderFocus(button.dataset.localImportProvider, { scroll: true });
 });
 $("#localImportDialog").onclick = (event) => {
-  if (event.target === $("#localImportDialog") && !localImportRunning) $("#localImportDialog").close();
+  if (event.target === $("#localImportDialog") && !localImportRunning) closeTransitionModal($("#localImportDialog"));
 };
 $("#localImportDialog").addEventListener("close", () => {
   void stopLocalImportPreview({ release: true, resumeMain: true });
@@ -9285,7 +9456,7 @@ $("#addSongsDialog").addEventListener("close", () => {
   addSongsPlaylistID = null;
   if (section === "library" && selectedPlaylistID) renderLibrary();
 });
-$("#closeListeningHistory").onclick = () => $("#listeningHistoryDialog").close();
+$("#closeListeningHistory").onclick = () => closeTransitionModal($("#listeningHistoryDialog"));
 $("#listeningHistoryRange").onchange = () => {
   listeningHistoryWindowOffset = 0;
   ensureListeningHistorySelection();
@@ -9301,7 +9472,7 @@ $("#listeningHistoryMode").onclick = (event) => {
   renderListeningHistory();
 };
 $("#listeningHistoryDialog").onclick = (event) => {
-  if (event.target === $("#listeningHistoryDialog")) $("#listeningHistoryDialog").close();
+  if (event.target === $("#listeningHistoryDialog")) closeTransitionModal($("#listeningHistoryDialog"));
 };
 $("#listeningHistoryDialog").addEventListener("close", () => {
   selectedListeningHistoryDayKey = null;
@@ -9394,7 +9565,10 @@ document.addEventListener("keydown", (event) => {
     closeListenAlongPopover({ restoreFocus: true });
   }
 });
-window.addEventListener("resize", positionListenAlongPopover);
+window.addEventListener("resize", () => {
+  positionListenAlongPopover();
+  moveFullPlayerQueueTabPill({ animate: false });
+});
 window.addEventListener("blur", () => {
   document.querySelectorAll(".recent-track-item.hovering").forEach((button) => button.classList.remove("hovering"));
 });
@@ -9413,7 +9587,7 @@ $("#playlistForm").onsubmit = async (event) => {
   markPlaylistDirty(playlist);
   state.playlists.push(playlist);
   pendingPlaylistTrackID = null;
-  $("#playlistDialog").close();
+  closeTransitionModal($("#playlistDialog"));
   await persist();
   schedulePlaylistSync();
   render();

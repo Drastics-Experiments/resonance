@@ -11,6 +11,7 @@ pnpm install --frozen-lockfile
 pnpm test
 pnpm start
 pnpm ui:browser
+pnpm ui:tailscale
 pnpm run package:win
 pnpm run installer:win
 ```
@@ -20,6 +21,13 @@ pnpm run installer:win
 CSP active, and uses the browser fixture bridge rather than credentials or
 server requests. Set `RESONANCE_UI_BROWSER_PORT` or pass `-- --port <port>` to
 choose another local port. Stop the preview with Ctrl+C.
+
+`pnpm ui:tailscale` starts the same credential-free fixture preview on the
+machine's Tailscale IPv4 address. Other devices on the same tailnet can open
+the printed `http://100.x.y.z:4173/ui/` URL, subject to the tailnet ACLs. The
+server binds only to that Tailscale address: wildcard and ordinary LAN
+bindings are rejected. Set `RESONANCE_UI_BROWSER_PORT` or pass
+`-- --port <port>` to choose another port.
 
 `package:win` creates a portable x64 folder in `windows/dist/`. `installer:win` creates the per-user NSIS installer under `installers/windows/dist/`.
 

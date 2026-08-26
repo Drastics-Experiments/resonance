@@ -106,6 +106,49 @@ test("browser runtime implements every preload method used by app.js", async () 
   for (const method of methods) assert.equal(typeof api[method], "function", method);
 });
 
+test("browser runtime provides interactive account, catalog, download, and import fixtures", async () => {
+  const api = createBrowserResonanceAPI({ storage: memoryStorage() });
+  const session = await api.loadAccountSession();
+  assert.equal(session.displayName, "Browser Tester");
+  assert.equal(session.role, "admin");
+
+  const catalog = await api.fetchCatalog();
+  assert.equal(catalog.count, 3);
+  assert.equal(catalog.songs[0].title, "Aurora Circuit");
+
+  const synced = await api.syncServer({ songIDs: [catalog.songs[0].id] });
+  assert.equal(synced.downloaded.length, 1);
+  assert.equal(synced.downloaded[0].remoteID, catalog.songs[0].id);
+  assert.ok(synced.downloaded[0].fileUrl.startsWith("blob:"));
+
+  const resolved = await api.resolveLocalImport({ source: "transition test", mediaKind: "audio" });
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.result.kind, "search_results");
+  assert.equal(resolved.result.candidates.length, 3);
+  const imported = await api.startLocalImport({
+    sourceURL: resolved.result.candidates[0].sourceURL,
+    metadata: resolved.result.candidates[0],
+  });
+  assert.equal(imported.ok, true);
+  assert.equal(imported.result.kind, "created");
+  assert.ok(imported.result.track.fileUrl.startsWith("blob:"));
+});
+
+test("renderer includes the reviewed transitions and browser reset surface", async () => {
+  const [html, css, appSource] = await Promise.all([
+    readFile(new URL("../ui/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../ui/transitions.css", import.meta.url), "utf8"),
+    readFile(new URL("../ui/app.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(html, /href="transitions\.css"/);
+  for (const transitionClass of ["t-dropdown", "t-modal", "t-panel-slide", "t-icon-swap", "t-skel", "t-tabs", "t-toast", "t-like", "t-toggle"]) {
+    assert.match(`${html}\n${css}\n${appSource}`, new RegExp(`\\.${transitionClass}|class="[^"]*${transitionClass}`), transitionClass);
+  }
+  assert.match(css, /prefers-reduced-motion: reduce/);
+  assert.match(html, /id="resetBrowserPreview"/);
+  assert.match(appSource, /api\.resetBrowserState\(\)/);
+});
+
 test("browser runtime is inserted before the renderer module and does not replace Electron preload", async () => {
   const [html, runtimeSource] = await Promise.all([
     readFile(new URL("../ui/index.html", import.meta.url), "utf8"),

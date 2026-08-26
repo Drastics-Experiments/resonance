@@ -1050,6 +1050,7 @@ test("bootstraps the cached Windows theme before CSS without trusting arbitrary 
 test("defines complete Windows palettes and routes major chrome through theme tokens", () => {
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   const shuffleSource = readFileSync(new URL("../ui/shuffle-icon.css", import.meta.url), "utf8");
+  const webImportOverrides = styleSource.slice(styleSource.indexOf("/* Web import is a utility, so keep its presentation quiet and direct. */"));
   const palettes = {
     midnight: [
       ["background", "#020305"], ["base", "#05060a"], ["panel", "#0c0d13"],
@@ -1107,18 +1108,17 @@ test("defines complete Windows palettes and routes major chrome through theme to
   assert.match(shuffleSource, /\.playlist-dialog\s*\{[\s\S]+background: var\(--dialog-background\)/);
   assert.match(shuffleSource, /#installUpdate\s*\{[\s\S]+background: var\(--action-background\)/);
   assert.match(styleSource, /\.add-song-row > button\.added\s*\{[^}]*background: var\(--accent-soft\)/);
-  assert.match(styleSource, /\.local-import-provider-pill button\[aria-pressed="true"\]\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-glow\)/);
-  assert.match(styleSource, /\.local-import-media-kind input:checked \+ span\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent/);
-  assert.match(styleSource, /\.local-import-candidate:has\(input:checked\)\s*\{[^}]*var\(--accent\)/);
-  assert.match(styleSource, /\.local-import-sync input:checked \+ \.local-import-sync-toggle\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent\)/);
-  assert.match(styleSource, /#confirmLocalImport\s*\{[^}]*background: var\(--action-background\)/);
+  assert.match(webImportOverrides, /\.local-import-provider-pill button\[aria-pressed="true"\]\s*\{[^}]*border-color: var\(--accent-tertiary\)[^}]*background: transparent[^}]*box-shadow: none/);
+  assert.match(webImportOverrides, /\.local-import-media-kind input:checked \+ span\s*\{[^}]*background: #252832[^}]*box-shadow: none/);
+  assert.match(webImportOverrides, /\.local-import-candidate:has\(input:checked\)\s*\{[^}]*background: var\(--accent-soft\)[^}]*box-shadow: none/);
+  assert.match(webImportOverrides, /\.local-import-sync input:checked \+ \.local-import-sync-toggle\s*\{[^}]*box-shadow: none/);
+  assert.match(webImportOverrides, /#confirmLocalImport\s*\{[^}]*background: var\(--action-background\)[^}]*box-shadow: none/);
   const chromeOverrides = styleSource.slice(styleSource.indexOf("/* Keep every non-content accent surface on the active app theme. */"));
   assert.match(chromeOverrides, /\.profile-menu-badge\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
   assert.match(chromeOverrides, /\.player-track:focus-visible\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-soft\)/);
   assert.match(chromeOverrides, /\.history-mode button\.active\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
   assert.match(chromeOverrides, /\.history-top-song-cover\[aria-expanded="true"\]\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-soft\)/);
   assert.match(chromeOverrides, /\.local-import-preview-button\.playing\s*\{[^}]*var\(--accent-tertiary\)[^}]*var\(--action-background\)[^}]*var\(--accent-glow\)/);
-  assert.match(chromeOverrides, /\.local-import-spark\s*\{[^}]*var\(--accent-soft\)[^}]*var\(--accent-tertiary\)[^}]*var\(--accent-glow\)/);
   assert.match(chromeOverrides, /\.clip-editor-save\s*\{[^}]*var\(--accent-border\)/);
   assert.match(styleSource, /\.clip-editor-handle span\s*\{[^}]*background: var\(--accent-secondary\)[^}]*var\(--accent-glow\)/);
   assert.match(styleSource, /\.clip-editor-handle\.dragging span\s*\{[^}]*background: var\(--accent\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-glow\)/);
@@ -1130,7 +1130,7 @@ test("defines complete Windows palettes and routes major chrome through theme to
   assert.match(styleSource, /\.storage-import-option-icon\s*\{[^}]*var\(--accent-border\)[^}]*var\(--accent-soft\)[^}]*var\(--accent-text\)/);
   assert.match(styleSource, /\.segmented button\.active\s*\{[^}]*#845bff[^}]*#5c2ee8[^}]*color: #fff/);
   assert.match(styleSource, /\.history-bar\.peak\s*\{[^}]*fill: var\(--history-peak-color\)/);
-  assert.match(styleSource, /\.local-import-provider-pill\s*\{[^}]*border: 1px solid var\(--accent-border\)/);
+  assert.match(webImportOverrides, /\.local-import-provider-pill\s*\{[^}]*position: static[^}]*border: 0[^}]*background: transparent[^}]*box-shadow: none/);
   assert.match(styleSource, /\.clip-editor-selection\s*\{[^}]*background: var\(--clip-selection-background\)/);
   assert.match(styleSource, /--history-bar-color: #7659d6;[\s\S]+--history-peak-color: #a98cff;[\s\S]+--clip-visualizer-low: #4e1a95/);
   assert.match(styleSource, /\.settings-theme-grid\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/);
@@ -1594,6 +1594,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   const debridSource = readFileSync(new URL("../local-debrid.cjs", import.meta.url), "utf8");
   const preloadSource = readFileSync(new URL("../preload.cjs", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
+  const webImportOverrides = styleSource.slice(styleSource.indexOf("/* Web import is a utility, so keep its presentation quiet and direct. */"));
   const packageSource = readFileSync(new URL("../package.json", import.meta.url), "utf8");
   const localImportUploadSource = mainSource.slice(
     mainSource.indexOf('ipcMain.handle("local-import:upload"'),
@@ -1622,7 +1623,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(preloadSource, /onLocalImportProgress:[\s\S]+local-import:progress/);
   assert.match(htmlSource, /id="localImportDialog"/);
   assert.match(htmlSource, /id="localImportTitle">Import from Web/);
-  assert.match(styleSource, /\.local-import-panel\s*\{[\s\S]*?border-radius: 29px/);
+  assert.match(webImportOverrides, /\.local-import-panel\s*\{[^}]*border-radius: 13px[^}]*background: #0d0f14/);
   assert.match(styleSource, /\.storage-import-menu\s*\{[\s\S]*?overflow: hidden;[\s\S]*?isolation: isolate;[\s\S]*?border-radius: 18px/);
   assert.doesNotMatch(htmlSource, /Spotify tracks are matched against/);
   assert.match(htmlSource, /id="localImportStage"[^>]*hidden/);
@@ -1632,7 +1633,8 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.doesNotMatch(htmlSource, /id="resolveLocalImport"|>Find (?:audio|video)</);
   assert.match(htmlSource, /id="localImportMediaKind"[\s\S]+value="audio"[\s\S]+value="video"/);
   assert.match(htmlSource, /id="localImportProviderPill"[\s\S]+data-local-import-provider="youtube"[\s\S]+data-local-import-provider="spotify"[\s\S]+data-local-import-provider="soundcloud"/);
-  assert.doesNotMatch(htmlSource, /<\/svg>(?:Audio|Video)<\/span>/);
+  assert.match(htmlSource, /value="audio" checked><span>Audio<\/span>[\s\S]+value="video"><span>Video<\/span>/);
+  assert.doesNotMatch(htmlSource, /local-import-spark|provider-youtube|provider-spotify|provider-soundcloud/);
   assert.match(htmlSource, /<header>[\s\S]+id="localImportMediaKind"[\s\S]+id="closeLocalImport"[\s\S]+<\/header>/);
   assert.doesNotMatch(htmlSource, /MP4 with audio/);
   assert.match(htmlSource, /id="localImportCandidates"/);
@@ -1644,8 +1646,8 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /input\.onchange = \(\) => \{[\s\S]+updateLocalImportSyncForSelection\(\{ preserveChecked: true \}\)/);
   assert.doesNotMatch(appSource, /sync\.disabled = serverBacked \|\| !canSync/);
   assert.doesNotMatch(htmlSource, /localImportSyncTitle|localImportSyncHelp|Upload after saving locally/);
-  assert.match(htmlSource, /Supported links are inspected directly\. Plain text searches Spotify, SoundCloud, and YouTube only after you press Enter/);
-  assert.match(htmlSource, /id="chooseLocalFiles"[\s\S]+Choose files instead/);
+  assert.match(htmlSource, /Supports YouTube, Spotify, and SoundCloud\./);
+  assert.match(htmlSource, /id="chooseLocalFiles"[^>]*>Choose files<\/button>/);
   assert.match(htmlSource, /id="confirmLocalImport"[\s\S]+Import selected/);
   assert.match(htmlSource, /style-src 'self'; style-src-attr 'unsafe-inline'/);
   assert.match(htmlSource, /connect-src blob:/);
@@ -1743,14 +1745,14 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(styleSource, /html\s*\{[\s\S]*?overflow: hidden/);
   assert.match(styleSource, /\.local-import-dialog\s*\{[\s\S]*?position: fixed/);
   assert.doesNotMatch(styleSource, /\.local-import-dialog\s*\{[\s\S]{0,160}?position: relative/);
-  assert.match(styleSource, /\.local-import-dialog:not\(\.expanded\)\s*\{[\s\S]*?height: 280px/);
+  assert.match(webImportOverrides, /\.local-import-dialog:not\(\.expanded\),[\s\S]*?height: 226px/);
   assert.match(styleSource, /\.local-import-dialog\.expanded\s*\{[\s\S]*?height: min\(600px, calc\(100vh - 64px\)\)/);
   assert.match(styleSource, /\.local-import-dialog\.expanded \.local-import-panel\s*\{\s*height: 100%/);
   assert.match(styleSource, /\.local-import-resolved fieldset\s*\{[\s\S]*?flex: 1 1 auto[\s\S]*?overflow: hidden/);
   assert.match(styleSource, /\.local-import-candidates\.search-results\s*\{[\s\S]*?height: 100%[\s\S]*?overscroll-behavior: contain/);
   assert.match(appSource, /LOCAL_IMPORT_PROVIDER_ORDER = Object\.freeze\(\[\s*\["youtube", "YouTube"\],[\s\S]*?\["spotify", "Spotify"\],[\s\S]*?\["soundcloud", "SoundCloud"\]/);
   assert.match(styleSource, /\.local-import-media-kind\s*\{/);
-  assert.match(styleSource, /\.local-import-provider-pill\s*\{[\s\S]*?left: -74px/);
+  assert.match(webImportOverrides, /\.local-import-provider-pill\s*\{[^}]*position: static[^}]*display: flex/);
   assert.match(appSource, /function setLocalImportProviderFocus[\s\S]+data-search-provider/);
   assert.match(styleSource, /\.local-import-sync input:checked\s*\{/);
   assert.match(styleSource, /\.local-import-preview-button\s*\{/);
